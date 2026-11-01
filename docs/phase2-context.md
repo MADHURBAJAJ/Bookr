@@ -4,7 +4,9 @@ These notes override `bookkeeping-handover.md` where they differ. Nothing here i
 
 ## Settled
 
-- App name: Bookr. Backend: Cloudflare (Workers, R2, Hyperdrive to Postgres).
+- App name: Bookr. Backend: Cloudflare (Workers, R2, D1 (SQLite)).
+- Money is stored as integer paise, never as floating-point numbers. It is converted to rupees only for display.
+- D1 has no open transactions, so any work that must be atomic (linked transfer pairs, approvals, role changes, invites) runs as a single D1 batch, which commits or rolls back as one.
 - All ten screens are designed in the prototype: https://claude.ai/artifact/MxGBWNinoQeH2nHL7HmWdv
   Newest screens: Compare sales (between Review and Bank sync), Reports, Export, Sign in, and an Accounts screen you added in Phase 1 (to be added to the prototype).
 - Role table to follow (Owner, Accountant, Entry staff, Viewer):
