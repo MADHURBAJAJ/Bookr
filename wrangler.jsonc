@@ -14,7 +14,7 @@
       "binding": "DB",
       "database_name": "bookr-demo",
       // Set by `wrangler d1 create bookr-demo`. An id, not a secret.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "85f66e7c-12f6-4565-9bbf-ad0fe246692d",
       "migrations_dir": "migrations"
     }
   ],
