@@ -248,6 +248,17 @@ Each line of an expense list becomes a draft expense row in `transactions`, paid
 | Reopen a confirmed shift | Yes | No | No | No |
 | Set the income head for each bill type | Yes | No | No | No |
 
+### As built (2 Nov 2026)
+
+- **OCR is not connected.** Both engines need credentials (a Google Cloud service account for Document AI, an Anthropic API key for Claude vision), and every page read costs money. Until they are added as Worker secrets, register, expense and cash summary rows are typed in on the Review screen beside the photo (`uploads.ocr_engine = manual`).
+- **Using the software side for a bill missing from the register is refused.** The register gives every bill its type (F&B or Room), which decides the income head. The person adds the bill to the register in Review, or leaves it out. The same applies when the software's mode is `U/N`.
+- **Confirming a shift also needs:** every register row checked, no bill repeated in the register, and each register bill's payments adding up to its amount.
+- **One income row per register payment.** A bill paid partly in cash and partly by UPI that is decided "Use register" becomes two income rows.
+- **Matching register to software uses bill number only.** The register has no POS number. With a single POS series this is exact; if a second counter appears, this must be revisited (see Still open).
+- **Coverage uses one-second resolution.** A report covering up to 23:59:59 meets one starting at 00:00:00.
+- **Photos are served only through the Worker,** after the role check, with `Cache-Control: no-store` and a sandbox Content-Security-Policy, instead of signed links. Only JPG, PNG and PDF are accepted, checked from the file's first bytes.
+- **Database triggers lock a confirmed shift.** Its register rows, software bills and decisions cannot change, and it cannot be confirmed twice, whichever request runs first.
+
 ### New Cloudflare resource
 
 An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.

@@ -33,6 +33,11 @@ export const PERMISSIONS = {
   'bank.link': BOOKS,
   'export.run': BOOKS,
   'reports.view': ['owner', 'accountant', 'viewer'],
+  // Phase 2: daily sales. See docs/phase2-context.md, "New permission actions".
+  'sales.view': ALL,
+  'sales.import': PREPARERS,
+  'sales.decide': BOOKS,
+  'shift.reopen': OWNER,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

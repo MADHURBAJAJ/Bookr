@@ -5,8 +5,9 @@ import { now } from '../src/db';
 import type { Role } from '../src/permissions';
 import { createTestDb } from './d1';
 
-const { db, dispose } = await createTestDb();
-export const env = { DB: db };
+const { db, uploads, dispose } = await createTestDb();
+export const env = { DB: db, UPLOADS: uploads };
+export { db, uploads };
 export const PASSWORD = 'test-password-1234';
 let hash: string | undefined;
 let n = 0;
@@ -65,7 +66,17 @@ export class Client {
     const text = await res.text();
     return { status: res.status, json: text ? JSON.parse(text) : null };
   }
+  /** Sends a raw file body, as the Upload screen does. */
+  async upload(path: string, bytes: Uint8Array<ArrayBuffer>, type: string) {
+    const res = await app.request(`/api${path}`, { method: 'POST', headers: { 'Content-Type': type, ...(this.cookie ? { Cookie: this.cookie } : {}) }, body: bytes }, env);
+    const text = await res.text();
+    return { status: res.status, json: text ? JSON.parse(text) : null, headers: res.headers };
+  }
+  async raw(path: string) {
+    return app.request(`/api${path}`, { headers: this.cookie ? { Cookie: this.cookie } : {} }, env);
+  }
   get = (p: string) => this.call('GET', p);
+  put = (p: string, b: unknown = {}) => this.call('PUT', p, b);
   post = (p: string, b: unknown = {}) => this.call('POST', p, b);
   patch = (p: string, b: unknown = {}) => this.call('PATCH', p, b);
   del = (p: string) => this.call('DELETE', p, {});

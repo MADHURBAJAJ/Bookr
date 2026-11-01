@@ -2,6 +2,7 @@ import type { Role } from './permissions';
 
 export interface Env {
   DB: D1Database;
+  UPLOADS: R2Bucket;
   ASSETS?: { fetch: typeof fetch };
 }
 

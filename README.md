@@ -4,7 +4,18 @@ Bookr turns cash-book photos and bank statement sheets into reviewed transaction
 
 The source design is the Bookkeeping App Build Handover doc and the Bookkeeping App UI prototype.
 
-## Phase 1: Foundation (this branch)
+## Phase 2: Cash capture
+
+- Software sales CSV import with its footer as a control total, and names never stored.
+- The 8 am to 8 am shift rule, with missing hours shown.
+- Overlapping reports: identical bills skipped, different ones flagged for a person.
+- Register, expense list and cash summary pages typed in beside the photo. OCR is not connected yet.
+- Compare sales: every difference decided by a person; confirm creates approved income rows; only an Owner can reopen.
+- Cash summary checks, including received against the shift's confirmed cash.
+
+See `docs/phase2-context.md` for the design.
+
+## Phase 1: Foundation
 
 - Sign in with email and password, using server-side sessions and an HttpOnly cookie.
 - Business switcher and the Choose a business screen. An Owner can create a new business.
@@ -40,6 +51,8 @@ npm install
 npm run db:migrate:local
 DEMO_PASSWORD='choose-one-locally' npm run db:seed-demo:local
 npm run dev                          # http://127.0.0.1:8787
+# in another terminal, once dev is running:
+DEMO_PASSWORD='choose-one-locally' npm run db:seed-demo-sales -- --base-url http://127.0.0.1:8787
 ```
 
 Demo sign-ins, all using the demo password:
@@ -67,6 +80,7 @@ The demo site runs on workers.dev with the `bookr-demo` D1 database. It holds sa
 npm run db:migrate:remote
 DEMO_PASSWORD="$(security find-generic-password -s bookr-demo-password -w)" npm run db:seed-demo:remote
 npm run deploy
+DEMO_PASSWORD="$(security find-generic-password -s bookr-demo-password -w)" npm run db:seed-demo-sales -- --base-url https://bookr-demo.bis-directoredu.workers.dev
 ```
 
 The live demo password is kept in the macOS Keychain on the build Mac (service `bookr-demo-password`), not in the repo.

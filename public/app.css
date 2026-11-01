@@ -62,6 +62,8 @@ td { padding: 8px 6px; border-top: 1px solid var(--line-soft); vertical-align: m
 .chip { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; background: var(--chip); }
 .chip.ok { background: var(--ok-bg); color: var(--ok); }
 .chip.wait { background: var(--wait-bg); color: var(--wait); }
+.chip.bad { background: #FEE2E2; color: #7F1D1D; }
+.chip.info { background: #DBEAFE; color: #1E3A8A; }
 .chip.income { background: var(--income-bg); color: var(--income); }
 .chip.expense { background: var(--expense-bg); color: var(--expense); }
 .yes { color: var(--teal-ink); font-weight: 600; text-align: center; } .no { color: var(--muted); text-align: center; }

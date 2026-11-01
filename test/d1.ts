@@ -30,7 +30,7 @@ export function splitStatements(text: string): string[] {
 
 export async function createTestDb() {
   const dir = mkdtempSync(join(tmpdir(), 'bookr-d1-'));
-  const proxy = await getPlatformProxy<{ DB: D1Database }>({ persist: { path: dir } });
+  const proxy = await getPlatformProxy<{ DB: D1Database; UPLOADS: R2Bucket }>({ persist: { path: dir } });
   const db = proxy.env.DB;
   for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()) {
     const statements = splitStatements(readFileSync(new URL(file, MIGRATIONS), 'utf8'));
@@ -40,5 +40,5 @@ export async function createTestDb() {
     await proxy.dispose();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { db, dispose };
+  return { db, uploads: proxy.env.UPLOADS, dispose };
 }

@@ -31,3 +31,4 @@ function message(e: unknown): string {
 export const isUniqueViolation = (e: unknown) => message(e).includes('UNIQUE constraint failed');
 export const isLastOwner = (e: unknown) => message(e).includes('last_owner');
 export const isInviteUnusable = (e: unknown) => message(e).includes('invite_unusable');
+export const isShiftConfirmed = (e: unknown) => message(e).includes('shift_confirmed');

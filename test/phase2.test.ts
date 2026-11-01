@@ -1,0 +1,457 @@
+// Phase 2 through the API: import, overlaps, coverage, comparison, decisions, confirm, reopen,
+// uploads, expense rows and the cash summary checks. Invented data only (demo/sample-data.ts).
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { businessWithAllRoles, Client, sql, resetDb, uploads } from './helpers';
+import { buildSalesCsv, REGISTER_31_OCT, REPORT_1_NOV_EARLY, REPORT_31_OCT, type SampleBill } from '../demo/sample-data';
+import { istToMs } from '../src/time';
+
+afterAll(() => sql.end());
+beforeEach(resetDb);
+// A full shift is ~20 API calls with many queries each; the local D1 proxy is slow per query.
+vi.setConfig({ testTimeout: 180_000 });
+
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const png = (n: number) => { const b = new Uint8Array(PNG); b[10] = n; return b; };
+const DAY_START = (y: number, m: number, d: number) => istToMs(y, m, d, 0, 0, 0);
+const DAY_END = (y: number, m: number, d: number) => istToMs(y, m, d, 23, 59, 59);
+
+/** A hotel with every role, F&B and Room income heads mapped to their bill types. */
+async function hotel() {
+  const h = await businessWithAllRoles('Hotel');
+  const o = h.clients.owner;
+  const fnb = (await o.post(`/businesses/${h.bid}/heads`, { name: 'F&B', type: 'income' })).json.id;
+  const room = (await o.post(`/businesses/${h.bid}/heads`, { name: 'Room', type: 'income' })).json.id;
+  expect((await h.clients.accountant.put(`/businesses/${h.bid}/bill-type-heads/fnb`, { headId: fnb })).status).toBe(200);
+  expect((await o.put(`/businesses/${h.bid}/bill-type-heads/room`, { headId: room })).status).toBe(200);
+  const importCsv = (c: Client, bills: SampleBill[], extra: Record<string, unknown> = {}) =>
+    c.post(`/businesses/${h.bid}/sales-reports`, { day: '2026-10-31', csv: buildSalesCsv(bills), ...extra });
+  return { ...h, fnb, room, importCsv };
+}
+
+/** Imports both sample reports covering whole days, and types in the 31 Oct register. */
+async function fullShift(h: Awaited<ReturnType<typeof hotel>>, register = REGISTER_31_OCT) {
+  const o = h.clients.owner;
+  expect((await h.importCsv(o, REPORT_31_OCT, { coversFrom: DAY_START(2026, 10, 31), coversTo: DAY_END(2026, 10, 31) })).status).toBe(201);
+  expect((await h.importCsv(o, REPORT_1_NOV_EARLY, { coversFrom: DAY_START(2026, 11, 1), coversTo: istToMs(2026, 11, 1, 7, 59, 59) })).status).toBe(201);
+  const page = await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(1), 'image/png');
+  expect(page.status).toBe(201);
+  for (const r of register) {
+    const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page.json.id}/register-rows`, {
+      billNo: r.billNo, billType: r.billType, amount: r.amount, remarks: r.remarks ?? null, status: 'checked',
+      payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: p.amount })),
+    });
+    expect(res.status).toBe(201);
+  }
+  return page.json.id as string;
+}
+
+const view = (h: { bid: string; clients: Record<string, Client> }, day = '2026-10-31') => h.clients.owner.get(`/businesses/${h.bid}/shifts/${day}`);
+const byBill = (v: { json: { comparisons: { billNo: string }[] } }, bill: string) => v.json.comparisons.find((c) => c.billNo === bill) as any;
+
+describe('software report import', () => {
+  it('previews without saving, then imports with each bill in its shift', async () => {
+    const h = await hotel();
+    const preview = await h.importCsv(h.clients.entry_staff, REPORT_31_OCT, { dryRun: true });
+    expect(preview.status).toBe(200);
+    expect(preview.json).toMatchObject({ bills: 16, add: 16, skip: 0, flag: 0, complimentary: 1, shifts: ['2026-10-30', '2026-10-31'] });
+    expect(preview.json.coversFrom).toBe(istToMs(2026, 10, 31, 0, 20, 11)); // defaults to the first and last payment
+    expect(preview.json.coversTo).toBe(istToMs(2026, 10, 31, 23, 40, 55));
+    expect((await sql`SELECT count(*) AS n FROM software_bills`)[0].n).toBe(0);
+
+    expect((await h.importCsv(h.clients.entry_staff, REPORT_31_OCT)).status).toBe(201);
+    const days = await sql`SELECT shift_day, count(*) AS n FROM software_bills GROUP BY shift_day ORDER BY shift_day`;
+    expect(days).toEqual([{ shift_day: '2026-10-30', n: 3 }, { shift_day: '2026-10-31', n: 13 }]);
+    const [b] = await sql`SELECT amount_paise, mode, is_complimentary FROM software_bills WHERE bill_no = '26103121'`;
+    expect(b).toEqual({ amount_paise: 124050, mode: 'cash', is_complimentary: 0 });
+    const [comp] = await sql`SELECT is_complimentary FROM software_bills WHERE bill_no = '2610316'`;
+    expect(comp.is_complimentary).toBe(1);
+  });
+
+  it('stores no guest name anywhere: not in D1, not in the stored copy', async () => {
+    const h = await hotel();
+    const res = await h.importCsv(h.clients.owner, REPORT_31_OCT);
+    const [u] = await sql`SELECT storage_key FROM uploads WHERE kind = 'software_sales_csv'`;
+    const stored = await (await uploads.get(u.storage_key))!.text();
+    expect(stored).not.toMatch(/Asha|Vikram|Room 4/);
+    expect(stored).toContain('26103120');
+    for (const table of ['software_bills', 'sales_reports', 'uploads', 'audit_log', 'bill_comparisons']) {
+      const rows = await sql([`SELECT * FROM ${table}`] as unknown as TemplateStringsArray);
+      expect(JSON.stringify(rows)).not.toMatch(/Asha|Vikram/);
+    }
+    expect(res.status).toBe(201);
+  });
+
+  it('refuses a file whose footer does not add up, and saves nothing', async () => {
+    const h = await hotel();
+    const res = await h.clients.owner.post(`/businesses/${h.bid}/sales-reports`, { day: '2026-10-31', csv: buildSalesCsv(REPORT_31_OCT, { breakFooter: 'upi' }) });
+    expect(res.status).toBe(400);
+    expect(res.json.problems.join(' ')).toMatch(/UPI/);
+    expect((await sql`SELECT count(*) AS n FROM uploads`)[0].n).toBe(0);
+  });
+
+  it('refuses the same file twice', async () => {
+    const h = await hotel();
+    expect((await h.importCsv(h.clients.owner, REPORT_31_OCT)).status).toBe(201);
+    expect((await h.importCsv(h.clients.owner, REPORT_31_OCT)).status).toBe(409);
+  });
+
+  it('the covered period must include every bill', async () => {
+    const h = await hotel();
+    const res = await h.importCsv(h.clients.owner, REPORT_31_OCT, { coversFrom: DAY_START(2026, 10, 31), coversTo: istToMs(2026, 10, 31, 12, 0, 0) });
+    expect(res.status).toBe(400);
+  });
+
+  it('Owner, Accountant and Entry staff can import; Viewer cannot', async () => {
+    const h = await hotel();
+    expect((await h.importCsv(h.clients.viewer, REPORT_31_OCT, { dryRun: true })).status).toBe(403);
+    expect((await h.importCsv(h.clients.entry_staff, REPORT_31_OCT, { dryRun: true })).status).toBe(200);
+    expect((await h.importCsv(h.clients.accountant, REPORT_31_OCT, { dryRun: true })).status).toBe(200);
+  });
+});
+
+describe('overlapping files', () => {
+  it('skips identical bills and flags different ones, never overwriting', async () => {
+    const h = await hotel();
+    await h.importCsv(h.clients.owner, REPORT_31_OCT);
+    const overlap: SampleBill[] = [
+      REPORT_31_OCT[14],                                  // identical
+      { ...REPORT_31_OCT[15], amount: '870' },            // 26103122 differs
+      ...REPORT_1_NOV_EARLY,                              // new
+    ];
+    const res = await h.importCsv(h.clients.owner, overlap);
+    expect(res.status).toBe(201);
+    expect(res.json).toMatchObject({ add: 3, skip: 1, flag: 1 });
+    const [kept] = await sql`SELECT amount_paise FROM software_bills WHERE bill_no = '26103122'`;
+    expect(kept.amount_paise).toBe(78000);
+    const v = await view(h);
+    expect(v.json.conflicts).toHaveLength(1);
+    expect(v.json.conflicts[0]).toMatchObject({ billNo: '26103122', existing: { amountPaise: 78000 }, incoming: { amountPaise: 87000 } });
+    expect(v.json.blockers.join(' ')).toMatch(/overlapping bill differs/);
+  });
+
+  it('a person decides the overlap: Entry staff cannot, Accountant can use the incoming values', async () => {
+    const h = await hotel();
+    await h.importCsv(h.clients.owner, REPORT_31_OCT);
+    await h.importCsv(h.clients.owner, [{ ...REPORT_31_OCT[15], amount: '870' }]);
+    const id = (await view(h)).json.conflicts[0].id;
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/conflicts/${id}`, { decision: 'use_incoming' })).status).toBe(403);
+    expect((await h.clients.accountant.put(`/businesses/${h.bid}/conflicts/${id}`, { decision: 'use_incoming' })).status).toBe(200);
+    const [b] = await sql`SELECT amount_paise FROM software_bills WHERE bill_no = '26103122'`;
+    expect(b.amount_paise).toBe(87000);
+    expect((await view(h)).json.conflicts).toHaveLength(0);
+    const [a] = await sql`SELECT action FROM audit_log WHERE action = 'conflict.decide'`;
+    expect(a).toBeTruthy();
+  });
+
+  it('a corrected file can replace an earlier one before the shift is confirmed', async () => {
+    const h = await hotel();
+    const first = await h.importCsv(h.clients.owner, REPORT_31_OCT);
+    const corrected = REPORT_31_OCT.map((b) => (b.bill === '2610317' ? { ...b, amount: '4140' } : b));
+    const res = await h.importCsv(h.clients.owner, corrected, { replaces: first.json.id });
+    expect(res.status).toBe(201);
+    expect(res.json).toMatchObject({ add: 16, skip: 0, flag: 0 });
+    const [b] = await sql`SELECT amount_paise FROM software_bills WHERE bill_no = '2610317'`;
+    expect(b.amount_paise).toBe(414000);
+    const [old] = await sql`SELECT replaced_by FROM sales_reports WHERE id = ${first.json.id}`;
+    expect(old.replaced_by).toBe(res.json.id);
+  });
+});
+
+describe('shift coverage', () => {
+  it('a shift stays incomplete until imported coverage spans 8 am to 8 am', async () => {
+    const h = await hotel();
+    await h.importCsv(h.clients.owner, REPORT_31_OCT);
+    let v = await view(h);
+    expect(v.json.gaps.length).toBeGreaterThan(0);
+    expect(v.json.blockers.join(' ')).toMatch(/not covered/);
+    // Widen the first report to the whole day, then add the early hours of 1 Nov.
+    const rid = v.json.reports[0].id;
+    expect((await h.clients.owner.patch(`/businesses/${h.bid}/sales-reports/${rid}`, { coversFrom: DAY_START(2026, 10, 31), coversTo: DAY_END(2026, 10, 31) })).status).toBe(200);
+    v = await view(h);
+    expect(v.json.gaps).toEqual([{ from: istToMs(2026, 11, 1, 0, 0, 0), to: istToMs(2026, 11, 1, 8, 0, 0) }]);
+    await h.importCsv(h.clients.owner, REPORT_1_NOV_EARLY, { coversFrom: DAY_START(2026, 11, 1), coversTo: istToMs(2026, 11, 1, 7, 59, 59) });
+    v = await view(h);
+    expect(v.json.gaps).toEqual([]);
+  });
+
+  it('one report spanning several days can cover a shift on its own', async () => {
+    const h = await hotel();
+    const res = await h.importCsv(h.clients.owner, [...REPORT_31_OCT, ...REPORT_1_NOV_EARLY], { coversFrom: DAY_START(2026, 10, 30), coversTo: DAY_END(2026, 11, 1) });
+    expect(res.status).toBe(201);
+    expect((await view(h)).json.gaps).toEqual([]);
+    expect((await view(h, '2026-10-30')).json.gaps).toEqual([]);
+  });
+});
+
+describe('comparison and decisions', () => {
+  it('finds every kind of difference in the sample shift', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const v = await view(h);
+    expect(byBill(v, '2610311').difference).toBe('match');
+    expect(byBill(v, '26103115').difference).toBe('mode');
+    expect(byBill(v, '2610317').difference).toBe('amount');
+    expect(byBill(v, '2610318').difference).toBe('mode');           // U/N in the software
+    expect(byBill(v, '2610319').difference).toBe('missing_in_register');
+    expect(byBill(v, '26103120').difference).toBe('mode');          // part cash, part UPI
+    expect(byBill(v, '26103120').register.mode).toBe('mixed');
+    expect(byBill(v, '26103125').difference).toBe('missing_in_software');
+    expect(byBill(v, '2610316').difference).toBe('complimentary');
+    expect(byBill(v, '26103010').difference).toBe('match');          // previous day's number, paid in this shift
+    expect(byBill(v, '2611011').difference).toBe('match');           // next day's number, paid before 8 am
+    expect(v.json.comparisons.filter((c: any) => ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'].includes(c.difference))).toHaveLength(6);
+    expect(v.json.canConfirm).toBe(false);
+  });
+
+  it('an amount and mode difference is one combined type', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.map((r) => (r.billNo === '2610311' ? { ...r, amount: '400', payments: [{ mode: 'cash' as const, columnLabel: 'Cash', amount: '400' }] } : r));
+    await fullShift(h, reg);
+    expect(byBill(await view(h), '2610311').difference).toBe('amount_and_mode');
+  });
+
+  it('only Owner and Accountant decide; the app refuses sides that cannot work', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const v = await view(h);
+    const put = (c: Client, bill: string, decision: string) => c.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision });
+    expect((await put(h.clients.entry_staff, '2610317', 'use_software')).status).toBe(403);
+    expect((await put(h.clients.viewer, '2610317', 'use_software')).status).toBe(403);
+    expect((await put(h.clients.accountant, '2610317', 'use_software')).status).toBe(200);
+    // Missing in the register: no bill type, so the software side cannot be used.
+    expect((await put(h.clients.owner, '2610319', 'use_software')).json.error).toMatch(/type/);
+    // Unknown mode in the software: cannot be used.
+    expect((await put(h.clients.owner, '2610318', 'use_software')).json.error).toMatch(/does not say how/);
+    expect((await put(h.clients.owner, '2611011', 'use_register')).status).toBe(400); // a match needs no decision
+    const [a] = await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide'`;
+    expect(a.n).toBe(1);
+  });
+
+  it('editing a decided bill clears its decision and logs it', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    let v = await view(h);
+    await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610317').id}`, { decision: 'use_register' });
+    const [row] = await sql`SELECT id FROM register_rows WHERE bill_no = '2610317'`;
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${row.id}`, {
+      billNo: '2610317', billType: 'fnb', amount: '4400', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI XOXO', amount: '4400' }],
+    });
+    v = await view(h);
+    expect(byBill(v, '2610317').decision).toBeNull();
+    const [a] = await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared'`;
+    expect(a.n).toBe(1);
+    expect(pageId).toBeTruthy();
+  });
+});
+
+async function decideAll(h: Awaited<ReturnType<typeof hotel>>) {
+  const v = await view(h);
+  const decide = (bill: string, decision: string) => h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision });
+  expect((await decide('26103115', 'use_register')).status).toBe(200);   // cash 403
+  expect((await decide('2610317', 'use_software')).status).toBe(200);    // UPI 4410
+  expect((await decide('2610318', 'use_register')).status).toBe(200);    // UPI 650
+  expect((await decide('2610319', 'leave_out')).status).toBe(200);
+  expect((await decide('26103120', 'use_register')).status).toBe(200);   // cash 1000 + UPI 1560
+  expect((await decide('26103125', 'use_register')).status).toBe(200);   // cash 500
+}
+
+describe('confirming a shift', () => {
+  it('lists what blocks confirmation', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect(res.status).toBe(409);
+    expect(res.json.problems.join(' ')).toMatch(/6 differences are not decided/);
+  });
+
+  it('creates approved income rows that follow each decision', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(403);
+    const res = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect(res.status).toBe(200);
+    const rows = await sql`SELECT t.bill_no, t.amount_paise, t.payment_mode, t.status, t.account_id, t.match_status, t.confirmed_source, h.name AS head, a.kind
+      FROM transactions t LEFT JOIN heads h ON h.id = t.head_id LEFT JOIN accounts a ON a.id = t.account_id
+      WHERE t.shift_day = '2026-10-31' ORDER BY t.bill_no, t.payment_mode`;
+    expect(rows.every((r) => r.status === 'approved')).toBe(true);
+    expect(rows.find((r) => r.bill_no === '2610319')).toBeUndefined();     // left out
+    expect(rows.find((r) => r.bill_no === '2610316')).toBeUndefined();     // complimentary
+    expect(rows.filter((r) => r.bill_no === '26103120')).toHaveLength(2);  // part cash, part UPI
+    const cash = rows.filter((r) => r.payment_mode === 'cash');
+    expect(cash.every((r) => r.kind === 'cash' && r.match_status === null)).toBe(true);
+    expect(rows.filter((r) => r.payment_mode === 'upi').every((r) => r.account_id === null && r.match_status === 'awaiting_bank_match')).toBe(true);
+    expect(rows.find((r) => r.payment_mode === 'card')).toMatchObject({ account_id: null, match_status: 'awaiting_card_settlement', head: 'Room' });
+    expect(rows.find((r) => r.bill_no === '2610317')).toMatchObject({ amount_paise: 441000, confirmed_source: 'software', head: 'F&B' });
+    expect(rows.find((r) => r.bill_no === '2610311')).toMatchObject({ confirmed_source: 'both_matched' });
+    // 380 + 403 + 1000 + 1240.50 + 560 + 220 + 500
+    expect(cash.reduce((s, r) => s + r.amount_paise, 0)).toBe(430350);
+    const [a] = await sql`SELECT after FROM audit_log WHERE action = 'shift.confirm'`;
+    expect(JSON.parse(a.after)).toMatchObject({ incomeRows: rows.length });
+  });
+
+  it('confirming twice at the same moment creates the rows once', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    const results = await Promise.all([
+      h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`),
+      h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`),
+    ]);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    const [n] = await sql`SELECT count(*) AS n FROM transactions WHERE shift_day = '2026-10-31'`;
+    expect(n.n).toBe(16);
+  });
+
+  it('a confirmed shift is locked: no register edits, decisions or imports into it', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    await decideAll(h);
+    await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    const [row] = await sql`SELECT id FROM register_rows WHERE bill_no = '2610311'`;
+    const edit = await h.clients.owner.put(`/businesses/${h.bid}/register-rows/${row.id}`, { billNo: '2610311', billType: 'fnb', amount: '1', status: 'checked', payments: [{ mode: 'cash', amount: '1' }] });
+    expect(edit.status).toBe(409);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: '9', billType: 'fnb', amount: '1', payments: [] })).status).toBe(409);
+    const v = await view(h);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610319').id}`, { decision: 'use_register' })).status).toBe(400);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610317').id}`, { decision: 'leave_out' })).status).toBe(409);
+    const late: SampleBill = { pos: 'POS-1', bill: '26103199', when: '31-10-2026.18:00:00', name: 'U/N', mode: 'CASH', amount: '100' };
+    expect((await h.importCsv(h.clients.owner, [late])).status).toBe(409);
+    // The database refuses too, whatever the app does.
+    await expect(sql`UPDATE register_rows SET amount_paise = 1 WHERE id = ${row.id}`).rejects.toThrow(/shift_confirmed/);
+  });
+
+  it('only an Owner can reopen; the rows go, and are kept in the audit log', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/reopen`, { reason: 'Typo' })).status).toBe(403);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/reopen`, {})).status).toBe(400); // a reason is required
+    const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/reopen`, { reason: 'Bill 2610317 was mistyped' });
+    expect(res.status).toBe(200);
+    expect(res.json.removed).toBe(16);
+    expect((await sql`SELECT count(*) AS n FROM transactions WHERE shift_day = '2026-10-31'`)[0].n).toBe(0);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'transaction.remove_on_reopen'`)[0].n).toBe(16);
+    const [s] = await sql`SELECT status, reopen_reason FROM shifts WHERE shift_day = '2026-10-31'`;
+    expect(s).toEqual({ status: 'comparing', reopen_reason: 'Bill 2610317 was mistyped' });
+    // Decisions survive the reopen, and the shift can be confirmed again.
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+  });
+
+  it('a shift with rows matched to the bank cannot be reopened', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    await sql`UPDATE transactions SET matched_bank_row = 'bank-1' WHERE payment_mode = 'upi' AND bill_no = '2610311'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/reopen`, { reason: 'x' })).status).toBe(409);
+  });
+
+  it('needs an income head for each bill type, set by Owner or Accountant only', async () => {
+    const h = await businessWithAllRoles('Hotel');
+    const exp = (await h.clients.owner.get(`/businesses/${h.bid}/heads`)).json.heads.find((x: any) => x.type === 'expense').id;
+    const inc = (await h.clients.owner.get(`/businesses/${h.bid}/heads`)).json.heads.find((x: any) => x.type === 'income').id;
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/bill-type-heads/fnb`, { headId: inc })).status).toBe(403);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bill-type-heads/fnb`, { headId: exp })).status).toBe(400);
+    expect((await h.clients.accountant.put(`/businesses/${h.bid}/bill-type-heads/fnb`, { headId: inc })).status).toBe(200);
+  });
+});
+
+describe('photo uploads', () => {
+  it('accepts JPG, PNG or PDF by their contents, from Owner, Accountant and Entry staff', async () => {
+    const h = await hotel();
+    const up = (c: Client, bytes: Uint8Array<ArrayBuffer>, type: string) => c.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, bytes, type);
+    expect((await up(h.clients.viewer, png(1), 'image/png')).status).toBe(403);
+    expect((await up(h.clients.entry_staff, new TextEncoder().encode('<svg onload=alert(1)>'), 'image/png')).status).toBe(400);
+    expect((await up(h.clients.entry_staff, png(2), 'image/png')).status).toBe(201);
+    expect((await up(h.clients.entry_staff, png(2), 'image/png')).status).toBe(409);
+    expect((await up(h.clients.entry_staff, png(3), 'text/plain')).status).toBe(415);
+  });
+
+  it('serves a photo only to the business, sandboxed and never cached', async () => {
+    const h = await hotel();
+    const id = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(4), 'image/png')).json.id;
+    const ok = await h.clients.accountant.raw(`/businesses/${h.bid}/uploads/${id}/file`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('Content-Type')).toBe('image/png');
+    expect(ok.headers.get('Content-Security-Policy')).toMatch(/sandbox/);
+    expect(ok.headers.get('Cache-Control')).toMatch(/no-store/);
+    expect((await h.clients.viewer.raw(`/businesses/${h.bid}/uploads/${id}/file`)).status).toBe(403);
+    const other = await hotel();
+    expect((await other.clients.owner.raw(`/businesses/${other.bid}/uploads/${id}/file`)).status).toBe(404);
+    expect((await new Client().raw(`/businesses/${h.bid}/uploads/${id}/file`)).status).toBe(401);
+  });
+});
+
+describe('expense list and cash summary', () => {
+  async function expensePage(h: Awaited<ReturnType<typeof hotel>>) {
+    const id = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, png(7), 'image/png')).json.id;
+    const heads = (await h.clients.owner.get(`/businesses/${h.bid}/heads`)).json.heads;
+    const util = heads.find((x: any) => x.name === 'Utilities').id;
+    const a = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${id}/expense-rows`, { narration: 'Gas cylinder', amount: '1100', headId: util });
+    const b = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${id}/expense-rows`, { narration: 'Auto fare', amount: '150' });
+    return { id, util, rowA: a.json.id, rowB: b.json.id };
+  }
+
+  it('expense rows are drafts from Cash until an Owner or Accountant approves rows with a head', async () => {
+    const h = await hotel();
+    const p = await expensePage(h);
+    const [r] = await sql`SELECT t.type, t.status, t.source, a.kind FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.id = ${p.rowA}`;
+    expect(r).toEqual({ type: 'expense', status: 'draft', source: 'cash_photo', kind: 'cash' });
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p.id}/expense-rows/approve`)).status).toBe(403);
+    const res = await h.clients.accountant.post(`/businesses/${h.bid}/uploads/${p.id}/expense-rows/approve`);
+    expect(res.json.approved).toBe(1); // the row without a head stays a draft
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/expense-rows/${p.rowA}`, { narration: 'x', amount: '1' })).status).toBe(404);
+  });
+
+  it('runs the four checks, waits on drafts and the shift, and needs a note to accept a mismatch', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const p = await expensePage(h);
+    const sumId = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=cash_summary&day=2026-10-31`, png(9), 'image/png')).json.id;
+    let page = await h.clients.owner.get(`/businesses/${h.bid}/uploads/${sumId}`);
+    const summaryId = page.json.summary.id;
+    // opening 8,400 + received 4,303.50 = 12,703.50; − expenses 1,250 = 11,453.50
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/cash-summaries/${summaryId}`, { opening: '8400', received: '4303.50', balance: '12703.50', expenses: '1250', cashInHand: '11453.50' });
+    page = await h.clients.owner.get(`/businesses/${h.bid}/uploads/${sumId}`);
+    const state = (k: string) => page.json.checks.find((c: any) => c.key === k).state;
+    expect(state('arithmetic')).toBe('pass');
+    expect(state('opening')).toBe('unavailable');
+    expect(state('received')).toBe('waiting');
+    expect(state('expenses')).toBe('waiting');
+    const list = await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads`);
+    expect(list.json.notices[0].text).toBe('The cash summary for 2026-10-31 cannot be checked yet: 2 expense rows for that day are not approved.');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/cash-summaries/${summaryId}/approve`)).status).toBe(409);
+
+    // Approve both expense rows and confirm the shift.
+    const transport = (await h.clients.owner.get(`/businesses/${h.bid}/heads`)).json.heads.find((x: any) => x.name === 'Transport').id;
+    await h.clients.owner.put(`/businesses/${h.bid}/expense-rows/${p.rowB}`, { narration: 'Auto fare', amount: '150', headId: transport });
+    await h.clients.owner.post(`/businesses/${h.bid}/uploads/${p.id}/expense-rows/approve`);
+    await decideAll(h);
+    await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    page = await h.clients.owner.get(`/businesses/${h.bid}/uploads/${sumId}`);
+    expect(state('received')).toBe('pass');   // 4,303.50 confirmed cash
+    expect(state('expenses')).toBe('pass');   // 1,100 + 150
+    expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads`)).json.notices).toEqual([]);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/cash-summaries/${summaryId}/approve`)).status).toBe(403);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/cash-summaries/${summaryId}/approve`)).json.acceptedMismatches).toBe(0);
+  });
+
+  it('a failed check can be accepted only with a note, which is logged', async () => {
+    const h = await hotel();
+    const sumId = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=cash_summary&day=2026-11-05`, png(11), 'image/png')).json.id;
+    const summaryId = (await h.clients.owner.get(`/businesses/${h.bid}/uploads/${sumId}`)).json.summary.id;
+    await h.clients.owner.put(`/businesses/${h.bid}/cash-summaries/${summaryId}`, { opening: '100', received: '0', balance: '100', expenses: '0', cashInHand: '90' });
+    // No shift for 5 Nov exists, so the received check waits. Confirm an empty shift is not possible, so check only the arithmetic path:
+    const page = await h.clients.owner.get(`/businesses/${h.bid}/uploads/${sumId}`);
+    expect(page.json.checks.find((c: any) => c.key === 'arithmetic').state).toBe('fail');
+    await sql`INSERT INTO shifts (id, business_id, shift_day, status, created_at) VALUES ('s5', ${h.bid}, '2026-11-05', 'confirmed', 0)`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/cash-summaries/${summaryId}/approve`)).status).toBe(409);
+    const ok = await h.clients.owner.post(`/businesses/${h.bid}/cash-summaries/${summaryId}/approve`, { note: 'Rs 10 short, counted twice' });
+    expect(ok.json.acceptedMismatches).toBe(1);
+    const [s] = await sql`SELECT status, mismatch_note FROM cash_summaries WHERE id = ${summaryId}`;
+    expect(s).toEqual({ status: 'approved', mismatch_note: 'Rs 10 short, counted twice' });
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'cash_summary.approve'`)[0].n).toBe(1);
+  });
+});

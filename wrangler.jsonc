@@ -18,5 +18,12 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "UPLOADS",
+      // Photos and CSVs with the NAME column blanked. Served only through the Worker after a role check.
+      "bucket_name": "bookr-demo-uploads"
+    }
+  ],
   "observability": { "enabled": true }
 }

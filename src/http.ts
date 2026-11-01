@@ -1,3 +1,4 @@
+import { parsePaise } from './money';
 import type { Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
@@ -33,15 +34,18 @@ export function date(data: Record<string, unknown>, key: string, label: string):
   return v;
 }
 
-// Parses a rupee amount typed by a person ("2,45,000.50") into integer paise, using string
-// arithmetic only, so no floating-point value is ever involved.
+// Parses a rupee amount typed by a person ("2,45,000.50") into integer paise. See money.ts.
 export function paise(data: Record<string, unknown>, key: string, label: string): number {
   const raw = data[key];
-  const v = typeof raw === 'string' ? raw.replace(/,/g, '').trim() : '';
-  const m = /^(-?)(\d{1,12})(?:\.(\d{1,2}))?$/.exec(v);
-  if (!m) fail(400, `${label} must be an amount in rupees with up to 2 decimals.`);
-  const value = Number(m[2]) * 100 + Number((m[3] ?? '').padEnd(2, '0'));
-  return m[1] === '-' ? -value : value;
+  const value = typeof raw === 'string' ? parsePaise(raw) : null;
+  if (value === null) fail(400, `${label} must be an amount in rupees with up to 2 decimals.`);
+  return value;
+}
+
+export function optionalPaise(data: Record<string, unknown>, key: string, label: string): number | null {
+  const raw = data[key];
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return null;
+  return paise(data, key, label);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
