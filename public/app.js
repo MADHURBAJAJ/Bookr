@@ -40,6 +40,7 @@ async function api(method, path, body) {
 
 const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (s) => inr.format(Number(s));
+const home = (b) => `#/b/${b.id}/${b.actions.includes('reports.view') ? 'dashboard' : 'accounts'}`;
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
 
 function relative(ts) {
@@ -79,20 +80,20 @@ function render(view) {
 // ---------- shell: sidebar + header with business switcher
 
 const NAV = [
-  { key: 'dashboard', label: 'Dashboard' },
+  { key: 'dashboard', label: 'Dashboard', needs: 'reports.view' },
   { key: 'upload', label: 'Upload', phase: 2 },
   { key: 'review', label: 'Review', phase: 2 },
   { key: 'bank', label: 'Bank sync', phase: 3 },
   { key: 'upi', label: 'UPI matching', phase: 3 },
   { key: 'accounts', label: 'Accounts' },
   { key: 'heads', label: 'Heads and rules' },
-  { key: 'reports', label: 'Reports', phase: 4 },
+  { key: 'reports', label: 'Reports', phase: 4, needs: 'reports.view' },
   { key: 'export', label: 'Export', phase: 5 },
   { key: 'users', label: 'Users and roles', owner: true },
 ];
 
 function shell(biz, current, title, subtitle, body) {
-  const nav = NAV.filter((n) => !n.owner || biz.role === 'owner').map((n) => html`
+  const nav = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))).map((n) => html`
     <a class="nav ${n.key === current ? 'on' : ''}" href="#/b/${biz.id}/${n.key}">
       <span>${n.label}</span>${n.phase ? html`<span class="soon">Phase ${n.phase}</span>` : ''}
     </a>`);
@@ -163,13 +164,13 @@ function loginView() {
   onSubmit(document.getElementById('login'), async (d) => {
     await api('POST', '/auth/login', { email: d.email, password: d.password });
     me = await api('GET', '/me');
-    go(me.businesses.length === 1 ? `#/b/${me.businesses[0].id}/dashboard` : '#/choose');
+    go(me.businesses.length === 1 ? home(me.businesses[0]) : '#/choose');
   });
 }
 
 function chooseView() {
   const list = me.businesses.map((b) => html`
-    <a class="biz" href="#/b/${b.id}/dashboard">
+    <a class="biz" href="${home(b)}">
       <div><div class="name">${b.name}</div><div class="note">${b.isDemo ? 'Demo business' : ''}</div></div>
       <span class="chip" style="font-size:13px;padding:4px 12px">${ROLE_LABELS[b.role]}</span>
     </a>`);
@@ -209,10 +210,7 @@ function fyDefault() {
 }
 
 async function dashboardView(biz) {
-  const [{ accounts }, { heads }] = await Promise.all([
-    api('GET', `/businesses/${biz.id}/accounts`),
-    api('GET', `/businesses/${biz.id}/heads`),
-  ]);
+  const { accounts, heads } = await api('GET', `/businesses/${biz.id}/dashboard`);
   const total = accounts.reduce((s, a) => s + Number(a.openingBalance), 0);
   render(shell(biz, 'dashboard', 'Dashboard', 'Totals, the weekly chart and items needing attention arrive in Phase 4.', html`
     <div class="row">
@@ -224,8 +222,8 @@ async function dashboardView(biz) {
       <section class="card grow1">
         <h2>Set up</h2>
         <div class="list-row"><span>Accounts</span><span>${accounts.length}</span></div>
-        <div class="list-row"><span>Income heads</span><span>${heads.filter((h) => h.type === 'income').length}</span></div>
-        <div class="list-row"><span>Expense heads</span><span>${heads.filter((h) => h.type === 'expense').length}</span></div>
+        <div class="list-row"><span>Income heads</span><span>${heads.income}</span></div>
+        <div class="list-row"><span>Expense heads</span><span>${heads.expense}</span></div>
         <div class="note"><a href="#/b/${biz.id}/accounts">Accounts</a> · <a href="#/b/${biz.id}/heads">Heads and rules</a></div>
       </section>
     </div>`));
@@ -513,10 +511,13 @@ async function route() {
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);
       if (screen === 'users' && biz.role === 'owner') return usersView(biz, parts[3]);
-      if (NAV.some((n) => n.key === screen && n.phase)) return laterView(biz, screen);
+      const item = NAV.find((n) => n.key === screen);
+      if (item?.needs && !biz.actions.includes(item.needs)) return go(home(biz));
+      if (item?.phase) return laterView(biz, screen);
+      if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);
     }
-    if (me.businesses.length === 1 && parts[0] !== 'choose') return go(`#/b/${me.businesses[0].id}/dashboard`);
+    if (me.businesses.length === 1 && parts[0] !== 'choose') return go(home(me.businesses[0]));
     return chooseView();
   } catch (e) {
     if (me) render(html`<div class="center"><section class="card"><div class="error">${e.message}</div><a href="#/choose">Back</a></section></div>`);

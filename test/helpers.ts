@@ -12,7 +12,7 @@ let hash: string | undefined;
 let n = 0;
 
 export async function resetDb() {
-  await sql`TRUNCATE businesses, users, memberships, sessions, invites, accounts, heads CASCADE`;
+  await sql`TRUNCATE businesses, users, memberships, sessions, invites, accounts, heads, audit_log CASCADE`;
 }
 
 export async function makeUser(label = 'user') {

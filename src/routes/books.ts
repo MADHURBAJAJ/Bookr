@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { body, date, fail, isUniqueViolation, isUuid, money, text } from '../http';
+import { audit } from '../audit';
 
 export const bookRoutes = new Hono<AppEnv>();
 
@@ -30,14 +31,21 @@ bookRoutes.get('/businesses/:businessId/accounts', requireRole('accounts.view'),
   return c.json({ accounts });
 });
 
+// Every account change is written to the audit log in the same transaction.
 bookRoutes.post('/businesses/:businessId/accounts', requireRole('accounts.edit'), async (c) => {
   const a = accountInput(await body(c));
+  const bid = c.get('businessId');
   try {
-    const [row] = await c.get('sql')`
-      INSERT INTO accounts (business_id, name, kind, account_number, opening_balance, opening_date)
-      VALUES (${c.get('businessId')}, ${a.name}, ${a.kind}, ${a.accountNumber}, ${a.openingBalance}, ${a.openingDate})
-      RETURNING id`;
-    return c.json({ id: row.id }, 201);
+    const id = await c.get('sql').begin(async (tx) => {
+      const [row] = await tx.unsafe(
+        `INSERT INTO accounts (business_id, name, kind, account_number, opening_balance, opening_date)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${ACCOUNT_COLUMNS}`,
+        [bid, a.name, a.kind, a.accountNumber, a.openingBalance, a.openingDate],
+      );
+      await audit(tx, { businessId: bid, userId: c.get('user').id, action: 'account.create', table: 'accounts', rowId: row.id, before: null, after: row });
+      return row.id as string;
+    });
+    return c.json({ id }, 201);
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, 'An account with this name already exists.');
     throw e;
@@ -48,13 +56,21 @@ bookRoutes.patch('/businesses/:businessId/accounts/:accountId', requireRole('acc
   const accountId = c.req.param('accountId');
   if (!isUuid(accountId)) fail(404, 'Account not found.');
   const a = accountInput(await body(c));
+  const bid = c.get('businessId');
   try {
-    const rows = await c.get('sql')`
-      UPDATE accounts SET name = ${a.name}, kind = ${a.kind}, account_number = ${a.accountNumber},
-        opening_balance = ${a.openingBalance}, opening_date = ${a.openingDate}
-      WHERE id = ${accountId} AND business_id = ${c.get('businessId')}
-      RETURNING id`;
-    if (!rows.length) fail(404, 'Account not found.');
+    await c.get('sql').begin(async (tx) => {
+      const [before] = await tx.unsafe(
+        `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+        [accountId, bid],
+      );
+      if (!before) fail(404, 'Account not found.');
+      const [after] = await tx.unsafe(
+        `UPDATE accounts SET name = $3, kind = $4, account_number = $5, opening_balance = $6, opening_date = $7
+         WHERE id = $1 AND business_id = $2 RETURNING ${ACCOUNT_COLUMNS}`,
+        [accountId, bid, a.name, a.kind, a.accountNumber, a.openingBalance, a.openingDate],
+      );
+      await audit(tx, { businessId: bid, userId: c.get('user').id, action: 'account.update', table: 'accounts', rowId: accountId, before, after });
+    });
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, 'An account with this name already exists.');
     throw e;

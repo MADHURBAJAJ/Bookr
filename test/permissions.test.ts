@@ -47,6 +47,7 @@ describe('HTTP: every business route checks the role in that business', () => {
   const cases: [string, (c: Client, bid: string) => Promise<{ status: number }>, Role[], number][] = [
     ['view business', (c, b) => c.get(`/businesses/${b}`), ['owner', 'accountant', 'entry_staff', 'viewer'], 200],
     ['edit business', (c, b) => c.patch(`/businesses/${b}`, { name: 'Biz', fyStart: '2026-04-01' }), ['owner'], 200],
+    ['dashboard', (c, b) => c.get(`/businesses/${b}/dashboard`), ['owner', 'accountant', 'viewer'], 200],
     ['list accounts', (c, b) => c.get(`/businesses/${b}/accounts`), ['owner', 'accountant', 'entry_staff', 'viewer'], 200],
     ['add account', (c, b) => c.post(`/businesses/${b}/accounts`, { ...account, name: `Bank ${++seq}` }), ['owner', 'accountant'], 201],
     ['edit account', (c, b) => c.patch(`/businesses/${b}/accounts/${accountId}`, { name: 'Cash', kind: 'cash', openingBalance: '5', openingDate: '2026-04-01' }), ['owner', 'accountant'], 200],
@@ -208,5 +209,39 @@ describe('a business always keeps an Owner', () => {
     const { bid, users, clients } = await businessWithAllRoles();
     expect((await clients.owner.del(`/businesses/${bid}/members/${users.accountant.id}`)).status).toBe(200);
     expect((await clients.accountant.get(`/businesses/${bid}/accounts`)).status).toBe(404);
+  });
+});
+
+describe('audit log', () => {
+  beforeEach(resetDb);
+
+  it('every account change by an Accountant is logged with who, before and after', async () => {
+    const { bid, users, clients } = await businessWithAllRoles();
+    const created = await clients.accountant.post(`/businesses/${bid}/accounts`, {
+      name: 'HDFC', kind: 'bank', accountNumber: 'XX12', openingBalance: '1000', openingDate: '2026-04-01',
+    });
+    expect(created.status).toBe(201);
+    const id = created.json.id;
+    expect((await clients.accountant.patch(`/businesses/${bid}/accounts/${id}`, {
+      name: 'HDFC Current', kind: 'bank', accountNumber: 'XX12', openingBalance: '2500.50', openingDate: '2026-04-01',
+    })).status).toBe(200);
+
+    const rows = await sql`SELECT action, user_id, business_id, before, after FROM audit_log WHERE row_id = ${id} ORDER BY id`;
+    expect(rows.map((r) => r.action)).toEqual(['account.create', 'account.update']);
+    expect(rows.every((r) => r.user_id === users.accountant.id && r.business_id === bid)).toBe(true);
+    expect(rows[0].before).toBeNull();
+    expect(rows[0].after).toMatchObject({ name: 'HDFC', openingBalance: '1000.00' });
+    expect(rows[1].before).toMatchObject({ name: 'HDFC', openingBalance: '1000.00' });
+    expect(rows[1].after).toMatchObject({ name: 'HDFC Current', openingBalance: '2500.50' });
+  });
+
+  it('a refused change leaves no audit row', async () => {
+    const { bid, clients } = await businessWithAllRoles();
+    const [cash] = await sql`SELECT id FROM accounts WHERE business_id = ${bid}`;
+    const body = { name: 'Cash', kind: 'cash', openingBalance: '9', openingDate: '2026-04-01' };
+    expect((await clients.entry_staff.patch(`/businesses/${bid}/accounts/${cash.id}`, body)).status).toBe(403);
+    expect((await clients.accountant.post(`/businesses/${bid}/accounts`, { ...body, name: 'cash' })).status).toBe(409);
+    const [n] = await sql`SELECT count(*)::int AS n FROM audit_log`;
+    expect(n.n).toBe(0);
   });
 });

@@ -33,3 +33,18 @@ businessRoutes.patch('/businesses/:businessId', requireRole('business.edit'), as
   await c.get('sql')`UPDATE businesses SET name = ${name}, fy_start = ${fyStart} WHERE id = ${c.get('businessId')}`;
   return c.json({ ok: true });
 });
+
+// Dashboard figures. Uses reports.view, so Entry staff are refused here even though they can
+// read the account and head lists they need for tagging.
+businessRoutes.get('/businesses/:businessId/dashboard', requireRole('reports.view'), async (c) => {
+  const sql = c.get('sql');
+  const bid = c.get('businessId');
+  const accounts = await sql`
+    SELECT id, name, kind, opening_balance::text AS "openingBalance"
+    FROM accounts WHERE business_id = ${bid} ORDER BY kind = 'bank', name`;
+  const [heads] = await sql<{ income: number; expense: number }[]>`
+    SELECT count(*) FILTER (WHERE type = 'income')::int AS income,
+           count(*) FILTER (WHERE type = 'expense')::int AS expense
+    FROM heads WHERE business_id = ${bid}`;
+  return c.json({ accounts, heads });
+});
