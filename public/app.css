@@ -1,0 +1,82 @@
+/* Colours and sizes follow the Bookkeeping App UI prototype. */
+:root {
+  --ink: #14202B; --muted: #4B5B6B; --line: #DDE3E9; --line-soft: #E8EDF1; --field: #C5CFD8;
+  --ground: #F4F6F8; --card: #FFFFFF; --side: #14202B; --side-ink: #E6ECF1; --side-muted: #B7C4D0; --side-on: #264257;
+  --teal: #0F766E; --teal-ink: #0B5A53; --danger: #7F1D1D;
+  --income: #1D4ED8; --income-bg: #DBEAFE; --expense: #92400E; --expense-bg: #FEF3C7;
+  --ok-bg: #DCFCE7; --ok: #14532D; --wait-bg: #FEF3C7; --wait: #7A4A06; --chip: #E8EDF1;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: 'IBM Plex Sans', system-ui, sans-serif; color: var(--ink); background: var(--ground); }
+a { color: var(--teal); text-decoration: none; }
+.mono, .amount { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.amount { text-align: right; white-space: nowrap; }
+.loading { padding: 40px; color: var(--muted); }
+
+.shell { display: flex; flex-wrap: wrap; min-height: 100vh; }
+.side { flex: 0 0 232px; background: var(--side); color: var(--side-ink); padding: 24px 16px; display: flex; flex-direction: column; gap: 4px; }
+.brand { font-size: 18px; font-weight: 600; padding: 0 12px 20px; color: #fff; }
+.nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 8px; color: var(--side-ink); font-size: 15px; }
+.nav.on { background: var(--side-on); font-weight: 600; }
+.nav .soon { font-size: 11px; color: var(--side-muted); }
+.side-foot { margin-top: auto; padding: 16px 12px 0; font-size: 13px; color: var(--side-muted); line-height: 1.5; }
+.side-foot button { margin-top: 8px; background: transparent; border: 1px solid #3A5266; color: var(--side-ink); border-radius: 8px; min-height: 36px; padding: 0 12px; font: inherit; font-size: 13px; cursor: pointer; }
+.main { flex: 999 1 560px; min-width: 0; padding: 28px 32px; display: flex; flex-direction: column; gap: 20px; }
+@media (max-width: 760px) {
+  .side { flex-basis: 100%; flex-direction: row; flex-wrap: wrap; padding: 12px; }
+  .brand { padding: 8px 12px; width: 100%; }
+  .side-foot { margin-top: 0; width: 100%; }
+  .main { padding: 20px 16px; }
+}
+
+.head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.head h1 { margin: 0; font-size: 28px; font-weight: 600; }
+.sub { font-size: 14px; color: var(--muted); }
+.row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.card h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.grow3 { flex: 3 1 560px; } .grow2 { flex: 2 1 320px; } .grow1 { flex: 1 1 340px; }
+.note { font-size: 13px; color: var(--muted); line-height: 1.5; }
+.tiny { font-size: 12px; color: var(--muted); }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.form-row .field { flex: 1 1 160px; }
+.field label { font-size: 14px; font-weight: 500; }
+input, select { min-height: 44px; padding: 0 12px; border: 1px solid var(--field); border-radius: 8px; font: inherit; font-size: 15px; background: #fff; color: var(--ink); width: 100%; }
+select.compact { min-height: 40px; font-size: 14px; padding: 0 10px; border-radius: 6px; width: auto; }
+.form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.inset { padding: 16px; border-radius: 10px; background: var(--ground); display: flex; flex-direction: column; gap: 12px; }
+
+.btn { min-height: 44px; padding: 0 20px; border: 0; border-radius: 8px; background: var(--teal); font: inherit; font-size: 15px; font-weight: 500; color: #fff; cursor: pointer; }
+.btn.big { min-height: 48px; font-size: 16px; }
+.btn.ghost { background: #fff; border: 1px solid var(--teal); color: var(--teal-ink); font-size: 14px; padding: 0 14px; }
+.btn.plain { background: #fff; border: 1px solid var(--field); color: var(--ink); font-size: 14px; font-weight: 400; padding: 0 14px; }
+.btn.danger { background: #fff; border: 1px solid var(--field); color: var(--danger); font-size: 14px; font-weight: 400; padding: 0 14px; }
+.btn:disabled { opacity: .55; cursor: default; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 6px; }
+td { padding: 8px 6px; border-top: 1px solid var(--line-soft); vertical-align: middle; }
+.scroll { overflow-x: auto; }
+.list-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line-soft); font-size: 15px; }
+.chip { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; background: var(--chip); }
+.chip.ok { background: var(--ok-bg); color: var(--ok); }
+.chip.wait { background: var(--wait-bg); color: var(--wait); }
+.chip.income { background: var(--income-bg); color: var(--income); }
+.chip.expense { background: var(--expense-bg); color: var(--expense); }
+.yes { color: var(--teal-ink); font-weight: 600; text-align: center; } .no { color: var(--muted); text-align: center; }
+
+.switcher { position: relative; }
+.menu { position: absolute; right: 0; top: 48px; z-index: 5; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 6px; min-width: 260px; box-shadow: 0 8px 24px rgba(20,32,43,.12); }
+.menu a { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 10px 12px; border-radius: 8px; color: var(--ink); }
+.menu a:hover, .menu a.on { background: var(--ground); }
+
+.center { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 24px; min-height: 100vh; padding: 40px 16px; }
+.center .card { padding: 32px; gap: 16px; }
+.biz { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-height: 64px; padding: 12px 16px; border: 1px solid var(--field); border-radius: 10px; color: var(--ink); }
+.biz .name { font-size: 16px; font-weight: 600; }
+.error { color: var(--danger); font-size: 14px; }
+.ok-msg { color: var(--ok); font-size: 14px; }
+.copy { display: flex; gap: 8px; }
+.copy input { font-family: 'IBM Plex Mono', monospace; font-size: 13px; }
+.demo-band { background: var(--wait-bg); color: var(--wait); font-size: 13px; padding: 8px 12px; border-radius: 8px; }
