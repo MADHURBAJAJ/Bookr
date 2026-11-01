@@ -18,7 +18,7 @@ Each day the user uploads a sales CSV from the hotel software. The handwritten b
 
 Flow per shift: software CSV, register photo (OCR), compare by bill number, person resolves differences, confirmed sales become income rows, UPI matching against bank credits.
 
-Proposed (needs approval): a "Software sales report" upload kind (table, no OCR); a comparison record per bill and shift (software values, register values, difference type: amount differs, payment mode differs, missing in register, missing in software; the decision, who made it, when); bill number and confirmed source on income rows.
+Approved on 2 Nov 2026. The tables are in **Phase 2 design** below.
 
 ### CSV format (one sample, 31-10-2026, 62 bills)
 
@@ -54,6 +54,200 @@ Phases: card settlement fits Phase 3 with UPI matching. MakeMyTrip and Djubo fee
 - Phase 3: Google Sheet bank tabs, UPI matching, card settlement, saved rules, transfers.
 - Phase 6 (later): room payment check using MakeMyTrip and Djubo.
 
+## Settled defaults for later phases
+
+Unknown parties: leave blank. OCR engine: test Google Document AI and Claude vision on real pages in Phase 2. Weekly preset: Monday to Sunday. Cash and bank overlap: treat as a Transfer when amounts match within a few days. Entry staff may upload the software CSV.
+
 ## Still open
 
-Unknown parties (default blank), OCR engine (test in Phase 2), weekly preset start day (Monday), cash and bank overlap (Transfer when amounts match), logo, part cash and UPI bills, whether Entry staff may upload the software CSV (proposed yes).
+- **POS series.** Can the software CSV hold more than one POS series, so that two counters issue the same BILL NO? Until this is answered, `pos_no` is part of every bill key.
+- **Part cash, part UPI bills.** Until decided, they show as a payment-mode difference.
+- **Logo.**
+- **Gmail.** The tables for the connected mailbox and imported mails are not designed yet.
+
+## Phase 2 design (approved 2 Nov 2026)
+
+These are D1 tables. Money is integer paise. Times are integer milliseconds (UTC). Calendar days are `YYYY-MM-DD` text, and India time (UTC+5:30) decides which day and which shift a time belongs to. Every table also has `id`, `business_id` and `created_at`. Anything that must happen all at once runs as one D1 batch, and every decision, confirmation, reopening and override is written to `audit_log`.
+
+**Test and demo data.** The real sales CSV is never loaded into the demo site or the repo. Tests and the demo use an invented CSV in the same format. It includes bills before 08:00, a bill whose number carries the previous day's prefix, a complimentary bill, `U/N` modes and names, and the footer.
+
+### Shift rule
+
+The shift of day D runs from D 08:00:00 up to, but not including, D+1 08:00:00. A bill belongs to the shift its payment time falls in. A shift is **complete** only when the coverage windows of the imported reports, joined together, span its whole window. Otherwise the app shows the missing hours at either end.
+
+### `uploads`: one row per file
+
+| Column | Type | Notes |
+|---|---|---|
+| kind | TEXT | `software_sales_csv`, `bill_register`, `expense_list`, `cash_summary`, `single_bill` |
+| business_day | TEXT | The day picked on Upload |
+| storage_key | TEXT | Where the file sits in R2. Photos are opened through short-lived links. For a CSV, only a copy with the NAME column blanked is kept. |
+| content_sha256 | TEXT | The same file uploaded twice is refused. Unique per business. |
+| status | TEXT | `uploaded`, `reading`, `ready`, `retake`, `approved`, `failed` |
+| page_written_total_paise | INTEGER | The total written on the page, read by OCR. It is checked against the sum of the page's rows. |
+| ocr_engine | TEXT | `document_ai` or `claude_vision` |
+| uploaded_by | TEXT | User |
+
+### `sales_reports`: one row per imported software CSV
+
+| Column | Type | Notes |
+|---|---|---|
+| upload_id | TEXT | Links to `uploads` |
+| covers_from, covers_to | INTEGER | The period the file covers. Defaults to the first and last payment times, and can be edited at import. A report may span more than one day. |
+| first_paid_at, last_paid_at | INTEGER | As found in the file |
+| bill_count | INTEGER | Bill rows found |
+| footer_bills | INTEGER | TOTAL BILLS from the footer |
+| footer_upi_paise, footer_card_paise, footer_cash_paise, footer_total_paise | INTEGER | The footer, used as a control total |
+| bills_added, bills_skipped, bills_flagged | INTEGER | The import result (see overlapping files) |
+| replaced_by | TEXT | Set when a corrected file replaces this one |
+
+- **Control total.** If the bill rows do not add up exactly to the footer, the import is refused whole.
+- **Corrected file.** A corrected file can replace an earlier report only while none of the shifts it touches is confirmed.
+
+### `software_bills`: one row per bill in a CSV
+
+| Column | Type | Notes |
+|---|---|---|
+| report_id | TEXT | The report it came from |
+| pos_no | TEXT | POS.NO |
+| bill_no | TEXT | Kept as text. Unique per business together with `pos_no` (see Still open). |
+| si_no | TEXT | As in the file |
+| paid_at | INTEGER | From DATE/TIME, read as India time |
+| shift_day | TEXT | From `paid_at` and the shift rule |
+| mode | TEXT | `upi`, `card`, `cash`, `unknown` (`U/N`) |
+| amount_paise | INTEGER | BILL AMOUNT |
+| discount_paise | INTEGER | DISCOUNT |
+| is_complimentary | INTEGER 0/1 | Amount 0. Listed separately, never a sale and never a difference. |
+
+NAME and SUBSIDY are not stored.
+
+**Overlapping files.** When an imported bill already exists with the same `pos_no` and `bill_no`:
+- **Identical values:** the new copy is skipped.
+- **Different values:** the bill is flagged, never overwritten.
+
+### `software_bill_conflicts`: flagged overlaps
+
+| Column | Type | Notes |
+|---|---|---|
+| report_id | TEXT | The import that brought the different values |
+| existing_bill_id | TEXT | The bill already stored |
+| incoming_paid_at, incoming_mode, incoming_amount_paise, incoming_discount_paise | | The values in the new file |
+| decision | TEXT | `keep_existing`, `use_incoming`, or empty while open |
+| decided_by, decided_at | TEXT / INTEGER | Owner or Accountant |
+
+A shift cannot be confirmed while any conflict on its bills is open.
+
+### `shifts`: one row per 8 am to 8 am shift
+
+| Column | Type | Notes |
+|---|---|---|
+| shift_day | TEXT | Day D. Unique per business. |
+| status | TEXT | `open`, `comparing`, `confirmed` |
+| confirmed_by, confirmed_at | TEXT / INTEGER | |
+| reopened_by, reopened_at, reopen_reason | TEXT / INTEGER / TEXT | The last reopening |
+
+- **Missing hours** are worked out from `sales_reports` coverage each time, not stored.
+- **Reopening** a confirmed shift is Owner only and is audit-logged. In one batch it removes the income rows that confirmation created (their contents are kept in the audit log) and sets the shift back to `comparing`. It is refused once any of those rows has been matched to the bank or the card settlement.
+
+### `register_rows`: one row per bill read from a register photo
+
+| Column | Type | Notes |
+|---|---|---|
+| upload_id | TEXT | The photo it came from |
+| line_no | INTEGER | Its position on the page, used to highlight the row on the photo |
+| shift_day | TEXT | The register page's day. The register for day D is shift D. |
+| bill_no | TEXT | As written |
+| bill_type | TEXT | `fnb` or `room` |
+| amount_paise | INTEGER | Bill amount |
+| remarks | TEXT | Kept as written |
+| status | TEXT | `draft` or `checked` |
+| ocr_original | TEXT (JSON) | The values exactly as OCR read them, before any edit |
+| edited_by, edited_at | TEXT / INTEGER | The last person to edit the row |
+
+### `register_payments`: each payment on a register bill
+
+| Column | Type | Notes |
+|---|---|---|
+| register_row_id | TEXT | Links to `register_rows` |
+| mode | TEXT | `cash`, `upi`, `card` |
+| column_label | TEXT | The column it was written in, such as "UPI XOXO" or "UPI Bank 2" |
+| amount_paise | INTEGER | |
+
+### `bill_comparisons`: one row per bill per shift
+
+| Column | Type | Notes |
+|---|---|---|
+| shift_day | TEXT | |
+| pos_no, bill_no | TEXT | Unique per business, shift, `pos_no` and `bill_no` |
+| software_bill_id, register_row_id | TEXT | Either can be empty |
+| sw_amount_paise, sw_mode, rg_amount_paise, rg_mode | | A copy of both sides at the moment of comparing |
+| difference | TEXT | `match`, `amount`, `mode`, `amount_and_mode`, `missing_in_register`, `missing_in_software`, `complimentary` |
+| decision | TEXT | `use_software`, `use_register`, `leave_out`, or empty while undecided. Only for real differences. |
+| decided_by, decided_at, note | | |
+
+If new data changes a bill after its decision was made, the decision is cleared and must be made again. The clearing is audit-logged.
+
+### `bill_type_heads`: which income head each bill type uses
+
+| Column | Type | Notes |
+|---|---|---|
+| bill_type | TEXT | `fnb`, `room` |
+| head_id | TEXT | Set once by the Owner. Unique per business and bill type. |
+
+### `cash_summaries`: one row per cash account summary page
+
+| Column | Type | Notes |
+|---|---|---|
+| upload_id | TEXT | The photo |
+| shift_day | TEXT | The day on the page. It is treated like the register: the summary for day D is shift D. |
+| opening_paise, received_paise, balance_paise, expenses_paise, cash_in_hand_paise | INTEGER | As written on the page |
+| ocr_original | TEXT (JSON) | As OCR read it |
+| status | TEXT | `draft`, `checked`, `approved` |
+| mismatch_note, mismatch_accepted_by, mismatch_accepted_at | | Needed to approve when a check below fails |
+
+**Checks shown on the summary.** Each one must pass, or the mismatch must be accepted with a note by an Owner or Accountant:
+1. opening + received = balance, and balance − expenses = cash in hand.
+2. Opening equals the previous day's cash in hand.
+3. **Received equals the confirmed cash total of the shift.** That is the sum of the confirmed income rows paid in cash for that shift.
+4. Expenses equal the total of that day's approved expense-list rows.
+
+### Expense list pages
+
+Each line of an expense list becomes a draft expense row in `transactions`, paid from the Cash account, with `source = cash_photo`. It is tagged and approved in the Review grid like any other row. There is no separate table.
+
+### `transactions`: first built in Phase 2
+
+| Column | Type | Notes |
+|---|---|---|
+| account_id | TEXT | The Cash account for cash. Empty for UPI and card until they are matched. |
+| day | TEXT | |
+| amount_paise | INTEGER | |
+| type | TEXT | `income`, `expense`, `transfer` |
+| head_id | TEXT | |
+| narration | TEXT | |
+| source | TEXT | `software_report`, `cash_photo`, `bank_sheet` |
+| status | TEXT | `draft`, `reviewed`, `approved` |
+| payment_mode | TEXT | |
+| upload_id, line_no | TEXT / INTEGER | For rows read from a photo |
+| ocr_original | TEXT (JSON) | For rows read from a photo |
+| bill_no, pos_no | TEXT | For sales |
+| confirmed_source | TEXT | `software`, `register`, `both_matched` |
+| comparison_id | TEXT | The decision that made the row |
+| shift_day | TEXT | For sales |
+| match_status | TEXT | `awaiting_bank_match` (UPI), `awaiting_card_settlement` (card), or empty |
+| party_id, transfer_pair_id, matched_bank_row | | Present but empty until Phase 3 |
+
+**Confirming a shift** is one batch: it creates the approved income rows, marks the shift confirmed and writes the audit rows. It is refused while any difference is undecided, any conflict is open, or the shift has missing hours.
+
+### New permission actions (no new roles)
+
+| Action | Owner | Accountant | Entry staff | Viewer |
+|---|---|---|---|---|
+| Import software CSV, upload photos, edit OCR rows | Yes | Yes | Yes | No |
+| Decide differences and conflicts, confirm a shift, approve a cash summary | Yes | Yes | No | No |
+| Reopen a confirmed shift | Yes | No | No | No |
+| Set the income head for each bill type | Yes | No | No | No |
+
+### New Cloudflare resource
+
+An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.
