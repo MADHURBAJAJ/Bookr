@@ -38,8 +38,16 @@ async function api(method, path, body) {
   return data;
 }
 
-const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const money = (s) => inr.format(Number(s));
+// Amounts arrive as integer paise and are only turned into rupees here, for display.
+// Integer arithmetic only: rupees and paise are split, never divided into a float.
+const inrWhole = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
+function rupeeParts(p) {
+  const neg = p < 0;
+  const abs = Math.abs(p);
+  return { neg, rupees: Math.trunc(abs / 100), paise: String(abs % 100).padStart(2, '0') };
+}
+const money = (p) => { const r = rupeeParts(p); return `${r.neg ? '−' : ''}${inrWhole.format(r.rupees)}.${r.paise}`; };
+const rupeesForInput = (p) => { const r = rupeeParts(p); return `${r.neg ? '-' : ''}${r.rupees}.${r.paise}`; };
 const home = (b) => `#/b/${b.id}/${b.actions.includes('reports.view') ? 'dashboard' : 'accounts'}`;
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
 
@@ -211,12 +219,12 @@ function fyDefault() {
 
 async function dashboardView(biz) {
   const { accounts, heads } = await api('GET', `/businesses/${biz.id}/dashboard`);
-  const total = accounts.reduce((s, a) => s + Number(a.openingBalance), 0);
+  const total = accounts.reduce((s, a) => s + a.openingBalancePaise, 0);
   render(shell(biz, 'dashboard', 'Dashboard', 'Totals, the weekly chart and items needing attention arrive in Phase 4.', html`
     <div class="row">
       <section class="card grow1">
         <h2>Opening balances</h2>
-        ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalance)}</span></div>`)}
+        ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalancePaise)}</span></div>`)}
         <div class="list-row" style="font-weight:600"><span>Combined</span><span class="amount">₹ ${money(total)}</span></div>
       </section>
       <section class="card grow1">
@@ -239,10 +247,10 @@ async function accountsView(biz, editId) {
       <td><div style="font-weight:500">${a.name}</div>${a.accountNumber ? html`<div class="note mono">${a.accountNumber}</div>` : ''}</td>
       <td>${a.kind === 'cash' ? 'Cash' : 'Bank'}</td>
       <td class="mono">${a.openingDate}</td>
-      <td class="amount">₹ ${money(a.openingBalance)}</td>
+      <td class="amount">₹ ${money(a.openingBalancePaise)}</td>
       <td style="text-align:right">${canEdit ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/accounts/${a.id}">Edit</a>` : ''}</td>
     </tr>`);
-  const f = editing ?? { name: '', kind: 'bank', accountNumber: '', openingBalance: '0.00', openingDate: biz.fyStart };
+  const f = editing ? { ...editing, openingBalance: rupeesForInput(editing.openingBalancePaise) } : { name: '', kind: 'bank', accountNumber: '', openingBalance: '0.00', openingDate: biz.fyStart };
   render(shell(biz, 'accounts', 'Accounts', canEdit ? 'Cash and each bank account, with the balance on the opening date.' : 'Only Owner and Accountant can change these.', html`
     <div class="row">
       <section class="card grow3">

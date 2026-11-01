@@ -1,8 +1,7 @@
-import type { Sql } from './db';
 import type { Role } from './permissions';
 
 export interface Env {
-  HYPERDRIVE: { connectionString: string };
+  DB: D1Database;
   ASSETS?: { fetch: typeof fetch };
 }
 
@@ -13,7 +12,6 @@ export interface SessionUser {
 }
 
 export interface Vars {
-  sql: Sql;
   user: SessionUser;
   sessionId: string;
   businessId: string;

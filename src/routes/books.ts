@@ -1,15 +1,13 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
-import { body, date, fail, isUniqueViolation, isUuid, money, text } from '../http';
-import { audit } from '../audit';
+import { all, isUniqueViolation, newId, now, stmt } from '../db';
+import { body, date, fail, isUuid, paise, text } from '../http';
+import { auditAccountAfter, auditAccountBefore } from '../audit';
 
 export const bookRoutes = new Hono<AppEnv>();
 
-// ---- Accounts: Cash and each bank account, with an opening balance on an opening date.
-
-const ACCOUNT_COLUMNS = `id, name, kind, account_number AS "accountNumber",
-  opening_balance::text AS "openingBalance", to_char(opening_date, 'YYYY-MM-DD') AS "openingDate"`;
+// ---- Accounts: Cash and each bank account, with an opening balance (integer paise) on an opening date.
 
 function accountInput(data: Record<string, unknown>) {
   const kind = data.kind;
@@ -18,74 +16,75 @@ function accountInput(data: Record<string, unknown>) {
     name: text(data, 'name', 'Account name', { max: 120 })!,
     kind,
     accountNumber: text(data, 'accountNumber', 'Account number', { optional: true, max: 40 }),
-    openingBalance: money(data, 'openingBalance', 'Opening balance'),
+    openingBalancePaise: paise(data, 'openingBalance', 'Opening balance'),
     openingDate: date(data, 'openingDate', 'Opening date'),
   };
 }
 
+const DUPLICATE_ACCOUNT = 'An account with this name already exists.';
+
 bookRoutes.get('/businesses/:businessId/accounts', requireRole('accounts.view'), async (c) => {
-  const accounts = await c.get('sql').unsafe(
-    `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE business_id = $1 ORDER BY kind = 'bank', name`,
-    [c.get('businessId')],
-  );
+  const accounts = await all(c.env.DB, `
+    SELECT id, name, kind, account_number AS accountNumber,
+           opening_balance_paise AS openingBalancePaise, opening_date AS openingDate
+    FROM accounts WHERE business_id = ? ORDER BY kind = 'bank', name`, c.get('businessId'));
   return c.json({ accounts });
 });
 
-// Every account change is written to the audit log in the same transaction.
+// Every account change and its audit row are one batch: both land or neither does.
 bookRoutes.post('/businesses/:businessId/accounts', requireRole('accounts.edit'), async (c) => {
   const a = accountInput(await body(c));
+  const db = c.env.DB;
   const bid = c.get('businessId');
+  const id = newId();
+  const t = now();
   try {
-    const id = await c.get('sql').begin(async (tx) => {
-      const [row] = await tx.unsafe(
-        `INSERT INTO accounts (business_id, name, kind, account_number, opening_balance, opening_date)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${ACCOUNT_COLUMNS}`,
-        [bid, a.name, a.kind, a.accountNumber, a.openingBalance, a.openingDate],
-      );
-      await audit(tx, { businessId: bid, userId: c.get('user').id, action: 'account.create', table: 'accounts', rowId: row.id, before: null, after: row });
-      return row.id as string;
-    });
-    return c.json({ id }, 201);
+    await db.batch([
+      stmt(db, `INSERT INTO accounts (id, business_id, name, kind, account_number, opening_balance_paise, opening_date, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, a.name, a.kind, a.accountNumber, a.openingBalancePaise, a.openingDate, t),
+      auditAccountAfter(db, { businessId: bid, userId: c.get('user').id, action: 'account.create', accountId: id, at: t, isCreate: true }),
+    ]);
   } catch (e) {
-    if (isUniqueViolation(e)) fail(409, 'An account with this name already exists.');
+    if (isUniqueViolation(e)) fail(409, DUPLICATE_ACCOUNT);
     throw e;
   }
+  return c.json({ id }, 201);
 });
 
 bookRoutes.patch('/businesses/:businessId/accounts/:accountId', requireRole('accounts.edit'), async (c) => {
   const accountId = c.req.param('accountId');
   if (!isUuid(accountId)) fail(404, 'Account not found.');
   const a = accountInput(await body(c));
+  const db = c.env.DB;
   const bid = c.get('businessId');
+  const e = { businessId: bid, userId: c.get('user').id, action: 'account.update', accountId, at: now() };
+  let results: D1Result[];
   try {
-    await c.get('sql').begin(async (tx) => {
-      const [before] = await tx.unsafe(
-        `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = $1 AND business_id = $2 FOR UPDATE`,
-        [accountId, bid],
-      );
-      if (!before) fail(404, 'Account not found.');
-      const [after] = await tx.unsafe(
-        `UPDATE accounts SET name = $3, kind = $4, account_number = $5, opening_balance = $6, opening_date = $7
-         WHERE id = $1 AND business_id = $2 RETURNING ${ACCOUNT_COLUMNS}`,
-        [accountId, bid, a.name, a.kind, a.accountNumber, a.openingBalance, a.openingDate],
-      );
-      await audit(tx, { businessId: bid, userId: c.get('user').id, action: 'account.update', table: 'accounts', rowId: accountId, before, after });
-    });
-  } catch (e) {
-    if (isUniqueViolation(e)) fail(409, 'An account with this name already exists.');
-    throw e;
+    results = await db.batch([
+      auditAccountBefore(db, e),
+      stmt(db, `UPDATE accounts SET name = ?, kind = ?, account_number = ?, opening_balance_paise = ?, opening_date = ?
+        WHERE id = ? AND business_id = ?`, a.name, a.kind, a.accountNumber, a.openingBalancePaise, a.openingDate, accountId, bid),
+      auditAccountAfter(db, { ...e, isCreate: false }),
+    ]);
+  } catch (err) {
+    if (isUniqueViolation(err)) fail(409, DUPLICATE_ACCOUNT);
+    throw err;
   }
+  // No row in this business: the batch changed nothing (no audit row either).
+  if (!results[1].meta.changes) fail(404, 'Account not found.');
   return c.json({ ok: true });
 });
 
 // ---- Heads: income and expense categories, each with an optional Tally ledger name.
 
+const DUPLICATE_HEAD = 'A head with this name already exists.';
+
 bookRoutes.get('/businesses/:businessId/heads', requireRole('heads.view'), async (c) => {
-  const heads = await c.get('sql')`
-    SELECT id, name, type, tally_ledger AS "tallyLedger", is_custom AS "isCustom"
-    FROM heads WHERE business_id = ${c.get('businessId')}
-    ORDER BY type, is_custom, name`;
-  return c.json({ heads });
+  const rows = await all<{ isCustom: number }>(c.env.DB, `
+    SELECT id, name, type, tally_ledger AS tallyLedger, is_custom AS isCustom
+    FROM heads WHERE business_id = ?
+    ORDER BY type, is_custom, name`, c.get('businessId'));
+  return c.json({ heads: rows.map((h) => ({ ...h, isCustom: h.isCustom === 1 })) });
 });
 
 bookRoutes.post('/businesses/:businessId/heads', requireRole('heads.edit'), async (c) => {
@@ -94,16 +93,15 @@ bookRoutes.post('/businesses/:businessId/heads', requireRole('heads.edit'), asyn
   if (type !== 'income' && type !== 'expense') fail(400, 'Type must be income or expense.');
   const name = text(data, 'name', 'Head name', { max: 80 })!;
   const tally = text(data, 'tallyLedger', 'Tally ledger name', { optional: true, max: 120 });
+  const id = newId();
   try {
-    const [row] = await c.get('sql')`
-      INSERT INTO heads (business_id, name, type, tally_ledger, is_custom)
-      VALUES (${c.get('businessId')}, ${name}, ${type}, ${tally}, true)
-      RETURNING id`;
-    return c.json({ id: row.id }, 201);
+    await stmt(c.env.DB, `INSERT INTO heads (id, business_id, name, type, tally_ledger, is_custom, created_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?)`, id, c.get('businessId'), name, type, tally, now()).run();
   } catch (e) {
-    if (isUniqueViolation(e)) fail(409, 'A head with this name already exists.');
+    if (isUniqueViolation(e)) fail(409, DUPLICATE_HEAD);
     throw e;
   }
+  return c.json({ id }, 201);
 });
 
 // Type is fixed once created; name and Tally ledger can change.
@@ -114,13 +112,11 @@ bookRoutes.patch('/businesses/:businessId/heads/:headId', requireRole('heads.edi
   const name = text(data, 'name', 'Head name', { max: 80 })!;
   const tally = text(data, 'tallyLedger', 'Tally ledger name', { optional: true, max: 120 });
   try {
-    const rows = await c.get('sql')`
-      UPDATE heads SET name = ${name}, tally_ledger = ${tally}
-      WHERE id = ${headId} AND business_id = ${c.get('businessId')}
-      RETURNING id`;
-    if (!rows.length) fail(404, 'Head not found.');
+    const res = await stmt(c.env.DB, 'UPDATE heads SET name = ?, tally_ledger = ? WHERE id = ? AND business_id = ?',
+      name, tally, headId, c.get('businessId')).run();
+    if (!res.meta.changes) fail(404, 'Head not found.');
   } catch (e) {
-    if (isUniqueViolation(e)) fail(409, 'A head with this name already exists.');
+    if (isUniqueViolation(e)) fail(409, DUPLICATE_HEAD);
     throw e;
   }
   return c.json({ ok: true });

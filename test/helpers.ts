@@ -1,34 +1,43 @@
-import postgres from 'postgres';
 import { app } from '../src/app';
 import { hashPassword } from '../src/crypto';
 import { createBusiness } from '../src/defaults';
+import { now } from '../src/db';
 import type { Role } from '../src/permissions';
-import { TEST_DB_URL } from './global-setup';
+import { createTestDb } from './d1';
 
-export const env = { HYPERDRIVE: { connectionString: TEST_DB_URL } };
-export const sql = postgres(TEST_DB_URL, { max: 2, onnotice: () => {} });
+const { db, dispose } = await createTestDb();
+export const env = { DB: db };
 export const PASSWORD = 'test-password-1234';
 let hash: string | undefined;
 let n = 0;
 
+/** Runs SQL against the test D1: sql`SELECT ... WHERE id = ${id}` → rows. */
+export async function sql(strings: TemplateStringsArray, ...values: unknown[]): Promise<any[]> {
+  return (await db.prepare(strings.join('?')).bind(...values).all()).results;
+}
+sql.end = dispose;
+
 export async function resetDb() {
-  await sql`TRUNCATE businesses, users, memberships, sessions, invites, accounts, heads, audit_log CASCADE`;
+  // Businesses first: their memberships, invites, accounts, heads and audit rows go with them.
+  await db.batch([db.prepare('DELETE FROM businesses'), db.prepare('DELETE FROM users')]);
 }
 
 export async function makeUser(label = 'user') {
   hash ??= await hashPassword(PASSWORD);
   const email = `${label}-${++n}@test.local`;
-  const [u] = await sql<{ id: string }[]>`
-    INSERT INTO users (name, email, password_hash) VALUES (${label}, ${email}, ${hash}) RETURNING id`;
-  return { id: u.id, email };
+  const id = crypto.randomUUID();
+  await db.prepare('INSERT INTO users (id, name, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, label, email, hash, now()).run();
+  return { id, email };
 }
 
 export async function makeBusiness(ownerId: string, name = 'Biz') {
-  return createBusiness(sql, { name, fyStart: '2026-04-01', ownerId });
+  return createBusiness(db, { name, fyStart: '2026-04-01', ownerId });
 }
 
 export async function addMember(businessId: string, userId: string, role: Role) {
-  await sql`INSERT INTO memberships (business_id, user_id, role) VALUES (${businessId}, ${userId}, ${role})`;
+  await db.prepare('INSERT INTO memberships (business_id, user_id, role, created_at) VALUES (?, ?, ?, ?)')
+    .bind(businessId, userId, role, now()).run();
 }
 
 /** A tiny client that keeps the session cookie between calls. */

@@ -1,4 +1,4 @@
-import type { Sql } from './db';
+import { newId, now, stmt, type DB } from './db';
 
 // The fixed starting list every new business gets. Users can add custom heads on top.
 export const DEFAULT_HEADS: { name: string; type: 'income' | 'expense'; tally: string }[] = [
@@ -14,23 +14,29 @@ export const DEFAULT_HEADS: { name: string; type: 'income' | 'expense'; tally: s
   { name: 'UPI charges', type: 'expense', tally: 'Bank Charges' },
 ];
 
-export async function createBusiness(
-  sql: Sql,
-  input: { name: string; fyStart: string; ownerId: string; isDemo?: boolean },
-): Promise<string> {
-  return sql.begin(async (tx) => {
-    const [b] = await tx<{ id: string }[]>`
-      INSERT INTO businesses (name, fy_start, is_demo)
-      VALUES (${input.name}, ${input.fyStart}, ${input.isDemo ?? false}) RETURNING id`;
-    await tx`INSERT INTO memberships (business_id, user_id, role) VALUES (${b.id}, ${input.ownerId}, 'owner')`;
-    for (const h of DEFAULT_HEADS) {
-      await tx`
-        INSERT INTO heads (business_id, name, type, tally_ledger, is_custom)
-        VALUES (${b.id}, ${h.name}, ${h.type}, ${h.tally}, false)`;
-    }
-    await tx`
-      INSERT INTO accounts (business_id, name, kind, opening_balance, opening_date)
-      VALUES (${b.id}, 'Cash', 'cash', 0, ${input.fyStart})`;
-    return b.id;
-  });
+// The statements that create a business with its Owner, standard heads and a Cash account.
+// Returned rather than run, so callers can add to the same atomic batch.
+export function createBusinessStatements(
+  db: DB,
+  input: { name: string; fyStart: string; ownerId: string; isDemo?: boolean; id?: string },
+): { id: string; statements: D1PreparedStatement[] } {
+  const id = input.id ?? newId();
+  const t = now();
+  const statements = [
+    stmt(db, 'INSERT INTO businesses (id, name, fy_start, is_demo, created_at) VALUES (?, ?, ?, ?, ?)',
+      id, input.name, input.fyStart, input.isDemo ? 1 : 0, t),
+    stmt(db, "INSERT INTO memberships (business_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)", id, input.ownerId, t),
+    ...DEFAULT_HEADS.map((h) => stmt(db,
+      'INSERT INTO heads (id, business_id, name, type, tally_ledger, is_custom, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
+      newId(), id, h.name, h.type, h.tally, t)),
+    stmt(db, "INSERT INTO accounts (id, business_id, name, kind, opening_balance_paise, opening_date, created_at) VALUES (?, ?, 'Cash', 'cash', 0, ?, ?)",
+      newId(), id, input.fyStart, t),
+  ];
+  return { id, statements };
+}
+
+export async function createBusiness(db: DB, input: Parameters<typeof createBusinessStatements>[1]): Promise<string> {
+  const { id, statements } = createBusinessStatements(db, input);
+  await db.batch(statements);
+  return id;
 }

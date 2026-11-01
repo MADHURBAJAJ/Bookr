@@ -5,14 +5,15 @@
   "scripts": {
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",
-    "db:start": "docker run -d --name bookr-pg -e POSTGRES_PASSWORD=bookr -e POSTGRES_DB=bookr -p 54329:5432 postgres:16-alpine",
-    "db:migrate": "tsx scripts/migrate.ts",
-    "db:seed-demo": "tsx scripts/seed-demo.ts",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "db:seed-demo:local": "tsx scripts/seed-demo.ts --local",
+    "db:seed-demo:remote": "tsx scripts/seed-demo.ts --remote",
+    "deploy": "wrangler deploy",
     "test": "vitest run"
   },
   "dependencies": {
-    "hono": "^4.6.20",
-    "postgres": "^3.4.5"
+    "hono": "^4.6.20"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261023.1",

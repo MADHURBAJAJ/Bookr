@@ -3,20 +3,19 @@
   "name": "bookr-demo",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
-  "hyperdrive": [
+  "d1_databases": [
     {
-      "binding": "HYPERDRIVE",
-      // Set when the demo Hyperdrive config is created (needs the Cloudflare token). Not a secret.
-      "id": "REPLACE_WITH_HYPERDRIVE_ID",
-      // Used only by `wrangler dev`; points at the local Docker Postgres from `npm run db:start`.
-      "localConnectionString": "postgres://postgres:bookr@127.0.0.1:54329/bookr"
+      "binding": "DB",
+      "database_name": "bookr-demo",
+      // Set by `wrangler d1 create bookr-demo`. An id, not a secret.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
     }
   ],
   "observability": { "enabled": true }

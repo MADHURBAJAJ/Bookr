@@ -1,6 +1,6 @@
 # Bookr
 
-Bookr turns cash-book photos and bank statement sheets into reviewed transactions, with Tally export. It runs on Cloudflare Workers with Hono and TypeScript, uses Postgres through Hyperdrive, and serves a static front end from the same Worker.
+Bookr turns cash-book photos and bank statement sheets into reviewed transactions, with Tally export. It runs on Cloudflare Workers with Hono and TypeScript, stores data in Cloudflare D1 (SQLite), and serves a static front end from the same Worker. Money is stored as integer paise and converted to rupees only for display.
 
 The source design is the Bookkeeping App Build Handover doc and the Bookkeeping App UI prototype.
 
@@ -25,23 +25,24 @@ All permission rules live in [`src/permissions.ts`](src/permissions.ts). Every b
 - A business always keeps at least one Owner.
 - Any role hiding in the browser is cosmetic. The server makes every decision.
 
-Database credentials exist only in the Hyperdrive binding. The browser talks only to `/api` on the same origin.
+The database is reached only through the Worker's `DB` binding, so no database credential exists anywhere. The browser talks only to `/api` on the same origin.
+
+D1 has no open transactions. Anything that must be atomic runs as one `db.batch([...])`, which commits or rolls back as a whole; for example, an account change and its audit row go in one batch. Two rules are enforced by database triggers, so they hold even when requests arrive at the same moment:
+- A business always keeps at least one Owner.
+- An invite is accepted at most once, and never after it is revoked or expired.
 
 ## Run locally
 
-Needs Node 22 and Docker.
+Needs Node 22. No Docker is needed: wrangler runs D1 locally.
 
 ```bash
 npm install
-npm run db:start                     # Postgres 16 on 127.0.0.1:54329
-DATABASE_URL=postgres://postgres:bookr@127.0.0.1:54329/bookr npm run db:migrate
-echo "DEMO_PASSWORD=$(openssl rand -hex 10)" > .dev.vars     # gitignored
-set -a; . ./.dev.vars; set +a
-DATABASE_URL=postgres://postgres:bookr@127.0.0.1:54329/bookr npm run db:seed-demo
+npm run db:migrate:local
+DEMO_PASSWORD='choose-one-locally' npm run db:seed-demo:local
 npm run dev                          # http://127.0.0.1:8787
 ```
 
-Demo sign-ins, all using `DEMO_PASSWORD`:
+Demo sign-ins, all using the demo password:
 
 | Email | Role |
 |---|---|
@@ -56,12 +57,16 @@ Demo sign-ins, all using `DEMO_PASSWORD`:
 npm test
 ```
 
-The tests run against a real local Postgres. They recreate the `bookr_test` database on each run. To use another server, set `TEST_DATABASE_URL`.
+Each test file gets its own throwaway local D1 through wrangler's platform proxy, with the migrations applied.
 
-## Deploy (not done yet)
+## Demo site
 
-Deploying needs the Cloudflare token. Steps:
+The demo site runs on workers.dev with the `bookr-demo` D1 database. It holds sample data only; never load real business data into it.
 
-1. Create a Hyperdrive config for the demo database. Put its id in `wrangler.jsonc` in place of `REPLACE_WITH_HYPERDRIVE_ID`.
-2. Run the migrations and the demo seed against the demo database.
-3. Run `npx wrangler deploy`.
+```bash
+npm run db:migrate:remote
+DEMO_PASSWORD="$(security find-generic-password -s bookr-demo-password -w)" npm run db:seed-demo:remote
+npm run deploy
+```
+
+The live demo password is kept in the macOS Keychain on the build Mac (service `bookr-demo-password`), not in the repo.

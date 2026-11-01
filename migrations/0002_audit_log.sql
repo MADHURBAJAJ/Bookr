@@ -2,15 +2,15 @@
 -- plus business_id like every other business table. Rows are only ever inserted.
 
 CREATE TABLE audit_log (
-  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  user_id     uuid REFERENCES users(id) ON DELETE SET NULL,
-  action      text NOT NULL,              -- e.g. account.create, account.update
-  row_table   text NOT NULL,              -- e.g. accounts
-  row_id      uuid NOT NULL,
-  before      jsonb,                      -- null on create
-  after       jsonb,                      -- null on delete
-  created_at  timestamptz NOT NULL DEFAULT now()
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
+  action      TEXT NOT NULL,              -- e.g. account.create, account.update
+  row_table   TEXT NOT NULL,              -- e.g. accounts
+  row_id      TEXT NOT NULL,
+  before      TEXT CHECK (before IS NULL OR json_valid(before)),   -- JSON; null on create
+  after       TEXT CHECK (after IS NULL OR json_valid(after)),     -- JSON; null on delete
+  created_at  INTEGER NOT NULL
 );
 CREATE INDEX audit_log_business_idx ON audit_log (business_id, created_at DESC);
 CREATE INDEX audit_log_row_idx ON audit_log (row_table, row_id);

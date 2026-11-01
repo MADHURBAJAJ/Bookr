@@ -174,7 +174,7 @@ describe('creating a business', () => {
     expect(res.status).toBe(201);
     const [m] = await sql`SELECT role FROM memberships WHERE business_id = ${res.json.id} AND user_id = ${owner.id}`;
     expect(m.role).toBe('owner');
-    const heads = await sql`SELECT count(*)::int AS n FROM heads WHERE business_id = ${res.json.id} AND NOT is_custom`;
+    const heads = await sql`SELECT count(*) AS n FROM heads WHERE business_id = ${res.json.id} AND is_custom = 0`;
     expect(heads[0].n).toBeGreaterThan(0);
   });
 
@@ -226,13 +226,14 @@ describe('audit log', () => {
       name: 'HDFC Current', kind: 'bank', accountNumber: 'XX12', openingBalance: '2500.50', openingDate: '2026-04-01',
     })).status).toBe(200);
 
-    const rows = await sql`SELECT action, user_id, business_id, before, after FROM audit_log WHERE row_id = ${id} ORDER BY id`;
+    const rows = (await sql`SELECT action, user_id, business_id, before, after FROM audit_log WHERE row_id = ${id} ORDER BY id`)
+      .map((r) => ({ ...r, before: r.before && JSON.parse(r.before), after: r.after && JSON.parse(r.after) }));
     expect(rows.map((r) => r.action)).toEqual(['account.create', 'account.update']);
     expect(rows.every((r) => r.user_id === users.accountant.id && r.business_id === bid)).toBe(true);
     expect(rows[0].before).toBeNull();
-    expect(rows[0].after).toMatchObject({ name: 'HDFC', openingBalance: '1000.00' });
-    expect(rows[1].before).toMatchObject({ name: 'HDFC', openingBalance: '1000.00' });
-    expect(rows[1].after).toMatchObject({ name: 'HDFC Current', openingBalance: '2500.50' });
+    expect(rows[0].after).toMatchObject({ name: 'HDFC', openingBalancePaise: 100000 });
+    expect(rows[1].before).toMatchObject({ name: 'HDFC', openingBalancePaise: 100000 });
+    expect(rows[1].after).toMatchObject({ name: 'HDFC Current', openingBalancePaise: 250050 });
   });
 
   it('a refused change leaves no audit row', async () => {
@@ -241,7 +242,7 @@ describe('audit log', () => {
     const body = { name: 'Cash', kind: 'cash', openingBalance: '9', openingDate: '2026-04-01' };
     expect((await clients.entry_staff.patch(`/businesses/${bid}/accounts/${cash.id}`, body)).status).toBe(403);
     expect((await clients.accountant.post(`/businesses/${bid}/accounts`, { ...body, name: 'cash' })).status).toBe(409);
-    const [n] = await sql`SELECT count(*)::int AS n FROM audit_log`;
+    const [n] = await sql`SELECT count(*) AS n FROM audit_log`;
     expect(n.n).toBe(0);
   });
 });

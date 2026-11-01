@@ -33,11 +33,15 @@ export function date(data: Record<string, unknown>, key: string, label: string):
   return v;
 }
 
-export function money(data: Record<string, unknown>, key: string, label: string): string {
+// Parses a rupee amount typed by a person ("2,45,000.50") into integer paise, using string
+// arithmetic only, so no floating-point value is ever involved.
+export function paise(data: Record<string, unknown>, key: string, label: string): number {
   const raw = data[key];
-  const v = typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? raw.replace(/,/g, '').trim() : '';
-  if (!/^-?\d{1,12}(\.\d{1,2})?$/.test(v)) fail(400, `${label} must be an amount with up to 2 decimals.`);
-  return v;
+  const v = typeof raw === 'string' ? raw.replace(/,/g, '').trim() : '';
+  const m = /^(-?)(\d{1,12})(?:\.(\d{1,2}))?$/.exec(v);
+  if (!m) fail(400, `${label} must be an amount in rupees with up to 2 decimals.`);
+  const value = Number(m[2]) * 100 + Number((m[3] ?? '').padEnd(2, '0'));
+  return m[1] === '-' ? -value : value;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -47,8 +51,4 @@ export function isUuid(v: string | undefined): v is string {
 
 export function isEmail(v: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) && v.length <= 254;
-}
-
-export function isUniqueViolation(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && (e as { code?: string }).code === '23505';
 }
