@@ -1061,3 +1061,27 @@ describe('a shift with many one-sided bills', () => {
     expect(v.json.comparisons.filter((c: any) => c.difference === 'missing_in_software').length).toBeGreaterThan(100);
   });
 });
+
+describe('register-only bills in bulk (e.g. an old POS)', () => {
+  it('counts them from the register with a reason, keeps them off the watch list, and skips what cannot be done this way', async () => {
+    const h = await hotel();
+    const page = await fullShift(h);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
+    await add('145237', '131', [{ mode: 'cash', columnLabel: null, amount: '131' }]);
+    await add('076', '200', []);                                                  // no payment written
+    await add('078', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // 50% discount
+    let v = await view(h);
+    const ids = ['145236', '145237', '076', '078', '2610319'].map((b) => byBill(v, b).id);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids, note: 'Old POS bill' })).status).toBe(403);
+    const r = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids, note: 'Old POS bill' });
+    expect(r.json.decided).toBe(2);
+    expect(r.json.skipped.map((x: any) => x.billNo).sort()).toEqual(['076', '078', '2610319']);
+    v = await view(h);
+    expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register', note: 'Old POS bill' });
+    const waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills.map((b: any) => b.billNo);
+    expect(waiting).not.toContain('145236');
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%noSoftwareBillExpected%'`)[0].n).toBe(2);
+  });
+});

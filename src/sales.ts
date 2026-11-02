@@ -196,7 +196,8 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     if (c.decision) statements.push(clearedAudit(c, w));
     statements.push(...unlinkStatements(db, c.id, t));
     statements.push(stmt(db, `UPDATE bill_comparisons SET software_bill_id = ?, register_row_id = ?, sw_amount_paise = ?, sw_mode = ?,
-      rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = NULL, linked_to_id = NULL WHERE id = ?`,
+      rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = NULL, linked_to_id = NULL,
+      closed_at = NULL, closed_by = NULL, close_note = NULL WHERE id = ?`,
       w.software_bill_id, w.register_row_id, w.sw_amount_paise, w.sw_mode, w.rg_amount_paise, w.rg_mode, w.difference,
       null, null, null, null, c.id));
   }

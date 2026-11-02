@@ -1527,6 +1527,9 @@ function baseChoices(c) {
   return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
 }
 
+/** A register-only bill that can be counted from the register in bulk (not matched to another day's software bill). */
+const bulkOk = (c) => c.difference === 'missing_in_software' && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
+
 /** One line under a one-sided bill: the same bill on the other side, on another day. */
 function otherDayNote(c) {
   const o = c.otherDay;
@@ -1693,11 +1696,20 @@ async function compareView(biz, day) {
       <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2>Differences to decide</h2><span class="note">${decided} of ${toDecide.length} decided</span></div>
       ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so ${v.matchedAfterAdjustment.length > 1 ? 'they need' : 'it needs'} no decision. The register amount (what was received) is used, and is what bank matching will look for:
         ${v.matchedAfterAdjustment.map((m) => `${m.billNo} (software ${money(m.softwarePaise)}, received ${money(m.registerPaise)})`).join(', ')}.</div>` : ''}
+      ${canDecide && !confirmed && toDecide.filter(bulkOk).length > 1 ? html`<form id="bulkreg" class="inset" style="gap:8px">
+        <div class="note"><strong>${toDecide.filter(bulkOk).length} bills are only in the register.</strong> For bills that will never be in a software report (e.g. pending bills of an old POS), tick them and count them from the register at once. They are then not watched for a software bill.</div>
+        <div class="form-row" style="align-items:flex-end">
+          <button class="btn plain" type="button" id="bulkall">Select all ${toDecide.filter(bulkOk).length}</button>
+          <div class="field"><label for="bulknote">Reason</label><input id="bulknote" name="note" value="Old POS bill" required></div>
+          <button class="btn" type="submit" id="bulkgo" disabled>Use register for 0 selected</button>
+        </div>
+        <div class="form-msg"></div>
+      </form>` : ''}
       ${toDecide.length ? html`<div class="scroll"><table style="min-width:860px">
         <thead><tr><th>Bill</th><th>Paid at</th><th>Software</th><th>Register</th><th>What differs</th><th>Your decision</th></tr></thead>
         <tbody>${toDecide.map((c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
             class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
-          <td class="mono"><a href="#" data-openlink>${c.billNo}</a>${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
+          <td class="mono">${bulkOk(c) ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
           <td>${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)} of bills${c.largeDiscount.grossPaise !== (c.software?.amountPaise ?? 0) ? ' (bills paid together)' : ''}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html` <span class="chip wait">Mode</span>` : ''}`
             : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}</td>
@@ -1775,6 +1787,29 @@ async function compareView(biz, day) {
     act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${sel.dataset.leaveout}`, { decision: 'leave_out', note }));
   }));
   wireCashPanel(biz, day, () => compareView(biz, day), msg);
+  const bulk = document.getElementById('bulkreg');
+  if (bulk) {
+    const boxes = () => [...app.querySelectorAll('[data-bulk]')];
+    const count = () => {
+      const n = boxes().filter((x) => x.checked).length;
+      const go = document.getElementById('bulkgo');
+      go.disabled = !n;
+      go.textContent = `Use register for ${n} selected`;
+    };
+    boxes().forEach((x) => x.addEventListener('change', count));
+    document.getElementById('bulkall').addEventListener('click', () => { const all = boxes().every((x) => x.checked); boxes().forEach((x) => { x.checked = !all; }); count(); });
+    bulk.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const ids = boxes().filter((x) => x.checked).map((x) => x.dataset.bulk);
+      const note = bulk.note.value.trim();
+      if (!ids.length || !note || !confirm(`Count ${ids.length} bill${ids.length > 1 ? 's' : ''} from the register, with the reason "${note}"? No software bill will be expected for them.`)) return;
+      try {
+        const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids, note });
+        await compareView(biz, day);
+        document.getElementById('cmsg').innerHTML = html`<div class="${r.skipped.length ? 'error' : 'ok-msg'}">${r.decided} bill${r.decided === 1 ? '' : 's'} counted from the register.${r.skipped.length ? ` Not changed: ${r.skipped.map((x) => `${x.billNo} (${x.reason})`).join('; ')}.` : ''}</div>`.__html;
+      } catch (err) { showError(bulk.querySelector('.form-msg'), err); }
+    });
+  }
   app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
     const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));

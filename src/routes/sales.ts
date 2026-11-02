@@ -8,7 +8,7 @@ import { parseSalesCsv } from '../salescsv';
 import { istDay, shiftDayOf } from '../time';
 import { storageKey } from '../files';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { confirmShift, isCounted, largeDiscountOf, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { confirmShift, discountShares, isCounted, largeDiscountOf, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -446,4 +446,56 @@ salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/close', requ
       VALUES (?, ?, 'comparison.close', 'bill_comparisons', ?, ?, ?, ?)`, bid, user, id, JSON.stringify(w), JSON.stringify({ note }), t),
   ]);
   return c.json({ ok: true });
+});
+
+/**
+ * Many register-only bills at once, e.g. bills of an old POS that has no software report: each is counted
+ * from the register with the reason given, and closed at once because no software bill is expected for it.
+ * Each bill is checked as on its own; bills that cannot be decided this way are returned, not changed.
+ */
+salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = c.req.param('day');
+  const data = await body(c);
+  const note = text(data, 'note', 'Reason', { max: 200 })!;
+  const ids = Array.isArray(data.ids) ? data.ids.filter((x): x is string => typeof x === 'string' && isUuid(x)) : [];
+  if (!ids.length) fail(400, 'Choose at least one bill.');
+  if (ids.length > 500) fail(400, 'At most 500 bills at once.');
+  const comps = await all<{ id: string; bill_no: string; difference: string; register_row_id: string | null; decision: string | null; linked_to_id: string | null; shift_day: string }>(db,
+    `SELECT id, bill_no, difference, register_row_id, decision, linked_to_id, shift_day FROM bill_comparisons WHERE business_id = ? AND shift_day = ?`, bid, day);
+  const chosen = comps.filter((x) => ids.includes(x.id));
+  const others = await otherDays(db, bid, day, comps as never);
+  const paid = new Set((await all<{ id: string }>(db, `SELECT r.id FROM register_rows r WHERE r.business_id = ? AND r.shift_day = ?
+    AND EXISTS (SELECT 1 FROM register_payments p WHERE p.register_row_id = coalesce(r.paid_with_row_id, r.id))`, bid, day)).map((r) => r.id));
+  const regRows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null }>(db,
+    'SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day);
+  const shares = discountShares(regRows.map((r) => ({ ...r, amount_paise: r.amount_paise - r.discount_paise + r.tip_paise, discount_paise: r.discount_paise - r.tip_paise })));
+  const skipped: { billNo: string; reason: string }[] = [];
+  const ok = chosen.filter((x) => {
+    const o = others.get(x.id);
+    const why = x.difference !== 'missing_in_software' ? 'it is in the software report'
+      : !x.register_row_id || !paid.has(x.register_row_id) ? 'no payment is written for it in the register'
+      : o && isCounted(o.decision) ? `it is already counted on ${o.day}`
+      : shares.get(x.register_row_id)?.large ? `it has a ${shares.get(x.register_row_id)!.pct}% discount: decide it on its own` : null;
+    if (why) skipped.push({ billNo: x.bill_no, reason: why });
+    return !why;
+  });
+  if (ok.length) {
+    const t = now();
+    const user = c.get('user').id;
+    try {
+      await db.batch(ok.flatMap((x) => [
+        stmt(db, `UPDATE bill_comparisons SET decision = 'use_register', decided_by = ?, decided_at = ?, note = ?, linked_to_id = NULL,
+          closed_at = ?, closed_by = ?, close_note = ? WHERE id = ?`, user, t, note, t, user, note, x.id),
+        stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+          VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, ?, ?, ?)`, bid, user, x.id,
+          JSON.stringify({ decision: x.decision, linkedToId: x.linked_to_id }), JSON.stringify({ decision: 'use_register', note, noSoftwareBillExpected: true }), t),
+      ]));
+    } catch (e) {
+      if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+      throw e;
+    }
+  }
+  return c.json({ decided: ok.length, skipped });
 });
