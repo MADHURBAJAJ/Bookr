@@ -72,7 +72,12 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
       CASE u.kind
         WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id AND r.status <> 'checked')
         WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status <> 'approved')
-        ELSE NULL END AS open
+        ELSE NULL END AS open,
+      CASE WHEN u.page_written_total_paise IS NULL THEN NULL
+        WHEN u.kind = 'bill_register' THEN (SELECT coalesce(sum(amount_paise), 0) FROM register_rows r WHERE r.upload_id = u.id) <> u.page_written_total_paise
+        WHEN u.kind = 'expense_list' THEN (SELECT coalesce(sum(amount_paise), 0) FROM transactions t WHERE t.upload_id = u.id) <> u.page_written_total_paise
+        ELSE NULL END AS totalDiffers,
+      u.ocr_engine AS ocrEngine
     FROM uploads u WHERE u.business_id = ? ORDER BY u.created_at DESC LIMIT 100`, bid);
   // Software reports, with the shifts each one covers, for the Review list.
   const reportRows = await all<{ uploadId: string; id: string; coversFrom: number; coversTo: number; added: number; skipped: number;
@@ -162,15 +167,15 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at };
   if (u.kind === 'bill_register') {
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
-      remarks, status, ocr_original AS ocrOriginal FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
+      remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
     const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
     const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, u.business_day);
     return c.json({ ...base, shiftStatus: shift?.status ?? 'open', rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id) })) });
   }
   if (u.kind === 'expense_list') {
-    const rows = await all(db, `SELECT id, line_no AS lineNo, narration, amount_paise AS amountPaise, head_id AS headId, status
-      FROM transactions WHERE upload_id = ? ORDER BY line_no`, u.id);
+    const rows = await all(db, `SELECT id, line_no AS lineNo, narration, amount_paise AS amountPaise, head_id AS headId, status,
+      ocr_original AS ocrOriginal FROM transactions WHERE upload_id = ? ORDER BY line_no`, u.id);
     return c.json({ ...base, rows });
   }
   if (u.kind === 'cash_summary') {
@@ -180,6 +185,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     return c.json({ ...base, summary: {
       id: s!.id, status: s!.status, openingPaise: s!.opening_paise, receivedPaise: s!.received_paise, balancePaise: s!.balance_paise,
       expensesPaise: s!.expenses_paise, cashInHandPaise: s!.cash_in_hand_paise, mismatchNote: s!.mismatch_note, mismatchAcceptedAt: s!.mismatch_accepted_at,
+      ocrOriginal: (s as unknown as { ocr_original: string | null }).ocr_original,
     }, checks });
   }
   return c.json(base);
@@ -407,6 +413,7 @@ captureRoutes.post('/businesses/:businessId/cash-summaries/:summaryId/approve', 
     'SELECT * FROM cash_summaries WHERE id = ? AND business_id = ?', id, bid);
   if (!s) fail(404, 'Summary not found.');
   if (s.status === 'approved') fail(409, 'Already approved.');
+  if (s.status === 'draft') fail(409, 'Check the five figures against the page and press Save figures first.');
   const checks = await cashSummaryChecks(db, bid, s.shift_day, s);
   const waiting = checks.filter((k) => k.state === 'waiting');
   if (waiting.length) return c.json({ error: 'Some checks are still waiting.', problems: waiting.map((k) => k.detail) }, 409);

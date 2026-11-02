@@ -25,5 +25,11 @@
       "bucket_name": "bookr-demo-uploads"
     }
   ],
+  // Settings for reading pages with Claude. The API key is a Worker secret (ANTHROPIC_API_KEY), not here.
+  "vars": {
+    "CLAUDE_OCR_MODEL": "claude-opus-5-5",
+    "OCR_DAILY_PAGE_LIMIT": "40",
+    "OCR_MAX_PARALLEL": "3"
+  },
   "observability": { "enabled": true }
 }

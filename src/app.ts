@@ -8,6 +8,7 @@ import { memberRoutes, inviteRoutes } from './routes/members';
 import { bookRoutes } from './routes/books';
 import { salesRoutes } from './routes/sales';
 import { captureRoutes } from './routes/capture';
+import { ocrRoutes } from './routes/ocr';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -36,6 +37,7 @@ app.route('/', memberRoutes);
 app.route('/', bookRoutes);
 app.route('/', salesRoutes);
 app.route('/', captureRoutes);
+app.route('/', ocrRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

@@ -6,7 +6,7 @@ import type { Role } from '../src/permissions';
 import { createTestDb } from './d1';
 
 const { db, uploads, dispose } = await createTestDb();
-export const env = { DB: db, UPLOADS: uploads };
+export const env: Record<string, unknown> & { DB: D1Database; UPLOADS: R2Bucket } = { DB: db, UPLOADS: uploads };
 export { db, uploads };
 export const PASSWORD = 'test-password-1234';
 let hash: string | undefined;

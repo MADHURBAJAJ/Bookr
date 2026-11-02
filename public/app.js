@@ -680,8 +680,12 @@ async function reviewView(biz, uploadId) {
   const photo = html`
     <section class="card" style="flex:2 1 420px;max-width:100%;padding:16px;gap:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px" class="note"><span>Original page</span><span style="display:flex;gap:10px;align-items:center"><a href="${fileUrl}" target="_blank" rel="noopener">Open full size</a>${deleteButton(biz, u)}</span></div>
-      <img src="${fileUrl}" alt="Uploaded page" style="width:100%;border:1px solid var(--field);border-radius:6px;background:#FBFAF6" id="pimg">
-      <div class="note">${u.ocrEngine === 'sample' ? 'Invented sample page. Rows were entered for the demo.' : 'Reading pages automatically is not connected yet. Type the rows in from the page.'}</div>
+      <div style="overflow:hidden;display:flex;justify-content:center"><img src="${fileUrl}" alt="Uploaded page" style="width:100%;border:1px solid var(--field);border-radius:6px;background:#FBFAF6;transition:transform .2s" id="pimg"></div>
+      <div class="form-row" style="align-items:center">
+        ${READABLE.includes(u.kind) && biz.actions.includes('rows.upload') ? html`<button class="btn" type="button" id="readpage">Read page</button>` : ''}
+        <button class="btn plain" type="button" id="rotate">Rotate view</button>
+      </div>
+      <div class="note" id="ocrnote">${u.ocrEngine === 'claude_vision' ? 'Read by Claude. Every row is a draft: check each one against the photo.' : u.ocrEngine === 'manual' ? 'Rows typed in by hand.' : 'Press Read page to fill the rows from the photo, or type them in.'}</div>
     </section>`;
   let right;
   if (u.kind === 'bill_register') right = registerPanel(biz, u);
@@ -694,9 +698,47 @@ async function reviewView(biz, uploadId) {
   wireShell();
   wireDeletes(biz, () => document.getElementById('rmsg'), () => go(`#/b/${biz.id}/review`));
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
+  wireReadPage(biz, u);
   if (u.kind === 'bill_register') wireRegister(biz, u);
   if (u.kind === 'expense_list') wireExpense(biz, u);
   if (u.kind === 'cash_summary') wireSummary(biz, u);
+}
+
+function wireReadPage(biz, u) {
+  let turn = 0;
+  document.getElementById('rotate')?.addEventListener('click', () => {
+    turn = (turn + 90) % 360;
+    document.getElementById('pimg').style.transform = `rotate(${turn}deg)`;
+  });
+  const btn = document.getElementById('readpage');
+  if (!btn) return;
+  api('GET', `/businesses/${biz.id}/ocr`).then((s) => {
+    const note = document.getElementById('ocrnote');
+    if (!s.configured) { btn.disabled = true; note.textContent = 'Reading pages is not set up on the server yet. Type the rows in.'; return; }
+    note.textContent += ` Reads today: ${s.usedToday} of ${s.dailyLimit}.`;
+    btn.dataset.model = s.model;
+  }).catch(() => {});
+  btn.addEventListener('click', async () => {
+    const hasRows = (u.rows?.length ?? 0) > 0 || (u.kind === 'cash_summary' && u.summary.openingPaise != null);
+    if (!confirm(`Read this page with Claude${btn.dataset.model ? ` (${btn.dataset.model})` : ''}?${hasRows ? ' Unchecked rows on this page will be replaced.' : ''} This uses one of today's page reads.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Reading… this can take a minute';
+    const msg = document.getElementById('rmsg');
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/read`, {});
+      await reviewView(biz, u.id);
+      const parts = [u.kind === 'cash_summary' ? 'Figures read.' : `${r.rows} row${r.rows === 1 ? '' : 's'} read.`];
+      if (r.unclearCells) parts.push(`${r.unclearCells} cell${r.unclearCells === 1 ? '' : 's'} could not be read with confidence and show "Needs input".`);
+      if (r.totalMatches === false) parts.push(`The rows add up to ₹ ${money(r.rowsTotalPaise)} but the page total says ₹ ${money(r.writtenTotalPaise)}.`);
+      if (r.orientation && r.orientation !== 'upright') parts.push('The photo was turned; it was read the right way up.');
+      parts.push('Check every row against the photo before it counts.');
+      document.getElementById('rmsg').innerHTML = html`<div class="${r.totalMatches === false || r.unclearCells ? 'demo-band' : 'ok-msg'}">${parts.join(' ')}</div>`.__html;
+    } catch (err) {
+      showError(msg, err);
+      btn.disabled = false;
+      btn.textContent = 'Read page';
+    }
+  });
 }
 
 async function reviewListView(biz) {
@@ -720,12 +762,20 @@ async function reviewListView(biz) {
       ${pages.length ? pages.map((u) => html`
         <div class="list-row">
           <a href="#/b/${biz.id}/review/${u.id}" style="color:inherit"><strong>${KIND_LABELS[u.kind]}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}${u.open ? ` · ${u.open} to check` : ''}</a>
-          <span style="display:flex;gap:10px;align-items:center">${chip(u.status)}<a href="#/b/${biz.id}/review/${u.id}">Review</a>${deleteButton(biz, u)}</span>
+          <span style="display:flex;gap:10px;align-items:center">${u.totalDiffers ? html`<span class="chip bad">Total differs</span>` : ''}${chip(u.status)}<a href="#/b/${biz.id}/review/${u.id}">Review</a>${deleteButton(biz, u)}</span>
         </div>`) : html`<div class="note">No pages yet. <a href="#/b/${biz.id}/upload">Upload one</a>.</div>`}
     </section>`));
   wireShell();
   wireDeletes(biz, () => document.getElementById('rlmsg'), () => reviewListView(biz));
 }
+
+/** Fields Claude could not read with confidence, while nobody has checked the row yet. */
+function unclearOf(ocrOriginal, stillUnchecked) {
+  if (!ocrOriginal || !stillUnchecked) return new Set();
+  try { return new Set(JSON.parse(ocrOriginal).unclear ?? []); } catch { return new Set(); }
+}
+const needs = (set, field, content) => (set.has(field) ? html`${content} <span class="chip bad">Needs input</span>` : content);
+const READABLE = ['bill_register', 'expense_list', 'cash_summary'];
 
 function payText(pays) {
   return pays.length ? pays.map((p) => `${p.columnLabel || MODE_LABELS[p.mode]} ${money(p.amountPaise)}`).join(' + ') : 'none written';
@@ -740,13 +790,13 @@ function registerPanel(biz, u) {
       ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>` : ''}
       <div class="scroll"><table style="min-width:720px">
         <thead><tr><th>#</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th>Paid as</th><th>Remarks</th><th>Status</th><th></th></tr></thead>
-        <tbody>${u.rows.map((r) => html`
+        <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.editedAt); return html`
           <tr data-row="${r.id}">
-            <td class="note">${r.lineNo}</td><td class="mono">${r.billNo}</td><td>${TYPE_LABELS[r.billType] ?? html`<span class="error">Choose</span>`}</td>
-            <td class="amount">${money(r.amountPaise)}</td><td>${payText(r.payments)}</td><td class="note">${r.remarks ?? ''}</td>
+            <td class="note">${r.lineNo}</td><td class="mono">${needs(q, 'bill_no', r.billNo || '—')}</td><td>${needs(q, 'bill_type', TYPE_LABELS[r.billType] ?? html`<span class="error">Choose</span>`)}</td>
+            <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td><td>${needs(q, 'payments', payText(r.payments))}</td><td class="note">${needs(q, 'remarks', r.remarks ?? '')}</td>
             <td>${r.status === 'checked' ? html`<span class="chip ok">Checked</span>` : html`<span class="chip wait">Check</span>`}</td>
             <td style="text-align:right">${locked ? '' : html`<button class="btn plain" type="button" data-edit="${r.id}">Edit</button>`}</td>
-          </tr>`)}</tbody>
+          </tr>`; })}</tbody>
       </table></div>
       <div class="form-row" style="justify-content:space-between">
         <div class="note">Rows add up to ₹ ${money(sum)}. ${written == null ? 'Enter the total written on the page to check it.' : written === sum ? html`<span class="ok-msg">Matches the written total.</span>` : html`<span class="error">The page says ₹ ${money(written)}.</span>`}</div>
@@ -837,14 +887,17 @@ function expensePanel(biz, u, heads) {
       <div class="note">Each line is an expense paid from Cash. It counts only after an Owner or Accountant approves it.</div>
       <div class="scroll"><table style="min-width:560px">
         <thead><tr><th>#</th><th>Item</th><th style="text-align:right">Amount</th><th>Head</th><th>Status</th><th></th></tr></thead>
-        <tbody>${u.rows.map((r) => html`<tr>
-          <td class="note">${r.lineNo}</td><td>${r.narration}</td><td class="amount">${money(r.amountPaise)}</td>
+        <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.headId); return html`<tr>
+          <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td><td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
           <td>${name(r.headId) ?? html`<span class="chip bad">Needs input</span>`}</td>
           <td>${r.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Draft</span>`}</td>
           <td style="text-align:right">${r.status === 'draft' ? html`<button class="btn plain" type="button" data-eedit="${r.id}">Edit</button>` : ''}</td>
-        </tr>`)}</tbody>
+        </tr>`; })}</tbody>
       </table></div>
-      <div class="note">Rows add up to ₹ ${money(sum)}.</div>
+      <div class="form-row" style="justify-content:space-between">
+        <div class="note">Rows add up to ₹ ${money(sum)}. ${u.pageWrittenTotalPaise == null ? 'Enter the total written on the page to check it.' : u.pageWrittenTotalPaise === sum ? html`<span class="ok-msg">Matches the written total.</span>` : html`<span class="error">The page says ₹ ${money(u.pageWrittenTotalPaise)}.</span>`}</div>
+        <form id="ptotal" class="form-row" style="align-items:flex-end"><div class="field"><label for="pt">Total written on the page (₹)</label><input id="pt" name="pageWrittenTotal" class="mono" value="${u.pageWrittenTotalPaise == null ? '' : rupeesForInput(u.pageWrittenTotalPaise)}"></div><button class="btn plain" type="submit">Save total</button></form>
+      </div>
       <form class="inset" id="eform">
         <div style="font-size:15px;font-weight:600" id="etitle">Add a line from the page</div>
         <div class="form-row">
@@ -863,6 +916,8 @@ function expensePanel(biz, u, heads) {
 }
 
 function wireExpense(biz, u) {
+  const total = document.getElementById('ptotal');
+  total && onSubmit(total, async (d) => { await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { pageWrittenTotal: d.pageWrittenTotal || null }); reviewView(biz, u.id); });
   const form = document.getElementById('eform');
   let editing = null;
   onSubmit(form, async (d) => {
@@ -904,9 +959,10 @@ function summaryPanel(biz, u) {
       <form id="sform" class="inset">
         <div style="font-size:15px;font-weight:600">Figures written on the page (₹)</div>
         <div class="form-row">
-          ${[['opening', 'Opening balance', s.openingPaise], ['received', 'Received total', s.receivedPaise], ['balance', 'Balance', s.balancePaise], ['expenses', 'Expenses total', s.expensesPaise], ['cashInHand', 'Cash in hand', s.cashInHandPaise]]
-            .map(([k, l, p]) => html`<div class="field"><label>${l}</label><input name="${k}" class="mono" value="${v(p)}" ${approved ? 'disabled' : ''}></div>`)}
+          ${[['opening', 'Opening balance', s.openingPaise, 'opening'], ['received', 'Received total', s.receivedPaise, 'received'], ['balance', 'Balance', s.balancePaise, 'balance'], ['expenses', 'Expenses total', s.expensesPaise, 'expenses'], ['cashInHand', 'Cash in hand', s.cashInHandPaise, 'cash_in_hand']]
+            .map(([k, l, p, f]) => html`<div class="field"><label>${needs(unclearOf(s.ocrOriginal, s.status === 'draft'), f, l)}</label><input name="${k}" class="mono" value="${v(p)}" ${approved ? 'disabled' : ''}></div>`)}
         </div>
+        ${s.status === 'draft' && s.openingPaise != null ? html`<div class="note">Check each figure against the photo, then press Save figures. Approval needs a person to have saved them.</div>` : ''}
         <div class="form-msg"></div>
         ${approved ? '' : html`<button class="btn plain" type="submit" style="align-self:flex-start">Save figures</button>`}
       </form>
