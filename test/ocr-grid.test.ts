@@ -27,7 +27,7 @@ const HEAD = ['S.No', 'Bill No', 'Closure time', 'Bill Amt', 'Type', 'Cash', 'UP
 type Line = [string | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null];
 const grid = (lines: Line[], extra: Partial<{ paid_with_line: number | null; unclear_columns: string[] }>[] = []) => ({
   orientation: 'upright' as const, legible: true, page_total: null, headings: HEAD,
-  lines: lines.map((cells, i) => ({ line: i + 1, cells, paid_with_line: null, unclear_columns: [], ...extra[i] })),
+  lines: lines.map((cells, i) => ({ line: i + 1, y: 20 + i * 3, cells, paid_with_line: null, unclear_columns: [], ...extra[i] })),
 });
 
 describe('Reading the register as a grid', () => {
@@ -49,12 +49,12 @@ describe('Reading the register as a grid', () => {
 
   it('falls back to the usual register columns when the headings cannot be told apart', () => {
     const r = gridToReading({ orientation: 'upright', legible: true, page_total: null, headings: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'],
-      lines: [{ line: 1, cells: ['1', '26110101', '300', 'F&B', '300', null, null, null, null], paid_with_line: null, unclear_columns: [] }] });
+      lines: [{ line: 1, y: 20, cells: ['1', '26110101', '300', 'F&B', '300', null, null, null, null], paid_with_line: null, unclear_columns: [] }] });
     expect(r.rows[0]).toMatchObject({ bill_no: '26110101', amount: '300', payments: [{ mode: 'cash', amount: '300' }] });
   });
 
   it('a line with the wrong number of cells is marked unclear', () => {
-    const r = gridToReading({ ...grid([]), lines: [{ line: 1, cells: ['1', '26110101', '300'], paid_with_line: null, unclear_columns: [] }] });
+    const r = gridToReading({ ...grid([]), lines: [{ line: 1, y: 20, cells: ['1', '26110101', '300'], paid_with_line: null, unclear_columns: [] }] });
     expect(r.rows[0].unclear).toEqual(expect.arrayContaining(['amount', 'payments']));
   });
 });
@@ -143,6 +143,7 @@ describe('Shift them back', () => {
     expect(rows.map((r) => r.paid)).toEqual([45000, 82000, 30000, 61000]);
     expect(rows.every((r) => r.discount_paise === 0 && r.tip_paise === 0)).toBe(true); // the worked-out discounts went with the wrong payments
     expect(JSON.parse(rows[1].ocr_original).inferred).toContain('payments');
+    expect(JSON.parse(rows[2].ocr_original).y).toBe(26); // where the line is on the photo, for the strip on Review
     const [log] = await sql`SELECT after FROM audit_log WHERE action = 'register.shift_payments'`;
     expect(JSON.parse(log.after).moves).toHaveLength(4);
     expect((await p.clients.entry_staff.get(`/businesses/${p.bid}/uploads/${p.id}`)).json.slip).toBeNull();

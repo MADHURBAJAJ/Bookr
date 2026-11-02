@@ -43,6 +43,7 @@ export const RegisterGrid = z.object({
   headings: z.array(z.string()).describe('The printed column headings, left to right, exactly as printed.'),
   lines: z.array(z.object({
     line: z.number().int().describe('Position of this line on the page: 1 for the first bill line, 2 for the next, and so on.'),
+    y: z.number().describe('Where this line is on the page: its middle, as a percentage of the page height from the top edge of the upright page (0 = top, 100 = bottom).'),
     cells: z.array(z.string().nullable()).describe('One entry per heading, in the same order: the cell exactly as written. null if the cell is blank or holds only a dash.'),
     paid_with_line: z.number().int().nullable().describe('If this bill has no payment of its own because one amount written on another line (often joined by a bracket or brace across rows) pays for several bills, the "line" where that amount is written. Otherwise null.'),
     unclear_columns: z.array(z.string()).describe('Headings of the cells on this line you could not read with confidence.'),
@@ -84,6 +85,7 @@ Then, for every bill line in page order, give "cells": one entry per heading, in
 Write the bill type cell as written (for example "F&B", "Room"). A discount written in the remarks (such as "Disc 20") stays in the remarks cell.
 Sometimes one amount pays for several bills: it is written once, often with a bracket or brace joining those lines. Keep the amount in the cell where it is written, leave the other lines' payment cells null, and set their "paid_with_line" to the line where it is written. Otherwise "paid_with_line" is null.
 List in "unclear_columns" the headings of any cells on that line you could not read with confidence.
+For every line also give "y": where the middle of that line is, as a percentage of the page height from the top of the upright page.
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
 Return one item in "rows" for every expense line, in page order. Do not include the total line as a row; put it in "page_total".
@@ -308,6 +310,14 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
   return rows;
 }
 
+/** The grid line as read, and where it sits on the page (percent from the top), for Review's photo strip. */
+const gridOf = (data: Grid | Reading, line: number) => {
+  if (!('lines' in data)) return {};
+  const l = data.lines.find((x) => x.line === line);
+  const y = typeof l?.y === 'number' && l.y >= 0 && l.y <= 100 ? Math.round(l.y * 10) / 10 : null;
+  return { grid: l?.cells ?? null, ...(y !== null ? { y } : {}) };
+};
+
 /** Statements that replace the page's draft register rows with the reading. */
 export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softwareBills?: string[]; takenBills?: string[] } = {}): { statements: D1PreparedStatement[]; written: number | null } {
   const t = now();
@@ -319,7 +329,7 @@ export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softw
       paid_with_row_id, remarks, status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
       x.id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, x.billNo, x.read.bill_type === 'unclear' ? 'fnb' : x.read.bill_type,
       x.amt ?? 0, x.disc ?? 0, x.tip, null, x.read.remarks,
-      JSON.stringify({ ...base(ctx, r.orientation), line: x.line, read: x.read, ...('lines' in data ? { grid: data.lines.find((l) => l.line === x.line)?.cells ?? null } : {}),
+      JSON.stringify({ ...base(ctx, r.orientation), line: x.line, read: x.read, ...gridOf(data, x.line),
         unclear: [...x.unclear], inferred: x.inferred, ...(x.completedFrom ? { completedFrom: x.completedFrom } : {}) }), t));
     for (const p of x.pays) {
       if (p.paise === null) continue;
