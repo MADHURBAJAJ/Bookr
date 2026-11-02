@@ -87,3 +87,9 @@ select.cell { padding-right: 4px; }
 .cell.needs, .needs-key { border: 2px solid #DC2626; background: #FEF2F2; }
 .needs-key { padding: 0 6px; border-radius: 4px; color: #7F1D1D; }
 tr.row-checked td { background: #F6FBF8; }
+/* Expanded review: entries use the full width. */
+body.review-expanded .side, body.review-expanded #photocard { display: none; }
+body.review-expanded .main { padding: 20px 24px; }
+body.review-expanded #regtable { min-width: 100%; }
+body.review-expanded #regtable .cell[data-f="billNo"] { width: 130px !important; }
+body.review-expanded #regtable .cell[data-f="remarks"] { width: 220px !important; }

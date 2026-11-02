@@ -678,7 +678,7 @@ async function reviewView(biz, uploadId) {
   const { heads } = await api('GET', `/businesses/${biz.id}/heads`);
   const fileUrl = `/api/businesses/${biz.id}/uploads/${u.id}/file`;
   const photo = html`
-    <section class="card" style="flex:2 1 420px;max-width:100%;padding:16px;gap:10px">
+    <section class="card" id="photocard" style="flex:2 1 420px;max-width:100%;padding:16px;gap:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px" class="note"><span>Original page</span><span style="display:flex;gap:10px;align-items:center"><a href="${fileUrl}" target="_blank" rel="noopener">Open full size</a>${deleteButton(biz, u)}</span></div>
       <div style="overflow:hidden;display:flex;justify-content:center"><img src="${fileUrl}" alt="Uploaded page" style="width:100%;border:1px solid var(--field);border-radius:6px;background:#FBFAF6;transition:transform .2s" id="pimg"></div>
       <div class="form-row" style="align-items:center">
@@ -693,15 +693,38 @@ async function reviewView(biz, uploadId) {
   else if (u.kind === 'cash_summary') right = summaryPanel(biz, u);
   else right = html`<section class="card grow3"><div class="note">Single printed bills are kept for reference. Nothing is read from them yet.</div></section>`;
   render(shell(biz, 'review', `Review: ${KIND_LABELS[u.kind]}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
+    <div class="form-row" style="justify-content:flex-end;margin-bottom:-8px">
+      <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
+    </div>
     <div id="rmsg"></div>
     <div class="row">${photo}${right}</div>`));
   wireShell();
   wireDeletes(biz, () => document.getElementById('rmsg'), () => go(`#/b/${biz.id}/review`));
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
   wireReadPage(biz, u);
+  wireExpand();
   if (u.kind === 'bill_register') wireRegister(biz, u);
   if (u.kind === 'expense_list') wireExpense(biz, u);
   if (u.kind === 'cash_summary') wireSummary(biz, u);
+}
+
+// Expanded review: the entries take the full width (photo and menu hidden). Remembered per browser.
+const EXPAND_KEY = 'bookr.reviewExpanded';
+function wireExpand() {
+  const btn = document.getElementById('expand');
+  if (!btn) return;
+  let on = false;
+  try { on = localStorage.getItem(EXPAND_KEY) === '1'; } catch { /* storage unavailable */ }
+  const apply = () => {
+    document.body.classList.toggle('review-expanded', on);
+    btn.textContent = on ? 'Show photo' : 'Expand ⤢';
+  };
+  apply();
+  btn.addEventListener('click', () => {
+    on = !on;
+    try { localStorage.setItem(EXPAND_KEY, on ? '1' : '0'); } catch { /* storage unavailable */ }
+    apply();
+  });
 }
 
 function wireReadPage(biz, u) {
@@ -1227,6 +1250,7 @@ async function compareView(biz, day) {
 // ---------- router
 
 async function route() {
+  document.body.classList.remove('review-expanded');
   const hash = location.hash || '#/';
   const parts = hash.slice(2).split('/');
   try {
