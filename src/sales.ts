@@ -11,7 +11,8 @@ export type Decision = 'use_software' | 'use_register' | 'leave_out';
 export const NEEDS_DECISION: Difference[] = ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'];
 
 interface SwBill { id: string; pos_no: string; bill_no: string; paid_at: number; mode: string; amount_paise: number; is_complimentary: number }
-interface RgRow { id: string; bill_no: string; bill_type: string | null; amount_paise: number; status: string; line_no: number; upload_id: string }
+/** amount_paise here is the register amount after discount (what should have been paid). */
+interface RgRow { id: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; status: string; line_no: number; upload_id: string }
 interface RgPay { register_row_id: string; mode: string; amount_paise: number; column_label: string | null }
 interface Comparison {
   id: string; pos_no: string; bill_no: string; software_bill_id: string | null; register_row_id: string | null;
@@ -49,7 +50,7 @@ async function loadShiftData(db: DB, businessId: string, day: string) {
     stmt(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     stmt(db, `SELECT id, pos_no, bill_no, paid_at, mode, amount_paise, is_complimentary FROM software_bills
       WHERE business_id = ? AND shift_day = ? ORDER BY paid_at`, businessId, day),
-    stmt(db, `SELECT id, bill_no, bill_type, amount_paise, status, line_no, upload_id FROM register_rows
+    stmt(db, `SELECT id, bill_no, bill_type, amount_paise - discount_paise AS amount_paise, discount_paise, status, line_no, upload_id FROM register_rows
       WHERE business_id = ? AND shift_day = ? ORDER BY upload_id, line_no`, businessId, day),
     stmt(db, `SELECT p.register_row_id, p.mode, p.amount_paise, p.column_label FROM register_payments p
       JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
@@ -221,7 +222,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     comparisons: comparisons.map((c) => ({
       id: c.id, posNo: c.pos_no, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, note: c.note,
       software: c.software_bill_id ? { amountPaise: c.sw_amount_paise, mode: c.sw_mode } : null,
-      register: c.register_row_id ? { amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null } : null,
+      register: c.register_row_id ? { amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0 } : null,
     })),
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,

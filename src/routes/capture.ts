@@ -74,7 +74,10 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
         WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status <> 'approved')
         ELSE NULL END AS open,
       CASE WHEN u.page_written_total_paise IS NULL THEN NULL
-        WHEN u.kind = 'bill_register' THEN (SELECT coalesce(sum(amount_paise), 0) FROM register_rows r WHERE r.upload_id = u.id) <> u.page_written_total_paise
+        WHEN u.kind = 'bill_register' THEN u.page_written_total_paise NOT IN (
+          (SELECT coalesce(sum(amount_paise), 0) FROM register_rows r WHERE r.upload_id = u.id),
+          (SELECT coalesce(sum(amount_paise - discount_paise), 0) FROM register_rows r WHERE r.upload_id = u.id),
+          (SELECT coalesce(sum(p.amount_paise), 0) FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = u.id))
         WHEN u.kind = 'expense_list' THEN (SELECT coalesce(sum(amount_paise), 0) FROM transactions t WHERE t.upload_id = u.id) <> u.page_written_total_paise
         ELSE NULL END AS totalDiffers,
       u.ocr_engine AS ocrEngine
@@ -167,7 +170,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at };
   if (u.kind === 'bill_register') {
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
-      remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
+      discount_paise AS discountPaise, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
     const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
     const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, u.business_day);
@@ -176,7 +179,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       all<{ bill_no: string; pos_no: string; amount_paise: number; mode: string; paid_at: number }>(db,
         'SELECT bill_no, pos_no, amount_paise, mode, paid_at FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
       all<{ id: string; bill_no: string; amount_paise: number }>(db,
-        'SELECT id, bill_no, amount_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+        'SELECT id, bill_no, amount_paise - discount_paise AS amount_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
     ]);
     const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
     return c.json({
@@ -225,10 +228,14 @@ function registerInput(data: Record<string, unknown>) {
     return { mode: o.mode, columnLabel: text(o, 'columnLabel', 'Column', { optional: true, max: 40 }), amountPaise: paise(o, 'amount', `Payment ${i + 1} amount`) };
   });
   const status = data.status === 'checked' ? 'checked' : 'draft';
+  const amountPaise = paise(data, 'amount', 'Bill amount');
+  const discountPaise = optionalPaise(data, 'discount', 'Discount') ?? 0;
+  if (discountPaise < 0 || discountPaise > amountPaise) fail(400, 'Discount must be between zero and the bill amount.');
   return {
     billNo: text(data, 'billNo', 'Bill number', { max: 30 })!,
     billType,
-    amountPaise: paise(data, 'amount', 'Bill amount'),
+    amountPaise,
+    discountPaise,
     remarks: text(data, 'remarks', 'Remarks', { optional: true, max: 300 }),
     payments,
     status,
@@ -250,8 +257,8 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
   const t = now();
   try {
     await db.batch([
-      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, remarks, status, edited_by, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, u.id, last!.n + 1, u.business_day, r.billNo, r.billType, r.amountPaise, r.remarks, r.status,
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, remarks, status, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, u.id, last!.n + 1, u.business_day, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.remarks, r.status,
         c.get('user').id, t, t),
       ...paymentStatements(db, bid, id, r.payments, t),
       stmt(db, "UPDATE uploads SET ocr_engine = coalesce(ocr_engine, 'manual') WHERE id = ?", u.id),
@@ -269,8 +276,8 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; remarks: string | null; ocr_original: string | null }>(db,
-    'SELECT shift_day, bill_no, bill_type, amount_paise, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; remarks: string | null; ocr_original: string | null }>(db,
+    'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
   const r = registerInput(await body(c));
   const t = now();
@@ -285,6 +292,7 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
       old.bill_no !== r.billNo && 'bill_no',
       old.bill_type !== r.billType && 'bill_type',
       old.amount_paise !== r.amountPaise && 'amount',
+      old.discount_paise !== r.discountPaise && 'discount',
       (old.remarks ?? null) !== r.remarks && 'remarks',
       key(oldPays.map((p) => ({ mode: p.mode, amount: p.amount_paise, label: p.column_label }))) !== key(r.payments.map((p) => ({ mode: p.mode, amount: p.amountPaise, label: p.columnLabel }))) && 'payments',
     ].filter(Boolean) as string[];
@@ -296,8 +304,8 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   }
   try {
     await db.batch([
-      stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?, ocr_original = ?
-        WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.remarks, r.status, c.get('user').id, t, ocr, rowId, bid),
+      stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, discount_paise = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?, ocr_original = ?
+        WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.remarks, r.status, c.get('user').id, t, ocr, rowId, bid),
       stmt(db, 'DELETE FROM register_payments WHERE register_row_id = ?', rowId),
       ...paymentStatements(db, bid, rowId, r.payments, t),
     ]);

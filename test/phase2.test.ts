@@ -37,7 +37,7 @@ async function fullShift(h: Awaited<ReturnType<typeof hotel>>, register = REGIST
   expect(page.status).toBe(201);
   for (const r of register) {
     const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page.json.id}/register-rows`, {
-      billNo: r.billNo, billType: r.billType, amount: r.amount, remarks: r.remarks ?? null, status: 'checked',
+      billNo: r.billNo, billType: r.billType, amount: r.amount, discount: (r as { discount?: string }).discount ?? '0', remarks: r.remarks ?? null, status: 'checked',
       payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: p.amount })),
     });
     expect(res.status).toBe(201);
@@ -473,6 +473,30 @@ describe('register bill numbers against the software report', () => {
     await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${row.id}`, { billNo: '2610312', billType: 'fnb', amount: '380', status: 'checked', payments: [{ mode: 'cash', columnLabel: 'Cash', amount: '380' }] });
     const v = await view(h);
     expect(byBill(v, '2610312').difference).toBe('match');
+  });
+});
+
+describe('register discounts', () => {
+  it('a bill balances when payments equal amount less discount, and is compared to the software after discount', async () => {
+    const h = await hotel();
+    // Register says 4,500 with a 90 discount, paid 4,410 by UPI: the software report has 4,410.
+    const reg = REGISTER_31_OCT.map((r) => (r.billNo === '2610317' ? { ...r, amount: '4500', discount: '90', payments: [{ mode: 'upi' as const, columnLabel: 'UPI XOXO', amount: '4410' }] } : r));
+    const pageId = await fullShift(h, reg as never);
+    const [row] = await sql`SELECT amount_paise, discount_paise FROM register_rows WHERE bill_no = '2610317'`;
+    expect(row).toEqual({ amount_paise: 450000, discount_paise: 9000 });
+    const v = await view(h);
+    expect(byBill(v, '2610317').difference).toBe('match');
+    expect(byBill(v, '2610317').register).toMatchObject({ amountPaise: 441000, discountPaise: 9000 });
+    expect(v.json.blockers.join(' ')).not.toMatch(/do not add up/);
+    const u = await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${pageId}`);
+    expect(u.json.rows.find((r: any) => r.billNo === '2610317').discountPaise).toBe(9000);
+  });
+
+  it('refuses a discount larger than the bill', async () => {
+    const h = await hotel();
+    const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(31), 'image/png')).json.id;
+    const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo: '1', billType: 'fnb', amount: '100', discount: '150', payments: [] });
+    expect(res.status).toBe(400);
   });
 });
 

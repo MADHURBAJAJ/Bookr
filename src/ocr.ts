@@ -20,6 +20,7 @@ export const RegisterReading = z.object({
     bill_no: z.string().nullable(),
     bill_type: z.enum(['fnb', 'room', 'unclear']),
     amount: Amount,
+    discount: Amount.describe('Discount written for this bill, if any. null when none is written.'),
     payments: z.array(z.object({
       column: z.string().describe('Column heading the amount is written under, e.g. "Cash", "UPI XOXO", "UPI Bank 2", "Card".'),
       mode: z.enum(['cash', 'upi', 'card']),
@@ -55,8 +56,9 @@ Ignore printed headings, ruled lines and any "SAMPLE" stamp.`;
 export const INSTRUCTIONS = {
   bill_register: `This is a page of a hotel's handwritten bill register. Each line is one settled bill with columns such as: line number, Bill No, Amount, Type (F&B or Room), Cash, UPI XOXO, UPI Bank 2, Card, Remarks.
 Return one item in "rows" for every bill line, in page order. bill_type is "fnb" for F&B, "room" for Room, or "unclear".
+"amount" is the bill amount column. If a discount is written for a bill (in a Disc or Discount column, or as a remark such as "Disc 20"), put it in "discount"; otherwise null.
 For each amount written under a payment column, add an entry to "payments" with that column's heading and its mode (cash, upi or card). A bill can have more than one payment.
-Field names for "unclear": bill_no, bill_type, amount, payments, remarks.
+Field names for "unclear": bill_no, bill_type, amount, discount, payments, remarks.
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
 Return one item in "rows" for every expense line, in page order. Do not include the total line as a row; put it in "page_total".
@@ -85,15 +87,18 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
     const unclear = new Set(row.unclear);
     const amt = amount(row.amount);
     if (amt === null) unclear.add('amount');
+    let disc = amount(row.discount);
+    if (row.discount && disc === null) unclear.add('discount');
+    if (disc !== null && (disc < 0 || disc > (amt ?? 0))) { unclear.add('discount'); disc = null; }
     if (!row.bill_no) unclear.add('bill_no');
     if (row.bill_type === 'unclear') unclear.add('bill_type');
     const pays = row.payments.map((p) => ({ ...p, paise: amount(p.amount) }));
     if (pays.some((p) => p.paise === null)) unclear.add('payments');
     const id = newId();
-    statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, remarks,
-      status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
+    statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, remarks,
+      status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
       id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, row.bill_no?.trim() ?? '', row.bill_type === 'unclear' ? null : row.bill_type,
-      amt ?? 0, row.remarks, JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear] }), t));
+      amt ?? 0, disc ?? 0, row.remarks, JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear] }), t));
     for (const p of pays) {
       if (p.paise === null) continue;
       statements.push(stmt(ctx.db, `INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at)

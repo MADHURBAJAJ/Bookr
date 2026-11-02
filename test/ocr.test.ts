@@ -27,7 +27,7 @@ const registerReading = () => ({
   data: {
     orientation: 'rotated_90_clockwise', legible: true, page_total: '16215.50',
     rows: REGISTER_31_OCT.map((r, i) => ({
-      line: i + 1, bill_no: i === 2 ? null : r.billNo, bill_type: i === 3 ? 'unclear' : r.billType, amount: r.amount,
+      line: i + 1, bill_no: i === 2 ? null : r.billNo, bill_type: i === 3 ? 'unclear' : r.billType, amount: r.amount, discount: i === 7 ? '20' : null,
       payments: r.payments.map((p) => ({ column: p.columnLabel, mode: p.mode, amount: p.amount })),
       remarks: r.remarks ?? null, unclear: i === 5 ? ['amount'] : [],
     })),
@@ -56,6 +56,8 @@ describe('Read page: register', () => {
     expect(rows[3].bill_type).toBeNull();
     expect(JSON.parse(rows[5].ocr_original)).toMatchObject({ engine: 'claude_vision', model: 'claude-opus-5-5', unclear: ['amount'] });
     expect(rows[10].amount_paise).toBe(124050);
+    const [disc] = await sql`SELECT discount_paise FROM register_rows WHERE line_no = 8`;
+    expect(disc.discount_paise).toBe(2000);
     const [u] = await sql`SELECT status, ocr_engine, page_written_total_paise FROM uploads WHERE id = ${p.id}`;
     expect(u).toEqual({ status: 'ready', ocr_engine: 'claude_vision', page_written_total_paise: 1621550 });
     const pays = await sql`SELECT count(*) AS n FROM register_payments`;
