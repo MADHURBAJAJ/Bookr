@@ -5,6 +5,7 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type D
 import { body, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { cashSummaryChecks, refreshComparisons, type SummaryValues } from '../sales';
+import { shiftDayOf } from '../time';
 
 export const captureRoutes = new Hono<AppEnv>();
 
@@ -73,6 +74,20 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
         WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status <> 'approved')
         ELSE NULL END AS open
     FROM uploads u WHERE u.business_id = ? ORDER BY u.created_at DESC LIMIT 100`, bid);
+  // Software reports, with the shifts each one covers, for the Review list.
+  const reportRows = await all<{ uploadId: string; id: string; coversFrom: number; coversTo: number; added: number; skipped: number;
+    flagged: number; openConflicts: number; replacedBy: string | null }>(db, `
+    SELECT r.upload_id AS uploadId, r.id, r.covers_from AS coversFrom, r.covers_to AS coversTo, r.bills_added AS added,
+      r.bills_skipped AS skipped, r.bills_flagged AS flagged, r.replaced_by AS replacedBy,
+      (SELECT count(*) FROM software_bill_conflicts k WHERE k.report_id = r.id AND k.decision IS NULL) AS openConflicts
+    FROM sales_reports r WHERE r.business_id = ?`, bid);
+  const reports = new Map(reportRows.map((r) => {
+    const days = new Set<string>();
+    for (let t = r.coversFrom; t < r.coversTo; t += 3_600_000) days.add(shiftDayOf(t));
+    days.add(shiftDayOf(r.coversTo));
+    return [r.uploadId, { ...r, shiftDays: [...days].sort() }];
+  }));
+  const withReports = uploads.map((u) => (u.kind === 'software_sales_csv' ? { ...u, report: reports.get(u.id as string) ?? null } : u));
   // The cash summary's expense check waits while that day's expense rows are not approved.
   const waiting = await all<{ day: string; drafts: number }>(db, `
     SELECT s.shift_day AS day, (SELECT count(*) FROM transactions t WHERE t.business_id = s.business_id AND t.day = s.shift_day
@@ -82,7 +97,7 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
     day: w.day,
     text: `The cash summary for ${w.day} cannot be checked yet: ${w.drafts} expense row${w.drafts > 1 ? 's' : ''} for that day ${w.drafts > 1 ? 'are' : 'is'} not approved.`,
   }));
-  return c.json({ uploads, notices });
+  return c.json({ uploads: withReports, notices });
 });
 
 captureRoutes.get('/businesses/:businessId/uploads/:uploadId/file', requireRole('rows.edit'), async (c) => {

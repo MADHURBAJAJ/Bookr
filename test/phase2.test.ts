@@ -59,6 +59,8 @@ describe('software report import', () => {
     expect((await sql`SELECT count(*) AS n FROM software_bills`)[0].n).toBe(0);
 
     expect((await h.importCsv(h.clients.entry_staff, REPORT_31_OCT)).status).toBe(201);
+    const listed = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads`)).json.uploads.find((u: any) => u.kind === 'software_sales_csv');
+    expect(listed.report).toMatchObject({ added: 16, skipped: 0, flagged: 0, openConflicts: 0, shiftDays: ['2026-10-30', '2026-10-31'] });
     const days = await sql`SELECT shift_day, count(*) AS n FROM software_bills GROUP BY shift_day ORDER BY shift_day`;
     expect(days).toEqual([{ shift_day: '2026-10-30', n: 3 }, { shift_day: '2026-10-31', n: 13 }]);
     const [b] = await sql`SELECT amount_paise, mode, is_complimentary FROM software_bills WHERE bill_no = '26103121'`;

@@ -688,8 +688,19 @@ async function reviewView(biz, uploadId) {
 async function reviewListView(biz) {
   const { uploads, notices } = await api('GET', `/businesses/${biz.id}/uploads`);
   const pages = uploads.filter((u) => u.kind !== 'software_sales_csv');
-  render(shell(biz, 'review', 'Review', 'Pick a page to check its rows beside the photo.', html`
+  const csvs = uploads.filter((u) => u.kind === 'software_sales_csv' && u.report);
+  render(shell(biz, 'review', 'Review', 'Pick a page to check its rows beside the photo. Software reports are checked on Compare sales.', html`
     ${notices.map((n) => html`<div class="demo-band">${n.text.replace(n.day, dayLabel(n.day))}</div>`)}
+    <section class="card" style="gap:4px">
+      <h2 style="margin-bottom:8px">Software sales reports</h2>
+      ${csvs.length ? csvs.map((u) => { const r = u.report; return html`
+        <div class="list-row">
+          <span><strong>${when(r.coversFrom)} to ${when(r.coversTo)}</strong> · ${u.rows} bill${u.rows === 1 ? '' : 's'}
+            <br><span class="note">${r.added} new, ${r.skipped} already imported (skipped), ${r.flagged} with different values${r.openConflicts ? html` · <span class="error">${r.openConflicts} still to decide</span>` : ''}${r.replacedBy ? ' · replaced by a corrected file' : ''}</span></span>
+          <span style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${r.shiftDays.map((d) => html`<a href="#/b/${biz.id}/compare/${d}">Compare ${dayLabel(d)} shift</a>`)}</span>
+        </div>`; }) : html`<div class="note">No software reports yet.</div>`}
+    </section>
+    <h2 style="margin:4px 0 0">Pages</h2>
     <section class="card" style="gap:4px">
       ${pages.length ? pages.map((u) => html`
         <a class="list-row" href="#/b/${biz.id}/review/${u.id}" style="color:inherit">
