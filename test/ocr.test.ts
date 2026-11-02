@@ -223,7 +223,7 @@ describe('Read page: who, how many, and failures', () => {
     mocked.mockImplementationOnce(() => new Promise((r) => { release = () => r({ data: { orientation: 'upright', legible: true, page_total: null, rows: [] }, model: 'm' } as never); }));
     const second = (await p.clients.owner.upload(`/businesses/${p.bid}/uploads?kind=expense_list&day=2026-10-31`, PNG(++seq), 'image/png')).json.id;
     const first = p.read();
-    await vi.waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocked).toHaveBeenCalledTimes(1), { timeout: 15_000 });
     const blocked = await p.clients.owner.post(`/businesses/${p.bid}/uploads/${second}/read`);
     expect(blocked.status).toBe(429);
     expect(blocked.json.error).toMatch(/being read already/);

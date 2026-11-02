@@ -7,6 +7,7 @@ import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
 import { shiftDayOf } from '../time';
 import { storageKey } from '../files';
+import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { confirmShift, NEEDS_DECISION, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
@@ -261,6 +262,10 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
     'SELECT difference, software_bill_id, register_row_id, sw_mode, decision, shift_day FROM bill_comparisons WHERE id = ? AND business_id = ?', id, bid);
   if (!cmp) fail(404, 'Not found.');
   if (!NEEDS_DECISION.includes(cmp.difference as never)) fail(400, 'This bill has no difference to decide.');
+  // Cash the register never recorded is only left out for a stated reason, so missing cash cannot be hidden.
+  if (decision === 'leave_out' && cmp.difference === 'missing_in_register' && cmp.sw_mode === 'cash' && !note) {
+    fail(400, `Say why this cash bill is left out: ${LEAVE_OUT_REASONS.join(', ')}, or another reason.`);
+  }
   // A bill the register does not have gets its type (F&B or Room) with the decision; otherwise the register's type is used.
   let billType: string | null = null;
   if (decision === 'use_software') {
@@ -341,4 +346,58 @@ salesRoutes.put('/businesses/:businessId/bill-type-heads/:billType', requireRole
       before ? JSON.stringify({ billType, headId: before.head_id }) : null, JSON.stringify({ billType, headId }), now()),
   ]);
   return c.json({ ok: true });
+});
+
+// ---- Cash for a shift (Compare sales, and the cash summary page on Review)
+
+salesRoutes.get('/businesses/:businessId/shifts/:day/cash', requireRole('sales.view'), async (c) => {
+  return c.json({ ...(await cashCheck(c.env.DB, c.get('businessId'), dayParam(c.req.param('day')))), reasons: LEAVE_OUT_REASONS });
+});
+
+// A difference that is a writing mistake (the cash is there) is accepted with a note. Owner or Accountant.
+salesRoutes.post('/businesses/:businessId/shifts/:day/cash/accept', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = dayParam(c.req.param('day'));
+  const note = text(await body(c), 'note', 'Note', { max: 500 })!;
+  const check = await cashCheck(db, bid, day);
+  if (check.differencePaise === null) fail(409, 'There is no difference to accept yet: the shift must be confirmed and the cash summary entered.');
+  if (check.differencePaise === 0) fail(409, 'The cash agrees; there is nothing to accept.');
+  const shift = await one<{ id: string }>(db, 'SELECT id FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  await stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'cash.difference_accepted', 'shifts', ?, NULL, ?, ?)`, bid, c.get('user').id, shift!.id,
+    JSON.stringify({ day, differencePaise: check.differencePaise, shouldBePaise: check.shouldBePaise, countedPaise: check.countedPaise, note }), now()).run();
+  return c.json({ ok: true });
+});
+
+// Cash short: an Owner books the shortage as an approved Cash expense under "Cash shortage", so it is in the books.
+salesRoutes.post('/businesses/:businessId/shifts/:day/cash/shortage', requireRole('cash.writeoff'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = dayParam(c.req.param('day'));
+  const note = text(await body(c), 'note', 'Note', { max: 500 })!;
+  const check = await cashCheck(db, bid, day);
+  if (check.differencePaise === null) fail(409, 'The shift must be confirmed and the cash summary entered first.');
+  if (check.differencePaise >= 0) fail(409, 'The cash is not short.');
+  const cash = await one<{ id: string }>(db, `SELECT id FROM accounts WHERE business_id = ? AND kind = 'cash' ORDER BY lower(name) = 'cash' DESC, created_at LIMIT 1`, bid);
+  if (!cash) fail(400, 'This business has no cash account.');
+  const t = now();
+  let head = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'expense' AND lower(name) = lower(?)", bid, SHORTAGE_HEAD.name);
+  const statements: D1PreparedStatement[] = [];
+  if (!head) {
+    head = { id: newId() };
+    statements.push(stmt(db, `INSERT INTO heads (id, business_id, name, type, tally_ledger, is_custom, created_at) VALUES (?, ?, ?, 'expense', ?, 0, ?)`,
+      head.id, bid, SHORTAGE_HEAD.name, SHORTAGE_HEAD.tally, t));
+  }
+  const id = newId();
+  const amount = -check.differencePaise;
+  statements.push(
+    stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, shift_day, created_at)
+      VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_shortage', 'approved', 'cash', ?, ?)`, id, bid, cash.id, day, amount, head.id, `Cash shortage, ${day} shift: ${note}`, day, t),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash.shortage_booked', 'transactions', ?, NULL, ?, ?)`, bid, c.get('user').id, id,
+      JSON.stringify({ day, amountPaise: amount, shouldBePaise: check.shouldBePaise, countedPaise: check.countedPaise, note }), t),
+  );
+  await db.batch(statements);
+  return c.json({ ok: true, amountPaise: amount });
 });

@@ -38,6 +38,7 @@ export const PERMISSIONS = {
   'sales.import': PREPARERS,
   'sales.decide': BOOKS,
   'shift.reopen': OWNER,
+  'cash.writeoff': OWNER,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

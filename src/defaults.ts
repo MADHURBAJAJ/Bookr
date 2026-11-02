@@ -12,6 +12,7 @@ export const DEFAULT_HEADS: { name: string; type: 'income' | 'expense'; tally: s
   { name: 'Transport', type: 'expense', tally: 'Freight and Cartage' },
   { name: 'Food', type: 'expense', tally: 'Staff Welfare' },
   { name: 'UPI charges', type: 'expense', tally: 'Bank Charges' },
+  { name: 'Cash shortage', type: 'expense', tally: 'Cash Shortage' },
 ];
 
 // The statements that create a business with its Owner, standard heads and a Cash account.

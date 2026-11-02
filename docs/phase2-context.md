@@ -264,6 +264,8 @@ Each line of an expense list becomes a draft expense row in `transactions`, paid
 
 - **Matched after a discount or tip (approved 2 Nov 2026).** A register bill with a discount or tip counts as matched when the software shows its amount before them (or the received amount). No decision is needed; confirmation books the register's received amount (`confirmed_source = register`), which is what Phase 3 bank matching looks for. The payment mode must still agree. Compare sales lists these bills.
 
+- **Cash for a shift (approved 2 Nov 2026).** A panel at the bottom of Compare sales (and under the cash summary page on Review): opening (previous day's cash in hand, else the page's opening) + confirmed cash sales − approved cash expenses − booked shortage = should be in hand, against the counted cash in hand. A difference is accepted with a note (Owner or Accountant; audit-logged, valid only for that exact difference) or, when short, booked by an Owner as an approved Cash expense under "Cash shortage" (`transactions.source = cash_shortage`, migration 0009). A cash bill missing in the register can be left out only with a reason. Cash bills not in the register are listed on the panel.
+
 ### New Cloudflare resource
 
 An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.

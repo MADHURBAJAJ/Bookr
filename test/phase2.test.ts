@@ -248,7 +248,8 @@ describe('comparison and decisions', () => {
 
 async function decideAll(h: Awaited<ReturnType<typeof hotel>>) {
   const v = await view(h);
-  const decide = (bill: string, decision: string) => h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision });
+  const decide = (bill: string, decision: string) => h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`,
+    decision === 'leave_out' ? { decision, note: 'Cancelled in POS' } : { decision });
   expect((await decide('26103115', 'use_register')).status).toBe(200);   // cash 403
   expect((await decide('2610317', 'use_software')).status).toBe(200);    // UPI 4410
   expect((await decide('2610318', 'use_register')).status).toBe(200);    // UPI 650
@@ -543,7 +544,7 @@ describe('register discounts', () => {
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared'`)[0].n).toBe(1);
     await decideAll(h).catch(() => undefined);
     for (const [bill, d] of [['26103115', 'use_register'], ['2610318', 'use_register'], ['2610319', 'leave_out'], ['26103120', 'use_register'], ['26103125', 'use_register']]) {
-      await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
+      await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d, note: 'Cancelled in POS' });
     }
     expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
     const [t] = await sql`SELECT amount_paise, confirmed_source, match_status FROM transactions WHERE bill_no = '2610317'`;
@@ -733,5 +734,71 @@ describe('use register for a bill paid together', () => {
     expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '193').id}`, { decision: 'use_register' })).status).toBe(200);
     expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '194').id}`, { decision: 'use_register' })).json.error).toMatch(/not paid together/);
     expect(extra && lone).toBeTruthy();
+  });
+});
+
+describe('cash for a shift', () => {
+  async function confirmedWithSummary(cashInHand: string) {
+    const h = await hotel();
+    await fullShift(h);
+    const v = await view(h);
+    // 2610319 is cash 353 in the software and missing in the register: booked with Use software.
+    for (const [bill, d] of [['26103115', 'use_register'], ['2610317', 'use_software'], ['2610318', 'use_register'], ['26103120', 'use_register'], ['26103125', 'use_register']]) {
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
+    }
+    await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610319').id}`, { decision: 'use_software', billType: 'fnb' });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const sumUpload = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=cash_summary&day=2026-10-31`, png(61), 'image/png')).json.id;
+    const sid = (await h.clients.owner.get(`/businesses/${h.bid}/uploads/${sumUpload}`)).json.summary.id;
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/cash-summaries/${sid}`, { opening: '8400', received: '4303.50', balance: '12703.50', expenses: '0', cashInHand });
+    return h;
+  }
+  const cash = (h: any) => h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/cash`);
+
+  it('should be in hand = opening + confirmed cash sales - approved expenses, against the counted cash', async () => {
+    const h = await confirmedWithSummary('12703.50');
+    const k = (await cash(h)).json;
+    // 4,303.50 register cash + 353 cash bill not in the register = 4,656.50
+    expect(k).toMatchObject({ confirmed: true, openingPaise: 840000, openingFrom: 'page', cashSalesPaise: 465650, expensesPaise: 0,
+      shouldBePaise: 1305650, countedPaise: 1270350, differencePaise: -35300, settled: false, notInRegisterBookedPaise: 35300 });
+    expect(k.notInRegister).toEqual([{ id: expect.any(String), billNo: '2610319', amountPaise: 35300, decision: 'use_software', billType: 'fnb', note: null }]);
+  });
+
+  it('a difference is accepted with a note, and only that exact difference', async () => {
+    const h = await confirmedWithSummary('12703.50');
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/accept`, { note: 'x' })).status).toBe(403);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/accept`, {})).status).toBe(400);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/accept`, { note: 'Counted again: 353 in the drawer, not written' })).status).toBe(200);
+    expect((await cash(h)).json).toMatchObject({ settled: true, accepted: 'Counted again: 353 in the drawer, not written' });
+  });
+
+  it('an Owner books a shortage: an approved Cash expense under Cash shortage, and the cash then agrees', async () => {
+    const h = await confirmedWithSummary('12703.50');
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/shortage`, { note: 'x' })).status).toBe(403);
+    const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/shortage`, { note: 'Cashier to repay' });
+    expect(res.json).toEqual({ ok: true, amountPaise: 35300 });
+    const [t] = await sql`SELECT t.amount_paise, t.type, t.status, t.source, hd.name AS head, a.kind FROM transactions t
+      JOIN heads hd ON hd.id = t.head_id JOIN accounts a ON a.id = t.account_id WHERE t.source = 'cash_shortage'`;
+    expect(t).toEqual({ amount_paise: 35300, type: 'expense', status: 'approved', source: 'cash_shortage', head: 'Cash shortage', kind: 'cash' });
+    expect((await cash(h)).json).toMatchObject({ differencePaise: 0, settled: true, shortagePaise: 35300 });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/shortage`, { note: 'again' })).status).toBe(409);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'cash.shortage_booked'`)[0].n).toBe(1);
+  });
+
+  it('a cash bill missing in the register is only left out with a reason', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const v = await view(h);
+    const id = byBill(v, '2610319').id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'leave_out' })).json.error).toMatch(/Say why/);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'leave_out', note: 'Cancelled in POS' })).status).toBe(200);
+  });
+
+  it('before the shift is confirmed there is no difference to settle', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const k = (await cash(h)).json;
+    expect(k).toMatchObject({ confirmed: false, cashSalesPaise: null, shouldBePaise: null, differencePaise: null });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/accept`, { note: 'x' })).status).toBe(409);
   });
 });

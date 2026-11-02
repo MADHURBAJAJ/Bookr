@@ -799,7 +799,15 @@ async function reviewView(biz, uploadId, highlightRow) {
   }
   if (u.kind === 'bill_register') wireRegister(biz, u);
   if (u.kind === 'expense_list') wireExpense(biz, u);
-  if (u.kind === 'cash_summary') wireSummary(biz, u);
+  if (u.kind === 'cash_summary') {
+    wireSummary(biz, u);
+    api('GET', `/businesses/${biz.id}/shifts/${u.day}/cash`).then((k) => {
+      const host = document.getElementById('sform')?.closest('section');
+      if (!host) return;
+      host.insertAdjacentHTML('beforeend', cashPanelHtml(biz, k).__html);
+      wireCashPanel(biz, u.day, () => reviewView(biz, u.id), document.getElementById('rmsg'));
+    }).catch(() => {});
+  }
 }
 
 // Expanded review: the entries take the full width (photo and menu hidden). Remembered per browser.
@@ -1367,6 +1375,56 @@ function decisionChoices(c) {
   return Object.entries(DECISION_LABELS);
 }
 
+// ---------- Cash for a shift: should be in hand against counted
+
+function cashPanelHtml(biz, k) {
+  const row = (label, sub, paise, extra = '', strong = false) => html`<tr style="${strong ? 'font-weight:600' : ''}">
+    <td>${label}</td><td class="note">${sub}</td><td class="amount">${paise == null ? '—' : money(paise)}</td><td>${extra}</td></tr>`;
+  const diff = k.differencePaise;
+  const state = diff === null ? null : diff === 0 ? 'ok' : k.settled ? 'accepted' : diff < 0 ? 'short' : 'over';
+  const chipFor = { ok: html`<span class="chip ok">Cash agrees</span>`, accepted: html`<span class="chip ok">Difference accepted</span>`,
+    short: html`<span class="chip bad">Short</span>`, over: html`<span class="chip wait">More than expected</span>` };
+  return html`<section class="card" id="cashpanel" style="gap:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Cash for the ${dayLabel(k.day)} shift</h2>${state ? chipFor[state] : ''}</div>
+    ${!k.confirmed ? html`<div class="note">Cash sales are not final until the shift is confirmed above. The check below completes after that.</div>` : ''}
+    <div class="scroll"><table style="min-width:560px">
+      ${row('Opening cash', k.openingFrom === 'previous' ? 'previous day\'s cash in hand' : k.openingFrom === 'page' ? 'opening written on this day\'s cash page' : 'no cash summary for the previous day', k.openingPaise)}
+      ${row('+ Cash sales', 'confirmed for this shift', k.cashSalesPaise)}
+      ${k.notInRegisterBookedPaise ? row('', `of which not in the register (Use software)`, k.notInRegisterBookedPaise, html`<span class="chip bad">${k.notInRegister.filter((x) => x.decision === 'use_software').length} bill${k.notInRegister.filter((x) => x.decision === 'use_software').length > 1 ? 's' : ''}</span>`) : ''}
+      ${row('− Cash expenses', `approved lines${k.expensesWaiting ? `; ${k.expensesWaiting} still waiting for approval` : ''}`, k.expensesPaise, k.expensesWaiting ? html`<a href="#/b/${biz.id}/review">Review</a>` : '')}
+      ${k.shortagePaise ? row('− Cash shortage', 'booked by an Owner', k.shortagePaise) : ''}
+      ${row('= Should be in hand', '', k.shouldBePaise, '', true)}
+      ${row('Counted', 'cash in hand on this day\'s cash summary page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/upload">Upload it</a>`)}
+      ${diff !== null ? row('Difference', diff < 0 ? 'short: less cash than there should be' : diff > 0 ? 'more cash than there should be' : '', diff, '', true) : ''}
+    </table></div>
+    ${k.accepted ? html`<div class="note">Accepted with a note: ${k.accepted}</div>` : ''}
+    ${diff !== null && diff !== 0 && !k.settled ? html`<form id="cashact" class="inset">
+      <div class="field"><label for="cashnote">Note (what happened)</label><input id="cashnote" name="note" required placeholder="e.g. Bill 26103136 cash received, not written in the register"></div>
+      <div class="form-msg"></div>
+      <div class="form-row">
+        ${biz.actions.includes('sales.decide') ? html`<button class="btn plain" type="submit" data-cashact="accept">Accept with a note</button>` : ''}
+        ${diff < 0 && biz.actions.includes('cash.writeoff') ? html`<button class="btn danger" type="submit" data-cashact="shortage">Book ₹ ${money(-diff)} as cash shortage</button>` : ''}
+      </div>
+      <div class="note">Accept when the cash is there and only the writing is wrong. Book a shortage (Owner only) when cash is missing: it becomes an approved expense from Cash under "Cash shortage".</div>
+    </form>` : ''}
+    ${k.notInRegister.length ? html`<h2 style="font-size:16px;margin-top:6px">Cash bills not in the register</h2>
+      ${k.notInRegister.map((x) => html`<div class="list-row"><span class="mono">${x.billNo}</span><span class="amount">₹ ${money(x.amountPaise)}</span>
+        <span class="note">${x.decision === 'use_software' ? `Use software${x.billType ? ` · ${TYPE_LABELS[x.billType]}` : ''}` : x.decision === 'leave_out' ? `Left out: ${x.note ?? ''}` : 'Not decided'}</span></div>`)}` : ''}
+  </section>`;
+}
+
+function wireCashPanel(biz, day, reload, msg) {
+  const form = document.getElementById('cashact');
+  if (!form) return;
+  let which = 'accept';
+  form.querySelectorAll('[data-cashact]').forEach((b) => b.addEventListener('click', () => { which = b.dataset.cashact; }));
+  onSubmit(form, async (d) => {
+    if (which === 'shortage' && !confirm('Book this as a cash shortage? It becomes an approved expense from Cash.')) return;
+    await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/cash/${which === 'shortage' ? 'shortage' : 'accept'}`, { note: d.note });
+    reload();
+  });
+}
+
 // ---------- Way back from Review to the difference that opened it (per browser tab)
 const BACK_KEY = 'bookr.backTo';
 function setBackTo(v) { try { sessionStorage.setItem(BACK_KEY, JSON.stringify(v)); } catch { /* storage unavailable */ } }
@@ -1387,7 +1445,8 @@ async function compareView(biz, day) {
       <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/upload">Upload a software sales report</a>.</div></section>`));
     return wireShell();
   }
-  const v = await api('GET', `/businesses/${biz.id}/shifts/${day}`);
+  const [v, cash] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`)]);
+  v.reasons = cash.reasons;
   const canDecide = biz.actions.includes('sales.decide');
   const confirmed = v.status === 'confirmed';
   const toDecide = v.comparisons.filter((c) => ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'].includes(c.difference));
@@ -1448,9 +1507,14 @@ async function compareView(biz, day) {
           <td><span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span></td>
           <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type]) => {
               const on = c.decision === k && (!type || c.billType === type);
+              if (k === 'leave_out' && !c.register && c.software?.mode === 'cash') {
+                return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:44px">
+                  <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
+                  ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
+              }
               return html`<button class="btn ${on ? 'ghost' : 'plain'}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}">${l}</button>`;
             })}</div>`
-            : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}` : 'Not decided'}</span>`}</td>
+            : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
         </tr>`)}</tbody></table></div>` : html`<div class="note">No differences in this shift.</div>`}
     </section>
     <div class="row">
@@ -1474,7 +1538,8 @@ async function compareView(biz, day) {
           ${canDecide ? html`<button class="btn big" id="confirm" ${v.canConfirm ? '' : 'disabled'}>Confirm sales for this shift</button>` : ''}
           <div class="note">Only Owner and Accountant can decide differences and confirm.</div>`}
       </section>
-    </div>`));
+    </div>
+    ${cashPanelHtml(biz, cash)}`));
   wireShell();
   const msg = document.getElementById('cmsg');
   document.getElementById('sh').addEventListener('change', (e) => go(`#/b/${biz.id}/compare/${e.target.value}`));
@@ -1493,6 +1558,14 @@ async function compareView(biz, day) {
     const row = app.querySelector(`tr[data-bill="${CSS.escape(back.bill)}"]`);
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
+  app.querySelectorAll('[data-leaveout]').forEach((sel) => sel.addEventListener('change', () => {
+    let note = sel.value;
+    if (!note) return;
+    if (note === '__other') note = (prompt('Why is this cash bill left out?') ?? '').trim();
+    if (!note) { sel.value = ''; return; }
+    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${sel.dataset.leaveout}`, { decision: 'leave_out', note }));
+  }));
+  wireCashPanel(biz, day, () => compareView(biz, day), msg);
   app.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
   document.getElementById('confirm')?.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {})));
   const reopen = document.getElementById('reopen');
