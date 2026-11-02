@@ -5,6 +5,8 @@ export interface Env {
   UPLOADS: R2Bucket;
   /** Worker secret. Never sent to the browser or logged. */
   ANTHROPIC_API_KEY?: string;
+  /** Worker secret: Google service account key (JSON), read-only Sheets access. Never sent to the browser or logged. */
+  GOOGLE_SERVICE_ACCOUNT?: string;
   /** Worker settings (wrangler.jsonc vars). */
   CLAUDE_OCR_MODEL?: string;
   OCR_DAILY_PAGE_LIMIT?: string;

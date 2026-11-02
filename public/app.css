@@ -98,3 +98,5 @@ body.review-expanded #regtable .cell[data-f="remarks"] { width: 220px !important
 tr.row-found td { background: #FEF9C3 !important; }
 tr.clickrow { cursor: pointer; }
 tr.clickrow:hover td { background: #F1F5F9; }
+
+[hidden] { display: none !important; }

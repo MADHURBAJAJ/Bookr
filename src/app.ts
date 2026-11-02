@@ -9,6 +9,7 @@ import { bookRoutes } from './routes/books';
 import { salesRoutes } from './routes/sales';
 import { captureRoutes } from './routes/capture';
 import { ocrRoutes } from './routes/ocr';
+import { bankRoutes } from './routes/bank';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -38,6 +39,7 @@ app.route('/', bookRoutes);
 app.route('/', salesRoutes);
 app.route('/', captureRoutes);
 app.route('/', ocrRoutes);
+app.route('/', bankRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

@@ -1,0 +1,417 @@
+import { Hono } from 'hono';
+import type { AppEnv } from '../types';
+import { requireRole } from '../auth';
+import { all, newId, now, one, stmt } from '../db';
+import { body, fail, isUuid, optionalPaise, text } from '../http';
+import { parseStatementRows, parseStatementText } from '../bankstatement';
+import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
+import { getRow, importLines, loadRules, matchStatements, ruleFor, suggestionsFor, type BankRow } from '../bank';
+import { byName, loadParties } from '../parties';
+import { istDay } from '../time';
+
+export const bankRoutes = new Hono<AppEnv>();
+
+const MAX_PASTE = 2_000_000;
+const audit = (bid: string, user: string, action: string, id: string, before: unknown, after: unknown, t: number) =>
+  [bid, user, action, id, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), t] as const;
+const AUDIT = `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, 'bank_rows', ?, ?, ?, ?)`;
+
+async function bankAccount(db: D1Database, bid: string, id: string) {
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const a = await one<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE id = ? AND business_id = ? AND kind = 'bank'", id, bid);
+  if (!a) fail(404, 'Bank account not found.');
+  return a;
+}
+
+// ---- Accounts and where their statements come from
+
+bankRoutes.get('/businesses/:businessId/bank', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const accounts = await all(db, `
+    SELECT a.id, a.name, a.account_number AS accountNumber, s.sheet_id AS sheetId, s.tab, s.receives_upi_label AS receivesUpiLabel,
+      s.receives_card AS receivesCard, s.last_synced_at AS lastSyncedAt, s.last_sync_note AS lastSyncNote,
+      (SELECT count(*) FROM bank_rows r WHERE r.account_id = a.id) AS rows,
+      (SELECT count(*) FROM bank_rows r WHERE r.account_id = a.id AND r.status = 'unmatched') AS open,
+      (SELECT max(day) FROM bank_rows r WHERE r.account_id = a.id) AS lastDay
+    FROM accounts a LEFT JOIN bank_sources s ON s.account_id = a.id
+    WHERE a.business_id = ? AND a.kind = 'bank' ORDER BY a.name`, bid);
+  return c.json({ accounts, googleEmail: serviceAccountEmail(c.env) });
+});
+
+bankRoutes.put('/businesses/:businessId/bank/:accountId/source', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const a = await bankAccount(db, bid, c.req.param('accountId'));
+  const data = await body(c);
+  const sheetText = text(data, 'sheet', 'Google Sheet link', { optional: true, max: 300 });
+  const sheetId = sheetText ? sheetIdFrom(sheetText) : null;
+  if (sheetText && !sheetId) fail(400, 'That does not look like a Google Sheets link.');
+  const tab = data.allTabs === true ? null : text(data, 'tab', 'Tab name', { optional: true, max: 100 });
+  if (sheetId && !tab && data.allTabs !== true) fail(400, 'Give the tab name, or choose "every tab" for monthly tabs.');
+  const label = text(data, 'receivesUpiLabel', 'UPI column', { optional: true, max: 40 });
+  const card = data.receivesCard === true ? 1 : 0;
+  const t = now();
+  await db.batch([
+    stmt(db, `INSERT INTO bank_sources (id, business_id, account_id, sheet_id, tab, receives_upi_label, receives_card, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (account_id) DO UPDATE SET sheet_id = excluded.sheet_id, tab = excluded.tab,
+      receives_upi_label = excluded.receives_upi_label, receives_card = excluded.receives_card`,
+      newId(), bid, a.id, sheetId, tab, label, card, t),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'bank.source', 'accounts', ?, NULL, ?, ?)`, bid, c.get('user').id, a.id, JSON.stringify({ sheetId, tab, label, card }), t),
+  ]);
+  return c.json({ ok: true });
+});
+
+bankRoutes.post('/businesses/:businessId/bank/:accountId/paste', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const a = await bankAccount(db, bid, c.req.param('accountId'));
+  const raw = (await body(c)).text;
+  if (typeof raw !== 'string' || !raw.trim()) fail(400, 'Paste the rows copied from the sheet.');
+  if (raw.length > MAX_PASTE) fail(400, 'That is too much at once. Paste a month at a time.');
+  const parsed = parseStatementText(raw);
+  if (!parsed.lines.length) fail(400, parsed.problems[0] ?? 'No statement lines found. Copy whole rows from the sheet, including the Transaction ID column.');
+  const r = await importLines(db, bid, a.id, parsed.lines);
+  return c.json({ ...r, problems: parsed.problems.slice(0, 20) });
+});
+
+bankRoutes.post('/businesses/:businessId/bank/:accountId/sync', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const a = await bankAccount(db, bid, c.req.param('accountId'));
+  const src = await one<{ sheet_id: string | null; tab: string | null }>(db, 'SELECT sheet_id, tab FROM bank_sources WHERE account_id = ?', a.id);
+  if (!src?.sheet_id) fail(400, 'Give this account its Google Sheet link first, or paste the rows.');
+  let rows: string[][];
+  let tabs: string[];
+  try { ({ rows, tabs } = await readSheet(c.env, src.sheet_id, src.tab)); }
+  catch (e) {
+    if (e instanceof GoogleError) {
+      await stmt(db, 'UPDATE bank_sources SET last_sync_note = ? WHERE account_id = ?', e.message, a.id).run();
+      fail(400, e.message);
+    }
+    throw e;
+  }
+  const parsed = parseStatementRows(rows);
+  const r = await importLines(db, bid, a.id, parsed.lines);
+  const note = `${r.added} new line${r.added === 1 ? '' : 's'} from ${tabs.length} tab${tabs.length === 1 ? '' : 's'}${parsed.problems.length ? `; ${parsed.problems.length} could not be read` : ''}.`;
+  await stmt(db, 'UPDATE bank_sources SET last_synced_at = ?, last_sync_note = ? WHERE account_id = ?', now(), note, a.id).run();
+  return c.json({ ...r, tabs: tabs.length, problems: parsed.problems.slice(0, 20) });
+});
+
+// ---- Lines, with what Bookr suggests for each
+
+bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const q = c.req.query();
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : to;
+  if (from > to) fail(400, 'From must be on or before To.');
+  const account = q.account && isUuid(q.account) ? q.account : null;
+  const status = ['unmatched', 'matched', 'booked', 'ignored'].includes(q.status ?? '') ? q.status! : null;
+  const rows = await all<BankRow & { account_name: string; head_name: string | null; bills: string | null }>(db, `
+    SELECT r.*, a.name AS account_name, h.name AS head_name,
+      (SELECT group_concat(t.bill_no, ', ') FROM transactions t WHERE t.matched_bank_row = r.id AND t.type = 'income' AND t.source = 'software_report') AS bills
+    FROM bank_rows r JOIN accounts a ON a.id = r.account_id
+    LEFT JOIN transactions bt ON bt.id = r.transaction_id LEFT JOIN heads h ON h.id = bt.head_id
+    WHERE r.business_id = ? AND r.day BETWEEN ? AND ? AND (? IS NULL OR r.account_id = ?) AND (? IS NULL OR r.status = ?)
+    ORDER BY r.posted_at, r.tran_id LIMIT 3000`, bid, from, to, account, account, status, status);
+  const [rules, sug] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to)]);
+  return c.json({
+    from, to,
+    rows: rows.map((r) => {
+      const rule = r.status === 'unmatched' && r.kind !== 'upi_in' ? ruleFor(rules, r) : null;
+      const pair = r.pair_row_id ? rows.find((x) => x.id === r.pair_row_id) : null;
+      return {
+        id: r.id, accountId: r.account_id, accountName: r.account_name, tranId: r.tran_id, day: r.day, postedAt: r.posted_at, description: r.description,
+        direction: r.direction, amountPaise: r.amount_paise, balancePaise: r.balance_paise, kind: r.kind, upiRef: r.upi_ref, vpa: r.vpa, remark: r.remark,
+        pairRowId: r.pair_row_id, pairStatus: pair?.status ?? null, status: r.status, note: r.note, headName: r.head_name, bills: r.bills,
+        rule: rule ? { id: rule.id, name: rule.name, headId: rule.head_id, partyId: rule.party_id } : null,
+        candidates: r.kind === 'upi_in' && r.status === 'unmatched' ? (sug.candidates.get(r.id) ?? []).slice(0, 5) : [],
+        clear: sug.clear.has(r.id),
+      };
+    }),
+  });
+});
+
+// ---- UPI sales of a shift and their credits
+
+bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const shifts = await all<{ day: string }>(db, "SELECT shift_day AS day FROM shifts WHERE business_id = ? AND status = 'confirmed' ORDER BY shift_day DESC LIMIT 60", bid);
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('day') ?? '') ? c.req.query('day')! : shifts[0]?.day ?? istDay(Date.now() - 86400e3);
+  const sales = await all(db, `
+    SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.match_status AS matchStatus, t.matched_bank_row AS bankRowId,
+      sb.paid_at AS paidAt, r.posted_at AS creditAt, a.name AS accountName, r.tran_id AS tranId,
+      (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels
+    FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
+    LEFT JOIN register_rows rr ON rr.id = c.register_row_id
+    LEFT JOIN bank_rows r ON r.id = t.matched_bank_row LEFT JOIN accounts a ON a.id = r.account_id
+    WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.source = 'software_report'
+    ORDER BY coalesce(sb.paid_at, 0), t.bill_no`, bid, day);
+  return c.json({ day, sales, confirmedShifts: shifts.map((s) => s.day) });
+});
+
+// ---- Matching a credit to sales (a person confirms; never automatic)
+
+async function checkMatch(db: D1Database, bid: string, row: BankRow, ids: string[]) {
+  if (row.status !== 'unmatched') fail(409, 'This line is already matched, booked or ignored.');
+  if (row.direction !== 'CR') fail(400, 'Only money received can be matched to sales.');
+  if (!ids.length || ids.some((x) => !isUuid(x))) fail(400, 'Choose the sale or sales this credit pays.');
+  const tx = await all<{ id: string; amount_paise: number; match_status: string | null; matched_bank_row: string | null }>(db,
+    `SELECT id, amount_paise, match_status, matched_bank_row FROM transactions WHERE business_id = ? AND type = 'income' AND payment_mode = 'upi'
+      AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids);
+  if (tx.length !== new Set(ids).size) fail(400, 'One of those sales was not found.');
+  if (tx.some((t) => t.matched_bank_row || t.match_status !== 'awaiting_bank_match')) fail(409, 'One of those sales is already matched.');
+  const total = tx.reduce((s, t) => s + t.amount_paise, 0);
+  if (total !== row.amount_paise) fail(400, `The sales add up to ₹${(total / 100).toFixed(2)}, the credit is ₹${(row.amount_paise / 100).toFixed(2)}.`);
+}
+
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  const data = await body(c);
+  const ids = Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string') : [];
+  if (ids.length > 30) fail(400, 'At most 30 sales for one credit.');
+  await checkMatch(db, bid, row, ids);
+  await db.batch(matchStatements(db, bid, row.id, ids, c.get('user').id, now()));
+  return c.json({ ok: true });
+});
+
+/** The person ticks clear suggestions and confirms them together; each is checked again here. */
+bankRoutes.post('/businesses/:businessId/bank-rows/match-clear', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const ids = Array.isArray(data.ids) ? data.ids.filter((x): x is string => typeof x === 'string' && isUuid(x)).slice(0, 500) : [];
+  if (!ids.length) fail(400, 'Choose the suggestions to confirm.');
+  const days = await all<{ day: string }>(db, `SELECT DISTINCT day FROM bank_rows WHERE business_id = ? AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids.slice(0, 90));
+  if (!days.length) fail(404, 'Not found.');
+  const sorted = days.map((d) => d.day).sort();
+  const sug = await suggestionsFor(db, bid, sorted[0], sorted[sorted.length - 1]);
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  let done = 0;
+  for (const id of ids) {
+    const k = sug.clear.get(id);
+    if (!k) continue;
+    statements.push(...matchStatements(db, bid, id, k.transactionIds, user, t));
+    done += 1;
+  }
+  for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
+  return c.json({ matched: done, skipped: ids.length - done });
+});
+
+bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row.status !== 'matched') fail(409, 'This line is not matched.');
+  const t = now();
+  await db.batch([
+    stmt(db, "UPDATE transactions SET matched_bank_row = NULL, match_status = 'awaiting_bank_match' WHERE matched_bank_row = ? AND business_id = ? AND source = 'software_report'", row.id, bid),
+    stmt(db, 'DELETE FROM bank_matches WHERE bank_row_id = ?', row.id),
+    stmt(db, "UPDATE bank_rows SET status = 'unmatched', done_by = NULL, done_at = NULL WHERE id = ?", row.id),
+    stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.unmatch', row.id, { status: 'matched' }, { status: 'unmatched' }, t)),
+  ]);
+  return c.json({ ok: true });
+});
+
+// ---- Booking a line as income or expense under a head, or leaving it out
+
+async function bookStatements(db: D1Database, bid: string, row: BankRow, headId: string, partyId: string | null, note: string | null, user: string, t: number, how: string) {
+  const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', headId, bid);
+  if (!head) fail(400, 'Choose a head.');
+  const type = row.direction === 'CR' ? 'income' : 'expense';
+  if (head.type !== type) fail(400, row.direction === 'CR' ? 'Money received goes under an income head.' : 'Money paid goes under an expense head.');
+  const txId = newId();
+  return [
+    stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, party_id, matched_bank_row, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'bank_sheet', 'approved', ?, ?, ?, ?)`,
+      txId, bid, row.account_id, row.day, row.amount_paise, type, headId, note ? `${row.description} — ${note}` : row.description,
+      row.kind === 'upi_in' || row.kind === 'upi_out' || row.kind === 'upi_fee' ? 'upi' : null, partyId, row.id, t),
+    stmt(db, "UPDATE bank_rows SET status = 'booked', transaction_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", txId, note, user, t, row.id),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.book', row.id, { status: 'unmatched' }, { status: 'booked', headId, partyId, note, how, transactionId: txId }, t)),
+  ];
+}
+
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row.status !== 'unmatched') fail(409, 'This line is already matched, booked or ignored.');
+  const data = await body(c);
+  const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose a head.');
+  const partyName = text(data, 'party', 'Party', { optional: true, max: 120 });
+  const note = text(data, 'note', 'Note', { optional: true, max: 300 });
+  const t = now();
+  const statements: D1PreparedStatement[] = [];
+  let partyId: string | null = null;
+  if (partyName) {
+    const p = byName(await loadParties(db, bid), partyName);
+    partyId = p?.id ?? newId();
+    if (!p) statements.push(stmt(db, 'INSERT INTO parties (id, business_id, name, aliases, default_head_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', partyId, bid, partyName, '[]', headId, t));
+  }
+  statements.push(...(await bookStatements(db, bid, row, headId, partyId, note, c.get('user').id, t, 'by hand')));
+  await db.batch(statements);
+  return c.json({ ok: true });
+});
+
+/** Books the chosen lines with the head their rule gives; lines without a rule (or already done) are skipped. */
+bankRoutes.post('/businesses/:businessId/bank-rows/book-by-rules', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const ids = Array.isArray(data.ids) ? data.ids.filter((x): x is string => typeof x === 'string' && isUuid(x)).slice(0, 300) : [];
+  if (!ids.length) fail(400, 'Choose the lines to book.');
+  const rows = await all<BankRow>(db, `SELECT * FROM bank_rows WHERE business_id = ? AND status = 'unmatched' AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids.slice(0, 95));
+  const rules = await loadRules(db, bid);
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  let booked = 0;
+  for (const r of rows) {
+    const rule = r.kind === 'upi_in' ? null : ruleFor(rules, r);
+    if (!rule) continue;
+    statements.push(...(await bookStatements(db, bid, r, rule.head_id, rule.party_id, `Rule: ${rule.name}`, user, t, `rule ${rule.id}`)));
+    booked += 1;
+  }
+  for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
+  return c.json({ booked, skipped: ids.length - booked });
+});
+
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/ignore', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row.status !== 'unmatched') fail(409, 'This line is already matched, booked or ignored.');
+  const note = text(await body(c), 'note', 'Reason', { max: 300 })!;
+  const t = now();
+  await db.batch([
+    stmt(db, "UPDATE bank_rows SET status = 'ignored', note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", note, c.get('user').id, t, row.id),
+    stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.ignore', row.id, { status: 'unmatched' }, { status: 'ignored', note }, t)),
+  ]);
+  return c.json({ ok: true });
+});
+
+/** A payment and its reversal cancel out: both are left out together. */
+bankRoutes.post('/businesses/:businessId/bank-rows/ignore-reversals', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const pairs = await all<{ rev: string; out: string }>(db, `SELECT r.id AS rev, d.id AS out FROM bank_rows r JOIN bank_rows d ON d.id = r.pair_row_id
+    WHERE r.business_id = ? AND r.kind = 'reversal' AND r.status = 'unmatched' AND d.status = 'unmatched'`, bid);
+  const t = now();
+  const user = c.get('user').id;
+  const statements = pairs.flatMap((p) => [
+    stmt(db, "UPDATE bank_rows SET status = 'ignored', note = 'Payment reversed', done_by = ?, done_at = ? WHERE id IN (?, ?) AND status = 'unmatched'", user, t, p.rev, p.out),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.ignore_reversal', p.rev, null, { pairedWith: p.out }, t)),
+  ]);
+  for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
+  return c.json({ pairs: pairs.length });
+});
+
+/** Undo: a booked line's transaction is removed (kept in the audit log); an ignored line opens again. */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row.status !== 'booked' && row.status !== 'ignored') fail(409, 'Only a booked or ignored line can be opened again. Unmatch a matched one.');
+  const tx = row.transaction_id ? await one(db, 'SELECT * FROM transactions WHERE id = ?', row.transaction_id) : null;
+  const t = now();
+  await db.batch([
+    stmt(db, "UPDATE bank_rows SET status = 'unmatched', transaction_id = NULL, note = NULL, done_by = NULL, done_at = NULL WHERE id = ?", row.id),
+    ...(row.transaction_id ? [stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", row.transaction_id)] : []),
+    stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.reopen', row.id, { status: row.status, note: row.note, transaction: tx }, { status: 'unmatched' }, t)),
+  ]);
+  return c.json({ ok: true });
+});
+
+// ---- Rules (Owner and Accountant edit; checked top to bottom)
+
+function ruleInput(data: Record<string, unknown>) {
+  const contains = text(data, 'contains', 'Description contains', { optional: true, max: 80 });
+  const vpa = text(data, 'vpa', 'UPI ID', { optional: true, max: 80 });
+  if (!contains && !vpa) fail(400, 'A rule needs words the description contains, or a UPI ID.');
+  const direction = data.direction === 'CR' || data.direction === 'DR' ? data.direction : null;
+  const accountId = typeof data.accountId === 'string' && isUuid(data.accountId) ? data.accountId : null;
+  const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose the head this rule gives.');
+  const partyId = typeof data.partyId === 'string' && isUuid(data.partyId) ? data.partyId : null;
+  return { name: text(data, 'name', 'Rule name', { max: 80 })!, contains, vpa: vpa?.toLowerCase() ?? null, direction, accountId, headId, partyId,
+    min: optionalPaise(data, 'min', 'Smallest amount'), max: optionalPaise(data, 'max', 'Largest amount') };
+}
+
+async function checkRuleRefs(db: D1Database, bid: string, r: ReturnType<typeof ruleInput>) {
+  const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', r.headId, bid);
+  if (!head) fail(400, 'Choose the head this rule gives.');
+  if (r.direction && head.type !== (r.direction === 'CR' ? 'income' : 'expense')) fail(400, 'Money received goes under an income head; money paid under an expense head.');
+  if (r.accountId && !(await one(db, "SELECT 1 AS ok FROM accounts WHERE id = ? AND business_id = ? AND kind = 'bank'", r.accountId, bid))) fail(400, 'Unknown bank account.');
+  if (r.partyId && !(await one(db, 'SELECT 1 AS ok FROM parties WHERE id = ? AND business_id = ?', r.partyId, bid))) fail(400, 'Unknown party.');
+}
+
+bankRoutes.get('/businesses/:businessId/rules', requireRole('heads.view'), async (c) => {
+  const rules = await all(c.env.DB, `SELECT r.id, r.position, r.name, r.direction, r.account_id AS accountId, r.contains, r.vpa, r.min_paise AS minPaise,
+    r.max_paise AS maxPaise, r.head_id AS headId, r.party_id AS partyId, h.name AS headName, p.name AS partyName
+    FROM rules r JOIN heads h ON h.id = r.head_id LEFT JOIN parties p ON p.id = r.party_id WHERE r.business_id = ? ORDER BY r.position, r.created_at`, c.get('businessId'));
+  return c.json({ rules });
+});
+
+bankRoutes.post('/businesses/:businessId/rules', requireRole('rules.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const r = ruleInput(await body(c));
+  await checkRuleRefs(db, bid, r);
+  const id = newId();
+  const t = now();
+  const pos = (await one<{ p: number }>(db, 'SELECT coalesce(max(position), 0) + 1 AS p FROM rules WHERE business_id = ?', bid))!.p;
+  await db.batch([
+    stmt(db, `INSERT INTO rules (id, business_id, position, name, direction, account_id, contains, vpa, min_paise, max_paise, head_id, party_id, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, pos, r.name, r.direction, r.accountId, r.contains, r.vpa, r.min, r.max, r.headId, r.partyId, c.get('user').id, t),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'rule.create', 'rules', ?, NULL, ?, ?)`,
+      bid, c.get('user').id, id, JSON.stringify(r), t),
+  ]);
+  return c.json({ id }, 201);
+});
+
+bankRoutes.put('/businesses/:businessId/rules/:ruleId', requireRole('rules.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('ruleId');
+  const before = isUuid(id) ? await one(db, 'SELECT * FROM rules WHERE id = ? AND business_id = ?', id, bid) : null;
+  if (!before) fail(404, 'Not found.');
+  const data = await body(c);
+  const r = ruleInput(data);
+  await checkRuleRefs(db, bid, r);
+  const position = typeof data.position === 'number' && Number.isInteger(data.position) ? data.position : (before as { position: number }).position;
+  await db.batch([
+    stmt(db, `UPDATE rules SET name = ?, direction = ?, account_id = ?, contains = ?, vpa = ?, min_paise = ?, max_paise = ?, head_id = ?, party_id = ?, position = ? WHERE id = ?`,
+      r.name, r.direction, r.accountId, r.contains, r.vpa, r.min, r.max, r.headId, r.partyId, position, id),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'rule.edit', 'rules', ?, ?, ?, ?)`,
+      bid, c.get('user').id, id, JSON.stringify(before), JSON.stringify({ ...r, position }), now()),
+  ]);
+  return c.json({ ok: true });
+});
+
+bankRoutes.delete('/businesses/:businessId/rules/:ruleId', requireRole('rules.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('ruleId');
+  const before = isUuid(id) ? await one(db, 'SELECT * FROM rules WHERE id = ? AND business_id = ?', id, bid) : null;
+  if (!before) fail(404, 'Not found.');
+  await db.batch([
+    stmt(db, 'DELETE FROM rules WHERE id = ?', id),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'rule.delete', 'rules', ?, ?, NULL, ?)`,
+      bid, c.get('user').id, id, JSON.stringify(before), now()),
+  ]);
+  return c.json({ ok: true });
+});
+
+
