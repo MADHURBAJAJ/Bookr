@@ -254,9 +254,10 @@ export async function otherDays(db: DB, businessId: string, day: string, comps: 
     LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
     LEFT JOIN register_rows r ON r.id = c.register_row_id
     WHERE c.business_id = ? AND c.shift_day <> ? AND c.difference IN ('missing_in_register', 'missing_in_software')
-      AND ((c.shift_day BETWEEN ? AND ? AND c.closed_at IS NULL) OR c.linked_to_id IN (${mine.map(() => '?').join(',')})
-        OR c.id IN (SELECT linked_to_id FROM bill_comparisons WHERE id IN (${mine.map(() => '?').join(',')})))`,
-    businessId, day, addDays(day, -WATCH_DAYS), addDays(day, WATCH_DAYS), ...mine.map((c) => c.id), ...mine.map((c) => c.id));
+      AND ((c.shift_day BETWEEN ? AND ? AND c.closed_at IS NULL)
+        OR c.linked_to_id IN (SELECT x.id FROM bill_comparisons x WHERE x.business_id = ? AND x.shift_day = ?)
+        OR c.id IN (SELECT x.linked_to_id FROM bill_comparisons x WHERE x.business_id = ? AND x.shift_day = ? AND x.linked_to_id IS NOT NULL))`,
+    businessId, day, addDays(day, -WATCH_DAYS), addDays(day, WATCH_DAYS), businessId, day, businessId, day);
   for (const c of mine) {
     const opposite = c.difference === 'missing_in_register' ? 'missing_in_software' : 'missing_in_register';
     const pick = cands.find((o) => o.id === c.linked_to_id) ?? cands.find((o) => o.linked_to_id === c.id)

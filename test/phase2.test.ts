@@ -1043,3 +1043,21 @@ describe('bills paid together across register pages', () => {
     expect(rows.reduce((t, r) => t + r.discount_paise, 0)).toBe(10000);
   });
 });
+
+describe('a shift with many one-sided bills', () => {
+  it('loads with more one-sided bills than D1 allows query values (100)', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(99), 'image/png')).json.id;
+    for (let i = 0; i < 120; i += 1) {
+      await sql`INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, status, created_at)
+        VALUES (${crypto.randomUUID()}, ${h.bid}, ${page}, ${i + 1}, '2026-10-31', ${`77${String(i).padStart(4, '0')}`}, 'fnb', 10000, 'checked', 0)`;
+    }
+    // One more through the API rebuilds the shift's comparisons.
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`,
+      { billNo: '7799999', billType: 'fnb', amount: '100', status: 'checked', payments: [{ mode: 'cash', columnLabel: null, amount: '100' }] })).status).toBe(201);
+    const v = await view(h);
+    expect(v.status).toBe(200);
+    expect(v.json.comparisons.filter((c: any) => c.difference === 'missing_in_software').length).toBeGreaterThan(100);
+  });
+});
