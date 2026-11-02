@@ -2204,9 +2204,39 @@ async function upiView(biz, day) {
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
 }
+/**
+ * One row per bill as the register has it: a bill paid in several UPI goes is one row with its payments inside;
+ * bills paid together with one payment are one row. Matching underneath stays per payment.
+ */
+function billUnits(waiting) {
+  const key = (x) => x.groupHead ? `g:${x.groupHead}` : x.parts > 1 ? `b:${x.comparisonId}` : `t:${x.id}`;
+  const by = new Map();
+  for (const x of waiting) by.set(key(x), [...(by.get(key(x)) ?? []), x]);
+  return [...by.values()].map((xs) => {
+    const amount = xs.reduce((t, x) => t + x.amountPaise, 0);
+    const first = xs[0];
+    const at = first.paidAt ? when(first.paidAt) : 'register only';
+    const label = first.labels ? ` · ${first.labels}` : '';
+    let body;
+    if (first.groupHead && xs.length > 1) {
+      const bills = xs.reduce((t, x) => t + (x.billPaise ?? x.amountPaise), 0);
+      body = html`<span class="mono">${xs.map((x) => x.billNo).join(' + ')}</span> <span class="chip">paid together</span>
+        <span class="tiny" style="display:block">${xs.length} bills of ₹ ${money(bills)} · one payment${amount !== bills ? ` of ₹ ${money(amount)}` : ''} · ${at}${label}</span>`;
+    } else if (xs.length > 1) {
+      body = html`<span class="mono">${first.billNo}</span> <span class="chip wait">${xs.length} UPI payments</span>
+        <span class="tiny" style="display:block">bill ₹ ${money(first.billPaise ?? amount)}${first.discountPaise > 0 ? ` · discount ₹ ${money(first.discountPaise)}` : first.discountPaise < 0 ? ` · tip ₹ ${money(-first.discountPaise)}` : ''} · paid ${xs.map((x) => `₹ ${money(x.amountPaise)}`).join(' + ')} · ${at}${label}</span>`;
+    } else {
+      body = html`<span class="mono">${first.billNo ?? ''}</span>${first.billPaise != null && first.billPaise !== amount ? html` <span class="tiny">bill ₹ ${money(first.billPaise)}</span>` : ''}
+        <span class="tiny" style="display:block">${at}${label}</span>`;
+    }
+    return { ids: xs.map((x) => x.id), amount, html: body };
+  });
+}
+
 /** Side by side: bank credits not matched (left) and UPI bills not found (right). Tick, compare totals, match. */
 function pairPanel(v, waiting) {
   if (!v.credits.length && !waiting.length) return '';
+  const units = billUnits(waiting);
   const pick = 'width:18px;height:18px;min-height:0';
   const line = 'display:flex;gap:10px;align-items:center;padding:8px 10px;border-top:1px solid var(--line-soft);cursor:pointer';
   return html`<section class="card" id="pair" style="margin-top:16px;gap:10px">
@@ -2222,12 +2252,11 @@ function pairPanel(v, waiting) {
           <strong class="amount" style="color:var(--teal)">₹ ${money(c.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">None around this shift.</div>`}</div>
       </div>
       <div style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
-        <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">UPI bills not found in the bank <span class="chip">${waiting.length}</span></div>
-        <div style="max-height:420px;overflow:auto">${waiting.length ? waiting.map((s) => html`<label style="${line}">
-          <input type="checkbox" data-pbl="${s.id}" data-amt="${s.amountPaise}" data-group="${s.groupHead ?? (s.parts > 1 ? `bill:${s.comparisonId}` : '')}" style="${pick}">
-          <span style="flex:1;min-width:0"><span class="mono">${s.billNo ?? ''}</span>${s.groupHead ? html` <span class="chip" title="Paid together with other bills: they are ticked together">paid together</span>` : ''}${s.parts > 1 ? html` <span class="chip wait" title="The register shows this bill paid by ${s.parts} UPI payments; each is a line here">part of ${s.parts} UPI payments</span>` : ''}
-            <span class="tiny" style="display:block">${s.paidAt ? when(s.paidAt) : 'register only'}${s.labels ? ` · ${s.labels}` : ''}</span></span>
-          <strong class="amount">₹ ${money(s.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>
+        <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">UPI bills not found in the bank <span class="chip">${units.length}</span></div>
+        <div style="max-height:420px;overflow:auto">${units.length ? units.map((u) => html`<label style="${line}">
+          <input type="checkbox" data-pbl="${u.ids.join(',')}" data-amt="${u.amount}" style="${pick}">
+          <span style="flex:1;min-width:0">${u.html}</span>
+          <strong class="amount">₹ ${money(u.amount)}</strong></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>
       </div>
     </div>
     <div id="pairbar" class="inset" style="position:sticky;bottom:8px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
@@ -2280,14 +2309,11 @@ function wirePairPanel(biz, v, heads, reload) {
   document.getElementById('pairtreat').addEventListener('change', () => refresh());
   box.querySelectorAll('[data-pcr]').forEach((x) => x.addEventListener('change', refresh));
   // Bills paid together are paid by one amount: ticking one ticks the whole group.
-  box.querySelectorAll('[data-pbl]').forEach((x) => x.addEventListener('change', () => {
-    if (x.dataset.group) box.querySelectorAll(`[data-pbl][data-group="${CSS.escape(x.dataset.group)}"]`).forEach((y) => { y.checked = x.checked; });
-    refresh();
-  }));
+  box.querySelectorAll('[data-pbl]').forEach((x) => x.addEventListener('change', refresh));
   go.addEventListener('click', async () => {
     const c = crs(); const b = bls();
     const diff = sum(c) - sum(b);
-    const body = { rowIds: c.map((x) => x.dataset.pcr), transactionIds: b.map((x) => x.dataset.pbl) };
+    const body = { rowIds: c.map((x) => x.dataset.pcr), transactionIds: b.flatMap((x) => x.dataset.pbl.split(',')) };
     try {
       let r;
       if (diff !== 0) {
