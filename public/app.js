@@ -1056,7 +1056,7 @@ function regRowHtml(r, locked) {
   const nd = (f) => (q.has(f) ? 'needs' : '');
   if (locked) {
     return html`<tr data-row="${r.id}">
-      <td class="note">${r.lineNo}</td><td>${r.status === 'checked' ? '✓' : ''}</td><td class="mono">${r.billNo}</td><td>${TYPE_LABELS[r.billType] ?? ''}</td>
+      <td class="note">${r.lineNo}</td><td>${r.status === 'checked' ? '✓' : ''}</td><td class="mono">${r.billNo}${r.bankAdjusted ? html`<div class="tiny" style="color:var(--teal);font-family:inherit" title="Discount or tip and payment changed to what the bank received, on UPI matching. Unmatch there to undo.">Adjusted from bank</div>` : ''}</td><td>${TYPE_LABELS[r.billType] ?? ''}</td>
       <td class="amount">${money(r.amountPaise)}</td><td class="amount">${r.discountPaise ? money(r.discountPaise) : ''}</td><td>${r.paidWithRowId ? `Paid with ${headOf(r) ? rowLabel(headOf(r)) : 'another row'}` : payText(r.payments)}${groupNote(r)}</td><td class="note">${r.remarks ?? ''}</td><td></td></tr>`;
   }
   const single = r.payments.length <= 1;
@@ -1066,7 +1066,7 @@ function regRowHtml(r, locked) {
   return html`<tr data-row="${r.id}" class="${r.status === 'checked' ? 'row-checked' : ''}">
     <td class="note">${r.lineNo}</td>
     <td style="text-align:center"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Checked against the page" title="Checked against the page" style="width:20px;height:20px;min-height:0"></td>
-    <td>${billCell(r, nd('bill_no'))}</td>
+    <td>${billCell(r, nd('bill_no'))}${r.bankAdjusted ? html`<div class="tiny" style="color:var(--teal)" title="Discount or tip and payment changed to what the bank received, on UPI matching. Unmatch there to undo.">Adjusted from bank</div>` : ''}</td>
     <td><select class="cell ${nd('bill_type')}" data-f="billType" aria-label="Type">
       <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
     <td><input class="cell mono ${nd('amount') || (payDiffers(r) ? 'needs' : '')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount" title="${payDiffers(r) ? `Payments add up to ${money(paidOf(r))}` : ''}"></td>
@@ -2228,8 +2228,12 @@ function pairPanel(v, waiting) {
       <span id="pairsum" class="note">Tick the credit(s) on the left and the bill(s) they pay on the right.</span>
       <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span id="pairdiff" hidden style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <select class="compact" id="pairhead" aria-label="Head for the difference"></select>
-          <input class="compact" id="pairnote" placeholder="Reason, e.g. register typo 2189 for 2139" style="min-width:260px">
+          <select class="compact" id="pairtreat" aria-label="What the difference is">
+            <option value="bills">Change the bills: discount / tip</option>
+            <option value="head">Book it under a head</option>
+          </select>
+          <select class="compact" id="pairhead" aria-label="Head for the difference" hidden></select>
+          <input class="compact" id="pairnote" placeholder="Reason, e.g. register typo 2189 for 2139" style="min-width:240px">
         </span>
         <button class="btn" type="button" id="pairgo" disabled>Match</button>
       </span>
@@ -2255,14 +2259,19 @@ function wirePairPanel(biz, v, heads, reload) {
       : 'Tick the credit(s) on the left and the bill(s) they pay on the right.';
     const ready = c.length > 0 && b.length > 0;
     diffBox.hidden = !(ready && diff !== 0);
+    const treat = document.getElementById('pairtreat');
+    const onBills = treat.value === 'bills';
+    treat.options[0].textContent = diff < 0 ? 'Change the bills: discount' : 'Change the bills: tip';
+    headSel.hidden = onBills;
     if (ready && diff !== 0) {
       const type = diff < 0 ? 'expense' : 'income';
       const keep = headSel.value;
       headSel.innerHTML = `<option value="">Head for the difference</option>${heads.filter((h) => h.type === type).map((h) => `<option value="${h.id}" ${h.id === keep ? 'selected' : ''}>${esc(h.name)}</option>`).join('')}`;
     }
     go.disabled = !ready;
-    go.textContent = ready && diff !== 0 ? 'Match with this difference' : 'Match';
+    go.textContent = ready && diff !== 0 ? (onBills ? `Match and ${diff < 0 ? 'add the discount' : 'add the tip'}` : 'Match and book the difference') : 'Match';
   };
+  document.getElementById('pairtreat').addEventListener('change', () => refresh());
   box.querySelectorAll('[data-pcr]').forEach((x) => x.addEventListener('change', refresh));
   // Bills paid together are paid by one amount: ticking one ticks the whole group.
   box.querySelectorAll('[data-pbl]').forEach((x) => x.addEventListener('change', () => {
@@ -2274,14 +2283,17 @@ function wirePairPanel(biz, v, heads, reload) {
     const diff = sum(c) - sum(b);
     const body = { rowIds: c.map((x) => x.dataset.pcr), transactionIds: b.map((x) => x.dataset.pbl) };
     try {
+      let r;
       if (diff !== 0) {
         const note = document.getElementById('pairnote').value.trim();
-        if (!headSel.value || !note) throw new Error('Choose a head for the difference and write the reason.');
-        Object.assign(body, { headId: headSel.value, note });
+        const treat = document.getElementById('pairtreat').value;
+        if (!note || (treat === 'head' && !headSel.value)) throw new Error(treat === 'head' ? 'Choose a head for the difference and write the reason.' : 'Write the reason, e.g. register typo.');
+        Object.assign(body, treat === 'head' ? { headId: headSel.value, note } : { treat: 'bills', note });
+        if (treat === 'bills' && !confirm(`The register and sales for these bills will be changed to what the bank received (${diff < 0 ? 'a discount' : 'a tip'} of ₹ ${money(Math.abs(diff))}). Unmatch puts them back. Go ahead?`)) return;
       }
-      await apiFull('POST', `/businesses/${biz.id}/bank-rows/match-set`, body);
+      r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/match-set`, body);
       await reload();
-      document.getElementById('pairmsg')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Matched${diff ? `, with a difference of ₹ ${money(Math.abs(diff))} booked` : ''}.</div>`.__html);
+      document.getElementById('pairmsg')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Matched${r.changed?.length ? `. Bills changed to what the bank received: ${r.changed.map((x) => `${x.billNo} ₹ ${money(x.beforePaise)} → ₹ ${money(x.afterPaise)}`).join(', ')}` : diff ? `, with a difference of ₹ ${money(Math.abs(diff))} booked` : ''}.</div>`.__html);
     } catch (err) { showError(document.getElementById('pairmsg'), err); }
   });
   refresh();

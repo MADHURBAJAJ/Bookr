@@ -1085,3 +1085,46 @@ describe('register-only bills in bulk (e.g. an old POS)', () => {
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%noSoftwareBillExpected%'`)[0].n).toBe(2);
   });
 });
+
+describe('hand match that changes the bills (bank received a different amount)', () => {
+  it('discount spread over a confirmed group: register, payment and income change, recorded; unmatch puts them back; lock holds otherwise', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => !['2610311', '2610314', '26103122'].includes(r.billNo));
+    const pageId = await fullShift(h, reg);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    const head = (await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '2380' }])).json.id;
+    await add('2610314', '1180', [], { paidWithRowId: head });
+    await add('26103122', '780', [], { paidWithRowId: head });
+    await decideAll(h);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const tx = await sql`SELECT id, amount_paise FROM transactions WHERE bill_no IN ('2610311', '2610314', '26103122') AND type = 'income'`;
+    expect(tx.reduce((t, x) => t + x.amount_paise, 0)).toBe(238000);
+
+    // The bank shows 2,330 for that payment: 50 less (the register had a typo).
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    const line = ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t') + '\n'
+      + [1, 'S40000001', '31/10/2026', '31/10/2026 9:20:00 AM', '-', 'UPI/900000000001/UPI/xxa@okaxis/B/ICIa', 'CR', 2330, 1].join('\t');
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: line });
+    const [row] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000001'`;
+    const ids = tx.map((x) => x.id);
+    // Part of a group only: refused.
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: [row.id], transactionIds: ids.slice(0, 1), treat: 'bills', note: 'typo' })).status).toBe(400);
+    const r = await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: [row.id], transactionIds: ids, treat: 'bills', note: 'register typo 2380 for 2330' });
+    expect(r.status).toBe(200);
+    const regs = await sql`SELECT bill_no, discount_paise, tip_paise FROM register_rows WHERE bill_no IN ('2610311', '2610314', '26103122')`;
+    expect(regs.reduce((t, x) => t + x.discount_paise, 0)).toBe(5000);
+    expect((await sql`SELECT amount_paise FROM register_payments WHERE register_row_id = ${head}`)[0].amount_paise).toBe(233000);
+    expect((await sql`SELECT sum(amount_paise) AS s FROM transactions WHERE id IN (${ids[0]}, ${ids[1]}, ${ids[2]})`)[0].s).toBe(233000);
+    expect((await sql`SELECT count(*) AS n FROM register_bank_adjustments WHERE bank_row_id = ${row.id}`)[0].n).toBeGreaterThanOrEqual(10);
+    expect((await sql`SELECT status FROM shifts WHERE shift_day = '2026-10-31'`)[0].status).toBe('confirmed');
+    // The lock still holds for anything else.
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, { billNo: '2610311', billType: 'fnb', amount: '421', payments: [{ mode: 'upi', amount: '2330' }] })).status).toBe(409);
+    await expect(sql`UPDATE register_rows SET discount_paise = 1 WHERE id = ${head}`).rejects.toThrow(/shift_confirmed/);
+    // Unmatch: everything back as it was.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${row.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT sum(discount_paise) AS d, sum(tip_paise) AS t FROM register_rows WHERE bill_no IN ('2610311', '2610314', '26103122')`)[0]).toEqual({ d: 0, t: 0 });
+    expect((await sql`SELECT amount_paise FROM register_payments WHERE register_row_id = ${head}`)[0].amount_paise).toBe(238000);
+    expect((await sql`SELECT sum(amount_paise) AS s FROM transactions WHERE id IN (${ids[0]}, ${ids[1]}, ${ids[2]})`)[0].s).toBe(238000);
+  });
+});
