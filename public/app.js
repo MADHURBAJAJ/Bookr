@@ -1711,8 +1711,10 @@ async function compareView(biz, day) {
             class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
           <td class="mono">${bulkOk(c) ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
-          <td>${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)} of bills${c.largeDiscount.grossPaise !== (c.software?.amountPaise ?? 0) ? ' (bills paid together)' : ''}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html` <span class="chip wait">Mode</span>` : ''}`
-            : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}</td>
+          <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
+            ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
+            ${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)} of bills${c.largeDiscount.grossPaise !== (c.register?.amountPaise ?? 0) + Math.max(c.register?.discountPaise ?? 0, 0) ? ' (bills paid together)' : ''}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html`<span class="chip wait">Mode differs</span>` : ''}` : ''}
+          </div></td>
           <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
               const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
               if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
