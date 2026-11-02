@@ -1043,8 +1043,11 @@ function billCell(r, needsClass) {
   const bm = r.billMatch;
   const off = bm && !bm.exact;
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount only' };
-  return html`<input class="cell mono ${needsClass || (off ? 'needs' : '')}" data-f="billNo" value="${r.billNo}" style="width:104px" aria-label="Bill number"
-      title="${off ? 'Not found in the software report for this shift' : ''}">
+  let completed = null;
+  if (inferredOf(r.ocrOriginal).has('bill_no')) { try { completed = JSON.parse(r.ocrOriginal).completedFrom ?? null; } catch { /* not JSON */ } }
+  return html`<input class="cell mono ${needsClass || (off ? 'needs' : completed ? 'auto' : '')}" data-f="billNo" value="${r.billNo}" style="width:104px" aria-label="Bill number"
+      title="${off ? 'Not found in the software report for this shift' : completed ? `The page says ${completed}: completed from the only bill in the software report ending in it. Check it.` : ''}">
+    ${completed && !off ? html`<div class="tiny" style="color:#7A4A06;margin-top:2px">Completed from software (page: ${completed})</div>` : ''}
     ${off ? (bm.options.length ? html`<select class="cell pick" data-f="pickBill" aria-label="Pick the bill from the software report" style="display:block;margin-top:4px;max-width:220px">
         <option value="">Did you mean…</option>
         ${bm.options.map((o) => html`<option value="${o.billNo}">${o.billNo} · ₹ ${money(o.amountPaise)} ${o.amountMatches ? '✓ same amount' : ''} (${why[o.why]})</option>`)}
@@ -1158,7 +1161,12 @@ function regSumHtml(u) {
 
 /** Fill button and the amber note: redrawn after every inline save. */
 function regToolsHtml(u, locked) {
+  const slip = !locked && u.slip;
   return html`
+    ${slip ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <span><strong>Payments look shifted by one line</strong> on lines ${slip.lines.join(', ')}: each payment equals the bill amount of the line ${slip.direction === 'up' ? 'below' : 'above'} it.
+        Move them back? Line ${slip.receiver} gets the odd one out and stays red for you to check.</span>
+        <button class="btn" type="button" id="unslip" data-dir="${slip.direction}">Shift them back</button></div>` : ''}
     ${!locked && [...new Set(u.rows.map((r) => headOf(r) ?? r))].some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
         && [r, ...membersOf(r)].every((m) => (!m.discountPaise && !m.tipPaise) || inferredOf(m.ocrOriginal).has('discount')))
         ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts and tips</button>
@@ -1323,7 +1331,15 @@ function payLine(p) {
 
 let wireFill = () => {};
 function wireRegister(biz, u) {
-  wireFill = () => document.getElementById('filldisc')?.addEventListener('click', async () => {
+  wireFill = () => { wireUnslip(); wireFillBtn(); };
+  const wireUnslip = () => document.getElementById('unslip')?.addEventListener('click', async (e) => {
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/shift-payments`, { direction: e.currentTarget.dataset.dir });
+      await reviewView(biz, u.id);
+      document.getElementById('rmsg').innerHTML = html`<div class="ok-msg">Payments moved back on ${r.moved} lines. Check line ${r.checkLine} against the photo.</div>`.__html;
+    } catch (err) { showError(document.getElementById('rmsg'), err); }
+  });
+  const wireFillBtn = () => document.getElementById('filldisc')?.addEventListener('click', async () => {
     try {
       const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/fill-discounts`, {});
       await reviewView(biz, u.id);
@@ -2538,6 +2554,38 @@ const addDaysIso = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 864
 
 const currentShiftDay = () => new Date(Date.now() + IST_MS - 8 * 3600e3).toISOString().slice(0, 10);
 
+/** Owner: re-reads checked register pages and shows how often each field was right, first reading vs now. */
+async function checkAccuracy(biz, btn) {
+  const out = document.getElementById('accout');
+  const n = Math.min(15, Math.max(1, Number(document.getElementById('accn').value) || 10));
+  btn.disabled = true;
+  try {
+    const { pages } = await api('GET', `/businesses/${biz.id}/ocr/accuracy-pages`);
+    const pick = pages.slice(0, n);
+    if (!pick.length) { out.innerHTML = html`<p class="note">No register page has all its rows checked yet.</p>`.__html; return; }
+    const results = [], errors = [];
+    let next = 0;
+    const show = () => { out.innerHTML = html`<p class="note"><span class="spinner"></span> Reading ${results.length + errors.length} of ${pick.length} pages…</p>`.__html; };
+    show();
+    const worker = async () => {
+      while (next < pick.length) {
+        const p = pick[next++];
+        try { results.push(await api('POST', `/businesses/${biz.id}/ocr/accuracy/${p.id}`, {})); } catch (err) { errors.push(`${p.day}: ${err.message}`); }
+        show();
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    const fields = [['bill_no', 'Bill number'], ['amount', 'Amount'], ['bill_type', 'Type'], ['payments', 'Payments']];
+    const sum = (k, f) => results.reduce((t, r) => { const x = r[k][f]; return { right: t.right + x.right, red: t.red + x.wrongRed, amber: t.amber + x.wrongAmber, silent: t.silent + x.wrongUnmarked }; }, { right: 0, red: 0, amber: 0, silent: 0 });
+    const pct = (x) => { const all = x.right + x.red + x.amber + x.silent; return all ? `${Math.round((100 * x.right) / all)}%` : '–'; };
+    const rows = results.reduce((t, r) => t + r.rows, 0);
+    out.innerHTML = html`<p class="note">${results.length} page${results.length === 1 ? '' : 's'}, ${rows} checked rows.${results.some((r) => r.missing) ? ` ${results.reduce((t, r) => t + r.missing, 0)} rows had no line at the same place in the new reading.` : ''}</p>
+      <div class="table-wrap"><table><thead><tr><th>Field</th><th>Right, first reading</th><th>Right, now</th><th title="Wrong and not marked red or amber: the ones a person could miss">Wrong unmarked, first → now</th><th>Wrong but marked, first → now</th></tr></thead>
+      <tbody>${fields.map(([f, label]) => { const b = sum('before', f), a = sum('after', f); return html`<tr><td>${label}</td><td>${pct(b)}</td><td><strong>${pct(a)}</strong></td><td>${b.silent} → <strong>${a.silent}</strong></td><td>${b.red + b.amber} → ${a.red + a.amber}</td></tr>`; })}</tbody></table></div>
+      ${errors.length ? html`<p class="error">${errors.join(' · ')}</p>` : ''}`.__html;
+  } catch (err) { showError(out, err); } finally { btn.disabled = false; }
+}
+
 async function bringInView(biz, dayArg) {
   const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : addDaysIso(currentShiftDay(), -1);
   const v = await api('GET', `/businesses/${biz.id}/shifts/${day}/inputs`);
@@ -2605,9 +2653,16 @@ async function bringInView(biz, dayArg) {
       ${head('✨', allOk, false, allOk ? 'Everything is in' : 'Then', allOk ? 'Go and match the shift.' : `Still to come: ${[!softwareOk && 'software report', v.bank && !bankOk && 'bank up to 8 am', !pagesOk && (regs.length ? 'pages read and a cash summary' : 'register pages')].filter(Boolean).join(' · ')}`)}
       <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">Compare sales →</a>
         ${v.bank ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/upi/${day}">UPI matching</a>` : ''}</div>
-    </section>`));
+    </section>
+    ${biz.role === 'owner' ? html`<details class="card" style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">Check reading accuracy</summary>
+      <p class="note">Reads register pages whose rows have all been checked again, the way pages are read now, and compares the first reading and the new one with what was ticked.
+        Nothing on the pages changes. Each page uses one of today's reads.</p>
+      <div class="form-row" style="align-items:center"><label class="tiny">Pages <input id="accn" type="number" min="1" max="15" value="10" class="compact" style="width:70px"></label>
+        <button class="btn" type="button" id="accgo">Check</button></div>
+      <div id="accout"></div></details>` : ''}`));
   wireShell();
   const reload = () => bringInView(biz, day);
+  document.getElementById('accgo')?.addEventListener('click', (e) => checkAccuracy(biz, e.currentTarget));
   const msg = document.getElementById('bmsg');
   document.getElementById('bid').addEventListener('change', (e) => go(`#/b/${biz.id}/bringin/${e.target.value}`));
   app.querySelectorAll('[data-shift]').forEach((b) => b.addEventListener('click', () => go(`#/b/${biz.id}/bringin/${b.dataset.shift}`)));

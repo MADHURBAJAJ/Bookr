@@ -5,8 +5,9 @@ import { all, isShiftConfirmed, now, one, stmt, type DB } from '../db';
 import { fail, isUuid } from '../http';
 import { istDay, istToMs } from '../time';
 import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../claude';
-import { expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
+import { asReading, draftRegisterRows, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
 import { refreshComparisons } from '../sales';
+import { parsePaise } from '../money';
 import { loadHistory, loadParties } from '../parties';
 
 export const ocrRoutes = new Hono<AppEnv>();
@@ -28,6 +29,28 @@ async function usage(db: DB, businessId: string, t: number) {
       count(CASE WHEN after IS NULL AND created_at > ? THEN 1 END) AS running
     FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND created_at >= ?`, t - STALE_MS, businessId, dayStart(t));
   return r!;
+}
+
+/** Reserves one read, atomically: under today's cap, under the parallel limit, and not already running for this page. */
+async function reserveRead(db: DB, env: Env, bid: string, user: string, uploadId: string, before: Record<string, unknown>): Promise<number> {
+  const l = limits(env);
+  const t = now();
+  const reserve = await stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    SELECT ?, ?, 'ocr.read', 'uploads', ?, ?, NULL, ?
+    WHERE (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND created_at >= ?) < ?
+      AND (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND after IS NULL AND created_at > ?) < ?
+      AND NOT EXISTS (SELECT 1 FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND row_id = ? AND after IS NULL AND created_at > ?)`,
+    bid, user, uploadId, JSON.stringify(before), t,
+    bid, dayStart(t), l.daily,
+    bid, t - STALE_MS, l.parallel,
+    bid, uploadId, t - STALE_MS).run();
+  if (!reserve.meta.changes) {
+    const now2 = await usage(db, bid, t);
+    if (now2.used >= l.daily) fail(429, `Today's limit of ${l.daily} page reads for this business is used up. It resets at midnight India time. You can still type the rows in.`);
+    if (now2.running >= l.parallel) fail(429, `${now2.running} pages are being read already. Wait for them to finish, then try again.`);
+    fail(409, 'This page is already being read.');
+  }
+  return reserve.meta.last_row_id;
 }
 
 ocrRoutes.get('/businesses/:businessId/ocr', requireRole('rows.upload'), async (c) => {
@@ -72,25 +95,8 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     if (!cashAccount) fail(400, 'This business has no cash account. Add one on Accounts.');
   }
 
-  // Reserve one read, atomically: under today's cap, under the parallel limit, and not already running for this page.
   const l = limits(c.env);
-  const t = now();
-  const reserve = await stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
-    SELECT ?, ?, 'ocr.read', 'uploads', ?, ?, NULL, ?
-    WHERE (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND created_at >= ?) < ?
-      AND (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND after IS NULL AND created_at > ?) < ?
-      AND NOT EXISTS (SELECT 1 FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND row_id = ? AND after IS NULL AND created_at > ?)`,
-    bid, user, u.id, JSON.stringify({ kind, model: l.model }), t,
-    bid, dayStart(t), l.daily,
-    bid, t - STALE_MS, l.parallel,
-    bid, u.id, t - STALE_MS).run();
-  if (!reserve.meta.changes) {
-    const now2 = await usage(db, bid, t);
-    if (now2.used >= l.daily) fail(429, `Today's limit of ${l.daily} page reads for this business is used up. It resets at midnight India time. You can still type the rows in.`);
-    if (now2.running >= l.parallel) fail(429, `${now2.running} pages are being read already. Wait for them to finish, then try again.`);
-    fail(409, 'This page is already being read.');
-  }
-  const auditId = reserve.meta.last_row_id;
+  const auditId = await reserveRead(db, c.env, bid, user, u.id, { kind, model: l.model });
   const finish = (after: Record<string, unknown>) =>
     stmt(db, 'UPDATE audit_log SET after = ? WHERE id = ?', JSON.stringify({ ...after, finishedAt: now() }), auditId);
   await stmt(db, "UPDATE uploads SET status = 'reading' WHERE id = ?", u.id).run();
@@ -111,9 +117,14 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     let statements: D1PreparedStatement[];
     let rows = 0;
     if (kind === 'bill_register') {
-      const r = registerStatements(ctx, data as never);
+      // The shift's software bills, to complete short bill numbers; numbers already on the shift's other pages are taken.
+      const [sw, taken] = await Promise.all([
+        all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+        all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ? AND upload_id <> ?', bid, u.business_day, u.id),
+      ]);
+      const r = registerStatements(ctx, data as never, { softwareBills: sw.map((b) => b.bill_no), takenBills: taken.map((b) => b.bill_no) });
       ({ statements, written } = r);
-      rows = (data as { rows: unknown[] }).rows.length;
+      rows = asReading(data as never).rows.length;
     } else if (kind === 'expense_list') {
       const r = expenseStatements(ctx, data as never, cashAccount!, await loadParties(db, bid), await loadHistory(db, bid));
       ({ statements, written } = r);
@@ -157,3 +168,80 @@ async function countUnclear(db: DB, kind: ReadableKind, uploadId: string): Promi
       : await all<{ o: string | null }>(db, 'SELECT ocr_original AS o FROM cash_summaries WHERE upload_id = ?', uploadId);
   return rows.reduce((n, r) => n + ((r.o && (JSON.parse(r.o).unclear as string[] | undefined)?.length) || 0), 0);
 }
+
+// "Check reading accuracy" (Owner): reads register pages whose rows have all been checked again, with today's
+// method, and compares both the first reading and the new one with what a person ticked. Nothing on the page
+// changes; each page counts as one read toward today's limit. Only counts are returned and logged.
+
+const ACCURACY_FIELDS = ['bill_no', 'amount', 'bill_type', 'payments'] as const;
+type Field = (typeof ACCURACY_FIELDS)[number];
+type Tally = Record<Field, { right: number; wrongRed: number; wrongAmber: number; wrongUnmarked: number }>;
+const tally = (): Tally => Object.fromEntries(ACCURACY_FIELDS.map((f) => [f, { right: 0, wrongRed: 0, wrongAmber: 0, wrongUnmarked: 0 }])) as Tally;
+
+ocrRoutes.get('/businesses/:businessId/ocr/accuracy-pages', requireRole('business.edit'), async (c) => {
+  const pages = await all(c.env.DB, `SELECT u.id, u.business_day AS day, count(r.id) AS rows FROM uploads u JOIN register_rows r ON r.upload_id = u.id
+    WHERE u.business_id = ? AND u.kind = 'bill_register' AND u.ocr_engine = 'claude_vision' AND u.storage_key NOT LIKE 'software-added/%'
+    GROUP BY u.id HAVING count(r.id) >= 3 AND sum(r.status <> 'checked') = 0 AND sum(r.ocr_original IS NULL) = 0
+    ORDER BY u.business_day DESC, u.created_at DESC LIMIT 15`, c.get('businessId'));
+  return c.json({ pages });
+});
+
+ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('business.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('uploadId');
+  if (!isUuid(id)) fail(404, 'Upload not found.');
+  const u = await one<{ id: string; business_day: string; storage_key: string }>(db,
+    "SELECT id, business_day, storage_key FROM uploads WHERE id = ? AND business_id = ? AND kind = 'bill_register'", id, bid);
+  if (!u) fail(404, 'Upload not found.');
+  const truth = await all<{ id: string; bill_no: string; bill_type: string; amount_paise: number; paid_with_row_id: string | null; status: string; ocr_original: string | null; pays: string }>(db, `
+    SELECT r.id, r.bill_no, r.bill_type, r.amount_paise, r.paid_with_row_id, r.status, r.ocr_original,
+      (SELECT json_group_array(p.mode || ':' || p.amount_paise) FROM register_payments p WHERE p.register_row_id = r.id) AS pays
+    FROM register_rows r WHERE r.upload_id = ? ORDER BY r.line_no`, u.id);
+  if (!truth.length || truth.some((r) => r.status !== 'checked' || !r.ocr_original)) fail(409, 'Only pages whose rows are all checked can be compared.');
+  if (!c.env.ANTHROPIC_API_KEY) fail(503, 'Reading pages is not set up on the server.');
+  const auditId = await reserveRead(db, c.env, bid, c.get('user').id, u.id, { kind: 'bill_register', purpose: 'accuracy' });
+  const finish = (after: Record<string, unknown>) => stmt(db, 'UPDATE audit_log SET after = ? WHERE id = ?', JSON.stringify({ ...after, finishedAt: now() }), auditId).run();
+  try {
+    const obj = await c.env.UPLOADS.get(u.storage_key);
+    if (!obj) throw new OcrError(502, 'The stored file is missing.');
+    const page: PageImage = { bytes: new Uint8Array(await obj.arrayBuffer()), mediaType: (obj.httpMetadata?.contentType ?? 'image/jpeg') as PageImage['mediaType'] };
+    const { data, model } = await readWithClaude(c.env, page, INSTRUCTIONS.bill_register, SCHEMAS.bill_register);
+    const [sw, taken] = await Promise.all([
+      all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+      all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ? AND upload_id <> ?', bid, u.business_day, u.id),
+    ]);
+    const fresh = draftRegisterRows(asReading(data as never), { softwareBills: sw.map((b) => b.bill_no), takenBills: taken.map((b) => b.bill_no) });
+    const byLine = new Map(fresh.map((x) => [x.line, x]));
+    const ids = new Map(fresh.map((x) => [x.id, x]));
+    const payKey = (ps: string[]) => JSON.stringify([...ps].sort());
+    const before = tally(), after = tally();
+    const mark = (t: Tally, f: Field, right: boolean, red: boolean, amber: boolean) => {
+      t[f][right ? 'right' : red ? 'wrongRed' : amber ? 'wrongAmber' : 'wrongUnmarked']++;
+    };
+    let missing = 0;
+    for (const r of truth) {
+      const o = JSON.parse(r.ocr_original!) as { line?: number; read?: Record<string, unknown> & { payments?: { mode: string; amount: string | null }[]; paid_with_line?: number | null }; unclear?: string[]; inferred?: string[] };
+      const want = { bill_no: r.bill_no, amount: r.amount_paise, bill_type: r.bill_type, payments: r.paid_with_row_id ? 'with another bill' : payKey(JSON.parse(r.pays)) };
+      // First reading, as it was stored.
+      const rd = o.read ?? {};
+      const oldPays = rd.paid_with_line != null ? 'with another bill' : payKey((rd.payments ?? []).map((p) => `${p.mode}:${p.amount == null ? 'x' : parsePaise(p.amount) ?? 'x'}`));
+      const old = { bill_no: String(rd.bill_no ?? '').trim(), amount: rd.amount == null ? null : parsePaise(String(rd.amount)), bill_type: rd.bill_type === 'unclear' ? 'fnb' : rd.bill_type, payments: oldPays };
+      for (const f of ACCURACY_FIELDS) mark(before, f, old[f] === want[f], !!o.unclear?.includes(f), !!o.inferred?.includes(f));
+      // New reading: the line at the same place on the page.
+      const x = o.line != null ? byLine.get(o.line) : undefined;
+      if (!x) { missing++; for (const f of ACCURACY_FIELDS) mark(after, f, false, false, false); continue; }
+      const now2 = { bill_no: x.billNo, amount: x.amt, bill_type: x.read.bill_type === 'unclear' ? 'fnb' : x.read.bill_type,
+        payments: x.paidWith && ids.has(x.paidWith) ? 'with another bill' : payKey(x.pays.map((p) => `${p.mode}:${p.paise ?? 'x'}`)) };
+      for (const f of ACCURACY_FIELDS) mark(after, f, now2[f] === want[f], x.unclear.has(f), x.inferred.includes(f));
+    }
+    const result = { uploadId: u.id, day: u.business_day, rows: truth.length, newLines: fresh.length, missing, model, before, after };
+    await finish({ ok: true, model, purpose: 'accuracy', rows: truth.length, before, after });
+    return c.json(result);
+  } catch (e) {
+    const err = e instanceof OcrError ? e : null;
+    await finish({ ok: false, purpose: 'accuracy', error: err?.message ?? 'unexpected' });
+    if (err) fail(err.status, err.message);
+    throw e;
+  }
+});

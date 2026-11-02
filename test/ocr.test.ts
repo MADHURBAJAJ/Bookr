@@ -48,7 +48,7 @@ describe('Read page: register', () => {
     const res = await p.read();
     expect(res.status).toBe(200);
     expect(res.json).toMatchObject({ rows: 16, totalMatches: true, writtenTotalPaise: 1621550, orientation: 'rotated_90_clockwise' });
-    expect(res.json.unclearCells).toBe(2); // missing bill number, unsure amount (an unclear type is assumed F&B)
+    expect(res.json.unclearCells).toBe(3); // missing bill number, unsure amount, and line 8: discount 20 written but 650 paid in full (an unclear type is assumed F&B)
     const rows = await sql`SELECT bill_no, bill_type, amount_paise, status, ocr_original FROM register_rows ORDER BY line_no`;
     expect(rows).toHaveLength(16);
     expect(rows.every((r) => r.status === 'draft')).toBe(true); // never confirmed automatically

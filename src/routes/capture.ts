@@ -8,6 +8,7 @@ import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { spreadDifference } from '../discounts';
+import { findSlip, type Slip } from '../ocr';
 import { can, type Role } from '../permissions';
 
 export const captureRoutes = new Hono<AppEnv>();
@@ -236,8 +237,10 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       all<{ registerRowId: string }>(db, `SELECT p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel, p.amount_paise AS amountPaise
         FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
     ]);
+    const slip = pageSlip(rows as unknown as SlipRow[], pays as unknown as { registerRowId: string; amountPaise: number }[]);
     return c.json({
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
+      slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
       rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null,
         hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }) })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
@@ -425,6 +428,89 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   }
   await refreshComparisons(db, bid, old.shift_day, c.get('user').id);
   return c.json({ ok: true });
+});
+
+interface SlipRow { id: string; lineNo: number; amountPaise: number; paidWithRowId: string | null; status: string }
+
+/**
+ * Payments read a line off on this page (see findSlip), as the rows involved: "slice" is every row whose payments
+ * change, "moves" says which row's payments each takes. The one row left with the odd payment out ("receiver")
+ * gets it and stays marked for a person. Null when there is nothing to move or a row involved is already checked.
+ */
+function pageSlip<R extends SlipRow>(rows: R[], pays: { registerRowId: string; amountPaise: number }[]) {
+  const sorted = [...rows].sort((a, b) => a.lineNo - b.lineNo);
+  const paid = (id: string) => { const p = pays.filter((x) => x.registerRowId === id); return p.length ? p.reduce((t, x) => t + x.amountPaise, 0) : null; };
+  const heads = new Set(sorted.map((r) => r.paidWithRowId).filter(Boolean));
+  const slip: Slip | null = findSlip(sorted.map((r, i) => ({ line: i, amt: r.amountPaise, paid: paid(r.id), grouped: !!r.paidWithRowId || heads.has(r.id) })));
+  if (!slip) return null;
+  const lo = Math.min(...slip.lines), hi = Math.max(...slip.lines);
+  // "up": rows lo..hi hold the payments of the row below each. "down": rows lo..hi hold the payments of the row above.
+  const [first, last] = slip.direction === 'up' ? [lo, hi + 1] : [lo - 1, hi];
+  const slice = sorted.slice(first, last + 1);
+  if (slice.some((r) => r.status === 'checked')) return null;
+  const moves = new Map<string, string>(); // row id → id of the row whose payments it takes
+  if (slip.direction === 'up') {
+    for (let k = first; k < last; k++) moves.set(sorted[k + 1].id, sorted[k].id);
+    moves.set(sorted[first].id, sorted[last].id);
+  } else {
+    for (let k = first + 1; k <= last; k++) moves.set(sorted[k - 1].id, sorted[k].id);
+    moves.set(sorted[last].id, sorted[first].id);
+  }
+  const receiver = slip.direction === 'up' ? sorted[first] : sorted[last];
+  return { direction: slip.direction, slice, moves, receiver, lineNos: slice.map((r) => r.lineNo), receiverLineNo: receiver.lineNo };
+}
+
+// Moves the payments of the rows read a line off back to their own bills, in one step. Unchecked rows only.
+// Worked-out discounts on those rows are worked out again; the row left with the odd payment stays marked. Logged.
+captureRoutes.post('/businesses/:businessId/uploads/:uploadId/shift-payments', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const u = await getUpload(db, bid, c.req.param('uploadId'));
+  if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
+  const b = await body(c);
+  const rows = await all<SlipRow & { discountPaise: number; tipPaise: number; ocrOriginal: string | null }>(db, `SELECT id, line_no AS lineNo, amount_paise AS amountPaise,
+    paid_with_row_id AS paidWithRowId, status, discount_paise AS discountPaise, tip_paise AS tipPaise, ocr_original AS ocrOriginal FROM register_rows WHERE upload_id = ?`, u.id);
+  const pays = await all<{ id: string; registerRowId: string; amountPaise: number }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.amount_paise AS amountPaise
+    FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ?`, u.id);
+  const slip = pageSlip(rows, pays);
+  if (!slip || slip.direction !== b.direction) fail(409, 'The payments on this page no longer look shifted. Reload the page.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  const done: { rowId: string; lineNo: number; fromRowId: string; paidPaise: number }[] = [];
+  for (const r of slip!.slice) {
+    const from = slip!.moves.get(r.id)!;
+    const moved = pays.filter((p) => p.registerRowId === from);
+    for (const p of moved) statements.push(stmt(db, 'UPDATE register_payments SET register_row_id = ? WHERE id = ?', r.id, p.id));
+    const paid = moved.reduce((t2, p) => t2 + p.amountPaise, 0);
+    const o = r.ocrOriginal ? JSON.parse(r.ocrOriginal) : {};
+    const inferred = new Set<string>(o.inferred ?? []);
+    const resolved = new Set<string>(o.resolved ?? []);
+    const unclear = new Set<string>(o.unclear ?? []);
+    let disc = r.discountPaise, tip = r.tipPaise;
+    // A discount or tip worked out from the wrong payment is worked out again from the right one.
+    if ((!disc && !tip) || stillInferred(r.ocrOriginal, 'discount')) {
+      const v = paid > 0 ? spreadDifference({ id: r.id, amountPaise: r.amountPaise }, [], paid)?.get(r.id) : undefined;
+      disc = v?.discountPaise ?? 0; tip = v?.tipPaise ?? 0;
+      inferred.delete('discount');
+      if (disc || tip) inferred.add('discount');
+    }
+    if (r.id === slip!.receiver.id && paid !== r.amountPaise - disc + tip) { unclear.add('payments'); resolved.delete('payments'); }
+    else { inferred.add('payments'); resolved.add('payments'); }
+    Object.assign(o, { inferred: [...inferred], resolved: [...resolved], unclear: [...unclear], movedFromRow: from });
+    statements.push(stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?',
+      disc, tip, JSON.stringify(o), user, t, r.id));
+    done.push({ rowId: r.id, lineNo: r.lineNo, fromRowId: from, paidPaise: paid });
+  }
+  try {
+    await db.batch([...statements, stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'register.shift_payments', 'uploads', ?, NULL, ?, ?)`, bid, user, u.id, JSON.stringify({ direction: slip!.direction, moves: done }), t)]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, u.business_day, user);
+  return c.json({ moved: done.length, checkLine: slip!.receiverLineNo });
 });
 
 // Fills discount = bill amount - payments on this page's rows with no discount or tip yet: a discount
