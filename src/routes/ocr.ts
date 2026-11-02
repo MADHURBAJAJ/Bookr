@@ -194,9 +194,10 @@ ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('bu
   const u = await one<{ id: string; business_day: string; storage_key: string }>(db,
     "SELECT id, business_day, storage_key FROM uploads WHERE id = ? AND business_id = ? AND kind = 'bill_register'", id, bid);
   if (!u) fail(404, 'Upload not found.');
-  const truth = await all<{ id: string; bill_no: string; bill_type: string; amount_paise: number; paid_with_row_id: string | null; status: string; ocr_original: string | null; pays: string }>(db, `
+  const truth = await all<{ id: string; bank: number; bill_no: string; bill_type: string; amount_paise: number; paid_with_row_id: string | null; status: string; ocr_original: string | null; pays: string }>(db, `
     SELECT r.id, r.bill_no, r.bill_type, r.amount_paise, r.paid_with_row_id, r.status, r.ocr_original,
-      (SELECT json_group_array(p.mode || ':' || p.amount_paise) FROM register_payments p WHERE p.register_row_id = r.id) AS pays
+      (SELECT json_group_array(p.mode || ':' || p.amount_paise) FROM register_payments p WHERE p.register_row_id = r.id) AS pays,
+      EXISTS (SELECT 1 FROM register_bank_adjustments a WHERE a.target_id = r.id) AS bank
     FROM register_rows r WHERE r.upload_id = ? ORDER BY r.line_no`, u.id);
   if (!truth.length || truth.some((r) => r.status !== 'checked' || !r.ocr_original)) fail(409, 'Only pages whose rows are all checked can be compared.');
   if (!c.env.ANTHROPIC_API_KEY) fail(503, 'Reading pages is not set up on the server.');
@@ -219,23 +220,26 @@ ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('bu
     const mark = (t: Tally, f: Field, right: boolean, red: boolean, amber: boolean) => {
       t[f][right ? 'right' : red ? 'wrongRed' : amber ? 'wrongAmber' : 'wrongUnmarked']++;
     };
-    let missing = 0;
+    let missing = 0, bankChanged = 0;
     for (const r of truth) {
+      // Amounts and payments changed on UPI matching follow the bank, not the page: not a reading mistake.
+      const fields = r.bank ? ACCURACY_FIELDS.filter((f) => f === 'bill_no' || f === 'bill_type') : ACCURACY_FIELDS;
+      if (r.bank) bankChanged++;
       const o = JSON.parse(r.ocr_original!) as { line?: number; read?: Record<string, unknown> & { payments?: { mode: string; amount: string | null }[]; paid_with_line?: number | null }; unclear?: string[]; inferred?: string[] };
       const want = { bill_no: r.bill_no, amount: r.amount_paise, bill_type: r.bill_type, payments: r.paid_with_row_id ? 'with another bill' : payKey(JSON.parse(r.pays)) };
       // First reading, as it was stored.
       const rd = o.read ?? {};
       const oldPays = rd.paid_with_line != null ? 'with another bill' : payKey((rd.payments ?? []).map((p) => `${p.mode}:${p.amount == null ? 'x' : parsePaise(p.amount) ?? 'x'}`));
       const old = { bill_no: String(rd.bill_no ?? '').trim(), amount: rd.amount == null ? null : parsePaise(String(rd.amount)), bill_type: rd.bill_type === 'unclear' ? 'fnb' : rd.bill_type, payments: oldPays };
-      for (const f of ACCURACY_FIELDS) mark(before, f, old[f] === want[f], !!o.unclear?.includes(f), !!o.inferred?.includes(f));
+      for (const f of fields) mark(before, f, old[f] === want[f], !!o.unclear?.includes(f), !!o.inferred?.includes(f));
       // New reading: the line at the same place on the page.
       const x = o.line != null ? byLine.get(o.line) : undefined;
-      if (!x) { missing++; for (const f of ACCURACY_FIELDS) mark(after, f, false, false, false); continue; }
+      if (!x) { missing++; for (const f of fields) mark(after, f, false, false, false); continue; }
       const now2 = { bill_no: x.billNo, amount: x.amt, bill_type: x.read.bill_type === 'unclear' ? 'fnb' : x.read.bill_type,
         payments: x.paidWith && ids.has(x.paidWith) ? 'with another bill' : payKey(x.pays.map((p) => `${p.mode}:${p.paise ?? 'x'}`)) };
-      for (const f of ACCURACY_FIELDS) mark(after, f, now2[f] === want[f], x.unclear.has(f), x.inferred.includes(f));
+      for (const f of fields) mark(after, f, now2[f] === want[f], x.unclear.has(f), x.inferred.includes(f));
     }
-    const result = { uploadId: u.id, day: u.business_day, rows: truth.length, newLines: fresh.length, missing, model, before, after };
+    const result = { uploadId: u.id, day: u.business_day, rows: truth.length, newLines: fresh.length, missing, bankChanged, model, before, after };
     await finish({ ok: true, model, purpose: 'accuracy', rows: truth.length, before, after });
     return c.json(result);
   } catch (e) {

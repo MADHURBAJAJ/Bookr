@@ -178,10 +178,11 @@ export function gridToReading(g: Grid): Reading {
 /** Reading as Claude returned it: a grid (now) or bill rows (pages read before grids). */
 export const asReading = (data: Grid | Reading): Reading => ('lines' in data ? gridToReading(data) : data);
 
+const explainedInRemark = (r: string | null) => !!r && /dis|tip|less|off|comp|nc\b|round|kot|credit|due/i.test(r);
+
 // A tip larger than this share of the bill, or a discount larger than LARGE_DISCOUNT_PCT, is not taken as explained.
 const LARGE_TIP_PCT = 10;
 const LARGE_DISCOUNT_PCT = 20;
-const explainedInRemark = (r: string | null) => !!r && /dis|tip|less|off|comp|nc\b|round|kot|credit|due/i.test(r);
 
 export interface DraftRow {
   id: string; line: number; read: Reading['rows'][number]; billNo: string; amt: number | null; disc: number | null; tip: number;
@@ -192,23 +193,29 @@ export interface DraftRow {
 export interface Slip { direction: 'down' | 'up'; lines: number[] }
 
 /**
- * Payments read one line off: on several lines in a row, what was paid equals the bill amount of the next line
+ * Payments read one line off: on several lines in a row, what was paid fits the bill amount of the next line
  * ("up": the payment sits a line above its bill) or of the line before ("down"). Bills paid together break a run.
  * Returns the longest run of at least two such lines, as the lines whose payments would move.
  */
 export function findSlip(rows: { line: number; amt: number | null; paid: number | null; grouped: boolean }[]): Slip | null {
-  const fits = (paid: number | null, amt: number | null) => paid !== null && amt !== null && amt > 0 && paid === amt;
+  // A payment fits a bill when the difference could be an ordinary discount or tip (up to 20% less, 10% more).
+  const fits = (paid: number | null, amt: number | null) => paid !== null && amt !== null && amt > 0
+    && paid * 100 >= amt * (100 - LARGE_DISCOUNT_PCT) && paid * 100 <= amt * (100 + LARGE_TIP_PCT);
+  // A run carries on through lines whose payment fits either bill; it needs at least two lines whose payment
+  // does not fit their own bill at all.
   let best: Slip | null = null;
   for (const direction of ['up', 'down'] as const) {
     let run: number[] = [];
-    const close = () => { if (run.length >= 2 && (!best || run.length > best.lines.length)) best = { direction, lines: [...run] }; run = []; };
+    let clear = 0;
+    const close = () => { if (clear >= 2 && (!best || run.length > best.lines.length)) best = { direction, lines: [...run] }; run = []; clear = 0; };
     for (let i = 0; i + 1 < rows.length; i++) {
       const [a, b] = [rows[i], rows[i + 1]];
       // "up": line a holds line b's payment. "down": line b holds line a's payment.
-      const ok = !a.grouped && !b.grouped && (direction === 'up'
-        ? fits(a.paid, b.amt) && !fits(a.paid, a.amt)
-        : fits(b.paid, a.amt) && !fits(b.paid, b.amt));
-      if (ok) run.push(direction === 'up' ? a.line : b.line); else close();
+      const [holder, bill] = direction === 'up' ? [a, b] : [b, a];
+      if (!a.grouped && !b.grouped && fits(holder.paid, bill.amt)) {
+        run.push(holder.line);
+        if (!fits(holder.paid, holder.amt)) clear++;
+      } else close();
     }
     close();
   }

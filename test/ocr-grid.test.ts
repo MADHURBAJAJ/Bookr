@@ -106,6 +106,11 @@ describe('Differences nothing explains, and payments a line off', () => {
       { line: 3, amt: 300, paid: 610, grouped: false }, { line: 4, amt: 610, paid: null, grouped: false },
     ])).toEqual({ direction: 'up', lines: [1, 2, 3] });
     expect(findSlip([{ line: 1, amt: 450, paid: 450, grouped: false }, { line: 2, amt: 820, paid: 820, grouped: false }])).toBeNull();
+    // Written a line lower, with the usual tips and discounts: 385 for a bill of 368, 418 for 398, 188 for 199.
+    expect(findSlip([
+      { line: 1, amt: 36800, paid: 23000, grouped: false }, { line: 2, amt: 39800, paid: 38500, grouped: false },
+      { line: 3, amt: 19900, paid: 41800, grouped: false }, { line: 4, amt: 50400, paid: 18800, grouped: false },
+    ])).toEqual({ direction: 'down', lines: [2, 3, 4] });
     const rows = draftRegisterRows(gridToReading(grid([line(1, '450', '820'), line(2, '820', '300'), line(3, '300', '610'), line(4, '610', null)])));
     expect(rows.slice(0, 3).every((x) => x.unclear.has('payments'))).toBe(true);
   });
