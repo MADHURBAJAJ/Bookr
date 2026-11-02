@@ -207,6 +207,60 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-clear', requireRole('ba
   return c.json({ matched: done, skipped: ids.length - done });
 });
 
+/** Several credits, each with the sale(s) the person chose for it. Each is checked as on its own; failures are listed. */
+bankRoutes.post('/businesses/:businessId/bank-rows/match-many', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const pairs = (Array.isArray(data.pairs) ? data.pairs : []).slice(0, 300) as { rowId?: unknown; transactionIds?: unknown }[];
+  if (!pairs.length) fail(400, 'Choose the credits to match.');
+  const t = now();
+  const user = c.get('user').id;
+  const used = new Set<string>();
+  const statements: D1PreparedStatement[] = [];
+  const skipped: string[] = [];
+  let matched = 0;
+  for (const p of pairs) {
+    const rowId = typeof p.rowId === 'string' && isUuid(p.rowId) ? p.rowId : null;
+    const ids = Array.isArray(p.transactionIds) ? p.transactionIds.filter((x): x is string => typeof x === 'string' && isUuid(x)) : [];
+    const row = rowId ? await getRow(db, bid, rowId) : null;
+    if (!row) { skipped.push('A line was not found.'); continue; }
+    if (ids.some((x) => used.has(x))) { skipped.push(`${row.tran_id}: that bill is chosen for another credit too.`); continue; }
+    try { await checkMatch(db, bid, row, ids); }
+    catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); continue; }
+    ids.forEach((x) => used.add(x));
+    statements.push(...matchStatements(db, bid, row.id, ids, user, t));
+    matched += 1;
+  }
+  for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
+  return c.json({ matched, skipped });
+});
+
+/** Several lines booked under the head the person chose for each (money in: income heads; money out: expense heads). */
+bankRoutes.post('/businesses/:businessId/bank-rows/book-many', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const items = (Array.isArray(data.items) ? data.items : []).slice(0, 300) as { rowId?: unknown; headId?: unknown }[];
+  if (!items.length) fail(400, 'Choose the lines to book.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  const skipped: string[] = [];
+  let booked = 0;
+  for (const it of items) {
+    const rowId = typeof it.rowId === 'string' && isUuid(it.rowId) ? it.rowId : null;
+    const headId = typeof it.headId === 'string' && isUuid(it.headId) ? it.headId : null;
+    const row = rowId ? await getRow(db, bid, rowId) : null;
+    if (!row || row.status !== 'unmatched') { skipped.push(`${row?.tran_id ?? 'A line'}: already done or not found.`); continue; }
+    if (!headId) { skipped.push(`${row.tran_id}: choose a head.`); continue; }
+    try { statements.push(...(await bookStatements(db, bid, row, headId, null, null, user, t, 'chosen in a list'))); booked += 1; }
+    catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); }
+  }
+  for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
+  return c.json({ booked, skipped });
+});
+
 bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');

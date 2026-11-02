@@ -1956,6 +1956,53 @@ async function bankView(biz, query = '') {
     return parts;
   };
 
+  // ---- One shift's lines, in sections with tick boxes. Every section works the same way: tick, then one button.
+  const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
+  const payer = (r) => {
+    const note = r.remark && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay)$/i.test(r.remark) ? r.remark : '';
+    return html`<div style="min-width:0"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px">${note ? html`<strong>${note}</strong> ` : ''}<span class="mono note">${r.vpa ?? BANK_KIND[r.kind]}</span></div>
+      <div class="tiny">${hhmm(r.postedAt)} · ${r.accountName}${r.kind !== 'upi_in' && r.kind !== 'upi_out' ? ` · ${BANK_KIND[r.kind]}` : ''}</div></div>`;
+  };
+  const amt = (r) => html`<div class="amount" style="white-space:nowrap;font-weight:600;color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}₹ ${money(r.amountPaise)}</div>`;
+  const headSelect = (r, chosen) => html`<select class="compact" data-head="${r.id}" aria-label="Head" style="max-width:190px"><option value="">Choose head</option>
+    ${headsOf(r.direction).map((h) => html`<option value="${h.id}" ${h.id === chosen ? 'selected' : ''}>${h.name}</option>`)}</select>`;
+  const candText = (k) => `Bill ${k.billNos.join(' + ')}${k.minutes != null ? ` · ${k.minutes} min apart` : ' · in register'}`;
+  const section = (id, title, help, items, rowHtml, action) => !items.length ? '' : html`
+    <div data-sec="${id}" style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;background:var(--surface-2, #F6F7F9)">
+        <label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" data-selall="${id}" style="width:18px;height:18px;min-height:0"> ${title} <span class="chip">${items.length}</span></label>
+        <span style="display:flex;gap:8px;align-items:center"><span class="tiny">${help}</span>
+          <button class="btn" type="button" style="${SMALL}" data-bulk="${id}" data-action="${action}" disabled>${action === 'match' ? 'Match' : 'Book'} 0 selected</button></span>
+      </div>
+      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:28px minmax(180px,1.4fr) 120px minmax(200px,1.6fr) auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft)">
+        <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.rule && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
+        ${payer(r)}${amt(r)}${rowHtml(r)}</div>`)}
+    </div>`;
+  const skipLink = (r) => html`<button class="btn plain" type="button" style="${SMALL}" data-ignore="${r.id}" title="Not business money, e.g. a transfer between your own accounts">Skip</button>`;
+  const rulePill = (r) => canRules && r.kind !== 'upi_in' ? html`<button class="btn plain" type="button" style="${SMALL}" data-mkrule="${r.id}" title="Remember this payee's head">Rule</button>` : '';
+  const shiftBody = (list) => {
+    if (tab === 'done') {
+      return html`<div style="border:1px solid var(--line-soft);border-radius:8px">${list.map((r) => html`<div style="display:grid;grid-template-columns:minmax(180px,1.4fr) 120px minmax(200px,2fr);gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft)">${payer(r)}${amt(r)}<div>${suggestion(r)}</div></div>`)}</div>`;
+    }
+    if (tab === 'in') {
+      const found = list.filter((r) => r.candidates.length);
+      const rest = list.filter((r) => !r.candidates.length);
+      return html`${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
+          <div>${r.candidates.length === 1 ? html`<span class="${r.candidates[0].strong ? '' : 'note'}">${candText(r.candidates[0])}</span><input type="hidden" data-cand="${r.id}" value="${r.candidates[0].transactionIds.join(',')}">`
+            : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${k.transactionIds.join(',')}">${candText(k)}</option>`)}</select>`}</div>
+          <div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'match')}
+        ${section('nobill', 'No bill found', 'Book money received that is not a bill, e.g. hostel rent', rest, (r) => html`
+          <div>${headSelect(r, r.rule?.headId)}</div><div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'book')}`;
+    }
+    const ruled = list.filter((r) => r.rule);
+    const rest = list.filter((r) => !r.rule);
+    return html`${section('ruled', 'Rule suggests a head', 'Change the head if needed', ruled, (r) => html`
+        <div style="display:flex;gap:6px;align-items:center">${headSelect(r, r.rule.headId)}<span class="tiny">${r.rule.name}</span></div><div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'book')}
+      ${section('needs', 'Needs a head', 'Choose a head, or make a rule for payees that repeat', rest, (r) => html`
+        <div>${headSelect(r, null)}${r.kind === 'upi_fee' ? html`<div class="tiny">Fee on a credit card paid through UPI</div>` : r.kind === 'reversal' ? html`<div class="tiny">Gives back a failed payment</div>` : ''}</div>
+        <div style="display:flex;gap:4px">${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
+  };
+
   render(shell(biz, 'bank', 'Bank sync', 'Statement lines from each bank account, matched to sales or booked under a head. Nothing is booked until a person confirms it.', html`
     <div id="bmsg"></div>
     <section class="card" style="gap:10px">
@@ -1996,28 +2043,20 @@ async function bankView(biz, query = '') {
       ${shifts.length ? shifts.map((sd) => {
         const list = rows.filter((r) => r.shift === sd);
         const total = list.reduce((t, r) => t + r.amountPaise, 0);
-        const clear = list.filter((r) => r.clear).length;
+        const found = list.filter((r) => r.candidates.length).length;
         const ruled = list.filter((r) => r.rule).length;
         const matchedHere = all.filter((r) => r.shift === sd && r.status === 'matched');
         return html`<details class="shiftgroup" data-shift="${sd}" ${openShifts.has(sd) ? 'open' : ''} style="border:1px solid var(--line-soft);border-radius:8px">
           <summary style="cursor:pointer;padding:12px 14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
             <span><strong>${dayLabel(sd)} shift</strong> <span class="note">8 am to 8 am</span></span>
             <span class="note">${list.length} line${list.length === 1 ? '' : 's'} · ₹ ${money(total)}${tab === 'in' && matchedHere.length ? ` · ${matchedHere.length} already matched` : ''}</span>
-            <span style="display:flex;gap:6px">
-              ${tab === 'in' && clear ? html`<button class="btn" type="button" data-shiftclear="${sd}">Confirm ${clear} clear match${clear > 1 ? 'es' : ''}</button>` : ''}
-              ${tab !== 'done' && ruled ? html`<button class="btn" type="button" data-shiftrules="${sd}">Book ${ruled} by rules</button>` : ''}
+            <span style="display:flex;gap:6px;flex-wrap:wrap">
+              ${tab === 'in' && found ? html`<span class="chip ok">${found} bill${found > 1 ? 's' : ''} found</span>` : ''}
+              ${tab === 'out' && ruled ? html`<span class="chip ok">${ruled} by rule</span>` : ''}
+              ${tab !== 'done' && list.length - (tab === 'in' ? found : ruled) ? html`<span class="chip wait">${list.length - (tab === 'in' ? found : ruled)} need a head</span>` : ''}
             </span>
           </summary>
-          <div class="scroll" style="padding:0 10px 10px"><table style="min-width:900px">
-            <thead><tr><th>Time</th><th>Account</th><th>Description</th><th style="text-align:right">Amount</th><th>${tab === 'done' ? 'Done' : 'Bookr suggests'}</th></tr></thead>
-            <tbody>${list.map((r) => html`<tr data-row="${r.id}">
-              <td style="white-space:nowrap">${hhmm(r.postedAt)}<div class="tiny">${dayLabel(r.day)}</div></td>
-              <td class="note">${r.accountName}</td>
-              <td style="max-width:320px"><span class="chip">${BANK_KIND[r.kind]}</span> ${r.remark && !/^(UPI|UPI Pay|NA|NO REMARKS?)$/i.test(r.remark) ? html`<strong>${r.remark}</strong>` : ''}
-                <div class="tiny mono" style="word-break:break-all">${r.vpa ? `${r.vpa} · ` : ''}${r.tranId}</div></td>
-              <td class="amount" style="color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}${money(r.amountPaise)}</td>
-              <td>${suggestion(r)}</td></tr>`)}</tbody></table></div>
-          <div class="note" style="padding:0 14px 12px">${tab === 'in' && clear ? 'Clear: one confirmed UPI bill of the same amount paid within 20 minutes. Untick any you are not sure of.' : ''}</div>
+          <div style="padding:0 12px 12px;display:flex;flex-direction:column;gap:14px">${shiftBody(list, sd)}</div>
         </details>`;
       }) : html`<div class="note">${tab === 'in' ? 'No money received is waiting' : tab === 'out' ? 'No payments are waiting' : 'Nothing done yet'} for shifts ${dayLabel(from)} to ${dayLabel(to)}${account ? ' in this account' : ''}.</div>`}
     </section>`));
@@ -2064,18 +2103,34 @@ async function bankView(biz, query = '') {
     try { await apiFull('POST', `/businesses/${biz.id}/bank-rows/${f.dataset.bookform}/book`, { headId: f.headId.value, party: f.party.value || null, note: f.note.value || null }); bankView(biz, query); }
     catch (err) { showError(f.querySelector('.form-msg'), err); }
   }));
-  // Bulk buttons sit in a shift's header: they act on the ticked lines of that shift only.
-  const ticked = (sd, attr) => [...app.querySelectorAll(`details[data-shift="${sd}"] [${attr}]`)].filter((c) => c.checked).map((c) => c.getAttribute(attr));
-  app.querySelectorAll('[data-shiftclear]').forEach((x) => x.addEventListener('click', (e) => {
-    e.preventDefault();
-    const ids = ticked(x.dataset.shiftclear, 'data-clear');
-    if (ids.length) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-clear`, { ids }), (r) => `${r.matched} UPI credit${r.matched === 1 ? '' : 's'} matched to bills.`);
-  }));
-  app.querySelectorAll('[data-shiftrules]').forEach((x) => x.addEventListener('click', (e) => {
-    e.preventDefault();
-    const ids = ticked(x.dataset.shiftrules, 'data-byrule');
-    if (ids.length) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-by-rules`, { ids }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked by rules.`);
-  }));
+  // Sections: Select all, ticked count on the button, one button for the ticked lines of that section.
+  app.querySelectorAll('[data-sec]').forEach((sec) => {
+    const picks = () => [...sec.querySelectorAll('[data-pick]')];
+    const btn = sec.querySelector('[data-bulk]');
+    const all = sec.querySelector('[data-selall]');
+    const verb = btn.dataset.action === 'match' ? 'Match' : 'Book';
+    const refresh = () => {
+      const n = picks().filter((c) => c.checked).length;
+      btn.disabled = !n; btn.textContent = `${verb} ${n} selected`;
+      all.checked = n > 0 && n === picks().length; all.indeterminate = n > 0 && n < picks().length;
+    };
+    picks().forEach((c) => c.addEventListener('change', refresh));
+    sec.querySelectorAll('[data-head]').forEach((h) => h.addEventListener('change', () => { const c = sec.querySelector(`[data-pick][value="${h.dataset.head}"]`); if (h.value && c) { c.checked = true; refresh(); } }));
+    all.addEventListener('change', () => { picks().forEach((c) => { c.checked = all.checked; }); refresh(); });
+    refresh();
+    btn.addEventListener('click', () => {
+      const ids = picks().filter((c) => c.checked).map((c) => c.value);
+      if (btn.dataset.action === 'match') {
+        const pairs = ids.map((id) => ({ rowId: id, transactionIds: (sec.querySelector(`[data-cand="${id}"]`)?.value ?? '').split(',').filter(Boolean) }));
+        run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-many`, { pairs }), (r) => `${r.matched} credit${r.matched === 1 ? '' : 's'} matched to bills.${r.skipped.length ? ` Not matched: ${r.skipped.join(' ')}` : ''}`);
+      } else {
+        const items = ids.map((id) => ({ rowId: id, headId: sec.querySelector(`[data-head="${id}"]`)?.value || null }));
+        const missing = items.filter((x) => !x.headId).length;
+        if (missing) { showError(msg, new Error(`Choose a head for ${missing} ticked line${missing > 1 ? 's' : ''} first.`)); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+        run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`);
+      }
+    });
+  });
   document.getElementById('gorev')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/ignore-reversals`, {}), (r) => `${r.pairs} failed payment${r.pairs === 1 ? '' : 's'} skipped with ${r.pairs === 1 ? 'its' : 'their'} reversal.`));
   const rf = document.getElementById('ruleform');
   app.querySelectorAll('[data-mkrule]').forEach((x) => x.addEventListener('click', () => {

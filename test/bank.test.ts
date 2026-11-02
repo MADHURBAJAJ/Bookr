@@ -131,4 +131,24 @@ describe('bank lines through the API', () => {
     expect((await sql`SELECT count(*) AS n FROM transactions WHERE matched_bank_row = ${veg.id}`)[0].n).toBe(0);
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action LIKE 'bank.%'`)[0].n).toBeGreaterThanOrEqual(4);
   });
+
+  it('match-many and book-many do the ticked lines, each checked on its own', async () => {
+    const h = await setup();
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: STATEMENT });
+    const sale = crypto.randomUUID();
+    await sql`INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, source, status, payment_mode, bill_no, shift_day, match_status, created_at)
+      VALUES (${sale}, ${h.bid}, '2026-10-31', 84000, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '145251', '2026-10-31', 'awaiting_bank_match', 0)`;
+    const rows = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-11-01`)).json.rows;
+    const id = (t: string) => rows.find((r: any) => r.tranId === t).id;
+    const m = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/match-many`, { pairs: [
+      { rowId: id('S10000001'), transactionIds: [sale] }, { rowId: id('S10000005'), transactionIds: [sale] }] })).json;
+    expect(m.matched).toBe(1);
+    expect(m.skipped[0]).toMatch(/another credit/);
+    const b = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [
+      { rowId: id('S10000003'), headId: h.veg }, { rowId: id('S10000006'), headId: h.veg }, { rowId: id('S10000004') }] })).json;
+    expect(b.booked).toBe(1);
+    expect(b.skipped.join(' ')).toMatch(/income head/);
+    expect(b.skipped.join(' ')).toMatch(/choose a head/);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: id('S10000004'), headId: h.veg }] })).status).toBe(403);
+  });
 });

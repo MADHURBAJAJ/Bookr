@@ -51,3 +51,4 @@ No., Transaction ID, Value Date, Txn Posted Date, ChequeNo., Description, Cr/Dr,
 - Transfers between own accounts as transfer pairs (today: Leave out with a reason).
 - A "Owner drawings" head type that is not an expense (needs approval).
 - Bank sync screen: tabs Money in / Money out / Done; lines grouped by shift (8 am to 8 am), folded until opened; bulk "Confirm clear matches" and "Book by rules" per shift. Actions named Match to bill / Book under a head / Skip (not business).
+- Inside a shift: sections "Bill found" (tick, choose among candidate bills, Match N selected), "No bill found" / "Needs a head" / "Rule suggests a head" (head dropdown per line, Book N selected), each with Select all. Server: POST bank-rows/match-many and book-many, each line checked on its own.
