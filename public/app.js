@@ -321,7 +321,11 @@ async function headsView(biz, editId) {
   const addBtn = (type, label) => canEdit ? html`<a class="btn ghost" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/heads/new-${type}">${label}</a>` : '';
   const newType = editId === 'new-income' ? 'income' : editId === 'new-expense' ? 'expense' : null;
   const showForm = canEdit && (editing || newType);
+  const ret = getNewHeadReturn();
+  const backToLine = ret && ret.done === undefined ? html`<div class="form-row" style="margin-bottom:12px"><a class="btn plain" style="display:inline-flex;align-items:center" href="${ret.hash}" id="backline">← Back to the expense line${ret.narration ? ` (${ret.narration})` : ''}</a>
+    <span class="note">Add the head below; you go straight back with it chosen.</span></div>` : '';
   render(shell(biz, 'heads', 'Heads and rules', 'Only Owner and Accountant can change these.', html`
+    ${backToLine}
     <div class="row">
       <section class="card grow1" style="gap:10px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2>Income heads</h2>${addBtn('income', 'Add income head')}</div>
@@ -340,7 +344,7 @@ async function headsView(biz, editId) {
           <div class="form-msg"></div>
           <div class="form-row">
             <button class="btn" type="submit">${editing ? 'Save head' : 'Add head'}</button>
-            <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/heads">Cancel</a>
+            <a class="btn plain" style="display:inline-flex;align-items:center" href="${ret && ret.done === undefined && newType ? ret.hash : `#/b/${biz.id}/heads`}" id="headcancel">Cancel</a>
           </div>
         </form>` : ''}
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
@@ -391,9 +395,14 @@ async function headsView(biz, editId) {
   const form = document.getElementById('head');
   form && onSubmit(form, async (d) => {
     if (editing) await api('PATCH', `/businesses/${biz.id}/heads/${editing.id}`, d);
-    else await api('POST', `/businesses/${biz.id}/heads`, { ...d, type: newType });
+    else {
+      const { id } = await api('POST', `/businesses/${biz.id}/heads`, { ...d, type: newType });
+      if (ret && ret.done === undefined && newType === 'expense') { setNewHeadReturn({ ...ret, done: id }); return go(ret.hash); }
+    }
     go(`#/b/${biz.id}/heads`);
   });
+  // Going back without adding a head still restores the line.
+  ['backline', 'headcancel'].forEach((id) => document.getElementById(id)?.addEventListener('click', () => { if (ret && ret.done === undefined) setNewHeadReturn({ ...ret, done: null }); }));
 }
 
 const PERM_ROWS = [
@@ -1312,7 +1321,7 @@ function expensePanel(biz, u, heads, parties = []) {
           <div class="field" style="flex:2 1 200px"><label>Item</label><input name="narration" required></div>
           <div class="field"><label>Vendor</label><input name="vendor" list="vendorlist" placeholder="e.g. Blinkit" autocomplete="off"></div>
           <div class="field"><label>Amount (₹)</label><input name="amount" class="mono" required></div>
-          <div class="field"><label>Head</label><select name="headId"><option value="">Choose later</option>${exp.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select></div>
+          <div class="field"><label>Head</label><select name="headId"><option value="">Choose later</option>${exp.map((h) => html`<option value="${h.id}">${h.name}</option>`)}${biz.actions.includes('heads.edit') ? html`<option value="__new">+ New head…</option>` : ''}</select></div>
         </div>
         <datalist id="vendorlist">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
         <div class="note" id="vendorhint">Name the vendor and its head once; next time the head fills in by itself.</div>
@@ -1360,6 +1369,28 @@ function wireExpense(biz, u, parties = []) {
   };
   form.vendor.addEventListener('change', onVendor);
   form.vendor.addEventListener('input', onVendor);
+  let lastHead = form.headId.value;
+  form.headId.addEventListener('change', () => {
+    if (form.headId.value !== '__new') { lastHead = form.headId.value; return; }
+    form.headId.value = lastHead;
+    setNewHeadReturn({ hash: `#/b/${biz.id}/review/${u.id}`, uploadId: u.id, editing, narration: form.narration.value, vendor: form.vendor.value, amount: form.amount.value });
+    go(`#/b/${biz.id}/heads/new-expense`);
+  });
+  // Back from adding a head: put the line back as it was, with the new head chosen.
+  const back = getNewHeadReturn();
+  if (back?.uploadId === u.id && back.done !== undefined) {
+    clearNewHeadReturn();
+    editing = back.editing ?? null;
+    form.narration.value = back.narration ?? '';
+    form.vendor.value = back.vendor ?? '';
+    form.amount.value = back.amount ?? '';
+    if (back.done) form.headId.value = back.done;
+    lastHead = form.headId.value;
+    onVendor();
+    if (editing) { document.getElementById('etitle').textContent = `Edit line ${u.rows.find((x) => x.id === editing)?.lineNo ?? ''}`; document.getElementById('edel').hidden = false; }
+    form.scrollIntoView({ block: 'center' });
+    (back.done ? form.querySelector('button[type=submit]') : form.headId).focus();
+  }
   onSubmit(form, async (d) => {
     const body = { narration: d.narration, vendor: d.vendor || null, amount: d.amount, headId: d.headId || null };
     if (editing) await api('PUT', `/businesses/${biz.id}/expense-rows/${editing}`, body);
@@ -1494,6 +1525,15 @@ function wireCashPanel(biz, day, reload, msg) {
     reload();
   });
 }
+
+// ---------- Way back from Heads to the expense line that asked for a new head (per browser tab)
+const NEW_HEAD_KEY = 'bookr.newHeadFor';
+function setNewHeadReturn(v) { try { sessionStorage.setItem(NEW_HEAD_KEY, JSON.stringify({ ...v, at: v.at ?? Date.now() })); } catch { /* storage unavailable */ } }
+// A trip left unfinished for more than 30 minutes is forgotten.
+function getNewHeadReturn() {
+  try { const v = JSON.parse(sessionStorage.getItem(NEW_HEAD_KEY) || 'null'); return v && Date.now() - v.at < 30 * 60e3 ? v : null; } catch { return null; }
+}
+function clearNewHeadReturn() { try { sessionStorage.removeItem(NEW_HEAD_KEY); } catch { /* storage unavailable */ } }
 
 // ---------- Way back from Review to the difference that opened it (per browser tab)
 const BACK_KEY = 'bookr.backTo';
