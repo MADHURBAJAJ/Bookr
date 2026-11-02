@@ -364,15 +364,15 @@ async function headsView(biz, editId) {
           <div id="btmsg"></div>
         </div>
         <div style="border-top:1px solid var(--line-soft);padding-top:14px;display:flex;flex-direction:column;gap:8px">
-          <h2>Vendors</h2>
-          <div class="note">Each vendor is remembered under the heads it is booked to, e.g. Blinkit under Kitchen purchases and Housekeeping. Its first head is its main head. With several heads, a line gets the head its item had before, or a one-click choice.${canEdit ? ' Change the main head or rename a vendor here.' : ''}</div>
+          <h2>Parties</h2>
+          <div class="note">Each party is remembered under the heads it is booked to, e.g. Blinkit under Kitchen purchases and Housekeeping. Its first head is its main head. With several heads, a line gets the head its item had before, or a one-click choice.${canEdit ? ' Change the main head or rename a party here.' : ''}</div>
           ${parties.length ? parties.map((p) => html`<div class="form-row" style="align-items:center;border-top:1px solid var(--line-soft);padding-top:8px">
-            ${canEdit ? html`<input class="cell" data-vname="${p.id}" value="${p.name}" style="width:180px" aria-label="Vendor name">` : html`<span style="width:180px">${p.name}</span>`}
-            ${canEdit ? html`<select class="compact" data-vhead="${p.id}" aria-label="Main head for ${p.name}" title="Main head: used when the vendor has only one, and offered first"><option value="">No head yet</option>
+            ${canEdit ? html`<input class="cell" data-vname="${p.id}" value="${p.name}" style="width:180px" aria-label="Party name">` : html`<span style="width:180px">${p.name}</span>`}
+            ${canEdit ? html`<select class="compact" data-vhead="${p.id}" aria-label="Main head for ${p.name}" title="Main head: used when the party has only one, and offered first"><option value="">No head yet</option>
               ${heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}" ${p.defaultHeadId === h.id ? 'selected' : ''}>${h.name}</option>`)}</select>`
               : html`<span>${heads.find((h) => h.id === p.defaultHeadId)?.name ?? 'No head yet'}</span>`}
             <span class="note">${p.lines} line${p.lines === 1 ? '' : 's'}${(p.heads ?? []).length > 1 ? ` · used under ${p.heads.map((x) => `${heads.find((h) => h.id === x.headId)?.name ?? '?'} (${x.lines})`).join(', ')}` : ''}</span>
-          </div>`) : html`<div class="note">No vendors yet. Add one by naming the vendor on an expense line.</div>`}
+          </div>`) : html`<div class="note">No parties yet. Add one by naming the party on an expense line.</div>`}
           <div id="vmsg"></div>
         </div>
       </section>
@@ -1299,12 +1299,12 @@ function expensePanel(biz, u, heads, parties = []) {
     <section class="card grow3" style="gap:12px">
       <div class="note">Each line is an expense paid from Cash. It counts only after an Owner or Accountant approves it.</div>
       <div class="scroll"><table style="min-width:560px">
-        <thead><tr><th>#</th><th>Item</th><th>Vendor</th><th style="text-align:right">Amount</th><th>Head</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>#</th><th>Item</th><th>Party</th><th style="text-align:right">Amount</th><th>Head</th><th>Status</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.headId); const read = readVendor(r); return html`<tr>
           <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td>
-          <td>${r.vendor ?? (read ? html`<span class="chip wait" title="Read from the page; not a known vendor yet. Edit the line to keep it.">${read}?</span>` : html`<span class="note">—</span>`)}</td>
+          <td>${r.vendor ?? (read ? html`<span class="chip wait" title="Read from the page; not a known party yet. Edit the line to keep it.">${read}?</span>` : html`<span class="note">—</span>`)}</td>
           <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
-          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? html` <span class="chip wait" title="Filled in from how this vendor was booked before">Learned</span>` : ''}`
+          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? html` <span class="chip wait" title="Filled in from how this party was booked before">Learned</span>` : ''}`
             : headChoices(r).length > 1 && r.status === 'draft' ? html`<div style="display:flex;flex-wrap:wrap;gap:4px">${headChoices(r).map((hid) => html`<button class="btn plain" type="button" style="min-height:32px;font-size:13px;padding:0 8px" data-quickhead="${r.id}" data-head="${hid}" title="${r.vendor} is used under this head">${name(hid)}</button>`)}</div>`
             : html`<span class="chip bad">Needs input</span>`}</td>
           <td>${r.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Draft</span>`}</td>
@@ -1319,12 +1319,12 @@ function expensePanel(biz, u, heads, parties = []) {
         <div style="font-size:15px;font-weight:600" id="etitle">Add a line from the page</div>
         <div class="form-row">
           <div class="field" style="flex:2 1 200px"><label>Item</label><input name="narration" required></div>
-          <div class="field"><label>Vendor</label><input name="vendor" list="vendorlist" placeholder="e.g. Blinkit" autocomplete="off"></div>
+          <div class="field"><label>Party</label><input name="vendor" list="vendorlist" placeholder="e.g. Blinkit, Ramesh (salary)" autocomplete="off"></div>
           <div class="field"><label>Amount (₹)</label><input name="amount" class="mono" required></div>
           <div class="field"><label>Head</label><select name="headId"><option value="">Choose later</option>${exp.map((h) => html`<option value="${h.id}">${h.name}</option>`)}${biz.actions.includes('heads.edit') ? html`<option value="__new">+ New head…</option>` : ''}</select></div>
         </div>
         <datalist id="vendorlist">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
-        <div class="note" id="vendorhint">Name the vendor and its head once; next time the head fills in by itself.</div>
+        <div class="note" id="vendorhint">Name the party and its head once; next time the head fills in by itself.</div>
         <div class="form-msg"></div>
         <div class="form-row"><button class="btn" type="submit">Save line</button><button class="btn danger" type="button" id="edel" hidden>Delete line</button></div>
       </form>
@@ -1335,12 +1335,12 @@ function expensePanel(biz, u, heads, parties = []) {
     </section>`;
 }
 
-/** The heads a line's vendor has been booked under, offered as one-click choices when there are several. */
+/** The heads a line's party has been booked under, offered as one-click choices when there are several. */
 function headChoices(r) {
   try { return (JSON.parse(r.vendorHeads ?? '[]') ?? []).filter(Boolean); } catch { return []; }
 }
 
-/** The vendor Claude read on a line, when it is not a known vendor yet. */
+/** The party Claude read on a line, when it is not a known party yet. */
 function readVendor(r) {
   if (r.vendor || !r.ocrOriginal) return null;
   try { return JSON.parse(r.ocrOriginal).read?.vendor ?? null; } catch { return null; }
@@ -1351,21 +1351,21 @@ function wireExpense(biz, u, parties = []) {
   total && onSubmit(total, async (d) => { await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { pageWrittenTotal: d.pageWrittenTotal || null }); reviewView(biz, u.id); });
   const form = document.getElementById('eform');
   let editing = null;
-  // A known vendor fills in its remembered head; a new one is remembered under the head chosen now.
+  // A known party fills in its remembered head; a new one is remembered under the head chosen now.
   const hint = document.getElementById('vendorhint');
   const findParty = (name) => parties.find((p) => [p.name, ...(p.aliases ?? [])].some((n) => n.toLowerCase().trim() === name.toLowerCase().trim()));
   const onVendor = () => {
     const name = form.vendor.value.trim();
     const p = name ? findParty(name) : null;
-    if (!name) hint.textContent = 'Name the vendor and its head once; next time the head fills in by itself.';
+    if (!name) hint.textContent = 'Name the party and its head once; next time the head fills in by itself.';
     else if (p && (p.heads?.length ?? 0) > 1) {
       const names = p.heads.map((x) => [...form.headId.options].find((o) => o.value === x.headId)?.textContent).filter(Boolean);
       hint.textContent = `${p.name} is used under ${names.join(' and ')}. Choose one, or leave it empty: an item booked before fills its head in.`;
     } else if (p?.defaultHeadId) {
       if (!form.headId.value) form.headId.value = p.defaultHeadId;
-      hint.textContent = `${p.name} is remembered under ${form.headId.selectedOptions[0]?.textContent ?? 'its head'}. A vendor can be under more than one head: choose another if this line belongs elsewhere.`;
+      hint.textContent = `${p.name} is remembered under ${form.headId.selectedOptions[0]?.textContent ?? 'its head'}. A party can be under more than one head: choose another if this line belongs elsewhere.`;
     } else if (p) hint.textContent = `${p.name} has no head yet: the head you choose now will be remembered.`;
-    else hint.textContent = `New vendor: the head you choose now will be remembered for ${name}.`;
+    else hint.textContent = `New party: the head you choose now will be remembered for ${name}.`;
   };
   form.vendor.addEventListener('change', onVendor);
   form.vendor.addEventListener('input', onVendor);

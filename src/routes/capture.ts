@@ -444,7 +444,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows', req
   const amount = paise(data, 'amount', 'Amount');
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
   const chosenHead = await expenseHead(db, bid, data);
-  const vendor = text(data, 'vendor', 'Vendor', { optional: true, max: 120 });
+  const vendor = text(data, 'vendor', 'Party', { optional: true, max: 120 });
   const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid));
   const account = await cashAccount(db, bid);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM transactions WHERE upload_id = ?', u.id);
@@ -472,7 +472,7 @@ captureRoutes.put('/businesses/:businessId/expense-rows/:rowId', requireRole('ro
   const amount = paise(data, 'amount', 'Amount');
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
   const chosenHead = await expenseHead(db, bid, data);
-  const vendor = text(data, 'vendor', 'Vendor', { optional: true, max: 120 });
+  const vendor = text(data, 'vendor', 'Party', { optional: true, max: 120 });
   const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid));
   await db.batch([
     ...v.statements,
@@ -598,7 +598,7 @@ captureRoutes.patch('/businesses/:businessId/parties/:partyId', requireRole('hea
         JSON.stringify({ name, default_head_id: headId, aliases }), now()),
     ]);
   } catch (e) {
-    if (isUniqueViolation(e)) fail(409, 'Another vendor already has this name.');
+    if (isUniqueViolation(e)) fail(409, 'Another party already has this name.');
     throw e;
   }
   return c.json({ ok: true });

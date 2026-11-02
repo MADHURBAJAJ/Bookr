@@ -71,7 +71,7 @@ Field names for "unclear": bill_no, bill_type, amount, discount, payments, remar
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
 Return one item in "rows" for every expense line, in page order. Do not include the total line as a row; put it in "page_total".
-If a line names who was paid (a shop, app or person, e.g. "Blinkit", "Zepto", "Ramesh veg"), put that in "vendor"; keep the item text as written.
+If a line names who was paid (a shop, app, staff member or person, e.g. "Blinkit", "Zepto", "Ramesh veg", "Raju salary"), put that in "vendor"; keep the item text as written.
 Field names for "unclear": item, amount.
 ${COMMON}`,
   cash_summary: `This is a handwritten cash account summary for one day. It shows: opening balance, received (total received), balance, expenses (total), and cash in hand.
