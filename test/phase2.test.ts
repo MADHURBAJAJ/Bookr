@@ -457,3 +457,47 @@ describe('expense list and cash summary', () => {
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'cash_summary.approve'`)[0].n).toBe(1);
   });
 });
+
+describe('deleting an upload', () => {
+  it('deleting a CSV removes its bills and rebuilds the comparison, logged', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const [u] = await sql`SELECT u.id FROM uploads u JOIN sales_reports r ON r.upload_id = u.id WHERE r.bill_count = 16`;
+    const res = await h.clients.accountant.del(`/businesses/${h.bid}/uploads/${u.id}`);
+    expect(res.status).toBe(200);
+    expect(res.json.bills).toBe(16);
+    expect((await sql`SELECT count(*) AS n FROM software_bills`)[0].n).toBe(3);
+    const v = await view(h);
+    expect(byBill(v, '2610311').difference).toBe('missing_in_software');
+    expect(v.json.gaps.length).toBeGreaterThan(0);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'upload.delete'`)[0].n).toBe(1);
+  });
+
+  it('Entry staff can delete only their own uploads; Viewer none', async () => {
+    const h = await hotel();
+    const mine = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(21), 'image/png')).json.id;
+    const owners = (await h.clients.owner.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(22), 'image/png')).json.id;
+    expect((await h.clients.viewer.del(`/businesses/${h.bid}/uploads/${mine}`)).status).toBe(403);
+    expect((await h.clients.entry_staff.del(`/businesses/${h.bid}/uploads/${owners}`)).status).toBe(403);
+    expect((await h.clients.entry_staff.del(`/businesses/${h.bid}/uploads/${mine}`)).status).toBe(200);
+    const [u] = await sql`SELECT storage_key FROM uploads WHERE id = ${owners}`;
+    expect(u).toBeTruthy();
+    expect(await uploads.get(`${h.bid}/${mine}`)).toBeNull();
+  });
+
+  it('refused for a confirmed shift and for approved expense lines', async () => {
+    const h = await hotel();
+    const page = await fullShift(h);
+    await decideAll(h);
+    await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/uploads/${page}`)).status).toBe(409);
+    const [csv] = await sql`SELECT u.id FROM uploads u JOIN sales_reports r ON r.upload_id = u.id WHERE r.bill_count = 3`;
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/uploads/${csv.id}`)).status).toBe(409);
+
+    const exp = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, png(23), 'image/png')).json.id;
+    const util = (await h.clients.owner.get(`/businesses/${h.bid}/heads`)).json.heads.find((x: any) => x.name === 'Utilities').id;
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${exp}/expense-rows`, { narration: 'Gas', amount: '100', headId: util });
+    await h.clients.owner.post(`/businesses/${h.bid}/uploads/${exp}/expense-rows/approve`);
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/uploads/${exp}`)).status).toBe(409);
+  });
+});

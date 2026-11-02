@@ -548,6 +548,17 @@ const STATUS_CHIPS = {
 };
 const chip = (status) => { const [t, k] = STATUS_CHIPS[status] ?? [status, '']; return html`<span class="chip ${k}">${t}</span>`; };
 
+const canDeleteUpload = (biz, u) => ['owner', 'accountant'].includes(biz.role) || u.uploadedBy === me.user.id;
+const deleteButton = (biz, u) => (canDeleteUpload(biz, u) ? html`<button class="btn danger" type="button" data-delupload="${u.id}" data-what="${KIND_LABELS[u.kind]} for ${dayLabel(u.day)}">Delete</button>` : '');
+/** Wires every Delete button on the screen. Asks first; then runs after(). */
+function wireDeletes(biz, msgEl, after) {
+  app.querySelectorAll('[data-delupload]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm(`Delete the ${b.dataset.what}? Everything read from it goes too. This cannot be undone.`)) return;
+    try { await apiFull('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delupload}`, {}); after(); }
+    catch (err) { showError(msgEl(), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  }));
+}
+
 async function apiUpload(path, file) {
   const ext = (file.name.split('.').pop() || '').toLowerCase();
   const type = file.type || ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', pdf: 'application/pdf' })[ext] || 'application/octet-stream';
@@ -591,10 +602,12 @@ async function uploadView(biz) {
         <div class="list-row">
           <span><strong>${KIND_LABELS[u.kind]}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}</span>
           <span style="display:flex;gap:10px;align-items:center">${chip(u.status)}
-            ${u.kind === 'software_sales_csv' ? html`<a href="#/b/${biz.id}/compare">Compare sales</a>` : html`<a href="#/b/${biz.id}/review/${u.id}">Review</a>`}</span>
+            ${u.kind === 'software_sales_csv' ? html`<a href="#/b/${biz.id}/compare">Compare sales</a>` : html`<a href="#/b/${biz.id}/review/${u.id}">Review</a>`}
+            ${deleteButton(biz, u)}</span>
         </div>`) : html`<div class="note">Nothing uploaded yet.</div>`}
     </section>`));
   wireShell();
+  wireDeletes(biz, () => document.getElementById('umsg'), () => uploadView(biz));
   const form = document.getElementById('up');
   const kind = document.getElementById('uk');
   const file = document.getElementById('uf');
@@ -666,7 +679,7 @@ async function reviewView(biz, uploadId) {
   const fileUrl = `/api/businesses/${biz.id}/uploads/${u.id}/file`;
   const photo = html`
     <section class="card" style="flex:2 1 420px;max-width:100%;padding:16px;gap:10px">
-      <div style="display:flex;justify-content:space-between" class="note"><span>Original page</span><a href="${fileUrl}" target="_blank" rel="noopener">Open full size</a></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px" class="note"><span>Original page</span><span style="display:flex;gap:10px;align-items:center"><a href="${fileUrl}" target="_blank" rel="noopener">Open full size</a>${deleteButton(biz, u)}</span></div>
       <img src="${fileUrl}" alt="Uploaded page" style="width:100%;border:1px solid var(--field);border-radius:6px;background:#FBFAF6" id="pimg">
       <div class="note">${u.ocrEngine === 'sample' ? 'Invented sample page. Rows were entered for the demo.' : 'Reading pages automatically is not connected yet. Type the rows in from the page.'}</div>
     </section>`;
@@ -679,6 +692,7 @@ async function reviewView(biz, uploadId) {
     <div id="rmsg"></div>
     <div class="row">${photo}${right}</div>`));
   wireShell();
+  wireDeletes(biz, () => document.getElementById('rmsg'), () => go(`#/b/${biz.id}/review`));
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
   if (u.kind === 'bill_register') wireRegister(biz, u);
   if (u.kind === 'expense_list') wireExpense(biz, u);
@@ -690,6 +704,7 @@ async function reviewListView(biz) {
   const pages = uploads.filter((u) => u.kind !== 'software_sales_csv');
   const csvs = uploads.filter((u) => u.kind === 'software_sales_csv' && u.report);
   render(shell(biz, 'review', 'Review', 'Pick a page to check its rows beside the photo. Software reports are checked on Compare sales.', html`
+    <div id="rlmsg"></div>
     ${notices.map((n) => html`<div class="demo-band">${n.text.replace(n.day, dayLabel(n.day))}</div>`)}
     <section class="card" style="gap:4px">
       <h2 style="margin-bottom:8px">Software sales reports</h2>
@@ -697,18 +712,19 @@ async function reviewListView(biz) {
         <div class="list-row">
           <span><strong>${when(r.coversFrom)} to ${when(r.coversTo)}</strong> · ${u.rows} bill${u.rows === 1 ? '' : 's'}
             <br><span class="note">${r.added} new, ${r.skipped} already imported (skipped), ${r.flagged} with different values${r.openConflicts ? html` · <span class="error">${r.openConflicts} still to decide</span>` : ''}${r.replacedBy ? ' · replaced by a corrected file' : ''}</span></span>
-          <span style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${r.shiftDays.map((d) => html`<a href="#/b/${biz.id}/compare/${d}">Compare ${dayLabel(d)} shift</a>`)}</span>
+          <span style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${r.shiftDays.map((d) => html`<a href="#/b/${biz.id}/compare/${d}">Compare ${dayLabel(d)} shift</a>`)}${deleteButton(biz, u)}</span>
         </div>`; }) : html`<div class="note">No software reports yet.</div>`}
     </section>
     <h2 style="margin:4px 0 0">Pages</h2>
     <section class="card" style="gap:4px">
       ${pages.length ? pages.map((u) => html`
-        <a class="list-row" href="#/b/${biz.id}/review/${u.id}" style="color:inherit">
-          <span><strong>${KIND_LABELS[u.kind]}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}${u.open ? ` · ${u.open} to check` : ''}</span>
-          ${chip(u.status)}
-        </a>`) : html`<div class="note">No pages yet. <a href="#/b/${biz.id}/upload">Upload one</a>.</div>`}
+        <div class="list-row">
+          <a href="#/b/${biz.id}/review/${u.id}" style="color:inherit"><strong>${KIND_LABELS[u.kind]}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}${u.open ? ` · ${u.open} to check` : ''}</a>
+          <span style="display:flex;gap:10px;align-items:center">${chip(u.status)}<a href="#/b/${biz.id}/review/${u.id}">Review</a>${deleteButton(biz, u)}</span>
+        </div>`) : html`<div class="note">No pages yet. <a href="#/b/${biz.id}/upload">Upload one</a>.</div>`}
     </section>`));
   wireShell();
+  wireDeletes(biz, () => document.getElementById('rlmsg'), () => reviewListView(biz));
 }
 
 function payText(pays) {

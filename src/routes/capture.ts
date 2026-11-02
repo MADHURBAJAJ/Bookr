@@ -13,11 +13,11 @@ const PHOTO_KINDS = ['bill_register', 'expense_list', 'cash_summary', 'single_bi
 type PhotoKind = (typeof PHOTO_KINDS)[number];
 const CONFIRMED = 'This shift is confirmed. An Owner must reopen it first.';
 
-interface Upload { id: string; kind: string; business_day: string; storage_key: string; status: string; page_written_total_paise: number | null; ocr_engine: string | null; created_at: number }
+interface Upload { id: string; kind: string; business_day: string; storage_key: string; status: string; page_written_total_paise: number | null; ocr_engine: string | null; uploaded_by: string | null; created_at: number }
 
 async function getUpload(db: DB, businessId: string, id: string | undefined): Promise<Upload> {
   if (!isUuid(id)) fail(404, 'Upload not found.');
-  const u = await one<Upload>(db, `SELECT id, kind, business_day, storage_key, status, page_written_total_paise, ocr_engine, created_at
+  const u = await one<Upload>(db, `SELECT id, kind, business_day, storage_key, status, page_written_total_paise, ocr_engine, uploaded_by, created_at
     FROM uploads WHERE id = ? AND business_id = ?`, id, businessId);
   if (!u) fail(404, 'Upload not found.');
   return u;
@@ -63,7 +63,7 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
   const db = c.env.DB;
   const bid = c.get('businessId');
   const uploads = await all(db, `
-    SELECT u.id, u.kind, u.business_day AS day, u.status, u.created_at AS createdAt,
+    SELECT u.id, u.kind, u.business_day AS day, u.status, u.uploaded_by AS uploadedBy, u.created_at AS createdAt,
       CASE u.kind
         WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id)
         WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id)
@@ -100,6 +100,55 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
   return c.json({ uploads: withReports, notices });
 });
 
+// Deletes an upload and everything read from it. Owner and Accountant can delete any upload;
+// Entry staff only their own. Refused when it would change a confirmed shift or approved rows.
+captureRoutes.delete('/businesses/:businessId/uploads/:uploadId', requireRole('rows.upload'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user').id;
+  const u = await getUpload(db, bid, c.req.param('uploadId'));
+  if (!['owner', 'accountant'].includes(c.get('role')) && u.uploaded_by !== user) fail(403, 'Entry staff can delete only their own uploads.');
+
+  const report = await one<{ id: string; bill_count: number }>(db, 'SELECT id, bill_count FROM sales_reports WHERE upload_id = ?', u.id);
+  if (report && (await one(db, 'SELECT 1 AS ok FROM sales_reports WHERE replaced_by = ?', report.id))) {
+    fail(409, 'This file replaced an earlier report, so it cannot be deleted. Upload a corrected file instead.');
+  }
+  const days = new Set<string>();
+  if (report) for (const r of await all<{ shift_day: string }>(db, 'SELECT DISTINCT shift_day FROM software_bills WHERE report_id = ?', report.id)) days.add(r.shift_day);
+  if (u.kind === 'bill_register') for (const r of await all<{ shift_day: string }>(db, 'SELECT DISTINCT shift_day FROM register_rows WHERE upload_id = ?', u.id)) days.add(r.shift_day);
+  if (days.size) {
+    const confirmed = await one<{ shift_day: string }>(db, `SELECT shift_day FROM shifts WHERE business_id = ? AND status = 'confirmed'
+      AND shift_day IN (SELECT value FROM json_each(?)) LIMIT 1`, bid, JSON.stringify([...days]));
+    if (confirmed) fail(409, `Shift ${confirmed.shift_day} is confirmed. An Owner must reopen it before this upload can be deleted.`);
+  }
+  if (u.kind === 'expense_list' && (await one(db, "SELECT 1 AS ok FROM transactions WHERE upload_id = ? AND status = 'approved'", u.id))) {
+    fail(409, 'Some lines on this page are approved, so it cannot be deleted.');
+  }
+  if (u.kind === 'cash_summary' && (await one(db, "SELECT 1 AS ok FROM cash_summaries WHERE upload_id = ? AND status = 'approved'", u.id))) {
+    fail(409, 'This cash summary is approved, so it cannot be deleted.');
+  }
+
+  const counts = await one<{ bills: number; register: number; expenses: number }>(db, `SELECT
+    (SELECT count(*) FROM software_bills WHERE report_id = ?) AS bills,
+    (SELECT count(*) FROM register_rows WHERE upload_id = ?) AS register,
+    (SELECT count(*) FROM transactions WHERE upload_id = ?) AS expenses`, report?.id ?? '', u.id, u.id);
+  try {
+    await db.batch([
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'upload.delete', 'uploads', ?, ?, NULL, ?)`, bid, user, u.id,
+        JSON.stringify({ kind: u.kind, day: u.business_day, uploadedBy: u.uploaded_by, reportId: report?.id ?? null, ...counts }), now()),
+      stmt(db, "DELETE FROM transactions WHERE upload_id = ? AND status <> 'approved'", u.id),
+      stmt(db, 'DELETE FROM uploads WHERE id = ? AND business_id = ?', u.id, bid),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await c.env.UPLOADS.delete(u.storage_key);
+  for (const d of days) await refreshComparisons(db, bid, d, user);
+  return c.json({ ok: true, ...counts });
+});
+
 captureRoutes.get('/businesses/:businessId/uploads/:uploadId/file', requireRole('rows.edit'), async (c) => {
   const u = await getUpload(c.env.DB, c.get('businessId'), c.req.param('uploadId'));
   return serveStored(c, u.storage_key);
@@ -110,7 +159,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const db = c.env.DB;
   const bid = c.get('businessId');
   const u = await getUpload(db, bid, c.req.param('uploadId'));
-  const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, createdAt: u.created_at };
+  const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at };
   if (u.kind === 'bill_register') {
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
       remarks, status, ocr_original AS ocrOriginal FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
