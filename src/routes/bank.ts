@@ -158,15 +158,18 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
     LEFT JOIN bank_rows r ON r.id = t.matched_bank_row LEFT JOIN accounts a ON a.id = r.account_id
     WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.source = 'software_report'
     ORDER BY coalesce(sb.paid_at, 0), t.bill_no`, bid, day);
-  // Credits not matched yet, received from 3 hours before the shift to 6 hours after it (late payments, next morning).
+  // Credits not matched yet: the shift's own, then up to an hour either side (late or early postings), more on request.
   const w = shiftWindow(day);
-  const credits = await all(db, `SELECT r.id, r.tran_id AS tranId, r.posted_at AS postedAt, r.amount_paise AS amountPaise, r.vpa, r.remark, r.kind,
+  const more = Math.min(Math.max(Number(c.req.query('more') ?? 1) || 1, 1), 48);
+  const credits = (await all<{ postedAt: number }>(db, `SELECT r.id, r.tran_id AS tranId, r.posted_at AS postedAt, r.amount_paise AS amountPaise, r.vpa, r.remark, r.kind,
       a.name AS accountName, s.receives_upi_label AS label
     FROM bank_rows r JOIN accounts a ON a.id = r.account_id LEFT JOIN bank_sources s ON s.account_id = r.account_id
-    WHERE r.business_id = ? AND r.direction = 'CR' AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at BETWEEN ? AND ?
-    ORDER BY r.posted_at`, bid, w.from - 3 * 3600e3, w.to + 6 * 3600e3);
+    WHERE r.business_id = ? AND r.direction = 'CR' AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
+    ORDER BY r.posted_at`, bid, w.from - 3600e3, w.to + more * 3600e3))
+    .map((x) => ({ ...x, outside: x.postedAt < w.from || x.postedAt >= w.to }))
+    .sort((a, b) => Number(a.outside) - Number(b.outside) || a.postedAt - b.postedAt);
   const repaid = (await repaidFor(db, bid, day)).map((a) => ({ id: a.id, at: a.created_at, ...JSON.parse(a.after) }));
-  return c.json({ day, sales, credits, repaid, confirmedShifts: shifts.map((s) => s.day) });
+  return c.json({ day, sales, credits, repaid, moreHours: more, confirmedShifts: shifts.map((s) => s.day) });
 });
 
 // ---- A UPI sale that was in fact paid by cash or card (the register's mode was a slip)

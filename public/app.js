@@ -2224,8 +2224,10 @@ async function bankView(biz, query = '') {
 
 // ---------- UPI matching: each confirmed shift's UPI sales and the credit that paid each
 
-async function upiView(biz, day) {
-  const [v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/upi${day ? `?day=${day}` : ''}`), api('GET', `/businesses/${biz.id}/heads`)]);
+async function upiView(biz, dayArg) {
+  const [day, qs = ''] = String(dayArg ?? '').split('?');
+  const more = Number(new URLSearchParams(qs).get('more')) || 1;
+  const [v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/upi?more=${more}${day ? `&day=${day}` : ''}`), api('GET', `/businesses/${biz.id}/heads`)]);
   const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
   const matched = v.sales.filter((s) => s.bankRowId);
   const waiting = v.sales.filter((s) => !s.bankRowId);
@@ -2252,7 +2254,7 @@ async function upiView(biz, day) {
     </section>`));
   wireShell();
   document.getElementById('upiday').addEventListener('change', (e) => go(`#/b/${biz.id}/upi/${e.target.value}`));
-  wirePairPanel(biz, v, heads, () => upiView(biz, v.day));
+  wirePairPanel(biz, v, heads, () => upiView(biz, `${v.day}?more=${v.moreHours}`));
   // A sale opens its bill in the register page; Review offers the way back here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     e.preventDefault();
@@ -2297,6 +2299,7 @@ function billUnits(waiting) {
 
 /** Side by side: bank credits not matched (left) and UPI bills not found (right). Tick, compare totals, match. */
 function pairPanel(v, waiting) {
+  v.bizId = currentBizId();
   if (!v.credits.length && !waiting.length && !v.repaid?.length) return '';
   const units = billUnits(waiting);
   const pick = 'width:18px;height:18px;min-height:0';
@@ -2310,8 +2313,10 @@ function pairPanel(v, waiting) {
         <div style="max-height:420px;overflow:auto">${v.credits.length ? v.credits.map((c) => html`<label style="${line}">
           <input type="checkbox" data-pcr="${c.id}" data-amt="${c.amountPaise}" style="${pick}">
           <span style="flex:1;min-width:0"><span class="mono note" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(c.remark) ? `${c.remark} · ` : ''}${c.vpa ?? ''}</span>
-            <span class="tiny">${when(c.postedAt)} · ${c.accountName}${c.label ? ` · ${c.label}` : ''}</span></span>
-          <strong class="amount" style="color:var(--teal)">₹ ${money(c.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">None around this shift.</div>`}</div>
+            <span class="tiny">${when(c.postedAt)} · ${c.accountName}${c.label ? ` · ${c.label}` : ''}${c.outside ? html` <span class="chip" style="background:#EEF0F3;color:#5B6472" title="Received outside this shift's 8 am to 8 am">outside shift</span>` : ''}</span></span>
+          <strong class="amount" style="color:${c.outside ? '#5B6472' : 'var(--teal)'}">₹ ${money(c.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">None around this shift.</div>`}
+          <div style="padding:8px 10px;border-top:1px solid var(--line-soft)"><a class="btn plain" style="display:inline-flex;align-items:center;min-height:34px" href="#/b/${v.bizId}/upi/${v.day}?more=${v.moreHours + 3}">Show 3 more hours after the shift</a>
+            <span class="tiny">Showing to ${v.moreHours} hour${v.moreHours === 1 ? '' : 's'} after 8 am.</span></div></div>
       </div>
       <div style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
         <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">UPI bills not found in the bank <span class="chip">${units.length}</span></div>
