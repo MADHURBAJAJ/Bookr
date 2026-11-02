@@ -844,21 +844,33 @@ function regRowHtml(r, locked) {
     <td>${billCell(r, nd('bill_no'))}</td>
     <td><select class="cell ${nd('bill_type')}" data-f="billType" aria-label="Type">
       <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
-    <td><input class="cell mono ${nd('amount')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount"></td>
+    <td><input class="cell mono ${nd('amount') || (payDiffers(r) ? 'needs' : '')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount" title="${payDiffers(r) ? `Payments add up to ${money(paidOf(r))}` : ''}"></td>
     <td>${single ? html`<div style="display:flex;gap:6px">
         <select class="cell ${nd('payments')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
           ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}</select>
-        <input class="cell mono ${nd('payments')}" data-f="payAmount" value="${p ? rupeesForInput(p.amountPaise) : ''}" style="width:84px;text-align:right" inputmode="decimal" aria-label="Payment amount" ${p ? '' : 'hidden'}>
-      </div>` : html`<span class="${nd('payments') ? 'error' : ''}">${payText(r.payments)}</span>`}</td>
+        <input class="cell mono ${nd('payments') || (payDiffers(r) && p ? 'needs' : '')}" data-f="payAmount" value="${p ? rupeesForInput(p.amountPaise) : ''}" style="width:84px;text-align:right" inputmode="decimal" aria-label="Payment amount" ${p ? '' : 'hidden'}>
+      </div>` : html`<span class="${nd('payments') || payDiffers(r) ? 'error' : ''}">${payText(r.payments)}</span>`}</td>
     <td><input class="cell ${nd('remarks')}" data-f="remarks" value="${r.remarks ?? ''}" style="width:130px" aria-label="Remarks"></td>
     <td style="text-align:right"><button class="btn plain" type="button" data-edit="${r.id}" style="min-height:36px">Edit</button></td>
   </tr>`;
 }
 
+const paidOf = (r) => r.payments.reduce((t, p) => t + p.amountPaise, 0);
+/** A bill whose written payments do not add up to its amount (complimentary bills with none are fine). */
+const payDiffers = (r) => !(r.amountPaise === 0 && r.payments.length === 0) && paidOf(r) !== r.amountPaise;
+
 function regSumHtml(u) {
-  const sum = u.rows.reduce((s, r) => s + r.amountPaise, 0);
+  const bills = u.rows.reduce((s, r) => s + r.amountPaise, 0);
+  const paid = u.rows.reduce((s, r) => s + paidOf(r), 0);
   const written = u.pageWrittenTotalPaise;
-  return html`Rows add up to ₹ ${money(sum)}. ${written == null ? 'Enter the total written on the page to check it.' : written === sum ? html`<span class="ok-msg">Matches the written total.</span>` : html`<span class="error">The page says ₹ ${money(written)}.</span>`}`;
+  const off = u.rows.filter(payDiffers);
+  const vsPage = written == null ? 'Enter the total written on the page to check it.'
+    : written === bills && written === paid ? html`<span class="ok-msg">Both match the written total.</span>`
+    : written === bills ? html`<span class="ok-msg">Bill amounts match the written total.</span>`
+    : written === paid ? html`<span class="ok-msg">Payments match the written total</span> (₹ ${money(written)}).`
+    : html`<span class="error">The page says ₹ ${money(written)}.</span>`;
+  return html`Bill amounts add up to <strong>₹ ${money(bills)}</strong>. Payments add up to <strong>₹ ${money(paid)}</strong>. ${vsPage}
+    ${off.length ? html`<br><span class="error">${off.length} row${off.length > 1 ? 's have' : ' has'} a payment that differs from the bill amount (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its bill amount.</span>` : ''}`;
 }
 
 function registerPanel(biz, u) {
@@ -868,7 +880,7 @@ function registerPanel(biz, u) {
   return html`
     <section class="card grow3" style="gap:12px">
       ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>`
-        : html`<div class="note">Change any cell and it saves when you leave it. Tick a row once it matches the page. Use Edit for a bill paid in more than one way.${anyUnclear || u.rows.some((r) => r.billMatch && !r.billMatch.exact) ? html` <span class="needs-key">Red boxes</span> need a look: Claude could not read the cell, or the bill number is not in the software report for this shift (pick the right one from "Did you mean…").` : ''}</div>`}
+        : html`<div class="note">Change any cell and it saves when you leave it. Tick a row once it matches the page; the tick is saved at once. When every row is ticked and the payments match, an Owner or Accountant confirms the shift on <a href="#/b/${biz.id}/compare/${u.day}">Compare sales</a>, which locks this page. Use Edit for a bill paid in more than one way.${anyUnclear || u.rows.some((r) => r.billMatch && !r.billMatch.exact) ? html` <span class="needs-key">Red boxes</span> need a look: Claude could not read the cell, or the bill number is not in the software report for this shift (pick the right one from "Did you mean…").` : ''}</div>`}
       <div class="scroll"><table style="min-width:860px" id="regtable">
         <thead><tr><th>#</th><th title="Checked against the page">✓</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th>Paid as</th><th>Remarks</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
