@@ -492,6 +492,25 @@ describe('register discounts', () => {
     expect(u.json.rows.find((r: any) => r.billNo === '2610317').discountPaise).toBe(9000);
   });
 
+  it('Fill discounts sets amount - payments only on rows paid less than billed with no discount', async () => {
+    const h = await hotel();
+    const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(32), 'image/png')).json.id;
+    const add = (billNo: string, amount: string, payments: unknown[], discount = '0') =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, discount, payments, status: 'checked' });
+    await add('1', '230', [{ mode: 'card', amount: '219' }]);          // fills 11
+    await add('2', '10899', [{ mode: 'upi', amount: '10500' }]);       // fills 399
+    await add('3', '179', [{ mode: 'upi', amount: '188' }]);           // paid more: left alone
+    await add('4', '100', []);                                          // nothing paid: left alone
+    await add('5', '500', [{ mode: 'cash', amount: '450' }], '30');    // has a discount: left alone
+    const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/fill-discounts`);
+    expect(res.json.filled).toBe(2);
+    const rows = await sql`SELECT bill_no, discount_paise, status FROM register_rows WHERE upload_id = ${page} ORDER BY bill_no`;
+    expect(rows.map((r) => [r.bill_no, r.discount_paise])).toEqual([['1', 1100], ['2', 39900], ['3', 0], ['4', 0], ['5', 3000]]);
+    expect(rows.every((r) => r.status === 'checked')).toBe(true);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'register.fill_discounts'`)[0].n).toBe(1);
+    expect((await h.clients.viewer.post(`/businesses/${h.bid}/uploads/${page}/fill-discounts`)).status).toBe(403);
+  });
+
   it('refuses a discount larger than the bill', async () => {
     const h = await hotel();
     const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(31), 'image/png')).json.id;

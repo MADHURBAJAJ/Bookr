@@ -114,6 +114,20 @@ describe('Read page: register', () => {
     expect(o.read.bill_type).toBe('unclear');
   });
 
+  it('fills in a discount when less was paid than billed, marked as worked out', async () => {
+    const p = await page('bill_register');
+    const r = registerReading();
+    r.data.rows[1] = { ...r.data.rows[1], amount: '440', discount: null, payments: [{ column: 'UPI XOXO', mode: 'upi', amount: '420' }] } as never; // paid 20 less
+    r.data.rows[2] = { ...r.data.rows[2], amount: '380', discount: null, payments: [{ column: 'Cash', mode: 'cash', amount: '400' }] } as never;  // paid more
+    mocked.mockResolvedValueOnce(r as never);
+    await p.read();
+    const rows = await sql`SELECT line_no, amount_paise, discount_paise, ocr_original FROM register_rows WHERE line_no IN (2, 3) ORDER BY line_no`;
+    expect(rows[0]).toMatchObject({ amount_paise: 44000, discount_paise: 2000 });
+    expect(JSON.parse(rows[0].ocr_original).inferred).toEqual(['discount']);
+    expect(rows[1]).toMatchObject({ amount_paise: 38000, discount_paise: 0 }); // never a negative discount
+    expect(JSON.parse(rows[1].ocr_original).inferred).toEqual([]);
+  });
+
   it('refuses a confirmed shift', async () => {
     const p = await page('bill_register');
     await sql`INSERT INTO shifts (id, business_id, shift_day, status, created_at) VALUES ('s1', ${p.bid}, '2026-10-31', 'confirmed', 0)`;

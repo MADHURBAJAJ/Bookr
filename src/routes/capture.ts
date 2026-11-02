@@ -317,6 +317,41 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   return c.json({ ok: true });
 });
 
+// Fills discount = bill amount - payments on this page's rows that have no discount and were paid less
+// than billed. Rows with no payment written, or paid in full or more, are left alone. Logged.
+captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const u = await getUpload(db, bid, c.req.param('uploadId'));
+  if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
+  const rows = await all<{ id: string; amount_paise: number; paid: number; n: number; ocr_original: string | null }>(db, `
+    SELECT r.id, r.amount_paise, r.ocr_original, coalesce(sum(p.amount_paise), 0) AS paid, count(p.id) AS n
+    FROM register_rows r LEFT JOIN register_payments p ON p.register_row_id = r.id
+    WHERE r.upload_id = ? AND r.discount_paise = 0 GROUP BY r.id`, u.id);
+  const fill = rows.filter((r) => r.n > 0 && r.paid > 0 && r.paid < r.amount_paise);
+  if (!fill.length) return c.json({ filled: 0 });
+  const t = now();
+  const user = c.get('user').id;
+  try {
+    await db.batch([
+      ...fill.map((r) => {
+        let ocr = r.ocr_original;
+        if (ocr) { const o = JSON.parse(ocr); o.inferred = [...new Set([...(o.inferred ?? []), 'discount'])]; ocr = JSON.stringify(o); }
+        return stmt(db, 'UPDATE register_rows SET discount_paise = ?, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ? AND discount_paise = 0',
+          r.amount_paise - r.paid, ocr, user, t, r.id);
+      }),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.fill_discounts', 'uploads', ?, NULL, ?, ?)`, bid, user, u.id,
+        JSON.stringify(fill.map((r) => ({ rowId: r.id, discountPaise: r.amount_paise - r.paid }))), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, u.business_day, user);
+  return c.json({ filled: fill.length });
+});
+
 captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
