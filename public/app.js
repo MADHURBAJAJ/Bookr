@@ -1068,7 +1068,9 @@ const FIELD_WORDS = { bill_no: 'bill no', amount: 'amount', bill_type: 'type', d
 
 /** What is wrong with a row, in words, and which cells to mark. */
 function rowIssues(r) {
+  // Remarks are free text and never block anything: an unclear remark is not raised.
   const q = unclearOf(r.ocrOriginal, r.status === 'draft');
+  q.delete('remarks');
   const inf = inferredOf(r.ocrOriginal);
   let o = {};
   try { o = r.ocrOriginal ? JSON.parse(r.ocrOriginal) : {}; } catch { /* not JSON */ }
@@ -1094,7 +1096,7 @@ function rowIssues(r) {
   }
   if (inf.has('bill_no') && o.completedFrom) { flags.bill_no ??= 'amber'; amber.push(`Completed from "${o.completedFrom}" on the page`); }
   if (inf.has('bill_type')) { flags.bill_type ??= 'amber'; amber.push('Type assumed F&B'); }
-  if (inf.has('discount') && !largePct(r)) { flags.discount ??= 'amber'; amber.push((r.discountPaise ?? 0) < 0 ? 'Tip worked out' : 'Discount worked out'); }
+  if (inf.has('discount') && !largePct(r)) flags.discount ??= 'amber'; // a worked-out discount is only tinted, not spelled out
   if (inf.has('payments') && !r.paidWithRowId && o.movedFromRow) { flags.payments ??= 'amber'; amber.push('Payment moved from the next line'); }
   if (r.bankAdjusted) info.push('Adjusted from bank on UPI matching');
   return { red, amber, info, flags, needsYou: red.length > 0 && r.status !== 'checked' };
