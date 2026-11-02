@@ -31,12 +31,17 @@ export function registerMode(pays: RgPay[]): string | null {
   return modes.length === 0 ? null : modes.length === 1 ? modes[0] : 'mixed';
 }
 
-export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null } | null): Difference {
+/**
+ * rg.amount is the register amount after discount and tip (what was received); rg.gross is the bill
+ * amount before them. A bill with a discount or tip matches when the software shows either figure:
+ * the register's received amount is then used (approved rule, 2 Nov 2026).
+ */
+export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null; gross?: number } | null): Difference {
   if (sw && sw.amount === 0) return 'complimentary';
   if (!sw && rg && rg.amount === 0) return 'complimentary';
   if (sw && !rg) return 'missing_in_register';
   if (!sw && rg) return 'missing_in_software';
-  const amountDiffers = sw!.amount !== rg!.amount;
+  const amountDiffers = sw!.amount !== rg!.amount && !(rg!.gross !== undefined && rg!.gross !== rg!.amount && sw!.amount === rg!.gross);
   const modeDiffers = sw!.mode === 'unknown' || sw!.mode !== rg!.mode;
   if (amountDiffers && modeDiffers) return 'amount_and_mode';
   if (amountDiffers) return 'amount';
@@ -121,7 +126,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     wanted.set(`${b.pos_no}\u0000${b.bill_no}`, {
       pos_no: b.pos_no, bill_no: b.bill_no, software_bill_id: b.id, register_row_id: r?.id ?? null,
       sw_amount_paise: b.amount_paise, sw_mode: b.mode, rg_amount_paise: r?.amount_paise ?? null, rg_mode: rgMode,
-      difference: classify({ amount: b.amount_paise, mode: b.mode }, r ? { amount: r.amount_paise, mode: rgMode } : null),
+      difference: classify({ amount: b.amount_paise, mode: b.mode }, r ? { amount: r.amount_paise, mode: rgMode, gross: r.amount_paise + r.discount_paise } : null),
     });
   }
   for (const r of rgByBill.values()) {
@@ -139,7 +144,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   const same = (a: Comparison, b: (typeof wanted extends Map<string, infer V> ? V : never)) =>
     a.software_bill_id === b.software_bill_id && a.register_row_id === b.register_row_id &&
     a.sw_amount_paise === b.sw_amount_paise && a.sw_mode === b.sw_mode &&
-    a.rg_amount_paise === b.rg_amount_paise && a.rg_mode === b.rg_mode;
+    a.rg_amount_paise === b.rg_amount_paise && a.rg_mode === b.rg_mode && a.difference === b.difference;
   const clearedAudit = (c: Comparison, after: unknown) => stmt(db, `
     INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
     VALUES (?, ?, 'comparison.decision_cleared', 'bill_comparisons', ?, ?, ?, ?)`,
@@ -268,6 +273,9 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     })),
     totals,
     unknownModePaise: unknownPaise,
+    matchedAfterAdjustment: comparisons
+      .filter((c) => c.difference === 'match' && c.sw_amount_paise !== c.rg_amount_paise)
+      .map((c) => ({ billNo: c.bill_no, softwarePaise: c.sw_amount_paise, registerPaise: c.rg_amount_paise })),
     blockers: shift?.status === 'confirmed' ? [] : blockers,
     canConfirm: shift?.status !== 'confirmed' && blockers.length === 0,
   };
@@ -287,7 +295,9 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
     const fromRegister = (source: NewRow['source']) => {
       for (const p of paysByRow.get(r!.id) ?? []) rows.push({ amount: p.amount_paise, mode: p.mode as NewRow['mode'], billType, source, c });
     };
-    if (c.difference === 'match') fromRegister('both_matched');
+    // Matched after a discount or tip: the software shows the bill amount, the register what was received.
+    // The register's figure is booked, so it is what bank matching will look for.
+    if (c.difference === 'match') fromRegister(c.sw_amount_paise === c.rg_amount_paise ? 'both_matched' : 'register');
     else if (c.decision === 'use_register') fromRegister('register');
     else if (c.decision === 'use_software') rows.push({ amount: c.sw_amount_paise!, mode: c.sw_mode as NewRow['mode'], billType, source: 'software', c });
   }

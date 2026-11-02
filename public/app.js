@@ -1367,6 +1367,8 @@ async function compareView(biz, day) {
       </tbody></table></div></section>` : ''}
     <section class="card">
       <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2>Differences to decide</h2><span class="note">${decided} of ${toDecide.length} decided</span></div>
+      ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so ${v.matchedAfterAdjustment.length > 1 ? 'they need' : 'it needs'} no decision. The register amount (what was received) is used, and is what bank matching will look for:
+        ${v.matchedAfterAdjustment.map((m) => `${m.billNo} (software ${money(m.softwarePaise)}, received ${money(m.registerPaise)})`).join(', ')}.</div>` : ''}
       ${toDecide.length ? html`<div class="scroll"><table style="min-width:860px">
         <thead><tr><th>Bill</th><th>Paid at</th><th>Software</th><th>Register</th><th>What differs</th><th>Your decision</th></tr></thead>
         <tbody>${toDecide.map((c) => html`<tr style="background:${c.decision ? 'transparent' : '#FFF7ED'}">

@@ -132,6 +132,15 @@ describe('difference types', () => {
     expect(classify({ amount: 0, mode: 'cash' }, null)).toBe('complimentary');
   });
 
+  it('a register bill with a discount or tip matches when the software shows its amount before them', () => {
+    expect(classify({ amount: 23000, mode: 'card' }, { amount: 21900, mode: 'card', gross: 23000 })).toBe('match');   // discount 11
+    expect(classify({ amount: 17900, mode: 'upi' }, { amount: 18800, mode: 'upi', gross: 17900 })).toBe('match');     // tip 9
+    expect(classify({ amount: 21900, mode: 'card' }, { amount: 21900, mode: 'card', gross: 23000 })).toBe('match');   // software already net
+    expect(classify({ amount: 25000, mode: 'card' }, { amount: 21900, mode: 'card', gross: 23000 })).toBe('amount');  // a real difference
+    expect(classify({ amount: 23000, mode: 'upi' }, { amount: 21900, mode: 'card', gross: 23000 })).toBe('mode');     // mode still checked
+    expect(classify({ amount: 21900, mode: 'card' }, { amount: 21900, mode: 'card', gross: 21900 })).toBe('match');
+  });
+
   it('an unknown software mode or a part-cash part-UPI register bill is a mode difference', () => {
     expect(classify({ amount: 650, mode: 'unknown' }, { amount: 650, mode: 'upi' })).toBe('mode');
     const mixed = registerMode([{ register_row_id: 'x', mode: 'cash', amount_paise: 1, column_label: null }, { register_row_id: 'x', mode: 'upi', amount_paise: 1, column_label: null }]);

@@ -525,6 +525,31 @@ describe('register discounts', () => {
     expect(u.json.rows.find((r: any) => r.billNo === '2610317').discountPaise).toBe(-900);
   });
 
+  it('matched after a discount: no decision, the register amount is booked for bank matching, earlier decisions cleared', async () => {
+    const h = await hotel();
+    // Software 4,410; register bill 4,410 with a 30 discount, 4,380 received by UPI.
+    const reg = REGISTER_31_OCT.map((r) => (r.billNo === '2610317' ? { ...r, amount: '4380', payments: [{ mode: 'upi' as const, columnLabel: 'UPI XOXO', amount: '4380' }] } : r));
+    await fullShift(h, reg as never);
+    let v = await view(h);
+    expect(byBill(v, '2610317').difference).toBe('amount');
+    await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610317').id}`, { decision: 'use_software' });
+    const [row] = await sql`SELECT id FROM register_rows WHERE bill_no = '2610317'`;
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${row.id}`, {
+      billNo: '2610317', billType: 'fnb', amount: '4410', discount: '30', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI XOXO', amount: '4380' }],
+    });
+    v = await view(h);
+    expect(byBill(v, '2610317')).toMatchObject({ difference: 'match', decision: null });
+    expect(v.json.matchedAfterAdjustment).toEqual([{ billNo: '2610317', softwarePaise: 441000, registerPaise: 438000 }]);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared'`)[0].n).toBe(1);
+    await decideAll(h).catch(() => undefined);
+    for (const [bill, d] of [['26103115', 'use_register'], ['2610318', 'use_register'], ['2610319', 'leave_out'], ['26103120', 'use_register'], ['26103125', 'use_register']]) {
+      await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
+    }
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const [t] = await sql`SELECT amount_paise, confirmed_source, match_status FROM transactions WHERE bill_no = '2610317'`;
+    expect(t).toEqual({ amount_paise: 438000, confirmed_source: 'register', match_status: 'awaiting_bank_match' });
+  });
+
   it('refuses a discount larger than the bill', async () => {
     const h = await hotel();
     const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(31), 'image/png')).json.id;
@@ -603,7 +628,9 @@ describe('bills paid together', () => {
     expect(row.discount_paise).toBe(1000);
     v = await view(h);
     expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
-    expect(byBill(v, '2610311').difference).toBe('amount'); // 410 after discount against 420 in the software
+    // 410 received after the group's discount, 420 in the software: matched after a discount, no decision.
+    expect(byBill(v, '2610311').difference).toBe('match');
+    expect(v.json.matchedAfterAdjustment).toEqual([{ billNo: '2610311', softwarePaise: 42000, registerPaise: 41000 }]);
   });
 
   it('confirming books one income row per bill, in the group mode', async () => {

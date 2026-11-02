@@ -262,6 +262,8 @@ Each line of an expense list becomes a draft expense row in `transactions`, paid
 - **Bills paid together (approved 2 Nov 2026).** One payment written on one register row can cover several bills: the other rows point to it with `register_rows.paid_with_row_id` (same shift, no chains, no payments of their own). The group balances when its bills, after discounts and tips, equal the one payment; the difference is filled on the row holding the payment. For comparison and confirmation each bill counts as paid in the group's single mode for its own amount, so each matches its own software bill and becomes its own income row. Read page marks bracketed shared payments. **Phase 3 must allow one bank credit to match a group of register bills.**
 - **Discounts and tips on register bills.** `discount_paise` and `tip_paise` (both whole paise, never negative), shown as one signed "Disc / tip" figure. A bill balances when payments equal amount − discount + tip; Compare sales uses that figure.
 
+- **Matched after a discount or tip (approved 2 Nov 2026).** A register bill with a discount or tip counts as matched when the software shows its amount before them (or the received amount). No decision is needed; confirmation books the register's received amount (`confirmed_source = register`), which is what Phase 3 bank matching looks for. The payment mode must still agree. Compare sales lists these bills.
+
 ### New Cloudflare resource
 
 An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.
