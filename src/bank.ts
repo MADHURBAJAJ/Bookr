@@ -83,6 +83,8 @@ const labelFits = (labels: string | null, accountLabel: string | null) =>
   !labels || !accountLabel || labels.split(',').some((l) => !norm(l) || norm(l) === norm(accountLabel) || !/upi/.test(norm(l)) || norm(l) === 'upi');
 
 const STRONG_MIN = 20;
+/** Pre-ticked when paired within this many minutes. */
+const TICK_MIN = 60;
 const WIDE_MIN = 180;
 
 export interface Candidate { transactionIds: string[]; billNos: string[]; amountPaise: number; minutes: number | null; strong: boolean; shiftDay: string; part: string | null }
@@ -125,14 +127,20 @@ export function upiCandidates(credits: (BankRow & { label: string | null })[], s
     list.sort((a, b) => (a.minutes ?? 9999) - (b.minutes ?? 9999));
     out.set(c.id, list);
   }
-  // Clear: exactly one strong candidate for the credit, and no other credit has that sale as a strong candidate.
-  const strongUse = new Map<string, number>();
-  for (const list of out.values()) for (const k of list.filter((x) => x.strong)) strongUse.set(k.transactionIds.join(','), (strongUse.get(k.transactionIds.join(',')) ?? 0) + 1);
+  // Clear (ticked for the person): credits and sales paired by closest time first, each used once, up to an hour
+  // apart. Two credits of the same amount near two bills of that amount pair up by time instead of blocking each other.
+  const pairs: { creditId: string; k: Candidate }[] = [];
+  for (const [id, list] of out) for (const k of list) if (k.minutes != null && k.minutes <= TICK_MIN) pairs.push({ creditId: id, k });
+  pairs.sort((a, b) => a.k.minutes! - b.k.minutes!);
+  const usedSale = new Set<string>();
   const clear = new Map<string, Candidate>();
-  for (const [id, list] of out) {
-    const strong = list.filter((x) => x.strong);
-    if (strong.length === 1 && strongUse.get(strong[0].transactionIds.join(',')) === 1) clear.set(id, strong[0]);
+  for (const p of pairs) {
+    if (clear.has(p.creditId) || p.k.transactionIds.some((x) => usedSale.has(x))) continue;
+    clear.set(p.creditId, p.k);
+    p.k.transactionIds.forEach((x) => usedSale.add(x));
   }
+  // The paired sale comes first in each credit's list, so it is the one chosen by default.
+  for (const [id, k] of clear) out.set(id, [k, ...out.get(id)!.filter((x) => x !== k)]);
   return { candidates: out, clear };
 }
 

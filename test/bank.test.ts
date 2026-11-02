@@ -47,13 +47,22 @@ describe('UPI match suggestions', () => {
   const credit = (id: string, at: number, amount: number) => ({ id, posted_at: at, amount_paise: amount, label: 'UPI Bank 2' }) as any;
   const sale = (id: string, paidAt: number | null, amount: number, extra: Partial<UpiIncome> = {}): UpiIncome =>
     ({ id, amount_paise: amount, bill_no: id, shift_day: '2026-10-31', paid_at: paidAt, group_head: null, labels: 'UPI Bank 2', ...extra });
-  it('a sale of the same amount within 20 minutes is clear; two such credits make neither clear', () => {
+  it('credits and sales pair by closest time, each used once, up to an hour apart', () => {
     const at = istToMs(2026, 10, 31, 10, 0, 0);
     let r = upiCandidates([credit('c1', at + 5 * 60e3, 84000)], [sale('b1', at, 84000), sale('b2', at + 2 * 3600e3, 84000)]);
     expect(r.candidates.get('c1')!.map((k) => k.transactionIds[0])).toEqual(['b1', 'b2']);
     expect(r.clear.get('c1')?.transactionIds).toEqual(['b1']);
+    // Two credits, one sale: the closer credit gets it.
     r = upiCandidates([credit('c1', at + 60e3, 84000), credit('c2', at + 120e3, 84000)], [sale('b1', at, 84000)]);
-    expect(r.clear.size).toBe(0);
+    expect([...r.clear.keys()]).toEqual(['c1']);
+    // Two credits, two sales: paired by time, not blocked; the paired sale is first in each list.
+    r = upiCandidates([credit('c1', at + 60e3, 23000), credit('c2', at + 10 * 60e3, 23000)], [sale('b1', at, 23000), sale('b2', at + 7 * 60e3, 23000)]);
+    expect(r.clear.get('c1')?.transactionIds).toEqual(['b1']);
+    expect(r.clear.get('c2')?.transactionIds).toEqual(['b2']);
+    expect(r.candidates.get('c2')![0].transactionIds).toEqual(['b2']);
+    // 51 minutes apart and alone: ticked; over an hour: not.
+    expect(upiCandidates([credit('c1', at + 51 * 60e3, 1000)], [sale('b1', at, 1000)]).clear.size).toBe(1);
+    expect(upiCandidates([credit('c1', at + 70 * 60e3, 1000)], [sale('b1', at, 1000)]).clear.size).toBe(0);
   });
   it('bills paid together are offered as one; a sale written under another UPI column is not offered', () => {
     const at = istToMs(2026, 10, 31, 12, 0, 0);
