@@ -249,4 +249,46 @@ describe('bank lines through the API', () => {
     expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${row.id}/match`)).status).toBe(200);
     expect((await sql`SELECT amount_paise FROM transactions WHERE id = ${sale}`)[0].amount_paise).toBe(83400);
   });
+
+  it('bank payments book with item, party and head; the party is learned by UPI ID and fills in next time', async () => {
+    const h = await setup();
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: STATEMENT });
+    let rows = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-10-31`)).json.rows;
+    const veg = rows.find((r: any) => r.tranId === 'S10000003');
+    expect(veg.suggest).toMatchObject({ party: null, headId: null });
+    const b = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: veg.id, headId: h.veg, party: 'Ramesh Veg', item: 'Vegetables' }] })).json;
+    expect(b.booked).toBe(1);
+    const [tx] = await sql`SELECT t.narration, p.name, p.aliases, t.head_id FROM transactions t JOIN parties p ON p.id = t.party_id WHERE t.matched_bank_row = ${veg.id}`;
+    expect(tx).toMatchObject({ narration: 'Vegetables', name: 'Ramesh Veg', head_id: h.veg });
+    expect(JSON.parse(tx.aliases)).toContain('xxh225@okaxis');
+    // A second payment to the same UPI ID: party and head filled in, marked learned.
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: [STATEMENT.split('\n')[1],
+      T([9, 'S10000009', '31/10/2026', '31/10/2026 9:30:00 PM', '-', 'UPI/110000000009/UPI Pay/xxh225@okaxis//ICIz', 'DR', 500, '1'])].join('\n') });
+    rows = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-10-31`)).json.rows;
+    expect(rows.find((r: any) => r.tranId === 'S10000009').suggest).toMatchObject({ party: 'Ramesh Veg', headId: h.veg, learned: true });
+    // Booking it with only the party known: the head comes from the party.
+    const id9 = rows.find((r: any) => r.tranId === 'S10000009').id;
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: id9, party: 'Ramesh Veg' }] })).json.booked).toBe(1);
+    expect((await sql`SELECT head_id FROM transactions WHERE matched_bank_row = ${id9}`)[0].head_id).toBe(h.veg);
+  });
+
+  it('a UPI payment for a sale nobody billed is booked under the F&B (or Room) income head', async () => {
+    const h = await setup();
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: STATEMENT });
+    const rows = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-10-31`)).json.rows;
+    const cr = rows.find((r: any) => r.tranId === 'S10000001');
+    const dr = rows.find((r: any) => r.tranId === 'S10000003');
+    // No head set for F&B bills yet: refused with the reason.
+    let b = (await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: cr.id, billType: 'fnb', item: '2 beers' }] })).json;
+    expect(b.booked).toBe(0);
+    expect(b.skipped[0]).toMatch(/Heads and rules/);
+    await h.clients.owner.put(`/businesses/${h.bid}/bill-type-heads/fnb`, { headId: h.sales });
+    b = (await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: cr.id, billType: 'fnb', item: '2 beers' }, { rowId: dr.id, billType: 'fnb' }] })).json;
+    expect(b.booked).toBe(1);
+    expect(b.skipped[0]).toMatch(/only money received/);
+    const [tx] = await sql`SELECT type, head_id, narration, amount_paise FROM transactions WHERE matched_bank_row = ${cr.id}`;
+    expect(tx).toMatchObject({ type: 'income', head_id: h.sales, amount_paise: 84000 });
+    expect(tx.narration).toMatch(/Sale not billed \(F&B\): 2 beers/);
+    expect((await sql`SELECT note FROM bank_rows WHERE id = ${cr.id}`)[0].note).toBe('Unbilled sale');
+  });
 });

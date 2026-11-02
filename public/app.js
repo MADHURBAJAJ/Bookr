@@ -309,6 +309,7 @@ async function headsView(biz, editId) {
     api('GET', `/businesses/${biz.id}/bill-type-heads`),
     api('GET', `/businesses/${biz.id}/parties`),
     api('GET', `/businesses/${biz.id}/rules`),
+    api('GET', `/businesses/${biz.id}/parties`),
   ]);
   const canRules = biz.actions.includes('rules.edit');
   const vendorsOf = (headId) => parties.filter((p) => p.defaultHeadId === headId || (p.heads ?? []).some((x) => x.headId === headId));
@@ -1892,11 +1893,12 @@ async function bankView(biz, query = '') {
   const account = q.get('account') || '';
   const tab = ['in', 'out', 'done'].includes(q.get('tab')) ? q.get('tab') : 'in';
   // A shift runs 8 am to 8 am, so the last shift's lines run into the next calendar day.
-  const [b, lines, { heads }, { rules }] = await Promise.all([
+  const [b, lines, { heads }, { rules }, { parties }] = await Promise.all([
     api('GET', `/businesses/${biz.id}/bank`),
     api('GET', `/businesses/${biz.id}/bank-rows?from=${from}&to=${addDaysIso(to, 1)}${account ? `&account=${account}` : ''}`),
     api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/rules`),
+    api('GET', `/businesses/${biz.id}/parties`),
   ]);
   const canRules = biz.actions.includes('rules.edit');
   const headsOf = (dir) => heads.filter((h) => h.type === (dir === 'CR' ? 'income' : 'expense'));
@@ -1972,6 +1974,15 @@ async function bankView(biz, query = '') {
   const amt = (r) => html`<div class="amount" style="white-space:nowrap;font-weight:600;color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}₹ ${money(r.amountPaise)}</div>`;
   const headSelect = (r, chosen) => html`<select class="compact" data-head="${r.id}" aria-label="Head" style="max-width:190px"><option value="">Choose head</option>
     ${headsOf(r.direction).map((h) => html`<option value="${h.id}" ${h.id === chosen ? 'selected' : ''}>${h.name}</option>`)}</select>`;
+  // Item, party and head on one line, as on cash expense lines; the party's remembered head fills in.
+  const lineFields = (r) => {
+    const sg = r.suggest ?? {};
+    return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      <input class="compact" data-item="${r.id}" value="${sg.item ?? ''}" placeholder="Item" aria-label="Item" style="width:150px">
+      <input class="compact" data-party="${r.id}" value="${sg.party ?? ''}" list="bankparties" placeholder="Party" aria-label="Party" style="width:150px" autocomplete="off">
+      ${headSelect(r, sg.headId)}${sg.learned ? html`<span class="chip wait" title="Filled in from how this party was booked before">Learned</span>` : r.rule ? html`<span class="tiny">rule: ${r.rule.name}</span>` : ''}
+      ${r.kind === 'upi_fee' ? html`<span class="tiny">Fee on a credit card paid through UPI</span>` : r.kind === 'reversal' ? html`<span class="tiny">Gives back a failed payment</span>` : ''}</div>`;
+  };
   const candText = (k) => `Bill ${k.billNos.join(' + ')}${k.part ? ` (${k.part}, ₹ ${money(k.amountPaise)})` : ''}${k.minutes != null ? ` · ${k.minutes} min apart` : ' · in register'}${k.adjust ? ` · register says ₹ ${money(k.adjust.receivedPaise)} received` : ''}`;
   const candValue = (k) => `${k.adjust ? 'adj:' : ''}${k.transactionIds.join(',')}`;
   const adjustNote = (k) => {
@@ -1985,8 +1996,8 @@ async function bankView(biz, query = '') {
         <span style="display:flex;gap:8px;align-items:center"><span class="tiny">${help}</span>
           <button class="btn" type="button" style="${SMALL}" data-bulk="${id}" data-action="${action}" disabled>${action === 'match' ? 'Match' : 'Book'} 0 selected</button></span>
       </div>
-      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:28px minmax(180px,1.4fr) 120px minmax(200px,1.6fr) auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft);${r.candidates?.[0]?.adjust ? 'background:#FFFBEB;box-shadow:inset 3px 0 0 #F59E0B' : ''}">
-        <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.rule && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
+      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:28px minmax(170px,1.2fr) 110px minmax(240px,2.4fr) auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft);${r.candidates?.[0]?.adjust ? 'background:#FFFBEB;box-shadow:inset 3px 0 0 #F59E0B' : ''}">
+        <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.suggest?.headId && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
         ${payer(r)}${amt(r)}${rowHtml(r)}</div>`)}
     </div>`;
   const skipLink = (r) => html`<button class="btn plain" type="button" style="${SMALL}" data-ignore="${r.id}" title="Not business money, e.g. a transfer between your own accounts">Skip</button>`;
@@ -2003,16 +2014,18 @@ async function bankView(biz, query = '') {
             : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${candValue(k)}">${candText(k)}</option>`)}</select>`}
             ${r.candidates[0].adjust ? adjustNote(r.candidates[0]) : ''}</div>
           <div style="display:flex;gap:4px"><button class="btn plain" type="button" style="${SMALL}" data-fixbill="${r.id}" title="Correct the bill (number, amount, discount) to what the bank shows, and match">Fix bill</button>${skipLink(r)}</div>`, 'match')}
-        ${section('nobill', 'No bill found', 'Book money received that is not a bill, e.g. hostel rent', rest, (r) => html`
-          <div>${headSelect(r, r.rule?.headId)}</div><div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'book')}`;
+        ${section('nobill', 'No bill found', 'A sale nobody billed (e.g. drinks in a rush), or other money received', rest, (r) => html`
+          ${lineFields(r)}<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+            <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="fnb" title="A sale nobody billed: booked as F&B income">Unbilled F&amp;B</button>
+            <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="room" title="A sale nobody billed: booked as Room income">Unbilled Room</button>
+            ${skipLink(r)}</div>`, 'book')}`;
     }
-    const ruled = list.filter((r) => r.rule);
-    const rest = list.filter((r) => !r.rule);
-    return html`${section('ruled', 'Rule suggests a head', 'Change the head if needed', ruled, (r) => html`
-        <div style="display:flex;gap:6px;align-items:center">${headSelect(r, r.rule.headId)}<span class="tiny">${r.rule.name}</span></div><div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'book')}
-      ${section('needs', 'Needs a head', 'Choose a head, or make a rule for payees that repeat', rest, (r) => html`
-        <div>${headSelect(r, null)}${r.kind === 'upi_fee' ? html`<div class="tiny">Fee on a credit card paid through UPI</div>` : r.kind === 'reversal' ? html`<div class="tiny">Gives back a failed payment</div>` : ''}</div>
-        <div style="display:flex;gap:4px">${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
+    const known = list.filter((r) => r.suggest?.headId);
+    const rest = list.filter((r) => !r.suggest?.headId);
+    return html`${section('ruled', 'Head suggested', 'From the party\'s past lines or a rule; change anything that is wrong', known, (r) => html`
+        ${lineFields(r)}<div style="display:flex;gap:4px">${rulePill(r)}${skipLink(r)}</div>`, 'book')}
+      ${section('needs', 'Needs a head', 'Give the item, party and head once: next time the party fills in its head', rest, (r) => html`
+        ${lineFields(r)}<div style="display:flex;gap:4px">${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
   };
 
   render(shell(biz, 'bank', 'Bank sync', 'Statement lines from each bank account, matched to sales or booked under a head. Nothing is booked until a person confirms it.', html`
@@ -2041,6 +2054,7 @@ async function bankView(biz, query = '') {
         : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Make a rule</strong> once and the same supplier is suggested every time. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
         : 'Lines already matched, booked or skipped. Undo puts a line back.'}</div>
       ${tab === 'out' && reversals ? html`<div><button class="btn plain" type="button" id="gorev">Skip ${reversals} failed payment${reversals > 1 ? 's' : ''} and ${reversals > 1 ? 'their' : 'its'} reversal</button></div>` : ''}
+      <datalist id="bankparties">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
       <form class="inset" id="ruleform" hidden>
         <div style="font-weight:600">New rule</div>
         <div class="form-row">
@@ -2058,12 +2072,14 @@ async function bankView(biz, query = '') {
         const found = list.filter((r) => r.candidates.length).length;
         const ruled = list.filter((r) => r.rule).length;
         const matchedHere = all.filter((r) => r.shift === sd && r.status === 'matched');
+        const unbilledHere = all.filter((r) => r.shift === sd && r.status === 'booked' && r.note === 'Unbilled sale');
         return html`<details class="shiftgroup" data-shift="${sd}" ${openShifts.has(sd) ? 'open' : ''} style="border:1px solid var(--line-soft);border-radius:8px">
           <summary style="cursor:pointer;padding:12px 14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
             <span><strong>${dayLabel(sd)} shift</strong> <span class="note">8 am to 8 am</span></span>
             <span class="note">${list.length} line${list.length === 1 ? '' : 's'} · ₹ ${money(total)}${tab === 'in' && matchedHere.length ? ` · ${matchedHere.length} already matched` : ''}</span>
             <span style="display:flex;gap:6px;flex-wrap:wrap">
               ${tab === 'in' && found ? html`<span class="chip ok">${found} bill${found > 1 ? 's' : ''} found</span>` : ''}
+              ${unbilledHere.length ? html`<span class="chip" style="background:#FEF3C7;color:#92400E" title="UPI payments booked as sales nobody billed">${unbilledHere.length} unbilled sale${unbilledHere.length > 1 ? 's' : ''} ₹ ${money(unbilledHere.reduce((t, r) => t + r.amountPaise, 0))}</span>` : ''}
               ${tab === 'out' && ruled ? html`<span class="chip ok">${ruled} by rule</span>` : ''}
               ${tab !== 'done' && list.length - (tab === 'in' ? found : ruled) ? html`<span class="chip wait">${list.length - (tab === 'in' ? found : ruled)} need a head</span>` : ''}
             </span>
@@ -2168,6 +2184,14 @@ async function bankView(biz, query = '') {
       } catch (err) { showError(box.querySelector('.form-msg'), err); }
     });
   }));
+  // A UPI payment for a sale nobody billed: booked under the F&B or Room income head, with what it was.
+  app.querySelectorAll('[data-unbilled]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.unbilled;
+    const what = (prompt(`Sale not billed (${b.dataset.type === 'fnb' ? 'F&B' : 'Room'}). What was it? (e.g. 2 beers, water)`, app.querySelector(`[data-item="${id}"]`)?.value ?? '') ?? null);
+    if (what === null) return;
+    run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: [{ rowId: id, billType: b.dataset.type, item: what.trim() || null,
+      party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null }] }), (r) => r.booked ? 'Booked as a sale not billed.' : `Not booked: ${r.skipped.join(' ')}`);
+  }));
   // Sections: Select all, ticked count on the button, one button for the ticked lines of that section.
   app.querySelectorAll('[data-sec]').forEach((sec) => {
     const picks = () => [...sec.querySelectorAll('[data-pick]')];
@@ -2181,6 +2205,14 @@ async function bankView(biz, query = '') {
     };
     picks().forEach((c) => c.addEventListener('change', refresh));
     sec.querySelectorAll('[data-head]').forEach((h) => h.addEventListener('change', () => { const c = sec.querySelector(`[data-pick][value="${h.dataset.head}"]`); if (h.value && c) { c.checked = true; refresh(); } }));
+    sec.querySelectorAll('[data-party]').forEach((pi) => pi.addEventListener('change', () => {
+      const p = parties.find((x) => x.name.toLowerCase() === pi.value.trim().toLowerCase());
+      const h = sec.querySelector(`[data-head="${pi.dataset.party}"]`);
+      const heads1 = p ? [...new Set([p.defaultHeadId, ...(p.heads ?? []).map((x) => x.headId)].filter(Boolean))] : [];
+      if (h && !h.value && heads1.length === 1 && [...h.options].some((o) => o.value === heads1[0])) h.value = heads1[0];
+      const c = sec.querySelector(`[data-pick][value="${pi.dataset.party}"]`);
+      if (c && (h?.value || pi.value.trim())) { c.checked = true; refresh(); }
+    }));
     all.addEventListener('change', () => { picks().forEach((c) => { c.checked = all.checked; }); refresh(); });
     refresh();
     btn.addEventListener('click', () => {
@@ -2192,9 +2224,10 @@ async function bankView(biz, query = '') {
         });
         run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-many`, { pairs }), (r) => `${r.matched} credit${r.matched === 1 ? '' : 's'} matched to bills.${r.skipped.length ? ` Not matched: ${r.skipped.join(' ')}` : ''}`);
       } else {
-        const items = ids.map((id) => ({ rowId: id, headId: sec.querySelector(`[data-head="${id}"]`)?.value || null }));
-        const missing = items.filter((x) => !x.headId).length;
-        if (missing) { showError(msg, new Error(`Choose a head for ${missing} ticked line${missing > 1 ? 's' : ''} first.`)); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+        const items = ids.map((id) => ({ rowId: id, headId: sec.querySelector(`[data-head="${id}"]`)?.value || null,
+          party: sec.querySelector(`[data-party="${id}"]`)?.value.trim() || null, item: sec.querySelector(`[data-item="${id}"]`)?.value.trim() || null }));
+        const missing = items.filter((x) => !x.headId && !x.party).length;
+        if (missing) { showError(msg, new Error(`Choose a head (or a known party) for ${missing} ticked line${missing > 1 ? 's' : ''} first.`)); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
         run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`);
       }
     });

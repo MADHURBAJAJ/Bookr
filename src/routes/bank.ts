@@ -6,7 +6,7 @@ import { body, fail, isUuid, optionalPaise, text } from '../http';
 import { parseStatementRows, parseStatementText } from '../bankstatement';
 import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
 import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, ruleFor, suggestionsFor, type BankRow } from '../bank';
-import { byName, loadParties } from '../parties';
+import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } from '../parties';
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
@@ -121,7 +121,8 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
     LEFT JOIN transactions bt ON bt.id = r.transaction_id LEFT JOIN heads h ON h.id = bt.head_id
     WHERE r.business_id = ? AND r.day BETWEEN ? AND ? AND (? IS NULL OR r.account_id = ?) AND (? IS NULL OR r.status = ?)
     ORDER BY r.posted_at, r.tran_id LIMIT 3000`, bid, from, to, account, account, status, status);
-  const [rules, sug] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to)]);
+  const [rules, sug, parties, history] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to), loadParties(db, bid), loadHistory(db, bid)]);
+  const plainNote = (v: string | null) => (v && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay|Paid securely v|Navi UPI|Paid in seconds)$/i.test(v.trim()) ? v.trim() : '');
   return c.json({
     from, to,
     rows: rows.map((r) => {
@@ -133,6 +134,13 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
         pairRowId: r.pair_row_id, pairStatus: pair?.status ?? null, status: r.status, note: r.note, headName: r.head_name, bills: r.bills,
         rule: rule ? { id: rule.id, name: rule.name, headId: rule.head_id, partyId: rule.party_id } : null,
         candidates: r.kind === 'upi_in' && r.status === 'unmatched' ? (sug.candidates.get(r.id) ?? []).slice(0, 5) : [],
+        suggest: r.status === 'unmatched' ? (() => {
+          // As on cash expense lines: the party known by this UPI ID (or named in the note), and its head for this item.
+          const item = plainNote(r.remark);
+          const party = (r.vpa ? byName(parties, r.vpa) : null) ?? (item ? inText(parties, item) : null);
+          const head = party ? pickHead(party, history, item) : null;
+          return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? null, headChoices: head?.choices ?? [], learned: !!head?.headId };
+        })() : null,
         clear: sug.clear.has(r.id),
       };
     }),
@@ -300,21 +308,35 @@ bankRoutes.post('/businesses/:businessId/bank-rows/book-many', requireRole('bank
   const db = c.env.DB;
   const bid = c.get('businessId');
   const data = await body(c);
-  const items = (Array.isArray(data.items) ? data.items : []).slice(0, 300) as { rowId?: unknown; headId?: unknown }[];
+  const items = (Array.isArray(data.items) ? data.items : []).slice(0, 300) as { rowId?: unknown; headId?: unknown; party?: unknown; item?: unknown; billType?: unknown }[];
   if (!items.length) fail(400, 'Choose the lines to book.');
   const t = now();
   const user = c.get('user').id;
+  const ctx = { parties: await loadParties(db, bid), history: await loadHistory(db, bid) };
+  // A sale nobody billed (e.g. drinks in a rush, paid by UPI): booked under the bill type's income head, like billed sales.
+  const typeHeads = new Map((await all<{ bill_type: string; head_id: string }>(db, 'SELECT bill_type, head_id FROM bill_type_heads WHERE business_id = ?', bid)).map((x) => [x.bill_type, x.head_id]));
   const statements: D1PreparedStatement[] = [];
   const skipped: string[] = [];
   let booked = 0;
   for (const it of items) {
     const rowId = typeof it.rowId === 'string' && isUuid(it.rowId) ? it.rowId : null;
-    const headId = typeof it.headId === 'string' && isUuid(it.headId) ? it.headId : null;
+    const unbilled = it.billType === 'fnb' || it.billType === 'room' ? it.billType : null;
+    const chosen = unbilled ? typeHeads.get(unbilled) ?? null : typeof it.headId === 'string' && isUuid(it.headId) ? it.headId : null;
+    const partyName = typeof it.party === 'string' && it.party.trim() ? it.party.trim().slice(0, 120) : null;
+    const typed = typeof it.item === 'string' && it.item.trim() ? it.item.trim().slice(0, 200) : null;
+    const item = unbilled ? `Sale not billed (${unbilled === 'fnb' ? 'F&B' : 'Room'})${typed ? `: ${typed}` : ''}` : typed;
     const row = rowId ? await getRow(db, bid, rowId) : null;
     if (!row || row.status !== 'unmatched') { skipped.push(`${row?.tran_id ?? 'A line'}: already done or not found.`); continue; }
-    if (!headId) { skipped.push(`${row.tran_id}: choose a head.`); continue; }
-    try { statements.push(...(await bookStatements(db, bid, row, headId, null, null, user, t, 'chosen in a list'))); booked += 1; }
-    catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); }
+    if (unbilled && row.direction !== 'CR') { skipped.push(`${row.tran_id}: only money received can be a sale.`); continue; }
+    if (unbilled && !chosen) { skipped.push(`${row.tran_id}: choose the income head for ${unbilled === 'fnb' ? 'F&B' : 'Room'} bills on Heads and rules first.`); continue; }
+    try {
+      const p = await partyStatements(db, bid, row, partyName, item, chosen, ctx);
+      if (!p.headId) { skipped.push(`${row.tran_id}: choose a head.`); continue; }
+      const book = await bookStatements(db, bid, row, p.headId, p.partyId, unbilled ? 'Unbilled sale' : null, user, t, unbilled ? `unbilled ${unbilled} sale` : 'chosen in a list', item);
+      statements.push(...p.statements, ...book);
+      if (p.partyId) ctx.history.unshift({ party_id: p.partyId, head_id: p.headId, narration: item ?? row.remark });
+      booked += 1;
+    } catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); }
   }
   for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
   return c.json({ booked, skipped });
@@ -523,7 +545,30 @@ bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole(
 
 // ---- Booking a line as income or expense under a head, or leaving it out
 
-async function bookStatements(db: D1Database, bid: string, row: BankRow, headId: string, partyId: string | null, note: string | null, user: string, t: number, how: string) {
+/**
+ * The party a bank line is booked with, as on cash expense lines: a named party (new ones are remembered with the
+ * head chosen), or one known by this UPI ID or named in the note. The UPI ID is remembered on the party, so the
+ * next payment to or from it gets the party and its head by itself.
+ */
+async function partyStatements(db: D1Database, bid: string, row: BankRow, partyName: string | null, item: string | null, headId: string | null,
+  ctx: { parties: Awaited<ReturnType<typeof loadParties>>; history: Awaited<ReturnType<typeof loadHistory>> }) {
+  const named = partyName ? byName(ctx.parties, partyName) : null;
+  const byVpa = !partyName && row.vpa ? byName(ctx.parties, row.vpa) : null;
+  const v = resolveVendor(db, bid, ctx.parties, { vendor: partyName ?? byVpa?.name ?? null, narration: item ?? row.remark ?? '', headId }, ctx.history);
+  const statements = [...v.statements];
+  const party = v.partyId ? ctx.parties.find((p) => p.id === v.partyId) ?? named ?? byVpa : null;
+  if (party && row.vpa) {
+    const aliases = JSON.parse(party.aliases || '[]') as string[];
+    if (!aliases.map((a) => a.toLowerCase()).includes(row.vpa.toLowerCase()) && party.name.toLowerCase() !== row.vpa.toLowerCase()) {
+      aliases.push(row.vpa);
+      party.aliases = JSON.stringify(aliases);
+      statements.push(stmt(db, 'UPDATE parties SET aliases = ? WHERE id = ?', party.aliases, party.id));
+    }
+  }
+  return { partyId: v.partyId, headId: v.headId, statements };
+}
+
+async function bookStatements(db: D1Database, bid: string, row: BankRow, headId: string, partyId: string | null, note: string | null, user: string, t: number, how: string, item: string | null = null) {
   const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', headId, bid);
   if (!head) fail(400, 'Choose a head.');
   const type = row.direction === 'CR' ? 'income' : 'expense';
@@ -532,10 +577,10 @@ async function bookStatements(db: D1Database, bid: string, row: BankRow, headId:
   return [
     stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, party_id, matched_bank_row, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'bank_sheet', 'approved', ?, ?, ?, ?)`,
-      txId, bid, row.account_id, row.day, row.amount_paise, type, headId, note ? `${row.description} — ${note}` : row.description,
+      txId, bid, row.account_id, row.day, row.amount_paise, type, headId, [item || row.description, note].filter(Boolean).join(' — '),
       row.kind === 'upi_in' || row.kind === 'upi_out' || row.kind === 'upi_fee' ? 'upi' : null, partyId, row.id, t),
     stmt(db, "UPDATE bank_rows SET status = 'booked', transaction_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", txId, note, user, t, row.id),
-    stmt(db, AUDIT, ...audit(bid, user, 'bank.book', row.id, { status: 'unmatched' }, { status: 'booked', headId, partyId, note, how, transactionId: txId }, t)),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.book', row.id, { status: 'unmatched' }, { status: 'booked', headId, partyId, item, note, how, transactionId: txId }, t)),
   ];
 }
 
