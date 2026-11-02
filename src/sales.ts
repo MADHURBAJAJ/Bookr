@@ -250,10 +250,16 @@ export async function otherDays(db: DB, businessId: string, day: string, comps: 
   const out = new Map<string, OtherDay>();
   const mine = comps.filter((c) => ONE_SIDED.includes(c.difference));
   if (!mine.length) return out;
+  // A bill added to the register from the software report is, for other days, a software-only bill that was counted.
   const cands = await all<Comparison & { shift_day: string; shift_status: string | null; rg_type: string | null }>(db, `
-    SELECT c.*, s.status AS shift_status, r.bill_type AS rg_type FROM bill_comparisons c
+    SELECT * FROM (SELECT c.id, c.business_id, c.shift_day, c.pos_no, c.bill_no, c.software_bill_id, c.register_row_id, c.sw_amount_paise, c.sw_mode,
+      c.rg_amount_paise, c.rg_mode, c.note, c.bill_type, c.linked_to_id, c.closed_at, c.close_note, c.decided_by, c.decided_at, c.created_at,
+      CASE WHEN json_extract(r.ocr_original, '$.source') = 'software_report' THEN 'missing_in_register' ELSE c.difference END AS difference,
+      CASE WHEN json_extract(r.ocr_original, '$.source') = 'software_report' THEN 'use_software' ELSE c.decision END AS decision,
+      s.status AS shift_status, r.bill_type AS rg_type
+    FROM bill_comparisons c
     LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
-    LEFT JOIN register_rows r ON r.id = c.register_row_id
+    LEFT JOIN register_rows r ON r.id = c.register_row_id) c
     WHERE c.business_id = ? AND c.shift_day <> ? AND c.difference IN ('missing_in_register', 'missing_in_software')
       AND ((c.shift_day BETWEEN ? AND ? AND c.closed_at IS NULL)
         OR c.linked_to_id IN (SELECT x.id FROM bill_comparisons x WHERE x.business_id = ? AND x.shift_day = ?)

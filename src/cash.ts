@@ -25,7 +25,12 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
       WHERE business_id = ? AND shift_day = ? AND source = 'software_report' AND type = 'income' AND payment_mode = 'cash'`, businessId, day),
     all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null }>(db, `
       SELECT id, bill_no, sw_amount_paise, decision, bill_type, note FROM bill_comparisons
-      WHERE business_id = ? AND shift_day = ? AND difference = 'missing_in_register' AND sw_mode = 'cash' ORDER BY bill_no`, businessId, day),
+      WHERE business_id = ? AND shift_day = ? AND difference = 'missing_in_register' AND sw_mode = 'cash'
+      UNION ALL
+      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report'
+      FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
+      WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
+      ORDER BY 2`, businessId, day, businessId, day),
     one<{ approved: number; waiting: number }>(db, `SELECT
         coalesce(sum(CASE WHEN status = 'approved' THEN amount_paise END), 0) AS approved,
         count(CASE WHEN status <> 'approved' THEN 1 END) AS waiting

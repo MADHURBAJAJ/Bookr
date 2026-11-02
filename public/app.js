@@ -614,7 +614,8 @@ const STATUS_CHIPS = {
 const chip = (status) => { const [t, k] = STATUS_CHIPS[status] ?? [status, '']; return html`<span class="chip ${k}">${t}</span>`; };
 
 const canDeleteUpload = (biz, u) => ['owner', 'accountant'].includes(biz.role) || u.uploadedBy === me.user.id;
-const deleteButton = (biz, u) => (canDeleteUpload(biz, u) ? html`<button class="btn danger" type="button" data-delupload="${u.id}" data-what="${KIND_LABELS[u.kind]} for ${dayLabel(u.day)}">Delete</button>` : '');
+const kindLabel = (u) => (u.fromSoftware ? 'Bill register: added from software report' : KIND_LABELS[u.kind]);
+const deleteButton = (biz, u) => (canDeleteUpload(biz, u) ? html`<button class="btn danger" type="button" data-delupload="${u.id}" data-what="${kindLabel(u)} for ${dayLabel(u.day)}">Delete</button>` : '');
 /** Wires every Delete button on the screen. Asks first; then runs after(). */
 function wireDeletes(biz, msgEl, after) {
   app.querySelectorAll('[data-delupload]').forEach((b) => b.addEventListener('click', async () => {
@@ -665,7 +666,7 @@ async function uploadView(biz) {
       <h2 style="margin-bottom:8px">Recent uploads</h2>
       ${uploads.length ? uploads.map((u) => html`
         <div class="list-row">
-          <span><strong>${KIND_LABELS[u.kind]}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}</span>
+          <span><strong>${kindLabel(u)}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}</span>
           <span style="display:flex;gap:10px;align-items:center">${chip(u.status)}
             ${u.kind === 'software_sales_csv' ? html`<a href="#/b/${biz.id}/compare">Compare sales</a>` : html`<a href="#/b/${biz.id}/review/${u.id}">Review</a>`}
             ${deleteButton(biz, u)}</span>
@@ -815,7 +816,12 @@ async function reviewView(biz, uploadId, highlightRow) {
   const prev = at > 0 ? same[at - 1] : null;
   const next = at >= 0 && at < same.length - 1 ? same[at + 1] : null;
   const fileUrl = `/api/businesses/${biz.id}/uploads/${u.id}/file`;
-  const photo = html`
+  const photo = u.fromSoftware ? html`
+    <section class="card" id="photocard" style="flex:2 1 420px;max-width:100%;gap:10px">
+      <h2>Added from software report</h2>
+      <div class="note">No photo: these bills were in the software report but not written in the handwritten register. They were added here when "Add to register" was chosen on Compare sales, with the amount and payment mode from the software. Delete a line here to undo.</div>
+      <div style="display:flex;justify-content:flex-end">${deleteButton(biz, u)}</div>
+    </section>` : html`
     <section class="card" id="photocard" style="flex:2 1 420px;max-width:100%;padding:16px;gap:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px" class="note"><span>Original page</span><span style="display:flex;gap:10px;align-items:center"><a href="${fileUrl}" target="_blank" rel="noopener">Open full size</a>${deleteButton(biz, u)}</span></div>
       <div style="overflow:hidden;display:flex;justify-content:center"><img src="${fileUrl}" alt="Uploaded page" style="width:100%;border:1px solid var(--field);border-radius:6px;background:#FBFAF6;transition:transform .2s" id="pimg"></div>
@@ -830,7 +836,7 @@ async function reviewView(biz, uploadId, highlightRow) {
   else if (u.kind === 'expense_list') right = expensePanel(biz, u, heads, parties);
   else if (u.kind === 'cash_summary') right = summaryPanel(biz, u);
   else right = html`<section class="card grow3"><div class="note">Single printed bills are kept for reference. Nothing is read from them yet.</div></section>`;
-  render(shell(biz, 'review', `Review: ${KIND_LABELS[u.kind]}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
+  render(shell(biz, 'review', `Review: ${kindLabel(u)}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
     <div class="form-row" style="justify-content:space-between;align-items:center;margin-bottom:-8px">
       <div class="form-row" style="align-items:center">
         ${backButton()}
@@ -986,7 +992,7 @@ async function reviewListView(biz, find) {
     <section class="card" style="gap:4px">
       ${pages.length ? pages.map((u) => html`
         <div class="list-row">
-          <a href="#/b/${biz.id}/review/${u.id}" style="color:inherit"><strong>${KIND_LABELS[u.kind]}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}${u.open ? ` · ${u.open} to check` : ''}</a>
+          <a href="#/b/${biz.id}/review/${u.id}" style="color:inherit"><strong>${kindLabel(u)}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}${u.open ? ` · ${u.open} to check` : ''}</a>
           <span style="display:flex;gap:10px;align-items:center">${u.totalDiffers ? html`<span class="chip bad">Total differs</span>` : ''}${chip(u.status)}<a href="#/b/${biz.id}/review/${u.id}">Review</a>${deleteButton(biz, u)}</span>
         </div>`) : html`<div class="note">No pages yet. <a href="#/b/${biz.id}/upload">Upload one</a>.</div>`}
     </section>`));
@@ -1542,7 +1548,7 @@ function decisionChoices(c) {
 function baseChoices(c) {
   const carry = !c.register || !c.software ? [['carry_forward', 'Carry forward']] : [];
   if (c.largeDiscount && c.software) return [['use_register', 'Accept discount'], ['use_software', 'Payment missing · use software'], ['leave_out', 'Leave out']];
-  if (!c.register) return [['use_software', 'Use software · F&B', 'fnb'], ['use_software', 'Use software · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
+  if (!c.register) return [['use_software', 'Add to register · F&B', 'fnb'], ['use_software', 'Add to register · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
   if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out'], ...carry];
   return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
 }
@@ -1966,7 +1972,7 @@ async function bankView(biz, query = '') {
   const amt = (r) => html`<div class="amount" style="white-space:nowrap;font-weight:600;color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}₹ ${money(r.amountPaise)}</div>`;
   const headSelect = (r, chosen) => html`<select class="compact" data-head="${r.id}" aria-label="Head" style="max-width:190px"><option value="">Choose head</option>
     ${headsOf(r.direction).map((h) => html`<option value="${h.id}" ${h.id === chosen ? 'selected' : ''}>${h.name}</option>`)}</select>`;
-  const candText = (k) => `Bill ${k.billNos.join(' + ')}${k.minutes != null ? ` · ${k.minutes} min apart` : ' · in register'}`;
+  const candText = (k) => `Bill ${k.billNos.join(' + ')}${k.part ? ` (${k.part}, ₹ ${money(k.amountPaise)})` : ''}${k.minutes != null ? ` · ${k.minutes} min apart` : ' · in register'}`;
   const section = (id, title, help, items, rowHtml, action) => !items.length ? '' : html`
     <div data-sec="${id}" style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;background:var(--surface-2, #F6F7F9)">
@@ -2177,7 +2183,7 @@ async function upiView(biz, day) {
       ${v.sales.length ? html`<div class="scroll"><table style="min-width:720px"><thead><tr><th>Bill</th><th>Paid at</th><th>Register column</th><th style="text-align:right">Amount</th><th>Bank credit</th></tr></thead>
         <tbody>${v.sales.map((s) => html`<tr class="clickrow" data-bill="${s.billNo ?? ''}" data-open="${s.uploadId ? `#/b/${biz.id}/review/${s.uploadId}/${s.registerRowId}` : `#/b/${biz.id}/review?find=${(s.billNo ?? '').slice(-4)}`}"
             title="${s.uploadId ? 'Open this bill in its register page' : 'Not in the register: look for it on the register pages'}" style="cursor:pointer">
-          <td class="mono"><a href="#" data-openlink>${s.billNo ?? ''}</a></td><td>${s.paidAt ? when(s.paidAt) : html`<span class="note">register only</span>`}</td><td class="note">${s.labels ?? ''}</td>
+          <td class="mono"><a href="#" data-openlink>${s.billNo ?? ''}</a>${s.parts > 1 ? html`<div class="tiny" style="font-family:inherit">part of ${s.parts} UPI payments</div>` : ''}</td><td>${s.paidAt ? when(s.paidAt) : html`<span class="note">register only</span>`}</td><td class="note">${s.labels ?? ''}</td>
           <td class="amount">${money(s.amountPaise)}</td>
           <td>${s.bankRowId ? html`<span class="chip ok">${s.accountName}</span> <span class="note">${when(s.creditAt)}${s.paidAt ? ` · ${Math.round(Math.abs(s.creditAt - s.paidAt) / 60000)} min` : ''}</span>` : html`<span class="chip bad">Not found yet</span>`}</td></tr>`)}</tbody></table></div>`
         : html`<div class="note">No UPI sales in this shift${v.confirmedShifts.includes(v.day) ? '' : ' yet: sales count once the shift is confirmed on Compare sales'}.</div>`}
@@ -2219,7 +2225,7 @@ function pairPanel(v, waiting) {
         <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">UPI bills not found in the bank <span class="chip">${waiting.length}</span></div>
         <div style="max-height:420px;overflow:auto">${waiting.length ? waiting.map((s) => html`<label style="${line}">
           <input type="checkbox" data-pbl="${s.id}" data-amt="${s.amountPaise}" data-group="${s.groupHead ?? ''}" style="${pick}">
-          <span style="flex:1;min-width:0"><span class="mono">${s.billNo ?? ''}</span>${s.groupHead ? html` <span class="chip" title="Paid together with other bills: they are ticked together">paid together</span>` : ''}
+          <span style="flex:1;min-width:0"><span class="mono">${s.billNo ?? ''}</span>${s.groupHead ? html` <span class="chip" title="Paid together with other bills: they are ticked together">paid together</span>` : ''}${s.parts > 1 ? html` <span class="chip wait" title="The register shows this bill paid by ${s.parts} UPI payments; each is a line here">part of ${s.parts} UPI payments</span>` : ''}
             <span class="tiny" style="display:block">${s.paidAt ? when(s.paidAt) : 'register only'}${s.labels ? ` · ${s.labels}` : ''}</span></span>
           <strong class="amount">₹ ${money(s.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>
       </div>

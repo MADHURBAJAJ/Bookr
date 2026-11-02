@@ -700,15 +700,19 @@ describe('use software for a bill missing in the register', () => {
     expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_software', billType: 'bar' })).status).toBe(400);
     expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_software', billType: 'room' })).status).toBe(200);
     v = await view(h);
-    expect(byBill(v, '2610319')).toMatchObject({ decision: 'use_software', billType: 'room' });
+    // Written into the register on the shift's "Added from software report" page: now an ordinary match.
+    expect(byBill(v, '2610319')).toMatchObject({ difference: 'match', decision: null });
+    expect(byBill(v, '2610319').register).toMatchObject({ billType: 'room', amountPaise: 35300, mode: 'cash' });
+    const [added] = await sql`SELECT r.remarks, r.status, u.storage_key FROM register_rows r JOIN uploads u ON u.id = r.upload_id WHERE r.bill_no = '2610319'`;
+    expect(added).toMatchObject({ remarks: 'Added from software report', status: 'checked', storage_key: 'software-added/2026-10-31' });
     for (const [bill, d] of [['26103115', 'use_register'], ['2610317', 'use_software'], ['2610318', 'use_register'], ['26103120', 'use_register'], ['26103125', 'use_register']]) {
       await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
     }
     expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
     const [t] = await sql`SELECT t.amount_paise, t.payment_mode, t.confirmed_source, hd.name AS head FROM transactions t JOIN heads hd ON hd.id = t.head_id WHERE t.bill_no = '2610319'`;
-    expect(t).toEqual({ amount_paise: 35300, payment_mode: 'cash', confirmed_source: 'software', head: 'Room' });
-    const [a] = await sql`SELECT after FROM audit_log WHERE action = 'comparison.decide' AND row_id = ${id} ORDER BY id DESC LIMIT 1`;
-    expect(JSON.parse(a.after)).toMatchObject({ decision: 'use_software', billType: 'room' });
+    expect(t).toEqual({ amount_paise: 35300, payment_mode: 'cash', confirmed_source: 'both_matched', head: 'Room' });
+    const [a] = await sql`SELECT after FROM audit_log WHERE action = 'register.added_from_software' ORDER BY id DESC LIMIT 1`;
+    expect(JSON.parse(a.after)).toMatchObject({ billNo: '2610319', billType: 'room', amountPaise: 35300, mode: 'cash' });
   });
 
   it('the type is cleared with the decision when the bill turns up in the register', async () => {
@@ -764,7 +768,7 @@ describe('cash for a shift', () => {
     // 4,303.50 register cash + 353 cash bill not in the register = 4,656.50
     expect(k).toMatchObject({ confirmed: true, openingPaise: 840000, openingFrom: 'page', cashSalesPaise: 465650, expensesPaise: 0,
       shouldBePaise: 1305650, countedPaise: 1270350, differencePaise: -35300, settled: false, notInRegisterBookedPaise: 35300 });
-    expect(k.notInRegister).toEqual([{ id: expect.any(String), billNo: '2610319', amountPaise: 35300, decision: 'use_software', billType: 'fnb', note: null }]);
+    expect(k.notInRegister).toEqual([{ id: expect.any(String), billNo: '2610319', amountPaise: 35300, decision: 'use_software', billType: 'fnb', note: 'Added to the register from the software report' }]);
   });
 
   it('a difference is accepted with a note, and only that exact difference', async () => {
@@ -972,8 +976,9 @@ describe('bills on one side only, followed across days', () => {
     const h = await hotel();
     await fullShift(h);
     expect((await decide(h, byBill(await view(h), '2610319').id, { decision: 'use_software', billType: 'fnb' })).status).toBe(200);
+    // Added to the register from the software report: counted, not waiting.
     let waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills;
-    expect(waiting.map((b: any) => b.billNo)).toContain('2610319');
+    expect(waiting.map((b: any) => b.billNo)).not.toContain('2610319');
     await regPage(h, 95, [{ billNo: '2610319', amount: '353', mode: 'cash' }]);
     const late = byBill(await view(h, NOV1), '2610319');
     expect(late.difference).toBe('missing_in_software');

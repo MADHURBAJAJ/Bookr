@@ -215,4 +215,18 @@ describe('bank lines through the API', () => {
     expect((await sql`SELECT sum(amount_paise) AS s FROM bank_matches WHERE bank_row_id = ${row.id}`)[0].s).toBe(213900);
     expect((await sql`SELECT amount_paise, type FROM transactions WHERE source = 'bank_sheet' AND matched_bank_row = ${row.id}`)[0]).toEqual({ amount_paise: 5000, type: 'expense' });
   });
+
+  it('change the bills on a bill only in the software report: its sale becomes what the bank received, reversibly', async () => {
+    const h = await setup();
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: STATEMENT });
+    const sale = crypto.randomUUID();
+    await sql`INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, source, status, payment_mode, bill_no, shift_day, match_status, created_at)
+      VALUES (${sale}, ${h.bid}, '2026-10-31', 83400, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '26103018', '2026-10-31', 'awaiting_bank_match', 0)`;
+    const [row] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S10000001'`;
+    const r = await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: [row.id], transactionIds: [sale], treat: 'bills', note: 'tip' });
+    expect(r.status).toBe(200);
+    expect((await sql`SELECT amount_paise FROM transactions WHERE id = ${sale}`)[0].amount_paise).toBe(84000);
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${row.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT amount_paise FROM transactions WHERE id = ${sale}`)[0].amount_paise).toBe(83400);
+  });
 });

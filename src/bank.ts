@@ -61,12 +61,15 @@ export function ruleFor(rules: Rule[], r: Pick<BankRow, 'direction' | 'account_i
 
 export interface UpiIncome {
   id: string; amount_paise: number; bill_no: string | null; shift_day: string; paid_at: number | null; group_head: string | null; labels: string | null;
+  /** How many UPI payments the register shows for this bill (a bill paid in two goes has two sale lines). */
+  parts?: number;
 }
 
 /** Confirmed UPI sales still waiting for their bank credit, in shifts from..to. */
 export const waitingUpi = (db: DB, businessId: string, from: string, to: string) => all<UpiIncome>(db, `
   SELECT t.id, t.amount_paise, t.bill_no, t.shift_day, sb.paid_at, coalesce(rr.paid_with_row_id, rr.id) AS group_head,
-    (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels
+    (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels,
+    (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts
   FROM transactions t
   LEFT JOIN bill_comparisons c ON c.id = t.comparison_id
   LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
@@ -82,7 +85,7 @@ const labelFits = (labels: string | null, accountLabel: string | null) =>
 const STRONG_MIN = 20;
 const WIDE_MIN = 180;
 
-export interface Candidate { transactionIds: string[]; billNos: string[]; amountPaise: number; minutes: number | null; strong: boolean; shiftDay: string }
+export interface Candidate { transactionIds: string[]; billNos: string[]; amountPaise: number; minutes: number | null; strong: boolean; shiftDay: string; part: string | null }
 
 /**
  * For each unmatched UPI credit, sales of the same amount paid near that time (a bill paid together counts as one).
@@ -90,17 +93,19 @@ export interface Candidate { transactionIds: string[]; billNos: string[]; amount
  * other strong credit.
  */
 export function upiCandidates(credits: (BankRow & { label: string | null })[], sales: UpiIncome[]) {
-  const units: { ids: string[]; bills: string[]; amount: number; paidAt: number | null; shiftDay: string; labels: string | null }[] = [];
+  const units: { ids: string[]; bills: string[]; amount: number; paidAt: number | null; shiftDay: string; labels: string | null; part: string | null }[] = [];
   const byGroup = new Map<string, UpiIncome[]>();
   for (const s of sales) {
-    units.push({ ids: [s.id], bills: [s.bill_no ?? ''], amount: s.amount_paise, paidAt: s.paid_at, shiftDay: s.shift_day, labels: s.labels });
+    units.push({ ids: [s.id], bills: [s.bill_no ?? ''], amount: s.amount_paise, paidAt: s.paid_at, shiftDay: s.shift_day, labels: s.labels,
+      part: (s.parts ?? 1) > 1 ? `part: 1 of ${s.parts} UPI payments` : null });
     if (s.group_head) byGroup.set(s.group_head, [...(byGroup.get(s.group_head) ?? []), s]);
   }
   for (const g of byGroup.values()) {
     if (g.length < 2) continue;
     const times = g.map((s) => s.paid_at).filter((x): x is number => x != null);
-    units.push({ ids: g.map((s) => s.id), bills: g.map((s) => s.bill_no ?? ''), amount: g.reduce((t, s) => t + s.amount_paise, 0),
-      paidAt: times.length ? Math.max(...times) : null, shiftDay: g[0].shift_day, labels: g[0].labels });
+    const oneBill = new Set(g.map((s) => s.bill_no)).size === 1;
+    units.push({ ids: g.map((s) => s.id), bills: [...new Set(g.map((s) => s.bill_no ?? ''))], amount: g.reduce((t, s) => t + s.amount_paise, 0),
+      paidAt: times.length ? Math.max(...times) : null, shiftDay: g[0].shift_day, labels: g[0].labels, part: oneBill ? `all ${g.length} UPI payments` : null });
   }
   const out = new Map<string, Candidate[]>();
   for (const c of credits) {
@@ -115,7 +120,7 @@ export function upiCandidates(credits: (BankRow & { label: string | null })[], s
         const w = shiftWindow(u.shiftDay);
         if (c.posted_at < w.from - 3600e3 || c.posted_at > w.to + 3600e3) continue;
       }
-      list.push({ transactionIds: u.ids, billNos: u.bills, amountPaise: u.amount, minutes, strong: minutes != null && minutes <= STRONG_MIN, shiftDay: u.shiftDay });
+      list.push({ transactionIds: u.ids, billNos: u.bills, amountPaise: u.amount, minutes, strong: minutes != null && minutes <= STRONG_MIN, shiftDay: u.shiftDay, part: u.part });
     }
     list.sort((a, b) => (a.minutes ?? 9999) - (b.minutes ?? 9999));
     out.set(c.id, list);

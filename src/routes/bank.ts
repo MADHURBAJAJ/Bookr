@@ -147,6 +147,7 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
     SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.match_status AS matchStatus, t.matched_bank_row AS bankRowId,
       sb.paid_at AS paidAt, r.posted_at AS creditAt, a.name AS accountName, r.tran_id AS tranId, rr.id AS registerRowId, rr.upload_id AS uploadId,
       (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels,
+      (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts,
       CASE WHEN rr.paid_with_row_id IS NOT NULL OR EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = rr.id) THEN coalesce(rr.paid_with_row_id, rr.id) END AS groupHead
     FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
     LEFT JOIN register_rows rr ON rr.id = c.register_row_id

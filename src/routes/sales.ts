@@ -305,6 +305,35 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
   }
   const t = now();
   const user = c.get('user').id;
+  // A bill only in the software report, counted here: it is written into the register on the shift's
+  // "Added from software report" page (approved 2 Nov 2026), so the register is complete; it then matches.
+  if (decision === 'use_software' && cmp.difference === 'missing_in_register' && !cmp.register_row_id && !linkedToId) {
+    const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day);
+    if (shift?.status === 'confirmed') fail(409, CONFIRMED);
+    const sw = await one<{ amount_paise: number; mode: string }>(db, 'SELECT amount_paise, mode FROM software_bills WHERE id = ?', cmp.software_bill_id);
+    if (!sw || !['cash', 'upi', 'card'].includes(sw.mode)) fail(400, 'The software report does not say how this bill was paid. Leave it out, or write it in the register in Review.');
+    const page = await softwarePage(db, bid, cmp.shift_day, user, t);
+    const line = (await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) + 1 AS n FROM register_rows WHERE upload_id = ?', page.id))?.n ?? 1;
+    const rowId = newId();
+    try {
+      await db.batch([
+        ...page.statements,
+        stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, remarks, status, ocr_original, edited_by, edited_at, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'checked', ?, ?, ?, ?)`, rowId, bid, page.id, line, cmp.shift_day, cmp.bill_no, billType, sw.amount_paise,
+          note ? `Added from software report: ${note}` : 'Added from software report', JSON.stringify({ source: 'software_report', addedBy: user, comparisonId: id }), user, t, t),
+        stmt(db, 'INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?)',
+          newId(), bid, rowId, sw.mode, sw.amount_paise, t),
+        stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+          VALUES (?, ?, 'register.added_from_software', 'register_rows', ?, NULL, ?, ?)`, bid, user, rowId,
+          JSON.stringify({ billNo: cmp.bill_no, billType, amountPaise: sw.amount_paise, mode: sw.mode, note, comparisonId: id }), t),
+      ]);
+    } catch (e) {
+      if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+      throw e;
+    }
+    await refreshComparisons(db, bid, cmp.shift_day, user);
+    return c.json({ ok: true, addedToRegister: true });
+  }
   try {
     await db.batch([
       stmt(db, 'UPDATE bill_comparisons SET decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = ?, linked_to_id = ? WHERE id = ?',
@@ -427,6 +456,16 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/cash/shortage', requireRol
 salesRoutes.get('/businesses/:businessId/waiting-bills', requireRole('sales.view'), async (c) => {
   return c.json({ watchDays: WATCH_DAYS, bills: await waitingBills(c.env.DB, c.get('businessId'), istDay(Date.now())) });
 });
+
+/** The shift's "Added from software report" register page (no photo), made the first time it is needed. */
+async function softwarePage(db: D1Database, bid: string, day: string, user: string, t: number) {
+  const key = `software-added:${day}`;
+  const have = await one<{ id: string }>(db, 'SELECT id FROM uploads WHERE business_id = ? AND content_sha256 = ?', bid, key);
+  if (have) return { id: have.id, statements: [] as D1PreparedStatement[] };
+  const id = newId();
+  return { id, statements: [stmt(db, `INSERT INTO uploads (id, business_id, kind, business_day, storage_key, content_sha256, status, ocr_engine, uploaded_by, created_at)
+    VALUES (?, ?, 'bill_register', ?, ?, ?, 'ready', 'manual', ?, ?)`, id, bid, day, `software-added/${day}`, key, user, t)] };
+}
 
 /** Closes a one-sided bill still unmatched after the watch, with a reason. Owner or Accountant. Audited. */
 salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/close', requireRole('sales.decide'), async (c) => {

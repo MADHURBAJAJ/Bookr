@@ -73,7 +73,7 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
   const db = c.env.DB;
   const bid = c.get('businessId');
   const uploads = await all(db, `
-    SELECT u.id, u.kind, u.business_day AS day, u.status, u.uploaded_by AS uploadedBy, u.created_at AS createdAt,
+    SELECT u.id, u.kind, u.business_day AS day, u.status, u.uploaded_by AS uploadedBy, u.created_at AS createdAt, u.storage_key LIKE 'software-added/%' AS fromSoftware,
       CASE u.kind
         WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id)
         WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id)
@@ -190,7 +190,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const db = c.env.DB;
   const bid = c.get('businessId');
   const u = await getUpload(db, bid, c.req.param('uploadId'));
-  const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at };
+  const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at,
+    fromSoftware: u.storage_key.startsWith('software-added/') };
   if (u.kind === 'bill_register') {
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
       discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt,
