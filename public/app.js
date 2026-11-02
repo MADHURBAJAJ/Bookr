@@ -774,6 +774,7 @@ async function reviewView(biz, uploadId, highlightRow) {
   render(shell(biz, 'review', `Review: ${KIND_LABELS[u.kind]}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
     <div class="form-row" style="justify-content:space-between;align-items:center;margin-bottom:-8px">
       <div class="form-row" style="align-items:center">
+        ${backButton()}
         ${prev ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${prev.id}" title="${KIND_LABELS[prev.kind]} · ${dayLabel(prev.day)}">← Previous page</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">← Previous page</span>`}
         <span class="note">${at >= 0 ? `Page ${at + 1} of ${same.length}` : ''}</span>
         ${next ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${next.id}" title="${KIND_LABELS[next.kind]} · ${dayLabel(next.day)}">Next page →</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">Next page →</span>`}
@@ -862,10 +863,11 @@ const findBillBox = () => html`<form id="findbill" class="form-row" style="align
   <input name="bill" class="cell mono" placeholder="Find bill, e.g. 3154" style="width:190px" aria-label="Find a bill number on register pages" autocomplete="off">
   <button class="btn plain" type="submit" style="min-height:36px">Find</button></form>`;
 
-function wireFindBill(biz) {
+function wireFindBill(biz, initial) {
   const form = document.getElementById('findbill');
   const out = document.getElementById('findresults');
   if (!form || !out) return;
+  if (initial) setTimeout(() => { form.bill.value = initial; form.bill.dispatchEvent(new Event('input')); }, 0);
   let timer;
   const run = async () => {
     const q = form.bill.value.trim();
@@ -883,13 +885,13 @@ function wireFindBill(biz) {
   form.bill.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 300); });
 }
 
-async function reviewListView(biz) {
+async function reviewListView(biz, find) {
   const { uploads, notices } = await api('GET', `/businesses/${biz.id}/uploads`);
   const pages = uploads.filter((u) => u.kind !== 'software_sales_csv');
   const csvs = uploads.filter((u) => u.kind === 'software_sales_csv' && u.report);
   render(shell(biz, 'review', 'Review', 'Pick a page to check its rows beside the photo. Software reports are checked on Compare sales.', html`
     <div id="rlmsg"></div>
-    <div class="form-row" style="align-items:center">${findBillBox()}</div>
+    <div class="form-row" style="align-items:center">${backButton()}${findBillBox()}</div>
     <div id="findresults"></div>
     ${notices.map((n) => html`<div class="demo-band">${n.text.replace(n.day, dayLabel(n.day))}</div>`)}
     <section class="card" style="gap:4px">
@@ -911,7 +913,7 @@ async function reviewListView(biz) {
     </section>`));
   wireShell();
   wireDeletes(biz, () => document.getElementById('rlmsg'), () => reviewListView(biz));
-  wireFindBill(biz);
+  wireFindBill(biz, find);
 }
 
 /** Fields Claude could not read with confidence, while nobody has checked the row yet. */
@@ -1358,6 +1360,16 @@ function wireSummary(biz, u) {
   });
 }
 
+// ---------- Way back from Review to the difference that opened it (per browser tab)
+const BACK_KEY = 'bookr.backTo';
+function setBackTo(v) { try { sessionStorage.setItem(BACK_KEY, JSON.stringify(v)); } catch { /* storage unavailable */ } }
+function getBackTo() { try { return JSON.parse(sessionStorage.getItem(BACK_KEY) || 'null'); } catch { return null; } }
+function clearBackTo() { try { sessionStorage.removeItem(BACK_KEY); } catch { /* storage unavailable */ } }
+const backButton = () => {
+  const b = getBackTo();
+  return b ? html`<a class="btn" style="display:inline-flex;align-items:center" href="${b.hash}" id="backto">← Back to differences (${b.label})</a>` : '';
+};
+
 // ---------- Compare sales
 
 async function compareView(biz, day) {
@@ -1422,8 +1434,9 @@ async function compareView(biz, day) {
         ${v.matchedAfterAdjustment.map((m) => `${m.billNo} (software ${money(m.softwarePaise)}, received ${money(m.registerPaise)})`).join(', ')}.</div>` : ''}
       ${toDecide.length ? html`<div class="scroll"><table style="min-width:860px">
         <thead><tr><th>Bill</th><th>Paid at</th><th>Software</th><th>Register</th><th>What differs</th><th>Your decision</th></tr></thead>
-        <tbody>${toDecide.map((c) => html`<tr style="background:${c.decision ? 'transparent' : '#FFF7ED'}">
-          <td class="mono">${c.billNo}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
+        <tbody>${toDecide.map((c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
+            class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
+          <td class="mono"><a href="#" data-openlink>${c.billNo}</a></td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
           <td><span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span></td>
           <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${Object.entries(DECISION_LABELS).map(([k, l]) => html`
@@ -1458,6 +1471,19 @@ async function compareView(biz, day) {
   document.getElementById('sh').addEventListener('change', (e) => go(`#/b/${biz.id}/compare/${e.target.value}`));
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
   app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d }))));
+  // A difference opens its bill in Review; Review offers a way back to this bill here.
+  app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
+    if (e.target.closest('button, select, input')) return;
+    e.preventDefault();
+    setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: tr.dataset.bill, label: `${dayLabel(day)} shift` });
+    location.hash = tr.dataset.open;
+  }));
+  const back = getBackTo();
+  if (back?.bill && back.hash === `#/b/${biz.id}/compare/${day}`) {
+    clearBackTo();
+    const row = app.querySelector(`tr[data-bill="${CSS.escape(back.bill)}"]`);
+    if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
+  }
   app.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
   document.getElementById('confirm')?.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {})));
   const reopen = document.getElementById('reopen');
@@ -1494,14 +1520,14 @@ async function route() {
       if (!summary) return go('#/choose');
       const detail = await api('GET', `/businesses/${summary.id}`);
       const biz = { ...summary, ...detail, actions: summary.actions };
-      const screen = parts[2] || 'dashboard';
+      const [screen, query = ''] = (parts[2] || 'dashboard').split('?');
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);
       if (screen === 'users' && biz.role === 'owner') return usersView(biz, parts[3]);
       const item = NAV.find((n) => n.key === screen);
       if (item?.needs && !biz.actions.includes(item.needs)) return go(home(biz));
       if (screen === 'upload') return uploadView(biz);
-      if (screen === 'review') return reviewView(biz, parts[3], parts[4]);
+      if (screen === 'review') return parts[3] ? reviewView(biz, parts[3], parts[4]) : reviewListView(biz, new URLSearchParams(query).get('find'));
       if (screen === 'compare') return compareView(biz, parts[3]);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
