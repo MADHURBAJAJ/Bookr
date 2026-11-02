@@ -1995,7 +1995,7 @@ async function bankView(biz, query = '') {
             <div class="tiny mono" style="word-break:break-all">${r.vpa ? `${r.vpa} · ` : ''}${r.tranId}</div></td>
           <td class="amount">${r.direction === 'CR' ? money(r.amountPaise) : ''}</td><td class="amount">${r.direction === 'DR' ? money(r.amountPaise) : ''}</td>
           <td>${suggestion(r)}</td></tr>`)}</tbody></table></div>`
-        : html`<div class="note">No lines for these dates${status ? ' that are still open' : ''}.</div>`}
+        : html`<div class="note">No ${({ unmatched: 'open', matched: 'matched', booked: 'booked', ignored: 'left-out' })[status] ?? ''} lines for these dates${account ? ' in this account' : ''}.${status ? ' Choose "All" under Show to see every line.' : ''}</div>`}
     </section>`));
   wireShell();
   const msg = document.getElementById('bmsg');
