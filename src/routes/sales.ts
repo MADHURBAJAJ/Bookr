@@ -261,10 +261,15 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
     'SELECT difference, software_bill_id, register_row_id, sw_mode, decision, shift_day FROM bill_comparisons WHERE id = ? AND business_id = ?', id, bid);
   if (!cmp) fail(404, 'Not found.');
   if (!NEEDS_DECISION.includes(cmp.difference as never)) fail(400, 'This bill has no difference to decide.');
+  // A bill the register does not have gets its type (F&B or Room) with the decision; otherwise the register's type is used.
+  let billType: string | null = null;
   if (decision === 'use_software') {
     if (!cmp.software_bill_id) fail(400, 'This bill is not in the software report.');
-    if (!cmp.register_row_id) fail(400, 'The register gives each bill its type (F&B or Room). Add this bill to the register in Review, or leave it out.');
     if (cmp.sw_mode === 'unknown') fail(400, 'The software report does not say how this bill was paid. Use the register, or leave it out.');
+    if (!cmp.register_row_id) {
+      if (data.billType !== 'fnb' && data.billType !== 'room') fail(400, 'This bill is not in the register, so choose its type: Use software · F&B, or Use software · Room.');
+      billType = data.billType;
+    }
   }
   if (decision === 'use_register') {
     if (!cmp.register_row_id) fail(400, 'This bill is not in the register.');
@@ -275,11 +280,11 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
   const user = c.get('user').id;
   try {
     await db.batch([
-      stmt(db, 'UPDATE bill_comparisons SET decision = ?, decided_by = ?, decided_at = ?, note = ? WHERE id = ?',
-        decision, decision ? user : null, decision ? t : null, note, id),
+      stmt(db, 'UPDATE bill_comparisons SET decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = ? WHERE id = ?',
+        decision, decision ? user : null, decision ? t : null, note, billType, id),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
         VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, ?, ?, ?)`, bid, user, id,
-        JSON.stringify({ decision: cmp.decision }), JSON.stringify({ decision, note }), t),
+        JSON.stringify({ decision: cmp.decision }), JSON.stringify({ decision, note, billType }), t),
     ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);

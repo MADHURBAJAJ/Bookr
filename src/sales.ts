@@ -18,6 +18,7 @@ interface Comparison {
   id: string; pos_no: string; bill_no: string; software_bill_id: string | null; register_row_id: string | null;
   sw_amount_paise: number | null; sw_mode: string | null; rg_amount_paise: number | null; rg_mode: string | null;
   difference: Difference; decision: Decision | null; decided_by: string | null; decided_at: number | null; note: string | null;
+  bill_type: string | null;
 }
 
 export function shiftStatement(db: DB, businessId: string, day: string) {
@@ -117,7 +118,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   // a repeat is reported by shiftView and blocks confirmation.
   const rgByBill = new Map<string, RgRow>();
   for (const r of rg) if (!rgByBill.has(r.bill_no)) rgByBill.set(r.bill_no, r);
-  const wanted = new Map<string, Omit<Comparison, 'id' | 'decision' | 'decided_by' | 'decided_at' | 'note'>>();
+  const wanted = new Map<string, Omit<Comparison, 'id' | 'decision' | 'decided_by' | 'decided_at' | 'note' | 'bill_type'>>();
   const usedRg = new Set<string>();
   for (const b of sw) {
     const r = rgByBill.get(b.bill_no) ?? null;
@@ -164,7 +165,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     // Any change to a bill clears its decision, so it is decided again on the new values.
     if (c.decision) statements.push(clearedAudit(c, w));
     statements.push(stmt(db, `UPDATE bill_comparisons SET software_bill_id = ?, register_row_id = ?, sw_amount_paise = ?, sw_mode = ?,
-      rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ? WHERE id = ?`,
+      rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = NULL WHERE id = ?`,
       w.software_bill_id, w.register_row_id, w.sw_amount_paise, w.sw_mode, w.rg_amount_paise, w.rg_mode, w.difference,
       null, null, null, null, c.id));
   }
@@ -236,9 +237,10 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const typed = new Set(typeHeads.map((t) => t.bill_type));
   const counted = comparisons.filter((c) => c.difference === 'match' || (c.decision && c.decision !== 'leave_out'));
   const rgById = new Map(rg.map((r) => [r.id, r]));
-  const missingType = counted.filter((c) => !c.register_row_id || !rgById.get(c.register_row_id)?.bill_type);
+  const typeOf = (c: Comparison) => (c.register_row_id ? rgById.get(c.register_row_id)?.bill_type : c.bill_type) ?? null;
+  const missingType = counted.filter((c) => !typeOf(c));
   if (missingType.length) blockers.push(`Bill ${missingType.map((c) => c.bill_no).join(', ')} has no type (F&B or Room) in the register.`);
-  const neededTypes = new Set(counted.map((c) => (c.register_row_id ? rgById.get(c.register_row_id)?.bill_type : null)).filter(Boolean) as string[]);
+  const neededTypes = new Set(counted.map(typeOf).filter(Boolean) as string[]);
   const unmapped = [...neededTypes].filter((t) => !typed.has(t));
   if (unmapped.length) blockers.push(`Choose the income head for ${unmapped.map((t) => (t === 'fnb' ? 'F&B' : 'Room')).join(' and ')} bills on Heads and rules.`);
   if (!(await cashAccountId(db, businessId))) blockers.push('This business has no cash account.');
@@ -262,7 +264,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     registerRows: rg.length,
     registerPages: new Set(rg.map((r) => r.upload_id)).size,
     comparisons: comparisons.map((c) => ({
-      id: c.id, posNo: c.pos_no, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, note: c.note,
+      id: c.id, posNo: c.pos_no, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, note: c.note, billType: c.bill_type,
       software: c.software_bill_id ? { amountPaise: c.sw_amount_paise, mode: c.sw_mode } : null,
       register: c.register_row_id ? { amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0,
         rowId: c.register_row_id, uploadId: rgById.get(c.register_row_id)?.upload_id ?? null } : null,
@@ -292,7 +294,7 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
   const rows: NewRow[] = [];
   for (const c of comps) {
     const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
-    const billType = r?.bill_type ?? '';
+    const billType = r?.bill_type ?? c.bill_type ?? '';
     const fromRegister = (source: NewRow['source']) => {
       for (const p of paysByRow.get(r!.id) ?? []) rows.push({ amount: p.amount_paise, mode: p.mode as NewRow['mode'], billType, source, c });
     };

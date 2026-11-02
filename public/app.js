@@ -1360,6 +1360,13 @@ function wireSummary(biz, u) {
   });
 }
 
+/** Decision buttons for one difference. A bill missing in the register takes its type with "Use software". */
+function decisionChoices(c) {
+  if (!c.register) return [['use_software', 'Use software · F&B', 'fnb'], ['use_software', 'Use software · Room', 'room'], ['leave_out', 'Leave out']];
+  if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out']];
+  return Object.entries(DECISION_LABELS);
+}
+
 // ---------- Way back from Review to the difference that opened it (per browser tab)
 const BACK_KEY = 'bookr.backTo';
 function setBackTo(v) { try { sessionStorage.setItem(BACK_KEY, JSON.stringify(v)); } catch { /* storage unavailable */ } }
@@ -1439,9 +1446,11 @@ async function compareView(biz, day) {
           <td class="mono"><a href="#" data-openlink>${c.billNo}</a></td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
           <td><span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span></td>
-          <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${Object.entries(DECISION_LABELS).map(([k, l]) => html`
-              <button class="btn ${c.decision === k ? 'ghost' : 'plain'}" style="${c.decision === k ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}">${l}</button>`)}</div>`
-            : html`<span class="note">${c.decision ? DECISION_LABELS[c.decision] : 'Not decided'}</span>`}</td>
+          <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type]) => {
+              const on = c.decision === k && (!type || c.billType === type);
+              return html`<button class="btn ${on ? 'ghost' : 'plain'}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}">${l}</button>`;
+            })}</div>`
+            : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}` : 'Not decided'}</span>`}</td>
         </tr>`)}</tbody></table></div>` : html`<div class="note">No differences in this shift.</div>`}
     </section>
     <div class="row">
@@ -1470,7 +1479,7 @@ async function compareView(biz, day) {
   const msg = document.getElementById('cmsg');
   document.getElementById('sh').addEventListener('change', (e) => go(`#/b/${biz.id}/compare/${e.target.value}`));
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
-  app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d }))));
+  app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null }))));
   // A difference opens its bill in Review; Review offers a way back to this bill here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     if (e.target.closest('button, select, input')) return;

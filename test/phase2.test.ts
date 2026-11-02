@@ -220,8 +220,8 @@ describe('comparison and decisions', () => {
     expect((await put(h.clients.entry_staff, '2610317', 'use_software')).status).toBe(403);
     expect((await put(h.clients.viewer, '2610317', 'use_software')).status).toBe(403);
     expect((await put(h.clients.accountant, '2610317', 'use_software')).status).toBe(200);
-    // Missing in the register: no bill type, so the software side cannot be used.
-    expect((await put(h.clients.owner, '2610319', 'use_software')).json.error).toMatch(/type/);
+    // Missing in the register: "Use software" needs a type (F&B or Room) with it.
+    expect((await put(h.clients.owner, '2610319', 'use_software')).json.error).toMatch(/choose its type/);
     // Unknown mode in the software: cannot be used.
     expect((await put(h.clients.owner, '2610318', 'use_software')).json.error).toMatch(/does not say how/);
     expect((await put(h.clients.owner, '2611011', 'use_register')).status).toBe(400); // a match needs no decision
@@ -684,5 +684,36 @@ describe('finding a bill on register pages', () => {
     expect((await h.clients.viewer.get(`/businesses/${h.bid}/register-rows?bill=3120`)).status).toBe(403);
     const other = await hotel();
     expect((await other.clients.owner.get(`/businesses/${other.bid}/register-rows?bill=3120`)).json.rows).toEqual([]);
+  });
+});
+
+describe('use software for a bill missing in the register', () => {
+  it('takes a type with the decision and books the sale under that type\'s head', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    let v = await view(h);
+    const id = byBill(v, '2610319').id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_software', billType: 'bar' })).status).toBe(400);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_software', billType: 'room' })).status).toBe(200);
+    v = await view(h);
+    expect(byBill(v, '2610319')).toMatchObject({ decision: 'use_software', billType: 'room' });
+    for (const [bill, d] of [['26103115', 'use_register'], ['2610317', 'use_software'], ['2610318', 'use_register'], ['26103120', 'use_register'], ['26103125', 'use_register']]) {
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
+    }
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const [t] = await sql`SELECT t.amount_paise, t.payment_mode, t.confirmed_source, hd.name AS head FROM transactions t JOIN heads hd ON hd.id = t.head_id WHERE t.bill_no = '2610319'`;
+    expect(t).toEqual({ amount_paise: 35300, payment_mode: 'cash', confirmed_source: 'software', head: 'Room' });
+    const [a] = await sql`SELECT after FROM audit_log WHERE action = 'comparison.decide' AND row_id = ${id} ORDER BY id DESC LIMIT 1`;
+    expect(JSON.parse(a.after)).toMatchObject({ decision: 'use_software', billType: 'room' });
+  });
+
+  it('the type is cleared with the decision when the bill turns up in the register', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    let v = await view(h);
+    await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610319').id}`, { decision: 'use_software', billType: 'fnb' });
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: '2610319', billType: 'fnb', amount: '353', status: 'checked', payments: [{ mode: 'cash', amount: '353' }] });
+    v = await view(h);
+    expect(byBill(v, '2610319')).toMatchObject({ difference: 'match', decision: null, billType: null });
   });
 });
