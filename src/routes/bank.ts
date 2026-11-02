@@ -10,6 +10,7 @@ import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } fro
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
+import { explainShift } from '../explain';
 import { billDistance } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
@@ -202,6 +203,12 @@ bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole
   return c.json({ ok: true });
 });
 
+bankRoutes.get('/businesses/:businessId/shifts/:day/explain', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  return c.json(await explainShift(c.env.DB, c.get('businessId'), day));
+});
+
 // ---- Matching a credit to sales (a person confirms; never automatic)
 
 async function checkMatch(db: D1Database, bid: string, row: BankRow, ids: string[], allowDifference = false) {
@@ -248,7 +255,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-clear', requireRole('ba
   let done = 0;
   for (const id of ids) {
     const k = sug.clear.get(id);
-    if (!k) continue;
+    if (!k || k.adjust) continue; // a match that changes the register goes through match-many with adjust
     statements.push(...matchStatements(db, bid, id, k.transactionIds, user, t + done));
     done += 1;
   }

@@ -1273,3 +1273,52 @@ describe('a UPI sale that was paid another way', () => {
     expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${sale.id}`)[0]).toEqual({ payment_mode: 'card', match_status: 'awaiting_card_settlement' });
   });
 });
+
+describe('the explainer (what is left after matching, explained)', () => {
+  it('finds a number typo, a payment written wrong and a bill paid in two goes; each card fixes in one click', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    const add = (body: Record<string, unknown>) => h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billType: 'fnb', status: 'checked', ...body });
+    // Typo: register X2610319 ₹300 (software 2610319 ₹353); payment written wrong: bill 907 written as 920; two goes: 492 written 218 + 210.
+    await add({ billNo: 'X2610319', amount: '300', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '300' }] });
+    await add({ billNo: 'T907', amount: '907', discount: '-13', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '920' }] });
+    await add({ billNo: 'S492', amount: '492', discount: '64', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '218' }, { mode: 'upi', columnLabel: 'UPI Bank 2', amount: '210' }] });
+    let v = await view(h);
+    for (const [bill, d] of [['26103115', 'use_register'], ['2610317', 'use_software'], ['2610318', 'use_register'], ['26103120', 'use_register'], ['26103125', 'use_register'],
+      ['X2610319', 'use_register'], ['T907', 'use_register'], ['S492', 'use_register']]) {
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
+    }
+    await sql`UPDATE bill_comparisons SET decision = 'use_software', bill_type = 'fnb' WHERE bill_no = '2610319'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' });
+    const T = (c: (string | number)[]) => c.join('\t');
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      T(['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)']),
+      T([1, 'S80000001', '31/10/2026', '31/10/2026 5:40:00 PM', '-', 'UPI/1/UPI/xxa@okaxis/B/x', 'CR', 300, 1]),
+      T([2, 'S80000002', '31/10/2026', '31/10/2026 6:00:00 PM', '-', 'UPI/2/UPI/xxb@okaxis/B/x', 'CR', 907, 1]),
+      T([3, 'S80000003', '31/10/2026', '31/10/2026 10:47:00 PM', '-', 'UPI/3/UPI/xxan02@okhdfcb/B/x', 'CR', 210, 1]),
+      T([4, 'S80000004', '31/10/2026', '31/10/2026 10:54:00 PM', '-', 'UPI/4/UPI/xxan02@okhdfcb/B/x', 'CR', 282, 1]),
+      T([5, 'S80000005', '01/11/2026', '01/11/2026 7:59:00 AM', '-', 'UPI/5/UPI/xxz@okaxis/B/x', 'CR', 1, 1])].join('\n') });
+
+    const ex = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/explain`)).json;
+    expect(ex.coverage.covered).toBe(true);
+    const kinds = ex.cards.map((c: any) => c.kind);
+    expect(kinds).toEqual(expect.arrayContaining(['number_typo', 'payment_written_wrong', 'paid_in_parts']));
+    const typo = ex.cards.find((c: any) => c.kind === 'number_typo');
+    expect(typo.title).toMatch(/X2610319 is probably 2610319/);
+    // Apply every card's first action, as the screen does.
+    for (const k of ['number_typo', 'payment_written_wrong', 'paid_in_parts']) {
+      const c = ex.cards.find((x: any) => x.kind === k);
+      const a = c.actions[0];
+      const res = await h.clients.owner.post(a.path, a.body);
+      expect([k, res.status]).toEqual([k, 200]);
+    }
+    expect((await sql`SELECT bill_no, amount_paise, discount_paise FROM register_rows WHERE bill_no IN ('2610319', 'T907', 'S492') ORDER BY bill_no`).map((r) => [r.bill_no, r.amount_paise, r.discount_paise]))
+      .toEqual([['2610319', 35300, 5300], ['S492', 49200, 0], ['T907', 90700, 0]]);
+    expect((await sql`SELECT count(*) AS n FROM bank_rows WHERE status = 'matched'`)[0].n).toBe(4);
+    // Nothing left to explain for these.
+    const after = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/explain`)).json;
+    expect(after.cards.filter((c: any) => ['number_typo', 'payment_written_wrong', 'paid_in_parts'].includes(c.kind))).toEqual([]);
+  });
+});

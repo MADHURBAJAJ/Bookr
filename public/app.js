@@ -2261,6 +2261,7 @@ async function upiView(biz, dayArg) {
   const [day, qs = ''] = String(dayArg ?? '').split('?');
   const more = Number(new URLSearchParams(qs).get('more')) || 1;
   const [v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/upi?more=${more}${day ? `&day=${day}` : ''}`), api('GET', `/businesses/${biz.id}/heads`)]);
+  const ex = await api('GET', `/businesses/${biz.id}/shifts/${v.day}/explain`).catch(() => null);
   const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
   const matched = v.sales.filter((s) => s.bankRowId);
   const waiting = v.sales.filter((s) => !s.bankRowId);
@@ -2274,6 +2275,7 @@ async function upiView(biz, dayArg) {
       <section class="card grow1"><h2>In the bank</h2><div class="amount" style="font-size:24px;color:var(--teal)">₹ ${money(sum(matched))}</div><div class="note">${matched.length} matched</div></section>
       <section class="card grow1"><h2>Not found yet</h2><div class="amount" style="font-size:24px;color:${waiting.length ? 'var(--danger)' : 'inherit'}">₹ ${money(sum(waiting))}</div><div class="note">${waiting.length} waiting</div></section>
     </div>
+    ${explainPanel(ex)}
     ${pairPanel(v, waiting)}
     <section class="card" style="margin-top:16px">
       <h2>All UPI sales of the shift</h2>
@@ -2288,6 +2290,7 @@ async function upiView(biz, dayArg) {
   wireShell();
   document.getElementById('upiday').addEventListener('change', (e) => go(`#/b/${biz.id}/upi/${e.target.value}`));
   wirePairPanel(biz, v, heads, () => upiView(biz, `${v.day}?more=${v.moreHours}`));
+  wireExplain(ex, () => upiView(biz, `${v.day}?more=${v.moreHours}`));
   // A sale opens its bill in the register page; Review offers the way back here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     e.preventDefault();
@@ -2328,6 +2331,48 @@ function billUnits(waiting) {
     }
     return { ids: xs.map((x) => x.id), amount, html: body };
   });
+}
+
+// ---- Bookr's explanations for what is left (one click each; each fix is recorded and can be undone)
+const DISMISS_KEY = 'bookr.dismissedCards';
+const dismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(DISMISS_KEY) || '[]')); } catch { return new Set(); } };
+function explainPanel(ex) {
+  if (!ex) return '';
+  const gone = dismissed();
+  const cards = (ex.cards ?? []).filter((c) => !gone.has(c.key));
+  const cov = ex.coverage;
+  if (!cards.length && (!cov || cov.covered)) return '';
+  return html`<section class="card" id="explain" style="margin-top:16px;gap:10px">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline"><h2>Bookr's suggestions</h2>
+      <span class="note">What is left, explained. Each fix is recorded and Unmatch (or Put back) undoes it.</span></div>
+    ${cov && !cov.covered ? html`<div class="inset" style="background:#FFFBEB"><strong>Bank data is not in for the whole shift.</strong>
+      <span class="note">The latest bank line is ${cov.lastBankAt ? when(cov.lastBankAt) : 'missing'}; the shift ends ${when(cov.shiftEnd)}. Sync the bank sheets first: until then, bills with no UPI credit are not flagged.</span></div>` : ''}
+    ${cards.map((c) => html`<div class="inset" data-card="${c.key}" style="display:flex;flex-direction:column;gap:6px;${c.score >= 60 ? 'border-left:3px solid var(--teal)' : 'border-left:3px solid #F59E0B'}">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center"><strong>${c.title}</strong>
+        <span class="chip ${c.score >= 60 ? 'ok' : 'wait'}">${c.score >= 75 ? 'Very likely' : c.score >= 60 ? 'Likely' : 'Check'}</span></div>
+      <ul class="note" style="margin:0;padding-left:18px">${c.evidence.map((e) => html`<li>${e}</li>`)}</ul>
+      <div class="form-row" style="gap:6px">${c.actions.map((a, i) => html`<button class="btn ${a.primary ? '' : 'plain'}" type="button" data-cardact="${c.key}" data-i="${i}" style="min-height:36px">${a.label}</button>`)}
+        <button class="btn plain" type="button" data-carddismiss="${c.key}" style="min-height:36px" title="Hide this suggestion on this device">Not this</button></div>
+      <div class="form-msg"></div></div>`)}
+  </section>`;
+}
+function wireExplain(ex, reload) {
+  if (!ex) return;
+  document.querySelectorAll('[data-cardact]').forEach((b) => b.addEventListener('click', async () => {
+    const c = ex.cards.find((x) => x.key === b.dataset.cardact);
+    const a = c.actions[Number(b.dataset.i)];
+    b.disabled = true;
+    try {
+      await apiFull(a.method, `${a.path}`, a.body);
+      await reload();
+      document.getElementById('explain')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Done: ${c.title}.</div>`.__html);
+    } catch (err) { b.disabled = false; showError(document.querySelector(`[data-card="${CSS.escape(c.key)}"] .form-msg`), err); }
+  }));
+  document.querySelectorAll('[data-carddismiss]').forEach((b) => b.addEventListener('click', () => {
+    const gone = dismissed(); gone.add(b.dataset.carddismiss);
+    try { localStorage.setItem(DISMISS_KEY, JSON.stringify([...gone].slice(-500))); } catch { /* storage unavailable */ }
+    b.closest('[data-card]').remove();
+  }));
 }
 
 /** Side by side: bank credits not matched (left) and UPI bills not found (right). Tick, compare totals, match. */
