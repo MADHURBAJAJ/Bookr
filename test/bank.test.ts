@@ -173,4 +173,46 @@ describe('bank lines through the API', () => {
     expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${cr.id}/match`)).status).toBe(200);
     expect((await sql`SELECT count(*) AS n FROM transactions WHERE matched_bank_row = ${cr.id}`)[0].n).toBe(0);
   });
+
+  it('one bill paid in two goes: both credits match it, with amounts; unmatching one undoes both', async () => {
+    const h = await setup();
+    const two = [STATEMENT.split('\n')[1],
+      T([1, 'S20000001', '31/10/2026', '31/10/2026 1:00:00 PM', '-', 'UPI/700000000001/UPI/xxg-1@okaxis/SAMPLE BANK/ICIx', 'CR', 1000, '1']),
+      T([2, 'S20000002', '31/10/2026', '31/10/2026 1:02:00 PM', '-', 'UPI/700000000002/UPI/xxg-1@okaxis/SAMPLE BANK/ICIy', 'CR', 500, '1'])].join('\n');
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: two });
+    const sale = crypto.randomUUID();
+    await sql`INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, source, status, payment_mode, bill_no, shift_day, match_status, created_at)
+      VALUES (${sale}, ${h.bid}, '2026-10-31', 150000, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '2610350', '2026-10-31', 'awaiting_bank_match', 0)`;
+    const upi = (await h.clients.owner.get(`/businesses/${h.bid}/upi?day=2026-10-31`)).json;
+    const ids = upi.credits.filter((c: any) => c.tranId.startsWith('S2')).map((c: any) => c.id);
+    expect(ids.length).toBe(2);
+    const r = await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: ids, transactionIds: [sale] });
+    expect(r.json).toMatchObject({ differencePaise: 0, links: 2 });
+    const links = await sql`SELECT amount_paise FROM bank_matches WHERE transaction_id = ${sale} ORDER BY amount_paise`;
+    expect(links.map((l) => l.amount_paise)).toEqual([50000, 100000]);
+    expect((await sql`SELECT match_status FROM transactions WHERE id = ${sale}`)[0].match_status).toBeNull();
+    // Again: refused, already matched.
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: ids, transactionIds: [sale] })).status).toBe(409);
+    const u = await h.clients.accountant.del(`/businesses/${h.bid}/bank-rows/${ids[1]}/match`);
+    expect(u.json.unmatched).toBe(2);
+    expect((await sql`SELECT count(*) AS n FROM bank_rows WHERE status = 'matched'`)[0].n).toBe(0);
+    expect((await sql`SELECT match_status FROM transactions WHERE id = ${sale}`)[0].match_status).toBe('awaiting_bank_match');
+  });
+
+  it('several credits with a shortfall: bills paid in part and the shortfall booked under the head chosen', async () => {
+    const h = await setup();
+    const disc = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Discount allowed', type: 'expense' })).json.id;
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: [STATEMENT.split('\n')[1],
+      T([1, 'S30000001', '31/10/2026', '31/10/2026 2:00:00 PM', '-', 'UPI/800000000001/UPI/xxq@okaxis/B/ICIq', 'CR', 2139, '1'])].join('\n') });
+    const a = crypto.randomUUID(); const b = crypto.randomUUID();
+    await sql`INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, source, status, payment_mode, bill_no, shift_day, match_status, created_at)
+      VALUES (${a}, ${h.bid}, '2026-10-31', 65000, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '238', '2026-10-31', 'awaiting_bank_match', 0),
+             (${b}, ${h.bid}, '2026-10-31', 153900, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '213', '2026-10-31', 'awaiting_bank_match', 0)`;
+    const [row] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S30000001'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: [row.id], transactionIds: [a, b] })).status).toBe(400);
+    const r = await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: [row.id], transactionIds: [a, b], headId: disc, note: 'register typo' });
+    expect(r.json.differencePaise).toBe(-5000);
+    expect((await sql`SELECT sum(amount_paise) AS s FROM bank_matches WHERE bank_row_id = ${row.id}`)[0].s).toBe(213900);
+    expect((await sql`SELECT amount_paise, type FROM transactions WHERE source = 'bank_sheet' AND matched_bank_row = ${row.id}`)[0]).toEqual({ amount_paise: 5000, type: 'expense' });
+  });
 });

@@ -148,7 +148,8 @@ export async function suggestionsFor(db: DB, businessId: string, from: string, t
 export function matchStatements(db: DB, businessId: string, rowId: string, transactionIds: string[], userId: string, t: number) {
   return [
     ...transactionIds.flatMap((tid) => [
-      stmt(db, 'INSERT INTO bank_matches (id, business_id, bank_row_id, transaction_id, matched_by, matched_at) VALUES (?, ?, ?, ?, ?, ?)', newId(), businessId, rowId, tid, userId, t),
+      stmt(db, `INSERT INTO bank_matches (id, business_id, bank_row_id, transaction_id, amount_paise, matched_by, matched_at)
+        SELECT ?, ?, ?, id, amount_paise, ?, ? FROM transactions WHERE id = ?`, newId(), businessId, rowId, userId, t, tid),
       stmt(db, "UPDATE transactions SET matched_bank_row = ?, match_status = NULL WHERE id = ? AND matched_bank_row IS NULL AND match_status = 'awaiting_bank_match'", rowId, tid),
     ]),
     stmt(db, "UPDATE bank_rows SET status = 'matched', done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", userId, t, rowId),
@@ -159,3 +160,38 @@ export function matchStatements(db: DB, businessId: string, rowId: string, trans
 
 export const getRow = (db: DB, businessId: string, id: string) =>
   one<BankRow>(db, 'SELECT * FROM bank_rows WHERE id = ? AND business_id = ?', id, businessId);
+
+/**
+ * Splits credits over bills, in order: each bill takes from the credits until it is paid. Used when several credits
+ * pay one or more bills (e.g. a guest paying in two goes). Totals must already agree (any difference is booked apart).
+ */
+export function allocate(credits: { id: string; amount: number }[], bills: { id: string; amount: number }[]) {
+  const links: { rowId: string; transactionId: string; amount: number }[] = [];
+  const left = credits.map((c) => ({ ...c }));
+  let i = 0;
+  for (const b of bills) {
+    let need = b.amount;
+    while (need > 0 && i < left.length) {
+      const take = Math.min(need, left[i].amount);
+      if (take > 0) links.push({ rowId: left[i].id, transactionId: b.id, amount: take });
+      need -= take;
+      left[i].amount -= take;
+      if (left[i].amount === 0) i += 1;
+    }
+  }
+  return links;
+}
+
+/** Every credit tied to this one through shared bills: they are matched, and unmatched, together. */
+export async function matchedSet(db: DB, rowId: string) {
+  let rows = new Set([rowId]);
+  for (let round = 0; round < 10; round += 1) {
+    const list = [...rows];
+    const found = await all<{ bank_row_id: string; transaction_id: string }>(db, `SELECT bank_row_id, transaction_id FROM bank_matches
+      WHERE transaction_id IN (SELECT transaction_id FROM bank_matches WHERE bank_row_id IN (${list.map(() => '?').join(',')}))`, ...list);
+    const next = new Set([...rows, ...found.map((f) => f.bank_row_id)]);
+    if (next.size === rows.size) return { rows: [...rows], transactions: [...new Set(found.map((f) => f.transaction_id))] };
+    rows = next;
+  }
+  return { rows: [...rows], transactions: [] as string[] };
+}

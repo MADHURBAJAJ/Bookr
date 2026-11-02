@@ -2205,7 +2205,7 @@ function pairPanel(v, waiting) {
   const line = 'display:flex;gap:10px;align-items:center;padding:8px 10px;border-top:1px solid var(--line-soft);cursor:pointer';
   return html`<section class="card" id="pair" style="margin-top:16px;gap:10px">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline"><h2>Match by hand</h2>
-      <span class="note">For what the suggestions missed, e.g. a typo in the register. Tick one credit and the bill(s) it pays.</span></div>
+      <span class="note">For what the suggestions missed: a typo in the register, or a guest who paid in two goes. Tick the credit(s) and the bill(s) they pay.</span></div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">
       <div style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
         <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">Bank credits not matched <span class="chip">${v.credits.length}</span></div>
@@ -2225,7 +2225,7 @@ function pairPanel(v, waiting) {
       </div>
     </div>
     <div id="pairbar" class="inset" style="position:sticky;bottom:8px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
-      <span id="pairsum" class="note">Tick a credit on the left and the bill(s) on the right.</span>
+      <span id="pairsum" class="note">Tick the credit(s) on the left and the bill(s) they pay on the right.</span>
       <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span id="pairdiff" hidden style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <select class="compact" id="pairhead" aria-label="Head for the difference"></select>
@@ -2252,9 +2252,8 @@ function wirePairPanel(biz, v, heads, reload) {
     const bank = sum(c); const bills = sum(b); const diff = bank - bills;
     document.getElementById('pairsum').innerHTML = c.length || b.length
       ? html`Bank <strong>₹ ${money(bank)}</strong> · Bills <strong>₹ ${money(bills)}</strong> · Difference <strong style="color:${diff ? 'var(--danger)' : 'var(--teal)'}">${diff > 0 ? '+' : diff < 0 ? '−' : ''}₹ ${money(Math.abs(diff))}</strong>${diff < 0 ? ' (less came in)' : diff > 0 ? ' (more came in)' : ''}`.__html
-      : 'Tick a credit on the left and the bill(s) on the right.';
-    const ready = c.length === 1 && b.length > 0;
-    if (c.length > 1) document.getElementById('pairsum').innerHTML += ' · <span class="error">Tick one credit at a time.</span>';
+      : 'Tick the credit(s) on the left and the bill(s) they pay on the right.';
+    const ready = c.length > 0 && b.length > 0;
     diffBox.hidden = !(ready && diff !== 0);
     if (ready && diff !== 0) {
       const type = diff < 0 ? 'expense' : 'income';
@@ -2273,14 +2272,14 @@ function wirePairPanel(biz, v, heads, reload) {
   go.addEventListener('click', async () => {
     const c = crs(); const b = bls();
     const diff = sum(c) - sum(b);
-    const body = { transactionIds: b.map((x) => x.dataset.pbl) };
+    const body = { rowIds: c.map((x) => x.dataset.pcr), transactionIds: b.map((x) => x.dataset.pbl) };
     try {
-      if (diff === 0) await apiFull('POST', `/businesses/${biz.id}/bank-rows/${c[0].dataset.pcr}/match`, body);
-      else {
+      if (diff !== 0) {
         const note = document.getElementById('pairnote').value.trim();
         if (!headSel.value || !note) throw new Error('Choose a head for the difference and write the reason.');
-        await apiFull('POST', `/businesses/${biz.id}/bank-rows/${c[0].dataset.pcr}/match-with-difference`, { ...body, headId: headSel.value, note });
+        Object.assign(body, { headId: headSel.value, note });
       }
+      await apiFull('POST', `/businesses/${biz.id}/bank-rows/match-set`, body);
       await reload();
       document.getElementById('pairmsg')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Matched${diff ? `, with a difference of ₹ ${money(Math.abs(diff))} booked` : ''}.</div>`.__html);
     } catch (err) { showError(document.getElementById('pairmsg'), err); }
