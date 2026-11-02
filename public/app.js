@@ -1996,7 +1996,7 @@ async function bankView(biz, query = '') {
       return html`${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
           <div>${r.candidates.length === 1 ? html`<span class="${r.candidates[0].strong ? '' : 'note'}">${candText(r.candidates[0])}</span><input type="hidden" data-cand="${r.id}" value="${r.candidates[0].transactionIds.join(',')}">`
             : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${k.transactionIds.join(',')}">${candText(k)}</option>`)}</select>`}</div>
-          <div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'match')}
+          <div style="display:flex;gap:4px"><button class="btn plain" type="button" style="${SMALL}" data-fixbill="${r.id}" title="Correct the bill (number, amount, discount) to what the bank shows, and match">Fix bill</button>${skipLink(r)}</div>`, 'match')}
         ${section('nobill', 'No bill found', 'Book money received that is not a bill, e.g. hostel rent', rest, (r) => html`
           <div>${headSelect(r, r.rule?.headId)}</div><div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'book')}`;
     }
@@ -2108,6 +2108,59 @@ async function bankView(biz, query = '') {
     e.preventDefault();
     try { await apiFull('POST', `/businesses/${biz.id}/bank-rows/${f.dataset.bookform}/book`, { headId: f.headId.value, party: f.party.value || null, note: f.note.value || null }); bankView(biz, query); }
     catch (err) { showError(f.querySelector('.form-msg'), err); }
+  }));
+  // Fix the bill: a small editor under the line, for a register bill the bank shows differently (typo in number or amount).
+  app.querySelectorAll('[data-fixbill]').forEach((b) => b.addEventListener('click', async () => {
+    const line = app.querySelector(`[data-line="${b.dataset.fixbill}"]`);
+    const old = line.nextElementSibling?.classList.contains('fixbox') ? line.nextElementSibling : null;
+    if (old) { old.remove(); return; }
+    const tx = (app.querySelector(`[data-cand="${b.dataset.fixbill}"]`)?.value ?? '').split(',')[0];
+    const box = document.createElement('div');
+    box.className = 'inset fixbox';
+    box.style.margin = '0 12px 12px';
+    line.after(box);
+    box.innerHTML = '<div class="note">Loading…</div>';
+    let o;
+    try { o = await apiFull('GET', `/businesses/${biz.id}/bank-rows/${b.dataset.fixbill}/fix-options?tx=${tx}`); }
+    catch (err) { showError(box, err); return; }
+    const credit = o.credit.amountPaise;
+    const reg = o.register;
+    box.innerHTML = html`<form class="fixform" style="display:flex;flex-direction:column;gap:8px">
+      <div style="font-weight:600">Fix bill ${reg.billNo} to what the bank shows (₹ ${money(credit)} received)</div>
+      <div class="note">Register now: bill ${reg.billNo} · ₹ ${money(reg.amountPaise)}${reg.discountPaise > 0 ? ` · discount ₹ ${money(reg.discountPaise)}` : reg.discountPaise < 0 ? ` · tip ₹ ${money(-reg.discountPaise)}` : ''} · paid ${reg.payments.map((p) => `${p.label || MODE_LABELS[p.mode]} ₹ ${money(p.amountPaise)}`).join(' + ')}</div>
+      <div class="form-row" style="align-items:flex-end">
+        <div class="field"><label>Bill number</label><input name="billNo" value="${reg.billNo}" list="swbills-${b.dataset.fixbill}" class="mono" required></div>
+        <datalist id="swbills-${b.dataset.fixbill}">${o.softwareOnly.map((x) => html`<option value="${x.billNo}">₹ ${money(x.amountPaise)} · ${MODE_LABELS[x.mode] ?? x.mode}${x.paidAt ? ` · ${when(x.paidAt)}` : ''} · only in software</option>`)}</datalist>
+        <div class="field"><label>Bill amount (₹)</label><input name="amount" class="mono" value="${rupeesForInput(reg.amountPaise)}" required style="width:110px"></div>
+        <div class="field"><label>Discount (₹, tip is −)</label><input name="discount" class="mono" value="${rupeesForInput(reg.discountPaise)}" style="width:110px"></div>
+        <div class="field"><label>UPI payment</label><input value="${rupeesForInput(credit)}" class="mono" disabled style="width:110px"></div>
+      </div>
+      ${o.softwareOnly.length ? html`<div class="tiny">Bills only in the software report for this shift, closest number first: ${o.softwareOnly.slice(0, 6).map((x) => html`<a href="#" data-pickbill="${x.billNo}" data-amt="${x.amountPaise}" class="mono">${x.billNo} (₹ ${money(x.amountPaise)})</a>`)}. Choosing one joins the two halves into one bill and removes its duplicate sale.</div>` : ''}
+      <div class="form-row" style="align-items:flex-end">
+        <div class="field" style="flex:2 1 260px"><label>Reason</label><input name="note" required placeholder="e.g. register typo 2611114 for 26103114"></div>
+        <span class="note fixcheck" style="align-self:center"></span>
+        <button class="btn" type="submit">Fix and match</button><button class="btn plain" type="button" data-fixcancel>Cancel</button>
+      </div><div class="form-msg"></div></form>`.__html;
+    const f = box.querySelector('form');
+    const toPaise = (v) => Math.round(parseFloat(String(v || '0').replace(/,/g, '')) * 100) || 0;
+    const check = () => {
+      const net = toPaise(f.amount.value) - toPaise(f.discount.value);
+      box.querySelector('.fixcheck').innerHTML = net === credit ? html`<span class="ok-msg" style="font-size:14px">Bill less discount = ₹ ${money(net)} ✓</span>`.__html
+        : html`<span class="error" style="font-size:14px">Bill less discount = ₹ ${money(net)}; must be ₹ ${money(credit)}</span>`.__html;
+    };
+    const fill = (no, amt) => { f.billNo.value = no; if (amt) { f.amount.value = rupeesForInput(amt); f.discount.value = rupeesForInput(amt - credit); } check(); };
+    box.querySelectorAll('[data-pickbill]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); fill(a.dataset.pickbill, Number(a.dataset.amt)); }));
+    f.billNo.addEventListener('change', () => { const x = o.softwareOnly.find((y) => y.billNo === f.billNo.value.trim()); if (x) fill(x.billNo, x.amountPaise); });
+    f.amount.addEventListener('input', check); f.discount.addEventListener('input', check); check();
+    box.querySelector('[data-fixcancel]').addEventListener('click', () => box.remove());
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.fixbill}/fix-bill`, { registerRowId: reg.id, billNo: f.billNo.value, amount: f.amount.value, discount: f.discount.value || '0', note: f.note.value });
+        await bankView(biz, query);
+        document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Bill fixed and matched: ${r.changed.join(', ')}. Unmatch puts it back.</div>`.__html;
+      } catch (err) { showError(box.querySelector('.form-msg'), err); }
+    });
   }));
   // Sections: Select all, ticked count on the button, one button for the ticked lines of that section.
   app.querySelectorAll('[data-sec]').forEach((sec) => {

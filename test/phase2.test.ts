@@ -1167,3 +1167,53 @@ describe('change the bills: one bill paid in two UPI goes', () => {
     v = await view(h);
   });
 });
+
+describe('fix the bill from a bank credit (confirmed shift)', () => {
+  it('a typo bill number joins the two halves: one sale left, matched; unmatch puts everything back', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    // The register wrote 2610319 as "X2610319", ₹300 by UPI (bill 353 less 53). The software has 2610319 ₹353.
+    const reg = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: 'X2610319', billType: 'fnb', amount: '300', status: 'checked',
+      payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '300' }] })).json.id;
+    let v = await view(h);
+    for (const [bill, d] of [['26103115', 'use_register'], ['2610317', 'use_software'], ['2610318', 'use_register'], ['26103120', 'use_register'], ['26103125', 'use_register'], ['X2610319', 'use_register']]) {
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d });
+    }
+    // Counted separately as well (the old way): the software half by a decision row.
+    await sql`UPDATE bill_comparisons SET decision = 'use_software', bill_type = 'fnb' WHERE bill_no = '2610319'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const before = await sql`SELECT bill_no, amount_paise, payment_mode FROM transactions WHERE bill_no IN ('2610319', 'X2610319') AND type = 'income' ORDER BY bill_no`;
+    expect(before).toEqual([{ bill_no: '2610319', amount_paise: 35300, payment_mode: 'cash' }, { bill_no: 'X2610319', amount_paise: 30000, payment_mode: 'upi' }]);
+
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t'),
+      [1, 'S60000001', '31/10/2026', '31/10/2026 5:40:00 PM', '-', 'UPI/900000000021/UPI/xxq@okaxis/B/ICIq', 'CR', 300, 1].join('\t')].join('\n') });
+    const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S60000001'`;
+    const [tr] = await sql`SELECT id FROM transactions WHERE bill_no = 'X2610319'`;
+    const opts = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows/${credit.id}/fix-options?tx=${tr.id}`)).json;
+    expect(opts.register).toMatchObject({ billNo: 'X2610319', amountPaise: 30000 });
+    expect(opts.softwareOnly[0].billNo).toBe('2610319');
+    // Net must equal what came in.
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/fix-bill`, { registerRowId: reg, billNo: '2610319', amount: '353', discount: '0', note: 'typo' })).status).toBe(400);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/bank-rows/${credit.id}/fix-bill`, { registerRowId: reg, billNo: '2610319', amount: '353', discount: '53', note: 'typo' })).status).toBe(403);
+    const r = await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/fix-bill`, { registerRowId: reg, billNo: '2610319', amount: '353', discount: '53', note: 'register typo' });
+    expect(r.status).toBe(200);
+    expect((await sql`SELECT bill_no, amount_paise, discount_paise FROM register_rows WHERE id = ${reg}`)[0]).toEqual({ bill_no: '2610319', amount_paise: 35300, discount_paise: 5300 });
+    expect(await sql`SELECT bill_no, amount_paise, payment_mode, matched_bank_row FROM transactions WHERE bill_no IN ('2610319', 'X2610319') AND type = 'income'`)
+      .toEqual([{ bill_no: '2610319', amount_paise: 30000, payment_mode: 'upi', matched_bank_row: credit.id }]);
+    expect((await sql`SELECT count(*) AS n FROM bill_comparisons WHERE bill_no = 'X2610319'`)[0].n).toBe(0);
+    expect((await sql`SELECT register_row_id, decision FROM bill_comparisons WHERE bill_no = '2610319'`)[0]).toEqual({ register_row_id: reg, decision: 'use_register' });
+    // The lock still holds for anything else.
+    await expect(sql`UPDATE register_rows SET bill_no = 'Z' WHERE id = ${reg}`).rejects.toThrow(/shift_confirmed/);
+    // Unmatch: everything as it was.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${credit.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT bill_no, amount_paise, discount_paise FROM register_rows WHERE id = ${reg}`)[0]).toEqual({ bill_no: 'X2610319', amount_paise: 30000, discount_paise: 0 });
+    expect(await sql`SELECT bill_no, amount_paise, payment_mode, match_status FROM transactions WHERE bill_no IN ('2610319', 'X2610319') AND type = 'income' ORDER BY bill_no`).toEqual([
+      { bill_no: '2610319', amount_paise: 35300, payment_mode: 'cash', match_status: null },
+      { bill_no: 'X2610319', amount_paise: 30000, payment_mode: 'upi', match_status: 'awaiting_bank_match' }]);
+    expect((await sql`SELECT decision FROM bill_comparisons WHERE bill_no = 'X2610319'`)[0].decision).toBe('use_register');
+    expect((await sql`SELECT register_row_id, decision FROM bill_comparisons WHERE bill_no = '2610319'`)[0]).toEqual({ register_row_id: null, decision: 'use_software' });
+    v = await view(h);
+  });
+});

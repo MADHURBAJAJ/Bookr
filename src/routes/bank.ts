@@ -7,7 +7,9 @@ import { parseStatementRows, parseStatementText } from '../bankstatement';
 import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
 import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, ruleFor, suggestionsFor, type BankRow } from '../bank';
 import { byName, loadParties } from '../parties';
-import { adjustStatements, undoAdjustments } from '../bankadjust';
+import { adjustStatements } from '../bankadjust';
+import { fixBillStatements, undoAll } from '../billfix';
+import { billDistance } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
 export const bankRoutes = new Hono<AppEnv>();
@@ -397,6 +399,60 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-set', requireRole('bank
   return c.json({ ok: true, differencePaise: diff, links: links.length });
 });
 
+/** What "Fix the bill" needs for a credit and the register bill it was suggested with. */
+bankRoutes.get('/businesses/:businessId/bank-rows/:rowId/fix-options', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  const tx = c.req.query('tx') ?? '';
+  if (!isUuid(tx)) fail(400, 'Choose the bill to fix.');
+  const reg = await one<{ id: string; billNo: string; amountPaise: number; discountPaise: number; shiftDay: string; payments: string; uploadId: string; status: string }>(db, `
+    SELECT r.id, r.bill_no AS billNo, r.amount_paise AS amountPaise, r.discount_paise - r.tip_paise AS discountPaise, r.shift_day AS shiftDay, r.upload_id AS uploadId,
+      s.status, (SELECT json_group_array(json_object('mode', p.mode, 'amountPaise', p.amount_paise, 'label', p.column_label)) FROM register_payments p WHERE p.register_row_id = r.id) AS payments
+    FROM transactions t JOIN bill_comparisons c ON c.id = t.comparison_id JOIN register_rows r ON r.id = c.register_row_id
+    LEFT JOIN shifts s ON s.business_id = r.business_id AND s.shift_day = r.shift_day
+    WHERE t.id = ? AND t.business_id = ?`, tx, bid);
+  if (!reg) fail(400, 'That bill has no register line to fix.');
+  // Bills of the same shift that are only in the software report: the likely right number, closest first.
+  const sw = await all<{ billNo: string; amountPaise: number; mode: string; paidAt: number | null; decision: string | null }>(db, `
+    SELECT c.bill_no AS billNo, c.sw_amount_paise AS amountPaise, c.sw_mode AS mode, b.paid_at AS paidAt, c.decision
+    FROM bill_comparisons c LEFT JOIN software_bills b ON b.id = c.software_bill_id
+    WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.register_row_id IS NULL`, bid, reg.shiftDay);
+  const ranked = sw.map((x) => ({ ...x, distance: billDistance(reg.billNo, x.billNo), minutes: x.paidAt ? Math.round(Math.abs(row.posted_at - x.paidAt) / 60000) : null }))
+    .sort((a, b) => a.distance - b.distance || (a.minutes ?? 9999) - (b.minutes ?? 9999));
+  return c.json({ credit: { id: row.id, amountPaise: row.amount_paise, postedAt: row.posted_at }, register: { ...reg, payments: JSON.parse(reg.payments) }, softwareOnly: ranked.slice(0, 12) });
+});
+
+/** Fix the bill a credit pays, on a confirmed shift, and match the credit to it. Recorded; Unmatch undoes all of it. */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/fix-bill', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row.status !== 'unmatched' || row.direction !== 'CR') fail(409, 'Only an unmatched credit can be used to fix a bill.');
+  const data = await body(c);
+  const registerRowId = typeof data.registerRowId === 'string' && isUuid(data.registerRowId) ? data.registerRowId : fail(400, 'Choose the register line.');
+  const billNo = text(data, 'billNo', 'Bill number', { max: 30 })!;
+  const amount = optionalPaise(data, 'amount', 'Bill amount') ?? fail(400, 'Give the bill amount.');
+  const discount = optionalPaise(data, 'discount', 'Discount') ?? 0;
+  const note = text(data, 'note', 'Reason', { max: 300 })!;
+  const t = now();
+  const user = c.get('user').id;
+  const fix = await fixBillStatements(db, bid, row, { registerRowId, billNo, amountPaise: amount, discountPaise: discount, note }, user, t);
+  try {
+    await db.batch([
+      ...fix.statements,
+      ...matchStatements(db, bid, row.id, [fix.transactionId], user, t),
+      stmt(db, AUDIT, ...audit(bid, user, 'bank.fix_bill', row.id, null, { registerRowId, billNo, amountPaise: amount, discountPaise: discount, note, changed: fix.changed }, t)),
+    ]);
+  } catch (e) {
+    if (String((e as Error).message).includes('shift_confirmed')) fail(409, 'The register could not be changed this way. Reopen the shift and correct it on the register page.');
+    throw e;
+  }
+  return c.json({ ok: true, changed: fix.changed });
+});
+
 bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
@@ -408,7 +464,7 @@ bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole(
   const inRows = set.rows.map(() => '?').join(',');
   const differences = await all(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'bank_sheet' AND matched_bank_row IN (${inRows})`, bid, ...set.rows);
   const t = now();
-  const undo = await undoAdjustments(db, bid, set.rows, c.get('user').id, t);
+  const undo = await undoAll(db, bid, set.rows, c.get('user').id, t);
   await db.batch([
     ...undo,
     stmt(db, `UPDATE transactions SET matched_bank_row = NULL, match_status = 'awaiting_bank_match' WHERE business_id = ? AND source = 'software_report'
