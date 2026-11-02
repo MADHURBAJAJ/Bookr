@@ -48,12 +48,13 @@ describe('Read page: register', () => {
     const res = await p.read();
     expect(res.status).toBe(200);
     expect(res.json).toMatchObject({ rows: 16, totalMatches: true, writtenTotalPaise: 1621550, orientation: 'rotated_90_clockwise' });
-    expect(res.json.unclearCells).toBe(3); // missing bill number, unclear type, unsure amount
+    expect(res.json.unclearCells).toBe(2); // missing bill number, unsure amount (an unclear type is assumed F&B)
     const rows = await sql`SELECT bill_no, bill_type, amount_paise, status, ocr_original FROM register_rows ORDER BY line_no`;
     expect(rows).toHaveLength(16);
     expect(rows.every((r) => r.status === 'draft')).toBe(true); // never confirmed automatically
     expect(rows[2]).toMatchObject({ bill_no: '' });
-    expect(rows[3].bill_type).toBeNull();
+    expect(rows[3].bill_type).toBe('fnb');
+    expect(JSON.parse(rows[3].ocr_original).inferred).toEqual(['bill_type']);
     expect(JSON.parse(rows[5].ocr_original)).toMatchObject({ engine: 'claude_vision', model: 'claude-opus-5-5', unclear: ['amount'] });
     expect(rows[10].amount_paise).toBe(124050);
     const [disc] = await sql`SELECT discount_paise FROM register_rows WHERE line_no = 8`;
@@ -102,15 +103,16 @@ describe('Read page: register', () => {
     const p = await page('bill_register');
     mocked.mockResolvedValueOnce(registerReading() as never);
     await p.read();
-    const [row] = await sql`SELECT id, ocr_original FROM register_rows WHERE line_no = 4`; // type was unclear
-    expect(JSON.parse(row.ocr_original).unclear).toEqual(['bill_type']);
+    const [row] = await sql`SELECT id, ocr_original FROM register_rows WHERE line_no = 4`; // type was unclear: assumed F&B
+    expect(JSON.parse(row.ocr_original).unclear).toEqual([]);
+    expect(JSON.parse(row.ocr_original).inferred).toEqual(['bill_type']);
     await p.clients.entry_staff.put(`/businesses/${p.bid}/register-rows/${row.id}`, {
       billNo: '2610313', billType: 'room', amount: '942', status: 'draft', payments: [{ mode: 'card', columnLabel: 'Card', amount: '942' }],
     });
     const [after] = await sql`SELECT ocr_original FROM register_rows WHERE id = ${row.id}`;
     const o = JSON.parse(after.ocr_original);
-    expect(o.unclear).toEqual(['bill_type']);
-    expect(o.resolved).toEqual(['bill_type']);
+    expect(o.inferred).toEqual(['bill_type']);
+    expect(o.resolved).toContain('bill_type');
     expect(o.read.bill_type).toBe('unclear');
   });
 

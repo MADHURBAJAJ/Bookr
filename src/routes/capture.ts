@@ -6,7 +6,7 @@ import { body, date, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
-import { istDay, shiftDayOf } from '../time';
+import { addDays, istDay, shiftDayOf } from '../time';
 import { spreadDifference } from '../discounts';
 import { can, type Role } from '../permissions';
 
@@ -209,6 +209,22 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         'SELECT id, bill_no, amount_paise - discount_paise + tip_paise AS amount_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
     ]);
     const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
+    // A cell Claude could not read (amount or payment): the software's amount for this bill, and a bank credit of that
+    // amount near the bill's time, offered as a hint. Never applied by itself; clearly read cells get no hint.
+    const credits = await all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows
+      WHERE business_id = ? AND kind = 'upi_in' AND day BETWEEN ? AND ?`, bid, u.business_day, addDays(u.business_day, 1));
+    const hintFor = (r: { billNo: string; ocrOriginal: string | null }) => {
+      if (!r.ocrOriginal) return null;
+      let o: { unclear?: string[]; resolved?: string[] };
+      try { o = JSON.parse(r.ocrOriginal); } catch { return null; }
+      const open = (o.unclear ?? []).filter((f) => !(o.resolved ?? []).includes(f));
+      if (!open.includes('amount') && !open.includes('payments')) return null;
+      const sw = swBills.find((b) => b.bill_no === r.billNo);
+      if (!sw) return null;
+      const bankAt = credits.filter((x) => x.amount_paise === sw.amount_paise && Math.abs(x.posted_at - sw.paid_at) <= 30 * 60000)
+        .sort((a, b) => Math.abs(a.posted_at - sw.paid_at) - Math.abs(b.posted_at - sw.paid_at))[0]?.posted_at ?? null;
+      return { amountPaise: sw.amount_paise, mode: sw.mode, bankAt, fields: open.filter((f) => f === 'amount' || f === 'payments') };
+    };
     // Rows of the same shift on its other register pages: bills paid together can run across sheets.
     const pages = await all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
       WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id);
@@ -222,7 +238,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     ]);
     return c.json({
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
-      rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null })),
+      rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null,
+        hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }) })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });
   }

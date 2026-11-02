@@ -113,7 +113,7 @@ async function loadShiftData(db: DB, businessId: string, day: string) {
     stmt(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     stmt(db, `SELECT id, pos_no, bill_no, paid_at, mode, amount_paise, is_complimentary FROM software_bills
       WHERE business_id = ? AND shift_day = ? ORDER BY paid_at`, businessId, day),
-    stmt(db, `SELECT id, bill_no, bill_type, amount_paise - discount_paise + tip_paise AS amount_paise, discount_paise - tip_paise AS discount_paise, status, line_no, upload_id, paid_with_row_id FROM register_rows
+    stmt(db, `SELECT id, bill_no, bill_type, amount_paise - discount_paise + tip_paise AS amount_paise, discount_paise - tip_paise AS discount_paise, status, line_no, upload_id, paid_with_row_id, ocr_original FROM register_rows
       WHERE business_id = ? AND shift_day = ? ORDER BY upload_id, line_no`, businessId, day),
     stmt(db, `SELECT p.register_row_id, p.mode, p.amount_paise, p.column_label FROM register_payments p
       JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
@@ -409,6 +409,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     })),
     totals,
     unknownModePaise: unknownPaise,
+    // Types taken as F&B because the register's type could not be read, and not changed since.
+    assumedTypes: rg.filter((r) => { try { const o = JSON.parse((r as unknown as { ocr_original?: string }).ocr_original ?? 'null'); return o && (o.inferred ?? []).includes('bill_type') && !(o.resolved ?? []).includes('bill_type'); } catch { return false; } }).map((r) => r.bill_no),
     matchedAfterAdjustment: comparisons
       .filter((c) => c.difference === 'match' && c.sw_amount_paise !== c.rg_amount_paise)
       .map((c) => ({ billNo: c.bill_no, softwarePaise: c.sw_amount_paise, registerPaise: c.rg_amount_paise })),

@@ -1322,3 +1322,27 @@ describe('the explainer (what is left after matching, explained)', () => {
     expect(after.cards.filter((c: any) => ['number_typo', 'payment_written_wrong', 'paid_in_parts'].includes(c.kind))).toEqual([]);
   });
 });
+
+describe('bring in, sync all and the bill drawer', () => {
+  it('the checklist shows what has arrived; staff see no bank; sync all reports each account; a bill shows all its sides', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const staff = (await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31/inputs`)).json;
+    expect(staff.software.bills).toBeGreaterThan(0);
+    expect(staff.pages.filter((p: any) => p.kind === 'bill_register').length).toBe(1);
+    expect(staff.bank).toBeNull();
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { sheet: 'https://docs.google.com/spreadsheets/d/1abcdefghijklmnopqrstuvwxyz0123456789ABCD/edit', tab: '2026', receivesUpiLabel: 'UPI Bank 2' });
+    const owner = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/inputs`)).json;
+    expect(owner.bank).toMatchObject({ covered: false });
+    // No Google access in tests: the account reports why, the call itself works.
+    const sync = (await h.clients.owner.post(`/businesses/${h.bid}/bank/sync-all`, {})).json;
+    expect(sync.results).toEqual([expect.objectContaining({ name: 'HUF', ok: false })]);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/bank/sync-all`, {})).status).toBe(403);
+    // Bill drawer: software, register and comparison of one bill.
+    const b = (await h.clients.viewer.get(`/businesses/${h.bid}/bills/2610317?day=2026-10-31`)).json;
+    expect(b.comparisons[0]).toMatchObject({ bill_no: '2610317', difference: 'amount' });
+    expect(b.register[0]).toMatchObject({ bill_no: '2610317', amount_paise: 414000 });
+    expect(b.money).toEqual([]);
+  });
+});

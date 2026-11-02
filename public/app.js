@@ -96,6 +96,7 @@ function render(view) {
 
 const NAV = [
   { key: 'dashboard', label: 'Dashboard', needs: 'reports.view' },
+  { key: 'bringin', label: 'Bring in', needs: 'rows.upload' },
   { key: 'upload', label: 'Upload', needs: 'rows.upload' },
   { key: 'review', label: 'Review', needs: 'rows.edit' },
   { key: 'compare', label: 'Compare sales', needs: 'sales.view' },
@@ -684,7 +685,7 @@ async function uploadView(biz) {
     file.accept = csv ? '.csv,text/csv' : 'image/jpeg,image/png,application/pdf';
     document.getElementById('uhint').textContent = csv
       ? 'CSVs from the hotel software, up to 10 at a time. Each is checked against its own footer before anything is saved.'
-      : 'JPG, PNG or PDF, up to 10 at a time, all for the day and page type chosen. Read them with Claude afterwards, or type the rows in on Review.';
+      : 'JPG, PNG or PDF, up to 10 at a time, all for the day and page type chosen. Claude starts reading them as soon as they are uploaded; you check every row on Review.';
     document.getElementById('preview').innerHTML = '';
   });
   form.addEventListener('submit', async (e) => {
@@ -704,12 +705,6 @@ async function uploadView(biz) {
         await csvPreview(biz, day, await f.text(), undefined, card, f.name, files.length > 1);
       }
       return;
-    }
-    if (files.length === 1) {
-      try {
-        const { id } = await apiUpload(`/businesses/${biz.id}/uploads?kind=${kind.value}&day=${day}`, files[0]);
-        return go(`#/b/${biz.id}/review/${id}`);
-      } catch (err) { return showError(msg, err); }
     }
     await uploadMany(biz, day, kind.value, files, box);
   });
@@ -743,23 +738,35 @@ async function uploadMany(biz, day, kind, files, box) {
   }
   const done = lines.filter((l) => l.id);
   if (!done.length || !READABLE.includes(kind) || !biz.actions.includes('rows.upload')) return;
+  // Reading starts by itself (approved 3 Nov 2026): every row read is still a draft that a person checks.
+  await readPages(biz, done.map((l) => ({ id: l.id, kind, set: (state, error) => { l.state = state; l.error = error ?? null; draw(); } })));
+}
+
+/**
+ * Reads uploaded pages with Claude, a few at a time (the server's limit), waiting and trying again when it is busy.
+ * Runs in this browser: a page closed before its turn stays "not read" and can be read later.
+ */
+async function readPages(biz, items) {
   const status = await api('GET', `/businesses/${biz.id}/ocr`).catch(() => null);
-  if (!status?.configured) return;
-  const actions = document.getElementById('manyactions');
-  actions.innerHTML = html`<div class="form-row" style="align-items:center;margin-top:6px">
-    <button class="btn" type="button" id="readall">Read all ${done.length} with Claude</button>
-    <span class="note">Reads one page after another. Uses ${done.length} of today's page reads (${status.usedToday} of ${status.dailyLimit} used).</span></div>`.__html;
-  document.getElementById('readall').addEventListener('click', async () => {
-    for (const l of done) {
-      l.state = 'Reading…';
-      draw();
-      try {
-        const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${l.id}/read`, {});
-        l.state = kind === 'cash_summary' ? 'Read' : `Read: ${r.rows} row${r.rows === 1 ? '' : 's'}${r.unclearCells ? `, ${r.unclearCells} to check` : ''}${r.totalMatches === false ? ', total differs' : ''}`;
-      } catch (err) { l.state = 'Uploaded'; l.error = `Not read: ${err.message}`; }
-      draw();
+  if (!status?.configured) { items.forEach((x) => x.set('Uploaded', 'Not read: reading is not set up. Type the rows in on Review.')); return; }
+  const queue = [...items];
+  const worker = async () => {
+    for (let x = queue.shift(); x; x = queue.shift()) {
+      x.set('Reading…');
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        try {
+          const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${x.id}/read`, {});
+          x.set(x.kind === 'cash_summary' ? 'Read' : `Read: ${r.rows} row${r.rows === 1 ? '' : 's'}${r.unclearCells ? `, ${r.unclearCells} to check` : ''}${r.totalMatches === false ? ', total differs' : ''}`);
+          break;
+        } catch (err) {
+          if (/being read already|already being read/.test(err.message) && attempt < 5) { x.set('Waiting to read…'); await new Promise((res) => setTimeout(res, 15000)); continue; }
+          x.set('Uploaded', `Not read: ${err.message}`);
+          break;
+        }
+      }
     }
-  });
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(status.maxParallel ?? 2, 3)) }, worker));
 }
 
 async function csvPreview(biz, day, csv, replaces, box = document.getElementById('preview'), name = '', many = false) {
@@ -1057,6 +1064,15 @@ function groupNote(r) {
     ₹ ${money(paidOf(h))} for bills of ₹ ${money(groupNet(h))} (${all.map(rowLabel).join(', ')})${ok ? '' : ' — does not add up'}${other ? html` · <a href="#/b/${currentBizId()}/review/${other.uploadId}/${other.id}">open page ${other.pageNo}</a>` : ''}</div>`;
 }
 
+/** For a cell Claude could not read: the software's amount (and a bank credit of it), offered to fill in. */
+function hintButton(r) {
+  const h = r.hint;
+  if (!h || h.amountPaise === r.amountPaise) return '';
+  return html`<button type="button" class="btn plain" data-usehint="${r.id}" data-amt="${rupeesForInput(h.amountPaise)}" data-pay="${h.fields.includes('payments') && r.payments.length <= 1 ? '1' : ''}"
+    style="min-height:26px;padding:0 6px;font-size:12px;margin-top:2px;white-space:nowrap" title="The cell was unclear. The software report says ${money(h.amountPaise)}${h.bankAt ? `, and the bank received ${money(h.amountPaise)} at ${when(h.bankAt)}` : ''}.">
+    Use ${money(h.amountPaise)}?${h.bankAt ? ' (software + bank)' : ' (software)'}</button>`;
+}
+
 /** One register row. Editable in place unless the shift is confirmed; Edit opens the full form. */
 function regRowHtml(r, locked) {
   const q = unclearOf(r.ocrOriginal, r.status === 'draft');
@@ -1074,9 +1090,10 @@ function regRowHtml(r, locked) {
     <td class="note">${r.lineNo}</td>
     <td style="text-align:center"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Checked against the page" title="Checked against the page" style="width:20px;height:20px;min-height:0"></td>
     <td>${billCell(r, nd('bill_no'))}${r.bankAdjusted ? html`<div class="tiny" style="color:var(--teal)" title="Discount or tip and payment changed to what the bank received, on UPI matching. Unmatch there to undo.">Adjusted from bank</div>` : ''}</td>
-    <td><select class="cell ${nd('bill_type')}" data-f="billType" aria-label="Type">
+    <td><select class="cell ${nd('bill_type') || (inferredOf(r.ocrOriginal).has('bill_type') ? 'auto' : '')}" data-f="billType" aria-label="Type" ${inferredOf(r.ocrOriginal).has('bill_type') ? 'title="Assumed F&B: the type could not be read. Change it if this was a Room bill."' : ''}>
       <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
-    <td><input class="cell mono ${nd('amount') || (payDiffers(r) ? 'needs' : '')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount" title="${payDiffers(r) ? `Payments add up to ${money(paidOf(r))}` : ''}"></td>
+    <td><input class="cell mono ${nd('amount') || (payDiffers(r) ? 'needs' : '')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount" title="${payDiffers(r) ? `Payments add up to ${money(paidOf(r))}` : ''}">
+      ${hintButton(r)}</td>
     <td><input class="cell mono ${nd('discount') || (largePct(r) ? 'needs' : inferredOf(r.ocrOriginal).has('discount') ? 'auto' : '')}" data-f="discount" value="${r.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0" style="width:72px;text-align:right" inputmode="decimal" aria-label="Discount"
       title="${largePct(r) ? `Discount of ${largePct(r)}%${r.paidWithRowId || membersOf(r).length ? ' on the bills paid together' : ''}: check that no payment was missed. Compare sales asks for a decision.` : inferredOf(r.ocrOriginal).has('discount') ? 'Filled in automatically: bill amount minus payments (negative = tip). Check it against the page.' : 'Discount; a tip is negative'}">
       ${largePct(r) ? html`<div class="tiny" style="white-space:nowrap;color:var(--danger)">Disc ${largePct(r)}%</div>` : ''}</td>
@@ -1254,6 +1271,13 @@ function wireInlineRows(biz, u) {
   };
   const bind = (tr) => {
     tr.querySelectorAll('[data-f]').forEach((el) => el.addEventListener('change', () => save(tr, el)));
+    tr.querySelector('[data-usehint]')?.addEventListener('click', (e) => {
+      const b = e.currentTarget;
+      const amount = tr.querySelector('[data-f="amount"]');
+      amount.value = b.dataset.amt;
+      if (b.dataset.pay) { const pay = tr.querySelector('[data-f="payAmount"]'); if (pay && !pay.hidden) pay.value = b.dataset.amt; }
+      amount.dispatchEvent(new Event('change'));
+    });
     tr.querySelector('[data-edit]')?.addEventListener('click', () => openRowForm(tr.dataset.row));
   };
   let openRowForm = () => {};
@@ -1743,7 +1767,7 @@ async function compareView(biz, day) {
         <thead><tr><th>Bill</th><th>Paid at</th><th>Software</th><th>Register</th><th>What differs</th><th>Your decision</th></tr></thead>
         <tbody>${toDecide.map((c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
             class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
-          <td class="mono">${bulkOk(c) ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
+          <td class="mono">${bulkOk(c) ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
           <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
             ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
@@ -1779,6 +1803,7 @@ async function compareView(biz, day) {
         : html`
           ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
           ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="note">Everything is decided. Confirming turns the sales into approved income rows.</div>`}
+          ${v.assumedTypes?.length ? html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px">${v.assumedTypes.length} bill${v.assumedTypes.length > 1 ? 's were' : ' was'} taken as <strong>F&amp;B</strong> because the register's type could not be read: ${blockerHtml(v.assumedTypes.join(', '), v)}. Change any that were Room before confirming.</div>` : ''}
           ${canDecide ? html`<button class="btn big" id="confirm" ${v.canConfirm ? '' : 'disabled'}>Confirm sales for this shift</button>` : ''}
           <div class="note">Only Owner and Accountant can decide differences and confirm.</div>`}
       </section>
@@ -2031,7 +2056,8 @@ async function bankView(biz, query = '') {
   render(shell(biz, 'bank', 'Bank sync', 'Statement lines from each bank account, matched to sales or booked under a head. Nothing is booked until a person confirms it.', html`
     <div id="bmsg"></div>
     <section class="card" style="gap:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Bank accounts</h2><a href="#/b/${biz.id}/accounts" class="note">Add a bank account on Accounts</a></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Bank accounts</h2>
+        <span style="display:flex;gap:10px;align-items:center">${b.accounts.some((a) => a.sheetId) ? html`<button class="btn" type="button" id="banksyncall">Sync all bank accounts</button>` : ''}<a href="#/b/${biz.id}/accounts" class="note">Add a bank account on Accounts</a></span></div>
       ${b.googleEmail ? html`<div class="note">To sync a Google Sheet, share it with <strong class="mono">${b.googleEmail}</strong> as a Viewer.</div>`
         : html`<div class="note">Google Sheets access is not set up yet. Until it is, copy rows from the sheet (Ctrl+A, Ctrl+C) and use <strong>Paste rows</strong>. Lines already in Bookr are skipped.</div>`}
       ${b.accounts.length ? html`<div class="scroll"><table style="min-width:760px"><thead><tr><th>Account</th><th>Receives</th><th>Statement from</th><th style="text-align:right">Lines</th><th></th></tr></thead>
@@ -2095,6 +2121,11 @@ async function bankView(biz, query = '') {
     catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   };
   onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account })));
+  document.getElementById('banksyncall')?.addEventListener('click', async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Syncing…';
+    try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await bankView(biz, query); document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html; }
+    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync all bank accounts'; showError(msg, err); }
+  });
   app.querySelectorAll('details.shiftgroup').forEach((d) => d.addEventListener('toggle', () => {
     if (d.open) openShifts.add(d.dataset.shift); else openShifts.delete(d.dataset.shift);
     try { sessionStorage.setItem(OPEN_KEY, JSON.stringify([...openShifts])); } catch { /* storage unavailable */ }
@@ -2262,6 +2293,7 @@ async function upiView(biz, dayArg) {
   const more = Number(new URLSearchParams(qs).get('more')) || 1;
   const [v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/upi?more=${more}${day ? `&day=${day}` : ''}`), api('GET', `/businesses/${biz.id}/heads`)]);
   const ex = await api('GET', `/businesses/${biz.id}/shifts/${v.day}/explain`).catch(() => null);
+  if (ex) ex.day = v.day;
   const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
   const matched = v.sales.filter((s) => s.bankRowId);
   const waiting = v.sales.filter((s) => !s.bankRowId);
@@ -2282,7 +2314,7 @@ async function upiView(biz, dayArg) {
       ${v.sales.length ? html`<div class="scroll"><table style="min-width:720px"><thead><tr><th>Bill</th><th>Paid at</th><th>Register column</th><th style="text-align:right">Amount</th><th>Bank credit</th></tr></thead>
         <tbody>${v.sales.map((s) => html`<tr class="clickrow" data-bill="${s.billNo ?? ''}" data-open="${s.uploadId ? `#/b/${biz.id}/review/${s.uploadId}/${s.registerRowId}` : `#/b/${biz.id}/review?find=${(s.billNo ?? '').slice(-4)}`}"
             title="${s.uploadId ? 'Open this bill in its register page' : 'Not in the register: look for it on the register pages'}" style="cursor:pointer">
-          <td class="mono"><a href="#" data-openlink>${s.billNo ?? ''}</a>${s.parts > 1 ? html`<div class="tiny" style="font-family:inherit">part of ${s.parts} UPI payments</div>` : ''}</td><td>${s.paidAt ? when(s.paidAt) : html`<span class="note">register only</span>`}</td><td class="note">${s.labels ?? ''}</td>
+          <td class="mono"><a href="#" data-openlink>${s.billNo ?? ''}</a>${s.billNo ? drawerBtn(s.billNo, v.day) : ''}${s.parts > 1 ? html`<div class="tiny" style="font-family:inherit">part of ${s.parts} UPI payments</div>` : ''}</td><td>${s.paidAt ? when(s.paidAt) : html`<span class="note">register only</span>`}</td><td class="note">${s.labels ?? ''}</td>
           <td class="amount">${money(s.amountPaise)}</td>
           <td>${s.bankRowId ? html`<span class="chip ok">${s.accountName}</span> <span class="note">${when(s.creditAt)}${s.paidAt ? ` · ${Math.round(Math.abs(s.creditAt - s.paidAt) / 60000)} min` : ''}</span>` : html`<span class="chip bad">Not found yet</span>`}</td></tr>`)}</tbody></table></div>`
         : html`<div class="note">No UPI sales in this shift${v.confirmedShifts.includes(v.day) ? '' : ' yet: sales count once the shift is confirmed on Compare sales'}.</div>`}
@@ -2329,7 +2361,7 @@ function billUnits(waiting) {
       body = html`<span class="mono">${first.billNo ?? ''}</span>${first.billPaise != null && first.billPaise !== amount ? html` <span class="tiny">bill ₹ ${money(first.billPaise)}</span>` : ''}
         <span class="tiny" style="display:block">${at}${label}</span>`;
     }
-    return { ids: xs.map((x) => x.id), amount, html: body };
+    return { ids: xs.map((x) => x.id), amount, html: html`${body}${drawerBtn(first.billNo ?? '', first.shiftDay ?? '')}` };
   });
 }
 
@@ -2348,7 +2380,7 @@ function explainPanel(ex) {
     ${cov && !cov.covered ? html`<div class="inset" style="background:#FFFBEB"><strong>Bank data is not in for the whole shift.</strong>
       <span class="note">The latest bank line is ${cov.lastBankAt ? when(cov.lastBankAt) : 'missing'}; the shift ends ${when(cov.shiftEnd)}. Sync the bank sheets first: until then, bills with no UPI credit are not flagged.</span></div>` : ''}
     ${cards.map((c) => html`<div class="inset" data-card="${c.key}" style="display:flex;flex-direction:column;gap:6px;${c.score >= 60 ? 'border-left:3px solid var(--teal)' : 'border-left:3px solid #F59E0B'}">
-      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center"><strong>${c.title}</strong>
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center"><strong>${c.title}</strong>${(c.billNos ?? []).filter(Boolean).map((b) => drawerBtn(b, ex.day))}
         <span class="chip ${c.score >= 60 ? 'ok' : 'wait'}">${c.score >= 75 ? 'Very likely' : c.score >= 60 ? 'Likely' : 'Check'}</span></div>
       <ul class="note" style="margin:0;padding-left:18px">${c.evidence.map((e) => html`<li>${e}</li>`)}</ul>
       <div class="form-row" style="gap:6px">${c.actions.map((a, i) => html`<button class="btn ${a.primary ? '' : 'plain'}" type="button" data-cardact="${c.key}" data-i="${i}" style="min-height:36px">${a.label}</button>`)}
@@ -2502,6 +2534,152 @@ function wirePairPanel(biz, v, heads, reload) {
 
 const addDaysIso = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400e3).toISOString().slice(0, 10);
 
+// ---------- Bring in: everything a shift needs, in the morning, on one screen (approved 3 Nov 2026)
+
+const currentShiftDay = () => new Date(Date.now() + IST_MS - 8 * 3600e3).toISOString().slice(0, 10);
+
+async function bringInView(biz, dayArg) {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : addDaysIso(currentShiftDay(), -1);
+  const v = await api('GET', `/businesses/${biz.id}/shifts/${day}/inputs`);
+  const pagesOf = (k) => v.pages.filter((p) => p.kind === k);
+  const pageLine = (p) => html`<div class="list-row" style="padding:6px 0">
+    <span>${KIND_LABELS[p.kind]} · ${when(p.createdAt)}${p.rows != null ? ` · ${p.rows} row${p.rows === 1 ? '' : 's'}` : ''}</span>
+    <span style="display:flex;gap:8px;align-items:center">${p.status === 'ready' ? html`<span class="chip ok">Read</span>` : p.status === 'reading' ? html`<span class="chip wait">Reading…</span>`
+      : p.status === 'retake' ? html`<span class="chip bad">Retake needed</span>` : p.status === 'failed' ? html`<span class="chip bad">Not read</span>` : p.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Not read yet</span>`}
+      ${['uploaded', 'failed'].includes(p.status) ? html`<button class="btn plain" type="button" data-readnow="${p.id}" data-kind="${p.kind}" style="min-height:32px">Read now</button>` : ''}
+      <a href="#/b/${biz.id}/review/${p.id}">Review</a></span></div>`;
+  const tick = (ok, warn) => (ok ? html`<span class="chip ok">✓</span>` : warn ? html`<span class="chip wait">!</span>` : html`<span class="chip bad">✗</span>`);
+  const softwareOk = v.software.reports > 0 && !v.software.gaps.length;
+  const regs = pagesOf('bill_register');
+  const regsOk = regs.length > 0 && regs.every((p) => p.status === 'ready' || p.status === 'approved');
+  const exp = pagesOf('expense_list');
+  const sum = pagesOf('cash_summary');
+  const step = (n, title, ok, warn, status, body) => html`<section class="card" style="gap:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>${n}. ${title}</h2><span style="display:flex;gap:8px;align-items:center"><span class="note">${status}</span>${tick(ok, warn)}</span></div>${body}</section>`;
+  render(shell(biz, 'bringin', 'Bring in', 'Everything one shift needs, in this order: software report, bank statements, then the photographed pages. Pages are read as soon as they are uploaded.', html`
+    <div class="form-row" style="align-items:flex-end;margin-bottom:12px"><div class="field"><label for="bid">Shift (8 am to 8 am)</label><input id="bid" type="date" value="${day}"></div>
+      <span class="note">${dayLabel(day)} 8 am → ${dayLabel(addDaysIso(day, 1))} 8 am${v.shiftStatus === 'confirmed' ? ' · confirmed' : ''}</span></div>
+    <div id="bmsg"></div>
+    ${step(1, 'Software sales report', softwareOk, v.software.reports > 0, v.software.reports ? `${v.software.bills} bills${v.software.gaps.length ? ' · some hours missing' : ' · whole shift covered'}` : 'Not uploaded', html`
+      <div class="form-row" style="align-items:flex-end"><div class="field" style="flex:2 1 260px"><label>CSV from the hotel software</label><input type="file" id="bcsv" accept=".csv,text/csv" multiple></div></div>
+      <div id="bcsvbox"></div>`)}
+    ${v.bank ? step(2, 'Bank statements', v.bank.covered, false, v.bank.covered ? 'Up to the shift\'s end' : 'Not up to the shift\'s end yet', html`
+      ${v.bank.accounts.map((a) => html`<div class="list-row" style="padding:4px 0"><span>${a.name}${a.label ? html` <span class="note">· ${a.label}</span>` : ''}</span>
+        <span class="note">${a.lastAt ? `up to ${when(a.lastAt)}` : 'no lines yet'}${a.sheet ? '' : ' · pasted'}</span></div>`)}
+      <div class="form-row" style="align-items:center"><button class="btn" type="button" id="syncall">Sync all bank accounts</button>
+        <span class="note">Reads every account's Google Sheet. Pasted accounts: <a href="#/b/${biz.id}/bank">Bank sync</a>.</span></div>
+      <div id="syncbox"></div>`) : ''}
+    ${step(v.bank ? 3 : 2, 'Pages', regsOk && sum.length > 0, regs.length > 0, `${regs.length} register page${regs.length === 1 ? '' : 's'} · ${exp.length} expense · ${sum.length ? 'cash summary ✓' : 'no cash summary'}`, html`
+      ${v.pages.length ? v.pages.map(pageLine) : html`<div class="note">No pages for this shift yet.</div>`}
+      <form class="form-row" id="bpages" style="align-items:flex-end">
+        <div class="field"><label>Page type</label><select name="kind"><option value="bill_register">Bill register</option><option value="expense_list">Expense list</option><option value="cash_summary">Cash account summary</option></select></div>
+        <div class="field" style="flex:2 1 240px"><label>Photos (up to 10)</label><input type="file" name="file" accept="image/jpeg,image/png,application/pdf" multiple required></div>
+        <button class="btn" type="submit">Upload and read</button></form>
+      <div id="bpagebox"></div>`)}
+    <section class="card" style="gap:8px"><h2>Then</h2>
+      <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">Compare sales for this shift</a>
+        ${v.bank ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/upi/${day}">UPI matching</a>` : ''}</div>
+      ${!softwareOk || !regsOk || (v.bank && !v.bank.covered) ? html`<div class="note">Still to come: ${[!softwareOk && 'software report', v.bank && !v.bank.covered && 'bank statements up to 8 am', !regsOk && 'register pages read'].filter(Boolean).join(', ')}.</div>` : html`<div class="ok-msg">Everything is in for this shift.</div>`}
+    </section>`));
+  wireShell();
+  const reload = () => bringInView(biz, day);
+  document.getElementById('bid').addEventListener('change', (e) => go(`#/b/${biz.id}/bringin/${e.target.value}`));
+  document.getElementById('bcsv').addEventListener('change', async (e) => {
+    const box = document.getElementById('bcsvbox');
+    box.innerHTML = '';
+    for (const f of [...e.target.files].slice(0, MAX_FILES)) {
+      const card = document.createElement('div');
+      box.appendChild(card);
+      await csvPreview(biz, day, await f.text(), undefined, card, f.name, e.target.files.length > 1);
+    }
+  });
+  document.getElementById('syncall')?.addEventListener('click', async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Syncing…';
+    const box = document.getElementById('syncbox');
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {});
+      await reload();
+      document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html;
+    } catch (err) { e.target.disabled = false; e.target.textContent = 'Sync all bank accounts'; showError(box, err); }
+  });
+  const pf = document.getElementById('bpages');
+  pf.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const files = [...pf.file.files];
+    if (!files.length) return;
+    if (files.length > MAX_FILES) return showError(document.getElementById('bpagebox'), new Error(`Choose at most ${MAX_FILES} files at a time.`));
+    await uploadMany(biz, day, pf.kind.value, files, document.getElementById('bpagebox'));
+    await reload();
+  });
+  app.querySelectorAll('[data-readnow]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true; b.textContent = 'Reading…';
+    await readPages(biz, [{ id: b.dataset.readnow, kind: b.dataset.kind, set: (state, error) => { if (error) showError(document.getElementById('bmsg'), new Error(error)); } }]);
+    reload();
+  }));
+}
+
+function syncResultHtml(r) {
+  return html`<div class="inset" style="gap:4px">${r.results.length ? r.results.map((x) => html`<div class="list-row" style="padding:4px 0"><span>${x.name}</span>
+    ${x.ok ? html`<span class="ok-msg" style="font-size:14px">✓ ${x.added} new line${x.added === 1 ? '' : 's'}${x.lastAt ? ` · up to ${when(x.lastAt)}` : ''}</span>` : html`<span class="error" style="font-size:14px">${x.error}</span>`}</div>`)
+    : html`<div class="note">No account has a Google Sheet set up. Use Set up on Bank sync.</div>`}</div>`;
+}
+
+// ---------- The bill drawer: everything about one bill, from anywhere (approved 3 Nov 2026)
+
+async function openBillDrawer(biz, billNo, day) {
+  let d = document.getElementById('billdrawer');
+  if (!d) {
+    d = document.createElement('aside');
+    d.id = 'billdrawer';
+    d.setAttribute('role', 'dialog');
+    d.style.cssText = 'position:fixed;top:0;right:0;bottom:0;width:min(520px,100vw);background:var(--surface,#fff);box-shadow:-8px 0 30px rgba(0,0,0,.15);z-index:50;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:12px';
+    document.body.appendChild(d);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.getElementById('billdrawer')?.remove(); });
+  }
+  d.innerHTML = '<div class="note">Loading…</div>';
+  let b;
+  try { b = await api('GET', `/businesses/${biz.id}/bills/${encodeURIComponent(billNo)}${day ? `?day=${day}` : ''}`); }
+  catch (err) { showError(d, err); return; }
+  const section = (title, body) => html`<section style="border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:4px"><strong>${title}</strong>${body}</section>`;
+  const c0 = b.comparisons[0];
+  d.innerHTML = html`
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2 class="mono" style="margin:0">Bill ${b.billNo}</h2>
+      <button class="btn plain" type="button" id="drawerclose" aria-label="Close">Close ✕</button></div>
+    ${section('Software', b.comparisons.some((c) => c.sw_amount_paise != null) ? b.comparisons.filter((c) => c.sw_amount_paise != null).map((c) => html`<div>₹ ${money(c.sw_amount_paise)} · ${MODE_LABELS[c.sw_mode] ?? c.sw_mode}${c.paid_at ? ` · paid ${when(c.paid_at)}` : ''} · ${dayLabel(c.shift_day)} shift</div>`) : html`<div class="note">Not in the software report.</div>`)}
+    ${section('Register', b.register.length ? b.register.map((r) => html`<div>₹ ${money(r.amount_paise)}${r.discount_paise ? ` · discount ₹ ${money(r.discount_paise)}` : ''}${r.tip_paise ? ` · tip ₹ ${money(r.tip_paise)}` : ''} · ${TYPE_LABELS[r.bill_type] ?? 'no type'}
+        ${r.adjusted ? html` <span class="chip" style="background:#E3F1EF">Adjusted from bank</span>` : ''}
+        <div class="note">Paid ${r.payments.map((p) => `${p.label || MODE_LABELS[p.mode]} ₹ ${money(p.amountPaise)}`).join(' + ') || 'none written'}${r.paid_with_row_id ? ' (paid together with another bill)' : ''}${r.remarks ? ` · ${r.remarks}` : ''} · line ${r.line_no}</div>
+        <a href="#/b/${biz.id}/review/${r.upload_id}/${r.id}">Open on its register page (with the photo)</a></div>`) : html`<div class="note">Not in the register.</div>`)}
+    ${section('Comparison', b.comparisons.length ? b.comparisons.map((c) => html`<div>${dayLabel(c.shift_day)} shift: <span class="chip ${c.difference === 'match' ? 'ok' : 'wait'}">${DIFF_LABELS[c.difference]}</span>
+        ${c.decision ? ` · ${DECISION_LABELS[c.decision]}${c.note ? `: ${c.note}` : ''}` : ''}${c.shift_status === 'confirmed' ? ' · confirmed' : ''}
+        <div><a href="#/b/${biz.id}/compare/${c.shift_day}">Open on Compare sales</a></div></div>`) : html`<div class="note">No comparison.</div>`)}
+    ${section('Money', b.sales.length ? b.sales.map((x) => {
+      const paid = b.money.filter((m) => m.saleId === x.id);
+      return html`<div>Sale ₹ ${money(x.amount_paise)} · ${MODE_LABELS[x.payment_mode] ?? x.payment_mode}${x.head ? ` · ${x.head}` : ''}
+        <div class="note">${paid.length ? paid.map((m) => `In the bank: ₹ ${money(m.appliedPaise)} of ₹ ${money(m.amountPaise)} at ${when(m.postedAt)} · ${m.accountName}${m.vpa ? ` · ${m.vpa}` : ''}`).join('; ')
+          : x.payment_mode === 'cash' ? 'Cash: counted in the shift\'s cash check.' : x.match_status === 'awaiting_card_settlement' ? 'Waiting for the card settlement.' : x.match_status === 'awaiting_bank_match' ? 'Not found in the bank yet.' : ''}</div></div>`;
+    }) : html`<div class="note">${c0?.shift_status === 'confirmed' ? 'Not counted as a sale.' : 'Counted once the shift is confirmed.'}</div>`)}
+    ${section('History', b.history.length ? b.history.map((h) => html`<div class="tiny">${when(h.at)} · ${h.user ?? 'Bookr'} · ${HISTORY_LABELS[h.action] ?? h.action}</div>`) : html`<div class="note">Nothing yet.</div>`)}
+    ${c0 && b.sales.some((x) => x.match_status === 'awaiting_bank_match') ? html`<div><a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/upi/${c0.shift_day}">Match or fix on UPI matching</a></div>` : ''}`.__html;
+  document.getElementById('drawerclose').addEventListener('click', () => d.remove());
+}
+const HISTORY_LABELS = {
+  'comparison.decide': 'Decided', 'comparison.decision_cleared': 'Decision cleared (data changed)', 'register.added_from_software': 'Added to the register from the software report',
+  'bank.match': 'Matched to a bank credit', 'bank.match_set': 'Matched by hand', 'bank.match_adjust_bills': 'Matched; register corrected to the bank amount', 'bank.fix_bill': 'Bill fixed from the bank',
+  'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened',
+  'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
+};
+// Any element with data-bill-drawer="billNo|day" opens the drawer.
+document.addEventListener('click', (e) => {
+  const el = e.target.closest?.('[data-bill-drawer]');
+  if (!el) return;
+  e.preventDefault(); e.stopPropagation();
+  const [no, day] = el.dataset.billDrawer.split('|');
+  const biz = { id: currentBizId() };
+  openBillDrawer(biz, no, day || null);
+}, true);
+const drawerBtn = (billNo, day) => html`<button type="button" class="btn plain" data-bill-drawer="${billNo}|${day ?? ''}" title="Everything about this bill" style="min-height:26px;padding:0 6px;font-size:12px;margin-left:4px">Details</button>`;
+
 // ---------- router
 
 async function route() {
@@ -2530,6 +2708,7 @@ async function route() {
       if (screen === 'review') return parts[3] ? reviewView(biz, parts[3], parts[4]) : reviewListView(biz, new URLSearchParams(query).get('find'));
       if (screen === 'compare') return compareView(biz, parts[3]);
       if (screen === 'bank') return bankView(biz, query);
+      if (screen === 'bringin') return bringInView(biz, parts[3]);
       if (screen === 'upi') return upiView(biz, parts[3]);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));

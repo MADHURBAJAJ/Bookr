@@ -104,10 +104,11 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
     if (row.discount && disc === null) unclear.add('discount');
     if (disc !== null && (disc < 0 || disc > (amt ?? 0))) { unclear.add('discount'); disc = null; }
     if (!row.bill_no) unclear.add('bill_no');
-    if (row.bill_type === 'unclear') unclear.add('bill_type');
+    // Most sales are F&B: an unreadable type is taken as F&B and shown as assumed, for a person to change if wrong.
+    const assumedType = row.bill_type === 'unclear';
     const pays = row.payments.map((p) => ({ ...p, paise: amount(p.amount) }));
     if (pays.some((p) => p.paise === null)) unclear.add('payments');
-    return { row, id: newId(), amt, disc, tip: 0, pays, unclear, inferred: [] as string[], paidWith: null as string | null };
+    return { row, id: newId(), amt, disc, tip: 0, pays, unclear, inferred: assumedType ? ['bill_type'] : [] as string[], paidWith: null as string | null };
   });
 
   // Bills paid together: a row pointing at the line where one shared payment is written. No chains.
@@ -143,7 +144,7 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
   rows.forEach((x, i) => {
     statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise,
       paid_with_row_id, remarks, status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
-      x.id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, x.row.bill_no?.trim() ?? '', x.row.bill_type === 'unclear' ? null : x.row.bill_type,
+      x.id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, x.row.bill_no?.trim() ?? '', x.row.bill_type === 'unclear' ? 'fnb' : x.row.bill_type,
       x.amt ?? 0, x.disc ?? 0, x.tip, null, x.row.remarks,
       JSON.stringify({ ...base(ctx, r.orientation), line: x.row.line, read: x.row, unclear: [...x.unclear], inferred: x.inferred }), t));
     for (const p of x.pays) {

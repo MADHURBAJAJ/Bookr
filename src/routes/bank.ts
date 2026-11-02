@@ -81,27 +81,47 @@ bankRoutes.post('/businesses/:businessId/bank/:accountId/paste', requireRole('ba
   return c.json({ ...r, problems: parsed.problems.slice(0, 20) });
 });
 
-bankRoutes.post('/businesses/:businessId/bank/:accountId/sync', requireRole('bank.link'), async (c) => {
-  const db = c.env.DB;
-  const bid = c.get('businessId');
-  const a = await bankAccount(db, bid, c.req.param('accountId'));
-  const src = await one<{ sheet_id: string | null; tab: string | null }>(db, 'SELECT sheet_id, tab FROM bank_sources WHERE account_id = ?', a.id);
-  if (!src?.sheet_id) fail(400, 'Give this account its Google Sheet link first, or paste the rows.');
+/** Reads one account's sheet and adds the new lines. A Google problem is noted on the account and returned as text. */
+async function syncAccount(env: AppEnv['Bindings'], db: D1Database, bid: string, accountId: string) {
+  const src = await one<{ sheet_id: string | null; tab: string | null }>(db, 'SELECT sheet_id, tab FROM bank_sources WHERE account_id = ?', accountId);
+  if (!src?.sheet_id) return { ok: false as const, error: 'Give this account its Google Sheet link first, or paste the rows.' };
   let rows: string[][];
   let tabs: string[];
-  try { ({ rows, tabs } = await readSheet(c.env, src.sheet_id, src.tab)); }
+  try { ({ rows, tabs } = await readSheet(env, src.sheet_id, src.tab)); }
   catch (e) {
     if (e instanceof GoogleError) {
-      await stmt(db, 'UPDATE bank_sources SET last_sync_note = ? WHERE account_id = ?', e.message, a.id).run();
-      fail(400, e.message);
+      await stmt(db, 'UPDATE bank_sources SET last_sync_note = ? WHERE account_id = ?', e.message, accountId).run();
+      return { ok: false as const, error: e.message };
     }
     throw e;
   }
   const parsed = parseStatementRows(rows);
-  const r = await importLines(db, bid, a.id, parsed.lines);
+  const r = await importLines(db, bid, accountId, parsed.lines);
   const note = `${r.added} new line${r.added === 1 ? '' : 's'} from ${tabs.length} tab${tabs.length === 1 ? '' : 's'}${parsed.problems.length ? `; ${parsed.problems.length} could not be read` : ''}.`;
-  await stmt(db, 'UPDATE bank_sources SET last_synced_at = ?, last_sync_note = ? WHERE account_id = ?', now(), note, a.id).run();
-  return c.json({ ...r, tabs: tabs.length, problems: parsed.problems.slice(0, 20) });
+  await stmt(db, 'UPDATE bank_sources SET last_synced_at = ?, last_sync_note = ? WHERE account_id = ?', now(), note, accountId).run();
+  const last = await one<{ at: number | null }>(db, 'SELECT max(posted_at) AS at FROM bank_rows WHERE account_id = ?', accountId);
+  return { ok: true as const, ...r, tabs: tabs.length, problems: parsed.problems.slice(0, 20), lastAt: last?.at ?? null };
+}
+
+bankRoutes.post('/businesses/:businessId/bank/:accountId/sync', requireRole('bank.link'), async (c) => {
+  const a = await bankAccount(c.env.DB, c.get('businessId'), c.req.param('accountId'));
+  const r = await syncAccount(c.env, c.env.DB, c.get('businessId'), a.id);
+  if (!r.ok) fail(400, r.error);
+  return c.json(r);
+});
+
+/** Every account with a Google Sheet, one after another; one failing does not stop the rest. */
+bankRoutes.post('/businesses/:businessId/bank/sync-all', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const accounts = await all<{ id: string; name: string }>(db, `SELECT a.id, a.name FROM accounts a JOIN bank_sources s ON s.account_id = a.id
+    WHERE a.business_id = ? AND a.kind = 'bank' AND s.sheet_id IS NOT NULL ORDER BY a.name`, bid);
+  const results = [];
+  for (const a of accounts) {
+    try { results.push({ accountId: a.id, name: a.name, ...(await syncAccount(c.env, db, bid, a.id)) }); }
+    catch (e) { results.push({ accountId: a.id, name: a.name, ok: false, error: (e as Error).message || 'Could not sync.' }); }
+  }
+  return c.json({ results });
 });
 
 // ---- Lines, with what Bookr suggests for each
