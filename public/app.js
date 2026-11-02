@@ -2542,80 +2542,178 @@ async function bringInView(biz, dayArg) {
   const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : addDaysIso(currentShiftDay(), -1);
   const v = await api('GET', `/businesses/${biz.id}/shifts/${day}/inputs`);
   const pagesOf = (k) => v.pages.filter((p) => p.kind === k);
-  const pageLine = (p) => html`<div class="list-row" style="padding:6px 0">
-    <span>${KIND_LABELS[p.kind]} · ${when(p.createdAt)}${p.rows != null ? ` · ${p.rows} row${p.rows === 1 ? '' : 's'}` : ''}</span>
-    <span style="display:flex;gap:8px;align-items:center">${p.status === 'ready' ? html`<span class="chip ok">Read</span>` : p.status === 'reading' ? html`<span class="chip wait">Reading…</span>`
-      : p.status === 'retake' ? html`<span class="chip bad">Retake needed</span>` : p.status === 'failed' ? html`<span class="chip bad">Not read</span>` : p.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Not read yet</span>`}
-      ${['uploaded', 'failed'].includes(p.status) ? html`<button class="btn plain" type="button" data-readnow="${p.id}" data-kind="${p.kind}" style="min-height:32px">Read now</button>` : ''}
-      <a href="#/b/${biz.id}/review/${p.id}">Review</a></span></div>`;
-  const tick = (ok, warn) => (ok ? html`<span class="chip ok">✓</span>` : warn ? html`<span class="chip wait">!</span>` : html`<span class="chip bad">✗</span>`);
-  const softwareOk = v.software.reports > 0 && !v.software.gaps.length;
   const regs = pagesOf('bill_register');
-  const regsOk = regs.length > 0 && regs.every((p) => p.status === 'ready' || p.status === 'approved');
-  const exp = pagesOf('expense_list');
-  const sum = pagesOf('cash_summary');
-  const step = (n, title, ok, warn, status, body) => html`<section class="card" style="gap:8px">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>${n}. ${title}</h2><span style="display:flex;gap:8px;align-items:center"><span class="note">${status}</span>${tick(ok, warn)}</span></div>${body}</section>`;
-  render(shell(biz, 'bringin', 'Bring in', 'Everything one shift needs, in this order: software report, bank statements, then the photographed pages. Pages are read as soon as they are uploaded.', html`
-    <div class="form-row" style="align-items:flex-end;margin-bottom:12px"><div class="field"><label for="bid">Shift (8 am to 8 am)</label><input id="bid" type="date" value="${day}"></div>
-      <span class="note">${dayLabel(day)} 8 am → ${dayLabel(addDaysIso(day, 1))} 8 am${v.shiftStatus === 'confirmed' ? ' · confirmed' : ''}</span></div>
+  const softwareOk = v.software.reports > 0 && !v.software.gaps.length;
+  const bankOk = !v.bank || v.bank.covered;
+  const pagesOk = regs.length > 0 && regs.every((p) => ['ready', 'approved'].includes(p.status)) && pagesOf('cash_summary').length > 0;
+  const allOk = softwareOk && bankOk && pagesOk;
+  const nowStep = !softwareOk ? 'sales' : !bankOk ? 'bank' : !pagesOk ? 'pages' : 'ready';
+  const steps = [['sales', 'Sales report', softwareOk, v.software.reports > 0], ...(v.bank ? [['bank', 'Bank', bankOk, false]] : []), ['pages', 'Pages', pagesOk, regs.length > 0], ['ready', 'Ready', allOk, false]];
+  const stepper = html`<div class="stepper">${steps.map(([k, l, ok, warn], i) => html`${i ? html`<span class="bar ${steps[i - 1][2] ? 'done' : ''}"></span>` : ''}
+    <span class="st ${ok ? 'done' : k === nowStep ? 'now' : warn ? 'warn' : ''}" data-goto="${k}"><span class="dot">${ok ? '✓' : i + 1}</span>${l}</span>`)}</div>`;
+  const head = (icon, ok, warn, title, sub, extra = '') => html`<div class="step-head"><span class="icon ${ok ? 'ok' : warn ? 'warn' : ''}">${ok ? '✓' : icon}</span>
+    <span class="t"><strong>${title}</strong><span>${sub}</span></span>${extra}</div>`;
+  const drop = (id, icon, title, sub, accept, small = false) => html`<label class="drop ${small ? 'small' : ''}" data-drop="${id}">
+    <span class="big">${icon}</span><strong>${title}</strong><span class="tiny">${sub}</span>
+    <input type="file" data-dropinput="${id}" accept="${accept}" multiple hidden></label>`;
+  const pageState = (p) => p.status === 'ready' ? html`<span class="okdot"></span><span class="nm">Read · ${p.rows ?? 0} row${p.rows === 1 ? '' : 's'}${p.unclear ? ` · ${p.unclear} to tick` : ''}</span>`
+    : p.status === 'approved' ? html`<span class="okdot"></span><span class="nm">Approved</span>`
+    : p.status === 'reading' ? html`<span class="spinner"></span><span class="nm">Reading…</span>`
+    : p.status === 'retake' ? html`<span class="greydot" style="background:#F59E0B"></span><span class="nm">Photo unclear: retake</span>`
+    : html`<span class="greydot"></span><span class="nm">Not read yet</span><button class="linkbtn" type="button" data-readnow="${p.id}" data-kind="${p.kind}">Read now</button>`;
+  const tile = (kind, icon, title, hint) => {
+    const ps = pagesOf(kind);
+    return html`<div class="tile" data-tile="${kind}"><div class="th"><span style="font-size:20px">${icon}</span><strong>${title}</strong>
+      ${ps.length ? html`<span class="chip ${ps.every((p) => ['ready', 'approved'].includes(p.status)) ? 'ok' : 'wait'}">${ps.length}</span>` : ''}</div>
+      ${ps.map((p) => html`<div class="fileline">${pageState(p)}<a href="#/b/${biz.id}/review/${p.id}" class="tiny">Open</a></div>`)}
+      <div data-tilelist="${kind}"></div>
+      ${drop(kind, '📷', ps.length ? 'Add more' : 'Drop photos here', hint, 'image/jpeg,image/png,application/pdf', true)}</div>`;
+  };
+  render(shell(biz, 'bringin', 'Bring in', `Everything for one shift, in order. ${dayLabel(day)} 8 am → ${dayLabel(addDaysIso(day, 1))} 8 am.`, html`
+    <div class="form-row" style="align-items:center;gap:10px"><label for="bid" class="note">Shift</label>
+      <input id="bid" type="date" value="${day}" class="compact" style="max-width:180px">
+      <button class="linkbtn" type="button" data-shift="${addDaysIso(day, -1)}">← Day before</button>
+      <button class="linkbtn" type="button" data-shift="${addDaysIso(day, 1)}">Day after →</button>
+      ${v.shiftStatus === 'confirmed' ? html`<span class="chip ok">Confirmed</span>` : ''}</div>
+    ${stepper}
     <div id="bmsg"></div>
-    ${step(1, 'Software sales report', softwareOk, v.software.reports > 0, v.software.reports ? `${v.software.bills} bills${v.software.gaps.length ? ' · some hours missing' : ' · whole shift covered'}` : 'Not uploaded', html`
-      <div class="form-row" style="align-items:flex-end"><div class="field" style="flex:2 1 260px"><label>CSV from the hotel software</label><input type="file" id="bcsv" accept=".csv,text/csv" multiple></div></div>
-      <div id="bcsvbox"></div>`)}
-    ${v.bank ? step(2, 'Bank statements', v.bank.covered, false, v.bank.covered ? 'Up to the shift\'s end' : 'Not up to the shift\'s end yet', html`
-      ${v.bank.accounts.map((a) => html`<div class="list-row" style="padding:4px 0"><span>${a.name}${a.label ? html` <span class="note">· ${a.label}</span>` : ''}</span>
-        <span class="note">${a.lastAt ? `up to ${when(a.lastAt)}` : 'no lines yet'}${a.sheet ? '' : ' · pasted'}</span></div>`)}
+
+    <section class="card step-card" id="step-sales">
+      ${head('📄', softwareOk, v.software.reports > 0, 'Software sales report',
+        v.software.reports ? `${v.software.bills} bills${v.software.gaps.length ? ' · some hours of the shift not covered yet' : ' · the whole shift is covered'}` : 'The CSV from the hotel software')}
+      <div data-csvbox></div>
+      ${softwareOk ? html`<div><button class="linkbtn" type="button" data-reveal="csv">+ Add another file</button></div><div data-revealed="csv" hidden>${drop('csv', '📄', 'Drop the CSV here', 'or tap to choose · up to 10 files', '.csv,text/csv')}</div>`
+        : drop('csv', '📄', 'Drop the CSV here', 'or tap to choose · up to 10 files', '.csv,text/csv')}
+    </section>
+
+    ${v.bank ? html`<section class="card step-card" id="step-bank">
+      ${head('🏦', bankOk, false, 'Bank statements', bankOk ? 'In up to the end of the shift (8 am)' : 'Sync once the statements are in the Google Sheets')}
+      <div style="display:flex;flex-direction:column;gap:2px">${v.bank.accounts.map((a) => html`<div class="fileline">
+        <span class="${a.lastAt && a.lastAt >= v.bank.shiftEnd - 30 * 60000 ? 'okdot' : 'greydot'}"></span><span class="nm">${a.name}${a.label ? html` <span class="tiny">· ${a.label}</span>` : ''}</span>
+        <span class="tiny">${a.lastAt ? `up to ${when(a.lastAt)}` : 'nothing yet'}${a.sheet ? '' : ' · pasted'}</span></div>`)}</div>
       <div class="form-row" style="align-items:center"><button class="btn" type="button" id="syncall">Sync all bank accounts</button>
-        <span class="note">Reads every account's Google Sheet. Pasted accounts: <a href="#/b/${biz.id}/bank">Bank sync</a>.</span></div>
-      <div id="syncbox"></div>`) : ''}
-    ${step(v.bank ? 3 : 2, 'Pages', regsOk && sum.length > 0, regs.length > 0, `${regs.length} register page${regs.length === 1 ? '' : 's'} · ${exp.length} expense · ${sum.length ? 'cash summary ✓' : 'no cash summary'}`, html`
-      ${v.pages.length ? v.pages.map(pageLine) : html`<div class="note">No pages for this shift yet.</div>`}
-      <form class="form-row" id="bpages" style="align-items:flex-end">
-        <div class="field"><label>Page type</label><select name="kind"><option value="bill_register">Bill register</option><option value="expense_list">Expense list</option><option value="cash_summary">Cash account summary</option></select></div>
-        <div class="field" style="flex:2 1 240px"><label>Photos (up to 10)</label><input type="file" name="file" accept="image/jpeg,image/png,application/pdf" multiple required></div>
-        <button class="btn" type="submit">Upload and read</button></form>
-      <div id="bpagebox"></div>`)}
-    <section class="card" style="gap:8px"><h2>Then</h2>
-      <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">Compare sales for this shift</a>
+        <span class="tiny">Pasted accounts: <a href="#/b/${biz.id}/bank">Bank sync</a></span></div>
+      <div id="syncbox"></div>
+    </section>` : ''}
+
+    <section class="card step-card" id="step-pages">
+      ${head('📷', pagesOk, regs.length > 0, 'Pages', 'Drop each photo on its tile. Claude starts reading at once; you tick the rows on Review.')}
+      <div class="tiles">${tile('bill_register', '🧾', 'Bill register', 'Register pages')}${tile('expense_list', '🛒', 'Expense list', 'Cash expenses')}${tile('cash_summary', '💰', 'Cash summary', "The day's cash page")}</div>
+    </section>
+
+    <section class="card step-card" id="step-ready" style="${allOk ? 'border-color:#86EFAC;background:#F0FDF4' : ''}">
+      ${head('✨', allOk, false, allOk ? 'Everything is in' : 'Then', allOk ? 'Go and match the shift.' : `Still to come: ${[!softwareOk && 'software report', v.bank && !bankOk && 'bank up to 8 am', !pagesOk && (regs.length ? 'pages read and a cash summary' : 'register pages')].filter(Boolean).join(' · ')}`)}
+      <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">Compare sales →</a>
         ${v.bank ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/upi/${day}">UPI matching</a>` : ''}</div>
-      ${!softwareOk || !regsOk || (v.bank && !v.bank.covered) ? html`<div class="note">Still to come: ${[!softwareOk && 'software report', v.bank && !v.bank.covered && 'bank statements up to 8 am', !regsOk && 'register pages read'].filter(Boolean).join(', ')}.</div>` : html`<div class="ok-msg">Everything is in for this shift.</div>`}
     </section>`));
   wireShell();
   const reload = () => bringInView(biz, day);
+  const msg = document.getElementById('bmsg');
   document.getElementById('bid').addEventListener('change', (e) => go(`#/b/${biz.id}/bringin/${e.target.value}`));
-  document.getElementById('bcsv').addEventListener('change', async (e) => {
-    const box = document.getElementById('bcsvbox');
-    box.innerHTML = '';
-    for (const f of [...e.target.files].slice(0, MAX_FILES)) {
+  app.querySelectorAll('[data-shift]').forEach((b) => b.addEventListener('click', () => go(`#/b/${biz.id}/bringin/${b.dataset.shift}`)));
+  app.querySelectorAll('[data-goto]').forEach((s) => s.addEventListener('click', () => document.getElementById(`step-${s.dataset.goto}`)?.scrollIntoView({ behavior: 'smooth' })));
+  app.querySelectorAll('[data-reveal]').forEach((b) => b.addEventListener('click', () => { app.querySelector(`[data-revealed="${b.dataset.reveal}"]`).hidden = false; b.remove(); }));
+  // Drop zones: tap or drop.
+  const onFiles = {};
+  app.querySelectorAll('[data-drop]').forEach((z) => {
+    const id = z.dataset.drop;
+    const input = z.querySelector('input');
+    input.addEventListener('change', () => { if (input.files.length) onFiles[id]?.([...input.files]); input.value = ''; });
+    z.addEventListener('dragover', (e) => { e.preventDefault(); z.classList.add('over'); });
+    z.addEventListener('dragleave', () => z.classList.remove('over'));
+    z.addEventListener('drop', (e) => { e.preventDefault(); z.classList.remove('over'); const f = [...e.dataTransfer.files]; if (f.length) onFiles[id]?.(f); });
+  });
+
+  // 1. CSV: a short card per file; covered period set to whole days (change if the report was cut short).
+  const csvBox = app.querySelector('[data-csvbox]');
+  onFiles.csv = async (files) => {
+    // While files wait to be imported, the drop area steps aside; Cancel on a card brings it back.
+    const zone = app.querySelector('[data-drop="csv"]');
+    zone.hidden = true;
+    const showZone = () => { if (!csvBox.querySelector('[data-imp]')) zone.hidden = false; };
+    for (const f of files.slice(0, MAX_FILES)) {
       const card = document.createElement('div');
-      box.appendChild(card);
-      await csvPreview(biz, day, await f.text(), undefined, card, f.name, e.target.files.length > 1);
+      card.className = 'inset';
+      card.innerHTML = html`<div class="fileline"><span class="spinner"></span><span class="nm">${f.name}</span><span class="tiny">Checking…</span></div>`.__html;
+      csvBox.appendChild(card);
+      await csvCard(biz, day, await f.text(), f.name, card, reload, () => { card.remove(); showZone(); });
     }
-  });
+    showZone();
+  };
+
+  // 2. Bank
   document.getElementById('syncall')?.addEventListener('click', async (e) => {
-    e.target.disabled = true; e.target.textContent = 'Syncing…';
-    const box = document.getElementById('syncbox');
-    try {
-      const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {});
+    const b = e.currentTarget;
+    b.disabled = true; b.innerHTML = '<span class="spinner"></span>Syncing…';
+    try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await reload(); document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html; }
+    catch (err) { b.disabled = false; b.textContent = 'Sync all bank accounts'; showError(document.getElementById('syncbox'), err); }
+  });
+
+  // 3. Pages: each tile uploads its own kind; a line per file with a spinner while uploading and reading.
+  for (const kind of ['bill_register', 'expense_list', 'cash_summary']) {
+    onFiles[kind] = async (files) => {
+      const list = app.querySelector(`[data-tilelist="${kind}"]`);
+      const items = files.slice(0, MAX_FILES).map((f) => {
+        const el = document.createElement('div');
+        el.className = 'fileline';
+        list.appendChild(el);
+        const item = { file: f, id: null, kind, set: (state, error) => {
+          const busy = /…$/.test(state) && !error;
+          el.innerHTML = html`${busy ? html`<span class="spinner"></span>` : error ? html`<span class="greydot" style="background:#F59E0B"></span>` : html`<span class="okdot"></span>`}
+            <span class="nm">${f.name}</span><span class="tiny ${error ? 'error' : ''}">${error ?? state}</span>`.__html;
+        } };
+        item.set('Uploading…');
+        return item;
+      });
+      for (const x of items) {
+        try { x.id = (await apiUpload(`/businesses/${biz.id}/uploads?kind=${kind}&day=${day}`, x.file)).id; x.set('Waiting to read…'); }
+        catch (err) { x.set('', err.message); }
+      }
+      await readPages(biz, items.filter((x) => x.id));
       await reload();
-      document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html;
-    } catch (err) { e.target.disabled = false; e.target.textContent = 'Sync all bank accounts'; showError(box, err); }
-  });
-  const pf = document.getElementById('bpages');
-  pf.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const files = [...pf.file.files];
-    if (!files.length) return;
-    if (files.length > MAX_FILES) return showError(document.getElementById('bpagebox'), new Error(`Choose at most ${MAX_FILES} files at a time.`));
-    await uploadMany(biz, day, pf.kind.value, files, document.getElementById('bpagebox'));
-    await reload();
-  });
+    };
+  }
   app.querySelectorAll('[data-readnow]').forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true; b.textContent = 'Reading…';
-    await readPages(biz, [{ id: b.dataset.readnow, kind: b.dataset.kind, set: (state, error) => { if (error) showError(document.getElementById('bmsg'), new Error(error)); } }]);
+    b.outerHTML = '<span class="spinner"></span>';
+    await readPages(biz, [{ id: b.dataset.readnow, kind: b.dataset.kind, set: (state, error) => { if (error) showError(msg, new Error(error)); } }]);
     reload();
   }));
+}
+
+/** A short check of a software CSV before importing it: what matters at a glance, the rest one tap away. */
+async function csvCard(biz, day, csv, name, card, done, cancel) {
+  let p;
+  try { p = await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, dryRun: true }); }
+  catch (err) { card.innerHTML = html`<div class="fileline"><span class="greydot" style="background:#F59E0B"></span><span class="nm">${name}</span></div><div class="form-msg"></div>`.__html; return showError(card.querySelector('.form-msg'), err); }
+  const f = p.footer;
+  const whole = { from: `${toLocalInput(p.firstPaidAt).slice(0, 10)}T00:00:00`, to: `${toLocalInput(p.lastPaidAt).slice(0, 10)}T23:59:59` };
+  const span = whole.from.slice(0, 10) === whole.to.slice(0, 10) ? `${dayLabel(whole.from.slice(0, 10))}, whole day` : `${dayLabel(whole.from.slice(0, 10))} to ${dayLabel(whole.to.slice(0, 10))}, whole days`;
+  card.innerHTML = html`<form data-imp style="display:flex;flex-direction:column;gap:10px">
+    <div class="fileline" style="font-size:14px"><span>📄</span><span class="nm"><strong>${p.add} new bill${p.add === 1 ? '' : 's'}</strong> <span class="tiny">${name}</span></span>
+      <span class="chip ok" title="The bills add up to the totals at the bottom of the file">✓ Totals match</span></div>
+    <div class="pills"><span class="pill">UPI <b>₹ ${money(f.upiPaise)}</b></span><span class="pill">Card <b>₹ ${money(f.cardPaise)}</b></span><span class="pill">Cash <b>₹ ${money(f.cashPaise)}</b></span><span class="pill" style="background:var(--ok-bg)">Total <b>₹ ${money(f.totalPaise)}</b></span></div>
+    <div class="tiny">${when(p.firstPaidAt)} → ${when(p.lastPaidAt)} · covers <strong data-span>${span}</strong> <button class="linkbtn tiny" type="button" data-change>change</button>
+      ${p.skip || p.flag ? html`<br>${p.skip ? `${p.skip} already in Bookr (skipped)` : ''}${p.skip && p.flag ? ' · ' : ''}${p.flag ? `${p.flag} differ from before: you will decide` : ''}` : ''}</div>
+    <div class="form-row" data-period hidden><div class="field"><label>Covers from</label><input data-cf type="datetime-local" step="1" value="${whole.from}" class="compact"></div>
+      <div class="field"><label>Covers to</label><input data-ct type="datetime-local" step="1" value="${whole.to}" class="compact"></div>
+      <span class="tiny" style="align-self:center">Use the first and last bill (${when(p.firstPaidAt)} → ${when(p.lastPaidAt)}) if the report was taken before the day ended.</span></div>
+    ${p.confirmedShifts.length ? html`<div class="error">This would change a confirmed shift (${p.confirmedShifts.map(dayLabel).join(', ')}). An Owner must reopen it first.</div>` : ''}
+    <div class="form-msg"></div>
+    <div class="form-row" style="align-items:center"><button class="btn" type="submit" ${p.confirmedShifts.length || !p.add ? 'disabled' : ''}>${p.add ? `Import ${p.add} bill${p.add === 1 ? '' : 's'}` : 'Nothing new to import'}</button>
+      <button class="linkbtn" type="button" data-cancel>Cancel</button></div></form>`.__html;
+  card.querySelector('[data-cancel]').addEventListener('click', () => cancel?.());
+  card.querySelector('[data-change]').addEventListener('click', (e) => { card.querySelector('[data-period]').hidden = false; e.target.remove(); });
+  const form = card.querySelector('form');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Importing…';
+    try {
+      await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, coversFrom: fromLocalInput(form.querySelector('[data-cf]').value), coversTo: fromLocalInput(form.querySelector('[data-ct]').value) });
+      await done();
+      document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Imported ${p.add} bill${p.add === 1 ? '' : 's'} from ${name}.</div>`.__html;
+    } catch (err) { btn.disabled = false; btn.textContent = `Import ${p.add} bills`; showError(form.querySelector('.form-msg'), new Error([err.message, ...(err.problems ?? [])].join(' '))); }
+  });
 }
 
 function syncResultHtml(r) {
