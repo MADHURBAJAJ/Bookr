@@ -50,3 +50,4 @@ No., Transaction ID, Value Date, Txn Posted Date, ChequeNo., Description, Cr/Dr,
 - Card company daily email (Gmail) and card settlement matching with fees.
 - Transfers between own accounts as transfer pairs (today: Leave out with a reason).
 - A "Owner drawings" head type that is not an expense (needs approval).
+- Bank sync screen: tabs Money in / Money out / Done; lines grouped by shift (8 am to 8 am), folded until opened; bulk "Confirm clear matches" and "Book by rules" per shift. Actions named Match to bill / Book under a head / Skip (not business).

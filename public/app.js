@@ -1881,23 +1881,30 @@ const hhmm = (ms) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata'
 
 async function bankView(biz, query = '') {
   const q = new URLSearchParams(query);
-  const to = q.get('to') || todayIst();
-  const from = q.get('from') || to;
+  const to = q.get('to') || addDaysIso(todayIst(), -1);
+  const from = q.get('from') || addDaysIso(to, -6);
   const account = q.get('account') || '';
-  const status = q.get('status') ?? 'unmatched';
+  const tab = ['in', 'out', 'done'].includes(q.get('tab')) ? q.get('tab') : 'in';
+  // A shift runs 8 am to 8 am, so the last shift's lines run into the next calendar day.
   const [b, lines, { heads }, { rules }] = await Promise.all([
     api('GET', `/businesses/${biz.id}/bank`),
-    api('GET', `/businesses/${biz.id}/bank-rows?from=${from}&to=${to}${account ? `&account=${account}` : ''}${status ? `&status=${status}` : ''}`),
+    api('GET', `/businesses/${biz.id}/bank-rows?from=${from}&to=${addDaysIso(to, 1)}${account ? `&account=${account}` : ''}`),
     api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/rules`),
   ]);
   const canRules = biz.actions.includes('rules.edit');
   const headsOf = (dir) => heads.filter((h) => h.type === (dir === 'CR' ? 'income' : 'expense'));
-  const rows = lines.rows;
-  const clear = rows.filter((r) => r.clear);
-  const byRule = rows.filter((r) => r.rule);
-  const reversals = rows.filter((r) => r.kind === 'reversal' && r.status === 'unmatched' && r.pairRowId).length;
-  const link = (over) => { const p = new URLSearchParams({ from, to, account, status, ...over }); return `#/b/${biz.id}/bank?${p}`; };
+  const shiftOf = (ms) => new Date(ms + IST_MS - 8 * 3600e3).toISOString().slice(0, 10);
+  const all = lines.rows.map((r) => ({ ...r, shift: shiftOf(r.postedAt) })).filter((r) => r.shift >= from && r.shift <= to);
+  const inTab = (r) => (tab === 'done' ? r.status !== 'unmatched' : r.status === 'unmatched' && r.direction === (tab === 'in' ? 'CR' : 'DR'));
+  const rows = all.filter(inTab);
+  const count = (t) => all.filter((r) => (t === 'done' ? r.status !== 'unmatched' : r.status === 'unmatched' && r.direction === (t === 'in' ? 'CR' : 'DR'))).length;
+  const shifts = [...new Set(rows.map((r) => r.shift))].sort().reverse();
+  const reversals = all.filter((r) => r.kind === 'reversal' && r.status === 'unmatched' && r.pairRowId).length;
+  const link = (over) => { const p = new URLSearchParams({ from, to, account, tab, ...over }); return `#/b/${biz.id}/bank?${p}`; };
+  const OPEN_KEY = 'bookr.bankOpen';
+  let openShifts;
+  try { openShifts = new Set(JSON.parse(sessionStorage.getItem(OPEN_KEY) || '[]')); } catch { openShifts = new Set(); }
   const accountRow = (a) => html`<tr>
     <td><strong>${a.name}</strong>${a.accountNumber ? html`<div class="note mono">${a.accountNumber}</div>` : ''}</td>
     <td>${[a.receivesUpiLabel ? `UPI: ${a.receivesUpiLabel}` : '', a.receivesCard ? 'Card settlements' : ''].filter(Boolean).join(' · ') || html`<span class="note">Nothing set</span>`}</td>
@@ -1923,23 +1930,23 @@ async function bankView(biz, query = '') {
       <div class="form-msg"></div></form></td></tr>`;
 
   const suggestion = (r) => {
-    if (r.status === 'matched') return html`<span class="chip ok">Matched</span> <span class="note">Bill ${r.bills ?? ''}</span> <button class="btn plain" type="button" data-unmatch="${r.id}">Unmatch</button>`;
+    if (r.status === 'matched') return html`<span class="chip ok">Matched to bill</span> <span class="note">${r.bills ?? ''}</span> <button class="btn plain" type="button" data-unmatch="${r.id}">Unmatch</button>`;
     if (r.status === 'booked') return html`<span class="chip ok">Booked</span> <span class="note">${r.headName ?? ''}${r.note ? ` · ${r.note}` : ''}</span> <button class="btn plain" type="button" data-reopen="${r.id}">Undo</button>`;
-    if (r.status === 'ignored') return html`<span class="chip">Left out</span> <span class="note">${r.note ?? ''}</span> <button class="btn plain" type="button" data-reopen="${r.id}">Undo</button>`;
+    if (r.status === 'ignored') return html`<span class="chip">Skipped</span> <span class="note">${r.note ?? ''}</span> <button class="btn plain" type="button" data-reopen="${r.id}">Undo</button>`;
     const parts = [];
     if (r.kind === 'upi_in') {
       parts.push(r.candidates.length ? html`<div style="display:flex;flex-direction:column;gap:4px">${r.candidates.map((k, i) => html`<div class="form-row" style="gap:6px;align-items:center">
           ${r.clear && i === 0 ? html`<input type="checkbox" data-clear="${r.id}" checked aria-label="Confirm this match" style="width:18px;height:18px;min-height:0">` : ''}
           <span class="${k.strong ? '' : 'note'}">Bill ${k.billNos.join(' + ')} · ₹ ${money(k.amountPaise)}${k.minutes != null ? ` · ${k.minutes} min apart` : ` · ${dayLabel(k.shiftDay)} shift`}</span>
-          <button class="btn plain" type="button" data-match="${r.id}" data-tx="${k.transactionIds.join(',')}">Match</button></div>`)}</div>`
-        : html`<span class="note">No UPI sale of this amount near this time.</span>`);
+          <button class="btn plain" type="button" data-match="${r.id}" data-tx="${k.transactionIds.join(',')}">Match to bill</button></div>`)}</div>`
+        : html`<span class="note">No confirmed UPI bill of this amount near this time.</span>`);
     }
     if (r.kind === 'upi_fee') parts.push(html`<div class="note">Fee on a credit card paid through UPI${r.pairRowId ? '' : ' (its credit is not in Bookr yet)'}.</div>`);
     if (r.kind === 'reversal') parts.push(html`<div class="note">${r.pairRowId ? 'Gives back a failed payment: both cancel out.' : 'A reversal; its payment is not in Bookr yet.'}</div>`);
     if (r.rule) parts.push(html`<div class="form-row" style="gap:6px;align-items:center"><input type="checkbox" data-byrule="${r.id}" checked aria-label="Book by this rule" style="width:18px;height:18px;min-height:0">
       <span>Rule <strong>${r.rule.name}</strong> → ${heads.find((h) => h.id === r.rule.headId)?.name ?? ''}</span></div>`);
-    parts.push(html`<div class="form-row" style="gap:6px"><button class="btn plain" type="button" data-book="${r.id}">Book…</button>
-      <button class="btn plain" type="button" data-ignore="${r.id}">Leave out</button>
+    parts.push(html`<div class="form-row" style="gap:6px"><button class="btn plain" type="button" data-book="${r.id}">Book under a head</button>
+      <button class="btn plain" type="button" data-ignore="${r.id}">Skip (not business)</button>
       ${canRules && r.kind !== 'upi_in' ? html`<button class="btn plain" type="button" data-mkrule="${r.id}">Make a rule</button>` : ''}</div>
       <form class="inset" hidden data-bookform="${r.id}"><div class="form-row">
         <div class="field"><label>Head</label><select name="headId" required><option value="">Choose</option>${headsOf(r.direction).map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select></div>
@@ -1963,18 +1970,18 @@ async function bankView(biz, query = '') {
     </section>
     <section class="card" style="gap:10px">
       <form class="form-row" id="bfilter" style="align-items:flex-end">
-        <div class="field"><label>From</label><input type="date" name="from" value="${from}"></div>
-        <div class="field"><label>To</label><input type="date" name="to" value="${to}"></div>
+        <div class="field"><label>Shifts from</label><input type="date" name="from" value="${from}"></div>
+        <div class="field"><label>to</label><input type="date" name="to" value="${to}"></div>
         <div class="field"><label>Account</label><select name="account"><option value="">All</option>${b.accounts.map((a) => html`<option value="${a.id}" ${a.id === account ? 'selected' : ''}>${a.name}</option>`)}</select></div>
-        <div class="field"><label>Show</label><select name="status">${[['unmatched', 'Open'], ['', 'All'], ['matched', 'Matched'], ['booked', 'Booked'], ['ignored', 'Left out']].map(([v, l]) => html`<option value="${v}" ${v === status ? 'selected' : ''}>${l}</option>`)}</select></div>
         <button class="btn plain" type="submit">Show</button>
       </form>
-      <div class="form-row" style="gap:8px">
-        ${clear.length ? html`<button class="btn" type="button" id="goclear">Confirm ${clear.length} clear UPI match${clear.length > 1 ? 'es' : ''}</button>` : ''}
-        ${byRule.length ? html`<button class="btn" type="button" id="gorules">Book ${byRule.length} by rules</button>` : ''}
-        ${reversals ? html`<button class="btn plain" type="button" id="gorev">Leave out ${reversals} reversed payment${reversals > 1 ? 's' : ''}</button>` : ''}
-        <span class="note">${clear.length ? 'Clear: one UPI sale of the same amount paid within 20 minutes. ' : ''}Untick any you are not sure of.</span>
+      <div class="form-row" role="tablist" style="gap:6px;border-bottom:1px solid var(--line-soft);padding-bottom:8px">
+        ${[['in', 'Money in'], ['out', 'Money out'], ['done', 'Done']].map(([k, l]) => html`<a role="tab" aria-selected="${k === tab}" class="btn ${k === tab ? '' : 'plain'}" style="display:inline-flex;align-items:center" href="${link({ tab: k })}">${l} <span class="chip" style="margin-left:6px;${k === tab ? 'background:rgba(255,255,255,.22);color:#fff' : ''}">${count(k)}</span></a>`)}
       </div>
+      <div class="note">${tab === 'in' ? html`<strong>Match to bill</strong>: the credit is the payment for a bill already counted in sales (nothing new is booked). <strong>Book under a head</strong>: money received that is not a bill, e.g. hostel rent. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
+        : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Make a rule</strong> once and the same supplier is suggested every time. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
+        : 'Lines already matched, booked or skipped. Undo puts a line back.'}</div>
+      ${tab === 'out' && reversals ? html`<div><button class="btn plain" type="button" id="gorev">Skip ${reversals} failed payment${reversals > 1 ? 's' : ''} and ${reversals > 1 ? 'their' : 'its'} reversal</button></div>` : ''}
       <form class="inset" id="ruleform" hidden>
         <div style="font-weight:600">New rule</div>
         <div class="form-row">
@@ -1986,16 +1993,33 @@ async function bankView(biz, query = '') {
           <button class="btn" type="submit" style="align-self:flex-end">Save rule</button><button class="btn plain" type="button" id="rulecancel" style="align-self:flex-end">Cancel</button>
         </div><div class="note">The same supplier always pays to or from the same UPI ID, even when the description only says "UPI Pay".</div><div class="form-msg"></div>
       </form>
-      ${rows.length ? html`<div class="scroll"><table style="min-width:980px">
-        <thead><tr><th>When</th><th>Account</th><th>Description</th><th style="text-align:right">In</th><th style="text-align:right">Out</th><th>Bookr suggests / done</th></tr></thead>
-        <tbody>${rows.map((r) => html`<tr data-row="${r.id}">
-          <td style="white-space:nowrap">${dayLabel(r.day)}<div class="note">${hhmm(r.postedAt)}</div></td>
-          <td class="note">${r.accountName}</td>
-          <td style="max-width:340px"><span class="chip">${BANK_KIND[r.kind]}</span> ${r.remark && !/^(UPI|UPI Pay|NA|NO REMARKS?)$/i.test(r.remark) ? html`<strong>${r.remark}</strong>` : ''}
-            <div class="tiny mono" style="word-break:break-all">${r.vpa ? `${r.vpa} · ` : ''}${r.tranId}</div></td>
-          <td class="amount">${r.direction === 'CR' ? money(r.amountPaise) : ''}</td><td class="amount">${r.direction === 'DR' ? money(r.amountPaise) : ''}</td>
-          <td>${suggestion(r)}</td></tr>`)}</tbody></table></div>`
-        : html`<div class="note">No ${({ unmatched: 'open', matched: 'matched', booked: 'booked', ignored: 'left-out' })[status] ?? ''} lines for these dates${account ? ' in this account' : ''}.${status ? ' Choose "All" under Show to see every line.' : ''}</div>`}
+      ${shifts.length ? shifts.map((sd) => {
+        const list = rows.filter((r) => r.shift === sd);
+        const total = list.reduce((t, r) => t + r.amountPaise, 0);
+        const clear = list.filter((r) => r.clear).length;
+        const ruled = list.filter((r) => r.rule).length;
+        const matchedHere = all.filter((r) => r.shift === sd && r.status === 'matched');
+        return html`<details class="shiftgroup" data-shift="${sd}" ${openShifts.has(sd) ? 'open' : ''} style="border:1px solid var(--line-soft);border-radius:8px">
+          <summary style="cursor:pointer;padding:12px 14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
+            <span><strong>${dayLabel(sd)} shift</strong> <span class="note">8 am to 8 am</span></span>
+            <span class="note">${list.length} line${list.length === 1 ? '' : 's'} · ₹ ${money(total)}${tab === 'in' && matchedHere.length ? ` · ${matchedHere.length} already matched` : ''}</span>
+            <span style="display:flex;gap:6px">
+              ${tab === 'in' && clear ? html`<button class="btn" type="button" data-shiftclear="${sd}">Confirm ${clear} clear match${clear > 1 ? 'es' : ''}</button>` : ''}
+              ${tab !== 'done' && ruled ? html`<button class="btn" type="button" data-shiftrules="${sd}">Book ${ruled} by rules</button>` : ''}
+            </span>
+          </summary>
+          <div class="scroll" style="padding:0 10px 10px"><table style="min-width:900px">
+            <thead><tr><th>Time</th><th>Account</th><th>Description</th><th style="text-align:right">Amount</th><th>${tab === 'done' ? 'Done' : 'Bookr suggests'}</th></tr></thead>
+            <tbody>${list.map((r) => html`<tr data-row="${r.id}">
+              <td style="white-space:nowrap">${hhmm(r.postedAt)}<div class="tiny">${dayLabel(r.day)}</div></td>
+              <td class="note">${r.accountName}</td>
+              <td style="max-width:320px"><span class="chip">${BANK_KIND[r.kind]}</span> ${r.remark && !/^(UPI|UPI Pay|NA|NO REMARKS?)$/i.test(r.remark) ? html`<strong>${r.remark}</strong>` : ''}
+                <div class="tiny mono" style="word-break:break-all">${r.vpa ? `${r.vpa} · ` : ''}${r.tranId}</div></td>
+              <td class="amount" style="color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}${money(r.amountPaise)}</td>
+              <td>${suggestion(r)}</td></tr>`)}</tbody></table></div>
+          <div class="note" style="padding:0 14px 12px">${tab === 'in' && clear ? 'Clear: one confirmed UPI bill of the same amount paid within 20 minutes. Untick any you are not sure of.' : ''}</div>
+        </details>`;
+      }) : html`<div class="note">${tab === 'in' ? 'No money received is waiting' : tab === 'out' ? 'No payments are waiting' : 'Nothing done yet'} for shifts ${dayLabel(from)} to ${dayLabel(to)}${account ? ' in this account' : ''}.</div>`}
     </section>`));
   wireShell();
   const msg = document.getElementById('bmsg');
@@ -2003,7 +2027,11 @@ async function bankView(biz, query = '') {
     try { const r = await fn(); await bankView(biz, query); if (okText) document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${okText(r)}</div>`.__html; }
     catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   };
-  onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account, status: d.status })));
+  onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account })));
+  app.querySelectorAll('details.shiftgroup').forEach((d) => d.addEventListener('toggle', () => {
+    if (d.open) openShifts.add(d.dataset.shift); else openShifts.delete(d.dataset.shift);
+    try { sessionStorage.setItem(OPEN_KEY, JSON.stringify([...openShifts])); } catch { /* storage unavailable */ }
+  }));
   app.querySelectorAll('[data-setup]').forEach((x) => x.addEventListener('click', () => { const tr = app.querySelector(`[data-setupform="${x.dataset.setup}"]`); tr.hidden = !tr.hidden; }));
   app.querySelectorAll('[data-src]').forEach((f) => onSubmit(f, async (d) => {
     await api('PUT', `/businesses/${biz.id}/bank/${f.dataset.src}/source`, { sheet: d.sheet || null, tab: d.tab || null, allTabs: !!d.allTabs, receivesUpiLabel: d.receivesUpiLabel || null, receivesCard: !!d.receivesCard });
@@ -2027,7 +2055,7 @@ async function bankView(biz, query = '') {
   app.querySelectorAll('[data-unmatch]').forEach((x) => x.addEventListener('click', () => run(() => apiFull('DELETE', `/businesses/${biz.id}/bank-rows/${x.dataset.unmatch}/match`, {}))));
   app.querySelectorAll('[data-reopen]').forEach((x) => x.addEventListener('click', () => { if (confirm('Undo this? A booked line\'s entry is removed (it stays in the audit log).')) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${x.dataset.reopen}/reopen`, {})); }));
   app.querySelectorAll('[data-ignore]').forEach((x) => x.addEventListener('click', () => {
-    const note = (prompt('Why is this line left out? (e.g. transfer between own accounts, personal)') ?? '').trim();
+    const note = (prompt('Why skip this line? (e.g. transfer between own accounts, personal)') ?? '').trim();
     if (note) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${x.dataset.ignore}/ignore`, { note }));
   }));
   app.querySelectorAll('[data-book]').forEach((x) => x.addEventListener('click', () => { const f = app.querySelector(`[data-bookform="${x.dataset.book}"]`); f.hidden = !f.hidden; }));
@@ -2036,15 +2064,19 @@ async function bankView(biz, query = '') {
     try { await apiFull('POST', `/businesses/${biz.id}/bank-rows/${f.dataset.bookform}/book`, { headId: f.headId.value, party: f.party.value || null, note: f.note.value || null }); bankView(biz, query); }
     catch (err) { showError(f.querySelector('.form-msg'), err); }
   }));
-  document.getElementById('goclear')?.addEventListener('click', () => {
-    const ids = [...app.querySelectorAll('[data-clear]')].filter((c) => c.checked).map((c) => c.dataset.clear);
-    if (ids.length) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-clear`, { ids }), (r) => `${r.matched} UPI credit${r.matched === 1 ? '' : 's'} matched.`);
-  });
-  document.getElementById('gorules')?.addEventListener('click', () => {
-    const ids = [...app.querySelectorAll('[data-byrule]')].filter((c) => c.checked).map((c) => c.dataset.byrule);
+  // Bulk buttons sit in a shift's header: they act on the ticked lines of that shift only.
+  const ticked = (sd, attr) => [...app.querySelectorAll(`details[data-shift="${sd}"] [${attr}]`)].filter((c) => c.checked).map((c) => c.getAttribute(attr));
+  app.querySelectorAll('[data-shiftclear]').forEach((x) => x.addEventListener('click', (e) => {
+    e.preventDefault();
+    const ids = ticked(x.dataset.shiftclear, 'data-clear');
+    if (ids.length) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-clear`, { ids }), (r) => `${r.matched} UPI credit${r.matched === 1 ? '' : 's'} matched to bills.`);
+  }));
+  app.querySelectorAll('[data-shiftrules]').forEach((x) => x.addEventListener('click', (e) => {
+    e.preventDefault();
+    const ids = ticked(x.dataset.shiftrules, 'data-byrule');
     if (ids.length) run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-by-rules`, { ids }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked by rules.`);
-  });
-  document.getElementById('gorev')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/ignore-reversals`, {}), (r) => `${r.pairs} reversed payment${r.pairs === 1 ? '' : 's'} left out with ${r.pairs === 1 ? 'its' : 'their'} reversal.`));
+  }));
+  document.getElementById('gorev')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/ignore-reversals`, {}), (r) => `${r.pairs} failed payment${r.pairs === 1 ? '' : 's'} skipped with ${r.pairs === 1 ? 'its' : 'their'} reversal.`));
   const rf = document.getElementById('ruleform');
   app.querySelectorAll('[data-mkrule]').forEach((x) => x.addEventListener('click', () => {
     const r = rows.find((y) => y.id === x.dataset.mkrule);
@@ -2061,7 +2093,7 @@ async function bankView(biz, query = '') {
     try {
       await apiFull('POST', `/businesses/${biz.id}/rules`, { name: rf.name.value, contains: rf.contains.value || null, vpa: rf.vpa.value || null, direction: rf.direction.value, headId: rf.headId.value });
       await bankView(biz, query);
-      document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Rule saved. Lines it fits now show it; tick them and use "Book by rules".</div>`.__html;
+      document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Rule saved. Lines it fits now show it; use "Book N by rules" on their shift.</div>`.__html;
     } catch (err) { showError(rf.querySelector('.form-msg'), err); }
   });
   void rules;
@@ -2078,7 +2110,7 @@ async function upiView(biz, day) {
   render(shell(biz, 'upi', 'UPI matching', 'Each UPI sale of a confirmed shift, and the bank credit that paid it.', html`
     <div class="form-row" style="align-items:flex-end;margin-bottom:12px"><div class="field"><label for="upiday">Shift</label>
       <select id="upiday">${days.map((d) => html`<option value="${d}" ${d === v.day ? 'selected' : ''}>${dayLabel(d)}${v.confirmedShifts.includes(d) ? '' : ' (not confirmed)'}</option>`)}</select></div>
-      <a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${v.day}&to=${addDaysIso(v.day, 1)}&status=unmatched">Match on Bank sync</a></div>
+      <a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${v.day}&to=${v.day}&tab=in">Match on Bank sync</a></div>
     <div class="row">
       <section class="card grow1"><h2>UPI sales</h2><div class="amount" style="font-size:24px">₹ ${money(sum(v.sales))}</div><div class="note">${v.sales.length} sale${v.sales.length === 1 ? '' : 's'}</div></section>
       <section class="card grow1"><h2>In the bank</h2><div class="amount" style="font-size:24px;color:var(--teal)">₹ ${money(sum(matched))}</div><div class="note">${matched.length} matched</div></section>
