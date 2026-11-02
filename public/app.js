@@ -1656,7 +1656,7 @@ function getBackTo() { try { return JSON.parse(sessionStorage.getItem(BACK_KEY) 
 function clearBackTo() { try { sessionStorage.removeItem(BACK_KEY); } catch { /* storage unavailable */ } }
 const backButton = () => {
   const b = getBackTo();
-  return b ? html`<a class="btn" style="display:inline-flex;align-items:center" href="${b.hash}" id="backto">← Back to differences (${b.label})</a>` : '';
+  return b ? html`<a class="btn" style="display:inline-flex;align-items:center" href="${b.hash}" id="backto">← Back to ${b.to ?? 'differences'} (${b.label})</a>` : '';
 };
 
 // ---------- Compare sales
@@ -2173,14 +2173,27 @@ async function upiView(biz, day) {
     </div>
     <section class="card" style="margin-top:16px">
       ${v.sales.length ? html`<div class="scroll"><table style="min-width:720px"><thead><tr><th>Bill</th><th>Paid at</th><th>Register column</th><th style="text-align:right">Amount</th><th>Bank credit</th></tr></thead>
-        <tbody>${v.sales.map((s) => html`<tr>
-          <td class="mono">${s.billNo ?? ''}</td><td>${s.paidAt ? when(s.paidAt) : html`<span class="note">register only</span>`}</td><td class="note">${s.labels ?? ''}</td>
+        <tbody>${v.sales.map((s) => html`<tr class="clickrow" data-bill="${s.billNo ?? ''}" data-open="${s.uploadId ? `#/b/${biz.id}/review/${s.uploadId}/${s.registerRowId}` : `#/b/${biz.id}/review?find=${(s.billNo ?? '').slice(-4)}`}"
+            title="${s.uploadId ? 'Open this bill in its register page' : 'Not in the register: look for it on the register pages'}" style="cursor:pointer">
+          <td class="mono"><a href="#" data-openlink>${s.billNo ?? ''}</a></td><td>${s.paidAt ? when(s.paidAt) : html`<span class="note">register only</span>`}</td><td class="note">${s.labels ?? ''}</td>
           <td class="amount">${money(s.amountPaise)}</td>
           <td>${s.bankRowId ? html`<span class="chip ok">${s.accountName}</span> <span class="note">${when(s.creditAt)}${s.paidAt ? ` · ${Math.round(Math.abs(s.creditAt - s.paidAt) / 60000)} min` : ''}</span>` : html`<span class="chip bad">Not found yet</span>`}</td></tr>`)}</tbody></table></div>`
         : html`<div class="note">No UPI sales in this shift${v.confirmedShifts.includes(v.day) ? '' : ' yet: sales count once the shift is confirmed on Compare sales'}.</div>`}
     </section>`));
   wireShell();
   document.getElementById('upiday').addEventListener('change', (e) => go(`#/b/${biz.id}/upi/${e.target.value}`));
+  // A sale opens its bill in the register page; Review offers the way back here.
+  app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
+    e.preventDefault();
+    setBackTo({ hash: `#/b/${biz.id}/upi/${v.day}`, bill: tr.dataset.bill, label: `${dayLabel(v.day)} shift`, to: 'UPI matching' });
+    location.hash = tr.dataset.open;
+  }));
+  const back = getBackTo();
+  if (back?.bill && back.hash === `#/b/${biz.id}/upi/${v.day}`) {
+    clearBackTo();
+    const row = app.querySelector(`tr[data-bill="${CSS.escape(back.bill)}"]`);
+    if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
+  }
 }
 const addDaysIso = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400e3).toISOString().slice(0, 10);
 
