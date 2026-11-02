@@ -33,6 +33,35 @@ export function inText(parties: Party[], text: string): Party | null {
   return best?.p ?? null;
 }
 
+export interface PastLine { party_id: string; head_id: string; narration: string | null }
+
+/** Past expense lines with a vendor and a head: how each vendor has been booked before. */
+export async function loadHistory(db: DB, businessId: string): Promise<PastLine[]> {
+  return all<PastLine>(db, `SELECT party_id, head_id, narration FROM transactions
+    WHERE business_id = ? AND party_id IS NOT NULL AND head_id IS NOT NULL AND type = 'expense'
+    ORDER BY created_at DESC LIMIT 5000`, businessId);
+}
+
+const words = (v: string | null) => norm(v ?? '').replace(/[^a-z0-9 ]/g, ' ').split(' ').filter((w) => w.length >= 3);
+
+/**
+ * The head for a vendor's line. One head used so far: that head. Several: the head of an earlier line
+ * with the same item (or the same first word, e.g. "Detergent powder" after "Detergent"). Otherwise
+ * none, and the vendor's heads are offered as choices.
+ */
+export function pickHead(party: Party, history: PastLine[], narration: string): { headId: string | null; choices: string[] } {
+  const mine = history.filter((h) => h.party_id === party.id);
+  const choices = [...new Set([...(party.default_head_id ? [party.default_head_id] : []), ...mine.map((h) => h.head_id)])];
+  if (choices.length <= 1) return { headId: choices[0] ?? null, choices };
+  const item = words(narration).filter((w) => !namesOf(party).some((n) => n.split(' ').includes(w)));
+  if (item.length) {
+    const same = mine.find((h) => words(h.narration).join(' ') === item.join(' '));
+    const first = same ?? mine.find((h) => words(h.narration).filter((w) => !namesOf(party).some((n) => n.split(' ').includes(w)))[0] === item[0]);
+    if (first) return { headId: first.head_id, choices };
+  }
+  return { headId: null, choices };
+}
+
 /**
  * Works out the vendor and head of an expense line.
  * - vendor named and known: use it; unknown: a new vendor is created (its head remembered if one is chosen)
@@ -40,7 +69,7 @@ export function inText(parties: Party[], text: string): Party | null {
  * - head: the one chosen, else the vendor's remembered head ("learned")
  * - a vendor with no remembered head learns the first head chosen for it
  */
-export function resolveVendor(db: DB, businessId: string, parties: Party[], input: { vendor: string | null; narration: string; headId: string | null }) {
+export function resolveVendor(db: DB, businessId: string, parties: Party[], input: { vendor: string | null; narration: string; headId: string | null }, history: PastLine[] = []) {
   const statements: D1PreparedStatement[] = [];
   let party = input.vendor ? byName(parties, input.vendor) : inText(parties, input.narration);
   if (!party && input.vendor) {
@@ -52,8 +81,9 @@ export function resolveVendor(db: DB, businessId: string, parties: Party[], inpu
     statements.push(stmt(db, 'UPDATE parties SET default_head_id = ? WHERE id = ? AND default_head_id IS NULL', input.headId, party.id));
     party.default_head_id = input.headId;
   }
-  const learned = !input.headId && !!party?.default_head_id;
-  return { partyId: party?.id ?? null, headId: input.headId ?? party?.default_head_id ?? null, learned, statements };
+  const picked = !input.headId && party ? pickHead(party, history, input.narration) : null;
+  const headId = input.headId ?? picked?.headId ?? null;
+  return { partyId: party?.id ?? null, headId, learned: !input.headId && !!headId, statements };
 }
 
 /** Records in ocr_original whether the head was filled in from the vendor (shown as "Learned"). */

@@ -271,3 +271,4 @@ Each line of an expense list becomes a draft expense row in `transactions`, paid
 ### New Cloudflare resource
 
 An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.
+- A vendor can be used under several heads (no data-model change: worked out from past lines). One head so far: it is filled in. Several: the head of an earlier line with the same item (or same first word) is filled in, marked Learned; a new item gets one-click choices of the vendor's heads. The vendor's first head stays its main head; Heads and rules lists the vendor under every head it is used with, with line counts.

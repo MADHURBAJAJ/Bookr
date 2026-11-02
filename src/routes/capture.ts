@@ -5,7 +5,7 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type D
 import { body, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
-import { loadParties, markLearned, resolveVendor } from '../parties';
+import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { shiftDayOf } from '../time';
 
 export const captureRoutes = new Hono<AppEnv>();
@@ -203,7 +203,9 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   }
   if (u.kind === 'expense_list') {
     const rows = await all(db, `SELECT t.id, t.line_no AS lineNo, t.narration, t.amount_paise AS amountPaise, t.head_id AS headId, t.status,
-      t.ocr_original AS ocrOriginal, t.party_id AS partyId, p.name AS vendor
+      t.ocr_original AS ocrOriginal, t.party_id AS partyId, p.name AS vendor,
+      (SELECT json_group_array(DISTINCT h) FROM (SELECT p.default_head_id AS h WHERE p.default_head_id IS NOT NULL
+         UNION SELECT x.head_id FROM transactions x WHERE x.party_id = t.party_id AND x.head_id IS NOT NULL AND x.type = 'expense')) AS vendorHeads
       FROM transactions t LEFT JOIN parties p ON p.id = t.party_id WHERE t.upload_id = ? ORDER BY t.line_no`, u.id);
     return c.json({ ...base, rows });
   }
@@ -443,7 +445,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows', req
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
   const chosenHead = await expenseHead(db, bid, data);
   const vendor = text(data, 'vendor', 'Vendor', { optional: true, max: 120 });
-  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead });
+  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid));
   const account = await cashAccount(db, bid);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM transactions WHERE upload_id = ?', u.id);
   const id = newId();
@@ -471,7 +473,7 @@ captureRoutes.put('/businesses/:businessId/expense-rows/:rowId', requireRole('ro
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
   const chosenHead = await expenseHead(db, bid, data);
   const vendor = text(data, 'vendor', 'Vendor', { optional: true, max: 120 });
-  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead });
+  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid));
   await db.batch([
     ...v.statements,
     stmt(db, `UPDATE transactions SET narration = ?, amount_paise = ?, head_id = ?, party_id = ?, ocr_original = ?
@@ -569,9 +571,11 @@ captureRoutes.post('/businesses/:businessId/cash-summaries/:summaryId/approve', 
 captureRoutes.get('/businesses/:businessId/parties', requireRole('heads.view'), async (c) => {
   const parties = await all(c.env.DB, `
     SELECT p.id, p.name, p.aliases, p.default_head_id AS defaultHeadId,
-      (SELECT count(*) FROM transactions t WHERE t.party_id = p.id) AS lines
+      (SELECT count(*) FROM transactions t WHERE t.party_id = p.id) AS lines,
+      (SELECT json_group_array(json_object('headId', head_id, 'lines', n)) FROM (SELECT head_id, count(*) AS n FROM transactions t
+         WHERE t.party_id = p.id AND t.head_id IS NOT NULL AND t.type = 'expense' GROUP BY head_id ORDER BY n DESC)) AS heads
     FROM parties p WHERE p.business_id = ? ORDER BY lower(p.name)`, c.get('businessId'));
-  return c.json({ parties: parties.map((p) => ({ ...p, aliases: JSON.parse(p.aliases as string) })) });
+  return c.json({ parties: parties.map((p) => ({ ...p, aliases: JSON.parse(p.aliases as string), heads: JSON.parse(p.heads as string) })) });
 });
 
 // Rename a vendor, move it under another head, or set its other spellings. Owner or Accountant.

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { newId, now, stmt, type DB } from './db';
 import { parsePaise } from './money';
 import type { PageImage } from './claude';
-import { byName, inText, type Party } from './parties';
+import { byName, inText, pickHead, type Party, type PastLine } from './parties';
 
 const Orientation = z.enum(['upright', 'rotated_90_clockwise', 'rotated_180', 'rotated_90_counterclockwise']);
 const Amount = z.string().nullable().describe('Digits exactly as written, with a decimal point if written, no currency sign. null if unreadable or blank.');
@@ -151,7 +151,7 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
 }
 
 /** Statements that replace the page's draft expense rows with the reading. Rows have no head: a person chooses it. */
-export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, cashAccountId: string, parties: Party[] = []): { statements: D1PreparedStatement[]; written: number | null } {
+export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, cashAccountId: string, parties: Party[] = [], history: PastLine[] = []): { statements: D1PreparedStatement[]; written: number | null } {
   const t = now();
   const statements: D1PreparedStatement[] = [stmt(ctx.db, "DELETE FROM transactions WHERE upload_id = ? AND status = 'draft'", ctx.uploadId)];
   r.rows.forEach((row, i) => {
@@ -161,7 +161,7 @@ export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, c
     if (!row.item) unclear.add('item');
     // A vendor already known gives the line its remembered head ("Learned"); an unknown one waits for a person.
     const party = (row.vendor ? byName(parties, row.vendor) : null) ?? inText(parties, `${row.item ?? ''} ${row.vendor ?? ''}`);
-    const headId = party?.default_head_id ?? null;
+    const headId = party ? pickHead(party, history, row.item ?? '').headId : null;
     statements.push(stmt(ctx.db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status,
       payment_mode, upload_id, line_no, party_id, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?, ?, ?)`,
       newId(), ctx.businessId, cashAccountId, ctx.day, amt !== null && amt > 0 ? amt : 0, headId, row.item ?? '',

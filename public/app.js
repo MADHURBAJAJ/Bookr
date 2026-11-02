@@ -304,7 +304,7 @@ async function headsView(biz, editId) {
     api('GET', `/businesses/${biz.id}/bill-type-heads`),
     api('GET', `/businesses/${biz.id}/parties`),
   ]);
-  const vendorsOf = (headId) => parties.filter((p) => p.defaultHeadId === headId);
+  const vendorsOf = (headId) => parties.filter((p) => p.defaultHeadId === headId || (p.heads ?? []).some((x) => x.headId === headId));
   const canEdit = biz.actions.includes('heads.edit');
   const editing = heads.find((h) => h.id === editId);
   const mapped = (t) => billTypeHeads.find((m) => m.billType === t)?.headId ?? '';
@@ -361,13 +361,13 @@ async function headsView(biz, editId) {
         </div>
         <div style="border-top:1px solid var(--line-soft);padding-top:14px;display:flex;flex-direction:column;gap:8px">
           <h2>Vendors</h2>
-          <div class="note">Each vendor is remembered under an expense head, e.g. Blinkit under Kitchen purchases. A vendor gets its head the first time one is chosen for it on an expense line.${canEdit ? ' Move or rename one here.' : ''}</div>
+          <div class="note">Each vendor is remembered under the heads it is booked to, e.g. Blinkit under Kitchen purchases and Housekeeping. Its first head is its main head. With several heads, a line gets the head its item had before, or a one-click choice.${canEdit ? ' Change the main head or rename a vendor here.' : ''}</div>
           ${parties.length ? parties.map((p) => html`<div class="form-row" style="align-items:center;border-top:1px solid var(--line-soft);padding-top:8px">
             ${canEdit ? html`<input class="cell" data-vname="${p.id}" value="${p.name}" style="width:180px" aria-label="Vendor name">` : html`<span style="width:180px">${p.name}</span>`}
-            ${canEdit ? html`<select class="compact" data-vhead="${p.id}" aria-label="Head for ${p.name}"><option value="">No head yet</option>
+            ${canEdit ? html`<select class="compact" data-vhead="${p.id}" aria-label="Main head for ${p.name}" title="Main head: used when the vendor has only one, and offered first"><option value="">No head yet</option>
               ${heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}" ${p.defaultHeadId === h.id ? 'selected' : ''}>${h.name}</option>`)}</select>`
               : html`<span>${heads.find((h) => h.id === p.defaultHeadId)?.name ?? 'No head yet'}</span>`}
-            <span class="note">${p.lines} line${p.lines === 1 ? '' : 's'}</span>
+            <span class="note">${p.lines} line${p.lines === 1 ? '' : 's'}${(p.heads ?? []).length > 1 ? ` · used under ${p.heads.map((x) => `${heads.find((h) => h.id === x.headId)?.name ?? '?'} (${x.lines})`).join(', ')}` : ''}</span>
           </div>`) : html`<div class="note">No vendors yet. Add one by naming the vendor on an expense line.</div>`}
           <div id="vmsg"></div>
         </div>
@@ -1295,7 +1295,9 @@ function expensePanel(biz, u, heads, parties = []) {
           <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td>
           <td>${r.vendor ?? (read ? html`<span class="chip wait" title="Read from the page; not a known vendor yet. Edit the line to keep it.">${read}?</span>` : html`<span class="note">—</span>`)}</td>
           <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
-          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? html` <span class="chip wait" title="Filled in from the vendor's remembered head">Learned</span>` : ''}` : html`<span class="chip bad">Needs input</span>`}</td>
+          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? html` <span class="chip wait" title="Filled in from how this vendor was booked before">Learned</span>` : ''}`
+            : headChoices(r).length > 1 && r.status === 'draft' ? html`<div style="display:flex;flex-wrap:wrap;gap:4px">${headChoices(r).map((hid) => html`<button class="btn plain" type="button" style="min-height:32px;font-size:13px;padding:0 8px" data-quickhead="${r.id}" data-head="${hid}" title="${r.vendor} is used under this head">${name(hid)}</button>`)}</div>`
+            : html`<span class="chip bad">Needs input</span>`}</td>
           <td>${r.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Draft</span>`}</td>
           <td style="text-align:right">${r.status === 'draft' ? html`<button class="btn plain" type="button" data-eedit="${r.id}">Edit</button>` : ''}</td>
         </tr>`; })}</tbody>
@@ -1324,6 +1326,11 @@ function expensePanel(biz, u, heads, parties = []) {
     </section>`;
 }
 
+/** The heads a line's vendor has been booked under, offered as one-click choices when there are several. */
+function headChoices(r) {
+  try { return (JSON.parse(r.vendorHeads ?? '[]') ?? []).filter(Boolean); } catch { return []; }
+}
+
 /** The vendor Claude read on a line, when it is not a known vendor yet. */
 function readVendor(r) {
   if (r.vendor || !r.ocrOriginal) return null;
@@ -1342,10 +1349,14 @@ function wireExpense(biz, u, parties = []) {
     const name = form.vendor.value.trim();
     const p = name ? findParty(name) : null;
     if (!name) hint.textContent = 'Name the vendor and its head once; next time the head fills in by itself.';
-    else if (p?.defaultHeadId) {
+    else if (p && (p.heads?.length ?? 0) > 1) {
+      const names = p.heads.map((x) => [...form.headId.options].find((o) => o.value === x.headId)?.textContent).filter(Boolean);
+      hint.textContent = `${p.name} is used under ${names.join(' and ')}. Choose one, or leave it empty: an item booked before fills its head in.`;
+    } else if (p?.defaultHeadId) {
       if (!form.headId.value) form.headId.value = p.defaultHeadId;
-      hint.textContent = `${p.name} is remembered under ${form.headId.selectedOptions[0]?.textContent ?? 'its head'}.`;
-    } else hint.textContent = `New vendor: the head you choose now will be remembered for ${name}.`;
+      hint.textContent = `${p.name} is remembered under ${form.headId.selectedOptions[0]?.textContent ?? 'its head'}. A vendor can be under more than one head: choose another if this line belongs elsewhere.`;
+    } else if (p) hint.textContent = `${p.name} has no head yet: the head you choose now will be remembered.`;
+    else hint.textContent = `New vendor: the head you choose now will be remembered for ${name}.`;
   };
   form.vendor.addEventListener('change', onVendor);
   form.vendor.addEventListener('input', onVendor);
@@ -1366,6 +1377,13 @@ function wireExpense(biz, u, parties = []) {
     document.getElementById('etitle').textContent = `Edit line ${r.lineNo}`;
     document.getElementById('edel').hidden = false;
     form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }));
+  app.querySelectorAll('[data-quickhead]').forEach((b) => b.addEventListener('click', async () => {
+    const r = u.rows.find((x) => x.id === b.dataset.quickhead);
+    try {
+      await api('PUT', `/businesses/${biz.id}/expense-rows/${r.id}`, { narration: r.narration, vendor: r.vendor, amount: rupeesForInput(r.amountPaise), headId: b.dataset.head });
+      reviewView(biz, u.id);
+    } catch (err) { showError(document.getElementById('rmsg'), err); }
   }));
   document.getElementById('edel').addEventListener('click', async () => {
     await api('DELETE', `/businesses/${biz.id}/expense-rows/${editing}`, {});

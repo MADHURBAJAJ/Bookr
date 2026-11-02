@@ -848,3 +848,39 @@ describe('vendors remembered under a head', () => {
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'party.update'`)[0].n).toBe(1);
   });
 });
+
+describe('a vendor under several heads', () => {
+  it('picks the head from a matching earlier item, else offers the vendor\'s heads as choices', async () => {
+    const h = await hotel();
+    const kitchen = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Kitchen purchases', type: 'expense' })).json.id;
+    const house = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Housekeeping', type: 'expense' })).json.id;
+    const pg = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, png(91), 'image/png')).json.id;
+    const add = async (narration: string, headId?: string) => (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`,
+      { narration, vendor: 'Blinkit', amount: '100', headId: headId ?? null })).json.id;
+    await add('Vegetables', kitchen);
+    await add('Detergent', house);
+    const veg = await add('vegetables');            // same item: Kitchen purchases
+    const det = await add('Detergent powder');      // same first word: Housekeeping
+    const bread = await add('Bread');               // new item, two heads: no head, choices offered
+    const head = async (id: string) => (await sql`SELECT head_id, ocr_original FROM transactions WHERE id = ${id}`)[0];
+    expect((await head(veg)).head_id).toBe(kitchen);
+    expect(JSON.parse((await head(veg)).ocr_original).inferred).toEqual(['head']);
+    expect((await head(det)).head_id).toBe(house);
+    expect((await head(bread)).head_id).toBeNull();
+    const pageRows = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${pg}`)).json.rows;
+    expect(JSON.parse(pageRows.find((r: any) => r.id === bread).vendorHeads).sort()).toEqual([kitchen, house].sort());
+    // The main head stays the first one; the vendor is listed under both.
+    const [p] = (await h.clients.owner.get(`/businesses/${h.bid}/parties`)).json.parties;
+    expect(p.defaultHeadId).toBe(kitchen);
+    expect(p.heads.map((x: any) => x.headId).sort()).toEqual([kitchen, house].sort());
+  });
+
+  it('a vendor with one head still fills it in for any item', async () => {
+    const h = await hotel();
+    const kitchen = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Kitchen purchases', type: 'expense' })).json.id;
+    const pg = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, png(92), 'image/png')).json.id;
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`, { narration: 'Vegetables', vendor: 'Zepto', amount: '10', headId: kitchen });
+    const id = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`, { narration: 'Anything new', vendor: 'Zepto', amount: '10' })).json.id;
+    expect((await sql`SELECT head_id FROM transactions WHERE id = ${id}`)[0].head_id).toBe(kitchen);
+  });
+});
