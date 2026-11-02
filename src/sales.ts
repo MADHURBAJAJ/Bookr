@@ -343,7 +343,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     && (c.linked_to_id === others.get(c.id)!.id || others.get(c.id)!.linksHere || others.get(c.id)!.billNo === c.bill_no));
   if (twice.length) blockers.push(`Bill ${twice.map((c) => `${c.bill_no} (also counted on ${others.get(c.id)!.day})`).join(', ')} would be counted twice. Choose "Already counted" for it here.`);
   const undecided = comparisons.filter((c) => NEEDS_DECISION.includes(c.difference) && !c.decision);
-  if (undecided.length) blockers.push(`${undecided.length} difference${undecided.length > 1 ? 's are' : ' is'} not decided yet.`);
+  if (undecided.length) blockers.push(`${undecided.length} difference${undecided.length > 1 ? 's are' : ' is'} not decided yet: bill ${undecided.slice(0, 20).map((c) => c.bill_no).join(', ')}${undecided.length > 20 ? ' …' : ''}.`);
   const drafts = rg.filter((r) => r.status !== 'checked');
   if (drafts.length) blockers.push(`${drafts.length} register row${drafts.length > 1 ? 's are' : ' is'} not checked yet.`);
   const counts = new Map<string, number>();
@@ -358,7 +358,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   }
   if (unbalanced.length) blockers.push(`The payments written for bill ${unbalanced.map((r) => r.bill_no).join(', ')} do not add up to the bill amount.`);
   const typed = new Set(typeHeads.map((t) => t.bill_type));
-  const counted = comparisons.filter((c) => c.difference === 'match' || (c.decision && c.decision !== 'leave_out'));
+  const counted = comparisons.filter((c) => c.difference === 'match' || isCounted(c.decision));
   const rgById = new Map(rg.map((r) => [r.id, r]));
   const shares = discountShares(rg);
   const typeOf = (c: Comparison) => (c.register_row_id ? rgById.get(c.register_row_id)?.bill_type : c.bill_type) ?? null;

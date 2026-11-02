@@ -1527,6 +1527,13 @@ function baseChoices(c) {
   return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
 }
 
+/** A "Next step" line with each bill number on this shift turned into a link to its row. */
+function blockerHtml(text, v) {
+  const bills = new Set(v.comparisons.map((c) => c.billNo));
+  const parts = String(text).split(/(\b[0-9A-Za-z/-]{2,}\b)/);
+  return { __html: parts.map((p) => (bills.has(p) ? `<a href="#" data-gobill="${esc(p)}" class="mono">${esc(p)}</a>` : esc(p))).join('') };
+}
+
 /** A register-only bill that can be counted from the register in bulk (not matched to another day's software bill). */
 const bulkOk = (c) => c.difference === 'missing_in_software' && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
 
@@ -1744,7 +1751,7 @@ async function compareView(biz, day) {
           ${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`
         : html`
           ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
-          ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${b}</li>`)}</ul>` : html`<div class="note">Everything is decided. Confirming turns the sales into approved income rows.</div>`}
+          ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="note">Everything is decided. Confirming turns the sales into approved income rows.</div>`}
           ${canDecide ? html`<button class="btn big" id="confirm" ${v.canConfirm ? '' : 'disabled'}>Confirm sales for this shift</button>` : ''}
           <div class="note">Only Owner and Accountant can decide differences and confirm.</div>`}
       </section>
@@ -1812,6 +1819,19 @@ async function compareView(biz, day) {
       } catch (err) { showError(bulk.querySelector('.form-msg'), err); }
     });
   }
+  app.querySelectorAll('[data-gobill]').forEach((a) => a.addEventListener('click', (e) => {
+    e.preventDefault();
+    const row = app.querySelector(`tr[data-bill="${CSS.escape(a.dataset.gobill)}"]`);
+    if (!row) {
+      // Not a difference (e.g. a matched bill with no type): open it in its register page.
+      const c = v.comparisons.find((x) => x.billNo === a.dataset.gobill);
+      if (c?.register?.uploadId) { setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: c.billNo, label: `${dayLabel(day)} shift` }); location.hash = `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}`; }
+      return;
+    }
+    app.querySelectorAll('tr.row-found').forEach((x) => x.classList.remove('row-found'));
+    row.classList.add('row-found');
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }));
   app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
     const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
