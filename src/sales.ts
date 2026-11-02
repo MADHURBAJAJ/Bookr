@@ -6,7 +6,10 @@ import { all, newId, now, one, stmt, type DB } from './db';
 import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
 
 export type Difference = 'match' | 'amount' | 'mode' | 'amount_and_mode' | 'missing_in_register' | 'missing_in_software' | 'complimentary';
-export type Decision = 'use_software' | 'use_register' | 'leave_out';
+export type Decision = 'use_software' | 'use_register' | 'leave_out' | 'carry_forward';
+export const ONE_SIDED: Difference[] = ['missing_in_register', 'missing_in_software'];
+/** How long a bill found on one side only is watched for in other days' data. */
+export const WATCH_DAYS = 7;
 
 export const NEEDS_DECISION: Difference[] = ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'];
 
@@ -18,7 +21,7 @@ interface Comparison {
   id: string; pos_no: string; bill_no: string; software_bill_id: string | null; register_row_id: string | null;
   sw_amount_paise: number | null; sw_mode: string | null; rg_amount_paise: number | null; rg_mode: string | null;
   difference: Difference; decision: Decision | null; decided_by: string | null; decided_at: number | null; note: string | null;
-  bill_type: string | null;
+  bill_type: string | null; shift_day?: string; linked_to_id?: string | null; closed_at?: number | null; close_note?: string | null;
 }
 
 export function shiftStatement(db: DB, businessId: string, day: string) {
@@ -184,14 +187,16 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     seen.add(key);
     if (!w) {
       if (c.decision) statements.push(clearedAudit(c, null));
+      statements.push(...unlinkStatements(db, c.id, t));
       statements.push(stmt(db, 'DELETE FROM bill_comparisons WHERE id = ?', c.id));
       continue;
     }
     if (same(c, w)) continue;
     // Any change to a bill clears its decision, so it is decided again on the new values.
     if (c.decision) statements.push(clearedAudit(c, w));
+    statements.push(...unlinkStatements(db, c.id, t));
     statements.push(stmt(db, `UPDATE bill_comparisons SET software_bill_id = ?, register_row_id = ?, sw_amount_paise = ?, sw_mode = ?,
-      rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = NULL WHERE id = ?`,
+      rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = NULL, linked_to_id = NULL WHERE id = ?`,
       w.software_bill_id, w.register_row_id, w.sw_amount_paise, w.sw_mode, w.rg_amount_paise, w.rg_mode, w.difference,
       null, null, null, null, c.id));
   }
@@ -204,6 +209,92 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   }
   if (wanted.size) statements.push(stmt(db, "UPDATE shifts SET status = 'comparing' WHERE business_id = ? AND shift_day = ? AND status = 'open'", businessId, day));
   if (statements.length) await db.batch([shiftStatement(db, businessId, day), ...statements]);
+}
+
+/**
+ * A bill on another day that was decided by linking to this comparison (e.g. "already counted on 31 Oct")
+ * no longer holds when this one changes: its decision is cleared, unless its shift is confirmed.
+ */
+function unlinkStatements(db: DB, comparisonId: string, t: number): D1PreparedStatement[] {
+  const open = `linked_to_id = ? AND NOT EXISTS (SELECT 1 FROM shifts s WHERE s.business_id = bill_comparisons.business_id
+    AND s.shift_day = bill_comparisons.shift_day AND s.status = 'confirmed')`;
+  return [
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      SELECT business_id, NULL, 'comparison.decision_cleared', 'bill_comparisons', id,
+        json_object('decision', decision, 'linkedToId', linked_to_id, 'note', note), json_object('reason', 'linked bill changed'), ?
+      FROM bill_comparisons WHERE ${open}`, t, comparisonId),
+    stmt(db, `UPDATE bill_comparisons SET decision = NULL, decided_by = NULL, decided_at = NULL, note = NULL, bill_type = NULL, linked_to_id = NULL
+      WHERE ${open}`, comparisonId),
+  ];
+}
+
+// ---- Bills found on one side only, followed across shifts
+
+export interface OtherDay {
+  id: string; day: string; billNo: string; side: 'software' | 'register'; amountPaise: number | null; mode: string | null;
+  decision: Decision | null; note: string | null; billType: string | null; confirmed: boolean; closed: boolean;
+  /** This other entry was itself decided by linking to the comparison being looked at. */
+  linksHere: boolean;
+}
+
+export const isCounted = (d: Decision | null | undefined) => d === 'use_software' || d === 'use_register';
+/** Bill numbers that may be the same bill: equal, or one is the last 4+ digits of the other (as the register often writes). */
+export const sameBillNo = (a: string, b: string) => a === b || (Math.min(a.length, b.length) >= 4 && (a.endsWith(b) || b.endsWith(a)));
+
+/**
+ * For each one-sided comparison of a shift, the same bill on the other side in another shift within the
+ * watch (or one already linked either way). A comparison in a confirmed shift is shown but cannot change.
+ */
+export async function otherDays(db: DB, businessId: string, day: string, comps: Comparison[]): Promise<Map<string, OtherDay>> {
+  const out = new Map<string, OtherDay>();
+  const mine = comps.filter((c) => ONE_SIDED.includes(c.difference));
+  if (!mine.length) return out;
+  const cands = await all<Comparison & { shift_day: string; shift_status: string | null; rg_type: string | null }>(db, `
+    SELECT c.*, s.status AS shift_status, r.bill_type AS rg_type FROM bill_comparisons c
+    LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
+    LEFT JOIN register_rows r ON r.id = c.register_row_id
+    WHERE c.business_id = ? AND c.shift_day <> ? AND c.difference IN ('missing_in_register', 'missing_in_software')
+      AND ((c.shift_day BETWEEN ? AND ? AND c.closed_at IS NULL) OR c.linked_to_id IN (${mine.map(() => '?').join(',')})
+        OR c.id IN (SELECT linked_to_id FROM bill_comparisons WHERE id IN (${mine.map(() => '?').join(',')})))`,
+    businessId, day, addDays(day, -WATCH_DAYS), addDays(day, WATCH_DAYS), ...mine.map((c) => c.id), ...mine.map((c) => c.id));
+  for (const c of mine) {
+    const opposite = c.difference === 'missing_in_register' ? 'missing_in_software' : 'missing_in_register';
+    const pick = cands.find((o) => o.id === c.linked_to_id) ?? cands.find((o) => o.linked_to_id === c.id)
+      ?? cands.find((o) => o.difference === opposite && o.bill_no === c.bill_no && !o.linked_to_id)
+      ?? cands.find((o) => o.difference === opposite && sameBillNo(o.bill_no, c.bill_no) && !o.linked_to_id);
+    if (!pick || pick.difference !== opposite) continue;
+    const sw = pick.difference === 'missing_in_register';
+    out.set(c.id, {
+      id: pick.id, day: pick.shift_day, billNo: pick.bill_no, side: sw ? 'software' : 'register',
+      amountPaise: sw ? pick.sw_amount_paise : pick.rg_amount_paise, mode: sw ? pick.sw_mode : pick.rg_mode,
+      decision: pick.decision, note: pick.note, billType: pick.rg_type ?? pick.bill_type, confirmed: pick.shift_status === 'confirmed',
+      closed: pick.closed_at != null, linksHere: pick.linked_to_id === c.id,
+    });
+  }
+  return out;
+}
+
+/**
+ * The watch list: bills found on one side only, decided, not closed, and not yet paired with the other
+ * side on another day. After WATCH_DAYS they are unresolved and an Owner or Accountant closes them.
+ */
+export async function waitingBills(db: DB, businessId: string, today: string) {
+  const rows = await all<Comparison & { shift_day: string; shift_status: string | null }>(db, `
+    SELECT c.*, s.status AS shift_status FROM bill_comparisons c
+    LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
+    WHERE c.business_id = ? AND c.difference IN ('missing_in_register', 'missing_in_software') AND c.decision IS NOT NULL
+      AND c.closed_at IS NULL AND c.linked_to_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM bill_comparisons x WHERE x.linked_to_id = c.id)
+    ORDER BY c.shift_day, c.bill_no`, businessId);
+  return rows.map((c) => {
+    const days = Math.round((Date.parse(today) - Date.parse(c.shift_day)) / 86400000);
+    return {
+      id: c.id, day: c.shift_day, billNo: c.bill_no, side: c.difference === 'missing_in_register' ? 'software' : 'register',
+      amountPaise: c.difference === 'missing_in_register' ? c.sw_amount_paise : c.rg_amount_paise,
+      mode: c.difference === 'missing_in_register' ? c.sw_mode : c.rg_mode,
+      decision: c.decision, note: c.note, confirmed: c.shift_status === 'confirmed', daysWaiting: days, unresolved: days > WATCH_DAYS,
+    };
+  });
 }
 
 export async function coverage(db: DB, businessId: string, day: string) {
@@ -245,6 +336,10 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   if (!sw.length) blockers.push('No software report has bills in this shift yet.');
   if (cov.gaps.length) blockers.push('Some hours of this shift are not covered by a software report.');
   if (conflicts.length) blockers.push(`${conflicts.length} overlapping bill${conflicts.length > 1 ? 's differ' : ' differs'} between two software reports. Decide which values to keep.`);
+  const others = await otherDays(db, businessId, day, comparisons);
+  const twice = comparisons.filter((c) => isCounted(c.decision) && others.has(c.id) && isCounted(others.get(c.id)!.decision)
+    && (c.linked_to_id === others.get(c.id)!.id || others.get(c.id)!.linksHere || others.get(c.id)!.billNo === c.bill_no));
+  if (twice.length) blockers.push(`Bill ${twice.map((c) => `${c.bill_no} (also counted on ${others.get(c.id)!.day})`).join(', ')} would be counted twice. Choose "Already counted" for it here.`);
   const undecided = comparisons.filter((c) => NEEDS_DECISION.includes(c.difference) && !c.decision);
   if (undecided.length) blockers.push(`${undecided.length} difference${undecided.length > 1 ? 's are' : ' is'} not decided yet.`);
   const drafts = rg.filter((r) => r.status !== 'checked');
@@ -296,6 +391,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       register: c.register_row_id ? { amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0,
         rowId: c.register_row_id, uploadId: rgById.get(c.register_row_id)?.upload_id ?? null } : null,
       largeDiscount: c.register_row_id && shares.get(c.register_row_id)?.large ? shares.get(c.register_row_id) : null,
+      linkedToId: c.linked_to_id ?? null,
+      otherDay: others.get(c.id) ?? null,
     })),
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,

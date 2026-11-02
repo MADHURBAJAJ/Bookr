@@ -226,9 +226,14 @@ function fyDefault() {
 }
 
 async function dashboardView(biz) {
-  const { accounts, heads } = await api('GET', `/businesses/${biz.id}/dashboard`);
+  const [{ accounts, heads }, waiting] = await Promise.all([api('GET', `/businesses/${biz.id}/dashboard`),
+    biz.actions.includes('sales.view') ? api('GET', `/businesses/${biz.id}/waiting-bills`).catch(() => null) : null]);
+  const late = waiting?.bills.filter((b) => b.unresolved).length ?? 0;
   const total = accounts.reduce((s, a) => s + a.openingBalancePaise, 0);
   render(shell(biz, 'dashboard', 'Dashboard', 'Totals, the weekly chart and items needing attention arrive in Phase 4.', html`
+    ${waiting?.bills.length ? html`<section class="card" style="margin-bottom:16px;gap:6px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <h2>Bills waiting for their other side</h2>${late ? html`<span class="chip bad">${late} over ${waiting.watchDays} days</span>` : ''}</div>
+      <div class="note">${waiting.bills.length} bill${waiting.bills.length === 1 ? ' was' : 's were'} found only in the software report or only in the register. <a href="#/b/${biz.id}/compare/${waiting.bills[0].day}">See them on Compare sales</a>.</div></section>` : ''}
     <div class="row">
       <section class="card grow1">
         <h2>Opening balances</h2>
@@ -581,7 +586,7 @@ const DIFF_LABELS = {
   match: 'Match', amount: 'Amount differs', mode: 'Payment mode differs', amount_and_mode: 'Amount and mode differ',
   missing_in_register: 'Missing in register', missing_in_software: 'Missing in software', complimentary: 'Complimentary',
 };
-const DECISION_LABELS = { use_software: 'Use software', use_register: 'Use register', leave_out: 'Leave out' };
+const DECISION_LABELS = { use_software: 'Use software', use_register: 'Use register', leave_out: 'Leave out', carry_forward: 'Carry forward' };
 const STATUS_CHIPS = {
   uploaded: ['Uploaded', 'wait'], reading: ['Reading', 'wait'], ready: ['Ready to review', 'info'], retake: ['Retake needed', 'bad'],
   approved: ['Approved', 'ok'], failed: ['Failed', 'bad'],
@@ -1493,11 +1498,59 @@ function wireSummary(biz, u) {
 }
 
 /** Decision buttons for one difference. A bill missing in the register takes its type with "Use software". */
+/** [decision, label, billType, linkedToId] choices for a bill; a bill on one side only can match another day's entry. */
 function decisionChoices(c) {
+  const o = c.otherDay;
+  if (o && !o.closed) {
+    const here = c.register ? 'use_register' : 'use_software';
+    const countedThere = o.decision === 'use_software' || o.decision === 'use_register';
+    if (countedThere) return [['leave_out', `Already counted on ${dayLabel(o.day)}`, '', o.id], ['leave_out', 'Leave out (another reason)']];
+    if (!(o.linksHere && o.decision === 'leave_out')) {
+      const types = !c.register && o.side !== 'register' ? [['fnb', ' · F&B'], ['room', ' · Room']] : [['', '']];
+      return [...types.map(([t, l]) => [here, `Count here · matched with ${dayLabel(o.day)}${l}`, t, o.id]), ...baseChoices(c)];
+    }
+  }
+  return baseChoices(c);
+}
+function baseChoices(c) {
+  const carry = !c.register || !c.software ? [['carry_forward', 'Carry forward']] : [];
   if (c.largeDiscount && c.software) return [['use_register', 'Accept discount'], ['use_software', 'Payment missing · use software'], ['leave_out', 'Leave out']];
-  if (!c.register) return [['use_software', 'Use software · F&B', 'fnb'], ['use_software', 'Use software · Room', 'room'], ['leave_out', 'Leave out']];
-  if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out']];
-  return Object.entries(DECISION_LABELS);
+  if (!c.register) return [['use_software', 'Use software · F&B', 'fnb'], ['use_software', 'Use software · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
+  if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out'], ...carry];
+  return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
+}
+
+/** One line under a one-sided bill: the same bill on the other side, on another day. */
+function otherDayNote(c) {
+  const o = c.otherDay;
+  if (!o) return '';
+  const what = o.decision === 'use_software' || o.decision === 'use_register' ? 'counted there'
+    : o.decision === 'carry_forward' ? 'carried forward there' : o.decision === 'leave_out' ? `left out there${o.note ? `: ${o.note}` : ''}` : 'not decided there yet';
+  const warn = o.decision === 'leave_out' && !o.linksHere;
+  return html`<div class="tiny" style="color:${warn ? 'var(--danger)' : 'var(--teal)'};white-space:normal">${o.billNo !== c.billNo ? `Bill ${o.billNo} ` : ''}in the ${dayLabel(o.day)} ${o.side === 'software' ? 'software report' : 'register'}: ₹ ${money(o.amountPaise ?? 0)}${o.mode ? ` ${MODE_LABELS[o.mode] ?? o.mode}` : ''} · ${what}</div>`;
+}
+
+// ---------- Bills on one side only, waiting for the other side on another day
+
+function waitingHtml(biz, w, canDecide) {
+  if (!w?.bills?.length) return '';
+  const what = (b) => ({ use_software: 'Counted (Use software)', use_register: 'Counted (Use register)', carry_forward: 'Carried forward, not counted', leave_out: `Left out${b.note ? `: ${b.note}` : ''}` })[b.decision];
+  const late = w.bills.filter((b) => b.unresolved).length;
+  return html`<section class="card" id="waiting" style="gap:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Bills waiting for their other side</h2>
+      ${late ? html`<span class="chip bad">${late} over ${w.watchDays} days</span>` : html`<span class="note">Watched for ${w.watchDays} days</span>`}</div>
+    <div class="note">Each bill was found only in the software report or only in the register. When it turns up on another day, that day's Compare sales offers to match it, and a bill is never counted twice.</div>
+    <div class="scroll"><table style="min-width:640px">
+      <thead><tr><th>Bill</th><th>Shift</th><th>Found in</th><th style="text-align:right">Amount</th><th>Decided</th><th>Waiting</th><th></th></tr></thead>
+      <tbody>${w.bills.map((b) => html`<tr>
+        <td class="mono">${b.billNo}</td><td><a href="#/b/${biz.id}/compare/${b.day}">${dayLabel(b.day)}</a></td>
+        <td>${b.side === 'software' ? 'Software only' : 'Register only'}</td><td class="amount">${money(b.amountPaise ?? 0)}${b.mode ? html` <span class="note">${MODE_LABELS[b.mode] ?? b.mode}</span>` : ''}</td>
+        <td class="note">${what(b)}</td>
+        <td>${b.unresolved ? html`<span class="chip bad">${b.daysWaiting} days</span>` : html`<span class="note">${b.daysWaiting} day${b.daysWaiting === 1 ? '' : 's'}</span>`}</td>
+        <td>${b.unresolved && canDecide ? html`<button class="btn plain" type="button" data-closebill="${b.id}" data-bill="${b.billNo}">Close with a reason</button>` : ''}</td>
+      </tr>`)}</tbody>
+    </table></div>
+  </section>`;
 }
 
 // ---------- Cash for a shift: should be in hand against counted
@@ -1579,7 +1632,8 @@ async function compareView(biz, day) {
       <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/upload">Upload a software sales report</a>.</div></section>`));
     return wireShell();
   }
-  const [v, cash] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`)]);
+  const [v, cash, waiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
+    api('GET', `/businesses/${biz.id}/waiting-bills`)]);
   v.reasons = cash.reasons;
   const canDecide = biz.actions.includes('sales.decide');
   const confirmed = v.status === 'confirmed';
@@ -1636,18 +1690,18 @@ async function compareView(biz, day) {
         <thead><tr><th>Bill</th><th>Paid at</th><th>Software</th><th>Register</th><th>What differs</th><th>Your decision</th></tr></thead>
         <tbody>${toDecide.map((c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
             class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
-          <td class="mono"><a href="#" data-openlink>${c.billNo}</a></td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
+          <td class="mono"><a href="#" data-openlink>${c.billNo}</a>${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
           <td>${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)} of bills${c.largeDiscount.grossPaise !== (c.software?.amountPaise ?? 0) ? ' (bills paid together)' : ''}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html` <span class="chip wait">Mode</span>` : ''}`
             : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}</td>
-          <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type]) => {
-              const on = c.decision === k && (!type || c.billType === type);
-              if (k === 'leave_out' && !c.register && c.software?.mode === 'cash') {
+          <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
+              const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
+              if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
                 return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:44px">
                   <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
                   ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
               }
-              return html`<button class="btn ${on ? 'ghost' : 'plain'}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}">${l}</button>`;
+              return html`<button class="btn ${on ? 'ghost' : 'plain'}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}">${l}</button>`;
             })}</div>`
             : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
         </tr>`)}</tbody></table></div>` : html`<div class="note">No differences in this shift.</div>`}
@@ -1674,6 +1728,7 @@ async function compareView(biz, day) {
           <div class="note">Only Owner and Accountant can decide differences and confirm.</div>`}
       </section>
     </div>
+    ${waitingHtml(biz, waiting, canDecide)}
     ${cashPanelHtml(biz, cash)}`));
   wireShell();
   const msg = document.getElementById('cmsg');
@@ -1686,7 +1741,11 @@ async function compareView(biz, day) {
       note = (prompt(`Why is the ${c.largeDiscount.pct}% discount on bill ${c.billNo} accepted? (e.g. owner's guest, group rate)`) ?? '').trim();
       if (!note) return;
     }
-    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null, note }));
+    if (!note && b.dataset.d === 'leave_out' && b.dataset.link && c?.otherDay?.decision === 'leave_out') {
+      note = (prompt(`Bill ${c.billNo} was left out on ${dayLabel(c.otherDay.day)}${c.otherDay.note ? ` (${c.otherDay.note})` : ''} and now appears here. Why leave it out again?`) ?? '').trim();
+      if (!note) return;
+    }
+    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null, note, linkedToId: b.dataset.link || null }));
   }));
   // A difference opens its bill in Review; Review offers a way back to this bill here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
@@ -1709,6 +1768,10 @@ async function compareView(biz, day) {
     act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${sel.dataset.leaveout}`, { decision: 'leave_out', note }));
   }));
   wireCashPanel(biz, day, () => compareView(biz, day), msg);
+  app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
+    const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
+    if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
+  }));
   app.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
   document.getElementById('confirm')?.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {})));
   const reopen = document.getElementById('reopen');

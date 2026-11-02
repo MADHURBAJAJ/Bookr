@@ -5,10 +5,10 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt } from 
 import { body, fail, isUuid, text } from '../http';
 import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
-import { shiftDayOf } from '../time';
+import { istDay, shiftDayOf } from '../time';
 import { storageKey } from '../files';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { confirmShift, largeDiscountOf, NEEDS_DECISION, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { confirmShift, isCounted, largeDiscountOf, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -255,13 +255,29 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
   if (!isUuid(id)) fail(404, 'Not found.');
   const data = await body(c);
   const decision = data.decision === null ? null : (data.decision as Decision);
-  if (decision !== null && !['use_software', 'use_register', 'leave_out'].includes(decision)) fail(400, 'Decision must be use_software, use_register or leave_out.');
-  const note = text(data, 'note', 'Note', { optional: true, max: 500 });
+  if (decision !== null && !['use_software', 'use_register', 'leave_out', 'carry_forward'].includes(decision)) fail(400, 'Decision must be use_software, use_register, leave_out or carry_forward.');
+  let note = text(data, 'note', 'Note', { optional: true, max: 500 });
   const cmp = await one<{ difference: string; software_bill_id: string | null; register_row_id: string | null; sw_mode: string | null;
-    decision: string | null; shift_day: string }>(db,
-    'SELECT difference, software_bill_id, register_row_id, sw_mode, decision, shift_day FROM bill_comparisons WHERE id = ? AND business_id = ?', id, bid);
+    decision: string | null; shift_day: string; bill_no: string; linked_to_id: string | null }>(db,
+    'SELECT difference, software_bill_id, register_row_id, sw_mode, decision, shift_day, bill_no, linked_to_id FROM bill_comparisons WHERE id = ? AND business_id = ?', id, bid);
   if (!cmp) fail(404, 'Not found.');
   if (!NEEDS_DECISION.includes(cmp.difference as never)) fail(400, 'This bill has no difference to decide.');
+  const oneSided = ONE_SIDED.includes(cmp.difference as never);
+  if (decision === 'carry_forward' && !oneSided) fail(400, 'Only a bill missing on one side can be carried forward.');
+  // The same bill on the other side, on another day: the one chosen to link to, or one already linked here.
+  const linkedToId = decision === null ? null : typeof data.linkedToId === 'string' && data.linkedToId ? data.linkedToId : null;
+  if (linkedToId && (!oneSided || !isUuid(linkedToId))) fail(400, 'Only a bill missing on one side can be linked to another day.');
+  const other = oneSided ? (await otherDays(db, bid, cmp.shift_day, [{ id, ...cmp, linked_to_id: linkedToId } as never])).get(id) ?? null : null;
+  if (linkedToId && other?.id !== linkedToId) fail(400, 'That bill on another day is not the same bill on the other side, or is closed.');
+  if (decision === 'carry_forward' && linkedToId) fail(400, 'A bill matched with another day is counted or left out, not carried forward.');
+  // A bill is counted once: never when the same bill on another day is already counted.
+  const sameBill = other && (other.id === linkedToId || other.linksHere || other.billNo === cmp.bill_no);
+  if ((decision === 'use_software' || decision === 'use_register') && sameBill && isCounted(other!.decision)) {
+    fail(409, `Bill ${other!.billNo} is already counted on ${other!.day}. Choose "Already counted" so it is not counted twice.`);
+  }
+  if (decision === 'leave_out' && linkedToId && !note && isCounted(other!.decision)) note = `Already counted on ${other!.day}`;
+  // A bill left out on another day (e.g. cancelled) that turns up here is a warning sign: leaving it out again needs a reason.
+  if (decision === 'leave_out' && linkedToId && !note && other!.decision === 'leave_out') fail(400, `Bill ${other!.billNo} was left out on ${other!.day}${other!.note ? ` (${other!.note})` : ''} and now appears here. Say why it is left out again.`);
   // Cash the register never recorded is only left out for a stated reason, so missing cash cannot be hidden.
   if (decision === 'leave_out' && cmp.difference === 'missing_in_register' && cmp.sw_mode === 'cash' && !note) {
     fail(400, `Say why this cash bill is left out: ${LEAVE_OUT_REASONS.join(', ')}, or another reason.`);
@@ -272,8 +288,9 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
     if (!cmp.software_bill_id) fail(400, 'This bill is not in the software report.');
     if (cmp.sw_mode === 'unknown') fail(400, 'The software report does not say how this bill was paid. Use the register, or leave it out.');
     if (!cmp.register_row_id) {
-      if (data.billType !== 'fnb' && data.billType !== 'room') fail(400, 'This bill is not in the register, so choose its type: Use software · F&B, or Use software · Room.');
-      billType = data.billType;
+      const known = linkedToId && other?.side === 'register' ? other.billType : null;
+      if (data.billType !== 'fnb' && data.billType !== 'room' && !known) fail(400, 'This bill is not in the register, so choose its type: Use software · F&B, or Use software · Room.');
+      billType = data.billType === 'fnb' || data.billType === 'room' ? data.billType : known;
     }
   }
   if (decision === 'use_register') {
@@ -290,11 +307,11 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
   const user = c.get('user').id;
   try {
     await db.batch([
-      stmt(db, 'UPDATE bill_comparisons SET decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = ? WHERE id = ?',
-        decision, decision ? user : null, decision ? t : null, note, billType, id),
+      stmt(db, 'UPDATE bill_comparisons SET decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = ?, linked_to_id = ? WHERE id = ?',
+        decision, decision ? user : null, decision ? t : null, note, billType, linkedToId, id),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
         VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, ?, ?, ?)`, bid, user, id,
-        JSON.stringify({ decision: cmp.decision }), JSON.stringify({ decision, note, billType }), t),
+        JSON.stringify({ decision: cmp.decision, linkedToId: cmp.linked_to_id }), JSON.stringify({ decision, note, billType, linkedToId }), t),
     ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
@@ -403,4 +420,30 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/cash/shortage', requireRol
   );
   await db.batch(statements);
   return c.json({ ok: true, amountPaise: amount });
+});
+
+// ---- Bills found on one side only, waiting for the other side on another day
+
+salesRoutes.get('/businesses/:businessId/waiting-bills', requireRole('sales.view'), async (c) => {
+  return c.json({ watchDays: WATCH_DAYS, bills: await waitingBills(c.env.DB, c.get('businessId'), istDay(Date.now())) });
+});
+
+/** Closes a one-sided bill still unmatched after the watch, with a reason. Owner or Accountant. Audited. */
+salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/close', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('comparisonId');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const note = text(await body(c), 'note', 'Reason', { max: 500 })!;
+  const w = (await waitingBills(db, bid, istDay(Date.now()))).find((x) => x.id === id);
+  if (!w) fail(404, 'This bill is not waiting for its other side.');
+  if (!w.unresolved) fail(400, `This bill is watched for ${WATCH_DAYS} days; it can be closed after that.`);
+  const t = now();
+  const user = c.get('user').id;
+  await db.batch([
+    stmt(db, 'UPDATE bill_comparisons SET closed_at = ?, closed_by = ?, close_note = ? WHERE id = ? AND business_id = ? AND closed_at IS NULL', t, user, note, id, bid),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'comparison.close', 'bill_comparisons', ?, ?, ?, ?)`, bid, user, id, JSON.stringify(w), JSON.stringify({ note }), t),
+  ]);
+  return c.json({ ok: true });
 });

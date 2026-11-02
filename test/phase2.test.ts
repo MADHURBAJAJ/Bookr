@@ -956,3 +956,69 @@ describe('large discounts', () => {
     expect(byBill(v, '2610314').largeDiscount).toBeNull();
   });
 });
+
+describe('bills on one side only, followed across days', () => {
+  const NOV1 = '2026-11-01';
+  const regPage = async (h: Awaited<ReturnType<typeof hotel>>, n: number, rows: { billNo: string; amount: string; mode: string }[]) => {
+    const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=${NOV1}`, png(n), 'image/png')).json.id;
+    for (const r of rows) {
+      expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, {
+        billNo: r.billNo, billType: 'fnb', amount: r.amount, status: 'checked', payments: [{ mode: r.mode, columnLabel: null, amount: r.amount }] })).status).toBe(201);
+    }
+  };
+  const decide = (h: Awaited<ReturnType<typeof hotel>>, id: string, body: Record<string, unknown>) => h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${id}`, body);
+
+  it('counted on 31 Oct, written in the 1 Nov register: linked as already counted, never counted twice', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    expect((await decide(h, byBill(await view(h), '2610319').id, { decision: 'use_software', billType: 'fnb' })).status).toBe(200);
+    let waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills;
+    expect(waiting.map((b: any) => b.billNo)).toContain('2610319');
+    await regPage(h, 95, [{ billNo: '2610319', amount: '353', mode: 'cash' }]);
+    const late = byBill(await view(h, NOV1), '2610319');
+    expect(late.difference).toBe('missing_in_software');
+    expect(late.otherDay).toMatchObject({ day: '2026-10-31', side: 'software', decision: 'use_software', amountPaise: 35300 });
+    expect((await decide(h, late.id, { decision: 'use_register' })).status).toBe(409);
+    expect((await decide(h, late.id, { decision: 'leave_out', linkedToId: late.otherDay.id })).status).toBe(200);
+    const after = byBill(await view(h, NOV1), '2610319');
+    expect(after).toMatchObject({ decision: 'leave_out', linkedToId: late.otherDay.id });
+    expect(after.note).toMatch(/Already counted on 2026-10-31/);
+    waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills;
+    expect(waiting.map((b: any) => b.billNo)).not.toContain('2610319');
+  });
+
+  it('carried forward from 31 Oct, in the 1 Nov software report: counted on 1 Nov, its type from the register', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const c = byBill(await view(h), '26103125');   // cash 500, register only
+    expect((await decide(h, c.id, { decision: 'carry_forward' })).status).toBe(200);
+    expect((await decide(h, byBill(await view(h), '2610319').id, { decision: 'carry_forward' })).status).toBe(200);
+    expect((await decide(h, byBill(await view(h), '2610312').id, { decision: 'carry_forward' })).status).toBe(400); // a match
+    expect((await h.importCsv(h.clients.owner, [{ pos: 'POS-1', bill: '26103125', when: '01-11-2026.10:00:00', name: 'U/N', mode: 'CASH', amount: '500' }],
+      { day: NOV1, coversFrom: istToMs(2026, 11, 1, 8, 0, 0), coversTo: istToMs(2026, 11, 2, 7, 59, 59) })).status).toBe(201);
+    const late = byBill(await view(h, NOV1), '26103125');
+    expect(late.otherDay).toMatchObject({ day: '2026-10-31', side: 'register', decision: 'carry_forward', billType: 'fnb' });
+    expect((await decide(h, late.id, { decision: 'use_software', linkedToId: late.otherDay.id })).status).toBe(200);
+    const waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills;
+    expect(waiting.map((b: any) => b.billNo)).toEqual(['2610319']);
+  });
+
+  it('left out on 31 Oct, then in the 1 Nov register: leaving it out again needs a reason; an old bill closes after the watch', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    expect((await decide(h, byBill(await view(h), '2610319').id, { decision: 'leave_out', note: 'Cancelled in POS' })).status).toBe(200);
+    await regPage(h, 96, [{ billNo: '2610319', amount: '353', mode: 'cash' }]);
+    const late = byBill(await view(h, NOV1), '2610319');
+    expect(late.otherDay).toMatchObject({ decision: 'leave_out', note: 'Cancelled in POS' });
+    expect((await decide(h, late.id, { decision: 'leave_out', linkedToId: late.otherDay.id })).status).toBe(400);
+    expect((await decide(h, late.id, { decision: 'use_register', linkedToId: late.otherDay.id })).status).toBe(200);
+    // Closing: refused inside the watch, allowed after it, with a reason, by Owner or Accountant.
+    const c = byBill(await view(h), '26103125');
+    expect((await decide(h, c.id, { decision: 'carry_forward' })).status).toBe(200);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/comparisons/${c.id}/close`, { note: 'Never billed' })).status).toBe(400);
+    await sql`UPDATE bill_comparisons SET shift_day = '2026-10-01' WHERE id = ${c.id}`;
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/comparisons/${c.id}/close`, { note: 'Never billed' })).status).toBe(403);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/comparisons/${c.id}/close`, { note: 'Never billed' })).status).toBe(200);
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills.map((b: any) => b.billNo)).not.toContain('26103125');
+  });
+});
