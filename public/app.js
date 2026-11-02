@@ -1025,8 +1025,9 @@ function groupNote(r) {
   const h = head ?? r;
   const all = [h, ...membersOf(h)];
   const ok = paidOf(h) === groupNet(h);
-  return html`<div class="tiny" style="margin-top:3px;color:${ok ? 'var(--teal-ink)' : '#7F1D1D'}">${head ? `Paid with row ${h.lineNo}` : `Also pays row${ms.length > 1 ? 's' : ''} ${ms.map((m) => m.lineNo).join(', ')}`}:
-    ₹ ${money(paidOf(h))} for bills of ₹ ${money(groupNet(h))} (rows ${all.map((x) => x.lineNo).join(', ')})${ok ? '' : ' — does not add up'}</div>`;
+  const other = all.find((x) => x.elsewhere);
+  return html`<div class="tiny" style="margin-top:3px;color:${ok ? 'var(--teal-ink)' : '#7F1D1D'}">${head ? `Paid with ${rowLabel(h)}` : `Also pays ${ms.map(rowLabel).join(', ')}`}:
+    ₹ ${money(paidOf(h))} for bills of ₹ ${money(groupNet(h))} (${all.map(rowLabel).join(', ')})${ok ? '' : ' — does not add up'}${other ? html` · <a href="#/b/${currentBizId()}/review/${other.uploadId}/${other.id}">open page ${other.pageNo}</a>` : ''}</div>`;
 }
 
 /** One register row. Editable in place unless the shift is confirmed; Edit opens the full form. */
@@ -1036,7 +1037,7 @@ function regRowHtml(r, locked) {
   if (locked) {
     return html`<tr data-row="${r.id}">
       <td class="note">${r.lineNo}</td><td>${r.status === 'checked' ? '✓' : ''}</td><td class="mono">${r.billNo}</td><td>${TYPE_LABELS[r.billType] ?? ''}</td>
-      <td class="amount">${money(r.amountPaise)}</td><td class="amount">${r.discountPaise ? money(r.discountPaise) : ''}</td><td>${r.paidWithRowId ? `Paid with row ${headOf(r)?.lineNo ?? '?'}` : payText(r.payments)}${groupNote(r)}</td><td class="note">${r.remarks ?? ''}</td><td></td></tr>`;
+      <td class="amount">${money(r.amountPaise)}</td><td class="amount">${r.discountPaise ? money(r.discountPaise) : ''}</td><td>${r.paidWithRowId ? `Paid with ${headOf(r) ? rowLabel(headOf(r)) : 'another row'}` : payText(r.payments)}${groupNote(r)}</td><td class="note">${r.remarks ?? ''}</td><td></td></tr>`;
   }
   const single = r.payments.length <= 1;
   const p = r.payments[0];
@@ -1055,7 +1056,7 @@ function regRowHtml(r, locked) {
     <td>${single ? html`<div style="display:flex;gap:6px">
         <select class="cell ${nd('payments') || (inferredOf(r.ocrOriginal).has('payments') && r.paidWithRowId ? 'auto' : '')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
           ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${!r.paidWithRowId && p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}
-          ${!membersOf(r).length ? regRows.filter((x) => x.id !== r.id && !x.paidWithRowId).map((x) => html`<option value="with|${x.id}" ${r.paidWithRowId === x.id ? 'selected' : ''}>Paid with row ${x.lineNo}</option>`) : ''}</select>
+          ${!membersOf(r).length ? regRows.filter((x) => x.id !== r.id && !x.paidWithRowId).map((x) => html`<option value="with|${x.id}" ${r.paidWithRowId === x.id ? 'selected' : ''}>Paid with ${rowLabel(x)}${x.elsewhere ? ` (${x.billNo || 'no number'})` : ''}</option>`) : ''}</select>
         <input class="cell mono ${nd('payments') || (payDiffers(r) && p ? 'needs' : '')}" data-f="payAmount" value="${p ? rupeesForInput(p.amountPaise) : ''}" style="width:84px;text-align:right" inputmode="decimal" aria-label="Payment amount" ${p && !r.paidWithRowId ? '' : 'hidden'}>
       </div>${groupNote(r)}` : html`<span class="${nd('payments') || payDiffers(r) ? 'error' : ''}">${payText(r.payments)}</span>${groupNote(r)}`}</td>
     <td><input class="cell ${nd('remarks')}" data-f="remarks" value="${r.remarks ?? ''}" style="width:130px" aria-label="Remarks"></td>
@@ -1068,6 +1069,11 @@ const netOf = (r) => r.amountPaise - (r.discountPaise ?? 0);
 /** A bill whose written payments do not equal its amount after discount (complimentary bills with none are fine). */
 // Rows of the register page on screen, for bills paid together (a group = head row + rows paid with it).
 let regRows = [];
+/** This page's rows plus the shift's rows on its other pages (bills paid together can run across sheets). */
+const shiftRowsOf = (u) => [...u.rows, ...(u.otherPageRows ?? []).map((x) => ({ ...x, elsewhere: true }))];
+/** "row 4", or "page 2 · row 4" for a row on another page of the shift. */
+const currentBizId = () => location.hash.split('/')[2] ?? '';
+const rowLabel = (x) => (x.elsewhere ? `page ${x.pageNo ?? '?'} · row ${x.lineNo}` : `row ${x.lineNo}`);
 const membersOf = (r) => regRows.filter((x) => x.paidWithRowId === r.id);
 const headOf = (r) => (r.paidWithRowId ? regRows.find((x) => x.id === r.paidWithRowId) : null);
 /** The bills a row's payment has to cover: itself, plus the bills paid with it. */
@@ -1109,7 +1115,7 @@ function regSumHtml(u) {
 /** Fill button and the amber note: redrawn after every inline save. */
 function regToolsHtml(u, locked) {
   return html`
-    ${!locked && u.rows.some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
+    ${!locked && [...new Set(u.rows.map((r) => headOf(r) ?? r))].some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
         && [r, ...membersOf(r)].every((m) => (!m.discountPaise && !m.tipPaise) || inferredOf(m.ocrOriginal).has('discount')))
         ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts and tips</button>
             <span class="note">Sets Disc = bill amount − payments where nobody has typed one: a discount when less was paid, a tip (negative) when more was paid. For bills paid together, the discount is shared across the bills by amount.</span></div>` : ''}
@@ -1118,7 +1124,7 @@ function regToolsHtml(u, locked) {
 }
 
 function registerPanel(biz, u) {
-  regRows = u.rows;
+  regRows = shiftRowsOf(u);
   const locked = u.shiftStatus === 'confirmed';
   const written = u.pageWrittenTotalPaise;
   const anyUnclear = u.rows.some((r) => unclearOf(r.ocrOriginal, r.status === 'draft').size);
@@ -1203,7 +1209,8 @@ function wireInlineRows(biz, u) {
       }
       const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`);
       u.rows = fresh.rows;
-      regRows = u.rows;
+      u.otherPageRows = fresh.otherPageRows;
+      regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
       const active = document.activeElement;
       const keep = active?.closest?.('tr')?.dataset.row ? { row: active.closest('tr').dataset.row, f: active.dataset.f } : null;
@@ -1239,7 +1246,7 @@ function rowForm(r) {
       <div class="field"><label>Discount (₹, a tip as negative)</label><input name="discount" class="mono" value="${r?.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0"></div>
     </div>
     <div class="field" style="max-width:320px"><label>Paid together with another bill</label><select name="paidWithRowId"><option value="">No: this bill has its own payment</option>
-      ${(r && membersOf(r).length ? [] : regRows.filter((x) => !x.paidWithRowId && (!r || x.id !== r.id))).map((x) => html`<option value="${x.id}" ${r?.paidWithRowId === x.id ? 'selected' : ''}>Paid with row ${x.lineNo} (${x.billNo || 'no number'})</option>`)}</select></div>
+      ${(r && membersOf(r).length ? [] : regRows.filter((x) => !x.paidWithRowId && (!r || x.id !== r.id))).map((x) => html`<option value="${x.id}" ${r?.paidWithRowId === x.id ? 'selected' : ''}>Paid with ${rowLabel(x)} (${x.billNo || 'no number'})</option>`)}</select></div>
     <div class="note">Payments as written on the page. A bill paid partly in cash and partly by UPI has two lines. A bill paid together with another row has no payment lines of its own.</div>
     <div id="pays">${pays.map((p) => payLine(p))}</div>
     <button class="btn plain" type="button" id="addpay" style="align-self:flex-start">Add payment line</button>

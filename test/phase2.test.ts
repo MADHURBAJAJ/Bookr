@@ -1022,3 +1022,24 @@ describe('bills on one side only, followed across days', () => {
     expect((await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills.map((b: any) => b.billNo)).not.toContain('26103125');
   });
 });
+
+describe('bills paid together across register pages', () => {
+  it('a bill on page 2 can be paid with a row on page 1 of the same shift; Review and Fill see the whole group', async () => {
+    const h = await hotel();
+    const page = async (n: number) => (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(n), 'image/png')).json.id;
+    const p1 = await page(97);
+    const p2 = await page(98);
+    const head = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p1}/register-rows`,
+      { billNo: '9001', billType: 'fnb', amount: '600', payments: [{ mode: 'upi', columnLabel: null, amount: '1000' }] })).json.id;
+    const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/register-rows`,
+      { billNo: '9002', billType: 'fnb', amount: '500', payments: [], paidWithRowId: head });
+    expect(res.status).toBe(201);
+    const d2 = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${p2}`)).json;
+    expect(d2.pageNo).toBe(2);
+    expect(d2.otherPageRows).toEqual([expect.objectContaining({ id: head, pageNo: 1, uploadId: p1, amountPaise: 60000, payments: [expect.objectContaining({ amountPaise: 100000 })] })]);
+    // 600 + 500 = 1,100 against 1,000 paid: Fill on page 2 shares the 100 discount over both pages' bills.
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/fill-discounts`)).json.filled).toBe(2);
+    const rows = await sql`SELECT discount_paise FROM register_rows WHERE id IN (${head}, ${res.json.id})`;
+    expect(rows.reduce((t, r) => t + r.discount_paise, 0)).toBe(10000);
+  });
+});

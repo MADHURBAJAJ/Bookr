@@ -205,9 +205,21 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         'SELECT id, bill_no, amount_paise - discount_paise + tip_paise AS amount_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
     ]);
     const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
+    // Rows of the same shift on its other register pages: bills paid together can run across sheets.
+    const pages = await all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
+      WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id);
+    const pageNo = new Map(pages.map((p, i) => [p.id, i + 1]));
+    const [others, otherPays] = await Promise.all([
+      all<{ id: string; uploadId: string }>(db, `SELECT id, upload_id AS uploadId, line_no AS lineNo, bill_no AS billNo, amount_paise AS amountPaise,
+        discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId FROM register_rows
+        WHERE business_id = ? AND shift_day = ? AND upload_id <> ? ORDER BY line_no`, bid, u.business_day, u.id),
+      all<{ registerRowId: string }>(db, `SELECT p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel, p.amount_paise AS amountPaise
+        FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
+    ]);
     return c.json({
-      ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length,
+      ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
       rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null })),
+      otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });
   }
   if (u.kind === 'expense_list') {
@@ -408,10 +420,13 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
     SELECT r.id, r.amount_paise, r.discount_paise, r.tip_paise, r.paid_with_row_id, r.ocr_original,
       coalesce(sum(p.amount_paise), 0) AS paid, count(p.id) AS n
     FROM register_rows r LEFT JOIN register_payments p ON p.register_row_id = r.id
-    WHERE r.upload_id = ? AND r.business_id = ? GROUP BY r.id`, u.id, bid);
+    WHERE r.business_id = ? AND r.shift_day = ? GROUP BY r.id`, bid, u.business_day);
+  // Groups with a bill on this page; their other bills may be on other pages of the same shift.
+  const onPage = new Set((await all<{ id: string; head: string }>(db,
+    'SELECT id, coalesce(paid_with_row_id, id) AS head FROM register_rows WHERE upload_id = ?', u.id)).map((r) => r.head));
   const autoOrNone = (r: (typeof rows)[number]) => (!r.discount_paise && !r.tip_paise) || stillInferred(r.ocr_original, 'discount');
   const fill: { id: string; discountPaise: number; tipPaise: number; ocr: string | null }[] = [];
-  for (const head of rows.filter((r) => !r.paid_with_row_id && r.n > 0 && r.paid > 0)) {
+  for (const head of rows.filter((r) => !r.paid_with_row_id && r.n > 0 && r.paid > 0 && onPage.has(r.id))) {
     const group = [head, ...rows.filter((m) => m.paid_with_row_id === head.id)];
     if (!group.every(autoOrNone)) continue;
     const spread = spreadDifference({ id: head.id, amountPaise: head.amount_paise }, group.slice(1).map((m) => ({ id: m.id, amountPaise: m.amount_paise })), head.paid);
