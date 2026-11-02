@@ -95,3 +95,4 @@ body.review-expanded #regtable .cell[data-f="billNo"] { width: 130px !important;
 body.review-expanded #regtable .cell[data-f="remarks"] { width: 220px !important; }
 .cell.auto, .auto-key { border: 2px solid #D97706; background: #FFFBEB; }
 .auto-key { padding: 0 6px; border-radius: 4px; color: #7A4A06; }
+tr.row-found td { background: #FEF9C3 !important; }

@@ -743,10 +743,18 @@ async function csvPreview(biz, day, csv, replaces, box = document.getElementById
 
 // ---------- Review
 
-async function reviewView(biz, uploadId) {
+async function reviewView(biz, uploadId, highlightRow) {
   if (!uploadId) return reviewListView(biz);
-  const u = await api('GET', `/businesses/${biz.id}/uploads/${uploadId}`);
-  const { heads } = await api('GET', `/businesses/${biz.id}/heads`);
+  const [u, { heads }, list] = await Promise.all([
+    api('GET', `/businesses/${biz.id}/uploads/${uploadId}`),
+    api('GET', `/businesses/${biz.id}/heads`),
+    api('GET', `/businesses/${biz.id}/uploads`),
+  ]);
+  // Pages of the same type in day order, then upload order: for Previous and Next.
+  const same = list.uploads.filter((x) => x.kind === u.kind).sort((a, b) => a.day.localeCompare(b.day) || a.createdAt - b.createdAt);
+  const at = same.findIndex((x) => x.id === u.id);
+  const prev = at > 0 ? same[at - 1] : null;
+  const next = at >= 0 && at < same.length - 1 ? same[at + 1] : null;
   const fileUrl = `/api/businesses/${biz.id}/uploads/${u.id}/file`;
   const photo = html`
     <section class="card" id="photocard" style="flex:2 1 420px;max-width:100%;padding:16px;gap:10px">
@@ -764,9 +772,18 @@ async function reviewView(biz, uploadId) {
   else if (u.kind === 'cash_summary') right = summaryPanel(biz, u);
   else right = html`<section class="card grow3"><div class="note">Single printed bills are kept for reference. Nothing is read from them yet.</div></section>`;
   render(shell(biz, 'review', `Review: ${KIND_LABELS[u.kind]}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
-    <div class="form-row" style="justify-content:flex-end;margin-bottom:-8px">
-      <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
+    <div class="form-row" style="justify-content:space-between;align-items:center;margin-bottom:-8px">
+      <div class="form-row" style="align-items:center">
+        ${prev ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${prev.id}" title="${KIND_LABELS[prev.kind]} · ${dayLabel(prev.day)}">← Previous page</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">← Previous page</span>`}
+        <span class="note">${at >= 0 ? `Page ${at + 1} of ${same.length}` : ''}</span>
+        ${next ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${next.id}" title="${KIND_LABELS[next.kind]} · ${dayLabel(next.day)}">Next page →</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">Next page →</span>`}
+      </div>
+      <div class="form-row" style="align-items:center">
+        ${u.kind === 'bill_register' ? findBillBox() : ''}
+        <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
+      </div>
     </div>
+    <div id="findresults"></div>
     <div id="rmsg"></div>
     <div class="row">${photo}${right}</div>`));
   wireShell();
@@ -774,6 +791,11 @@ async function reviewView(biz, uploadId) {
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
   wireReadPage(biz, u);
   wireExpand();
+  wireFindBill(biz);
+  if (highlightRow) {
+    const tr = document.querySelector(`#regtable tr[data-row="${CSS.escape(highlightRow)}"]`);
+    if (tr) { tr.classList.add('row-found'); tr.scrollIntoView({ block: 'center' }); tr.querySelector('[data-f="billNo"]')?.focus(); }
+  }
   if (u.kind === 'bill_register') wireRegister(biz, u);
   if (u.kind === 'expense_list') wireExpense(biz, u);
   if (u.kind === 'cash_summary') wireSummary(biz, u);
@@ -835,12 +857,40 @@ function wireReadPage(biz, u) {
   });
 }
 
+/** Search box: register rows by bill number, or its last few digits, across every page. */
+const findBillBox = () => html`<form id="findbill" class="form-row" style="align-items:center;gap:6px" role="search">
+  <input name="bill" class="cell mono" placeholder="Find bill, e.g. 3154" style="width:190px" aria-label="Find a bill number on register pages" autocomplete="off">
+  <button class="btn plain" type="submit" style="min-height:36px">Find</button></form>`;
+
+function wireFindBill(biz) {
+  const form = document.getElementById('findbill');
+  const out = document.getElementById('findresults');
+  if (!form || !out) return;
+  let timer;
+  const run = async () => {
+    const q = form.bill.value.trim();
+    if (q.length < 2) { out.innerHTML = ''; return; }
+    const { rows } = await api('GET', `/businesses/${biz.id}/register-rows?bill=${encodeURIComponent(q)}`);
+    out.innerHTML = html`<section class="card" style="padding:12px 16px;gap:2px">
+      ${rows.length ? rows.map((r) => html`<a class="list-row" style="padding:6px 0;color:inherit" href="#/b/${biz.id}/review/${r.uploadId}/${r.id}">
+          <span><span class="mono">${r.billNo}</span> · ₹ ${money(r.amountPaise)}</span>
+          <span class="note">${dayLabel(r.day)} · line ${r.lineNo}${r.status === 'checked' ? ' · ✓' : ''}</span></a>`)
+        : html`<div class="note">No register row has "${q}" in its bill number.</div>`}
+      ${rows.length === 30 ? html`<div class="tiny">Showing the first 30. Type more digits to narrow it down.</div>` : ''}
+    </section>`.__html;
+  };
+  form.addEventListener('submit', (e) => { e.preventDefault(); run(); });
+  form.bill.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 300); });
+}
+
 async function reviewListView(biz) {
   const { uploads, notices } = await api('GET', `/businesses/${biz.id}/uploads`);
   const pages = uploads.filter((u) => u.kind !== 'software_sales_csv');
   const csvs = uploads.filter((u) => u.kind === 'software_sales_csv' && u.report);
   render(shell(biz, 'review', 'Review', 'Pick a page to check its rows beside the photo. Software reports are checked on Compare sales.', html`
     <div id="rlmsg"></div>
+    <div class="form-row" style="align-items:center">${findBillBox()}</div>
+    <div id="findresults"></div>
     ${notices.map((n) => html`<div class="demo-band">${n.text.replace(n.day, dayLabel(n.day))}</div>`)}
     <section class="card" style="gap:4px">
       <h2 style="margin-bottom:8px">Software sales reports</h2>
@@ -861,6 +911,7 @@ async function reviewListView(biz) {
     </section>`));
   wireShell();
   wireDeletes(biz, () => document.getElementById('rlmsg'), () => reviewListView(biz));
+  wireFindBill(biz);
 }
 
 /** Fields Claude could not read with confidence, while nobody has checked the row yet. */
@@ -1450,7 +1501,7 @@ async function route() {
       const item = NAV.find((n) => n.key === screen);
       if (item?.needs && !biz.actions.includes(item.needs)) return go(home(biz));
       if (screen === 'upload') return uploadView(biz);
-      if (screen === 'review') return reviewView(biz, parts[3]);
+      if (screen === 'review') return reviewView(biz, parts[3], parts[4]);
       if (screen === 'compare') return compareView(biz, parts[3]);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));

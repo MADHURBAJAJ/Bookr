@@ -669,3 +669,20 @@ describe('bills paid together', () => {
     expect((await view(h)).json.blockers.join(' ')).toMatch(/single mode/);
   });
 });
+
+describe('finding a bill on register pages', () => {
+  it('finds rows by any part of the bill number across pages, only in this business', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const page2 = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-11-01`, png(51), 'image/png')).json.id;
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page2}/register-rows`, { billNo: '26110120', billType: 'fnb', amount: '50', payments: [] });
+    const res = await h.clients.entry_staff.get(`/businesses/${h.bid}/register-rows?bill=3120`);
+    expect(res.json.rows.map((r: any) => r.billNo)).toEqual(['26103120']);
+    const both = await h.clients.entry_staff.get(`/businesses/${h.bid}/register-rows?bill=120`);
+    expect(both.json.rows.map((r: any) => r.billNo).sort()).toEqual(['26103120', '26110120']);
+    expect(both.json.rows[0]).toMatchObject({ day: '2026-11-01', uploadId: page2, lineNo: 1 });
+    expect((await h.clients.viewer.get(`/businesses/${h.bid}/register-rows?bill=3120`)).status).toBe(403);
+    const other = await hotel();
+    expect((await other.clients.owner.get(`/businesses/${other.bid}/register-rows?bill=3120`)).json.rows).toEqual([]);
+  });
+});

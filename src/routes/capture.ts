@@ -157,6 +157,19 @@ captureRoutes.delete('/businesses/:businessId/uploads/:uploadId', requireRole('r
   return c.json({ ok: true, ...counts });
 });
 
+// Finds register rows by bill number (any part of it, e.g. the last digits) across every page.
+captureRoutes.get('/businesses/:businessId/register-rows', requireRole('rows.edit'), async (c) => {
+  const q = (c.req.query('bill') ?? '').replace(/\s/g, '');
+  if (q.length < 2) return c.json({ rows: [] });
+  const rows = await all(c.env.DB, `
+    SELECT r.id, r.upload_id AS uploadId, r.line_no AS lineNo, r.bill_no AS billNo, r.amount_paise AS amountPaise,
+           r.shift_day AS day, r.status
+    FROM register_rows r
+    WHERE r.business_id = ? AND instr(r.bill_no, ?) > 0
+    ORDER BY r.shift_day DESC, r.upload_id, r.line_no LIMIT 30`, c.get('businessId'), q);
+  return c.json({ rows });
+});
+
 captureRoutes.get('/businesses/:businessId/uploads/:uploadId/file', requireRole('rows.edit'), async (c) => {
   const u = await getUpload(c.env.DB, c.get('businessId'), c.req.param('uploadId'));
   return serveStored(c, u.storage_key);
