@@ -1972,7 +1972,12 @@ async function bankView(biz, query = '') {
   const amt = (r) => html`<div class="amount" style="white-space:nowrap;font-weight:600;color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}₹ ${money(r.amountPaise)}</div>`;
   const headSelect = (r, chosen) => html`<select class="compact" data-head="${r.id}" aria-label="Head" style="max-width:190px"><option value="">Choose head</option>
     ${headsOf(r.direction).map((h) => html`<option value="${h.id}" ${h.id === chosen ? 'selected' : ''}>${h.name}</option>`)}</select>`;
-  const candText = (k) => `Bill ${k.billNos.join(' + ')}${k.part ? ` (${k.part}, ₹ ${money(k.amountPaise)})` : ''}${k.minutes != null ? ` · ${k.minutes} min apart` : ' · in register'}`;
+  const candText = (k) => `Bill ${k.billNos.join(' + ')}${k.part ? ` (${k.part}, ₹ ${money(k.amountPaise)})` : ''}${k.minutes != null ? ` · ${k.minutes} min apart` : ' · in register'}${k.adjust ? ` · register says ₹ ${money(k.adjust.receivedPaise)} received` : ''}`;
+  const candValue = (k) => `${k.adjust ? 'adj:' : ''}${k.transactionIds.join(',')}`;
+  const adjustNote = (k) => {
+    const d = k.adjust.receivedPaise - k.adjust.billPaise;
+    return html`<div class="tiny" style="color:#92400E">Bank shows the full bill ₹ ${money(k.adjust.billPaise)}; the register says ₹ ${money(k.adjust.receivedPaise)} received (${d > 0 ? `a ₹ ${money(d)} tip` : `a ₹ ${money(-d)} discount`}). Matching corrects the register: the ${d > 0 ? 'tip' : 'discount'} is removed.</div>`;
+  };
   const section = (id, title, help, items, rowHtml, action) => !items.length ? '' : html`
     <div data-sec="${id}" style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;background:var(--surface-2, #F6F7F9)">
@@ -1980,7 +1985,7 @@ async function bankView(biz, query = '') {
         <span style="display:flex;gap:8px;align-items:center"><span class="tiny">${help}</span>
           <button class="btn" type="button" style="${SMALL}" data-bulk="${id}" data-action="${action}" disabled>${action === 'match' ? 'Match' : 'Book'} 0 selected</button></span>
       </div>
-      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:28px minmax(180px,1.4fr) 120px minmax(200px,1.6fr) auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft)">
+      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:28px minmax(180px,1.4fr) 120px minmax(200px,1.6fr) auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft);${r.candidates?.[0]?.adjust ? 'background:#FFFBEB;box-shadow:inset 3px 0 0 #F59E0B' : ''}">
         <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.rule && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
         ${payer(r)}${amt(r)}${rowHtml(r)}</div>`)}
     </div>`;
@@ -1994,8 +1999,9 @@ async function bankView(biz, query = '') {
       const found = list.filter((r) => r.candidates.length);
       const rest = list.filter((r) => !r.candidates.length);
       return html`${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
-          <div>${r.candidates.length === 1 ? html`<span class="${r.candidates[0].strong ? '' : 'note'}">${candText(r.candidates[0])}</span><input type="hidden" data-cand="${r.id}" value="${r.candidates[0].transactionIds.join(',')}">`
-            : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${k.transactionIds.join(',')}">${candText(k)}</option>`)}</select>`}</div>
+          <div>${r.candidates.length === 1 ? html`<span class="${r.candidates[0].strong ? '' : 'note'}">${candText(r.candidates[0])}</span><input type="hidden" data-cand="${r.id}" value="${candValue(r.candidates[0])}">`
+            : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${candValue(k)}">${candText(k)}</option>`)}</select>`}
+            ${r.candidates[0].adjust ? adjustNote(r.candidates[0]) : ''}</div>
           <div style="display:flex;gap:4px"><button class="btn plain" type="button" style="${SMALL}" data-fixbill="${r.id}" title="Correct the bill (number, amount, discount) to what the bank shows, and match">Fix bill</button>${skipLink(r)}</div>`, 'match')}
         ${section('nobill', 'No bill found', 'Book money received that is not a bill, e.g. hostel rent', rest, (r) => html`
           <div>${headSelect(r, r.rule?.headId)}</div><div style="display:flex;gap:4px">${skipLink(r)}</div>`, 'book')}`;
@@ -2114,7 +2120,7 @@ async function bankView(biz, query = '') {
     const line = app.querySelector(`[data-line="${b.dataset.fixbill}"]`);
     const old = line.nextElementSibling?.classList.contains('fixbox') ? line.nextElementSibling : null;
     if (old) { old.remove(); return; }
-    const tx = (app.querySelector(`[data-cand="${b.dataset.fixbill}"]`)?.value ?? '').split(',')[0];
+    const tx = (app.querySelector(`[data-cand="${b.dataset.fixbill}"]`)?.value ?? '').replace(/^adj:/, '').split(',')[0];
     const box = document.createElement('div');
     box.className = 'inset fixbox';
     box.style.margin = '0 12px 12px';
@@ -2180,7 +2186,10 @@ async function bankView(biz, query = '') {
     btn.addEventListener('click', () => {
       const ids = picks().filter((c) => c.checked).map((c) => c.value);
       if (btn.dataset.action === 'match') {
-        const pairs = ids.map((id) => ({ rowId: id, transactionIds: (sec.querySelector(`[data-cand="${id}"]`)?.value ?? '').split(',').filter(Boolean) }));
+        const pairs = ids.map((id) => {
+          const v = sec.querySelector(`[data-cand="${id}"]`)?.value ?? '';
+          return { rowId: id, adjust: v.startsWith('adj:'), transactionIds: v.replace(/^adj:/, '').split(',').filter(Boolean) };
+        });
         run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-many`, { pairs }), (r) => `${r.matched} credit${r.matched === 1 ? '' : 's'} matched to bills.${r.skipped.length ? ` Not matched: ${r.skipped.join(' ')}` : ''}`);
       } else {
         const items = ids.map((id) => ({ rowId: id, headId: sec.querySelector(`[data-head="${id}"]`)?.value || null }));

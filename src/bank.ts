@@ -63,13 +63,17 @@ export interface UpiIncome {
   id: string; amount_paise: number; bill_no: string | null; shift_day: string; paid_at: number | null; group_head: string | null; labels: string | null;
   /** How many UPI payments the register shows for this bill (a bill paid in two goes has two sale lines). */
   parts?: number;
+  /** The register's bill amount before discount/tip, for a single bill paid by one payment (else null). */
+  bill_paise?: number | null;
 }
 
 /** Confirmed UPI sales still waiting for their bank credit, in shifts from..to. */
 export const waitingUpi = (db: DB, businessId: string, from: string, to: string) => all<UpiIncome>(db, `
   SELECT t.id, t.amount_paise, t.bill_no, t.shift_day, sb.paid_at, coalesce(rr.paid_with_row_id, rr.id) AS group_head,
     (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels,
-    (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts
+    (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts,
+    CASE WHEN rr.paid_with_row_id IS NULL AND NOT EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = rr.id)
+      AND (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income') = 1 THEN rr.amount_paise END AS bill_paise
   FROM transactions t
   LEFT JOIN bill_comparisons c ON c.id = t.comparison_id
   LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
@@ -87,7 +91,9 @@ const STRONG_MIN = 20;
 const TICK_MIN = 60;
 const WIDE_MIN = 180;
 
-export interface Candidate { transactionIds: string[]; billNos: string[]; amountPaise: number; minutes: number | null; strong: boolean; shiftDay: string; part: string | null }
+export interface Candidate { transactionIds: string[]; billNos: string[]; amountPaise: number; minutes: number | null; strong: boolean; shiftDay: string; part: string | null;
+  /** The credit equals the bill amount, not what the register says was received: matching corrects the register. */
+  adjust?: { receivedPaise: number; billPaise: number } }
 
 /**
  * For each unmatched UPI credit, sales of the same amount paid near that time (a bill paid together counts as one).
@@ -95,11 +101,18 @@ export interface Candidate { transactionIds: string[]; billNos: string[]; amount
  * other strong credit.
  */
 export function upiCandidates(credits: (BankRow & { label: string | null })[], sales: UpiIncome[]) {
-  const units: { ids: string[]; bills: string[]; amount: number; paidAt: number | null; shiftDay: string; labels: string | null; part: string | null }[] = [];
+  const units: { ids: string[]; bills: string[]; amount: number; paidAt: number | null; shiftDay: string; labels: string | null; part: string | null;
+    adjust?: { receivedPaise: number; billPaise: number } }[] = [];
   const byGroup = new Map<string, UpiIncome[]>();
   for (const s of sales) {
     units.push({ ids: [s.id], bills: [s.bill_no ?? ''], amount: s.amount_paise, paidAt: s.paid_at, shiftDay: s.shift_day, labels: s.labels,
       part: (s.parts ?? 1) > 1 ? `part: 1 of ${s.parts} UPI payments` : null });
+    // Also by its bill amount when the register shows a discount or tip: the bank may show the full bill (the tip or
+    // discount being a slip in the register).
+    if (s.bill_paise && s.bill_paise !== s.amount_paise) {
+      units.push({ ids: [s.id], bills: [s.bill_no ?? ''], amount: s.bill_paise, paidAt: s.paid_at, shiftDay: s.shift_day, labels: s.labels, part: null,
+        adjust: { receivedPaise: s.amount_paise, billPaise: s.bill_paise } });
+    }
     if (s.group_head) byGroup.set(s.group_head, [...(byGroup.get(s.group_head) ?? []), s]);
   }
   for (const g of byGroup.values()) {
@@ -122,7 +135,8 @@ export function upiCandidates(credits: (BankRow & { label: string | null })[], s
         const w = shiftWindow(u.shiftDay);
         if (c.posted_at < w.from - 3600e3 || c.posted_at > w.to + 3600e3) continue;
       }
-      list.push({ transactionIds: u.ids, billNos: u.bills, amountPaise: u.amount, minutes, strong: minutes != null && minutes <= STRONG_MIN, shiftDay: u.shiftDay, part: u.part });
+      list.push({ transactionIds: u.ids, billNos: u.bills, amountPaise: u.amount, minutes, strong: minutes != null && minutes <= STRONG_MIN, shiftDay: u.shiftDay, part: u.part,
+        ...(u.adjust ? { adjust: u.adjust } : {}) });
     }
     list.sort((a, b) => (a.minutes ?? 9999) - (b.minutes ?? 9999));
     out.set(c.id, list);

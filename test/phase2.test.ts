@@ -1217,3 +1217,34 @@ describe('fix the bill from a bank credit (confirmed shift)', () => {
     v = await view(h);
   });
 });
+
+describe('bank credit equal to the bill amount when the register shows a tip', () => {
+  it('is suggested, highlighted as a correction, and matching removes the tip from the register', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    // Bill 907, payment written as 920, so a 13 tip was filled in. The bank received 907.
+    const row = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: 'T907', billType: 'fnb', amount: '907', discount: '-13', status: 'checked',
+      payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '920' }] })).json.id;
+    await decideAll(h);
+    const v = await view(h);
+    await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, 'T907').id}`, { decision: 'use_register' });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' });
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t'),
+      [1, 'S70000001', '31/10/2026', '31/10/2026 1:37:00 PM', '-', 'UPI/900000000031/UPI/xx95@axl/B/AXLa', 'CR', 907, 1].join('\t')].join('\n') });
+    const rows = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-10-31`)).json.rows;
+    const cr = rows.find((r: any) => r.tranId === 'S70000001');
+    const k = cr.candidates.find((x: any) => x.billNos[0] === 'T907');
+    expect(k).toMatchObject({ amountPaise: 90700, adjust: { receivedPaise: 92000, billPaise: 90700 } });
+    const m = (await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-many`, { pairs: [{ rowId: cr.id, transactionIds: k.transactionIds, adjust: true }] })).json;
+    expect(m).toMatchObject({ matched: 1, skipped: [] });
+    expect((await sql`SELECT tip_paise, discount_paise FROM register_rows WHERE id = ${row}`)[0]).toEqual({ tip_paise: 0, discount_paise: 0 });
+    expect((await sql`SELECT amount_paise FROM register_payments WHERE register_row_id = ${row}`)[0].amount_paise).toBe(90700);
+    expect((await sql`SELECT amount_paise, match_status FROM transactions WHERE bill_no = 'T907' AND type = 'income'`)[0]).toEqual({ amount_paise: 90700, match_status: null });
+    // Unmatch puts the register back.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${cr.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT tip_paise FROM register_rows WHERE id = ${row}`)[0].tip_paise).toBe(1300);
+  });
+});

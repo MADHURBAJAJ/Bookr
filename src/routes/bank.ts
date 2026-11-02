@@ -226,7 +226,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-many', requireRole('ban
   const db = c.env.DB;
   const bid = c.get('businessId');
   const data = await body(c);
-  const pairs = (Array.isArray(data.pairs) ? data.pairs : []).slice(0, 300) as { rowId?: unknown; transactionIds?: unknown }[];
+  const pairs = (Array.isArray(data.pairs) ? data.pairs : []).slice(0, 300) as { rowId?: unknown; transactionIds?: unknown; adjust?: unknown }[];
   if (!pairs.length) fail(400, 'Choose the credits to match.');
   const t = now();
   const user = c.get('user').id;
@@ -240,9 +240,26 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-many', requireRole('ban
     const row = rowId ? await getRow(db, bid, rowId) : null;
     if (!row) { skipped.push('A line was not found.'); continue; }
     if (ids.some((x) => used.has(x))) { skipped.push(`${row.tran_id}: that bill is chosen for another credit too.`); continue; }
-    try { await checkMatch(db, bid, row, ids); }
+    let total = 0;
+    try { total = await checkMatch(db, bid, row, ids, p.adjust === true); }
     catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); continue; }
     ids.forEach((x) => used.add(x));
+    // The bank shows the bill amount and the register a discount or tip: the register is corrected as it is matched.
+    if (p.adjust === true && total !== row.amount_paise) {
+      try {
+        const adj = await adjustStatements(db, bid, row.id, ids, row.amount_paise, 'Bank shows the bill amount: register discount/tip corrected', user, t + matched, [row.amount_paise]);
+        statements.push(...adj.statements);
+        for (const x of ids) {
+          statements.push(stmt(db, 'INSERT INTO bank_matches (id, business_id, bank_row_id, transaction_id, amount_paise, matched_by, matched_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            newId(), bid, row.id, x, adj.nets.get(x)!, user, t + matched));
+          statements.push(stmt(db, "UPDATE transactions SET matched_bank_row = ?, match_status = NULL WHERE id = ? AND matched_bank_row IS NULL AND match_status = 'awaiting_bank_match'", row.id, x));
+        }
+        statements.push(stmt(db, "UPDATE bank_rows SET status = 'matched', done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", user, t, row.id));
+        statements.push(stmt(db, AUDIT, ...audit(bid, user, 'bank.match_adjust_bills', row.id, null, { sales: ids, changed: adj.changed, how: 'bank shows the bill amount' }, t)));
+        matched += 1;
+      } catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); }
+      continue;
+    }
     // Each credit of a bulk action keeps its own time, so unmatching one does not undo the others.
     statements.push(...matchStatements(db, bid, row.id, ids, user, t + matched));
     matched += 1;
