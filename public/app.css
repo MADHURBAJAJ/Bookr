@@ -213,3 +213,9 @@ details.menu > summary::-webkit-details-marker { display: none; }
   .regtable .cell { padding: 0 4px; font-size: 12px; }
   #striphint { display: none; }
 }
+
+/* Bills paid together: a bracket down the left of their rows */
+.regtable tr.grp td.ln { box-shadow: inset 4px 0 0 #8B5CF6; }
+.regtable tr.grp:not(.grp-first) td { border-top: 1px dashed #DDD6FE; }
+.regtable tr.grp.grp-first td.ln { border-top-left-radius: 6px; }
+.regtable td.paidwith { color: #6D28D9; }

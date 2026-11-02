@@ -470,6 +470,10 @@ describe('register bill numbers against the software report', () => {
     expect(byNo('0312').billMatch.options[0]).toMatchObject({ billNo: '2610312', amountMatches: true, why: 'short' });
     expect(byNo('2610341').billMatch.options[0]).toMatchObject({ billNo: '2610314', amountMatches: true, why: 'typo' });
     expect(byNo('26103125').billMatch.exact).toBe(false); // really missing from the software report
+    // The bill box suggests the shift's software bills as you type; those not yet on the register are marked so.
+    const list = u.json.softwareList as { billNo: string; amountPaise: number; used: boolean }[];
+    expect(list.find((b) => b.billNo === '2610312')).toMatchObject({ amountPaise: 38000, used: false });
+    expect(list.find((b) => b.billNo === '2610311')).toMatchObject({ used: true });
     const row = byNo('0312');
     await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${row.id}`, { billNo: '2610312', billType: 'fnb', amount: '380', status: 'checked', payments: [{ mode: 'cash', columnLabel: 'Cash', amount: '380' }] });
     const v = await view(h);

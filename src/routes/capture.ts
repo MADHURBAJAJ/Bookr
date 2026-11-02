@@ -241,6 +241,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     return c.json({
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
       slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
+      // The shift's software bills, for the bill box's suggestions as you type.
+      softwareList: swBills.map((b) => ({ billNo: b.bill_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, used: shiftRows.some((r) => r.bill_no === b.bill_no) })),
       rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null,
         hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }) })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
