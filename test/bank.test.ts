@@ -151,4 +151,26 @@ describe('bank lines through the API', () => {
     expect(b.skipped.join(' ')).toMatch(/choose a head/);
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: id('S10000004'), headId: h.veg }] })).status).toBe(403);
   });
+
+  it('match with a difference: the gap is booked under the chosen head with a reason; unmatch removes it', async () => {
+    const h = await setup();
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${h.acc}/paste`, { text: STATEMENT });
+    const disc = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Discount allowed', type: 'expense' })).json.id;
+    const sale = crypto.randomUUID();
+    await sql`INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, source, status, payment_mode, bill_no, shift_day, match_status, created_at)
+      VALUES (${sale}, ${h.bid}, '2026-10-31', 89000, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '238', '2026-10-31', 'awaiting_bank_match', 0)`;
+    const upi = (await h.clients.owner.get(`/businesses/${h.bid}/upi?day=2026-10-31`)).json;
+    expect(upi.credits.map((c: any) => c.tranId)).toContain('S10000001');
+    const cr = upi.credits.find((c: any) => c.tranId === 'S10000001');
+    // 840 came in for a bill of 890: refused as a plain match, needs a head and a reason, and an expense head.
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${cr.id}/match`, { transactionIds: [sale] })).status).toBe(400);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${cr.id}/match-with-difference`, { transactionIds: [sale] })).status).toBe(400);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${cr.id}/match-with-difference`, { transactionIds: [sale], headId: h.sales, note: 'x' })).status).toBe(400);
+    const ok = await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${cr.id}/match-with-difference`, { transactionIds: [sale], headId: disc, note: 'Register typo' });
+    expect(ok.json.differencePaise).toBe(-5000);
+    const [d] = await sql`SELECT type, amount_paise, head_id FROM transactions WHERE matched_bank_row = ${cr.id} AND source = 'bank_sheet'`;
+    expect(d).toEqual({ type: 'expense', amount_paise: 5000, head_id: disc });
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${cr.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT count(*) AS n FROM transactions WHERE matched_bank_row = ${cr.id}`)[0].n).toBe(0);
+  });
 });

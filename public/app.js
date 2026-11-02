@@ -2157,7 +2157,7 @@ async function bankView(biz, query = '') {
 // ---------- UPI matching: each confirmed shift's UPI sales and the credit that paid each
 
 async function upiView(biz, day) {
-  const v = await api('GET', `/businesses/${biz.id}/upi${day ? `?day=${day}` : ''}`);
+  const [v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/upi${day ? `?day=${day}` : ''}`), api('GET', `/businesses/${biz.id}/heads`)]);
   const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
   const matched = v.sales.filter((s) => s.bankRowId);
   const waiting = v.sales.filter((s) => !s.bankRowId);
@@ -2171,7 +2171,9 @@ async function upiView(biz, day) {
       <section class="card grow1"><h2>In the bank</h2><div class="amount" style="font-size:24px;color:var(--teal)">₹ ${money(sum(matched))}</div><div class="note">${matched.length} matched</div></section>
       <section class="card grow1"><h2>Not found yet</h2><div class="amount" style="font-size:24px;color:${waiting.length ? 'var(--danger)' : 'inherit'}">₹ ${money(sum(waiting))}</div><div class="note">${waiting.length} waiting</div></section>
     </div>
+    ${pairPanel(v, waiting)}
     <section class="card" style="margin-top:16px">
+      <h2>All UPI sales of the shift</h2>
       ${v.sales.length ? html`<div class="scroll"><table style="min-width:720px"><thead><tr><th>Bill</th><th>Paid at</th><th>Register column</th><th style="text-align:right">Amount</th><th>Bank credit</th></tr></thead>
         <tbody>${v.sales.map((s) => html`<tr class="clickrow" data-bill="${s.billNo ?? ''}" data-open="${s.uploadId ? `#/b/${biz.id}/review/${s.uploadId}/${s.registerRowId}` : `#/b/${biz.id}/review?find=${(s.billNo ?? '').slice(-4)}`}"
             title="${s.uploadId ? 'Open this bill in its register page' : 'Not in the register: look for it on the register pages'}" style="cursor:pointer">
@@ -2182,6 +2184,7 @@ async function upiView(biz, day) {
     </section>`));
   wireShell();
   document.getElementById('upiday').addEventListener('change', (e) => go(`#/b/${biz.id}/upi/${e.target.value}`));
+  wirePairPanel(biz, v, heads, () => upiView(biz, v.day));
   // A sale opens its bill in the register page; Review offers the way back here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     e.preventDefault();
@@ -2195,6 +2198,96 @@ async function upiView(biz, day) {
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
 }
+/** Side by side: bank credits not matched (left) and UPI bills not found (right). Tick, compare totals, match. */
+function pairPanel(v, waiting) {
+  if (!v.credits.length && !waiting.length) return '';
+  const pick = 'width:18px;height:18px;min-height:0';
+  const line = 'display:flex;gap:10px;align-items:center;padding:8px 10px;border-top:1px solid var(--line-soft);cursor:pointer';
+  return html`<section class="card" id="pair" style="margin-top:16px;gap:10px">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline"><h2>Match by hand</h2>
+      <span class="note">For what the suggestions missed, e.g. a typo in the register. Tick one credit and the bill(s) it pays.</span></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">
+      <div style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
+        <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">Bank credits not matched <span class="chip">${v.credits.length}</span></div>
+        <div style="max-height:420px;overflow:auto">${v.credits.length ? v.credits.map((c) => html`<label style="${line}">
+          <input type="checkbox" data-pcr="${c.id}" data-amt="${c.amountPaise}" style="${pick}">
+          <span style="flex:1;min-width:0"><span class="mono note" style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(c.remark) ? `${c.remark} · ` : ''}${c.vpa ?? ''}</span>
+            <span class="tiny">${when(c.postedAt)} · ${c.accountName}${c.label ? ` · ${c.label}` : ''}</span></span>
+          <strong class="amount" style="color:var(--teal)">₹ ${money(c.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">None around this shift.</div>`}</div>
+      </div>
+      <div style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
+        <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">UPI bills not found in the bank <span class="chip">${waiting.length}</span></div>
+        <div style="max-height:420px;overflow:auto">${waiting.length ? waiting.map((s) => html`<label style="${line}">
+          <input type="checkbox" data-pbl="${s.id}" data-amt="${s.amountPaise}" data-group="${s.groupHead ?? ''}" style="${pick}">
+          <span style="flex:1;min-width:0"><span class="mono">${s.billNo ?? ''}</span>${s.groupHead ? html` <span class="chip" title="Paid together with other bills: they are ticked together">paid together</span>` : ''}
+            <span class="tiny" style="display:block">${s.paidAt ? when(s.paidAt) : 'register only'}${s.labels ? ` · ${s.labels}` : ''}</span></span>
+          <strong class="amount">₹ ${money(s.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>
+      </div>
+    </div>
+    <div id="pairbar" class="inset" style="position:sticky;bottom:8px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
+      <span id="pairsum" class="note">Tick a credit on the left and the bill(s) on the right.</span>
+      <span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span id="pairdiff" hidden style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select class="compact" id="pairhead" aria-label="Head for the difference"></select>
+          <input class="compact" id="pairnote" placeholder="Reason, e.g. register typo 2189 for 2139" style="min-width:260px">
+        </span>
+        <button class="btn" type="button" id="pairgo" disabled>Match</button>
+      </span>
+    </div>
+    <div id="pairmsg"></div>
+  </section>`;
+}
+
+function wirePairPanel(biz, v, heads, reload) {
+  const box = document.getElementById('pair');
+  if (!box) return;
+  const crs = () => [...box.querySelectorAll('[data-pcr]')].filter((x) => x.checked);
+  const bls = () => [...box.querySelectorAll('[data-pbl]')].filter((x) => x.checked);
+  const sum = (xs) => xs.reduce((t, x) => t + Number(x.dataset.amt), 0);
+  const go = document.getElementById('pairgo');
+  const diffBox = document.getElementById('pairdiff');
+  const headSel = document.getElementById('pairhead');
+  const refresh = () => {
+    const c = crs(); const b = bls();
+    const bank = sum(c); const bills = sum(b); const diff = bank - bills;
+    document.getElementById('pairsum').innerHTML = c.length || b.length
+      ? html`Bank <strong>₹ ${money(bank)}</strong> · Bills <strong>₹ ${money(bills)}</strong> · Difference <strong style="color:${diff ? 'var(--danger)' : 'var(--teal)'}">${diff > 0 ? '+' : diff < 0 ? '−' : ''}₹ ${money(Math.abs(diff))}</strong>${diff < 0 ? ' (less came in)' : diff > 0 ? ' (more came in)' : ''}`.__html
+      : 'Tick a credit on the left and the bill(s) on the right.';
+    const ready = c.length === 1 && b.length > 0;
+    if (c.length > 1) document.getElementById('pairsum').innerHTML += ' · <span class="error">Tick one credit at a time.</span>';
+    diffBox.hidden = !(ready && diff !== 0);
+    if (ready && diff !== 0) {
+      const type = diff < 0 ? 'expense' : 'income';
+      const keep = headSel.value;
+      headSel.innerHTML = `<option value="">Head for the difference</option>${heads.filter((h) => h.type === type).map((h) => `<option value="${h.id}" ${h.id === keep ? 'selected' : ''}>${esc(h.name)}</option>`).join('')}`;
+    }
+    go.disabled = !ready;
+    go.textContent = ready && diff !== 0 ? 'Match with this difference' : 'Match';
+  };
+  box.querySelectorAll('[data-pcr]').forEach((x) => x.addEventListener('change', refresh));
+  // Bills paid together are paid by one amount: ticking one ticks the whole group.
+  box.querySelectorAll('[data-pbl]').forEach((x) => x.addEventListener('change', () => {
+    if (x.dataset.group) box.querySelectorAll(`[data-pbl][data-group="${CSS.escape(x.dataset.group)}"]`).forEach((y) => { y.checked = x.checked; });
+    refresh();
+  }));
+  go.addEventListener('click', async () => {
+    const c = crs(); const b = bls();
+    const diff = sum(c) - sum(b);
+    const body = { transactionIds: b.map((x) => x.dataset.pbl) };
+    try {
+      if (diff === 0) await apiFull('POST', `/businesses/${biz.id}/bank-rows/${c[0].dataset.pcr}/match`, body);
+      else {
+        const note = document.getElementById('pairnote').value.trim();
+        if (!headSel.value || !note) throw new Error('Choose a head for the difference and write the reason.');
+        await apiFull('POST', `/businesses/${biz.id}/bank-rows/${c[0].dataset.pcr}/match-with-difference`, { ...body, headId: headSel.value, note });
+      }
+      await reload();
+      document.getElementById('pairmsg')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Matched${diff ? `, with a difference of ₹ ${money(Math.abs(diff))} booked` : ''}.</div>`.__html);
+    } catch (err) { showError(document.getElementById('pairmsg'), err); }
+  });
+  refresh();
+}
+
 const addDaysIso = (day, n) => new Date(Date.parse(`${day}T12:00:00Z`) + n * 86400e3).toISOString().slice(0, 10);
 
 // ---------- router

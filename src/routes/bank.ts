@@ -7,7 +7,7 @@ import { parseStatementRows, parseStatementText } from '../bankstatement';
 import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
 import { getRow, importLines, loadRules, matchStatements, ruleFor, suggestionsFor, type BankRow } from '../bank';
 import { byName, loadParties } from '../parties';
-import { istDay } from '../time';
+import { istDay, shiftWindow } from '../time';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -145,18 +145,26 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
   const sales = await all(db, `
     SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.match_status AS matchStatus, t.matched_bank_row AS bankRowId,
       sb.paid_at AS paidAt, r.posted_at AS creditAt, a.name AS accountName, r.tran_id AS tranId, rr.id AS registerRowId, rr.upload_id AS uploadId,
-      (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels
+      (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels,
+      CASE WHEN rr.paid_with_row_id IS NOT NULL OR EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = rr.id) THEN coalesce(rr.paid_with_row_id, rr.id) END AS groupHead
     FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
     LEFT JOIN register_rows rr ON rr.id = c.register_row_id
     LEFT JOIN bank_rows r ON r.id = t.matched_bank_row LEFT JOIN accounts a ON a.id = r.account_id
     WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.source = 'software_report'
     ORDER BY coalesce(sb.paid_at, 0), t.bill_no`, bid, day);
-  return c.json({ day, sales, confirmedShifts: shifts.map((s) => s.day) });
+  // Credits not matched yet, received from 3 hours before the shift to 6 hours after it (late payments, next morning).
+  const w = shiftWindow(day);
+  const credits = await all(db, `SELECT r.id, r.tran_id AS tranId, r.posted_at AS postedAt, r.amount_paise AS amountPaise, r.vpa, r.remark, r.kind,
+      a.name AS accountName, s.receives_upi_label AS label
+    FROM bank_rows r JOIN accounts a ON a.id = r.account_id LEFT JOIN bank_sources s ON s.account_id = r.account_id
+    WHERE r.business_id = ? AND r.direction = 'CR' AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at BETWEEN ? AND ?
+    ORDER BY r.posted_at`, bid, w.from - 3 * 3600e3, w.to + 6 * 3600e3);
+  return c.json({ day, sales, credits, confirmedShifts: shifts.map((s) => s.day) });
 });
 
 // ---- Matching a credit to sales (a person confirms; never automatic)
 
-async function checkMatch(db: D1Database, bid: string, row: BankRow, ids: string[]) {
+async function checkMatch(db: D1Database, bid: string, row: BankRow, ids: string[], allowDifference = false) {
   if (row.status !== 'unmatched') fail(409, 'This line is already matched, booked or ignored.');
   if (row.direction !== 'CR') fail(400, 'Only money received can be matched to sales.');
   if (!ids.length || ids.some((x) => !isUuid(x))) fail(400, 'Choose the sale or sales this credit pays.');
@@ -166,7 +174,8 @@ async function checkMatch(db: D1Database, bid: string, row: BankRow, ids: string
   if (tx.length !== new Set(ids).size) fail(400, 'One of those sales was not found.');
   if (tx.some((t) => t.matched_bank_row || t.match_status !== 'awaiting_bank_match')) fail(409, 'One of those sales is already matched.');
   const total = tx.reduce((s, t) => s + t.amount_paise, 0);
-  if (total !== row.amount_paise) fail(400, `The sales add up to ₹${(total / 100).toFixed(2)}, the credit is ₹${(row.amount_paise / 100).toFixed(2)}.`);
+  if (total !== row.amount_paise && !allowDifference) fail(400, `The sales add up to ₹${(total / 100).toFixed(2)}, the credit is ₹${(row.amount_paise / 100).toFixed(2)}.`);
+  return total;
 }
 
 bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match', requireRole('bank.link'), async (c) => {
@@ -261,18 +270,56 @@ bankRoutes.post('/businesses/:businessId/bank-rows/book-many', requireRole('bank
   return c.json({ booked, skipped });
 });
 
+/**
+ * A credit and the bills it pays when the amounts differ (e.g. a typo in the register, a short payment).
+ * The difference is booked as its own entry on the bank account under the head chosen, with a reason:
+ * an expense when less came in than billed, income when more came in. Unmatching removes it again.
+ */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match-with-difference', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  const data = await body(c);
+  const ids = Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string').slice(0, 30) : [];
+  const total = await checkMatch(db, bid, row, ids, true);
+  const diff = row.amount_paise - total; // negative: less received than billed
+  const t = now();
+  const user = c.get('user').id;
+  const statements = matchStatements(db, bid, row.id, ids, user, t);
+  if (diff !== 0) {
+    const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose the head for the difference.');
+    const note = text(data, 'note', 'Reason for the difference', { max: 300 })!;
+    const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', headId, bid);
+    const type = diff < 0 ? 'expense' : 'income';
+    if (!head || head.type !== type) fail(400, diff < 0 ? 'Less came in than was billed: choose an expense head (e.g. Discount allowed).' : 'More came in than was billed: choose an income head.');
+    if (Math.abs(diff) > total) fail(400, 'The difference is larger than the bills. Check the bills chosen.');
+    const txId = newId();
+    statements.push(
+      stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, matched_bank_row, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'bank_sheet', 'approved', 'upi', ?, ?)`, txId, bid, row.account_id, row.day, Math.abs(diff), type, headId,
+        `Difference on UPI ${row.tran_id}: ${note}`, row.id, t),
+      stmt(db, AUDIT, ...audit(bid, user, 'bank.match_difference', row.id, null, { differencePaise: diff, headId, note, transactionId: txId, sales: ids }, t)),
+    );
+  }
+  await db.batch(statements);
+  return c.json({ ok: true, differencePaise: diff });
+});
+
 bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
   const row = await getRow(db, bid, c.req.param('rowId'));
   if (!row) fail(404, 'Not found.');
   if (row.status !== 'matched') fail(409, 'This line is not matched.');
+  const differences = await all(db, "SELECT * FROM transactions WHERE matched_bank_row = ? AND business_id = ? AND source = 'bank_sheet'", row.id, bid);
   const t = now();
   await db.batch([
     stmt(db, "UPDATE transactions SET matched_bank_row = NULL, match_status = 'awaiting_bank_match' WHERE matched_bank_row = ? AND business_id = ? AND source = 'software_report'", row.id, bid),
     stmt(db, 'DELETE FROM bank_matches WHERE bank_row_id = ?', row.id),
+    stmt(db, "DELETE FROM transactions WHERE matched_bank_row = ? AND business_id = ? AND source = 'bank_sheet'", row.id, bid),
     stmt(db, "UPDATE bank_rows SET status = 'unmatched', done_by = NULL, done_at = NULL WHERE id = ?", row.id),
-    stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.unmatch', row.id, { status: 'matched' }, { status: 'unmatched' }, t)),
+    stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.unmatch', row.id, { status: 'matched', differences }, { status: 'unmatched' }, t)),
   ]);
   return c.json({ ok: true });
 });
