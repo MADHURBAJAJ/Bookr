@@ -2604,16 +2604,25 @@ async function bringInView(biz, dayArg) {
   const drop = (id, icon, title, sub, accept, small = false) => html`<label class="drop ${small ? 'small' : ''}" data-drop="${id}">
     <span class="big">${icon}</span><strong>${title}</strong><span class="tiny">${sub}</span>
     <input type="file" data-dropinput="${id}" accept="${accept}" multiple hidden></label>`;
-  const pageState = (p) => p.status === 'ready' ? html`<span class="okdot"></span><span class="nm">Read · ${p.rows ?? 0} row${p.rows === 1 ? '' : 's'}${p.unclear ? ` · ${p.unclear} to tick` : ''}</span>`
-    : p.status === 'approved' ? html`<span class="okdot"></span><span class="nm">Approved</span>`
-    : p.status === 'reading' ? html`<span class="spinner"></span><span class="nm">Reading…</span>`
-    : p.status === 'retake' ? html`<span class="greydot" style="background:#F59E0B"></span><span class="nm">Photo unclear: retake</span>`
-    : html`<span class="greydot"></span><span class="nm">Not read yet</span><button class="linkbtn" type="button" data-readnow="${p.id}" data-kind="${p.kind}">Read now</button>`;
+  const what = (p) => p.kind === 'cash_summary' ? 'Figures read' : `${p.rows ?? 0} ${p.kind === 'expense_list' ? 'line' : 'row'}${p.rows === 1 ? '' : 's'}`;
+  const pageState = (p, n) => ['ready', 'approved'].includes(p.status) ? html`<span class="okdot" style="${p.unclear ? 'background:#F59E0B' : ''}"></span><span class="nm">Page ${n} · ${what(p)}</span>`
+    : p.status === 'reading' ? html`<span class="spinner"></span><span class="nm">Page ${n} · reading…</span>`
+    : p.status === 'retake' ? html`<span class="greydot" style="background:#F59E0B"></span><span class="nm">Page ${n} · photo unclear: retake</span>`
+    : html`<span class="greydot"></span><span class="nm">Page ${n} · not read yet</span><button class="linkbtn" type="button" data-readnow="${p.id}" data-kind="${p.kind}">Read now</button>`;
+  // Where the page stands on Review: what is left to tick, or ticked off. Either way it opens the page.
+  const reviewLink = (p) => {
+    const href = `#/b/${biz.id}/review/${p.id}`;
+    if (!['ready', 'approved'].includes(p.status)) return html`<a href="${href}" class="rvw">Open</a>`;
+    if (p.unclear) return html`<a href="${href}" class="rvw todo" title="Open the page and tick the rows">To review${p.kind === 'cash_summary' ? '' : ` · ${p.unclear}`} →</a>`;
+    return html`<a href="${href}" class="rvw done" title="Every row is checked. Open the page">✓ Reviewed</a>`;
+  };
+  const canDel = (p) => v.shiftStatus !== 'confirmed' && canDeleteUpload(biz, p);
+  const delBtn = (p) => canDel(p) ? html`<button type="button" class="iconbtn" data-delpage="${p.id}" data-reviewed="${p.reviewed}" title="Delete this page" aria-label="Delete this page">🗑</button>` : '';
   const tile = (kind, icon, title, hint) => {
     const ps = pagesOf(kind);
     return html`<div class="tile" data-tile="${kind}"><div class="th"><span style="font-size:20px">${icon}</span><strong>${title}</strong>
-      ${ps.length ? html`<span class="chip ${ps.every((p) => ['ready', 'approved'].includes(p.status)) ? 'ok' : 'wait'}">${ps.length}</span>` : ''}</div>
-      ${ps.map((p) => html`<div class="fileline">${pageState(p)}<a href="#/b/${biz.id}/review/${p.id}" class="tiny">Open</a></div>`)}
+      ${ps.length ? html`<span class="chip ${ps.every((p) => ['ready', 'approved'].includes(p.status) && !p.unclear) ? 'ok' : 'wait'}" title="${ps.filter((p) => !p.unclear && ['ready', 'approved'].includes(p.status)).length} of ${ps.length} reviewed">${ps.filter((p) => !p.unclear && ['ready', 'approved'].includes(p.status)).length}/${ps.length}</span>` : ''}</div>
+      ${ps.map((p, i) => html`<div class="fileline">${pageState(p, i + 1)}${reviewLink(p)}${delBtn(p)}</div>`)}
       <div data-tilelist="${kind}"></div>
       ${drop(kind, '📷', ps.length ? 'Add more' : 'Drop photos here', hint, 'image/jpeg,image/png,application/pdf', true)}</div>`;
   };
@@ -2663,6 +2672,13 @@ async function bringInView(biz, dayArg) {
   wireShell();
   const reload = () => bringInView(biz, day);
   document.getElementById('accgo')?.addEventListener('click', (e) => checkAccuracy(biz, e.currentTarget));
+  app.querySelectorAll('[data-delpage]').forEach((b) => b.addEventListener('click', async () => {
+    const n = Number(b.dataset.reviewed);
+    if (!confirm(n ? `Delete this page? ${n} row${n === 1 ? ' you have' : 's you have'} already checked on it will be removed too. This cannot be undone.` : 'Delete this page and its draft rows? This cannot be undone.')) return;
+    b.disabled = true;
+    try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delpage}`); reload(); }
+    catch (err) { b.disabled = false; showError(msg, err); }
+  }));
   const msg = document.getElementById('bmsg');
   document.getElementById('bid').addEventListener('change', (e) => go(`#/b/${biz.id}/bringin/${e.target.value}`));
   app.querySelectorAll('[data-shift]').forEach((b) => b.addEventListener('click', () => go(`#/b/${biz.id}/bringin/${b.dataset.shift}`)));

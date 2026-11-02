@@ -20,11 +20,17 @@ dayRoutes.get('/businesses/:businessId/shifts/:day/inputs', requireRole('rows.up
   const [cov, bills, pages, shift] = await Promise.all([
     coverage(db, bid, day),
     one<{ n: number }>(db, 'SELECT count(*) AS n FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, day),
-    all<{ id: string; kind: string; status: string; createdAt: number; fromSoftware: number; rows: number; unclear: number }>(db, `
-      SELECT u.id, u.kind, u.status, u.created_at AS createdAt, u.storage_key LIKE 'software-added/%' AS fromSoftware,
+    all<{ id: string; kind: string; status: string; createdAt: number; uploadedBy: string; fromSoftware: number; rows: number; unclear: number; reviewed: number }>(db, `
+      SELECT u.id, u.kind, u.status, u.created_at AS createdAt, u.uploaded_by AS uploadedBy, u.storage_key LIKE 'software-added/%' AS fromSoftware,
         CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id)
           WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id) ELSE NULL END AS rows,
-        CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id AND r.status <> 'checked') ELSE 0 END AS unclear
+        -- Still to review: register rows not ticked, expense lines not approved, a cash summary not approved.
+        CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id AND r.status <> 'checked')
+          WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status <> 'approved')
+          ELSE (SELECT count(*) FROM cash_summaries s WHERE s.upload_id = u.id AND s.status <> 'approved') END AS unclear,
+        CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id AND r.status = 'checked')
+          WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status = 'approved')
+          ELSE (SELECT count(*) FROM cash_summaries s WHERE s.upload_id = u.id AND s.status = 'approved') END AS reviewed
       FROM uploads u WHERE u.business_id = ? AND u.business_day = ? AND u.kind IN ('bill_register', 'expense_list', 'cash_summary') ORDER BY u.created_at`, bid, day),
     one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day),
   ]);

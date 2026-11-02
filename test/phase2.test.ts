@@ -1330,6 +1330,12 @@ describe('bring in, sync all and the bill drawer', () => {
     const staff = (await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31/inputs`)).json;
     expect(staff.software.bills).toBeGreaterThan(0);
     expect(staff.pages.filter((p: any) => p.kind === 'bill_register').length).toBe(1);
+    // Each page says how much is left to review and how much is done, and who uploaded it (for deleting).
+    const reg = staff.pages.find((p: any) => p.kind === 'bill_register');
+    const [{ n: ticked }] = await sql`SELECT count(*) AS n FROM register_rows WHERE upload_id = ${reg.id} AND status = 'checked'`;
+    expect(reg.reviewed).toBe(Number(ticked));
+    expect(reg.unclear + reg.reviewed).toBe(reg.rows);
+    expect(reg.uploadedBy).toBeTruthy();
     expect(staff.bank).toBeNull();
     const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
     await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { sheet: 'https://docs.google.com/spreadsheets/d/1abcdefghijklmnopqrstuvwxyz0123456789ABCD/edit', tab: '2026', receivesUpiLabel: 'UPI Bank 2' });
