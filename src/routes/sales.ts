@@ -273,8 +273,10 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
   }
   if (decision === 'use_register') {
     if (!cmp.register_row_id) fail(400, 'This bill is not in the register.');
-    const pays = await one<{ n: number }>(db, 'SELECT count(*) AS n FROM register_payments WHERE register_row_id = ?', cmp.register_row_id);
-    if (!pays!.n) fail(400, 'The register row has no payment written. Add it in Review first.');
+    // A bill paid together with another row is paid through that row's payment.
+    const pays = await one<{ n: number }>(db, `SELECT count(*) AS n FROM register_payments
+      WHERE register_row_id = coalesce((SELECT paid_with_row_id FROM register_rows WHERE id = ?), ?)`, cmp.register_row_id, cmp.register_row_id);
+    if (!pays!.n) fail(400, 'The register row has no payment written, and is not paid together with another row. Add its payment in Review first.');
   }
   const t = now();
   const user = c.get('user').id;

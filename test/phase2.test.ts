@@ -717,3 +717,21 @@ describe('use software for a bill missing in the register', () => {
     expect(byBill(v, '2610319')).toMatchObject({ difference: 'match', decision: null, billType: null });
   });
 });
+
+describe('use register for a bill paid together', () => {
+  it('a bill with no payment of its own counts as paid through its group', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    const [head] = await sql`SELECT id FROM register_rows WHERE bill_no = '26103125'`; // cash 500, missing in the software
+    const extra = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, {
+      billNo: '193', billType: 'fnb', amount: '676', payments: [], paidWithRowId: head.id, status: 'checked',
+    })).json.id;
+    const lone = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, {
+      billNo: '194', billType: 'fnb', amount: '50', payments: [], status: 'checked',
+    })).json.id;
+    const v = await view(h);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '193').id}`, { decision: 'use_register' })).status).toBe(200);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '194').id}`, { decision: 'use_register' })).json.error).toMatch(/not paid together/);
+    expect(extra && lone).toBeTruthy();
+  });
+});
