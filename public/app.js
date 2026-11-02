@@ -1068,9 +1068,10 @@ const FIELD_WORDS = { bill_no: 'bill no', amount: 'amount', bill_type: 'type', d
 
 /** What is wrong with a row, in words, and which cells to mark. */
 function rowIssues(r) {
-  // Remarks are free text and never block anything: an unclear remark is not raised.
+  // Remarks are free text, and an unread type is taken as F&B: neither is raised as an issue.
   const q = unclearOf(r.ocrOriginal, r.status === 'draft');
   q.delete('remarks');
+  q.delete('bill_type');
   const inf = inferredOf(r.ocrOriginal);
   let o = {};
   try { o = r.ocrOriginal ? JSON.parse(r.ocrOriginal) : {}; } catch { /* not JSON */ }
@@ -1095,7 +1096,7 @@ function rowIssues(r) {
       title="The software report says ${money(h.amountPaise)}${h.bankAt ? `, and the bank received it at ${when(h.bankAt)}` : ''}.">Use ${money(h.amountPaise)}? (${h.bankAt ? 'software + bank' : 'software'})</button>`);
   }
   if (inf.has('bill_no') && o.completedFrom) { flags.bill_no ??= 'amber'; amber.push(`Completed from "${o.completedFrom}" on the page`); }
-  if (inf.has('bill_type')) { flags.bill_type ??= 'amber'; amber.push('Type assumed F&B'); }
+  if (inf.has('bill_type')) flags.bill_type ??= 'amber'; // assumed F&B: only tinted
   if (inf.has('discount') && !largePct(r)) flags.discount ??= 'amber'; // a worked-out discount is only tinted, not spelled out
   if (inf.has('payments') && !r.paidWithRowId && o.movedFromRow) { flags.payments ??= 'amber'; amber.push('Payment moved from the next line'); }
   if (r.bankAdjusted) info.push('Adjusted from bank on UPI matching');
