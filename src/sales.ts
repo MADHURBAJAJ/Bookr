@@ -367,3 +367,62 @@ export async function cashSummaryChecks(db: DB, businessId: string, day: string,
   }
   return checks;
 }
+
+// ---- Bill number suggestions for the register (typos and short numbers)
+
+export interface BillOption { billNo: string; posNo: string; amountPaise: number; mode: string; paidAt: number; amountMatches: boolean; why: 'short' | 'typo' | 'short_typo' | 'amount' }
+export interface BillMatch { exact: boolean; options: BillOption[] }
+
+const digits = (v: string) => v.replace(/\D/g, '');
+
+/** Optimal string alignment distance: edits, inserts, deletes and swaps of neighbouring digits. */
+export function billDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+
+const WHY_ORDER = { short: 0, typo: 1, short_typo: 2, amount: 3 } as const;
+
+/**
+ * For each register row whose bill number is not exactly a software bill of the same shift, the
+ * software bills it probably means. A suggestion is never applied by itself; a person picks it.
+ */
+export function suggestBills(
+  rows: { id: string; bill_no: string; amount_paise: number }[],
+  bills: { bill_no: string; pos_no: string; amount_paise: number; mode: string; paid_at: number }[],
+): Map<string, BillMatch> {
+  const exact = new Set(bills.map((b) => b.bill_no));
+  const claimed = new Set(rows.filter((r) => exact.has(r.bill_no)).map((r) => r.bill_no));
+  const free = bills.filter((b) => !claimed.has(b.bill_no) && b.amount_paise !== 0);
+  const out = new Map<string, BillMatch>();
+  for (const r of rows) {
+    if (exact.has(r.bill_no)) { out.set(r.id, { exact: true, options: [] }); continue; }
+    const w = digits(r.bill_no);
+    const options: BillOption[] = [];
+    for (const b of free) {
+      const s = digits(b.bill_no);
+      const amountMatches = b.amount_paise === r.amount_paise;
+      let why: BillOption['why'] | null = null;
+      if (w.length >= 3 && w.length < s.length && s.endsWith(w)) why = 'short';
+      else if (w.length >= 5 && Math.abs(w.length - s.length) <= 1 && billDistance(w, s) === 1) why = 'typo';
+      else if (w.length >= 3 && w.length < s.length && billDistance(w, s.slice(-w.length)) === 1 && amountMatches) why = 'short_typo';
+      if (why) options.push({ billNo: b.bill_no, posNo: b.pos_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, amountMatches, why });
+    }
+    // With no close number (or none written), offer bills with the same amount.
+    if (!options.length) {
+      for (const b of free) {
+        if (b.amount_paise === r.amount_paise) options.push({ billNo: b.bill_no, posNo: b.pos_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, amountMatches: true, why: 'amount' });
+      }
+    }
+    options.sort((a, b) => Number(b.amountMatches) - Number(a.amountMatches) || WHY_ORDER[a.why] - WHY_ORDER[b.why] || a.paidAt - b.paidAt);
+    out.set(r.id, { exact: false, options: options.slice(0, 6) });
+  }
+  return out;
+}

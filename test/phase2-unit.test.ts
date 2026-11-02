@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { addDays, istDay, istToMs, missingInWindow, shiftDayOf, shiftWindow } from '../src/time';
 import { csvRows, parseDateTime, parseSalesCsv } from '../src/salescsv';
-import { classify, registerMode } from '../src/sales';
+import { billDistance, classify, registerMode, suggestBills } from '../src/sales';
 import { parsePaise } from '../src/money';
 import { buildSalesCsv, REPORT_1_NOV_EARLY, REPORT_31_OCT } from '../demo/sample-data';
 
@@ -137,5 +137,53 @@ describe('difference types', () => {
     const mixed = registerMode([{ register_row_id: 'x', mode: 'cash', amount_paise: 1, column_label: null }, { register_row_id: 'x', mode: 'upi', amount_paise: 1, column_label: null }]);
     expect(mixed).toBe('mixed');
     expect(classify({ amount: 2, mode: 'upi' }, { amount: 2, mode: mixed })).toBe('mode');
+  });
+});
+
+describe('bill number suggestions', () => {
+  const sw = [
+    { bill_no: '26103154', pos_no: 'POS-1', amount_paise: 23000, mode: 'upi', paid_at: 1 },
+    { bill_no: '26103156', pos_no: 'POS-1', amount_paise: 23000, mode: 'card', paid_at: 2 },
+    { bill_no: '26103157', pos_no: 'POS-1', amount_paise: 23000, mode: 'cash', paid_at: 3 },
+    { bill_no: '26103160', pos_no: 'POS-1', amount_paise: 36800, mode: 'upi', paid_at: 4 },
+    { bill_no: '26103199', pos_no: 'POS-1', amount_paise: 0, mode: 'cash', paid_at: 5 },
+  ];
+  const row = (id: string, bill_no: string, rupees: number) => ({ id, bill_no, amount_paise: rupees * 100 });
+
+  it('an exact number needs nothing', () => {
+    expect(suggestBills([row('a', '26103160', 368)], sw).get('a')).toEqual({ exact: true, options: [] });
+  });
+
+  it('a short number offers the bill ending in those digits', () => {
+    const m = suggestBills([row('a', '3154', 230)], sw).get('a')!;
+    expect(m.exact).toBe(false);
+    expect(m.options[0]).toMatchObject({ billNo: '26103154', why: 'short', amountMatches: true });
+  });
+
+  it('a one-digit typo, a missing digit or two swapped digits is offered, same amount first', () => {
+    expect(suggestBills([row('a', '26103610', 368)], sw).get('a')!.options[0]).toMatchObject({ billNo: '26103160', why: 'typo' }); // swapped
+    expect(suggestBills([row('a', '2610316', 368)], sw).get('a')!.options[0]).toMatchObject({ billNo: '26103160', why: 'typo' });  // missing digit
+    expect(suggestBills([row('a', '26103150', 368)], sw).get('a')!.options.map((o) => o.billNo)).toContain('26103160');          // one wrong
+  });
+
+  it('a short number with a slip is offered only when the amount matches', () => {
+    expect(suggestBills([row('a', '3158', 230)], sw).get('a')!.options.map((o) => o.why)).toEqual(['short_typo', 'short_typo', 'short_typo']);
+    expect(suggestBills([row('a', '3158', 999)], sw).get('a')!.options).toEqual([]);
+  });
+
+  it('with no number written, bills with the same amount are offered; complimentary bills never are', () => {
+    expect(suggestBills([row('a', '', 368)], sw).get('a')!.options.map((o) => o.billNo)).toEqual(['26103160']);
+    expect(suggestBills([row('a', '', 0)], sw).get('a')!.options).toEqual([]);
+  });
+
+  it('a bill already matched exactly by another row is not offered again', () => {
+    const m = suggestBills([row('x', '26103154', 230), row('a', '3154', 230)], sw).get('a')!;
+    expect(m.options.map((o) => o.billNo)).not.toContain('26103154');
+  });
+
+  it('typo distance counts swaps as one edit', () => {
+    expect(billDistance('12345', '12354')).toBe(1);
+    expect(billDistance('12345', '1245')).toBe(1);
+    expect(billDistance('12345', '12345')).toBe(0);
   });
 });

@@ -788,6 +788,20 @@ function payText(pays) {
 const PAY_OPTIONS = [['cash', 'Cash'], ['upi', 'UPI XOXO'], ['upi', 'UPI Bank 2'], ['card', 'Card']];
 const payKey = (p) => `${p.mode}|${p.columnLabel ?? ''}`;
 
+/** Bill number box. Red when the number is not exactly in the shift's software report; then a
+ *  dropdown offers the software bills it probably means (short number, typo, or same amount). */
+function billCell(r, needsClass) {
+  const bm = r.billMatch;
+  const off = bm && !bm.exact;
+  const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount only' };
+  return html`<input class="cell mono ${needsClass || (off ? 'needs' : '')}" data-f="billNo" value="${r.billNo}" style="width:104px" aria-label="Bill number"
+      title="${off ? 'Not found in the software report for this shift' : ''}">
+    ${off ? (bm.options.length ? html`<select class="cell pick" data-f="pickBill" aria-label="Pick the bill from the software report" style="display:block;margin-top:4px;max-width:220px">
+        <option value="">Did you mean…</option>
+        ${bm.options.map((o) => html`<option value="${o.billNo}">${o.billNo} · ₹ ${money(o.amountPaise)} ${o.amountMatches ? '✓ same amount' : ''} (${why[o.why]})</option>`)}
+      </select>` : html`<div class="tiny" style="color:#7F1D1D;margin-top:2px">Not in software report</div>`) : ''}`;
+}
+
 /** One register row. Editable in place unless the shift is confirmed; Edit opens the full form. */
 function regRowHtml(r, locked) {
   const q = unclearOf(r.ocrOriginal, r.status === 'draft');
@@ -804,7 +818,7 @@ function regRowHtml(r, locked) {
   return html`<tr data-row="${r.id}" class="${r.status === 'checked' ? 'row-checked' : ''}">
     <td class="note">${r.lineNo}</td>
     <td style="text-align:center"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Checked against the page" title="Checked against the page" style="width:20px;height:20px;min-height:0"></td>
-    <td><input class="cell mono ${nd('bill_no')}" data-f="billNo" value="${r.billNo}" style="width:104px" aria-label="Bill number"></td>
+    <td>${billCell(r, nd('bill_no'))}</td>
     <td><select class="cell ${nd('bill_type')}" data-f="billType" aria-label="Type">
       <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
     <td><input class="cell mono ${nd('amount')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount"></td>
@@ -831,7 +845,7 @@ function registerPanel(biz, u) {
   return html`
     <section class="card grow3" style="gap:12px">
       ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>`
-        : html`<div class="note">Change any cell and it saves when you leave it. Tick a row once it matches the page. Use Edit for a bill paid in more than one way.${anyUnclear ? html` <span class="needs-key">Red boxes</span> are cells Claude could not read with confidence.` : ''}</div>`}
+        : html`<div class="note">Change any cell and it saves when you leave it. Tick a row once it matches the page. Use Edit for a bill paid in more than one way.${anyUnclear || u.rows.some((r) => r.billMatch && !r.billMatch.exact) ? html` <span class="needs-key">Red boxes</span> need a look: Claude could not read the cell, or the bill number is not in the software report for this shift (pick the right one from "Did you mean…").` : ''}</div>`}
       <div class="scroll"><table style="min-width:860px" id="regtable">
         <thead><tr><th>#</th><th title="Checked against the page">✓</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th>Paid as</th><th>Remarks</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
@@ -874,6 +888,10 @@ function wireInlineRows(biz, u) {
     const pa = tr.querySelector('[data-f="payAmount"]');
     if (changed.dataset.f === 'amount' && pa && r.payments.length === 1 && r.payments[0].amountPaise === r.amountPaise) pa.value = changed.value;
     if (changed.dataset.f === 'pay' && pa) { pa.hidden = !changed.value; if (changed.value && !pa.value) pa.value = tr.querySelector('[data-f="amount"]').value; }
+    if (changed.dataset.f === 'pickBill') {
+      if (!changed.value) return;
+      tr.querySelector('[data-f="billNo"]').value = changed.value;
+    }
     const body = payloadOf(tr, r);
     const run = (queues.get(id) ?? Promise.resolve()).then(async () => {
       const focus = document.activeElement?.closest?.('tr')?.dataset.row === id ? document.activeElement.dataset.f : null;
@@ -885,14 +903,14 @@ function wireInlineRows(biz, u) {
       }
       const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`);
       u.rows = fresh.rows;
-      const nr = u.rows.find((x) => x.id === id);
-      const cur = table.querySelector(`tr[data-row="${id}"]`);
-      if (nr && cur) {
-        cur.outerHTML = regRowHtml(nr, false).__html;
-        const again = table.querySelector(`tr[data-row="${id}"]`);
-        bind(again);
-        if (focus) again.querySelector(`[data-f="${focus}"]`)?.focus();
-      }
+      // Redraw every row: fixing one bill number changes what the others are offered.
+      const active = document.activeElement;
+      const keep = active?.closest?.('tr')?.dataset.row ? { row: active.closest('tr').dataset.row, f: active.dataset.f } : null;
+      const body2 = table.querySelector('tbody');
+      body2.innerHTML = u.rows.map((x) => regRowHtml(x, false).__html).join('');
+      body2.querySelectorAll('tr').forEach(bind);
+      if (keep?.f) body2.querySelector(`tr[data-row="${keep.row}"] [data-f="${keep.f}"]`)?.focus();
+      else if (focus) body2.querySelector(`tr[data-row="${id}"] [data-f="${focus}"]`)?.focus();
       document.getElementById('regsum').innerHTML = regSumHtml(u).__html;
     });
     queues.set(id, run);

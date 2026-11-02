@@ -458,6 +458,24 @@ describe('expense list and cash summary', () => {
   });
 });
 
+describe('register bill numbers against the software report', () => {
+  it('flags a short or mistyped number and offers the right bill; picking it makes the bill match', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.map((r) => r.billNo === '2610312' ? { ...r, billNo: '0312' } : r.billNo === '2610314' ? { ...r, billNo: '2610341' } : r);
+    const pageId = await fullShift(h, reg);
+    const u = await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${pageId}`);
+    const byNo = (n: string) => u.json.rows.find((r: any) => r.billNo === n);
+    expect(byNo('2610311').billMatch).toEqual({ exact: true, options: [] });
+    expect(byNo('0312').billMatch.options[0]).toMatchObject({ billNo: '2610312', amountMatches: true, why: 'short' });
+    expect(byNo('2610341').billMatch.options[0]).toMatchObject({ billNo: '2610314', amountMatches: true, why: 'typo' });
+    expect(byNo('26103125').billMatch.exact).toBe(false); // really missing from the software report
+    const row = byNo('0312');
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${row.id}`, { billNo: '2610312', billType: 'fnb', amount: '380', status: 'checked', payments: [{ mode: 'cash', columnLabel: 'Cash', amount: '380' }] });
+    const v = await view(h);
+    expect(byBill(v, '2610312').difference).toBe('match');
+  });
+});
+
 describe('deleting an upload', () => {
   it('deleting a CSV removes its bills and rebuilds the comparison, logged', async () => {
     const h = await hotel();

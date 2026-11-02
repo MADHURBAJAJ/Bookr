@@ -4,7 +4,7 @@ import { requireRole } from '../auth';
 import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
-import { cashSummaryChecks, refreshComparisons, type SummaryValues } from '../sales';
+import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { shiftDayOf } from '../time';
 
 export const captureRoutes = new Hono<AppEnv>();
@@ -171,7 +171,18 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
     const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, u.business_day);
-    return c.json({ ...base, shiftStatus: shift?.status ?? 'open', rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id) })) });
+    // Bill number check against the software report of the same shift: exact, or suggestions for typos and short numbers.
+    const [swBills, shiftRows] = await Promise.all([
+      all<{ bill_no: string; pos_no: string; amount_paise: number; mode: string; paid_at: number }>(db,
+        'SELECT bill_no, pos_no, amount_paise, mode, paid_at FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+      all<{ id: string; bill_no: string; amount_paise: number }>(db,
+        'SELECT id, bill_no, amount_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+    ]);
+    const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
+    return c.json({
+      ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length,
+      rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null })),
+    });
   }
   if (u.kind === 'expense_list') {
     const rows = await all(db, `SELECT id, line_no AS lineNo, narration, amount_paise AS amountPaise, head_id AS headId, status,
