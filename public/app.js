@@ -299,10 +299,12 @@ async function accountsView(biz, editId) {
 }
 
 async function headsView(biz, editId) {
-  const [{ heads }, { billTypeHeads }] = await Promise.all([
+  const [{ heads }, { billTypeHeads }, { parties }] = await Promise.all([
     api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/bill-type-heads`),
+    api('GET', `/businesses/${biz.id}/parties`),
   ]);
+  const vendorsOf = (headId) => parties.filter((p) => p.defaultHeadId === headId);
   const canEdit = biz.actions.includes('heads.edit');
   const editing = heads.find((h) => h.id === editId);
   const mapped = (t) => billTypeHeads.find((m) => m.billType === t)?.headId ?? '';
@@ -314,6 +316,7 @@ async function headsView(biz, editId) {
         <span class="note">Tally ledger: ${h.tallyLedger || 'not set'}</span>
         ${canEdit ? html`<a href="#/b/${biz.id}/heads/${h.id}" class="note" style="color:var(--teal)">Edit</a>` : ''}
       </span>
+      ${h.type === 'expense' && vendorsOf(h.id).length ? html`<div class="tiny" style="flex-basis:100%;color:var(--muted)">Vendors: ${vendorsOf(h.id).map((p) => p.name).join(', ')}</div>` : ''}
     </div>`);
   const addBtn = (type, label) => canEdit ? html`<a class="btn ghost" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/heads/new-${type}">${label}</a>` : '';
   const newType = editId === 'new-income' ? 'income' : editId === 'new-expense' ? 'expense' : null;
@@ -356,9 +359,30 @@ async function headsView(biz, editId) {
           </div>`)}
           <div id="btmsg"></div>
         </div>
+        <div style="border-top:1px solid var(--line-soft);padding-top:14px;display:flex;flex-direction:column;gap:8px">
+          <h2>Vendors</h2>
+          <div class="note">Each vendor is remembered under an expense head, e.g. Blinkit under Kitchen purchases. A vendor gets its head the first time one is chosen for it on an expense line.${canEdit ? ' Move or rename one here.' : ''}</div>
+          ${parties.length ? parties.map((p) => html`<div class="form-row" style="align-items:center;border-top:1px solid var(--line-soft);padding-top:8px">
+            ${canEdit ? html`<input class="cell" data-vname="${p.id}" value="${p.name}" style="width:180px" aria-label="Vendor name">` : html`<span style="width:180px">${p.name}</span>`}
+            ${canEdit ? html`<select class="compact" data-vhead="${p.id}" aria-label="Head for ${p.name}"><option value="">No head yet</option>
+              ${heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}" ${p.defaultHeadId === h.id ? 'selected' : ''}>${h.name}</option>`)}</select>`
+              : html`<span>${heads.find((h) => h.id === p.defaultHeadId)?.name ?? 'No head yet'}</span>`}
+            <span class="note">${p.lines} line${p.lines === 1 ? '' : 's'}</span>
+          </div>`) : html`<div class="note">No vendors yet. Add one by naming the vendor on an expense line.</div>`}
+          <div id="vmsg"></div>
+        </div>
       </section>
     </div>`));
   wireShell();
+  const saveVendor = async (id) => {
+    const msg = document.getElementById('vmsg');
+    const name = app.querySelector(`[data-vname="${id}"]`).value.trim();
+    const defaultHeadId = app.querySelector(`[data-vhead="${id}"]`).value || null;
+    try { await api('PATCH', `/businesses/${biz.id}/parties/${id}`, { name, defaultHeadId }); msg.innerHTML = '<div class="ok-msg">Saved.</div>'; }
+    catch (e) { msg.innerHTML = `<div class="error">${esc(e.message)}</div>`; }
+  };
+  app.querySelectorAll('[data-vhead]').forEach((el) => el.addEventListener('change', () => saveVendor(el.dataset.vhead)));
+  app.querySelectorAll('[data-vname]').forEach((el) => el.addEventListener('change', () => saveVendor(el.dataset.vname)));
   app.querySelectorAll('[data-billtype]').forEach((sel) => sel.addEventListener('change', async () => {
     const msg = document.getElementById('btmsg');
     try { await api('PUT', `/businesses/${biz.id}/bill-type-heads/${sel.dataset.billtype}`, { headId: sel.value }); msg.innerHTML = '<div class="ok-msg">Saved.</div>'; }
@@ -745,10 +769,11 @@ async function csvPreview(biz, day, csv, replaces, box = document.getElementById
 
 async function reviewView(biz, uploadId, highlightRow) {
   if (!uploadId) return reviewListView(biz);
-  const [u, { heads }, list] = await Promise.all([
+  const [u, { heads }, list, { parties }] = await Promise.all([
     api('GET', `/businesses/${biz.id}/uploads/${uploadId}`),
     api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/uploads`),
+    api('GET', `/businesses/${biz.id}/parties`),
   ]);
   // Pages of the same type in day order, then upload order: for Previous and Next.
   const same = list.uploads.filter((x) => x.kind === u.kind).sort((a, b) => a.day.localeCompare(b.day) || a.createdAt - b.createdAt);
@@ -768,7 +793,7 @@ async function reviewView(biz, uploadId, highlightRow) {
     </section>`;
   let right;
   if (u.kind === 'bill_register') right = registerPanel(biz, u);
-  else if (u.kind === 'expense_list') right = expensePanel(biz, u, heads);
+  else if (u.kind === 'expense_list') right = expensePanel(biz, u, heads, parties);
   else if (u.kind === 'cash_summary') right = summaryPanel(biz, u);
   else right = html`<section class="card grow3"><div class="note">Single printed bills are kept for reference. Nothing is read from them yet.</div></section>`;
   render(shell(biz, 'review', `Review: ${KIND_LABELS[u.kind]}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
@@ -798,7 +823,7 @@ async function reviewView(biz, uploadId, highlightRow) {
     if (tr) { tr.classList.add('row-found'); tr.scrollIntoView({ block: 'center' }); tr.querySelector('[data-f="billNo"]')?.focus(); }
   }
   if (u.kind === 'bill_register') wireRegister(biz, u);
-  if (u.kind === 'expense_list') wireExpense(biz, u);
+  if (u.kind === 'expense_list') wireExpense(biz, u, parties);
   if (u.kind === 'cash_summary') {
     wireSummary(biz, u);
     api('GET', `/businesses/${biz.id}/shifts/${u.day}/cash`).then((k) => {
@@ -1254,7 +1279,7 @@ function wireRegister(biz, u) {
   show(null);
 }
 
-function expensePanel(biz, u, heads) {
+function expensePanel(biz, u, heads, parties = []) {
   const exp = heads.filter((h) => h.type === 'expense');
   const name = (id) => exp.find((h) => h.id === id)?.name;
   const canApprove = biz.actions.includes('rows.approve');
@@ -1265,10 +1290,12 @@ function expensePanel(biz, u, heads) {
     <section class="card grow3" style="gap:12px">
       <div class="note">Each line is an expense paid from Cash. It counts only after an Owner or Accountant approves it.</div>
       <div class="scroll"><table style="min-width:560px">
-        <thead><tr><th>#</th><th>Item</th><th style="text-align:right">Amount</th><th>Head</th><th>Status</th><th></th></tr></thead>
-        <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.headId); return html`<tr>
-          <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td><td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
-          <td>${name(r.headId) ?? html`<span class="chip bad">Needs input</span>`}</td>
+        <thead><tr><th>#</th><th>Item</th><th>Vendor</th><th style="text-align:right">Amount</th><th>Head</th><th>Status</th><th></th></tr></thead>
+        <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.headId); const read = readVendor(r); return html`<tr>
+          <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td>
+          <td>${r.vendor ?? (read ? html`<span class="chip wait" title="Read from the page; not a known vendor yet. Edit the line to keep it.">${read}?</span>` : html`<span class="note">—</span>`)}</td>
+          <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
+          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? html` <span class="chip wait" title="Filled in from the vendor's remembered head">Learned</span>` : ''}` : html`<span class="chip bad">Needs input</span>`}</td>
           <td>${r.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Draft</span>`}</td>
           <td style="text-align:right">${r.status === 'draft' ? html`<button class="btn plain" type="button" data-eedit="${r.id}">Edit</button>` : ''}</td>
         </tr>`; })}</tbody>
@@ -1281,9 +1308,12 @@ function expensePanel(biz, u, heads) {
         <div style="font-size:15px;font-weight:600" id="etitle">Add a line from the page</div>
         <div class="form-row">
           <div class="field" style="flex:2 1 200px"><label>Item</label><input name="narration" required></div>
+          <div class="field"><label>Vendor</label><input name="vendor" list="vendorlist" placeholder="e.g. Blinkit" autocomplete="off"></div>
           <div class="field"><label>Amount (₹)</label><input name="amount" class="mono" required></div>
           <div class="field"><label>Head</label><select name="headId"><option value="">Choose later</option>${exp.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select></div>
         </div>
+        <datalist id="vendorlist">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
+        <div class="note" id="vendorhint">Name the vendor and its head once; next time the head fills in by itself.</div>
         <div class="form-msg"></div>
         <div class="form-row"><button class="btn" type="submit">Save line</button><button class="btn danger" type="button" id="edel" hidden>Delete line</button></div>
       </form>
@@ -1294,13 +1324,33 @@ function expensePanel(biz, u, heads) {
     </section>`;
 }
 
-function wireExpense(biz, u) {
+/** The vendor Claude read on a line, when it is not a known vendor yet. */
+function readVendor(r) {
+  if (r.vendor || !r.ocrOriginal) return null;
+  try { return JSON.parse(r.ocrOriginal).read?.vendor ?? null; } catch { return null; }
+}
+
+function wireExpense(biz, u, parties = []) {
   const total = document.getElementById('ptotal');
   total && onSubmit(total, async (d) => { await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { pageWrittenTotal: d.pageWrittenTotal || null }); reviewView(biz, u.id); });
   const form = document.getElementById('eform');
   let editing = null;
+  // A known vendor fills in its remembered head; a new one is remembered under the head chosen now.
+  const hint = document.getElementById('vendorhint');
+  const findParty = (name) => parties.find((p) => [p.name, ...(p.aliases ?? [])].some((n) => n.toLowerCase().trim() === name.toLowerCase().trim()));
+  const onVendor = () => {
+    const name = form.vendor.value.trim();
+    const p = name ? findParty(name) : null;
+    if (!name) hint.textContent = 'Name the vendor and its head once; next time the head fills in by itself.';
+    else if (p?.defaultHeadId) {
+      if (!form.headId.value) form.headId.value = p.defaultHeadId;
+      hint.textContent = `${p.name} is remembered under ${form.headId.selectedOptions[0]?.textContent ?? 'its head'}.`;
+    } else hint.textContent = `New vendor: the head you choose now will be remembered for ${name}.`;
+  };
+  form.vendor.addEventListener('change', onVendor);
+  form.vendor.addEventListener('input', onVendor);
   onSubmit(form, async (d) => {
-    const body = { narration: d.narration, amount: d.amount, headId: d.headId || null };
+    const body = { narration: d.narration, vendor: d.vendor || null, amount: d.amount, headId: d.headId || null };
     if (editing) await api('PUT', `/businesses/${biz.id}/expense-rows/${editing}`, body);
     else await api('POST', `/businesses/${biz.id}/uploads/${u.id}/expense-rows`, body);
     reviewView(biz, u.id);
@@ -1311,6 +1361,8 @@ function wireExpense(biz, u) {
     form.narration.value = r.narration;
     form.amount.value = rupeesForInput(r.amountPaise);
     form.headId.value = r.headId ?? '';
+    form.vendor.value = r.vendor ?? readVendor(r) ?? '';
+    onVendor();
     document.getElementById('etitle').textContent = `Edit line ${r.lineNo}`;
     document.getElementById('edel').hidden = false;
     form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

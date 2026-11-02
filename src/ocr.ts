@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { newId, now, stmt, type DB } from './db';
 import { parsePaise } from './money';
 import type { PageImage } from './claude';
+import { byName, inText, type Party } from './parties';
 
 const Orientation = z.enum(['upright', 'rotated_90_clockwise', 'rotated_180', 'rotated_90_counterclockwise']);
 const Amount = z.string().nullable().describe('Digits exactly as written, with a decimal point if written, no currency sign. null if unreadable or blank.');
@@ -36,7 +37,13 @@ export const ExpenseReading = z.object({
   orientation: Orientation,
   legible: z.boolean(),
   page_total: Amount,
-  rows: z.array(z.object({ line: z.number().int(), item: z.string().nullable(), amount: Amount, unclear: Unclear })),
+  rows: z.array(z.object({
+    line: z.number().int(),
+    item: z.string().nullable(),
+    vendor: z.string().nullable().describe('The shop or vendor the money was paid to, if the line names one (e.g. "Blinkit", "Ramesh vegetables"). null if none.'),
+    amount: Amount,
+    unclear: Unclear,
+  })),
 });
 
 export const SummaryReading = z.object({
@@ -64,6 +71,7 @@ Field names for "unclear": bill_no, bill_type, amount, discount, payments, remar
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
 Return one item in "rows" for every expense line, in page order. Do not include the total line as a row; put it in "page_total".
+If a line names who was paid (a shop, app or person, e.g. "Blinkit", "Zepto", "Ramesh veg"), put that in "vendor"; keep the item text as written.
 Field names for "unclear": item, amount.
 ${COMMON}`,
   cash_summary: `This is a handwritten cash account summary for one day. It shows: opening balance, received (total received), balance, expenses (total), and cash in hand.
@@ -143,7 +151,7 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
 }
 
 /** Statements that replace the page's draft expense rows with the reading. Rows have no head: a person chooses it. */
-export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, cashAccountId: string): { statements: D1PreparedStatement[]; written: number | null } {
+export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, cashAccountId: string, parties: Party[] = []): { statements: D1PreparedStatement[]; written: number | null } {
   const t = now();
   const statements: D1PreparedStatement[] = [stmt(ctx.db, "DELETE FROM transactions WHERE upload_id = ? AND status = 'draft'", ctx.uploadId)];
   r.rows.forEach((row, i) => {
@@ -151,10 +159,14 @@ export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, c
     const amt = amount(row.amount);
     if (amt === null || amt <= 0) unclear.add('amount');
     if (!row.item) unclear.add('item');
+    // A vendor already known gives the line its remembered head ("Learned"); an unknown one waits for a person.
+    const party = (row.vendor ? byName(parties, row.vendor) : null) ?? inText(parties, `${row.item ?? ''} ${row.vendor ?? ''}`);
+    const headId = party?.default_head_id ?? null;
     statements.push(stmt(ctx.db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status,
-      payment_mode, upload_id, line_no, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, 'expense', NULL, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?, ?)`,
-      newId(), ctx.businessId, cashAccountId, ctx.day, amt !== null && amt > 0 ? amt : 0, row.item ?? '',
-      ctx.uploadId, i + 1, JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear] }), t));
+      payment_mode, upload_id, line_no, party_id, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?, ?, ?)`,
+      newId(), ctx.businessId, cashAccountId, ctx.day, amt !== null && amt > 0 ? amt : 0, headId, row.item ?? '',
+      ctx.uploadId, i + 1, party?.id ?? null,
+      JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear], inferred: headId ? ['head'] : [] }), t));
   });
   return { statements, written: amount(r.page_total) };
 }

@@ -172,6 +172,22 @@ describe('Read page: expense list and cash summary', () => {
     expect((await p.clients.owner.post(`/businesses/${p.bid}/uploads/${p.id}/expense-rows/approve`)).status).toBe(400);
   });
 
+  it('a known vendor on an expense line gives it the remembered head; an unknown one is kept as read', async () => {
+    const p = await page('expense_list');
+    const kitchen = (await p.clients.owner.post(`/businesses/${p.bid}/heads`, { name: 'Kitchen purchases', type: 'expense' })).json.id;
+    await sql`INSERT INTO parties (id, business_id, name, aliases, default_head_id, created_at) VALUES ('v1', ${p.bid}, 'Blinkit', '[]', ${kitchen}, 0)`;
+    mocked.mockResolvedValueOnce({ data: { orientation: 'upright', legible: true, page_total: null, rows: [
+      { line: 1, item: 'Vegetables', vendor: 'BLINKIT', amount: '420', unclear: [] },
+      { line: 2, item: 'Gas refill', vendor: 'Indane', amount: '900', unclear: [] },
+    ] }, model: 'm' } as never);
+    await p.read();
+    const rows = await sql`SELECT head_id, party_id, ocr_original FROM transactions ORDER BY line_no`;
+    expect(rows[0]).toMatchObject({ head_id: kitchen, party_id: 'v1' });
+    expect(JSON.parse(rows[0].ocr_original).inferred).toEqual(['head']);
+    expect(rows[1]).toMatchObject({ head_id: null, party_id: null });
+    expect(JSON.parse(rows[1].ocr_original).read.vendor).toBe('Indane');
+  });
+
   it('cash summary figures are filled as a draft that a person must save before approval', async () => {
     const p = await page('cash_summary');
     const c = CASH_SUMMARY_31_OCT;

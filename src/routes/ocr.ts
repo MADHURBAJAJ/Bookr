@@ -7,6 +7,7 @@ import { istDay, istToMs } from '../time';
 import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../claude';
 import { expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
 import { refreshComparisons } from '../sales';
+import { loadParties } from '../parties';
 
 export const ocrRoutes = new Hono<AppEnv>();
 
@@ -114,7 +115,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
       ({ statements, written } = r);
       rows = (data as { rows: unknown[] }).rows.length;
     } else if (kind === 'expense_list') {
-      const r = expenseStatements(ctx, data as never, cashAccount!);
+      const r = expenseStatements(ctx, data as never, cashAccount!, await loadParties(db, bid));
       ({ statements, written } = r);
       rows = (data as { rows: unknown[] }).rows.length;
     } else {

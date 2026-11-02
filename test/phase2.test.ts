@@ -802,3 +802,49 @@ describe('cash for a shift', () => {
     expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/accept`, { note: 'x' })).status).toBe(409);
   });
 });
+
+describe('vendors remembered under a head', () => {
+  async function page(h: Awaited<ReturnType<typeof hotel>>) {
+    return (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, png(71 + Math.floor(Math.random() * 100)), 'image/png')).json.id as string;
+  }
+  it('the first line names the vendor and head; later lines from that vendor get the head by themselves', async () => {
+    const h = await hotel();
+    const kitchen = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Kitchen purchases', type: 'expense' })).json.id;
+    const pg = await page(h);
+    const add = (body: Record<string, unknown>) => h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`, body);
+    expect((await add({ narration: 'Vegetables', vendor: 'Blinkit', amount: '420', headId: kitchen })).status).toBe(201);
+    const [p] = await sql`SELECT name, default_head_id FROM parties`;
+    expect(p).toEqual({ name: 'Blinkit', default_head_id: kitchen });
+    await add({ narration: 'Milk', vendor: 'blinkit', amount: '60' });          // same vendor, any case
+    await add({ narration: 'Blinkit eggs', amount: '90' });                     // vendor named in the item
+    await add({ narration: 'Auto fare', amount: '50' });                        // no vendor: no head
+    const rows = await sql`SELECT t.narration, t.head_id, p.name AS vendor, t.ocr_original FROM transactions t LEFT JOIN parties p ON p.id = t.party_id WHERE t.upload_id = ${pg} ORDER BY t.line_no`;
+    expect(rows.map((r) => [r.narration, r.vendor, r.head_id === kitchen])).toEqual([
+      ['Vegetables', 'Blinkit', true], ['Milk', 'Blinkit', true], ['Blinkit eggs', 'Blinkit', true], ['Auto fare', null, false],
+    ]);
+    expect(JSON.parse(rows[1].ocr_original).inferred).toEqual(['head']); // shown as Learned
+    expect(rows[0].ocr_original).toBeNull();                             // chosen by the person
+    expect((await sql`SELECT count(*) AS n FROM parties`)[0].n).toBe(1);
+  });
+
+  it('a vendor first seen without a head learns the first head chosen; moving it later is Owner or Accountant work', async () => {
+    const h = await hotel();
+    const kitchen = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Kitchen purchases', type: 'expense' })).json.id;
+    const util = (await h.clients.owner.get(`/businesses/${h.bid}/heads`)).json.heads.find((x: any) => x.name === 'Utilities').id;
+    const pg = await page(h);
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`, { narration: 'Groceries', vendor: 'Zepto', amount: '300' });
+    expect((await sql`SELECT default_head_id FROM parties`)[0].default_head_id).toBeNull();
+    const [row] = await sql`SELECT id FROM transactions WHERE upload_id = ${pg}`;
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/expense-rows/${row.id}`, { narration: 'Groceries', vendor: 'Zepto', amount: '300', headId: kitchen });
+    const [p] = await sql`SELECT id, default_head_id FROM parties`;
+    expect(p.default_head_id).toBe(kitchen);
+    // A later different head on one line does not move the vendor.
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`, { narration: 'Gas', vendor: 'Zepto', amount: '50', headId: util });
+    expect((await sql`SELECT default_head_id FROM parties`)[0].default_head_id).toBe(kitchen);
+    expect((await h.clients.entry_staff.patch(`/businesses/${h.bid}/parties/${p.id}`, { name: 'Zepto', defaultHeadId: util })).status).toBe(403);
+    expect((await h.clients.accountant.patch(`/businesses/${h.bid}/parties/${p.id}`, { name: 'Zepto', defaultHeadId: util })).status).toBe(200);
+    const list = (await h.clients.viewer.get(`/businesses/${h.bid}/parties`)).json.parties;
+    expect(list).toEqual([expect.objectContaining({ name: 'Zepto', defaultHeadId: util, lines: 2 })]);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'party.update'`)[0].n).toBe(1);
+  });
+});

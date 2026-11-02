@@ -266,6 +266,8 @@ Each line of an expense list becomes a draft expense row in `transactions`, paid
 
 - **Cash for a shift (approved 2 Nov 2026).** A panel at the bottom of Compare sales (and under the cash summary page on Review): opening (previous day's cash in hand, else the page's opening) + confirmed cash sales − approved cash expenses − booked shortage = should be in hand, against the counted cash in hand. A difference is accepted with a note (Owner or Accountant; audit-logged, valid only for that exact difference) or, when short, booked by an Owner as an approved Cash expense under "Cash shortage" (`transactions.source = cash_shortage`, migration 0009). A cash bill missing in the register can be left out only with a reason. Cash bills not in the register are listed on the panel.
 
+- **Vendors under heads (approved 2 Nov 2026).** The handover's `parties` table (migration 0010): each vendor (e.g. Blinkit) is remembered under a default expense head (e.g. Kitchen purchases), with other spellings in `aliases`. Expense lines name their vendor (`transactions.party_id`); the first head chosen for a new vendor is remembered, and later lines from it, named or found in the item text, get that head filled in ("Learned", a person can change it). Read page reads the vendor and uses known vendors. Moving or renaming a vendor is Owner or Accountant work (Heads and rules → Vendors), audit-logged. This brings the Phase 3 "party master" forward for expenses.
+
 ### New Cloudflare resource
 
 An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.

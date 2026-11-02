@@ -5,6 +5,7 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type D
 import { body, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
+import { loadParties, markLearned, resolveVendor } from '../parties';
 import { shiftDayOf } from '../time';
 
 export const captureRoutes = new Hono<AppEnv>();
@@ -201,8 +202,9 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     });
   }
   if (u.kind === 'expense_list') {
-    const rows = await all(db, `SELECT id, line_no AS lineNo, narration, amount_paise AS amountPaise, head_id AS headId, status,
-      ocr_original AS ocrOriginal FROM transactions WHERE upload_id = ? ORDER BY line_no`, u.id);
+    const rows = await all(db, `SELECT t.id, t.line_no AS lineNo, t.narration, t.amount_paise AS amountPaise, t.head_id AS headId, t.status,
+      t.ocr_original AS ocrOriginal, t.party_id AS partyId, p.name AS vendor
+      FROM transactions t LEFT JOIN parties p ON p.id = t.party_id WHERE t.upload_id = ? ORDER BY t.line_no`, u.id);
     return c.json({ ...base, rows });
   }
   if (u.kind === 'cash_summary') {
@@ -439,14 +441,17 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows', req
   const narration = text(data, 'narration', 'Item', { max: 200 })!;
   const amount = paise(data, 'amount', 'Amount');
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
-  const headId = await expenseHead(db, bid, data);
+  const chosenHead = await expenseHead(db, bid, data);
+  const vendor = text(data, 'vendor', 'Vendor', { optional: true, max: 120 });
+  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead });
   const account = await cashAccount(db, bid);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM transactions WHERE upload_id = ?', u.id);
   const id = newId();
   await db.batch([
+    ...v.statements,
     stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode,
-      upload_id, line_no, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?)`,
-      id, bid, account, u.business_day, amount, headId, narration, u.id, last!.n + 1, now()),
+      upload_id, line_no, party_id, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?, ?, ?)`,
+      id, bid, account, u.business_day, amount, v.headId, narration, u.id, last!.n + 1, v.partyId, markLearned(null, v.learned), now()),
     stmt(db, "UPDATE uploads SET ocr_engine = coalesce(ocr_engine, 'manual') WHERE id = ?", u.id),
   ]);
   return c.json({ id }, 201);
@@ -457,15 +462,23 @@ captureRoutes.put('/businesses/:businessId/expense-rows/:rowId', requireRole('ro
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
+  const old = await one<{ ocr_original: string | null }>(db,
+    "SELECT ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'draft'", rowId, bid);
+  if (!old) fail(404, 'Draft row not found. Approved rows cannot be edited.');
   const data = await body(c);
   const narration = text(data, 'narration', 'Item', { max: 200 })!;
   const amount = paise(data, 'amount', 'Amount');
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
-  const headId = await expenseHead(db, bid, data);
-  const res = await stmt(db, `UPDATE transactions SET narration = ?, amount_paise = ?, head_id = ?
-    WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'draft'`, narration, amount, headId, rowId, bid).run();
-  if (!res.meta.changes) fail(404, 'Draft row not found. Approved rows cannot be edited.');
-  return c.json({ ok: true });
+  const chosenHead = await expenseHead(db, bid, data);
+  const vendor = text(data, 'vendor', 'Vendor', { optional: true, max: 120 });
+  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead });
+  await db.batch([
+    ...v.statements,
+    stmt(db, `UPDATE transactions SET narration = ?, amount_paise = ?, head_id = ?, party_id = ?, ocr_original = ?
+      WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'draft'`,
+      narration, amount, v.headId, v.partyId, markLearned(old.ocr_original, v.learned), rowId, bid),
+  ]);
+  return c.json({ ok: true, headId: v.headId, learned: v.learned });
 });
 
 captureRoutes.delete('/businesses/:businessId/expense-rows/:rowId', requireRole('rows.edit'), async (c) => {
@@ -549,4 +562,40 @@ captureRoutes.post('/businesses/:businessId/cash-summaries/:summaryId/approve', 
       JSON.stringify({ checks: checks.map((k) => ({ key: k.key, state: k.state })), note: failed.length ? note : null }), t),
   ]);
   return c.json({ ok: true, acceptedMismatches: failed.length });
+});
+
+// ---- Vendors (parties) and the head each is remembered under
+
+captureRoutes.get('/businesses/:businessId/parties', requireRole('heads.view'), async (c) => {
+  const parties = await all(c.env.DB, `
+    SELECT p.id, p.name, p.aliases, p.default_head_id AS defaultHeadId,
+      (SELECT count(*) FROM transactions t WHERE t.party_id = p.id) AS lines
+    FROM parties p WHERE p.business_id = ? ORDER BY lower(p.name)`, c.get('businessId'));
+  return c.json({ parties: parties.map((p) => ({ ...p, aliases: JSON.parse(p.aliases as string) })) });
+});
+
+// Rename a vendor, move it under another head, or set its other spellings. Owner or Accountant.
+captureRoutes.patch('/businesses/:businessId/parties/:partyId', requireRole('heads.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('partyId');
+  if (!isUuid(id)) fail(404, 'Vendor not found.');
+  const data = await body(c);
+  const before = await one<Record<string, unknown>>(db, 'SELECT name, aliases, default_head_id FROM parties WHERE id = ? AND business_id = ?', id, bid);
+  if (!before) fail(404, 'Vendor not found.');
+  const name = text(data, 'name', 'Vendor name', { max: 120 })!;
+  const headId = await expenseHead(db, bid, { headId: data.defaultHeadId });
+  const aliases = Array.isArray(data.aliases) ? data.aliases.filter((a): a is string => typeof a === 'string' && a.trim() !== '').map((a) => a.trim().slice(0, 120)).slice(0, 20) : JSON.parse(before.aliases as string);
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE parties SET name = ?, default_head_id = ?, aliases = ? WHERE id = ? AND business_id = ?', name, headId, JSON.stringify(aliases), id, bid),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'party.update', 'parties', ?, ?, ?, ?)`, bid, c.get('user').id, id, JSON.stringify(before),
+        JSON.stringify({ name, default_head_id: headId, aliases }), now()),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, 'Another vendor already has this name.');
+    throw e;
+  }
+  return c.json({ ok: true });
 });
