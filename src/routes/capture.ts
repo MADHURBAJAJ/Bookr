@@ -170,7 +170,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at };
   if (u.kind === 'bill_register') {
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
-      discount_paise - tip_paise AS discountPaise, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
+      discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
     const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
     const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, u.business_day);
@@ -234,7 +234,11 @@ function registerInput(data: Record<string, unknown>) {
   if (signed > amountPaise) fail(400, 'Discount cannot be more than the bill amount.');
   const discountPaise = signed > 0 ? signed : 0;
   const tipPaise = signed < 0 ? -signed : 0;
+  const paidWith = typeof data.paidWithRowId === 'string' && data.paidWithRowId ? data.paidWithRowId : null;
+  if (paidWith && !isUuid(paidWith)) fail(400, 'Unknown row to be paid with.');
+  if (paidWith && payments.length) fail(400, 'A bill paid together with another row has no payment of its own. Remove its payment first.');
   return {
+    paidWithRowId: paidWith,
     billNo: text(data, 'billNo', 'Bill number', { max: 30 })!,
     billType,
     amountPaise,
@@ -244,6 +248,20 @@ function registerInput(data: Record<string, unknown>) {
     payments,
     status,
   };
+}
+
+/** Checks a "paid with" link: same business and shift, not itself, no chains. */
+async function checkPaidWith(db: DB, businessId: string, rowId: string | null, shiftDay: string, headId: string | null) {
+  if (!headId) return;
+  if (headId === rowId) fail(400, 'A bill cannot be paid with itself.');
+  const head = await one<{ shift_day: string; paid_with_row_id: string | null }>(db,
+    'SELECT shift_day, paid_with_row_id FROM register_rows WHERE id = ? AND business_id = ?', headId, businessId);
+  if (!head) fail(400, 'The row it was paid with was not found.');
+  if (head.shift_day !== shiftDay) fail(400, 'Bills paid together must be in the same shift.');
+  if (head.paid_with_row_id) fail(400, 'That row is itself paid with another row. Choose the row where the payment is written.');
+  if (rowId && (await one(db, 'SELECT 1 AS ok FROM register_rows WHERE paid_with_row_id = ? LIMIT 1', rowId))) {
+    fail(400, 'Other bills are paid with this row, so it must keep the payment.');
+  }
 }
 
 const paymentStatements = (db: DB, businessId: string, rowId: string, pays: PaymentIn[], t: number) =>
@@ -256,13 +274,14 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
   const u = await getUpload(db, bid, c.req.param('uploadId'));
   if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
   const r = registerInput(await body(c));
+  await checkPaidWith(db, bid, null, u.business_day, r.paidWithRowId);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM register_rows WHERE upload_id = ?', u.id);
   const id = newId();
   const t = now();
   try {
     await db.batch([
-      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks, status, edited_by, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, u.id, last!.n + 1, u.business_day, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.tipPaise, r.remarks, r.status,
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, status, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, u.id, last!.n + 1, u.business_day, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.tipPaise, r.paidWithRowId, r.remarks, r.status,
         c.get('user').id, t, t),
       ...paymentStatements(db, bid, id, r.payments, t),
       stmt(db, "UPDATE uploads SET ocr_engine = coalesce(ocr_engine, 'manual') WHERE id = ?", u.id),
@@ -280,10 +299,11 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; remarks: string | null; ocr_original: string | null }>(db,
-    'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; ocr_original: string | null }>(db,
+    'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
   const r = registerInput(await body(c));
+  await checkPaidWith(db, bid, rowId, old.shift_day, r.paidWithRowId);
   const t = now();
   // A field a person changes counts as resolved: its "Needs input" mark goes, the others stay until the row is checked.
   // The original reading and its "unclear" list are kept as they were.
@@ -298,7 +318,7 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
       old.amount_paise !== r.amountPaise && 'amount',
       (old.discount_paise !== r.discountPaise || old.tip_paise !== r.tipPaise) && 'discount',
       (old.remarks ?? null) !== r.remarks && 'remarks',
-      key(oldPays.map((p) => ({ mode: p.mode, amount: p.amount_paise, label: p.column_label }))) !== key(r.payments.map((p) => ({ mode: p.mode, amount: p.amountPaise, label: p.columnLabel }))) && 'payments',
+      (old.paid_with_row_id !== r.paidWithRowId || key(oldPays.map((p) => ({ mode: p.mode, amount: p.amount_paise, label: p.column_label }))) !== key(r.payments.map((p) => ({ mode: p.mode, amount: p.amountPaise, label: p.columnLabel })))) && 'payments',
     ].filter(Boolean) as string[];
     if (changed.length) {
       const o = JSON.parse(ocr) as { resolved?: string[] };
@@ -308,8 +328,8 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   }
   try {
     await db.batch([
-      stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, discount_paise = ?, tip_paise = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?, ocr_original = ?
-        WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.tipPaise, r.remarks, r.status, c.get('user').id, t, ocr, rowId, bid),
+      stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, discount_paise = ?, tip_paise = ?, paid_with_row_id = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?, ocr_original = ?
+        WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.tipPaise, r.paidWithRowId, r.remarks, r.status, c.get('user').id, t, ocr, rowId, bid),
       stmt(db, 'DELETE FROM register_payments WHERE register_row_id = ?', rowId),
       ...paymentStatements(db, bid, rowId, r.payments, t),
     ]);
@@ -328,11 +348,16 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
   const bid = c.get('businessId');
   const u = await getUpload(db, bid, c.req.param('uploadId'));
   if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
-  const rows = await all<{ id: string; amount_paise: number; paid: number; n: number; ocr_original: string | null }>(db, `
-    SELECT r.id, r.amount_paise, r.ocr_original, coalesce(sum(p.amount_paise), 0) AS paid, count(p.id) AS n
+  // For bills paid together, the bills of the whole group are compared with the one payment, and the
+  // difference goes on the row that holds the payment.
+  const rows = await all<{ id: string; amount_paise: number; paid: number; n: number; ocr_original: string | null; others: number }>(db, `
+    SELECT r.id, r.amount_paise, r.ocr_original, coalesce(sum(p.amount_paise), 0) AS paid, count(p.id) AS n,
+      (SELECT coalesce(sum(m.amount_paise - m.discount_paise + m.tip_paise), 0) FROM register_rows m WHERE m.paid_with_row_id = r.id) AS others
     FROM register_rows r LEFT JOIN register_payments p ON p.register_row_id = r.id
-    WHERE r.upload_id = ? AND r.discount_paise = 0 AND r.tip_paise = 0 GROUP BY r.id`, u.id);
-  const fill = rows.filter((r) => r.n > 0 && r.paid > 0 && r.paid !== r.amount_paise);
+    WHERE r.upload_id = ? AND r.discount_paise = 0 AND r.tip_paise = 0 AND r.paid_with_row_id IS NULL GROUP BY r.id`, u.id);
+  const fill = rows
+    .map((r) => ({ ...r, amount_paise: r.amount_paise + r.others }))
+    .filter((r) => r.n > 0 && r.paid > 0 && r.paid !== r.amount_paise);
   if (!fill.length) return c.json({ filled: 0 });
   const t = now();
   const user = c.get('user').id;

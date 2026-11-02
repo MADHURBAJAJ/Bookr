@@ -27,6 +27,7 @@ export const RegisterReading = z.object({
       amount: Amount,
     })),
     remarks: z.string().nullable(),
+    paid_with_line: z.number().int().nullable().describe('If this bill has no payment of its own because one amount written on another line (often joined by a bracket or brace across rows) pays for several bills, the line number where that amount is written. Otherwise null.'),
     unclear: Unclear,
   })),
 });
@@ -58,6 +59,7 @@ export const INSTRUCTIONS = {
 Return one item in "rows" for every bill line, in page order. bill_type is "fnb" for F&B, "room" for Room, or "unclear".
 "amount" is the bill amount column. If a discount is written for a bill (in a Disc or Discount column, or as a remark such as "Disc 20"), put it in "discount"; otherwise null.
 For each amount written under a payment column, add an entry to "payments" with that column's heading and its mode (cash, upi or card). A bill can have more than one payment.
+Sometimes one amount pays for several bills: it is written once, often with a bracket or brace joining those rows. Put that payment only on the line where the amount is written, give the other bills no payments, and set their "paid_with_line" to that line number. Otherwise "paid_with_line" is null.
 Field names for "unclear": bill_no, bill_type, amount, discount, payments, remarks.
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
@@ -83,7 +85,9 @@ const base = (ctx: Ctx, orientation: string) => ({ engine: 'claude_vision', mode
 export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>): { statements: D1PreparedStatement[]; written: number | null } {
   const t = now();
   const statements: D1PreparedStatement[] = [stmt(ctx.db, 'DELETE FROM register_rows WHERE upload_id = ? AND status = ?', ctx.uploadId, 'draft')];
-  r.rows.forEach((row, i) => {
+
+  // First pass: values per row.
+  const rows = r.rows.map((row) => {
     const unclear = new Set(row.unclear);
     const amt = amount(row.amount);
     if (amt === null) unclear.add('amount');
@@ -94,26 +98,47 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
     if (row.bill_type === 'unclear') unclear.add('bill_type');
     const pays = row.payments.map((p) => ({ ...p, paise: amount(p.amount) }));
     if (pays.some((p) => p.paise === null)) unclear.add('payments');
-    // No discount written but less was paid than billed: fill the difference in, marked as worked out.
-    const inferred: string[] = [];
-    const paid = pays.reduce((t, p) => t + (p.paise ?? 0), 0);
-    let tip = 0;
-    if (disc === null && amt !== null && pays.length && pays.every((p) => p.paise !== null) && paid > 0 && paid !== amt) {
-      if (paid < amt) disc = amt - paid;
-      else tip = paid - amt; // paid more than billed: a tip
-      inferred.push('discount');
+    return { row, id: newId(), amt, disc, tip: 0, pays, unclear, inferred: [] as string[], paidWith: null as string | null };
+  });
+
+  // Bills paid together: a row pointing at the line where one shared payment is written. No chains.
+  const byLine = new Map(rows.map((x) => [x.row.line, x]));
+  for (const x of rows) {
+    const head = x.row.paid_with_line != null ? byLine.get(x.row.paid_with_line) : undefined;
+    if (!head || head === x || head.row.paid_with_line != null) continue;
+    x.paidWith = head.id;
+    x.pays = [];
+    x.inferred.push('payments');
+  }
+
+  // No discount written but the payment differs from the bill(s): fill the difference in, marked as worked out.
+  // A positive difference is a discount, a negative one a tip. For bills paid together it goes on the head row.
+  for (const x of rows) {
+    if (x.paidWith || x.disc !== null || x.amt === null || !x.pays.length || x.pays.some((p) => p.paise === null)) continue;
+    const members = rows.filter((m) => m.paidWith === x.id);
+    if (members.some((m) => m.amt === null)) continue;
+    const bills = x.amt + members.reduce((t, m) => t + (m.amt! - (m.disc ?? 0)), 0);
+    const paid = x.pays.reduce((t, p) => t + p.paise!, 0);
+    if (paid > 0 && paid !== bills) {
+      if (paid < bills) x.disc = Math.min(bills - paid, x.amt); else x.tip = paid - bills;
+      x.inferred.push('discount');
     }
-    const id = newId();
-    statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks,
-      status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
-      id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, row.bill_no?.trim() ?? '', row.bill_type === 'unclear' ? null : row.bill_type,
-      amt ?? 0, disc ?? 0, tip, row.remarks, JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear], inferred }), t));
-    for (const p of pays) {
+  }
+
+  rows.forEach((x, i) => {
+    statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise,
+      paid_with_row_id, remarks, status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
+      x.id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, x.row.bill_no?.trim() ?? '', x.row.bill_type === 'unclear' ? null : x.row.bill_type,
+      x.amt ?? 0, x.disc ?? 0, x.tip, null, x.row.remarks,
+      JSON.stringify({ ...base(ctx, r.orientation), line: x.row.line, read: x.row, unclear: [...x.unclear], inferred: x.inferred }), t));
+    for (const p of x.pays) {
       if (p.paise === null) continue;
       statements.push(stmt(ctx.db, `INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`, newId(), ctx.businessId, id, p.mode, p.column, p.paise, t));
+        VALUES (?, ?, ?, ?, ?, ?, ?)`, newId(), ctx.businessId, x.id, p.mode, p.column, p.paise, t));
     }
   });
+  // Links last, once every row of the page exists.
+  for (const x of rows) if (x.paidWith) statements.push(stmt(ctx.db, 'UPDATE register_rows SET paid_with_row_id = ? WHERE id = ?', x.paidWith, x.id));
   return { statements, written: amount(r.page_total) };
 }
 

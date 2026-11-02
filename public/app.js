@@ -905,6 +905,18 @@ function billCell(r, needsClass) {
       </select>` : html`<div class="tiny" style="color:#7F1D1D;margin-top:2px">Not in software report</div>`) : ''}`;
 }
 
+/** Under "Paid as": which bills one payment covers, and whether it adds up. */
+function groupNote(r) {
+  const ms = membersOf(r);
+  const head = headOf(r);
+  if (!ms.length && !head) return '';
+  const h = head ?? r;
+  const all = [h, ...membersOf(h)];
+  const ok = paidOf(h) === groupNet(h);
+  return html`<div class="tiny" style="margin-top:3px;color:${ok ? 'var(--teal-ink)' : '#7F1D1D'}">${head ? `Paid with row ${h.lineNo}` : `Also pays row${ms.length > 1 ? 's' : ''} ${ms.map((m) => m.lineNo).join(', ')}`}:
+    ₹ ${money(paidOf(h))} for bills of ₹ ${money(groupNet(h))} (rows ${all.map((x) => x.lineNo).join(', ')})${ok ? '' : ' — does not add up'}</div>`;
+}
+
 /** One register row. Editable in place unless the shift is confirmed; Edit opens the full form. */
 function regRowHtml(r, locked) {
   const q = unclearOf(r.ocrOriginal, r.status === 'draft');
@@ -912,7 +924,7 @@ function regRowHtml(r, locked) {
   if (locked) {
     return html`<tr data-row="${r.id}">
       <td class="note">${r.lineNo}</td><td>${r.status === 'checked' ? '✓' : ''}</td><td class="mono">${r.billNo}</td><td>${TYPE_LABELS[r.billType] ?? ''}</td>
-      <td class="amount">${money(r.amountPaise)}</td><td class="amount">${r.discountPaise ? money(r.discountPaise) : ''}</td><td>${payText(r.payments)}</td><td class="note">${r.remarks ?? ''}</td><td></td></tr>`;
+      <td class="amount">${money(r.amountPaise)}</td><td class="amount">${r.discountPaise ? money(r.discountPaise) : ''}</td><td>${r.paidWithRowId ? `Paid with row ${headOf(r)?.lineNo ?? '?'}` : payText(r.payments)}${groupNote(r)}</td><td class="note">${r.remarks ?? ''}</td><td></td></tr>`;
   }
   const single = r.payments.length <= 1;
   const p = r.payments[0];
@@ -928,10 +940,11 @@ function regRowHtml(r, locked) {
     <td><input class="cell mono ${nd('discount') || (inferredOf(r.ocrOriginal).has('discount') ? 'auto' : '')}" data-f="discount" value="${r.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0" style="width:72px;text-align:right" inputmode="decimal" aria-label="Discount"
       title="${inferredOf(r.ocrOriginal).has('discount') ? 'Filled in automatically: bill amount minus payments (negative = tip). Check it against the page.' : 'Discount; a tip is negative'}"></td>
     <td>${single ? html`<div style="display:flex;gap:6px">
-        <select class="cell ${nd('payments')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
-          ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}</select>
-        <input class="cell mono ${nd('payments') || (payDiffers(r) && p ? 'needs' : '')}" data-f="payAmount" value="${p ? rupeesForInput(p.amountPaise) : ''}" style="width:84px;text-align:right" inputmode="decimal" aria-label="Payment amount" ${p ? '' : 'hidden'}>
-      </div>` : html`<span class="${nd('payments') || payDiffers(r) ? 'error' : ''}">${payText(r.payments)}</span>`}</td>
+        <select class="cell ${nd('payments') || (inferredOf(r.ocrOriginal).has('payments') && r.paidWithRowId ? 'auto' : '')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
+          ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${!r.paidWithRowId && p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}
+          ${!membersOf(r).length ? regRows.filter((x) => x.id !== r.id && !x.paidWithRowId).map((x) => html`<option value="with|${x.id}" ${r.paidWithRowId === x.id ? 'selected' : ''}>Paid with row ${x.lineNo}</option>`) : ''}</select>
+        <input class="cell mono ${nd('payments') || (payDiffers(r) && p ? 'needs' : '')}" data-f="payAmount" value="${p ? rupeesForInput(p.amountPaise) : ''}" style="width:84px;text-align:right" inputmode="decimal" aria-label="Payment amount" ${p && !r.paidWithRowId ? '' : 'hidden'}>
+      </div>${groupNote(r)}` : html`<span class="${nd('payments') || payDiffers(r) ? 'error' : ''}">${payText(r.payments)}</span>${groupNote(r)}`}</td>
     <td><input class="cell ${nd('remarks')}" data-f="remarks" value="${r.remarks ?? ''}" style="width:130px" aria-label="Remarks"></td>
     <td style="text-align:right"><button class="btn plain" type="button" data-edit="${r.id}" style="min-height:36px">Edit</button></td>
   </tr>`;
@@ -940,7 +953,19 @@ function regRowHtml(r, locked) {
 const paidOf = (r) => r.payments.reduce((t, p) => t + p.amountPaise, 0);
 const netOf = (r) => r.amountPaise - (r.discountPaise ?? 0);
 /** A bill whose written payments do not equal its amount after discount (complimentary bills with none are fine). */
-const payDiffers = (r) => !(netOf(r) === 0 && r.payments.length === 0) && paidOf(r) !== netOf(r);
+// Rows of the register page on screen, for bills paid together (a group = head row + rows paid with it).
+let regRows = [];
+const membersOf = (r) => regRows.filter((x) => x.paidWithRowId === r.id);
+const headOf = (r) => (r.paidWithRowId ? regRows.find((x) => x.id === r.paidWithRowId) : null);
+/** The bills a row's payment has to cover: itself, plus the bills paid with it. */
+const groupNet = (head) => netOf(head) + membersOf(head).reduce((t, m) => t + netOf(m), 0);
+/** A bill whose payments do not cover it after discount or tip. For bills paid together the whole group is checked. */
+const payDiffers = (r) => {
+  const head = headOf(r);
+  if (head) return paidOf(head) !== groupNet(head);
+  if (membersOf(r).length) return paidOf(r) !== groupNet(r);
+  return !(netOf(r) === 0 && r.payments.length === 0) && paidOf(r) !== netOf(r);
+};
 
 function regSumHtml(u) {
   const bills = u.rows.reduce((s, r) => s + r.amountPaise, 0);
@@ -959,7 +984,18 @@ function regSumHtml(u) {
     ${off.length ? html`<br><span class="error">${off.length} row${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount after discount or tip (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
 }
 
+/** Fill button and the amber note: redrawn after every inline save. */
+function regToolsHtml(u, locked) {
+  return html`
+    ${!locked && u.rows.some((r) => !r.paidWithRowId && !r.discountPaise && r.payments.length && paidOf(r) > 0 && payDiffers(r))
+        ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts and tips</button>
+            <span class="note">Sets Disc = bill amount − payments on rows with none yet: a discount when less was paid, a tip (negative) when more was paid.</span></div>` : ''}
+      ${u.rows.some((r) => inferredOf(r.ocrOriginal).has('discount')) ? html`<div class="note"><span class="auto-key">Amber</span> discounts and tips were filled in automatically (bill amount − payments; negative = tip). Check them against the page.</div>` : ''}
+  `;
+}
+
 function registerPanel(biz, u) {
+  regRows = u.rows;
   const locked = u.shiftStatus === 'confirmed';
   const written = u.pageWrittenTotalPaise;
   const anyUnclear = u.rows.some((r) => unclearOf(r.ocrOriginal, r.status === 'draft').size);
@@ -971,10 +1007,7 @@ function registerPanel(biz, u) {
         <thead><tr><th>#</th><th title="Checked against the page">✓</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th style="text-align:right" title="Discount. Enter a tip as a negative number.">Disc / tip</th><th>Paid as</th><th>Remarks</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
       </table></div>
-      ${!locked && u.rows.some((r) => !r.discountPaise && r.payments.length && paidOf(r) > 0 && paidOf(r) !== r.amountPaise)
-        ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts and tips</button>
-            <span class="note">Sets Disc = bill amount − payments on rows with none yet: a discount when less was paid, a tip (negative) when more was paid.</span></div>` : ''}
-      ${u.rows.some((r) => inferredOf(r.ocrOriginal).has('discount')) ? html`<div class="note"><span class="auto-key">Amber</span> discounts and tips were filled in automatically (bill amount − payments; negative = tip). Check them against the page.</div>` : ''}
+      <div id="regtools">${regToolsHtml(u, locked)}</div>
       <div class="form-row" style="justify-content:space-between">
         <div class="note" id="regsum">${regSumHtml(u)}</div>
         ${locked ? '' : html`<form id="ptotal" class="form-row" style="align-items:flex-end"><div class="field"><label for="pt">Total written on the page (₹)</label><input id="pt" name="pageWrittenTotal" class="mono" value="${written == null ? '' : rupeesForInput(written)}"></div><button class="btn plain" type="submit">Save total</button></form>`}
@@ -995,13 +1028,15 @@ function wireInlineRows(biz, u) {
       payments = r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) }));
     } else {
       const sel = val('pay').value;
-      if (!sel) payments = [];
+      if (!sel || sel.startsWith('with|')) payments = [];
       else {
         const [mode, label] = sel.split('|');
         payments = [{ mode, columnLabel: label || null, amount: val('payAmount').value || val('amount').value }];
       }
     }
+    const sel = val('pay')?.value ?? '';
     return {
+      paidWithRowId: sel.startsWith('with|') ? sel.slice(5) : null,
       billNo: val('billNo').value.trim(), billType: val('billType').value || null, amount: val('amount').value, discount: val('discount').value || '0',
       remarks: val('remarks').value.trim() || null, payments, status: val('checked').checked ? 'checked' : 'draft',
     };
@@ -1012,7 +1047,8 @@ function wireInlineRows(biz, u) {
     // Keep a single payment in step with the bill amount when they were equal.
     const pa = tr.querySelector('[data-f="payAmount"]');
     if (changed.dataset.f === 'pay' && pa) {
-      pa.hidden = !changed.value;
+      pa.hidden = !changed.value || changed.value.startsWith('with|');
+      if (changed.value.startsWith('with|')) pa.value = '';
       if (changed.value && !pa.value) {
         const a = parsePaiseText(tr.querySelector('[data-f="amount"]').value);
         const d = parsePaiseText(tr.querySelector('[data-f="discount"]').value || '0');
@@ -1023,7 +1059,7 @@ function wireInlineRows(biz, u) {
       pa.value = '';
     }
     // Discount follows the payment: amount - payments. Negative when more was paid: a tip.
-    if (['amount', 'payAmount', 'pay'].includes(changed.dataset.f) && r.payments.length <= 1) {
+    if (['amount', 'payAmount', 'pay'].includes(changed.dataset.f) && r.payments.length <= 1 && !r.paidWithRowId && !membersOf(r).length && !String(tr.querySelector('[data-f="pay"]')?.value).startsWith('with|')) {
       const a = parsePaiseText(tr.querySelector('[data-f="amount"]').value);
       const sel = tr.querySelector('[data-f="pay"]');
       const paid = pa && sel?.value ? parsePaiseText(pa.value) : null;
@@ -1044,6 +1080,7 @@ function wireInlineRows(biz, u) {
       }
       const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`);
       u.rows = fresh.rows;
+      regRows = u.rows;
       // Redraw every row: fixing one bill number changes what the others are offered.
       const active = document.activeElement;
       const keep = active?.closest?.('tr')?.dataset.row ? { row: active.closest('tr').dataset.row, f: active.dataset.f } : null;
@@ -1053,6 +1090,8 @@ function wireInlineRows(biz, u) {
       if (keep?.f) body2.querySelector(`tr[data-row="${keep.row}"] [data-f="${keep.f}"]`)?.focus();
       else if (focus) body2.querySelector(`tr[data-row="${id}"] [data-f="${focus}"]`)?.focus();
       document.getElementById('regsum').innerHTML = regSumHtml(u).__html;
+      document.getElementById('regtools').innerHTML = regToolsHtml(u, false).__html;
+      wireFill();
     });
     queues.set(id, run);
   };
@@ -1076,7 +1115,9 @@ function rowForm(r) {
       <div class="field"><label>Bill amount (₹)</label><input name="amount" class="mono" value="${r ? rupeesForInput(r.amountPaise) : ''}" required></div>
       <div class="field"><label>Discount (₹, a tip as negative)</label><input name="discount" class="mono" value="${r?.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0"></div>
     </div>
-    <div class="note">Payments as written on the page. A bill paid partly in cash and partly by UPI has two lines.</div>
+    <div class="field" style="max-width:320px"><label>Paid together with another bill</label><select name="paidWithRowId"><option value="">No: this bill has its own payment</option>
+      ${(r && membersOf(r).length ? [] : regRows.filter((x) => !x.paidWithRowId && (!r || x.id !== r.id))).map((x) => html`<option value="${x.id}" ${r?.paidWithRowId === x.id ? 'selected' : ''}>Paid with row ${x.lineNo} (${x.billNo || 'no number'})</option>`)}</select></div>
+    <div class="note">Payments as written on the page. A bill paid partly in cash and partly by UPI has two lines. A bill paid together with another row has no payment lines of its own.</div>
     <div id="pays">${pays.map((p) => payLine(p))}</div>
     <button class="btn plain" type="button" id="addpay" style="align-self:flex-start">Add payment line</button>
     <div class="form-row">
@@ -1099,14 +1140,16 @@ function payLine(p) {
   </div>`;
 }
 
+let wireFill = () => {};
 function wireRegister(biz, u) {
-  document.getElementById('filldisc')?.addEventListener('click', async () => {
+  wireFill = () => document.getElementById('filldisc')?.addEventListener('click', async () => {
     try {
       const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/fill-discounts`, {});
       await reviewView(biz, u.id);
       document.getElementById('rmsg').innerHTML = html`<div class="ok-msg">Discount or tip filled in on ${r.filled} row${r.filled === 1 ? '' : 's'}. They are shown in amber: check them against the page.</div>`.__html;
     } catch (err) { showError(document.getElementById('rmsg'), err); }
   });
+  wireFill();
   const form = document.getElementById('rform');
   const total = document.getElementById('ptotal');
   total && onSubmit(total, async (d) => { await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { pageWrittenTotal: d.pageWrittenTotal || null }); reviewView(biz, u.id); });
@@ -1134,7 +1177,8 @@ function wireRegister(biz, u) {
       const paid = payments.reduce((t, p) => t + (parsePaiseText(p.amount) ?? 0), 0);
       if (a !== null && paid > 0 && paid !== a) discount = rupeesForInput(a - paid);
     }
-    const payload = { billNo: d.billNo, billType: d.billType || null, amount: d.amount, discount, remarks: d.remarks || null, payments, status: d.checked ? 'checked' : 'draft' };
+    const payload = { billNo: d.billNo, billType: d.billType || null, amount: d.amount, discount, remarks: d.remarks || null,
+      paidWithRowId: d.paidWithRowId || null, payments: d.paidWithRowId ? [] : payments, status: d.checked ? 'checked' : 'draft' };
     if (editing) await api('PUT', `/businesses/${biz.id}/register-rows/${editing}`, payload);
     else await api('POST', `/businesses/${biz.id}/uploads/${u.id}/register-rows`, payload);
     reviewView(biz, u.id);

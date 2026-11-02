@@ -128,6 +128,25 @@ describe('Read page: register', () => {
     expect(JSON.parse(rows[1].ocr_original).inferred).toEqual(['discount']);
   });
 
+  it('reads one payment shared by several bills as bills paid together', async () => {
+    const p = await page('bill_register');
+    const r = registerReading();
+    r.data.rows[7] = { ...r.data.rows[7], amount: '1890', discount: null, payments: [{ column: 'UPI Bank 2', mode: 'upi', amount: '3400' }], paid_with_line: null } as never;
+    r.data.rows[8] = { ...r.data.rows[8], amount: '836', discount: null, payments: [], paid_with_line: 8 } as never;
+    r.data.rows[9] = { ...r.data.rows[9], amount: '676', discount: null, payments: [], paid_with_line: 8 } as never;
+    mocked.mockResolvedValueOnce(r as never);
+    expect((await p.read()).status).toBe(200);
+    const rows = await sql`SELECT r.line_no, r.id, r.paid_with_row_id, r.discount_paise, r.tip_paise, r.ocr_original,
+      (SELECT count(*) FROM register_payments p WHERE p.register_row_id = r.id) AS pays FROM register_rows r WHERE line_no IN (8, 9, 10) ORDER BY line_no`;
+    expect(rows[1].paid_with_row_id).toBe(rows[0].id);
+    expect(rows[2].paid_with_row_id).toBe(rows[0].id);
+    expect(rows.map((x) => x.pays)).toEqual([1, 0, 0]);
+    // 1,890 + 836 + 676 = 3,402 against 3,400 paid: a discount of 2 on the row holding the payment.
+    expect(rows[0]).toMatchObject({ discount_paise: 200, tip_paise: 0 });
+    expect(JSON.parse(rows[0].ocr_original).inferred).toEqual(['discount']);
+    expect(JSON.parse(rows[1].ocr_original).inferred).toEqual(['payments']);
+  });
+
   it('refuses a confirmed shift', async () => {
     const p = await page('bill_register');
     await sql`INSERT INTO shifts (id, business_id, shift_day, status, created_at) VALUES ('s1', ${p.bid}, '2026-10-31', 'confirmed', 0)`;

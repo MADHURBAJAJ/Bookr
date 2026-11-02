@@ -12,7 +12,7 @@ export const NEEDS_DECISION: Difference[] = ['amount', 'mode', 'amount_and_mode'
 
 interface SwBill { id: string; pos_no: string; bill_no: string; paid_at: number; mode: string; amount_paise: number; is_complimentary: number }
 /** amount_paise here is the register amount after discount and tip (what should have been paid); discount_paise is signed (negative = tip). */
-interface RgRow { id: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; status: string; line_no: number; upload_id: string }
+interface RgRow { id: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; status: string; line_no: number; upload_id: string; paid_with_row_id: string | null }
 interface RgPay { register_row_id: string; mode: string; amount_paise: number; column_label: string | null }
 interface Comparison {
   id: string; pos_no: string; bill_no: string; software_bill_id: string | null; register_row_id: string | null;
@@ -44,25 +44,57 @@ export function classify(sw: { amount: number; mode: string } | null, rg: { amou
   return 'match';
 }
 
+export interface PaidGroup { headId: string; billNos: string[]; billsPaise: number; paidPaise: number; modes: string[] }
+
+/**
+ * Bills paid together: one payment written on the head row covers the head and every row that points
+ * to it. When the group was paid one way, each bill is treated as paid that way for its own amount
+ * after discount and tip, so each bill can match its own software bill and becomes its own income row.
+ * The group as a whole must balance (see shiftView); a group paid more than one way is a blocker.
+ */
+export function applyPaidTogether(rows: RgRow[], written: Map<string, RgPay[]>) {
+  const paysByRow = new Map(written);
+  const members = new Map<string, RgRow[]>();
+  for (const r of rows) if (r.paid_with_row_id) members.set(r.paid_with_row_id, [...(members.get(r.paid_with_row_id) ?? []), r]);
+  const groups: PaidGroup[] = [];
+  for (const head of rows) {
+    const ms = members.get(head.id);
+    if (!ms || head.paid_with_row_id) continue;
+    const pays = written.get(head.id) ?? [];
+    const modes = [...new Set(pays.map((p) => p.mode))];
+    const all = [head, ...ms];
+    groups.push({ headId: head.id, billNos: all.map((r) => r.bill_no), billsPaise: all.reduce((t, r) => t + r.amount_paise, 0), paidPaise: pays.reduce((t, p) => t + p.amount_paise, 0), modes });
+    if (modes.length === 1) {
+      for (const r of all) paysByRow.set(r.id, [{ register_row_id: r.id, mode: modes[0], amount_paise: r.amount_paise, column_label: pays[0].column_label }]);
+    } else {
+      for (const m of ms) paysByRow.set(m.id, []);
+    }
+  }
+  return { paysByRow, groups };
+}
+
 // One round trip: D1 runs a batch of reads together.
 async function loadShiftData(db: DB, businessId: string, day: string) {
   const [status, sw, rg, pays, existing] = await db.batch([
     stmt(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     stmt(db, `SELECT id, pos_no, bill_no, paid_at, mode, amount_paise, is_complimentary FROM software_bills
       WHERE business_id = ? AND shift_day = ? ORDER BY paid_at`, businessId, day),
-    stmt(db, `SELECT id, bill_no, bill_type, amount_paise - discount_paise + tip_paise AS amount_paise, discount_paise - tip_paise AS discount_paise, status, line_no, upload_id FROM register_rows
+    stmt(db, `SELECT id, bill_no, bill_type, amount_paise - discount_paise + tip_paise AS amount_paise, discount_paise - tip_paise AS discount_paise, status, line_no, upload_id, paid_with_row_id FROM register_rows
       WHERE business_id = ? AND shift_day = ? ORDER BY upload_id, line_no`, businessId, day),
     stmt(db, `SELECT p.register_row_id, p.mode, p.amount_paise, p.column_label FROM register_payments p
       JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
     stmt(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day),
   ]);
-  const paysByRow = new Map<string, RgPay[]>();
-  for (const p of pays.results as RgPay[]) paysByRow.set(p.register_row_id, [...(paysByRow.get(p.register_row_id) ?? []), p]);
+  const written = new Map<string, RgPay[]>();
+  for (const p of pays.results as RgPay[]) written.set(p.register_row_id, [...(written.get(p.register_row_id) ?? []), p]);
+  const rows = rg.results as RgRow[];
+  const { paysByRow, groups } = applyPaidTogether(rows, written);
   return {
     status: (status.results[0] as { status: string } | undefined)?.status ?? null,
     sw: sw.results as SwBill[],
-    rg: rg.results as RgRow[],
+    rg: rows,
     paysByRow,
+    groups,
     existing: existing.results as Comparison[],
   };
 }
@@ -160,7 +192,7 @@ async function cashAccountId(db: DB, businessId: string): Promise<string | null>
 
 /** Everything the Compare sales screen shows for one shift, plus what still blocks confirming it. */
 export async function shiftView(db: DB, businessId: string, day: string) {
-  const [{ sw, rg, paysByRow }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
+  const [{ sw, rg, paysByRow, groups }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
     loadShiftData(db, businessId, day),
     coverage(db, businessId, day),
     all<Comparison & { paid_at: number | null }>(db, `
@@ -189,7 +221,12 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   for (const r of rg) counts.set(r.bill_no, (counts.get(r.bill_no) ?? 0) + 1);
   const repeated = [...counts].filter(([, n]) => n > 1).map(([b]) => b);
   if (repeated.length) blockers.push(`Bill ${repeated.join(', ')} appears more than once in the register.`);
-  const unbalanced = rg.filter((r) => (paysByRow.get(r.id) ?? []).reduce((s, p) => s + p.amount_paise, 0) !== r.amount_paise && r.amount_paise !== 0);
+  const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
+  const unbalanced = rg.filter((r) => !grouped.has(r.id) && (paysByRow.get(r.id) ?? []).reduce((s, p) => s + p.amount_paise, 0) !== r.amount_paise && r.amount_paise !== 0);
+  for (const g of groups) {
+    if (g.modes.length !== 1) blockers.push(`Bills ${g.billNos.join(', ')} are paid together, so their one payment must be a single mode (cash, UPI or card).`);
+    else if (g.paidPaise !== g.billsPaise) blockers.push(`Bills ${g.billNos.join(', ')} are paid together: the payment does not equal the bills after discounts and tips.`);
+  }
   if (unbalanced.length) blockers.push(`The payments written for bill ${unbalanced.map((r) => r.bill_no).join(', ')} do not add up to the bill amount.`);
   const typed = new Set(typeHeads.map((t) => t.bill_type));
   const counted = comparisons.filter((c) => c.difference === 'match' || (c.decision && c.decision !== 'leave_out'));

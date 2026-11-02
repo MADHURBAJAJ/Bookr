@@ -576,3 +576,69 @@ describe('deleting an upload', () => {
     expect((await h.clients.owner.del(`/businesses/${h.bid}/uploads/${exp}`)).status).toBe(409);
   });
 });
+
+describe('bills paid together', () => {
+  // Three register bills settled by one UPI payment written on the first of them.
+  const setup = async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => !['2610311', '2610314', '26103122'].includes(r.billNo));
+    const pageId = await fullShift(h, reg);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    const head = (await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '2370' }])).json.id;   // 420 + 1180 + 780 = 2,380
+    const b2 = (await add('2610314', '1180', [], { paidWithRowId: head })).json.id;
+    const b3 = (await add('26103122', '780', [], { paidWithRowId: head })).json.id;
+    return { h, pageId, head, b2, b3 };
+  };
+
+  it('each bill matches its own software bill through the group payment mode; the group must balance', async () => {
+    const { h, pageId } = await setup();
+    let v = await view(h);
+    for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
+    expect(v.json.blockers.join(' ')).toMatch(/paid together: the payment does not equal/);
+    // 2,370 paid for 2,380 of bills: Fill puts the 10 discount on the row holding the payment.
+    const fill = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
+    expect(fill.json.filled).toBe(1);
+    const [row] = await sql`SELECT discount_paise FROM register_rows WHERE bill_no = '2610311'`;
+    expect(row.discount_paise).toBe(1000);
+    v = await view(h);
+    expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
+    expect(byBill(v, '2610311').difference).toBe('amount'); // 410 after discount against 420 in the software
+  });
+
+  it('confirming books one income row per bill, in the group mode', async () => {
+    const { h } = await setup();
+    await sql`UPDATE register_payments SET amount_paise = 238000 WHERE register_row_id = (SELECT id FROM register_rows WHERE bill_no = '2610311')`;
+    await decideAll(h);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const rows = await sql`SELECT bill_no, amount_paise, payment_mode, match_status FROM transactions WHERE bill_no IN ('2610311', '2610314', '26103122') ORDER BY bill_no`;
+    expect(rows).toEqual([
+      { bill_no: '2610311', amount_paise: 42000, payment_mode: 'upi', match_status: 'awaiting_bank_match' },
+      { bill_no: '26103122', amount_paise: 78000, payment_mode: 'upi', match_status: 'awaiting_bank_match' },
+      { bill_no: '2610314', amount_paise: 118000, payment_mode: 'upi', match_status: 'awaiting_bank_match' },
+    ]);
+  });
+
+  it('refuses chains, itself, another shift, and a payment on a bill paid with another', async () => {
+    const { h, pageId, head, b2 } = await setup();
+    const put = (id: string, extra: Record<string, unknown>) =>
+      h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${id}`, { billNo: 'x', billType: 'fnb', amount: '1', payments: [], ...extra });
+    expect((await put(b2, { paidWithRowId: b2 })).status).toBe(400);
+    const other = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: '9', billType: 'fnb', amount: '1', payments: [] })).json.id;
+    expect((await put(other, { paidWithRowId: b2 })).json.error).toMatch(/itself paid with another row/);
+    expect((await put(head, { paidWithRowId: other })).json.error).toMatch(/must keep the payment/);
+    expect((await put(other, { paidWithRowId: head, payments: [{ mode: 'cash', amount: '1' }] })).status).toBe(400);
+    const nextDay = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-11-01`, png(41), 'image/png')).json.id;
+    const far = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${nextDay}/register-rows`, { billNo: '8', billType: 'fnb', amount: '1', payments: [] })).json.id;
+    expect((await put(far, { paidWithRowId: head })).json.error).toMatch(/same shift/);
+  });
+
+  it('a group paid more than one way cannot be confirmed', async () => {
+    const { h, head } = await setup();
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, {
+      billNo: '2610311', billType: 'fnb', amount: '420', status: 'checked',
+      payments: [{ mode: 'upi', amount: '2000' }, { mode: 'cash', amount: '380' }],
+    });
+    expect((await view(h)).json.blockers.join(' ')).toMatch(/single mode/);
+  });
+});

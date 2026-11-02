@@ -259,6 +259,9 @@ Each line of an expense list becomes a draft expense row in `transactions`, paid
 - **Photos are served only through the Worker,** after the role check, with `Cache-Control: no-store` and a sandbox Content-Security-Policy, instead of signed links. Only JPG, PNG and PDF are accepted, checked from the file's first bytes.
 - **Database triggers lock a confirmed shift.** Its register rows, software bills and decisions cannot change, and it cannot be confirmed twice, whichever request runs first.
 
+- **Bills paid together (approved 2 Nov 2026).** One payment written on one register row can cover several bills: the other rows point to it with `register_rows.paid_with_row_id` (same shift, no chains, no payments of their own). The group balances when its bills, after discounts and tips, equal the one payment; the difference is filled on the row holding the payment. For comparison and confirmation each bill counts as paid in the group's single mode for its own amount, so each matches its own software bill and becomes its own income row. Read page marks bracketed shared payments. **Phase 3 must allow one bank credit to match a group of register bills.**
+- **Discounts and tips on register bills.** `discount_paise` and `tip_paise` (both whole paise, never negative), shown as one signed "Disc / tip" figure. A bill balances when payments equal amount − discount + tip; Compare sales uses that figure.
+
 ### New Cloudflare resource
 
 An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tier.
