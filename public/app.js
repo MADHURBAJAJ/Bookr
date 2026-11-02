@@ -596,10 +596,10 @@ async function uploadView(biz) {
         <div class="field"><label for="ud">Day</label><input id="ud" name="day" type="date" value="${todayIst()}" required></div>
         <div class="field"><label for="uk">What is it?</label><select id="uk" name="kind">
           ${Object.entries(KIND_LABELS).map(([k, l]) => html`<option value="${k}">${l}${k === 'software_sales_csv' ? ' (CSV)' : ''}</option>`)}</select></div>
-        <div class="field" style="flex:2 1 260px"><label for="uf">File</label><input id="uf" name="file" type="file" accept=".csv,text/csv" required></div>
+        <div class="field" style="flex:2 1 260px"><label for="uf">Files (up to 10)</label><input id="uf" name="file" type="file" accept=".csv,text/csv" multiple required></div>
         <button class="btn" type="submit">Upload</button>
       </form>
-      <div class="note" id="uhint">A CSV from the hotel software is checked against its own footer before anything is saved.</div>
+      <div class="note" id="uhint">CSVs from the hotel software, up to 10 at a time. Each is checked against its own footer before anything is saved.</div>
       <div id="umsg"></div>
       <div id="preview"></div>
     </section>
@@ -623,57 +623,121 @@ async function uploadView(biz) {
     const csv = kind.value === 'software_sales_csv';
     file.accept = csv ? '.csv,text/csv' : 'image/jpeg,image/png,application/pdf';
     document.getElementById('uhint').textContent = csv
-      ? 'A CSV from the hotel software is checked against its own footer before anything is saved.'
-      : 'JPG, PNG or PDF. Reading pages automatically (OCR) is not connected yet, so you type the rows in on Review, beside the photo.';
+      ? 'CSVs from the hotel software, up to 10 at a time. Each is checked against its own footer before anything is saved.'
+      : 'JPG, PNG or PDF, up to 10 at a time, all for the day and page type chosen. Read them with Claude afterwards, or type the rows in on Review.';
     document.getElementById('preview').innerHTML = '';
   });
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     msg.innerHTML = '';
-    const f = file.files[0];
+    const files = [...file.files];
     const day = document.getElementById('ud').value;
-    if (!f) return;
-    try {
-      if (kind.value === 'software_sales_csv') return csvPreview(biz, day, await f.text());
-      const { id } = await apiUpload(`/businesses/${biz.id}/uploads?kind=${kind.value}&day=${day}`, f);
-      go(`#/b/${biz.id}/review/${id}`);
-    } catch (err) { showError(msg, err); }
+    if (!files.length) return;
+    if (files.length > MAX_FILES) return showError(msg, new Error(`Choose at most ${MAX_FILES} files at a time.`));
+    const box = document.getElementById('preview');
+    box.innerHTML = '';
+    if (kind.value === 'software_sales_csv') {
+      // One preview card per CSV, each with its own covered period and Import button.
+      for (const f of files) {
+        const card = document.createElement('div');
+        box.appendChild(card);
+        await csvPreview(biz, day, await f.text(), undefined, card, f.name, files.length > 1);
+      }
+      return;
+    }
+    if (files.length === 1) {
+      try {
+        const { id } = await apiUpload(`/businesses/${biz.id}/uploads?kind=${kind.value}&day=${day}`, files[0]);
+        return go(`#/b/${biz.id}/review/${id}`);
+      } catch (err) { return showError(msg, err); }
+    }
+    await uploadMany(biz, day, kind.value, files, box);
   });
 }
 
-async function csvPreview(biz, day, csv, replaces) {
-  const box = document.getElementById('preview');
-  const msg = document.getElementById('umsg');
+const MAX_FILES = 10;
+
+/** Uploads photos one after another with a status line each, then offers to read them all. */
+async function uploadMany(biz, day, kind, files, box) {
+  const lines = files.map((f) => ({ name: f.name, state: 'Waiting', id: null, error: null }));
+  const draw = () => {
+    box.innerHTML = html`<div class="inset" style="gap:6px">
+      <div style="font-size:15px;font-weight:600">${KIND_LABELS[kind]} · ${dayLabel(day)}</div>
+      ${lines.map((l) => html`<div class="list-row" style="padding:6px 0"><span class="mono" style="font-size:13px">${l.name}</span>
+        <span style="display:flex;gap:10px;align-items:center">${l.error ? html`<span class="error">${l.error}</span>`
+          : l.id ? html`<span class="chip ok">${l.state}</span><a href="#/b/${biz.id}/review/${l.id}">Review</a>`
+          : html`<span class="chip wait">${l.state}</span>`}</span></div>`)}
+      <div id="manyactions"></div>
+    </div>`.__html;
+  };
+  draw();
+  for (const l of lines) {
+    l.state = 'Uploading…';
+    draw();
+    try {
+      const { id } = await apiUpload(`/businesses/${biz.id}/uploads?kind=${kind}&day=${day}`, files[lines.indexOf(l)]);
+      l.id = id;
+      l.state = 'Uploaded';
+    } catch (err) { l.error = err.message; }
+    draw();
+  }
+  const done = lines.filter((l) => l.id);
+  if (!done.length || !READABLE.includes(kind) || !biz.actions.includes('rows.upload')) return;
+  const status = await api('GET', `/businesses/${biz.id}/ocr`).catch(() => null);
+  if (!status?.configured) return;
+  const actions = document.getElementById('manyactions');
+  actions.innerHTML = html`<div class="form-row" style="align-items:center;margin-top:6px">
+    <button class="btn" type="button" id="readall">Read all ${done.length} with Claude</button>
+    <span class="note">Reads one page after another. Uses ${done.length} of today's page reads (${status.usedToday} of ${status.dailyLimit} used).</span></div>`.__html;
+  document.getElementById('readall').addEventListener('click', async () => {
+    for (const l of done) {
+      l.state = 'Reading…';
+      draw();
+      try {
+        const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${l.id}/read`, {});
+        l.state = kind === 'cash_summary' ? 'Read' : `Read: ${r.rows} row${r.rows === 1 ? '' : 's'}${r.unclearCells ? `, ${r.unclearCells} to check` : ''}${r.totalMatches === false ? ', total differs' : ''}`;
+      } catch (err) { l.state = 'Uploaded'; l.error = `Not read: ${err.message}`; }
+      draw();
+    }
+  });
+}
+
+async function csvPreview(biz, day, csv, replaces, box = document.getElementById('preview'), name = '', many = false) {
   let p;
   try { p = await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, dryRun: true, replaces }); }
-  catch (err) { box.innerHTML = ''; return showError(msg, err); }
+  catch (err) {
+    box.innerHTML = html`<div class="inset">${name ? html`<div class="mono" style="font-size:13px">${name}</div>` : ''}<div class="form-msg"></div></div>`.__html;
+    return showError(box.querySelector('.form-msg'), err);
+  }
   const f = p.footer;
   box.innerHTML = html`
-    <form class="inset" id="imp">
-      <div style="font-size:15px;font-weight:600">Check before importing</div>
+    <form class="inset" data-imp>
+      <div style="font-size:15px;font-weight:600">Check before importing${name ? html` <span class="mono" style="font-weight:400;font-size:13px">${name}</span>` : ''}</div>
       <div class="note">${p.bills} bills (${p.complimentary} complimentary), ${when(p.firstPaidAt)} to ${when(p.lastPaidAt)}. The footer matches: UPI ₹ ${money(f.upiPaise)}, Card ₹ ${money(f.cardPaise)}, Cash ₹ ${money(f.cashPaise)}, total ₹ ${money(f.totalPaise)}.</div>
       <div class="note">Shifts touched: ${p.shifts.map(dayLabel).join(', ')}. New bills: ${p.add}. Already imported with the same values (skipped): ${p.skip}. Already imported with different values (flagged for you to decide): ${p.flag}.</div>
       ${p.confirmedShifts.length ? html`<div class="error">This file would change a confirmed shift (${p.confirmedShifts.map(dayLabel).join(', ')}). An Owner must reopen it first.</div>` : ''}
       <div class="form-row">
-        <div class="field"><label for="cf">Covers from (India time)</label><input id="cf" type="datetime-local" step="1" value="${toLocalInput(p.coversFrom)}" required></div>
-        <div class="field"><label for="ct">Covers to</label><input id="ct" type="datetime-local" step="1" value="${toLocalInput(p.coversTo)}" required></div>
-        <button class="btn plain" type="button" id="whole">Whole day${p.shifts.length > 1 ? 's' : ''}</button>
+        <div class="field"><label>Covers from (India time)</label><input data-cf type="datetime-local" step="1" value="${toLocalInput(p.coversFrom)}" required></div>
+        <div class="field"><label>Covers to</label><input data-ct type="datetime-local" step="1" value="${toLocalInput(p.coversTo)}" required></div>
+        <button class="btn plain" type="button" data-whole>Whole day${p.shifts.length > 1 ? 's' : ''}</button>
       </div>
       <div class="note">These start at the first and last bill. If the report covers the whole day, set it from 00:00:00 to 23:59:59, or the shift will show missing hours.</div>
       <div class="form-msg"></div>
       <button class="btn" type="submit" ${p.confirmedShifts.length ? 'disabled' : ''}>Import ${p.add} bill${p.add === 1 ? '' : 's'}</button>
     </form>`.__html;
-  document.getElementById('whole').addEventListener('click', () => {
-    document.getElementById('cf').value = `${toLocalInput(p.firstPaidAt).slice(0, 10)}T00:00:00`;
-    document.getElementById('ct').value = `${toLocalInput(p.lastPaidAt).slice(0, 10)}T23:59:59`;
+  const cf = box.querySelector('[data-cf]');
+  const ct = box.querySelector('[data-ct]');
+  box.querySelector('[data-whole]').addEventListener('click', () => {
+    cf.value = `${toLocalInput(p.firstPaidAt).slice(0, 10)}T00:00:00`;
+    ct.value = `${toLocalInput(p.lastPaidAt).slice(0, 10)}T23:59:59`;
   });
-  onSubmit(document.getElementById('imp'), async () => {
-    const coversFrom = fromLocalInput(document.getElementById('cf').value);
-    const coversTo = fromLocalInput(document.getElementById('ct').value);
+  onSubmit(box.querySelector('[data-imp]'), async () => {
     try {
-      await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, coversFrom, coversTo, replaces });
+      await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, coversFrom: fromLocalInput(cf.value), coversTo: fromLocalInput(ct.value), replaces });
     } catch (err) { const e = new Error([err.message, ...(err.problems ?? [])].join(' ')); throw e; }
-    go(`#/b/${biz.id}/compare/${p.shifts[p.shifts.length - 1]}`);
+    const last = p.shifts[p.shifts.length - 1];
+    if (!many) return go(`#/b/${biz.id}/compare/${last}`);
+    box.innerHTML = html`<div class="inset"><span><span class="chip ok">Imported</span> ${name}: ${p.add} bill${p.add === 1 ? '' : 's'} · <a href="#/b/${biz.id}/compare/${last}">Compare ${dayLabel(last)} shift</a></span></div>`.__html;
   });
 }
 
