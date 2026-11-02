@@ -7,6 +7,7 @@ import { newId, now, stmt, type DB } from './db';
 import { parsePaise } from './money';
 import type { PageImage } from './claude';
 import { byName, inText, pickHead, type Party, type PastLine } from './parties';
+import { spreadDifference } from './discounts';
 
 const Orientation = z.enum(['upright', 'rotated_90_clockwise', 'rotated_180', 'rotated_90_counterclockwise']);
 const Amount = z.string().nullable().describe('Digits exactly as written, with a decimal point if written, no currency sign. null if unreadable or blank.');
@@ -120,16 +121,22 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
   }
 
   // No discount written but the payment differs from the bill(s): fill the difference in, marked as worked out.
-  // A positive difference is a discount, a negative one a tip. For bills paid together it goes on the head row.
+  // A positive difference is a discount, a negative one a tip. For bills paid together a discount is spread
+  // over the group's bills by amount; a tip goes on the row with the payment. Written discounts are kept.
   for (const x of rows) {
-    if (x.paidWith || x.disc !== null || x.amt === null || !x.pays.length || x.pays.some((p) => p.paise === null)) continue;
+    if (x.paidWith || x.amt === null || !x.pays.length || x.pays.some((p) => p.paise === null)) continue;
     const members = rows.filter((m) => m.paidWith === x.id);
-    if (members.some((m) => m.amt === null)) continue;
-    const bills = x.amt + members.reduce((t, m) => t + (m.amt! - (m.disc ?? 0)), 0);
+    const group = [x, ...members];
+    if (group.some((m) => m.amt === null || m.disc !== null)) continue;
     const paid = x.pays.reduce((t, p) => t + p.paise!, 0);
-    if (paid > 0 && paid !== bills) {
-      if (paid < bills) x.disc = Math.min(bills - paid, x.amt); else x.tip = paid - bills;
-      x.inferred.push('discount');
+    if (paid <= 0) continue;
+    const spread = spreadDifference({ id: x.id, amountPaise: x.amt }, members.map((m) => ({ id: m.id, amountPaise: m.amt! })), paid);
+    if (!spread) continue;
+    for (const m of group) {
+      const v = spread.get(m.id)!;
+      if (!v.discountPaise && !v.tipPaise) continue;
+      m.disc = v.discountPaise; m.tip = v.tipPaise;
+      m.inferred.push('discount');
     }
   }
 

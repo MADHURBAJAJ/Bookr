@@ -1094,9 +1094,10 @@ function regSumHtml(u) {
 /** Fill button and the amber note: redrawn after every inline save. */
 function regToolsHtml(u, locked) {
   return html`
-    ${!locked && u.rows.some((r) => !r.paidWithRowId && !r.discountPaise && r.payments.length && paidOf(r) > 0 && payDiffers(r))
+    ${!locked && u.rows.some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
+        && [r, ...membersOf(r)].every((m) => (!m.discountPaise && !m.tipPaise) || inferredOf(m.ocrOriginal).has('discount')))
         ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts and tips</button>
-            <span class="note">Sets Disc = bill amount − payments on rows with none yet: a discount when less was paid, a tip (negative) when more was paid.</span></div>` : ''}
+            <span class="note">Sets Disc = bill amount − payments where nobody has typed one: a discount when less was paid, a tip (negative) when more was paid. For bills paid together, the discount is shared across the bills by amount.</span></div>` : ''}
       ${u.rows.some((r) => inferredOf(r.ocrOriginal).has('discount')) ? html`<div class="note"><span class="auto-key">Amber</span> discounts and tips were filled in automatically (bill amount − payments; negative = tip). Check them against the page.</div>` : ''}
   `;
 }

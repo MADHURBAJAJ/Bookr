@@ -7,9 +7,17 @@ import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files'
 import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { istDay, shiftDayOf } from '../time';
+import { spreadDifference } from '../discounts';
 import { can, type Role } from '../permissions';
 
 export const captureRoutes = new Hono<AppEnv>();
+
+/** A field the app worked out that nobody has changed since. */
+function stillInferred(ocrOriginal: string | null, field: string): boolean {
+  if (!ocrOriginal) return false;
+  const o = JSON.parse(ocrOriginal) as { inferred?: string[]; resolved?: string[] };
+  return (o.inferred ?? []).includes(field) && !(o.resolved ?? []).includes(field);
+}
 
 const PHOTO_KINDS = ['bill_register', 'expense_list', 'cash_summary', 'single_bill'] as const;
 type PhotoKind = (typeof PHOTO_KINDS)[number];
@@ -393,31 +401,44 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
   const bid = c.get('businessId');
   const u = await getUpload(db, bid, c.req.param('uploadId'));
   if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
-  // For bills paid together, the bills of the whole group are compared with the one payment, and the
-  // difference goes on the row that holds the payment.
-  const rows = await all<{ id: string; amount_paise: number; paid: number; n: number; ocr_original: string | null; others: number }>(db, `
-    SELECT r.id, r.amount_paise, r.ocr_original, coalesce(sum(p.amount_paise), 0) AS paid, count(p.id) AS n,
-      (SELECT coalesce(sum(m.amount_paise - m.discount_paise + m.tip_paise), 0) FROM register_rows m WHERE m.paid_with_row_id = r.id) AS others
+  // For bills paid together, the bills of the whole group are compared with the one payment. A discount is
+  // spread over the group's bills by amount; a tip goes on the row with the payment. A group is filled only
+  // when none of its discounts or tips were typed by a person (amounts filled in earlier are worked out again).
+  const rows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; ocr_original: string | null; paid: number; n: number }>(db, `
+    SELECT r.id, r.amount_paise, r.discount_paise, r.tip_paise, r.paid_with_row_id, r.ocr_original,
+      coalesce(sum(p.amount_paise), 0) AS paid, count(p.id) AS n
     FROM register_rows r LEFT JOIN register_payments p ON p.register_row_id = r.id
-    WHERE r.upload_id = ? AND r.discount_paise = 0 AND r.tip_paise = 0 AND r.paid_with_row_id IS NULL GROUP BY r.id`, u.id);
-  const fill = rows
-    .map((r) => ({ ...r, amount_paise: r.amount_paise + r.others }))
-    .filter((r) => r.n > 0 && r.paid > 0 && r.paid !== r.amount_paise);
+    WHERE r.upload_id = ? AND r.business_id = ? GROUP BY r.id`, u.id, bid);
+  const autoOrNone = (r: (typeof rows)[number]) => (!r.discount_paise && !r.tip_paise) || stillInferred(r.ocr_original, 'discount');
+  const fill: { id: string; discountPaise: number; tipPaise: number; ocr: string | null }[] = [];
+  for (const head of rows.filter((r) => !r.paid_with_row_id && r.n > 0 && r.paid > 0)) {
+    const group = [head, ...rows.filter((m) => m.paid_with_row_id === head.id)];
+    if (!group.every(autoOrNone)) continue;
+    const spread = spreadDifference({ id: head.id, amountPaise: head.amount_paise }, group.slice(1).map((m) => ({ id: m.id, amountPaise: m.amount_paise })), head.paid);
+    if (!spread) continue;
+    for (const r of group) {
+      const v = spread.get(r.id)!;
+      if (v.discountPaise === r.discount_paise && v.tipPaise === r.tip_paise) continue;
+      let ocr = r.ocr_original;
+      const o = ocr ? JSON.parse(ocr) : {};
+      const inferred = new Set<string>((o.inferred ?? []).filter((f: string) => f !== 'discount'));
+      if (v.discountPaise || v.tipPaise) inferred.add('discount');
+      o.inferred = [...inferred];
+      o.resolved = (o.resolved ?? []).filter((f: string) => f !== 'discount');
+      ocr = JSON.stringify(o);
+      fill.push({ id: r.id, ...v, ocr });
+    }
+  }
   if (!fill.length) return c.json({ filled: 0 });
   const t = now();
   const user = c.get('user').id;
   try {
     await db.batch([
-      ...fill.map((r) => {
-        let ocr = r.ocr_original;
-        if (ocr) { const o = JSON.parse(ocr); o.inferred = [...new Set([...(o.inferred ?? []), 'discount'])]; ocr = JSON.stringify(o); }
-        const d = r.amount_paise - r.paid; // positive: discount; negative: tip
-        return stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ? AND discount_paise = 0 AND tip_paise = 0',
-          d > 0 ? d : 0, d < 0 ? -d : 0, ocr, user, t, r.id);
-      }),
+      ...fill.map((r) => stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?',
+        r.discountPaise, r.tipPaise, r.ocr, user, t, r.id)),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
         VALUES (?, ?, 'register.fill_discounts', 'uploads', ?, NULL, ?, ?)`, bid, user, u.id,
-        JSON.stringify(fill.map((r) => ({ rowId: r.id, discountPaise: r.amount_paise - r.paid }))), t),
+        JSON.stringify(fill.map((r) => ({ rowId: r.id, discountPaise: r.discountPaise, tipPaise: r.tipPaise }))), t),
     ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
