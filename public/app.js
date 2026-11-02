@@ -862,7 +862,7 @@ function regRowHtml(r, locked) {
       <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
     <td><input class="cell mono ${nd('amount') || (payDiffers(r) ? 'needs' : '')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount" title="${payDiffers(r) ? `Payments add up to ${money(paidOf(r))}` : ''}"></td>
     <td><input class="cell mono ${nd('discount') || (inferredOf(r.ocrOriginal).has('discount') ? 'auto' : '')}" data-f="discount" value="${r.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0" style="width:72px;text-align:right" inputmode="decimal" aria-label="Discount"
-      title="${inferredOf(r.ocrOriginal).has('discount') ? 'Filled in automatically: bill amount minus payments. Check it against the page.' : ''}"></td>
+      title="${inferredOf(r.ocrOriginal).has('discount') ? 'Filled in automatically: bill amount minus payments (negative = tip). Check it against the page.' : 'Discount; a tip is negative'}"></td>
     <td>${single ? html`<div style="display:flex;gap:6px">
         <select class="cell ${nd('payments')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
           ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}</select>
@@ -880,18 +880,19 @@ const payDiffers = (r) => !(netOf(r) === 0 && r.payments.length === 0) && paidOf
 
 function regSumHtml(u) {
   const bills = u.rows.reduce((s, r) => s + r.amountPaise, 0);
-  const disc = u.rows.reduce((s, r) => s + (r.discountPaise ?? 0), 0);
+  const disc = u.rows.reduce((s, r) => s + Math.max(r.discountPaise ?? 0, 0), 0);
+  const tips = u.rows.reduce((s, r) => s + Math.max(-(r.discountPaise ?? 0), 0), 0);
   const paid = u.rows.reduce((s, r) => s + paidOf(r), 0);
   const written = u.pageWrittenTotalPaise;
   const off = u.rows.filter(payDiffers);
   const vsPage = written == null ? 'Enter the total written on the page to check it.'
     : written === bills && written === paid ? html`<span class="ok-msg">Both match the written total.</span>`
     : written === bills ? html`<span class="ok-msg">Bill amounts match the written total.</span>`
-    : disc && written === bills - disc ? html`<span class="ok-msg">Bill amounts less discounts match the written total.</span>`
+    : (disc || tips) && written === bills - disc + tips ? html`<span class="ok-msg">Bill amounts after discounts and tips match the written total.</span>`
     : written === paid ? html`<span class="ok-msg">Payments match the written total</span> (₹ ${money(written)}).`
     : html`<span class="error">The page says ₹ ${money(written)}.</span>`;
-  return html`Bill amounts add up to <strong>₹ ${money(bills)}</strong>${disc ? html`, less discounts <strong>₹ ${money(disc)}</strong> = <strong>₹ ${money(bills - disc)}</strong>` : ''}. Payments add up to <strong>₹ ${money(paid)}</strong>. ${vsPage}
-    ${off.length ? html`<br><span class="error">${off.length} row${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount less discount (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
+  return html`Bill amounts add up to <strong>₹ ${money(bills)}</strong>${disc || tips ? html`${disc ? html`, less discounts <strong>₹ ${money(disc)}</strong>` : ''}${tips ? html`, plus tips <strong>₹ ${money(tips)}</strong>` : ''} = <strong>₹ ${money(bills - disc + tips)}</strong>` : ''}. Payments add up to <strong>₹ ${money(paid)}</strong>. ${vsPage}
+    ${off.length ? html`<br><span class="error">${off.length} row${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount after discount or tip (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
 }
 
 function registerPanel(biz, u) {
@@ -903,13 +904,13 @@ function registerPanel(biz, u) {
       ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>`
         : html`<div class="note">Change any cell and it saves when you leave it. Tick a row once it matches the page; the tick is saved at once. When every row is ticked and the payments match, an Owner or Accountant confirms the shift on <a href="#/b/${biz.id}/compare/${u.day}">Compare sales</a>, which locks this page. Use Edit for a bill paid in more than one way.${anyUnclear || u.rows.some((r) => r.billMatch && !r.billMatch.exact) ? html` <span class="needs-key">Red boxes</span> need a look: Claude could not read the cell, or the bill number is not in the software report for this shift (pick the right one from "Did you mean…").` : ''}</div>`}
       <div class="scroll"><table style="min-width:860px" id="regtable">
-        <thead><tr><th>#</th><th title="Checked against the page">✓</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th style="text-align:right">Disc</th><th>Paid as</th><th>Remarks</th><th></th></tr></thead>
+        <thead><tr><th>#</th><th title="Checked against the page">✓</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th style="text-align:right" title="Discount. Enter a tip as a negative number.">Disc / tip</th><th>Paid as</th><th>Remarks</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
       </table></div>
-      ${!locked && u.rows.some((r) => !r.discountPaise && r.payments.length && paidOf(r) > 0 && paidOf(r) < r.amountPaise)
-        ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts</button>
-            <span class="note">Sets Disc = bill amount − payments on rows paid less than billed that have no discount yet.</span></div>` : ''}
-      ${u.rows.some((r) => inferredOf(r.ocrOriginal).has('discount')) ? html`<div class="note"><span class="auto-key">Amber</span> discounts were filled in automatically (bill amount − payments). Check them against the page.</div>` : ''}
+      ${!locked && u.rows.some((r) => !r.discountPaise && r.payments.length && paidOf(r) > 0 && paidOf(r) !== r.amountPaise)
+        ? html`<div class="form-row" style="align-items:center"><button class="btn plain" type="button" id="filldisc">Fill discounts and tips</button>
+            <span class="note">Sets Disc = bill amount − payments on rows with none yet: a discount when less was paid, a tip (negative) when more was paid.</span></div>` : ''}
+      ${u.rows.some((r) => inferredOf(r.ocrOriginal).has('discount')) ? html`<div class="note"><span class="auto-key">Amber</span> discounts and tips were filled in automatically (bill amount − payments; negative = tip). Check them against the page.</div>` : ''}
       <div class="form-row" style="justify-content:space-between">
         <div class="note" id="regsum">${regSumHtml(u)}</div>
         ${locked ? '' : html`<form id="ptotal" class="form-row" style="align-items:flex-end"><div class="field"><label for="pt">Total written on the page (₹)</label><input id="pt" name="pageWrittenTotal" class="mono" value="${written == null ? '' : rupeesForInput(written)}"></div><button class="btn plain" type="submit">Save total</button></form>`}
@@ -957,12 +958,12 @@ function wireInlineRows(biz, u) {
     if (changed.dataset.f === 'pay' && pa && !changed.value) {
       pa.value = '';
     }
-    // Discount follows the payment: amount - payments when less was paid, otherwise 0.
+    // Discount follows the payment: amount - payments. Negative when more was paid: a tip.
     if (['amount', 'payAmount', 'pay'].includes(changed.dataset.f) && r.payments.length <= 1) {
       const a = parsePaiseText(tr.querySelector('[data-f="amount"]').value);
       const sel = tr.querySelector('[data-f="pay"]');
       const paid = pa && sel?.value ? parsePaiseText(pa.value) : null;
-      if (a !== null && paid !== null && paid > 0) tr.querySelector('[data-f="discount"]').value = paid < a ? rupeesForInput(a - paid) : '';
+      if (a !== null && paid !== null && paid > 0) tr.querySelector('[data-f="discount"]').value = paid !== a ? rupeesForInput(a - paid) : '';
     }
     if (changed.dataset.f === 'pickBill') {
       if (!changed.value) return;
@@ -1009,7 +1010,7 @@ function rowForm(r) {
       <div class="field"><label>Type</label><select name="billType"><option value="">Choose</option>
         ${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r?.billType === k ? 'selected' : ''}>${l}</option>`)}</select></div>
       <div class="field"><label>Bill amount (₹)</label><input name="amount" class="mono" value="${r ? rupeesForInput(r.amountPaise) : ''}" required></div>
-      <div class="field"><label>Discount (₹)</label><input name="discount" class="mono" value="${r?.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0"></div>
+      <div class="field"><label>Discount (₹, a tip as negative)</label><input name="discount" class="mono" value="${r?.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0"></div>
     </div>
     <div class="note">Payments as written on the page. A bill paid partly in cash and partly by UPI has two lines.</div>
     <div id="pays">${pays.map((p) => payLine(p))}</div>
@@ -1039,7 +1040,7 @@ function wireRegister(biz, u) {
     try {
       const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/fill-discounts`, {});
       await reviewView(biz, u.id);
-      document.getElementById('rmsg').innerHTML = html`<div class="ok-msg">Discount filled in on ${r.filled} row${r.filled === 1 ? '' : 's'}. They are shown in amber: check them against the page.</div>`.__html;
+      document.getElementById('rmsg').innerHTML = html`<div class="ok-msg">Discount or tip filled in on ${r.filled} row${r.filled === 1 ? '' : 's'}. They are shown in amber: check them against the page.</div>`.__html;
     } catch (err) { showError(document.getElementById('rmsg'), err); }
   });
   const form = document.getElementById('rform');
@@ -1067,7 +1068,7 @@ function wireRegister(biz, u) {
     if (!d.discount) {
       const a = parsePaiseText(d.amount);
       const paid = payments.reduce((t, p) => t + (parsePaiseText(p.amount) ?? 0), 0);
-      if (a !== null && paid > 0 && paid < a) discount = rupeesForInput(a - paid);
+      if (a !== null && paid > 0 && paid !== a) discount = rupeesForInput(a - paid);
     }
     const payload = { billNo: d.billNo, billType: d.billType || null, amount: d.amount, discount, remarks: d.remarks || null, payments, status: d.checked ? 'checked' : 'draft' };
     if (editing) await api('PUT', `/businesses/${biz.id}/register-rows/${editing}`, payload);
@@ -1216,7 +1217,7 @@ async function compareView(biz, day) {
   const comps = v.comparisons.filter((c) => c.difference === 'complimentary');
   const matches = v.comparisons.filter((c) => c.difference === 'match').length;
   const missingHours = Math.round(v.gaps.reduce((s, g) => s + g.to - g.from, 0) / 3600000 * 10) / 10;
-  const side = (s) => (s ? html`<div class="mono">${money(s.amountPaise)}</div><div class="note">${MODE_LABELS[s.mode] ?? 'No payment written'}${s.billType ? ` · ${TYPE_LABELS[s.billType]}` : ''}${s.discountPaise ? ` · after ₹ ${money(s.discountPaise)} discount` : ''}</div>` : html`<div class="note">Not found</div>`);
+  const side = (s) => (s ? html`<div class="mono">${money(s.amountPaise)}</div><div class="note">${MODE_LABELS[s.mode] ?? 'No payment written'}${s.billType ? ` · ${TYPE_LABELS[s.billType]}` : ''}${s.discountPaise > 0 ? ` · after ₹ ${money(s.discountPaise)} discount` : s.discountPaise < 0 ? ` · incl. ₹ ${money(-s.discountPaise)} tip` : ''}</div>` : html`<div class="note">Not found</div>`);
   const shiftOptions = [...new Set([day, ...shifts.map((s) => s.day)])].sort().reverse();
   const totalsRow = (label, sw, rg, bold) => html`<tr style="${bold ? 'font-weight:600' : ''}"><td>${label}</td><td class="amount">${money(sw)}</td><td class="amount">${money(rg)}</td><td class="amount" style="color:${sw === rg ? 'var(--muted)' : '#B45309'}">${rg - sw === 0 ? '0' : `${rg - sw > 0 ? '+' : ''}${money(rg - sw)}`}</td></tr>`;
   const swTotal = v.totals.reduce((s, t) => s + t.softwarePaise, 0) + v.unknownModePaise;

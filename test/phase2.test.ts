@@ -492,23 +492,37 @@ describe('register discounts', () => {
     expect(u.json.rows.find((r: any) => r.billNo === '2610317').discountPaise).toBe(9000);
   });
 
-  it('Fill discounts sets amount - payments only on rows paid less than billed with no discount', async () => {
+  it('Fill discounts sets amount - payments on rows with none yet: a discount, or a tip when paid more', async () => {
     const h = await hotel();
     const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(32), 'image/png')).json.id;
     const add = (billNo: string, amount: string, payments: unknown[], discount = '0') =>
       h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, discount, payments, status: 'checked' });
     await add('1', '230', [{ mode: 'card', amount: '219' }]);          // fills 11
     await add('2', '10899', [{ mode: 'upi', amount: '10500' }]);       // fills 399
-    await add('3', '179', [{ mode: 'upi', amount: '188' }]);           // paid more: left alone
+    await add('3', '179', [{ mode: 'upi', amount: '188' }]);           // paid more: a tip of 9
     await add('4', '100', []);                                          // nothing paid: left alone
     await add('5', '500', [{ mode: 'cash', amount: '450' }], '30');    // has a discount: left alone
     const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/fill-discounts`);
-    expect(res.json.filled).toBe(2);
-    const rows = await sql`SELECT bill_no, discount_paise, status FROM register_rows WHERE upload_id = ${page} ORDER BY bill_no`;
-    expect(rows.map((r) => [r.bill_no, r.discount_paise])).toEqual([['1', 1100], ['2', 39900], ['3', 0], ['4', 0], ['5', 3000]]);
+    expect(res.json.filled).toBe(3);
+    const rows = await sql`SELECT bill_no, discount_paise, tip_paise, status FROM register_rows WHERE upload_id = ${page} ORDER BY bill_no`;
+    expect(rows.map((r) => [r.bill_no, r.discount_paise, r.tip_paise])).toEqual([['1', 1100, 0], ['2', 39900, 0], ['3', 0, 900], ['4', 0, 0], ['5', 3000, 0]]);
     expect(rows.every((r) => r.status === 'checked')).toBe(true);
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'register.fill_discounts'`)[0].n).toBe(1);
     expect((await h.clients.viewer.post(`/businesses/${h.bid}/uploads/${page}/fill-discounts`)).status).toBe(403);
+  });
+
+  it('a negative discount is a tip: kept apart, and the bill balances with the extra paid', async () => {
+    const h = await hotel();
+    // Register 4,401 billed, 9 tip, 4,410 paid by UPI: the software report has 4,410.
+    const reg = REGISTER_31_OCT.map((r) => (r.billNo === '2610317' ? { ...r, amount: '4401', discount: '-9', payments: [{ mode: 'upi' as const, columnLabel: 'UPI XOXO', amount: '4410' }] } : r));
+    const pageId = await fullShift(h, reg as never);
+    const [row] = await sql`SELECT amount_paise, discount_paise, tip_paise FROM register_rows WHERE bill_no = '2610317'`;
+    expect(row).toEqual({ amount_paise: 440100, discount_paise: 0, tip_paise: 900 });
+    const v = await view(h);
+    expect(byBill(v, '2610317').difference).toBe('match');
+    expect(byBill(v, '2610317').register).toMatchObject({ amountPaise: 441000, discountPaise: -900 });
+    const u = await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${pageId}`);
+    expect(u.json.rows.find((r: any) => r.billNo === '2610317').discountPaise).toBe(-900);
   });
 
   it('refuses a discount larger than the bill', async () => {

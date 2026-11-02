@@ -97,15 +97,17 @@ export function registerStatements(ctx: Ctx, r: z.infer<typeof RegisterReading>)
     // No discount written but less was paid than billed: fill the difference in, marked as worked out.
     const inferred: string[] = [];
     const paid = pays.reduce((t, p) => t + (p.paise ?? 0), 0);
-    if (disc === null && amt !== null && pays.length && pays.every((p) => p.paise !== null) && paid > 0 && paid < amt) {
-      disc = amt - paid;
+    let tip = 0;
+    if (disc === null && amt !== null && pays.length && pays.every((p) => p.paise !== null) && paid > 0 && paid !== amt) {
+      if (paid < amt) disc = amt - paid;
+      else tip = paid - amt; // paid more than billed: a tip
       inferred.push('discount');
     }
     const id = newId();
-    statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, remarks,
-      status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
+    statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks,
+      status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
       id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, row.bill_no?.trim() ?? '', row.bill_type === 'unclear' ? null : row.bill_type,
-      amt ?? 0, disc ?? 0, row.remarks, JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear], inferred }), t));
+      amt ?? 0, disc ?? 0, tip, row.remarks, JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear], inferred }), t));
     for (const p of pays) {
       if (p.paise === null) continue;
       statements.push(stmt(ctx.db, `INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at)
