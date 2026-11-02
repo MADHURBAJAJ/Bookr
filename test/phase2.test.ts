@@ -1248,3 +1248,28 @@ describe('bank credit equal to the bill amount when the register shows a tip', (
     expect((await sql`SELECT tip_paise FROM register_rows WHERE id = ${row}`)[0].tip_paise).toBe(1300);
   });
 });
+
+describe('a UPI sale that was paid another way', () => {
+  it('becomes cash: register mode and the sale change, the cash check counts it; put back restores', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const [sale] = await sql`SELECT id, amount_paise FROM transactions WHERE bill_no = '2610318' AND type = 'income'`;
+    const cashBefore = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/cash`)).json.cashSalesPaise;
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale.id], mode: 'cash', note: 'x' })).status).toBe(403);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale.id], mode: 'cash', note: 'register slip: it was cash' })).status).toBe(200);
+    expect((await sql`SELECT payment_mode, match_status, account_id IS NOT NULL AS cash FROM transactions WHERE id = ${sale.id}`)[0]).toEqual({ payment_mode: 'cash', match_status: null, cash: 1 });
+    expect((await sql`SELECT p.mode FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.bill_no = '2610318'`)[0].mode).toBe('cash');
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/cash`)).json.cashSalesPaise).toBe(cashBefore + sale.amount_paise);
+    const upi = (await h.clients.owner.get(`/businesses/${h.bid}/upi?day=2026-10-31`)).json;
+    expect(upi.sales.map((x: any) => x.billNo)).not.toContain('2610318');
+    expect(upi.repaid[0]).toMatchObject({ mode: 'cash', bills: ['2610318'] });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/sales/repay/${upi.repaid[0].id}/undo`, {})).status).toBe(200);
+    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${sale.id}`)[0]).toEqual({ payment_mode: 'upi', match_status: 'awaiting_bank_match' });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/sales/repay/${upi.repaid[0].id}/undo`, {})).status).toBe(409);
+    // Card: waits for the card settlement.
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale.id], mode: 'card', note: 'card' })).status).toBe(200);
+    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${sale.id}`)[0]).toEqual({ payment_mode: 'card', match_status: 'awaiting_card_settlement' });
+  });
+});

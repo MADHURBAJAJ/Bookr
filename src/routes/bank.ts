@@ -9,6 +9,7 @@ import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, 
 import { byName, loadParties } from '../parties';
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
+import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
 import { billDistance } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
@@ -164,7 +165,30 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
     FROM bank_rows r JOIN accounts a ON a.id = r.account_id LEFT JOIN bank_sources s ON s.account_id = r.account_id
     WHERE r.business_id = ? AND r.direction = 'CR' AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at BETWEEN ? AND ?
     ORDER BY r.posted_at`, bid, w.from - 3 * 3600e3, w.to + 6 * 3600e3);
-  return c.json({ day, sales, credits, confirmedShifts: shifts.map((s) => s.day) });
+  const repaid = (await repaidFor(db, bid, day)).map((a) => ({ id: a.id, at: a.created_at, ...JSON.parse(a.after) }));
+  return c.json({ day, sales, credits, repaid, confirmedShifts: shifts.map((s) => s.day) });
+});
+
+// ---- A UPI sale that was in fact paid by cash or card (the register's mode was a slip)
+
+bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const ids = Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string' && isUuid(x)).slice(0, 30) : [];
+  if (!ids.length) fail(400, 'Choose the bill.');
+  const mode = data.mode === 'cash' || data.mode === 'card' ? data.mode : fail(400, 'Choose cash or card.');
+  const note = text(data, 'note', 'Reason', { max: 300 })!;
+  const r = await repayStatements(db, bid, ids, mode, note, c.get('user').id, now());
+  await db.batch(r.statements);
+  return c.json({ ok: true, bills: r.bills, amountPaise: r.amountPaise });
+});
+
+bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole('bank.link'), async (c) => {
+  const id = Number(c.req.param('auditId'));
+  if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
+  await c.env.DB.batch(await undoRepayStatements(c.env.DB, c.get('businessId'), id, c.get('user').id, now()));
+  return c.json({ ok: true });
 });
 
 // ---- Matching a credit to sales (a person confirms; never automatic)

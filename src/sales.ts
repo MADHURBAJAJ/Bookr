@@ -315,7 +315,7 @@ export async function coverage(db: DB, businessId: string, day: string) {
   return { window, reports, gaps };
 }
 
-async function cashAccountId(db: DB, businessId: string): Promise<string | null> {
+export async function cashAccountId(db: DB, businessId: string): Promise<string | null> {
   const a = await one<{ id: string }>(db, `SELECT id FROM accounts WHERE business_id = ? AND kind = 'cash'
     ORDER BY lower(name) = 'cash' DESC, created_at LIMIT 1`, businessId);
   return a?.id ?? null;

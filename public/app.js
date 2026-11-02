@@ -2297,7 +2297,7 @@ function billUnits(waiting) {
 
 /** Side by side: bank credits not matched (left) and UPI bills not found (right). Tick, compare totals, match. */
 function pairPanel(v, waiting) {
-  if (!v.credits.length && !waiting.length) return '';
+  if (!v.credits.length && !waiting.length && !v.repaid?.length) return '';
   const units = billUnits(waiting);
   const pick = 'width:18px;height:18px;min-height:0';
   const line = 'display:flex;gap:10px;align-items:center;padding:8px 10px;border-top:1px solid var(--line-soft);cursor:pointer';
@@ -2318,7 +2318,9 @@ function pairPanel(v, waiting) {
         <div style="max-height:420px;overflow:auto">${units.length ? units.map((u) => html`<label style="${line}">
           <input type="checkbox" data-pbl="${u.ids.join(',')}" data-amt="${u.amount}" style="${pick}">
           <span style="flex:1;min-width:0">${u.html}</span>
-          <strong class="amount">₹ ${money(u.amount)}</strong></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>
+          <span style="display:flex;flex-direction:column;align-items:flex-end;gap:4px"><strong class="amount">₹ ${money(u.amount)}</strong>
+            <select class="compact" data-repay="${u.ids.join(',')}" aria-label="Paid another way" title="The register said UPI, but it was paid by cash or card" style="font-size:13px;min-height:30px">
+              <option value="">Paid another way…</option><option value="cash">Was cash</option><option value="card">Was card</option></select></span></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>
       </div>
     </div>
     <div id="pairbar" class="inset" style="position:sticky;bottom:8px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
@@ -2336,6 +2338,12 @@ function pairPanel(v, waiting) {
       </span>
     </div>
     <div id="pairmsg"></div>
+    ${v.repaid?.length ? html`<div style="border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:6px">
+      <strong>Changed here from UPI to cash or card</strong>
+      ${v.repaid.map((x) => html`<div class="form-row" style="align-items:center;gap:10px">
+        <span class="mono">${(x.bills ?? []).join(' + ')}</span><span>₹ ${money(x.amountPaise)} → <strong>${x.mode === 'cash' ? 'Cash' : 'Card'}</strong></span>
+        <span class="note">${x.note ?? ''} · ${when(x.at)}</span><button class="btn plain" type="button" data-repayundo="${x.id}" style="min-height:32px">Put back</button></div>`)}
+    </div>` : ''}
   </section>`;
 }
 
@@ -2372,6 +2380,22 @@ function wirePairPanel(biz, v, heads, reload) {
   box.querySelectorAll('[data-pcr]').forEach((x) => x.addEventListener('change', refresh));
   // Bills paid together are paid by one amount: ticking one ticks the whole group.
   box.querySelectorAll('[data-pbl]').forEach((x) => x.addEventListener('change', refresh));
+  box.querySelectorAll('[data-repay]').forEach((sel) => sel.addEventListener('change', async () => {
+    const mode = sel.value;
+    if (!mode) return;
+    const note = (prompt(`This bill was paid by ${mode} (the register said UPI). Reason?${mode === 'cash' ? ' The shift\'s cash check will count it as cash.' : ' It will wait for the card settlement.'}`) ?? '').trim();
+    if (!note) { sel.value = ''; return; }
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/sales/repay`, { transactionIds: sel.dataset.repay.split(','), mode, note });
+      await reload();
+      document.getElementById('pairmsg')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Bill ${r.bills.join(' + ')} (₹ ${money(r.amountPaise)}) is now ${mode}. ${mode === 'cash' ? 'It counts in the cash check for this shift.' : 'It waits for the card settlement.'}</div>`.__html);
+    } catch (err) { sel.value = ''; showError(document.getElementById('pairmsg'), err); }
+  }));
+  box.querySelectorAll('[data-repayundo]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Put this bill back to UPI as the register had it?')) return;
+    try { await apiFull('POST', `/businesses/${biz.id}/sales/repay/${b.dataset.repayundo}/undo`, {}); await reload(); }
+    catch (err) { showError(document.getElementById('pairmsg'), err); }
+  }));
   go.addEventListener('click', async () => {
     const c = crs(); const b = bls();
     const diff = sum(c) - sum(b);
