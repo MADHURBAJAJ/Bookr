@@ -1044,8 +1044,9 @@ function regRowHtml(r, locked) {
     <td><select class="cell ${nd('bill_type')}" data-f="billType" aria-label="Type">
       <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
     <td><input class="cell mono ${nd('amount') || (payDiffers(r) ? 'needs' : '')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount" title="${payDiffers(r) ? `Payments add up to ${money(paidOf(r))}` : ''}"></td>
-    <td><input class="cell mono ${nd('discount') || (inferredOf(r.ocrOriginal).has('discount') ? 'auto' : '')}" data-f="discount" value="${r.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0" style="width:72px;text-align:right" inputmode="decimal" aria-label="Discount"
-      title="${inferredOf(r.ocrOriginal).has('discount') ? 'Filled in automatically: bill amount minus payments (negative = tip). Check it against the page.' : 'Discount; a tip is negative'}"></td>
+    <td><input class="cell mono ${nd('discount') || (largePct(r) ? 'needs' : inferredOf(r.ocrOriginal).has('discount') ? 'auto' : '')}" data-f="discount" value="${r.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0" style="width:72px;text-align:right" inputmode="decimal" aria-label="Discount"
+      title="${largePct(r) ? `Discount of ${largePct(r)}%${r.paidWithRowId || membersOf(r).length ? ' on the bills paid together' : ''}: check that no payment was missed. Compare sales asks for a decision.` : inferredOf(r.ocrOriginal).has('discount') ? 'Filled in automatically: bill amount minus payments (negative = tip). Check it against the page.' : 'Discount; a tip is negative'}">
+      ${largePct(r) ? html`<div class="tiny" style="white-space:nowrap;color:var(--danger)">Disc ${largePct(r)}%</div>` : ''}</td>
     <td>${single ? html`<div style="display:flex;gap:6px">
         <select class="cell ${nd('payments') || (inferredOf(r.ocrOriginal).has('payments') && r.paidWithRowId ? 'auto' : '')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
           ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${!r.paidWithRowId && p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}
@@ -1067,6 +1068,15 @@ const headOf = (r) => (r.paidWithRowId ? regRows.find((x) => x.id === r.paidWith
 /** The bills a row's payment has to cover: itself, plus the bills paid with it. */
 const groupNet = (head) => netOf(head) + membersOf(head).reduce((t, m) => t + netOf(m), 0);
 /** A bill whose payments do not cover it after discount or tip. For bills paid together the whole group is checked. */
+const LARGE_DISCOUNT_PCT = 20; // mirrors src/sales.ts
+/** The discount of a row's bills (the whole group when paid together) as a % of the bills, when over the limit; else 0. */
+const largePct = (r) => {
+  const head = headOf(r) ?? r;
+  const group = [head, ...membersOf(head)];
+  const disc = group.reduce((t, x) => t + Math.max(x.discountPaise ?? 0, 0), 0);
+  const gross = group.reduce((t, x) => t + x.amountPaise, 0);
+  return disc > 0 && gross > 0 && disc * 100 > LARGE_DISCOUNT_PCT * gross ? Math.round((disc * 100) / gross) : 0;
+};
 const payDiffers = (r) => {
   const head = headOf(r);
   if (head) return paidOf(head) !== groupNet(head);
@@ -1484,6 +1494,7 @@ function wireSummary(biz, u) {
 
 /** Decision buttons for one difference. A bill missing in the register takes its type with "Use software". */
 function decisionChoices(c) {
+  if (c.largeDiscount && c.software) return [['use_register', 'Accept discount'], ['use_software', 'Payment missing · use software'], ['leave_out', 'Leave out']];
   if (!c.register) return [['use_software', 'Use software · F&B', 'fnb'], ['use_software', 'Use software · Room', 'room'], ['leave_out', 'Leave out']];
   if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out']];
   return Object.entries(DECISION_LABELS);
@@ -1627,7 +1638,8 @@ async function compareView(biz, day) {
             class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
           <td class="mono"><a href="#" data-openlink>${c.billNo}</a></td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
           <td>${side(c.software)}</td><td>${side(c.register)}</td>
-          <td><span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span></td>
+          <td>${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)} of bills${c.largeDiscount.grossPaise !== (c.software?.amountPaise ?? 0) ? ' (bills paid together)' : ''}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html` <span class="chip wait">Mode</span>` : ''}`
+            : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}</td>
           <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type]) => {
               const on = c.decision === k && (!type || c.billType === type);
               if (k === 'leave_out' && !c.register && c.software?.mode === 'cash') {
@@ -1667,7 +1679,15 @@ async function compareView(biz, day) {
   const msg = document.getElementById('cmsg');
   document.getElementById('sh').addEventListener('change', (e) => go(`#/b/${biz.id}/compare/${e.target.value}`));
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
-  app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null }))));
+  app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => {
+    const c = v.comparisons.find((x) => x.id === b.dataset.cmp);
+    let note = null;
+    if (c?.largeDiscount && b.dataset.d === 'use_register') {
+      note = (prompt(`Why is the ${c.largeDiscount.pct}% discount on bill ${c.billNo} accepted? (e.g. owner's guest, group rate)`) ?? '').trim();
+      if (!note) return;
+    }
+    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null, note }));
+  }));
   // A difference opens its bill in Review; Review offers a way back to this bill here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     if (e.target.closest('button, select, input')) return;

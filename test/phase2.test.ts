@@ -924,3 +924,35 @@ describe('discount for bills paid together, worked out again', () => {
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(0);
   });
 });
+
+describe('large discounts', () => {
+  it('a discount over 20% is not matched by itself; accepting it needs a reason; paid-together bills are judged as a group', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => !['2610311', '2610314', '26103122'].includes(r.billNo));
+    const pageId = await fullShift(h, reg);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    // 420 + 1180 + 780 = 2,380 of bills, 1,500 paid: 880 discount (37%) over the group.
+    const head = (await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '1500' }])).json.id;
+    await add('2610314', '1180', [], { paidWithRowId: head });
+    await add('26103122', '780', [], { paidWithRowId: head });
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(3);
+    let v = await view(h);
+    for (const b of ['2610311', '2610314', '26103122']) {
+      const c = byBill(v, b);
+      expect(c.difference).toBe('amount');
+      expect(c.largeDiscount).toMatchObject({ pct: 37, discountPaise: 88000, grossPaise: 238000, large: true });
+    }
+    const id = byBill(v, '2610314').id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_register' })).status).toBe(400);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_register', note: 'Group rate' })).status).toBe(200);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610311').id}`, { decision: 'use_software' })).status).toBe(200);
+    // A small discount still matches by itself.
+    await sql`UPDATE register_payments SET amount_paise = 230000 WHERE register_row_id = ${head}`;
+    await sql`UPDATE register_rows SET discount_paise = 0, tip_paise = 0 WHERE upload_id = ${pageId}`;
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
+    v = await view(h);
+    expect(byBill(v, '2610314').difference).toBe('match');
+    expect(byBill(v, '2610314').largeDiscount).toBeNull();
+  });
+});

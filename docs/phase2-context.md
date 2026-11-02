@@ -276,3 +276,4 @@ An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tie
 - "Vendor" is shown as "Party" everywhere (shops, staff paid salary, owner drawings); stored as parties already, so wording only.
 - Review: an expense list or cash summary page can be moved to another day ("Page is for"); its lines move with it. Once approved, only Owner/Accountant can move it. Audited as upload.day_changed.
 - Bills paid together: a worked-out discount is shared over the group's bills by amount (whole rupees when possible), never more than a bill's own amount; a tip stays on the paying row. Fill discounts redoes amounts it filled itself, never typed ones.
+- Large discounts: a discount over 20% of the bill(s) (the group total for bills paid together) is never matched by itself. Compare sales shows "Large discount N%" with Accept discount (needs a reason), Payment missing · use software, or Leave out. Review shows such discounts in red with the %.

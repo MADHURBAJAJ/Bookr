@@ -37,12 +37,37 @@ export function registerMode(pays: RgPay[]): string | null {
  * amount before them. A bill with a discount or tip matches when the software shows either figure:
  * the register's received amount is then used (approved rule, 2 Nov 2026).
  */
-export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null; gross?: number } | null): Difference {
+/** A discount above this share of the bill(s) is never matched by itself: a person checks for a missing payment. */
+export const LARGE_DISCOUNT_PCT = 20;
+
+/**
+ * Discount per register row as a share of its bills. Bills paid together are judged as one: the group's
+ * discounts against the group's bills. discount_paise is signed here (negative = tip); amount_paise is net.
+ */
+export function discountShares(rows: { id: string; amount_paise: number; discount_paise: number; paid_with_row_id: string | null }[]) {
+  const groups = new Map<string, { discount: number; gross: number }>();
+  for (const r of rows) {
+    const g = groups.get(r.paid_with_row_id ?? r.id) ?? { discount: 0, gross: 0 };
+    g.discount += Math.max(r.discount_paise, 0);
+    g.gross += r.amount_paise + r.discount_paise;
+    groups.set(r.paid_with_row_id ?? r.id, g);
+  }
+  const out = new Map<string, { discountPaise: number; grossPaise: number; pct: number; large: boolean }>();
+  for (const r of rows) {
+    const g = groups.get(r.paid_with_row_id ?? r.id)!;
+    const large = g.discount > 0 && g.discount * 100 > LARGE_DISCOUNT_PCT * g.gross;
+    out.set(r.id, { discountPaise: g.discount, grossPaise: g.gross, pct: g.gross ? Math.round((g.discount * 100) / g.gross) : 0, large });
+  }
+  return out;
+}
+
+export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null; gross?: number; largeDiscount?: boolean } | null): Difference {
   if (sw && sw.amount === 0) return 'complimentary';
   if (!sw && rg && rg.amount === 0) return 'complimentary';
   if (sw && !rg) return 'missing_in_register';
   if (!sw && rg) return 'missing_in_software';
-  const amountDiffers = sw!.amount !== rg!.amount && !(rg!.gross !== undefined && rg!.gross !== rg!.amount && sw!.amount === rg!.gross);
+  // Matched after a discount or tip, unless the discount is large (more than LARGE_DISCOUNT_PCT of the bills).
+  const amountDiffers = sw!.amount !== rg!.amount && !(rg!.gross !== undefined && rg!.gross !== rg!.amount && sw!.amount === rg!.gross && !rg!.largeDiscount);
   const modeDiffers = sw!.mode === 'unknown' || sw!.mode !== rg!.mode;
   if (amountDiffers && modeDiffers) return 'amount_and_mode';
   if (amountDiffers) return 'amount';
@@ -118,6 +143,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   // a repeat is reported by shiftView and blocks confirmation.
   const rgByBill = new Map<string, RgRow>();
   for (const r of rg) if (!rgByBill.has(r.bill_no)) rgByBill.set(r.bill_no, r);
+  const shares = discountShares(rg);
   const wanted = new Map<string, Omit<Comparison, 'id' | 'decision' | 'decided_by' | 'decided_at' | 'note' | 'bill_type'>>();
   const usedRg = new Set<string>();
   for (const b of sw) {
@@ -127,7 +153,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     wanted.set(`${b.pos_no}\u0000${b.bill_no}`, {
       pos_no: b.pos_no, bill_no: b.bill_no, software_bill_id: b.id, register_row_id: r?.id ?? null,
       sw_amount_paise: b.amount_paise, sw_mode: b.mode, rg_amount_paise: r?.amount_paise ?? null, rg_mode: rgMode,
-      difference: classify({ amount: b.amount_paise, mode: b.mode }, r ? { amount: r.amount_paise, mode: rgMode, gross: r.amount_paise + r.discount_paise } : null),
+      difference: classify({ amount: b.amount_paise, mode: b.mode }, r ? { amount: r.amount_paise, mode: rgMode, gross: r.amount_paise + r.discount_paise, largeDiscount: shares.get(r.id)?.large } : null),
     });
   }
   for (const r of rgByBill.values()) {
@@ -237,6 +263,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const typed = new Set(typeHeads.map((t) => t.bill_type));
   const counted = comparisons.filter((c) => c.difference === 'match' || (c.decision && c.decision !== 'leave_out'));
   const rgById = new Map(rg.map((r) => [r.id, r]));
+  const shares = discountShares(rg);
   const typeOf = (c: Comparison) => (c.register_row_id ? rgById.get(c.register_row_id)?.bill_type : c.bill_type) ?? null;
   const missingType = counted.filter((c) => !typeOf(c));
   if (missingType.length) blockers.push(`Bill ${missingType.map((c) => c.bill_no).join(', ')} has no type (F&B or Room) in the register.`);
@@ -268,6 +295,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       software: c.software_bill_id ? { amountPaise: c.sw_amount_paise, mode: c.sw_mode } : null,
       register: c.register_row_id ? { amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0,
         rowId: c.register_row_id, uploadId: rgById.get(c.register_row_id)?.upload_id ?? null } : null,
+      largeDiscount: c.register_row_id && shares.get(c.register_row_id)?.large ? shares.get(c.register_row_id) : null,
     })),
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,
@@ -476,4 +504,13 @@ export function suggestBills(
     out.set(r.id, { exact: false, options: options.slice(0, 6) });
   }
   return out;
+}
+
+/** The discount share of a register row's bills (its group's, when paid together), straight from the table. */
+export async function largeDiscountOf(db: DB, rowId: string) {
+  const rows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null }>(db, `
+    SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id FROM register_rows
+    WHERE coalesce(paid_with_row_id, id) = (SELECT coalesce(paid_with_row_id, id) FROM register_rows WHERE id = ?)`, rowId);
+  const net = rows.map((r) => ({ ...r, amount_paise: r.amount_paise - r.discount_paise + r.tip_paise, discount_paise: r.discount_paise - r.tip_paise }));
+  return discountShares(net).get(rowId) ?? null;
 }

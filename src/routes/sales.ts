@@ -8,7 +8,7 @@ import { parseSalesCsv } from '../salescsv';
 import { shiftDayOf } from '../time';
 import { storageKey } from '../files';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { confirmShift, NEEDS_DECISION, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { confirmShift, largeDiscountOf, NEEDS_DECISION, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -282,6 +282,9 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
     const pays = await one<{ n: number }>(db, `SELECT count(*) AS n FROM register_payments
       WHERE register_row_id = coalesce((SELECT paid_with_row_id FROM register_rows WHERE id = ?), ?)`, cmp.register_row_id, cmp.register_row_id);
     if (!pays!.n) fail(400, 'The register row has no payment written, and is not paid together with another row. Add its payment in Review first.');
+    // A large discount is accepted only with a reason, so a missing payment cannot pass as a discount.
+    const share = await largeDiscountOf(db, cmp.register_row_id);
+    if (share?.large && !note) fail(400, `This bill has a ${share.pct}% discount. Say why it is accepted (e.g. owner's guest, group rate), or choose Payment missing.`);
   }
   const t = now();
   const user = c.get('user').id;
