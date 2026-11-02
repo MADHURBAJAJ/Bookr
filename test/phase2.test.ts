@@ -884,3 +884,20 @@ describe('a vendor under several heads', () => {
     expect((await sql`SELECT head_id FROM transactions WHERE id = ${id}`)[0].head_id).toBe(kitchen);
   });
 });
+
+describe('moving a page to another day', () => {
+  it('an expense page moves with its lines; once approved only Owner or Accountant can move it', async () => {
+    const h = await hotel();
+    const head = (await h.clients.owner.post(`/businesses/${h.bid}/heads`, { name: 'Kitchen purchases', type: 'expense' })).json.id;
+    const pg = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=expense_list&day=2026-10-31`, png(93), 'image/png')).json.id;
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows`, { narration: 'Milk', amount: '50', headId: head });
+    expect((await h.clients.entry_staff.patch(`/businesses/${h.bid}/uploads/${pg}`, { day: '2026-10-30' })).status).toBe(200);
+    expect((await sql`SELECT day FROM transactions WHERE upload_id = ${pg}`)[0].day).toBe('2026-10-30');
+    expect((await h.clients.entry_staff.patch(`/businesses/${h.bid}/uploads/${pg}`, { day: '2999-01-01' })).status).toBe(400);
+    await h.clients.owner.post(`/businesses/${h.bid}/uploads/${pg}/expense-rows/approve`, {});
+    expect((await h.clients.entry_staff.patch(`/businesses/${h.bid}/uploads/${pg}`, { day: '2026-10-31' })).status).toBe(403);
+    expect((await h.clients.accountant.patch(`/businesses/${h.bid}/uploads/${pg}`, { day: '2026-10-31' })).status).toBe(200);
+    expect((await sql`SELECT day FROM transactions WHERE upload_id = ${pg}`)[0].day).toBe('2026-10-31');
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'upload.day_changed' AND row_id = ${pg}`)[0].n).toBe(2);
+  });
+});

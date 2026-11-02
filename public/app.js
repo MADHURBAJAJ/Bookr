@@ -814,6 +814,7 @@ async function reviewView(biz, uploadId, highlightRow) {
         ${next ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${next.id}" title="${KIND_LABELS[next.kind]} · ${dayLabel(next.day)}">Next page →</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">Next page →</span>`}
       </div>
       <div class="form-row" style="align-items:center">
+        ${(u.kind === 'expense_list' || u.kind === 'cash_summary') && biz.actions.includes('rows.edit') ? html`<form id="dayform" class="form-row" style="align-items:center;gap:6px" title="The shift this page belongs to"><label for="pday" class="note">Page is for</label><input id="pday" name="day" type="date" class="compact" value="${u.day}" max="${todayIst()}"><button class="btn plain" type="submit" hidden id="daysave">Move page</button></form>` : ''}
         ${u.kind === 'bill_register' ? findBillBox() : ''}
         <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
       </div>
@@ -825,6 +826,17 @@ async function reviewView(biz, uploadId, highlightRow) {
   wireDeletes(biz, () => document.getElementById('rmsg'), () => go(`#/b/${biz.id}/review`));
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
   wireReadPage(biz, u);
+  const dayForm = document.getElementById('dayform');
+  if (dayForm) {
+    dayForm.day.addEventListener('input', () => { document.getElementById('daysave').hidden = dayForm.day.value === u.day; });
+    dayForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const day = dayForm.day.value;
+      if (!day || !confirm(`Move this page${u.kind === 'expense_list' ? ' and its lines' : ''} from ${dayLabel(u.day)} to ${dayLabel(day)}?`)) return;
+      try { await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { day }); reviewView(biz, u.id); }
+      catch (err) { showError(document.getElementById('rmsg'), err); }
+    });
+  }
   wireExpand();
   wireFindBill(biz);
   if (highlightRow) {

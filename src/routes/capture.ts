@@ -2,11 +2,12 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
-import { body, fail, isUuid, optionalPaise, paise, text } from '../http';
+import { body, date, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
-import { shiftDayOf } from '../time';
+import { istDay, shiftDayOf } from '../time';
+import { can, type Role } from '../permissions';
 
 export const captureRoutes = new Hono<AppEnv>();
 
@@ -226,10 +227,37 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
 captureRoutes.patch('/businesses/:businessId/uploads/:uploadId', requireRole('rows.edit'), async (c) => {
   const u = await getUpload(c.env.DB, c.get('businessId'), c.req.param('uploadId'));
   const data = await body(c);
+  if ('day' in data) {
+    await changeDay(c.env.DB, c.get('businessId'), u, date(data, 'day', 'Day'), c.get('role'), c.get('user').id);
+    return c.json({ ok: true });
+  }
   const total = optionalPaise(data, 'pageWrittenTotal', 'Page total');
   await stmt(c.env.DB, 'UPDATE uploads SET page_written_total_paise = ? WHERE id = ?', total, u.id).run();
   return c.json({ ok: true });
 });
+
+/**
+ * Moves an expense list or cash summary page to another day, e.g. a page uploaded under today that
+ * belongs to an earlier shift. Its lines move with it. Once anything on it is approved, only an
+ * Owner or Accountant can move it. Audited.
+ */
+async function changeDay(db: DB, bid: string, u: Upload, day: string, role: Role, user: string) {
+  if (u.kind !== 'expense_list' && u.kind !== 'cash_summary') fail(400, 'Only an expense list or cash summary page can change its day.');
+  if (day > istDay(Date.now())) fail(400, 'The day cannot be in the future.');
+  if (day === u.business_day) return;
+  const approved = u.kind === 'expense_list'
+    ? await one(db, "SELECT 1 AS ok FROM transactions WHERE upload_id = ? AND status = 'approved' LIMIT 1", u.id)
+    : await one(db, "SELECT 1 AS ok FROM cash_summaries WHERE upload_id = ? AND status = 'approved'", u.id);
+  if (approved && !can(role, 'rows.approve')) fail(403, 'Lines on this page are approved. Only an Owner or Accountant can change its day.');
+  await db.batch([
+    stmt(db, 'UPDATE uploads SET business_day = ? WHERE id = ?', day, u.id),
+    u.kind === 'expense_list'
+      ? stmt(db, 'UPDATE transactions SET day = ? WHERE upload_id = ? AND business_id = ?', day, u.id, bid)
+      : stmt(db, 'UPDATE cash_summaries SET shift_day = ? WHERE upload_id = ? AND business_id = ?', day, u.id, bid),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'upload.day_changed', 'uploads', ?, ?, ?, ?)`, bid, user, u.id, JSON.stringify({ day: u.business_day }), JSON.stringify({ day }), now()),
+  ]);
+}
 
 // ---- Register rows (bill register pages)
 
