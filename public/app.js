@@ -2224,7 +2224,7 @@ function pairPanel(v, waiting) {
       <div style="border:1px solid var(--line-soft);border-radius:8px;overflow:hidden">
         <div style="padding:8px 10px;font-weight:600;background:var(--surface-2,#F6F7F9)">UPI bills not found in the bank <span class="chip">${waiting.length}</span></div>
         <div style="max-height:420px;overflow:auto">${waiting.length ? waiting.map((s) => html`<label style="${line}">
-          <input type="checkbox" data-pbl="${s.id}" data-amt="${s.amountPaise}" data-group="${s.groupHead ?? ''}" style="${pick}">
+          <input type="checkbox" data-pbl="${s.id}" data-amt="${s.amountPaise}" data-group="${s.groupHead ?? (s.parts > 1 ? `bill:${s.comparisonId}` : '')}" style="${pick}">
           <span style="flex:1;min-width:0"><span class="mono">${s.billNo ?? ''}</span>${s.groupHead ? html` <span class="chip" title="Paid together with other bills: they are ticked together">paid together</span>` : ''}${s.parts > 1 ? html` <span class="chip wait" title="The register shows this bill paid by ${s.parts} UPI payments; each is a line here">part of ${s.parts} UPI payments</span>` : ''}
             <span class="tiny" style="display:block">${s.paidAt ? when(s.paidAt) : 'register only'}${s.labels ? ` · ${s.labels}` : ''}</span></span>
           <strong class="amount">₹ ${money(s.amountPaise)}</strong></label>`) : html`<div class="note" style="padding:10px">Every UPI bill of this shift is found.</div>`}</div>

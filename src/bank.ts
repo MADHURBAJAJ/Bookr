@@ -192,8 +192,11 @@ export async function matchedSet(db: DB, rowId: string) {
   let rows = new Set([rowId]);
   for (let round = 0; round < 10; round += 1) {
     const list = [...rows];
+    // Tied by a shared bill, or matched in the same action (same time and person): undone together.
+    const q = list.map(() => '?').join(',');
     const found = await all<{ bank_row_id: string; transaction_id: string }>(db, `SELECT bank_row_id, transaction_id FROM bank_matches
-      WHERE transaction_id IN (SELECT transaction_id FROM bank_matches WHERE bank_row_id IN (${list.map(() => '?').join(',')}))`, ...list);
+      WHERE transaction_id IN (SELECT transaction_id FROM bank_matches WHERE bank_row_id IN (${q}))
+         OR EXISTS (SELECT 1 FROM bank_matches x WHERE x.bank_row_id IN (${q}) AND x.matched_at = bank_matches.matched_at AND x.matched_by IS bank_matches.matched_by)`, ...list, ...list);
     const next = new Set([...rows, ...found.map((f) => f.bank_row_id)]);
     if (next.size === rows.size) return { rows: [...rows], transactions: [...new Set(found.map((f) => f.transaction_id))] };
     rows = next;

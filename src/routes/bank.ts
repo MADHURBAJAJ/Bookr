@@ -147,7 +147,7 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
     SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.match_status AS matchStatus, t.matched_bank_row AS bankRowId,
       sb.paid_at AS paidAt, r.posted_at AS creditAt, a.name AS accountName, r.tran_id AS tranId, rr.id AS registerRowId, rr.upload_id AS uploadId,
       (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels,
-      (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts,
+      (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts, t.comparison_id AS comparisonId,
       CASE WHEN rr.paid_with_row_id IS NOT NULL OR EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = rr.id) THEN coalesce(rr.paid_with_row_id, rr.id) END AS groupHead
     FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
     LEFT JOIN register_rows rr ON rr.id = c.register_row_id
@@ -211,7 +211,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-clear', requireRole('ba
   for (const id of ids) {
     const k = sug.clear.get(id);
     if (!k) continue;
-    statements.push(...matchStatements(db, bid, id, k.transactionIds, user, t));
+    statements.push(...matchStatements(db, bid, id, k.transactionIds, user, t + done));
     done += 1;
   }
   for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
@@ -240,7 +240,8 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-many', requireRole('ban
     try { await checkMatch(db, bid, row, ids); }
     catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); continue; }
     ids.forEach((x) => used.add(x));
-    statements.push(...matchStatements(db, bid, row.id, ids, user, t));
+    // Each credit of a bulk action keeps its own time, so unmatching one does not undo the others.
+    statements.push(...matchStatements(db, bid, row.id, ids, user, t + matched));
     matched += 1;
   }
   for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
@@ -339,7 +340,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/match-set', requireRole('bank
   // "Change the bills": what came in is what the bills were paid; register and income rows are corrected.
   if (diff !== 0 && data.treat === 'bills') {
     const note = text(data, 'note', 'Reason for the difference', { max: 300 })!;
-    const adj = await adjustStatements(db, bid, rows[0].id, tx.map((x) => x.id), bank, note, user, t);
+    const adj = await adjustStatements(db, bid, rows[0].id, tx.map((x) => x.id), bank, note, user, t, rows.map((r) => r.amount_paise));
     const links = allocate(credits, tx.map((x) => ({ id: x.id, amount: adj.nets.get(x.id)! })));
     const statements: D1PreparedStatement[] = [...adj.statements];
     for (const l of links) {

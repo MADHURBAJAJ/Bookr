@@ -144,6 +144,17 @@ describe('bank lines through the API', () => {
       { rowId: id('S10000001'), transactionIds: [sale] }, { rowId: id('S10000005'), transactionIds: [sale] }] })).json;
     expect(m.matched).toBe(1);
     expect(m.skipped[0]).toMatch(/another credit/);
+    // Unmatching one credit of a bulk action undoes only that one.
+    const sale2 = crypto.randomUUID();
+    await sql`INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, source, status, payment_mode, bill_no, shift_day, match_status, created_at)
+      VALUES (${sale2}, ${h.bid}, '2026-10-31', 30000, 'income', ${h.sales}, 'software_report', 'approved', 'upi', '145252', '2026-10-31', 'awaiting_bank_match', 0)`;
+    await sql`UPDATE transactions SET matched_bank_row = NULL, match_status = 'awaiting_bank_match' WHERE id = ${sale}`;
+    await sql`DELETE FROM bank_matches`;
+    await sql`UPDATE bank_rows SET status = 'unmatched'`;
+    const m2 = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/match-many`, { pairs: [
+      { rowId: id('S10000001'), transactionIds: [sale] }, { rowId: id('S10000005'), transactionIds: [sale2] }] })).json;
+    expect(m2.matched).toBe(2);
+    expect((await h.clients.accountant.del(`/businesses/${h.bid}/bank-rows/${id('S10000001')}/match`)).json.unmatched).toBe(1);
     const b = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [
       { rowId: id('S10000003'), headId: h.veg }, { rowId: id('S10000006'), headId: h.veg }, { rowId: id('S10000004') }] })).json;
     expect(b.booked).toBe(1);

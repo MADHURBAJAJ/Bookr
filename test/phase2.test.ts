@@ -1133,3 +1133,37 @@ describe('hand match that changes the bills (bank received a different amount)',
     expect((await sql`SELECT sum(amount_paise) AS s FROM transactions WHERE id IN (${ids[0]}, ${ids[1]}, ${ids[2]})`)[0].s).toBe(238000);
   });
 });
+
+describe('change the bills: one bill paid in two UPI goes', () => {
+  it('the register payments become the two bank credits, the false discount goes; unmatch restores', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h);
+    // Written as 218 + 210 for a 492 bill, so a 64 discount was filled in; the bank shows 210 + 282.
+    const row = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: '9900', billType: 'fnb', amount: '492', discount: '64', status: 'checked',
+      payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '218' }, { mode: 'upi', columnLabel: 'UPI Bank 2', amount: '210' }] })).json.id;
+    await decideAll(h);
+    let v = await view(h);
+    await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '9900').id}`, { decision: 'use_register' });
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const parts = await sql`SELECT id, amount_paise FROM transactions WHERE bill_no = '9900' AND type = 'income' ORDER BY amount_paise`;
+    expect(parts.map((p) => p.amount_paise)).toEqual([21000, 21800]);
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    const T = (c: (string | number)[]) => c.join('\t');
+    await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      T(['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)']),
+      T([1, 'S50000001', '31/10/2026', '31/10/2026 10:47:00 PM', '-', 'UPI/900000000011/UPI/xxan@okhdfcb/B/HDFa', 'CR', 210, 1]),
+      T([2, 'S50000002', '31/10/2026', '31/10/2026 10:54:00 PM', '-', 'UPI/900000000012/UPI/xxan@okhdfcb/B/HDFb', 'CR', 282, 1])].join('\n') });
+    const credits = (await sql`SELECT id FROM bank_rows WHERE tran_id IN ('S50000001', 'S50000002') ORDER BY tran_id`).map((r) => r.id);
+    // One part only: refused.
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: credits, transactionIds: [parts[0].id], treat: 'bills', note: 'typo' })).status).toBe(400);
+    const r = await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/match-set`, { rowIds: credits, transactionIds: parts.map((p) => p.id), treat: 'bills', note: 'register typo 218 for 282' });
+    expect(r.status).toBe(200);
+    expect((await sql`SELECT amount_paise FROM register_payments WHERE register_row_id = ${row} ORDER BY amount_paise`).map((p) => p.amount_paise)).toEqual([21000, 28200]);
+    expect((await sql`SELECT discount_paise, tip_paise FROM register_rows WHERE id = ${row}`)[0]).toEqual({ discount_paise: 0, tip_paise: 0 });
+    expect((await sql`SELECT amount_paise FROM transactions WHERE bill_no = '9900' AND type = 'income' ORDER BY amount_paise`).map((p) => p.amount_paise)).toEqual([21000, 28200]);
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${credits[0]}/match`)).json.unmatched).toBe(2);
+    expect((await sql`SELECT amount_paise FROM register_payments WHERE register_row_id = ${row} ORDER BY amount_paise`).map((p) => p.amount_paise)).toEqual([21000, 21800]);
+    expect((await sql`SELECT discount_paise FROM register_rows WHERE id = ${row}`)[0].discount_paise).toBe(6400);
+    v = await view(h);
+  });
+});
