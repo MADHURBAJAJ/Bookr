@@ -82,3 +82,8 @@ td { padding: 8px 6px; border-top: 1px solid var(--line-soft); vertical-align: m
 .copy { display: flex; gap: 8px; }
 .copy input { font-family: 'IBM Plex Mono', monospace; font-size: 13px; }
 .demo-band { background: var(--wait-bg); color: var(--wait); font-size: 13px; padding: 8px 12px; border-radius: 8px; }
+.cell { min-height: 36px; padding: 0 8px; font-size: 14px; border-radius: 6px; width: auto; }
+select.cell { padding-right: 4px; }
+.cell.needs, .needs-key { border: 2px solid #DC2626; background: #FEF2F2; }
+.needs-key { padding: 0 6px; border-radius: 4px; color: #7F1D1D; }
+tr.row-checked td { background: #F6FBF8; }

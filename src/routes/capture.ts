@@ -258,14 +258,35 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ shift_day: string }>(db, 'SELECT shift_day FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; remarks: string | null; ocr_original: string | null }>(db,
+    'SELECT shift_day, bill_no, bill_type, amount_paise, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
   const r = registerInput(await body(c));
   const t = now();
+  // A field a person changes counts as resolved: its "Needs input" mark goes, the others stay until the row is checked.
+  // The original reading and its "unclear" list are kept as they were.
+  let ocr = old.ocr_original;
+  if (ocr) {
+    const oldPays = await all<{ mode: string; amount_paise: number; column_label: string | null }>(db,
+      'SELECT mode, amount_paise, column_label FROM register_payments WHERE register_row_id = ? ORDER BY created_at, id', rowId);
+    const key = (ps: { mode: string; amount: number; label: string | null }[]) => JSON.stringify(ps.map((p) => [p.mode, p.amount, p.label ?? '']).sort());
+    const changed = [
+      old.bill_no !== r.billNo && 'bill_no',
+      old.bill_type !== r.billType && 'bill_type',
+      old.amount_paise !== r.amountPaise && 'amount',
+      (old.remarks ?? null) !== r.remarks && 'remarks',
+      key(oldPays.map((p) => ({ mode: p.mode, amount: p.amount_paise, label: p.column_label }))) !== key(r.payments.map((p) => ({ mode: p.mode, amount: p.amountPaise, label: p.columnLabel }))) && 'payments',
+    ].filter(Boolean) as string[];
+    if (changed.length) {
+      const o = JSON.parse(ocr) as { resolved?: string[] };
+      o.resolved = [...new Set([...(o.resolved ?? []), ...changed])];
+      ocr = JSON.stringify(o);
+    }
+  }
   try {
     await db.batch([
-      stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?
-        WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.remarks, r.status, c.get('user').id, t, rowId, bid),
+      stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?, ocr_original = ?
+        WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.remarks, r.status, c.get('user').id, t, ocr, rowId, bid),
       stmt(db, 'DELETE FROM register_payments WHERE register_row_id = ?', rowId),
       ...paymentStatements(db, bid, rowId, r.payments, t),
     ]);

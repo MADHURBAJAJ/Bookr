@@ -772,7 +772,11 @@ async function reviewListView(biz) {
 /** Fields Claude could not read with confidence, while nobody has checked the row yet. */
 function unclearOf(ocrOriginal, stillUnchecked) {
   if (!ocrOriginal || !stillUnchecked) return new Set();
-  try { return new Set(JSON.parse(ocrOriginal).unclear ?? []); } catch { return new Set(); }
+  try {
+    const o = JSON.parse(ocrOriginal);
+    const resolved = new Set(o.resolved ?? []);
+    return new Set((o.unclear ?? []).filter((f) => !resolved.has(f)));
+  } catch { return new Set(); }
 }
 const needs = (set, field, content) => (set.has(field) ? html`${content} <span class="chip bad">Needs input</span>` : content);
 const READABLE = ['bill_register', 'expense_list', 'cash_summary'];
@@ -781,29 +785,125 @@ function payText(pays) {
   return pays.length ? pays.map((p) => `${p.columnLabel || MODE_LABELS[p.mode]} ${money(p.amountPaise)}`).join(' + ') : 'none written';
 }
 
-function registerPanel(biz, u) {
-  const locked = u.shiftStatus === 'confirmed';
+const PAY_OPTIONS = [['cash', 'Cash'], ['upi', 'UPI XOXO'], ['upi', 'UPI Bank 2'], ['card', 'Card']];
+const payKey = (p) => `${p.mode}|${p.columnLabel ?? ''}`;
+
+/** One register row. Editable in place unless the shift is confirmed; Edit opens the full form. */
+function regRowHtml(r, locked) {
+  const q = unclearOf(r.ocrOriginal, r.status === 'draft');
+  const nd = (f) => (q.has(f) ? 'needs' : '');
+  if (locked) {
+    return html`<tr data-row="${r.id}">
+      <td class="note">${r.lineNo}</td><td>${r.status === 'checked' ? '✓' : ''}</td><td class="mono">${r.billNo}</td><td>${TYPE_LABELS[r.billType] ?? ''}</td>
+      <td class="amount">${money(r.amountPaise)}</td><td>${payText(r.payments)}</td><td class="note">${r.remarks ?? ''}</td><td></td></tr>`;
+  }
+  const single = r.payments.length <= 1;
+  const p = r.payments[0];
+  const opts = [...PAY_OPTIONS];
+  if (p && !opts.some(([m, l]) => `${m}|${l}` === payKey(p))) opts.push([p.mode, p.columnLabel ?? MODE_LABELS[p.mode]]);
+  return html`<tr data-row="${r.id}" class="${r.status === 'checked' ? 'row-checked' : ''}">
+    <td class="note">${r.lineNo}</td>
+    <td style="text-align:center"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Checked against the page" title="Checked against the page" style="width:20px;height:20px;min-height:0"></td>
+    <td><input class="cell mono ${nd('bill_no')}" data-f="billNo" value="${r.billNo}" style="width:104px" aria-label="Bill number"></td>
+    <td><select class="cell ${nd('bill_type')}" data-f="billType" aria-label="Type">
+      <option value="">Choose</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
+    <td><input class="cell mono ${nd('amount')}" data-f="amount" value="${rupeesForInput(r.amountPaise)}" style="width:88px;text-align:right" inputmode="decimal" aria-label="Bill amount"></td>
+    <td>${single ? html`<div style="display:flex;gap:6px">
+        <select class="cell ${nd('payments')}" data-f="pay" aria-label="Paid as"><option value="">None written</option>
+          ${opts.map(([m, l]) => html`<option value="${m}|${l}" ${p && payKey(p) === `${m}|${l}` ? 'selected' : ''}>${l}</option>`)}</select>
+        <input class="cell mono ${nd('payments')}" data-f="payAmount" value="${p ? rupeesForInput(p.amountPaise) : ''}" style="width:84px;text-align:right" inputmode="decimal" aria-label="Payment amount" ${p ? '' : 'hidden'}>
+      </div>` : html`<span class="${nd('payments') ? 'error' : ''}">${payText(r.payments)}</span>`}</td>
+    <td><input class="cell ${nd('remarks')}" data-f="remarks" value="${r.remarks ?? ''}" style="width:130px" aria-label="Remarks"></td>
+    <td style="text-align:right"><button class="btn plain" type="button" data-edit="${r.id}" style="min-height:36px">Edit</button></td>
+  </tr>`;
+}
+
+function regSumHtml(u) {
   const sum = u.rows.reduce((s, r) => s + r.amountPaise, 0);
   const written = u.pageWrittenTotalPaise;
+  return html`Rows add up to ₹ ${money(sum)}. ${written == null ? 'Enter the total written on the page to check it.' : written === sum ? html`<span class="ok-msg">Matches the written total.</span>` : html`<span class="error">The page says ₹ ${money(written)}.</span>`}`;
+}
+
+function registerPanel(biz, u) {
+  const locked = u.shiftStatus === 'confirmed';
+  const written = u.pageWrittenTotalPaise;
+  const anyUnclear = u.rows.some((r) => unclearOf(r.ocrOriginal, r.status === 'draft').size);
   return html`
     <section class="card grow3" style="gap:12px">
-      ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>` : ''}
-      <div class="scroll"><table style="min-width:720px">
-        <thead><tr><th>#</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th>Paid as</th><th>Remarks</th><th>Status</th><th></th></tr></thead>
-        <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.editedAt); return html`
-          <tr data-row="${r.id}">
-            <td class="note">${r.lineNo}</td><td class="mono">${needs(q, 'bill_no', r.billNo || '—')}</td><td>${needs(q, 'bill_type', TYPE_LABELS[r.billType] ?? html`<span class="error">Choose</span>`)}</td>
-            <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td><td>${needs(q, 'payments', payText(r.payments))}</td><td class="note">${needs(q, 'remarks', r.remarks ?? '')}</td>
-            <td>${r.status === 'checked' ? html`<span class="chip ok">Checked</span>` : html`<span class="chip wait">Check</span>`}</td>
-            <td style="text-align:right">${locked ? '' : html`<button class="btn plain" type="button" data-edit="${r.id}">Edit</button>`}</td>
-          </tr>`; })}</tbody>
+      ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>`
+        : html`<div class="note">Change any cell and it saves when you leave it. Tick a row once it matches the page. Use Edit for a bill paid in more than one way.${anyUnclear ? html` <span class="needs-key">Red boxes</span> are cells Claude could not read with confidence.` : ''}</div>`}
+      <div class="scroll"><table style="min-width:860px" id="regtable">
+        <thead><tr><th>#</th><th title="Checked against the page">✓</th><th>Bill</th><th>Type</th><th style="text-align:right">Amount</th><th>Paid as</th><th>Remarks</th><th></th></tr></thead>
+        <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
       </table></div>
       <div class="form-row" style="justify-content:space-between">
-        <div class="note">Rows add up to ₹ ${money(sum)}. ${written == null ? 'Enter the total written on the page to check it.' : written === sum ? html`<span class="ok-msg">Matches the written total.</span>` : html`<span class="error">The page says ₹ ${money(written)}.</span>`}</div>
+        <div class="note" id="regsum">${regSumHtml(u)}</div>
         ${locked ? '' : html`<form id="ptotal" class="form-row" style="align-items:flex-end"><div class="field"><label for="pt">Total written on the page (₹)</label><input id="pt" name="pageWrittenTotal" class="mono" value="${written == null ? '' : rupeesForInput(written)}"></div><button class="btn plain" type="submit">Save total</button></form>`}
       </div>
       ${locked ? '' : html`<form class="inset" id="rform"></form>`}
     </section>`;
+}
+
+/** Saves a row from its inline cells. One save at a time per row; the row is redrawn from the server. */
+function wireInlineRows(biz, u) {
+  const table = document.getElementById('regtable');
+  if (!table) return;
+  const queues = new Map();
+  const payloadOf = (tr, r) => {
+    const val = (f) => tr.querySelector(`[data-f="${f}"]`);
+    let payments;
+    if (r.payments.length > 1) {
+      payments = r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) }));
+    } else {
+      const sel = val('pay').value;
+      if (!sel) payments = [];
+      else {
+        const [mode, label] = sel.split('|');
+        payments = [{ mode, columnLabel: label || null, amount: val('payAmount').value || val('amount').value }];
+      }
+    }
+    return {
+      billNo: val('billNo').value.trim(), billType: val('billType').value || null, amount: val('amount').value,
+      remarks: val('remarks').value.trim() || null, payments, status: val('checked').checked ? 'checked' : 'draft',
+    };
+  };
+  const save = (tr, changed) => {
+    const id = tr.dataset.row;
+    const r = u.rows.find((x) => x.id === id);
+    // Keep a single payment in step with the bill amount when they were equal.
+    const pa = tr.querySelector('[data-f="payAmount"]');
+    if (changed.dataset.f === 'amount' && pa && r.payments.length === 1 && r.payments[0].amountPaise === r.amountPaise) pa.value = changed.value;
+    if (changed.dataset.f === 'pay' && pa) { pa.hidden = !changed.value; if (changed.value && !pa.value) pa.value = tr.querySelector('[data-f="amount"]').value; }
+    const body = payloadOf(tr, r);
+    const run = (queues.get(id) ?? Promise.resolve()).then(async () => {
+      const focus = document.activeElement?.closest?.('tr')?.dataset.row === id ? document.activeElement.dataset.f : null;
+      try {
+        await apiFull('PUT', `/businesses/${biz.id}/register-rows/${id}`, body);
+        document.getElementById('rmsg').innerHTML = '';
+      } catch (err) {
+        showError(document.getElementById('rmsg'), err);
+      }
+      const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`);
+      u.rows = fresh.rows;
+      const nr = u.rows.find((x) => x.id === id);
+      const cur = table.querySelector(`tr[data-row="${id}"]`);
+      if (nr && cur) {
+        cur.outerHTML = regRowHtml(nr, false).__html;
+        const again = table.querySelector(`tr[data-row="${id}"]`);
+        bind(again);
+        if (focus) again.querySelector(`[data-f="${focus}"]`)?.focus();
+      }
+      document.getElementById('regsum').innerHTML = regSumHtml(u).__html;
+    });
+    queues.set(id, run);
+  };
+  const bind = (tr) => {
+    tr.querySelectorAll('[data-f]').forEach((el) => el.addEventListener('change', () => save(tr, el)));
+    tr.querySelector('[data-edit]')?.addEventListener('click', () => openRowForm(tr.dataset.row));
+  };
+  let openRowForm = () => {};
+  table.querySelectorAll('tbody tr').forEach(bind);
+  return (fn) => { openRowForm = fn; };
 }
 
 function rowForm(r) {
@@ -866,11 +966,12 @@ function wireRegister(biz, u) {
     else await api('POST', `/businesses/${biz.id}/uploads/${u.id}/register-rows`, payload);
     reviewView(biz, u.id);
   });
-  app.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
-    const r = u.rows.find((x) => x.id === b.dataset.edit);
+  const setEdit = wireInlineRows(biz, u);
+  setEdit?.((rowId) => {
+    const r = u.rows.find((x) => x.id === rowId);
     form.dataset.editing = r.id;
     show(r);
-  }));
+  });
   form.dataset.editing = '';
   show(null);
 }

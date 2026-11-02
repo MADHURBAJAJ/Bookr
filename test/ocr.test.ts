@@ -96,6 +96,22 @@ describe('Read page: register', () => {
     expect((await p.read()).status).toBe(409);
   });
 
+  it('fixing a cell clears only that cell\'s "Needs input"; the original reading is kept', async () => {
+    const p = await page('bill_register');
+    mocked.mockResolvedValueOnce(registerReading() as never);
+    await p.read();
+    const [row] = await sql`SELECT id, ocr_original FROM register_rows WHERE line_no = 4`; // type was unclear
+    expect(JSON.parse(row.ocr_original).unclear).toEqual(['bill_type']);
+    await p.clients.entry_staff.put(`/businesses/${p.bid}/register-rows/${row.id}`, {
+      billNo: '2610313', billType: 'room', amount: '942', status: 'draft', payments: [{ mode: 'card', columnLabel: 'Card', amount: '942' }],
+    });
+    const [after] = await sql`SELECT ocr_original FROM register_rows WHERE id = ${row.id}`;
+    const o = JSON.parse(after.ocr_original);
+    expect(o.unclear).toEqual(['bill_type']);
+    expect(o.resolved).toEqual(['bill_type']);
+    expect(o.read.bill_type).toBe('unclear');
+  });
+
   it('refuses a confirmed shift', async () => {
     const p = await page('bill_register');
     await sql`INSERT INTO shifts (id, business_id, shift_day, status, created_at) VALUES ('s1', ${p.bid}, '2026-10-31', 'confirmed', 0)`;
