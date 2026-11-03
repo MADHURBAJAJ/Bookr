@@ -171,6 +171,21 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
 
   const t = now();
   const statements: D1PreparedStatement[] = [];
+  // An old POS bill on the register is never in the software report: it is counted from the register without
+  // waiting for a person (approved 3 Nov 2026), once its payment is written and its discount is not large.
+  const rgById = new Map(rg.map((r) => [r.id, r]));
+  const autoOldPos = (w: { difference: Difference; bill_no: string; register_row_id: string | null }) => {
+    const r = w.register_row_id ? rgById.get(w.register_row_id) : undefined;
+    return w.difference === 'missing_in_software' && isOldPosBill(w.bill_no) && !!r
+      && !!paysByRow.get(r.paid_with_row_id ?? r.id)?.length && !shares.get(r.id)?.large;
+  };
+  const decideOldPos = (id: string, before: unknown) => [
+    stmt(db, `UPDATE bill_comparisons SET decision = 'use_register', decided_by = NULL, decided_at = ?, note = ?, linked_to_id = NULL,
+      closed_at = ?, closed_by = NULL, close_note = ? WHERE id = ? AND decision IS NULL`, t, OLD_POS_NOTE, t, OLD_POS_NOTE, id),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, NULL, 'comparison.decide', 'bill_comparisons', ?, ?, ?, ?)`, businessId, id, JSON.stringify(before),
+      JSON.stringify({ decision: 'use_register', note: OLD_POS_NOTE, oldPos: true }), t),
+  ];
   const same = (a: Comparison, b: (typeof wanted extends Map<string, infer V> ? V : never)) =>
     a.software_bill_id === b.software_bill_id && a.register_row_id === b.register_row_id &&
     a.sw_amount_paise === b.sw_amount_paise && a.sw_mode === b.sw_mode &&
@@ -191,7 +206,10 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
       statements.push(stmt(db, 'DELETE FROM bill_comparisons WHERE id = ?', c.id));
       continue;
     }
-    if (same(c, w)) continue;
+    if (same(c, w)) {
+      if (!c.decision && autoOldPos(w)) statements.push(...decideOldPos(c.id, { decision: null }));
+      continue;
+    }
     // Any change to a bill clears its decision, so it is decided again on the new values.
     if (c.decision) statements.push(clearedAudit(c, w));
     statements.push(...unlinkStatements(db, c.id, t));
@@ -200,13 +218,16 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
       closed_at = NULL, closed_by = NULL, close_note = NULL WHERE id = ?`,
       w.software_bill_id, w.register_row_id, w.sw_amount_paise, w.sw_mode, w.rg_amount_paise, w.rg_mode, w.difference,
       null, null, null, null, c.id));
+    if (autoOldPos(w)) statements.push(...decideOldPos(c.id, { decision: null }));
   }
   for (const [key, w] of wanted) {
     if (seen.has(key)) continue;
+    const id = newId();
     statements.push(stmt(db, `INSERT INTO bill_comparisons (id, business_id, shift_day, pos_no, bill_no, software_bill_id, register_row_id,
       sw_amount_paise, sw_mode, rg_amount_paise, rg_mode, difference, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      newId(), businessId, day, w.pos_no, w.bill_no, w.software_bill_id, w.register_row_id,
+      id, businessId, day, w.pos_no, w.bill_no, w.software_bill_id, w.register_row_id,
       w.sw_amount_paise, w.sw_mode, w.rg_amount_paise, w.rg_mode, w.difference, t));
+    if (autoOldPos(w)) statements.push(...decideOldPos(id, { decision: null }));
   }
   if (wanted.size) statements.push(stmt(db, "UPDATE shifts SET status = 'comparing' WHERE business_id = ? AND shift_day = ? AND status = 'open'", businessId, day));
   if (statements.length) await db.batch([shiftStatement(db, businessId, day), ...statements]);
@@ -286,6 +307,8 @@ export async function otherDays(db: DB, businessId: string, day: string, comps: 
  * The watch list: bills found on one side only, decided, not closed, and not yet paired with the other
  * side on another day. After WATCH_DAYS they are unresolved and an Owner or Accountant closes them.
  */
+const OLD_POS_NOTE = 'Old POS bill: never in the software report, counted from the register';
+
 /** Bills of the old POS: 6-digit numbers, never in the software report, so never matched. */
 export const isOldPosBill = (billNo: string | null | undefined) => /^\d{6}$/.test(billNo ?? '');
 

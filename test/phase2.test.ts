@@ -1071,6 +1071,25 @@ describe('a shift with many one-sided bills', () => {
   });
 });
 
+describe('old POS bills (6 digits) are counted from the register on their own', () => {
+  it('once paid and without a large discount; others still wait for a person', async () => {
+    const h = await hotel();
+    const page = await fullShift(h);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
+    await add('145238', '200', []);                                                   // no payment written
+    await add('145239', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // 50% discount
+    await add('7700001', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]); // not old POS
+    const v = await view(h);
+    expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register' });
+    expect(byBill(v, '145236').note).toMatch(/Old POS/);
+    for (const b of ['145238', '145239', '7700001']) expect(byBill(v, b).decision ?? null).toBeNull();
+    const [log] = await sql`SELECT user_id, after FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%oldPos%'`;
+    expect(log.user_id).toBeNull();
+  });
+});
+
 describe('register-only bills in bulk (e.g. an old POS)', () => {
   it('counts them from the register with a reason, keeps them off the watch list, and skips what cannot be done this way', async () => {
     const h = await hotel();

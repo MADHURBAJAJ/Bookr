@@ -306,3 +306,4 @@ An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tie
 - The total written under Bill Amt on the paper is what was paid in all modes, so the totals row compares it with all payments added up (bill amounts shown underneath).
 - Old POS bills are 6-digit numbers (`isOldPosBill`): never in the software report, so Review shows "Old POS bill" instead of "Not in software report", and they are left out of the bills-waiting lists.
 - The Review pager numbers pages within the day ("Page 2 of 3"); Previous and Next carry on into other days.
+- Old POS bills on the register are decided 'use register' automatically on comparison (approved 3 Nov 2026), once their payment is written and the discount is not large; audit_log 'comparison.decide' with user NULL and oldPos.
