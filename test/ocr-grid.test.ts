@@ -8,7 +8,7 @@ vi.mock('../src/claude', async (importOriginal) => {
 });
 
 import { readWithClaude } from '../src/claude';
-import { draftRegisterRows, findSlip, gridToReading, headingRole } from '../src/ocr';
+import { columnTotals, draftRegisterRows, findSlip, gridToReading, headingRole } from '../src/ocr';
 import { suggestBills } from '../src/sales';
 import { businessWithAllRoles, env, sql, resetDb } from './helpers';
 
@@ -27,7 +27,7 @@ vi.setConfig({ testTimeout: 120_000 });
 const HEAD = ['S.No', 'Bill No', 'Closure time', 'Bill Amt', 'Type', 'Cash', 'UPI XOXO', 'UPI Bank 2', 'Card', 'Remarks'];
 type Line = [string | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null, string | null];
 const grid = (lines: Line[], extra: Partial<{ paid_with_line: number | null; unclear_columns: string[] }>[] = []) => ({
-  orientation: 'upright' as const, legible: true, page_total: null, headings: HEAD,
+  orientation: 'upright' as const, legible: true, page_total: null, headings: HEAD, total_cells: null as (string | null)[] | null,
   lines: lines.map((cells, i) => ({ line: i + 1, y: 20 + i * 3, cells, paid_with_line: null, unclear_columns: [], ...extra[i] })),
 });
 
@@ -49,7 +49,7 @@ describe('Reading the register as a grid', () => {
   });
 
   it('falls back to the usual register columns when the headings cannot be told apart', () => {
-    const r = gridToReading({ orientation: 'upright', legible: true, page_total: null, headings: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'],
+    const r = gridToReading({ orientation: 'upright', legible: true, page_total: null, headings: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'], total_cells: null,
       lines: [{ line: 1, y: 20, cells: ['1', '26110101', '300', 'F&B', '300', null, null, null, null], paid_with_line: null, unclear_columns: [] }] });
     expect(r.rows[0]).toMatchObject({ bill_no: '26110101', amount: '300', payments: [{ mode: 'cash', amount: '300' }] });
   });
@@ -213,5 +213,24 @@ describe('Add a line below', () => {
     expect(rows[2]).toMatchObject({ id: res.json.id, bill_no: '', amount_paise: 0, status: 'draft' });
     expect(JSON.parse(rows[2].ocr_original).y).toBe(JSON.parse(second.ocr_original).y);
     expect((await p.clients.entry_staff.post(`/businesses/${p.bid}/register-rows/not-a-row/insert-below`, {})).status).toBe(404);
+  });
+});
+
+describe('Totals on the bottom line of the page', () => {
+  it('are read by column, a second UPI column kept apart; a blank or dashed total is left out', () => {
+    const g = { ...grid([['1', '26110101', '21:10', '450', 'F&B', null, '450', null, null, null]]),
+      total_cells: ['Total', null, null, '21,030', null, '4,200', '9,587', '7000', '-', null] };
+    expect(columnTotals(g)).toEqual({ amount: 2103000, cash: 420000, upi: 958700, upi2: 700000 });
+    expect(columnTotals({ ...g, total_cells: ['Total', '21030'] })).toBeNull(); // cannot be placed under the headings
+  });
+
+  it('are saved with the reading, can be corrected on Review, and only for a register page', async () => {
+    const p = await page();
+    mocked.mockResolvedValueOnce({ data: { ...slipped(), total_cells: [null, null, null, '2,950', null, '450', '1,200', null, null, null] }, model: 'claude-opus-5-5' } as never);
+    expect((await p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/read`)).status).toBe(200);
+    expect((await p.clients.entry_staff.get(`/businesses/${p.bid}/uploads/${p.id}`)).json.columnTotals).toEqual({ amount: 295000, cash: 45000, upi: 120000 });
+    const res = await p.clients.entry_staff.patch(`/businesses/${p.bid}/uploads/${p.id}`, { columnTotals: { amount: '2950', cash: '500', upi: '', card: '0' } });
+    expect(res.json.columnTotals).toEqual({ amount: 295000, cash: 50000, card: 0 });
+    expect((await p.clients.entry_staff.patch(`/businesses/${p.bid}/uploads/${p.id}`, { columnTotals: { cash: 'abc' } })).status).toBe(400);
   });
 });

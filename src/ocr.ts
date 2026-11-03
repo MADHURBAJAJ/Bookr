@@ -48,6 +48,7 @@ export const RegisterGrid = z.object({
     paid_with_line: z.number().int().nullable().describe('If this bill has no payment of its own because one amount written on another line (often joined by a bracket or brace across rows) pays for several bills, the "line" where that amount is written. Otherwise null.'),
     unclear_columns: z.array(z.string()).describe('Headings of the cells on this line you could not read with confidence.'),
   })),
+  total_cells: z.array(z.string().nullable()).nullable().describe('The total line at the bottom of the page (often marked "Total"), one entry per heading in the same order: the total exactly as written under that heading, null where none is written. null if the page has no total line. Do not include it in "lines".'),
 });
 
 export const ExpenseReading = z.object({
@@ -86,6 +87,7 @@ Write the bill type cell as written (for example "F&B", "Room"). A discount writ
 Sometimes one amount pays for several bills: it is written once, often with a bracket or brace joining those lines. Keep the amount in the cell where it is written, leave the other lines' payment cells null, and set their "paid_with_line" to the line where it is written. Otherwise "paid_with_line" is null.
 List in "unclear_columns" the headings of any cells on that line you could not read with confidence.
 For every line also give "y": where the middle of that line is, as a percentage of the page height from the top of the upright page.
+If the page ends with a total line, it is not a bill: leave it out of "lines" and give its cells in "total_cells", one per heading (null where no total is written under that heading). Put the overall total of the payments in "page_total".
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
 Return one item in "rows" for every expense line, in page order. Do not include the total line as a row; put it in "page_total".
@@ -179,6 +181,24 @@ export function gridToReading(g: Grid): Reading {
 
 /** Reading as Claude returned it: a grid (now) or bill rows (pages read before grids). */
 export const asReading = (data: Grid | Reading): Reading => ('lines' in data ? gridToReading(data) : data);
+
+export const TOTAL_KEYS = ['amount', 'discount', 'cash', 'upi', 'upi2', 'card'] as const;
+export type ColumnTotals = Partial<Record<(typeof TOTAL_KEYS)[number], number>>;
+
+/** The totals on the page's bottom line, by column. A second UPI column ("UPI Bank 2") is upi2, as on Review. */
+export function columnTotals(data: Grid | Reading): ColumnTotals | null {
+  if (!('lines' in data) || !data.total_cells?.length) return null;
+  let headings = data.headings;
+  if (data.total_cells.length !== headings.length) return null; // cannot be placed under the headings with confidence
+  const out: ColumnTotals = {};
+  headings.forEach((h, i) => {
+    const role = headingRole(h);
+    const key = role === 'upi' ? (/bank|\b2\b/i.test(h) ? 'upi2' : 'upi') : role === 'amount' || role === 'discount' || role === 'cash' || role === 'card' ? role : null;
+    const v = blank(data.total_cells![i]) ? null : amount(data.total_cells![i]);
+    if (key && v !== null && out[key] === undefined) out[key] = v;
+  });
+  return Object.keys(out).length ? out : null;
+}
 
 const explainedInRemark = (r: string | null) => !!r && /dis|tip|less|off|comp|nc\b|round|kot|credit|due/i.test(r);
 
@@ -319,7 +339,7 @@ const gridOf = (data: Grid | Reading, line: number) => {
 };
 
 /** Statements that replace the page's draft register rows with the reading. */
-export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softwareBills?: string[]; takenBills?: string[] } = {}): { statements: D1PreparedStatement[]; written: number | null } {
+export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softwareBills?: string[]; takenBills?: string[] } = {}): { statements: D1PreparedStatement[]; written: number | null; columns: ColumnTotals | null } {
   const t = now();
   const r = asReading(data);
   const statements: D1PreparedStatement[] = [stmt(ctx.db, 'DELETE FROM register_rows WHERE upload_id = ? AND status = ?', ctx.uploadId, 'draft')];
@@ -339,7 +359,7 @@ export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softw
   });
   // Links last, once every row of the page exists.
   for (const x of rows) if (x.paidWith) statements.push(stmt(ctx.db, 'UPDATE register_rows SET paid_with_row_id = ? WHERE id = ?', x.paidWith, x.id));
-  return { statements, written: amount(r.page_total) };
+  return { statements, written: amount(r.page_total), columns: columnTotals(data) };
 }
 
 /** Statements that replace the page's draft expense rows with the reading. Rows have no head: a person chooses it. */

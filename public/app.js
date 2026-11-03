@@ -1219,6 +1219,50 @@ function regSumHtml(u) {
     ${off.length ? html`<br><span class="error">${off.length} bill${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount after discount or tip (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
 }
 
+// The bottom line of the page: what each column adds up to here, against the total written under it on the paper.
+const TOTAL_COLS = [['amount', 'c-am', 'Amount'], ['cash', 'c-p0', 'Cash'], ['upi', 'c-p1', PAY_COLS[1][1]], ['upi2', 'c-p2', PAY_COLS[2][1]], ['card', 'c-p3', 'Card'], ['discount', 'c-dc', 'Disc']];
+function columnSums(u) {
+  const pay = (i) => u.rows.reduce((t, r) => t + r.payments.filter((p) => colOf(p) === i).reduce((a, p) => a + p.amountPaise, 0), 0);
+  return { amount: u.rows.reduce((t, r) => t + r.amountPaise, 0), cash: pay(0), upi: pay(1), upi2: pay(2), card: pay(3), discount: u.rows.reduce((t, r) => t + (r.discountPaise ?? 0), 0) };
+}
+function regFootHtml(u, locked) {
+  const sums = columnSums(u);
+  const w = u.columnTotals ?? {};
+  const cell = ([k, c, l]) => {
+    const has = w[k] != null;
+    const diff = has ? sums[k] - w[k] : 0;
+    const st = !has ? '' : diff === 0 ? 'tot-ok' : 'tot-bad';
+    return { k, c, l, has, diff, st };
+  };
+  const cells = TOTAL_COLS.map(cell);
+  const byKey = Object.fromEntries(cells.map((x) => [x.k, x]));
+  const checked = cells.filter((x) => x.has);
+  const bad = checked.filter((x) => x.diff !== 0);
+  const verdict = !checked.length ? html`<span class="tiny">Type the totals written on the last line of the page to check each column.</span>`
+    : !bad.length ? html`<span class="ok-msg">✓ ${checked.length === cells.length ? 'Every column' : `${checked.length} column${checked.length > 1 ? 's' : ''}`} match${checked.length === 1 ? 'es' : ''} the page</span>`
+    : html`<span class="error">${bad.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'} than written`).join(' · ')}</span>`;
+  const sumTd = (k) => { const x = byKey[k]; return html`<td class="amount ${x.c} ${x.st}" data-l="${x.l}" title="${x.has && x.diff ? `Written ₹ ${rs(w[k])}: rows are ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}` : ''}">${rs(sums[k])}${x.has && x.diff ? html`<span class="tot-diff">${x.diff > 0 ? '+' : '−'}${rs(Math.abs(x.diff))}</span>` : ''}</td>`; };
+  const inTd = (k) => { const x = byKey[k]; return html`<td class="${x.c}" data-l="${x.l}">${locked ? html`<span class="amount mono" style="display:block">${x.has ? rs(w[k]) : ''}</span>`
+    : html`<input class="cell mono ${x.st}" data-tot="${k}" value="${x.has ? rsIn(w[k]) : ''}" placeholder="–" style="width:100%;text-align:right" inputmode="decimal" aria-label="${x.l} total written on the page">`}</td>`; };
+  return html`<tr class="tot-rows"><td class="ln"></td><td class="c-bn"><strong>Rows add up to</strong></td>${sumTd('amount')}<td class="c-ty"></td>${sumTd('cash')}${sumTd('upi')}${sumTd('upi2')}${sumTd('card')}${sumTd('discount')}<td class="c-rm tot-verdict" colspan="4">${verdict}</td></tr>
+    <tr class="tot-written"><td class="ln"></td><td class="c-bn">Written on the page</td>${inTd('amount')}<td class="c-ty"></td>${inTd('cash')}${inTd('upi')}${inTd('upi2')}${inTd('card')}${inTd('discount')}<td class="c-rm" colspan="4"></td></tr>`;
+}
+
+/** Saves the column totals typed on the bottom line; each saves when you leave it. */
+function wireFoot(biz, u) {
+  document.querySelectorAll('#regfoot [data-tot]').forEach((inp) => inp.addEventListener('change', async () => {
+    const columnTotals = Object.fromEntries([...document.querySelectorAll('#regfoot [data-tot]')].map((x) => [x.dataset.tot, x.value.replace(/,/g, '').trim()]));
+    try {
+      const res = await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { columnTotals });
+      u.columnTotals = res.columnTotals;
+      const at = inp.dataset.tot;
+      document.getElementById('regfoot').innerHTML = regFootHtml(u, false).__html;
+      wireFoot(biz, u);
+      document.querySelector(`#regfoot [data-tot="${at}"]`)?.closest('td')?.nextElementSibling?.querySelector('input')?.focus();
+    } catch (err) { showError(document.getElementById('rmsg'), err); }
+  }));
+}
+
 /** Fill button and the amber note: redrawn after every inline save. */
 function regToolsHtml(u, locked) {
   const slip = !locked && u.slip;
@@ -1335,6 +1379,7 @@ function registerPanel(biz, u) {
         <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:84px"></colgroup>
         <thead><tr><th>#</th><th>Bill no</th><th style="text-align:right">Amount</th><th>Type</th>${PAY_COLS.map(([, l]) => html`<th style="text-align:right">${l}</th>`)}<th style="text-align:right" title="Discount. A tip is negative.">Disc</th><th>Remarks</th><th>Issue</th><th title="Looks right">✓</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
+        <tfoot id="regfoot">${regFootHtml(u, locked)}</tfoot>
       </table></div>
       <div class="form-row" style="justify-content:space-between;align-items:flex-end">
         <div class="note" id="regsum" style="flex:1 1 320px">${regSumHtml(u)}</div>
@@ -1444,6 +1489,7 @@ function wireInlineRows(biz, u, strip) {
     tbody.querySelectorAll('tr[data-row]').forEach(bind);
     if (keep?.f) tbody.querySelector(`tr[data-row="${keep.row}"] [data-f="${keep.f}"]`)?.focus();
     document.getElementById('regsum').innerHTML = regSumHtml(u).__html;
+    document.getElementById('regfoot').innerHTML = regFootHtml(u, false).__html; wireFoot(biz, u);
     document.getElementById('rvbar').innerHTML = regBarHtml(u).__html;
     document.getElementById('regtools').innerHTML = regToolsHtml(u, false).__html;
     wireBar(); wireFill();
@@ -1470,7 +1516,7 @@ function wireInlineRows(biz, u, strip) {
       u.otherPageRows = fresh.otherPageRows;
       u.slip = fresh.slip;
       u.softwareList = fresh.softwareList;
-      u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise;
+      u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise; u.columnTotals = fresh.columnTotals;
       regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
       redraw();
@@ -1548,6 +1594,7 @@ function wireInlineRows(biz, u, strip) {
   };
   let openRowForm = () => {};
   table.querySelectorAll('tbody tr[data-row]').forEach(bind);
+  wireFoot(biz, u);
   wireBar();
   // Start on the first row that needs you, so the strip shows its line.
   const first = table.querySelector('tbody tr.needs-you') ?? table.querySelector('tbody tr[data-row]');

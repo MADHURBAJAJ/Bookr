@@ -5,7 +5,7 @@ import { all, isShiftConfirmed, now, one, stmt, type DB } from '../db';
 import { fail, isUuid } from '../http';
 import { istDay, istToMs } from '../time';
 import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../claude';
-import { asReading, draftRegisterRows, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
+import { asReading, type ColumnTotals, draftRegisterRows, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
 import { refreshComparisons } from '../sales';
 import { parsePaise } from '../money';
 import { loadHistory, loadParties } from '../parties';
@@ -114,6 +114,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     }
 
     let written: number | null = null;
+    let columns: ColumnTotals | null = null;
     let statements: D1PreparedStatement[];
     let rows = 0;
     if (kind === 'bill_register') {
@@ -123,7 +124,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
         all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ? AND upload_id <> ?', bid, u.business_day, u.id),
       ]);
       const r = registerStatements(ctx, data as never, { softwareBills: sw.map((b) => b.bill_no), takenBills: taken.map((b) => b.bill_no) });
-      ({ statements, written } = r);
+      ({ statements, written, columns } = r);
       rows = asReading(data as never).rows.length;
     } else if (kind === 'expense_list') {
       const r = expenseStatements(ctx, data as never, cashAccount!, await loadParties(db, bid), await loadHistory(db, bid));
@@ -134,7 +135,8 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     }
     await db.batch([
       ...statements,
-      stmt(db, `UPDATE uploads SET status = 'ready', ocr_engine = 'claude_vision', page_written_total_paise = coalesce(?, page_written_total_paise) WHERE id = ?`, written, u.id),
+      stmt(db, `UPDATE uploads SET status = 'ready', ocr_engine = 'claude_vision', page_written_total_paise = coalesce(?, page_written_total_paise),
+        page_column_totals = coalesce(?, page_column_totals) WHERE id = ?`, written, columns ? JSON.stringify(columns) : null, u.id),
       finish({ ok: true, model, rows, orientation: data.orientation }),
     ]);
     if (kind === 'bill_register') await refreshComparisons(db, bid, u.business_day, user);

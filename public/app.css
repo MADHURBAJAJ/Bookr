@@ -212,6 +212,7 @@ details.menu > summary::-webkit-details-marker { display: none; }
   .regtable td[data-l]::before { content: attr(data-l); display: block; font-size: 10px; color: var(--muted, #6B7280); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .regtable .cell { padding: 0 4px; font-size: 12px; }
   .regtable tr.grptotal { display: block; padding: 4px 0 8px 28px; } .regtable tr.grptotal td.ln { display: none; }
+  .regtable tfoot { display: block; } .regtable tfoot tr.tot-rows { border-top: 2px solid var(--ink, #111827); } .regtable tfoot tr.tot-rows td { border-top: 0; }
   #striphint { display: none; }
 }
 
@@ -219,6 +220,14 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .regtable tr.grp td.ln { box-shadow: inset 4px 0 0 #8B5CF6; }
 .regtable tr.grp:not(.grp-first) td { border-top: 1px dashed #DDD6FE; }
 .regtable tr.grp.grp-first td.ln { border-top-left-radius: 6px; }
+.regtable tfoot td { border-top: 0; padding: 4px 6px; font-size: 13px; vertical-align: top; }
+.regtable tfoot tr.tot-rows td { border-top: 2px solid var(--ink, #111827); font-weight: 600; padding-top: 8px; }
+.regtable tfoot td.tot-ok { color: var(--teal-ink); background: #ECFDF5; }
+.regtable tfoot td.tot-bad { color: #B91C1C; background: #FEF2F2; }
+.regtable tfoot input.tot-ok { border-color: #10B981; background: #ECFDF5; }
+.regtable tfoot input.tot-bad { border-color: #EF4444; background: #FEF2F2; }
+.regtable tfoot .tot-diff { display: block; font-size: 11px; font-weight: 600; }
+.regtable tfoot .tot-verdict { font-weight: 500; }
 .regtable tr.grptotal td { padding: 3px 8px 8px; font-size: 13px; font-weight: 600; border-top: 1px dashed #DDD6FE; }
 .regtable tr.grptotal td.ln { box-shadow: inset 4px 0 0 #8B5CF6; border-bottom-left-radius: 6px; }
 .regtable tr.grptotal.ok td:last-child { color: var(--teal-ink); }

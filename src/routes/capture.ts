@@ -8,7 +8,7 @@ import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { spreadDifference } from '../discounts';
-import { findSlip, type Slip } from '../ocr';
+import { findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
 import { can, type Role } from '../permissions';
 
 export const captureRoutes = new Hono<AppEnv>();
@@ -24,11 +24,11 @@ const PHOTO_KINDS = ['bill_register', 'expense_list', 'cash_summary', 'single_bi
 type PhotoKind = (typeof PHOTO_KINDS)[number];
 const CONFIRMED = 'This shift is confirmed. An Owner must reopen it first.';
 
-interface Upload { id: string; kind: string; business_day: string; storage_key: string; status: string; page_written_total_paise: number | null; ocr_engine: string | null; uploaded_by: string | null; created_at: number }
+interface Upload { id: string; kind: string; business_day: string; storage_key: string; status: string; page_written_total_paise: number | null; page_column_totals: string | null; ocr_engine: string | null; uploaded_by: string | null; created_at: number }
 
 async function getUpload(db: DB, businessId: string, id: string | undefined): Promise<Upload> {
   if (!isUuid(id)) fail(404, 'Upload not found.');
-  const u = await one<Upload>(db, `SELECT id, kind, business_day, storage_key, status, page_written_total_paise, ocr_engine, uploaded_by, created_at
+  const u = await one<Upload>(db, `SELECT id, kind, business_day, storage_key, status, page_written_total_paise, page_column_totals, ocr_engine, uploaded_by, created_at
     FROM uploads WHERE id = ? AND business_id = ?`, id, businessId);
   if (!u) fail(404, 'Upload not found.');
   return u;
@@ -191,7 +191,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const db = c.env.DB;
   const bid = c.get('businessId');
   const u = await getUpload(db, bid, c.req.param('uploadId'));
-  const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at,
+  const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, columnTotals: u.page_column_totals ? JSON.parse(u.page_column_totals) : null, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at,
     fromSoftware: u.storage_key.startsWith('software-added/') };
   if (u.kind === 'bill_register') {
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
@@ -276,6 +276,18 @@ captureRoutes.patch('/businesses/:businessId/uploads/:uploadId', requireRole('ro
   if ('day' in data) {
     await changeDay(c.env.DB, c.get('businessId'), u, date(data, 'day', 'Day'), c.get('role'), c.get('user').id);
     return c.json({ ok: true });
+  }
+  if ('columnTotals' in data) {
+    // The totals on the bottom line of a register page, by column; a blank one is left out.
+    const raw = data.columnTotals;
+    if (u.kind !== 'bill_register' || !raw || typeof raw !== 'object' || Array.isArray(raw)) fail(400, 'Column totals are for a register page.');
+    const out: ColumnTotals = {};
+    for (const k of TOTAL_KEYS) {
+      const v = optionalPaise(raw as Record<string, unknown>, k, `Total of ${k}`);
+      if (v !== null) out[k] = v;
+    }
+    await stmt(c.env.DB, 'UPDATE uploads SET page_column_totals = ? WHERE id = ?', Object.keys(out).length ? JSON.stringify(out) : null, u.id).run();
+    return c.json({ ok: true, columnTotals: Object.keys(out).length ? out : null });
   }
   const total = optionalPaise(data, 'pageWrittenTotal', 'Page total');
   await stmt(c.env.DB, 'UPDATE uploads SET page_written_total_paise = ? WHERE id = ?', total, u.id).run();
