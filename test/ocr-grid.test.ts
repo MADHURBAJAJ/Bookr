@@ -233,4 +233,18 @@ describe('Totals on the bottom line of the page', () => {
     expect(res.json.columnTotals).toEqual({ amount: 295000, cash: 50000, card: 0 });
     expect((await p.clients.entry_staff.patch(`/businesses/${p.bid}/uploads/${p.id}`, { columnTotals: { cash: 'abc' } })).status).toBe(400);
   });
+
+  it('a page read before totals were read gets its total line read once, on its own', async () => {
+    const p = await page();
+    mocked.mockResolvedValueOnce({ data: slipped(), model: 'claude-opus-5-5' } as never);
+    await p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/read`);
+    expect((await p.clients.entry_staff.get(`/businesses/${p.bid}/uploads/${p.id}`)).json.columnTotals).toEqual({}); // read: no total line
+    await sql`UPDATE uploads SET page_column_totals = NULL`; // as pages read before 3 Nov
+    mocked.mockResolvedValueOnce({ data: { legible: true, headings: HEAD, total_cells: ['Total', null, null, '2,180', null, null, '2,180', null, null, null] }, model: 'claude-opus-5-5' } as never);
+    const res = await p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/read-totals`, {});
+    expect(res.json.columnTotals).toEqual({ amount: 218000, upi: 218000 });
+    const calls = mocked.mock.calls.length;
+    expect((await p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/read-totals`, {})).json.columnTotals).toEqual({ amount: 218000, upi: 218000 });
+    expect(mocked.mock.calls.length).toBe(calls); // not read twice
+  });
 });

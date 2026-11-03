@@ -100,6 +100,16 @@ ${COMMON}`,
 } as const;
 
 export type ReadableKind = keyof typeof INSTRUCTIONS;
+// Only the total line of a register page, for pages read before totals were read with the rest.
+export const TotalsReading = z.object({
+  legible: z.boolean(),
+  headings: z.array(z.string()).describe('The printed column headings, left to right, exactly as printed.'),
+  total_cells: z.array(z.string().nullable()).nullable().describe('The total line at the bottom of the page (often marked "Total"), one entry per heading in the same order: the total exactly as written under that heading, null where none is written. null if the page has no total line.'),
+});
+export const TOTALS_INSTRUCTIONS = `This is a page of a hotel's handwritten bill register, a ruled table. Read only two things.
+First list the printed column headings, left to right, in "headings" (for example: S.No, Bill No, Bill Amt, Type, Cash, UPI XOXO, UPI Bank 2, Card, Remarks). If a column has no printed heading, give it a short name of your own.
+Then find the total line at the bottom of the bill lines (often marked "Total" or underlined) and give its cells in "total_cells", one per heading in the same order, exactly as written; null where nothing is written under that heading. If there is no total line, "total_cells" is null. Do not add anything up yourself.`;
+
 export const SCHEMAS = { bill_register: RegisterGrid, expense_list: ExpenseReading, cash_summary: SummaryReading } as const;
 
 /** Rupee text from the page → paise, or null when it is missing or not a clean amount. */
@@ -186,8 +196,8 @@ export const TOTAL_KEYS = ['amount', 'discount', 'cash', 'upi', 'upi2', 'card'] 
 export type ColumnTotals = Partial<Record<(typeof TOTAL_KEYS)[number], number>>;
 
 /** The totals on the page's bottom line, by column. A second UPI column ("UPI Bank 2") is upi2, as on Review. */
-export function columnTotals(data: Grid | Reading): ColumnTotals | null {
-  if (!('lines' in data) || !data.total_cells?.length) return null;
+export function columnTotals(data: Grid | Reading | z.infer<typeof TotalsReading>): ColumnTotals | null {
+  if (!('total_cells' in data) || !data.total_cells?.length) return null;
   let headings = data.headings;
   if (data.total_cells.length !== headings.length) return null; // cannot be placed under the headings with confidence
   const out: ColumnTotals = {};

@@ -1238,7 +1238,8 @@ function regFootHtml(u, locked) {
   const byKey = Object.fromEntries(cells.map((x) => [x.k, x]));
   const checked = cells.filter((x) => x.has);
   const bad = checked.filter((x) => x.diff !== 0);
-  const verdict = !checked.length ? html`<span class="tiny">Type the totals written on the last line of the page to check each column.</span>`
+  const verdict = u.readingTotals ? html`<span class="tiny">Reading the total line from the photo…</span>`
+    : !checked.length ? html`<span class="tiny">${u.columnTotals ? 'No totals found on the photo. Type the totals from the last line of the page to check each column.' : 'Type the totals written on the last line of the page to check each column.'}</span>`
     : !bad.length ? html`<span class="ok-msg">✓ ${checked.length === cells.length ? 'Every column' : `${checked.length} column${checked.length > 1 ? 's' : ''}`} match${checked.length === 1 ? 'es' : ''} the page</span>`
     : html`<span class="error">${bad.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'} than written`).join(' · ')}</span>`;
   const sumTd = (k) => { const x = byKey[k]; return html`<td class="amount ${x.c} ${x.st}" data-l="${x.l}" title="${x.has && x.diff ? `Written ₹ ${rs(w[k])}: rows are ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}` : ''}">${rs(sums[k])}${x.has && x.diff ? html`<span class="tot-diff">${x.diff > 0 ? '+' : '−'}${rs(Math.abs(x.diff))}</span>` : ''}</td>`; };
@@ -1248,8 +1249,19 @@ function regFootHtml(u, locked) {
     <tr class="tot-written"><td class="ln"></td><td class="c-bn">Written on the page</td>${inTd('amount')}<td class="c-ty"></td>${inTd('cash')}${inTd('upi')}${inTd('upi2')}${inTd('card')}${inTd('discount')}<td class="c-rm" colspan="4"></td></tr>`;
 }
 
-/** Saves the column totals typed on the bottom line; each saves when you leave it. */
+/** Saves the column totals typed on the bottom line; each saves when you leave it. A page read before totals were
+ * read with the rest has none yet (null): its total line is read from the photo once, on the first open. */
 function wireFoot(biz, u) {
+  if (u.columnTotals === null && !u.fromSoftware && !u.readingTotals && !u.totalsTried) {
+    u.readingTotals = true; u.totalsTried = true;
+    const redraw = () => { const f = document.getElementById('regfoot'); if (f) { f.innerHTML = regFootHtml(u, false).__html; wireFoot(biz, u); } };
+    redraw();
+    api('POST', `/businesses/${biz.id}/uploads/${u.id}/read-totals`, {})
+      .then((res) => { u.columnTotals = res.columnTotals; })
+      .catch(() => { /* the boxes stay open for typing */ })
+      .finally(() => { u.readingTotals = false; redraw(); });
+    return;
+  }
   document.querySelectorAll('#regfoot [data-tot]').forEach((inp) => inp.addEventListener('change', async () => {
     const columnTotals = Object.fromEntries([...document.querySelectorAll('#regfoot [data-tot]')].map((x) => [x.dataset.tot, x.value.replace(/,/g, '').trim()]));
     try {

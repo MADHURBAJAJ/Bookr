@@ -5,7 +5,7 @@ import { all, isShiftConfirmed, now, one, stmt, type DB } from '../db';
 import { fail, isUuid } from '../http';
 import { istDay, istToMs } from '../time';
 import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../claude';
-import { asReading, type ColumnTotals, draftRegisterRows, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
+import { asReading, columnTotals, type ColumnTotals, draftRegisterRows, TOTALS_INSTRUCTIONS, TotalsReading, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
 import { refreshComparisons } from '../sales';
 import { parsePaise } from '../money';
 import { loadHistory, loadParties } from '../parties';
@@ -136,7 +136,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     await db.batch([
       ...statements,
       stmt(db, `UPDATE uploads SET status = 'ready', ocr_engine = 'claude_vision', page_written_total_paise = coalesce(?, page_written_total_paise),
-        page_column_totals = coalesce(?, page_column_totals) WHERE id = ?`, written, columns ? JSON.stringify(columns) : null, u.id),
+        page_column_totals = coalesce(?, page_column_totals) WHERE id = ?`, written, kind === 'bill_register' ? JSON.stringify(columns ?? {}) : null, u.id),
       finish({ ok: true, model, rows, orientation: data.orientation }),
     ]);
     if (kind === 'bill_register') await refreshComparisons(db, bid, u.business_day, user);
@@ -186,6 +186,39 @@ ocrRoutes.get('/businesses/:businessId/ocr/accuracy-pages', requireRole('busines
     GROUP BY u.id HAVING count(r.id) >= 3 AND sum(r.status <> 'checked') = 0 AND sum(r.ocr_original IS NULL) = 0
     ORDER BY u.business_day DESC, u.created_at DESC LIMIT 15`, c.get('businessId'));
   return c.json({ pages });
+});
+
+// The totals on the bottom line of a register page read before totals were read with the rest. One read, once:
+// afterwards the page holds the totals, or {} when there is no total line, and Review does not ask again.
+ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read-totals', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('uploadId');
+  if (!isUuid(id)) fail(404, 'Upload not found.');
+  const u = await one<{ id: string; storage_key: string; page_column_totals: string | null }>(db,
+    "SELECT id, storage_key, page_column_totals FROM uploads WHERE id = ? AND business_id = ? AND kind = 'bill_register' AND storage_key NOT LIKE 'software-added/%'", id, bid);
+  if (!u) fail(404, 'Upload not found.');
+  if (u.page_column_totals !== null) return c.json({ columnTotals: JSON.parse(u.page_column_totals) });
+  if (!c.env.ANTHROPIC_API_KEY) fail(503, 'Reading pages is not set up on the server.');
+  const auditId = await reserveRead(db, c.env, bid, c.get('user').id, u.id, { kind: 'bill_register', purpose: 'totals' });
+  const finish = (after: Record<string, unknown>) => stmt(db, 'UPDATE audit_log SET after = ? WHERE id = ?', JSON.stringify({ ...after, finishedAt: now() }), auditId).run();
+  try {
+    const obj = await c.env.UPLOADS.get(u.storage_key);
+    if (!obj) throw new OcrError(502, 'The stored file is missing.');
+    const page: PageImage = { bytes: new Uint8Array(await obj.arrayBuffer()), mediaType: (obj.httpMetadata?.contentType ?? 'image/jpeg') as PageImage['mediaType'] };
+    const { data, model } = await readWithClaude(c.env, page, TOTALS_INSTRUCTIONS, TotalsReading);
+    const totals = data.legible ? columnTotals(data) ?? {} : {};
+    // Only if nobody typed totals meanwhile.
+    await stmt(db, 'UPDATE uploads SET page_column_totals = ? WHERE id = ? AND page_column_totals IS NULL', JSON.stringify(totals), u.id).run();
+    await finish({ ok: true, model, purpose: 'totals', columns: Object.keys(totals).length });
+    const now2 = await one<{ t: string | null }>(db, 'SELECT page_column_totals AS t FROM uploads WHERE id = ?', u.id);
+    return c.json({ columnTotals: now2?.t ? JSON.parse(now2.t) : null });
+  } catch (e) {
+    const err = e instanceof OcrError ? e : null;
+    await finish({ ok: false, purpose: 'totals', error: err?.message ?? 'unexpected' });
+    if (err) fail(err.status, err.message);
+    throw e;
+  }
 });
 
 ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('business.edit'), async (c) => {

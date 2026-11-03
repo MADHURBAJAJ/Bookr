@@ -286,8 +286,8 @@ captureRoutes.patch('/businesses/:businessId/uploads/:uploadId', requireRole('ro
       const v = optionalPaise(raw as Record<string, unknown>, k, `Total of ${k}`);
       if (v !== null) out[k] = v;
     }
-    await stmt(c.env.DB, 'UPDATE uploads SET page_column_totals = ? WHERE id = ?', Object.keys(out).length ? JSON.stringify(out) : null, u.id).run();
-    return c.json({ ok: true, columnTotals: Object.keys(out).length ? out : null });
+    await stmt(c.env.DB, 'UPDATE uploads SET page_column_totals = ? WHERE id = ?', JSON.stringify(out), u.id).run();
+    return c.json({ ok: true, columnTotals: out });
   }
   const total = optionalPaise(data, 'pageWrittenTotal', 'Page total');
   await stmt(c.env.DB, 'UPDATE uploads SET page_written_total_paise = ? WHERE id = ?', total, u.id).run();
