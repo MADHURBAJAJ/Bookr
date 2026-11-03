@@ -219,3 +219,9 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .regtable tr.grp:not(.grp-first) td { border-top: 1px dashed #DDD6FE; }
 .regtable tr.grp.grp-first td.ln { border-top-left-radius: 6px; }
 .regtable td.paidwith { color: #6D28D9; }
+
+.pickchip.taken { color: #6B7280; border-style: dashed; }
+.billpop { position: absolute; z-index: 50; background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 4px; min-width: 320px; display: flex; flex-direction: column; }
+.billpop button { display: grid; grid-template-columns: 96px 80px 1fr; gap: 8px; align-items: center; text-align: left; border: 0; background: none; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; min-height: 0; color: inherit; }
+.billpop button:hover, .billpop button.on { background: #F0FDFA; }
+.billpop button.taken { color: #6B7280; }

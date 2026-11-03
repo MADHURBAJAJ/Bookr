@@ -9,6 +9,7 @@ vi.mock('../src/claude', async (importOriginal) => {
 
 import { readWithClaude } from '../src/claude';
 import { draftRegisterRows, findSlip, gridToReading, headingRole } from '../src/ocr';
+import { suggestBills } from '../src/sales';
 import { businessWithAllRoles, env, sql, resetDb } from './helpers';
 
 const mocked = vi.mocked(readWithClaude);
@@ -80,6 +81,18 @@ describe('Short bill numbers', () => {
     expect(rows[1].billNo).toBe('114');
     const other = draftRegisterRows(read(['3114']), { softwareBills: ['26103114'], takenBills: ['26103114'] });
     expect(other[0].billNo).toBe('3114');
+  });
+});
+
+describe('Bill number suggestions', () => {
+  it('offers a bill read with an extra digit, even when another line already has it (marked taken; a matching amount comes first)', () => {
+    const bill = (no: string, amt: number) => ({ bill_no: no, pos_no: '1', amount_paise: amt, mode: 'upi', paid_at: 1 });
+    const m = suggestBills(
+      [{ id: 'a', bill_no: '26103107', amount_paise: 150000 }, { id: 'b', bill_no: '2610307', amount_paise: 150000 }],
+      [bill('2610307', 150000), bill('2610317', 90000)],
+    );
+    expect(m.get('b')).toEqual({ exact: true, options: [] });
+    expect(m.get('a')!.options[0]).toMatchObject({ billNo: '2610307', why: 'typo', amountMatches: true, taken: true });
   });
 });
 

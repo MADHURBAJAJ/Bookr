@@ -1084,7 +1084,7 @@ function rowIssues(r) {
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount' };
   if (bm && !bm.exact) {
     flags.bill_no = 'red';
-    red.push(html`Not in software report${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip" data-pick="${x.billNo}" title="${why[x.why] ?? ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}</button>`)}</span>` : ''}`);
+    red.push(html`Not in software report${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip ${x.taken ? 'taken' : ''}" data-pick="${x.billNo}" title="${why[x.why] ?? ''}${x.taken ? ' · already on another register line: one of the two may be wrong, or the bill was written twice' : ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}${x.taken ? ' · on register' : ''}</button>`)}</span>` : ''}`);
   }
   // Bills paid together: the group is told once, on the row where the payment is written. Its other rows say nothing about it.
   const member = !!r.paidWithRowId;
@@ -1131,17 +1131,17 @@ function regRowHtml(r, locked) {
   }
   return html`<tr data-row="${r.id}" class="${cls}">
     <td class="ln">${r.lineNo}</td>
-    <td class="c-bn"><input class="cell mono ${flagClass(x.flags.bill_no)}" data-f="billNo" value="${r.billNo}" aria-label="Bill number" style="width:100%" list="swbills" autocomplete="off"></td>
+    <td class="c-bn"><input class="cell mono ${flagClass(x.flags.bill_no)}" data-f="billNo" value="${r.billNo}" aria-label="Bill number" style="width:100%" autocomplete="off"></td>
     <td class="c-am"><input class="cell mono ${flagClass(x.flags.amount)}" data-f="amount" value="${rsIn(r.amountPaise)}" style="width:100%;text-align:right" inputmode="decimal" aria-label="Bill amount"></td>
     <td class="c-ty"><select class="cell ${flagClass(x.flags.bill_type)}" data-f="billType" aria-label="Type" style="width:100%"><option value="">–</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
     ${r.paidWithRowId ? html`<td colspan="4" class="paidwith c-pw" data-l="Paid">↳ paid with ${head ? rowLabel(head) : 'another row'} <button type="button" class="linkbtn" data-unlink title="This bill has its own payment">Own payment</button></td>`
-      : cols.map((c, i) => html`<td data-l="${PAY_COLS[i][1]}" class="c-p${i}"><input class="cell mono ${c.length ? flagClass(x.flags.payments) : ''}" data-f="pay${i}" value="${c.length ? rsIn(c.reduce((t, p) => t + p.amountPaise, 0)) : ''}" style="width:100%;text-align:right" inputmode="decimal"
-          aria-label="${PAY_COLS[i][1]}" ${c.length > 1 ? 'readonly title="Two payments in this column: use ✎ to change them"' : ''}></td>`)}
+      : cols.map((c, i) => html`<td data-l="${PAY_COLS[i][1]}" class="c-p${i}"><input class="cell mono ${c.length ? flagClass(x.flags.payments) : ''}" data-f="pay${i}" value="${c.map((p) => rsIn(p.amountPaise)).join('+')}" style="width:100%;text-align:right"
+          aria-label="${PAY_COLS[i][1]}" title="Two payments in this column? Type them with a plus, e.g. 1000+500"></td>`)}
     <td data-l="Disc" class="c-dc"><input class="cell mono ${flagClass(x.flags.discount)}" data-f="discount" value="${r.discountPaise ? rsIn(r.discountPaise) : ''}" placeholder="0" style="width:100%;text-align:right" inputmode="decimal" aria-label="Discount; a tip is negative" title="Discount; a tip is negative"></td>
     <td data-l="Remarks" class="c-rm"><input class="cell ${flagClass(x.flags.remarks)}" data-f="remarks" value="${r.remarks ?? ''}" style="width:100%" aria-label="Remarks"></td>
     <td class="issue c-is">${issueHtml(x, r)}</td>
     <td class="tick c-tk"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Looks right" title="Looks right (Enter)"></td>
-    <td class="c-ed"><button class="iconbtn" type="button" data-edit="${r.id}" title="More: paid together with another bill, several payments, delete" aria-label="Edit row">✎</button></td>
+    <td class="c-ed" style="white-space:nowrap"><button class="iconbtn" type="button" data-edit="${r.id}" title="More: paid together with another bill" aria-label="Edit row">✎</button><button class="iconbtn" type="button" data-delrow="${r.id}" title="Delete this line" aria-label="Delete this line">🗑</button></td>
   </tr>`;
 }
 
@@ -1209,10 +1209,64 @@ function regToolsHtml(u, locked) {
   `;
 }
 
-/** Bill numbers of the shift's software report, for the bill box's suggestions: those not on the register yet first. */
-function swListHtml(u) {
-  const list = [...(u.softwareList ?? [])].sort((p1, p2) => p1.used - p2.used || p1.billNo.localeCompare(p2.billNo));
-  return html`${list.map((b) => html`<option value="${b.billNo}" label="₹ ${rs(b.amountPaise)} · ${MODE_LABELS[b.mode] ?? ''} · ${when(b.paidAt)}${b.used ? ' · on register' : ''}"></option>`)}`;
+/** Edits between two bill numbers (a wrong, extra or missing digit counts one), for suggestions. */
+function digitDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+
+/** Software bills of the shift the typed number probably means: its last digits, a digit wrong, extra or missing,
+ *  or containing it. Same amount as the line first; bills already on the register last. */
+function billCandidates(typed, row, list) {
+  const w = typed.replace(/\D/g, '');
+  if (!w) return list.filter((b) => b.amountPaise === row?.amountPaise && !b.used).slice(0, 6).map((b) => ({ ...b, why: 'same amount' }));
+  const out = [];
+  for (const b of list) {
+    const s2 = b.billNo.replace(/\D/g, '');
+    if (s2 === w) continue;
+    let why = null, score = 0;
+    if (w.length >= 2 && s2.endsWith(w)) why = 'last digits';
+    else if (w.length >= 4 && digitDistance(w, s2) === 1) { why = w.length > s2.length ? 'extra digit' : w.length < s2.length ? 'missing digit' : 'one digit off'; score = 1; }
+    else if (w.length >= 3 && s2.includes(w)) { why = 'contains'; score = 2; }
+    else if (w.length >= 6 && digitDistance(w, s2) === 2) { why = 'two digits off'; score = 3; }
+    if (!why) continue;
+    out.push({ ...b, why, rank: (row && b.amountPaise === row.amountPaise ? 0 : 20) + (b.used ? 8 : 0) + score });
+  }
+  return out.sort((x, y) => x.rank - y.rank || x.billNo.localeCompare(y.billNo)).slice(0, 7);
+}
+
+/** A suggestion list under the bill box: while typing, and on entering a red bill box. ↑ ↓ choose, Enter picks, Esc closes. */
+function billSuggest(input, u, rowOf, pick) {
+  if (!input || !(u.softwareList ?? []).length) return;
+  let pop = null, at = -1, items = [];
+  const close = () => { pop?.remove(); pop = null; at = -1; };
+  const show = () => {
+    const row = rowOf();
+    items = billCandidates(input.value, row, u.softwareList);
+    close();
+    if (!items.length) return;
+    pop = document.createElement('div');
+    pop.className = 'billpop';
+    pop.innerHTML = items.map((b, i) => html`<button type="button" data-i="${i}" class="${b.used ? 'taken' : ''}">
+      <span class="mono">${b.billNo}</span><span>₹ ${rs(b.amountPaise)}${row && b.amountPaise === row.amountPaise ? ' ✓' : ''}</span>
+      <span class="tiny">${MODE_LABELS[b.mode] ?? ''} · ${when(b.paidAt)} · ${b.why}${b.used ? ' · on register' : ''}</span></button>`.__html).join('');
+    const r = input.getBoundingClientRect();
+    Object.assign(pop.style, { left: `${r.left + window.scrollX}px`, top: `${r.bottom + window.scrollY + 2}px` });
+    document.body.appendChild(pop);
+    pop.addEventListener('mousedown', (e) => { const b = e.target.closest('[data-i]'); if (!b) return; e.preventDefault(); const v = items[+b.dataset.i].billNo; close(); pick(v); });
+  };
+  const mark = () => pop?.querySelectorAll('[data-i]').forEach((b, i) => b.classList.toggle('on', i === at));
+  input.addEventListener('input', show);
+  input.addEventListener('focus', () => { if (input.classList.contains('flag')) show(); });
+  input.addEventListener('blur', () => setTimeout(close, 120));
+  input.addEventListener('keydown', (e) => {
+    if (!pop) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); at = (at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; mark(); }
+    else if (e.key === 'Enter' && at >= 0) { e.preventDefault(); const v = items[at].billNo; close(); pick(v); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
 }
 
 /** The top bar: how far checking has got, and whether the page adds up. */
@@ -1250,9 +1304,8 @@ function registerPanel(biz, u) {
       <div id="regtools">${regToolsHtml(u, locked)}</div>
       ${u.fromSoftware ? '' : html`<div class="strip" id="strip"><canvas></canvas><span class="band"></span>
         <span class="strip-tools"><span class="tiny" id="striphint"></span><button type="button" class="iconbtn" id="striprot" title="Turn the photo" aria-label="Turn the photo">⟳</button><button type="button" class="btn plain" id="photoside" style="min-height:28px;padding:0 10px;font-size:12px">Whole page</button></span></div>`}
-      <datalist id="swbills">${swListHtml(u)}</datalist>
       <div class="scroll"><table id="regtable" class="regtable ${regFilter === 'needs' ? 'only-needs' : ''}">
-        <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:34px"></colgroup>
+        <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:58px"></colgroup>
         <thead><tr><th>#</th><th>Bill no</th><th style="text-align:right">Amount</th><th>Type</th>${PAY_COLS.map(([, l]) => html`<th style="text-align:right">${l}</th>`)}<th style="text-align:right" title="Discount. A tip is negative.">Disc</th><th>Remarks</th><th>Issue</th><th title="Looks right">✓</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
       </table></div>
@@ -1344,9 +1397,10 @@ function wireInlineRows(biz, u, strip) {
     if (!r.paidWithRowId || unlinked) {
       PAY_COLS.forEach(([mode, label], i) => {
         const had = r.payments.filter((p) => colOf(p) === i);
-        if (had.length > 1) { payments.push(...had.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) }))); return; }
-        const v = val(tr, `pay${i}`)?.value.trim();
-        if (v) payments.push({ mode, columnLabel: had[0]?.columnLabel ?? label, amount: v });
+        // "1000+500" is two payments in this column.
+        for (const v of (val(tr, `pay${i}`)?.value ?? '').split('+').map((x) => x.trim()).filter(Boolean)) {
+          payments.push({ mode, columnLabel: had[0]?.columnLabel ?? label, amount: v });
+        }
       });
     }
     return {
@@ -1373,7 +1427,7 @@ function wireInlineRows(biz, u, strip) {
     // Discount follows the payments: amount − payments, negative when more was paid (a tip). Not for bills paid together.
     if (/^(amount|pay\d)$/.test(changed.dataset.f) && !r.paidWithRowId && !membersOf(r).length) {
       const a = parsePaiseText(val(tr, 'amount').value);
-      const paid = PAY_COLS.reduce((t, _, i) => t + (parsePaiseText(val(tr, `pay${i}`)?.value || '0') ?? 0), 0);
+      const paid = PAY_COLS.reduce((t, _, i) => t + (val(tr, `pay${i}`)?.value ?? '').split('+').reduce((t2, v) => t2 + (parsePaiseText(v.trim() || '0') ?? 0), 0), 0);
       if (a !== null && paid > 0) val(tr, 'discount').value = paid !== a ? rupeesForInput(a - paid) : '';
     }
     const body = payloadOf(tr, r);
@@ -1389,8 +1443,6 @@ function wireInlineRows(biz, u, strip) {
       u.otherPageRows = fresh.otherPageRows;
       u.slip = fresh.slip;
       u.softwareList = fresh.softwareList;
-      const dl = document.getElementById('swbills');
-      if (dl) dl.innerHTML = swListHtml(u).__html;
       u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise;
       regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
@@ -1417,6 +1469,13 @@ function wireInlineRows(biz, u, strip) {
       save(tr, amount);
     });
     tr.querySelector('[data-edit]')?.addEventListener('click', () => openRowForm(tr.dataset.row));
+    tr.querySelector('[data-delrow]')?.addEventListener('click', async () => {
+      const r = u.rows.find((x) => x.id === tr.dataset.row);
+      if (!confirm(`Delete line ${r.lineNo}${r.billNo ? ` (bill ${r.billNo})` : ''} from this page?`)) return;
+      try { await api('DELETE', `/businesses/${biz.id}/register-rows/${r.id}`, {}); reviewView(biz, u.id); }
+      catch (err) { showError(document.getElementById('rmsg'), err); }
+    });
+    billSuggest(val(tr, 'billNo'), u, () => u.rows.find((x) => x.id === tr.dataset.row), (b) => { val(tr, 'billNo').value = b; save(tr, val(tr, 'billNo')); });
     tr.addEventListener('focusin', () => {
       table.querySelectorAll('tr.current').forEach((x) => x.classList.remove('current'));
       tr.classList.add('current');
@@ -1425,7 +1484,7 @@ function wireInlineRows(biz, u, strip) {
     });
     tr.addEventListener('keydown', (e) => {
       const el = e.target;
-      if (!el.dataset?.f || el.tagName === 'BUTTON') return;
+      if (!el.dataset?.f || el.tagName === 'BUTTON' || e.defaultPrevented) return;
       const shown = rowsShown();
       const at = shown.indexOf(tr);
       if (e.key === 'Enter') {

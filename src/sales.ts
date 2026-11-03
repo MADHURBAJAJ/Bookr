@@ -556,7 +556,7 @@ export async function cashSummaryChecks(db: DB, businessId: string, day: string,
 
 // ---- Bill number suggestions for the register (typos and short numbers)
 
-export interface BillOption { billNo: string; posNo: string; amountPaise: number; mode: string; paidAt: number; amountMatches: boolean; why: 'short' | 'typo' | 'short_typo' | 'amount' }
+export interface BillOption { billNo: string; posNo: string; amountPaise: number; mode: string; paidAt: number; amountMatches: boolean; why: 'short' | 'typo' | 'short_typo' | 'amount'; taken?: boolean }
 export interface BillMatch { exact: boolean; options: BillOption[] }
 
 const digits = (v: string) => v.replace(/\D/g, '');
@@ -592,14 +592,18 @@ export function suggestBills(
     if (exact.has(r.bill_no)) { out.set(r.id, { exact: true, options: [] }); continue; }
     const w = digits(r.bill_no);
     const options: BillOption[] = [];
-    for (const b of free) {
+    // Bills already on another register line are offered too, marked taken and listed last: the other line may be
+    // the wrong one, or the bill written twice.
+    for (const b of bills) {
+      if (b.amount_paise === 0) continue;
       const s = digits(b.bill_no);
       const amountMatches = b.amount_paise === r.amount_paise;
       let why: BillOption['why'] | null = null;
       if (w.length >= 3 && w.length < s.length && s.endsWith(w)) why = 'short';
       else if (w.length >= 5 && Math.abs(w.length - s.length) <= 1 && billDistance(w, s) === 1) why = 'typo';
       else if (w.length >= 3 && w.length < s.length && billDistance(w, s.slice(-w.length)) === 1 && amountMatches) why = 'short_typo';
-      if (why) options.push({ billNo: b.bill_no, posNo: b.pos_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, amountMatches, why });
+      const taken = claimed.has(b.bill_no);
+      if (why && (!taken || amountMatches || why !== 'short')) options.push({ billNo: b.bill_no, posNo: b.pos_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, amountMatches, why, ...(taken ? { taken } : {}) });
     }
     // With no close number (or none written), offer bills with the same amount.
     if (!options.length) {
@@ -607,7 +611,7 @@ export function suggestBills(
         if (b.amount_paise === r.amount_paise) options.push({ billNo: b.bill_no, posNo: b.pos_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, amountMatches: true, why: 'amount' });
       }
     }
-    options.sort((a, b) => Number(b.amountMatches) - Number(a.amountMatches) || WHY_ORDER[a.why] - WHY_ORDER[b.why] || a.paidAt - b.paidAt);
+    options.sort((a, b) => Number(b.amountMatches) - Number(a.amountMatches) || Number(!!a.taken) - Number(!!b.taken) || WHY_ORDER[a.why] - WHY_ORDER[b.why] || a.paidAt - b.paidAt);
     out.set(r.id, { exact: false, options: options.slice(0, 6) });
   }
   return out;
