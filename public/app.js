@@ -1088,6 +1088,39 @@ function regSumHtml(u) {
     ${off.length ? html`<br><span class="error">${off.length} bill${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount after discount or tip (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
 }
 
+const DELETE_REASONS = [['written_twice', 'Written twice on the page'], ['misread', 'Not on the page (read by mistake)'], ['not_a_bill', 'Not a bill (a note or total line)'], ['cancelled', 'Bill cancelled'], ['other', 'Other']];
+const deleteReasonLabel = (k) => (DELETE_REASONS.find(([x]) => x === k)?.[1] ?? 'Other').toLowerCase();
+
+/** Asks why a line is deleted; the page's totals may still include it, and Review explains them with it. */
+function askDeleteReason(r) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.className = 'rowdlg';
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:10px">
+      <h3 style="margin:0">Delete line ${r.lineNo}${r.billNo ? ` · bill ${r.billNo}` : ''}${r.amountPaise ? ` · ₹ ${rs(r.amountPaise)}` : ''}?</h3>
+      <div class="note">Why? It is kept on record so the page totals can be explained.</div>
+      ${DELETE_REASONS.map(([k, l], i) => html`<label style="display:flex;gap:8px;align-items:center"><input type="radio" name="reason" value="${k}" ${i === 0 ? 'checked' : ''}> ${l}</label>`)}
+      <input name="note" placeholder="Note (optional)" maxlength="200">
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button><button class="btn danger" value="ok" type="submit">Delete line</button></div>
+    </form>`.__html;
+    document.body.append(dlg);
+    dlg.addEventListener('close', () => {
+      const f = dlg.querySelector('form');
+      resolve(dlg.returnValue === 'ok' ? { reason: f.reason.value, note: f.note.value.trim() || null } : null);
+      dlg.remove();
+    });
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
+    dlg.showModal();
+  });
+}
+
+/** What the deleted lines of a page held, by column, as the paper still shows them. */
+function deletedSums(u) {
+  const d = u.deletedRows ?? [];
+  const pay = (i) => d.reduce((t, r) => t + (r.payments ?? []).filter((p) => colOf(p) === i).reduce((a, p) => a + p.amountPaise, 0), 0);
+  return { amount: d.reduce((t, r) => t + (r.amountPaise ?? 0), 0), cash: pay(0), upi: pay(1), upi2: pay(2), card: pay(3), discount: d.reduce((t, r) => t + (r.discountPaise ?? 0), 0) };
+}
+
 // The bottom line of the page: what each column adds up to here, against the total written under it on the paper.
 const TOTAL_COLS = [['amount', 'c-am', 'Amount'], ['cash', 'c-p0', 'Cash'], ['upi', 'c-p1', PAY_COLS[1][1]], ['upi2', 'c-p2', PAY_COLS[2][1]], ['card', 'c-p3', 'Card'], ['discount', 'c-dc', 'Disc']];
 function columnSums(u) {
@@ -1096,26 +1129,35 @@ function columnSums(u) {
 }
 function regFootHtml(u, locked) {
   const sums = columnSums(u);
+  const del = deletedSums(u);
   const w = u.columnTotals ?? {};
   const cell = ([k, c, l]) => {
     const has = w[k] != null;
     const diff = has ? sums[k] - w[k] : 0;
-    const st = !has ? '' : diff === 0 ? 'tot-ok' : 'tot-bad';
-    return { k, c, l, has, diff, st };
+    // A difference made only by lines deleted here (the paper still has them) is explained, not wrong.
+    const explained = has && diff !== 0 && del[k] !== 0 && sums[k] + del[k] === w[k];
+    const st = !has ? '' : diff === 0 ? 'tot-ok' : explained ? 'tot-why' : 'tot-bad';
+    return { k, c, l, has, diff, st, explained };
   };
   const cells = TOTAL_COLS.map(cell);
   const byKey = Object.fromEntries(cells.map((x) => [x.k, x]));
   const checked = cells.filter((x) => x.has);
-  const bad = checked.filter((x) => x.diff !== 0);
+  const bad = checked.filter((x) => x.diff !== 0 && !x.explained);
+  const why = checked.filter((x) => x.explained);
+  const gone = (u.deletedRows ?? []).filter((r) => r.amountPaise || (r.payments ?? []).length);
+  const goneText = gone.map((r) => `row ${r.lineNo}${r.billNo ? ` (bill ${r.billNo})` : ''} deleted: ${deleteReasonLabel(r.reason)}${r.note ? `, ${r.note}` : ''}`).join(' · ');
   const verdict = u.readingTotals ? html`<span class="tiny">Reading the total line from the photo…</span>`
     : !checked.length ? html`<span class="tiny">${u.columnTotals ? 'No totals found on the photo. Type the totals from the last line of the page to check each column.' : 'Type the totals written on the last line of the page to check each column.'}</span>`
-    : !bad.length ? html`<span class="ok-msg">✓ ${checked.length === cells.length ? 'Every column' : `${checked.length} column${checked.length > 1 ? 's' : ''}`} match${checked.length === 1 ? 'es' : ''} the page</span>`
-    : html`<span class="error">${bad.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'} than written`).join(' · ')}</span>`;
-  const sumTd = (k) => { const x = byKey[k]; return html`<td class="amount ${x.c} ${x.st}" data-l="${x.l}" title="${x.has && x.diff ? `Written ₹ ${rs(w[k])}: rows are ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}` : ''}">${rs(sums[k])}${x.has && x.diff ? html`<span class="tot-diff">${x.diff > 0 ? '+' : '−'}${rs(Math.abs(x.diff))}</span>` : ''}</td>`; };
+    : !bad.length && !why.length ? html`<span class="ok-msg">✓ ${checked.length === cells.length ? 'Every column' : `${checked.length} column${checked.length > 1 ? 's' : ''}`} match${checked.length === 1 ? 'es' : ''} the page</span>`
+    : html`${bad.length ? html`<span class="error">${bad.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'} than written`).join(' · ')}</span>` : ''}
+      ${why.length ? html`<span class="tot-whymsg">${bad.length ? html`<br>` : ''}${why.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}`).join(', ')} than written, explained: ${goneText}</span>` : ''}`;
+  const sumTd = (k) => { const x = byKey[k]; return html`<td class="amount ${x.c} ${x.st}" data-l="${x.l}" title="${x.has && x.diff ? `Written ₹ ${rs(w[k])}: rows are ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}${x.explained ? ` because of deleted lines: ${goneText}` : ''}` : ''}">${rs(sums[k])}${x.has && x.diff ? html`<span class="tot-diff">${x.diff > 0 ? '+' : '−'}${rs(Math.abs(x.diff))}</span>` : ''}</td>`; };
   const inTd = (k) => { const x = byKey[k]; return html`<td class="${x.c}" data-l="${x.l}">${locked ? html`<span class="amount mono" style="display:block">${x.has ? rs(w[k]) : ''}</span>`
     : html`<input class="cell mono ${x.st}" data-tot="${k}" value="${x.has ? rsIn(w[k]) : ''}" placeholder="–" style="width:100%;text-align:right" inputmode="decimal" aria-label="${x.l} total written on the page">`}</td>`; };
   return html`<tr class="tot-rows"><td class="ln"></td><td class="c-bn"><strong>Rows add up to</strong></td>${sumTd('amount')}<td class="c-ty"></td>${sumTd('cash')}${sumTd('upi')}${sumTd('upi2')}${sumTd('card')}${sumTd('discount')}<td class="c-rm tot-verdict" colspan="4">${verdict}</td></tr>
-    <tr class="tot-written"><td class="ln"></td><td class="c-bn">Written on the page</td>${inTd('amount')}<td class="c-ty"></td>${inTd('cash')}${inTd('upi')}${inTd('upi2')}${inTd('card')}${inTd('discount')}<td class="c-rm" colspan="4"></td></tr>`;
+    <tr class="tot-written"><td class="ln"></td><td class="c-bn">Written on the page</td>${inTd('amount')}<td class="c-ty"></td>${inTd('cash')}${inTd('upi')}${inTd('upi2')}${inTd('card')}${inTd('discount')}<td class="c-rm" colspan="4"></td></tr>
+    ${(u.deletedRows ?? []).length ? html`<tr class="tot-deleted"><td class="ln"></td><td class="c-bn" colspan="12"><span class="tiny">Deleted from this page:
+      ${(u.deletedRows).map((r, i) => html`${i ? ' · ' : ''}row ${r.lineNo}${r.billNo ? ` bill ${r.billNo}` : ''}${r.amountPaise ? ` ₹ ${rs(r.amountPaise)}` : ''}, ${deleteReasonLabel(r.reason)}${r.note ? ` (${r.note})` : ''}${r.by ? ` by ${r.by}` : ''}`)}</span></td></tr>` : ''}`;
 }
 
 /** Saves the column totals typed on the bottom line; each saves when you leave it. A page read before totals were
@@ -1430,7 +1472,7 @@ function wireInlineRows(biz, u, strip) {
       u.otherPageRows = fresh.otherPageRows;
       u.slip = fresh.slip;
       u.softwareList = fresh.softwareList;
-      u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise; u.columnTotals = fresh.columnTotals;
+      u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise; u.columnTotals = fresh.columnTotals; u.deletedRows = fresh.deletedRows;
       regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
       redraw();
@@ -1464,8 +1506,9 @@ function wireInlineRows(biz, u, strip) {
     });
     tr.querySelector('[data-delrow]')?.addEventListener('click', async () => {
       const r = u.rows.find((x) => x.id === tr.dataset.row);
-      if (!confirm(`Delete line ${r.lineNo}${r.billNo ? ` (bill ${r.billNo})` : ''} from this page?`)) return;
-      try { await api('DELETE', `/businesses/${biz.id}/register-rows/${r.id}`, {}); reviewView(biz, u.id); }
+      const why = await askDeleteReason(r);
+      if (!why) return;
+      try { await api('DELETE', `/businesses/${biz.id}/register-rows/${r.id}`, why); reviewView(biz, u.id); }
       catch (err) { showError(document.getElementById('rmsg'), err); }
     });
     billSuggest(val(tr, 'billNo'), u, () => u.rows.find((x) => x.id === tr.dataset.row), (b) => { val(tr, 'billNo').value = b; save(tr, val(tr, 'billNo')); });

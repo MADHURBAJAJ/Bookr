@@ -238,7 +238,11 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
     ]);
     const slip = pageSlip(rows as unknown as SlipRow[], pays as unknown as { registerRowId: string; amountPaise: number }[]);
+    const deleted = await all<{ before: string; after: string; at: number; by: string | null }>(db, `SELECT a.before, a.after, a.created_at AS at, us.name AS by
+      FROM audit_log a LEFT JOIN users us ON us.id = a.user_id
+      WHERE a.business_id = ? AND a.action = 'register.delete' AND json_extract(a.before, '$.uploadId') = ? ORDER BY a.id`, bid, u.id);
     return c.json({
+      deletedRows: deleted.map((d) => ({ ...JSON.parse(d.before), ...JSON.parse(d.after), at: d.at, by: d.by })),
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
       slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
       // The shift's software bills, for the bill box's suggestions as you type.
@@ -615,15 +619,30 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
   return c.json({ filled: fill.length });
 });
 
+const DELETE_REASONS = ['written_twice', 'not_a_bill', 'cancelled', 'misread', 'other'];
+
 captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ shift_day: string }>(db, 'SELECT shift_day FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  const old = await one<{ shift_day: string; upload_id: string; line_no: number; bill_no: string; amount_paise: number; discount_paise: number }>(db,
+    'SELECT shift_day, upload_id, line_no, bill_no, amount_paise, discount_paise FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
+  // Why the line went: the page's totals still include it, so Review explains the difference with it.
+  const data = await body(c).catch(() => ({} as Record<string, unknown>));
+  const reason = typeof data.reason === 'string' && DELETE_REASONS.includes(data.reason) ? data.reason : 'other';
+  const note = typeof data.note === 'string' ? data.note.trim().slice(0, 200) || null : null;
+  const pays = await all<{ mode: string; columnLabel: string | null; amountPaise: number }>(db,
+    'SELECT mode, column_label AS columnLabel, amount_paise AS amountPaise FROM register_payments WHERE register_row_id = ?', rowId);
   try {
-    await stmt(db, 'DELETE FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid).run();
+    await db.batch([
+      stmt(db, 'DELETE FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.delete', 'register_rows', ?, ?, ?, ?)`, bid, c.get('user').id, rowId,
+        JSON.stringify({ uploadId: old.upload_id, lineNo: old.line_no, billNo: old.bill_no, amountPaise: old.amount_paise, discountPaise: old.discount_paise, payments: pays }),
+        JSON.stringify({ reason, note }), now()),
+    ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;

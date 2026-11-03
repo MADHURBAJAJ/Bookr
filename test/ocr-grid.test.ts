@@ -248,3 +248,17 @@ describe('Totals on the bottom line of the page', () => {
     expect(mocked.mock.calls.length).toBe(calls); // not read twice
   });
 });
+
+describe('Deleting a line', () => {
+  it('keeps what the line held and why, so the page totals can be explained', async () => {
+    const p = await page();
+    mocked.mockResolvedValueOnce({ data: slipped(), model: 'claude-opus-5-5' } as never);
+    await p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/read`);
+    const [r] = await sql`SELECT id FROM register_rows WHERE line_no = 2`;
+    expect((await p.clients.entry_staff.del(`/businesses/${p.bid}/register-rows/${r.id}`, { reason: 'written_twice', note: 'same as row 1' })).status).toBe(200);
+    const { deletedRows } = (await p.clients.entry_staff.get(`/businesses/${p.bid}/uploads/${p.id}`)).json;
+    expect(deletedRows).toHaveLength(1);
+    expect(deletedRows[0]).toMatchObject({ lineNo: 2, billNo: '26110102', amountPaise: 82000, reason: 'written_twice', note: 'same as row 1' });
+    expect(deletedRows[0].payments).toEqual([{ mode: 'upi', columnLabel: 'UPI XOXO', amountPaise: 30000 }]);
+  });
+});

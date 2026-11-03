@@ -79,7 +79,7 @@ export class Client {
   put = (p: string, b: unknown = {}) => this.call('PUT', p, b);
   post = (p: string, b: unknown = {}) => this.call('POST', p, b);
   patch = (p: string, b: unknown = {}) => this.call('PATCH', p, b);
-  del = (p: string) => this.call('DELETE', p, {});
+  del = (p: string, b: unknown = {}) => this.call('DELETE', p, b);
 }
 
 export async function signIn(email: string, password = PASSWORD) {
