@@ -238,7 +238,7 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
     const assumedType = row.bill_type === 'unclear';
     const pays = row.payments.map((p) => ({ column: p.column, mode: p.mode, paise: amount(p.amount) }));
     if (pays.some((p) => p.paise === null)) unclear.add('payments');
-    return { id: newId(), line: row.line, read: row, billNo: row.bill_no?.trim() ?? '', amt, disc, tip: 0, pays, unclear,
+    return { id: newId(), line: row.line, read: row, billNo: row.bill_no?.replace(/\s+/g, '') ?? '' /* "26110 1103" is 261101103 */, amt, disc, tip: 0, pays, unclear,
       inferred: assumedType ? ['bill_type'] : [], paidWith: null };
   });
 

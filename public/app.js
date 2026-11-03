@@ -1081,6 +1081,10 @@ function rowIssues(r) {
   const red = [], amber = [], info = [], flags = {};
   if (q.size) { red.push(html`Couldn't read ${[...q].map((f) => FIELD_WORDS[f] ?? f).join(', ')}`); q.forEach((f) => { flags[f] = 'red'; }); }
   const bm = r.billMatch;
+  if (bm && !bm.exact && q.has('bill_no')) { // said once, as "Not in software report"
+    red.splice(0, red.length); q.delete('bill_no');
+    if (q.size) red.push(html`Couldn't read ${[...q].map((f) => FIELD_WORDS[f] ?? f).join(', ')}`);
+  }
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount' };
   if (bm && !bm.exact) {
     flags.bill_no = 'red';
@@ -1225,9 +1229,10 @@ function billCandidates(typed, row, list) {
   const out = [];
   for (const b of list) {
     const s2 = b.billNo.replace(/\D/g, '');
-    if (s2 === w) continue;
+    if (b.billNo === typed.trim()) continue;
     let why = null, score = 0;
-    if (w.length >= 2 && s2.endsWith(w)) why = 'last digits';
+    if (s2 === w) why = 'same digits';
+    else if (w.length >= 2 && s2.endsWith(w)) why = 'last digits';
     else if (w.length >= 4 && digitDistance(w, s2) === 1) { why = w.length > s2.length ? 'extra digit' : w.length < s2.length ? 'missing digit' : 'one digit off'; score = 1; }
     else if (w.length >= 3 && s2.includes(w)) { why = 'contains'; score = 2; }
     else if (w.length >= 6 && digitDistance(w, s2) === 2) { why = 'two digits off'; score = 3; }

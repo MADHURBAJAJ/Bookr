@@ -599,7 +599,8 @@ export function suggestBills(
       const s = digits(b.bill_no);
       const amountMatches = b.amount_paise === r.amount_paise;
       let why: BillOption['why'] | null = null;
-      if (w.length >= 3 && w.length < s.length && s.endsWith(w)) why = 'short';
+      if (w.length >= 3 && w === s) why = 'typo'; // the same digits written with a space or a stray mark
+      else if (w.length >= 3 && w.length < s.length && s.endsWith(w)) why = 'short';
       else if (w.length >= 5 && Math.abs(w.length - s.length) <= 1 && billDistance(w, s) === 1) why = 'typo';
       else if (w.length >= 3 && w.length < s.length && billDistance(w, s.slice(-w.length)) === 1 && amountMatches) why = 'short_typo';
       const taken = claimed.has(b.bill_no);

@@ -94,6 +94,13 @@ describe('Bill number suggestions', () => {
     expect(m.get('b')).toEqual({ exact: true, options: [] });
     expect(m.get('a')!.options[0]).toMatchObject({ billNo: '2610307', why: 'typo', amountMatches: true, taken: true });
   });
+
+  it('a number read with a space in it is the bill with the same digits', () => {
+    const m = suggestBills([{ id: 'a', bill_no: '26110 1103', amount_paise: 22900 }], [{ bill_no: '261101103', pos_no: '1', amount_paise: 22900, mode: 'upi', paid_at: 1 }]);
+    expect(m.get('a')!.options[0]).toMatchObject({ billNo: '261101103', amountMatches: true });
+    const rows = draftRegisterRows(gridToReading(grid([['1', '26110 1103', null, '229', 'F&B', null, null, '229', null, null]])));
+    expect(rows[0].billNo).toBe('261101103');
+  });
 });
 
 describe('Differences nothing explains, and payments a line off', () => {
