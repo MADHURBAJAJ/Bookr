@@ -185,9 +185,9 @@ describe('bill number suggestions', () => {
     expect(suggestBills([row('a', '', 0)], sw).get('a')!.options).toEqual([]);
   });
 
-  it('a bill already matched exactly by another row is not offered again', () => {
+  it('a bill already matched exactly by another row is still offered, marked as on the register', () => {
     const m = suggestBills([row('x', '26103154', 230), row('a', '3154', 230)], sw).get('a')!;
-    expect(m.options.map((o) => o.billNo)).not.toContain('26103154');
+    expect(m.options.find((o) => o.billNo === '26103154')?.taken).toBe(true);
   });
 
   it('typo distance counts swaps as one edit', () => {

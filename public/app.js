@@ -1080,6 +1080,12 @@ function rowIssues(r) {
   try { o = r.ocrOriginal ? JSON.parse(r.ocrOriginal) : {}; } catch { /* not JSON */ }
   const red = [], amber = [], info = [], flags = {};
   if (q.size) { red.push(html`Couldn't read ${[...q].map((f) => FIELD_WORDS[f] ?? f).join(', ')}`); q.forEach((f) => { flags[f] = 'red'; }); }
+  // The same bill number on another line of the shift (this page or another): written twice, or one is wrong.
+  const twins = r.billNo ? regRows.filter((y) => y.id !== r.id && y.billNo === r.billNo) : [];
+  if (twins.length) {
+    flags.bill_no = 'red';
+    red.push(html`Bill ${r.billNo} is also on ${twins.map((y) => (y.elsewhere ? html`<a href="#/b/${currentBizId()}/review/${y.uploadId}/${y.id}">${rowLabel(y)}</a>` : rowLabel(y)))}: written twice, or one number is wrong`);
+  }
   const bm = r.billMatch;
   if (bm && !bm.exact && q.has('bill_no')) { // said once, as "Not in software report"
     red.splice(0, red.length); q.delete('bill_no');
@@ -1128,6 +1134,22 @@ function regRowHtml(r, locked) {
   const grp = lead ? [lead, ...membersOf(lead)].filter((m) => !m.elsewhere).sort((p1, p2) => p1.lineNo - p2.lineNo) : [];
   const gpos = grp.length > 1 ? `grp ${grp[0].id === r.id ? 'grp-first' : ''} ${grp[grp.length - 1].id === r.id ? 'grp-last' : ''}` : '';
   const cls = `${r.status === 'checked' ? 'row-checked' : ''} ${x.needsYou ? 'needs-you' : ''} ${gpos}`;
+  const total = grp.length > 1 && grp[grp.length - 1].id === r.id ? groupTotalHtml(lead) : '';
+  return html`${regLineHtml(r, locked, x, cols, head, cls)}${total}`;
+}
+
+/** Under the last row of a group paid together: what the bills come to against what was paid. */
+function groupTotalHtml(lead) {
+  const all = [lead, ...membersOf(lead)];
+  const bills = groupNet(lead);
+  const paid = paidOf(lead);
+  const diff = paid - bills;
+  const ok = diff === 0;
+  return html`<tr class="grptotal ${ok ? 'ok' : 'bad'}" aria-label="Group total"><td class="ln"></td><td colspan="12">Group of ${all.length} bills: ₹ ${rs(bills)} · paid ₹ ${rs(paid)} ·
+    ${ok ? '✓ matches' : `₹ ${rs(Math.abs(diff))} ${diff > 0 ? 'over' : 'short'}`}</td></tr>`;
+}
+
+function regLineHtml(r, locked, x, cols, head, cls) {
   if (locked) {
     return html`<tr data-row="${r.id}" class="${cls}"><td class="ln">${r.lineNo}</td><td class="mono">${r.billNo}</td><td class="amount">${rs(r.amountPaise)}</td><td>${TYPE_LABELS[r.billType] ?? ''}</td>
       ${r.paidWithRowId ? html`<td colspan="4" class="note">Paid with ${head ? rowLabel(head) : 'another row'}</td>` : cols.map((c) => html`<td class="amount">${c.length ? rs(c.reduce((t, p) => t + p.amountPaise, 0)) : ''}</td>`)}
@@ -1145,7 +1167,7 @@ function regRowHtml(r, locked) {
     <td data-l="Remarks" class="c-rm"><input class="cell ${flagClass(x.flags.remarks)}" data-f="remarks" value="${r.remarks ?? ''}" style="width:100%" aria-label="Remarks"></td>
     <td class="issue c-is">${issueHtml(x, r)}</td>
     <td class="tick c-tk"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Looks right" title="Looks right (Enter)"></td>
-    <td class="c-ed" style="white-space:nowrap"><button class="iconbtn" type="button" data-edit="${r.id}" title="More: paid together with another bill" aria-label="Edit row">✎</button><button class="iconbtn" type="button" data-delrow="${r.id}" title="Delete this line" aria-label="Delete this line">🗑</button></td>
+    <td class="c-ed" style="white-space:nowrap"><button class="iconbtn" type="button" data-edit="${r.id}" title="More: paid together with another bill" aria-label="Edit row">✎</button><button class="iconbtn" type="button" data-addbelow="${r.id}" title="Add a line below: two bills written on one line" aria-label="Add a line below">＋</button><button class="iconbtn" type="button" data-delrow="${r.id}" title="Delete this line" aria-label="Delete this line">🗑</button></td>
   </tr>`;
 }
 
@@ -1310,7 +1332,7 @@ function registerPanel(biz, u) {
       ${u.fromSoftware ? '' : html`<div class="strip" id="strip"><canvas></canvas><span class="band"></span>
         <span class="strip-tools"><span class="tiny" id="striphint"></span><button type="button" class="iconbtn" id="striprot" title="Turn the photo" aria-label="Turn the photo">⟳</button><button type="button" class="btn plain" id="photoside" style="min-height:28px;padding:0 10px;font-size:12px">Whole page</button></span></div>`}
       <div class="scroll"><table id="regtable" class="regtable ${regFilter === 'needs' ? 'only-needs' : ''}">
-        <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:58px"></colgroup>
+        <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:84px"></colgroup>
         <thead><tr><th>#</th><th>Bill no</th><th style="text-align:right">Amount</th><th>Type</th>${PAY_COLS.map(([, l]) => html`<th style="text-align:right">${l}</th>`)}<th style="text-align:right" title="Discount. A tip is negative.">Disc</th><th>Remarks</th><th>Issue</th><th title="Looks right">✓</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
       </table></div>
@@ -1419,7 +1441,7 @@ function wireInlineRows(biz, u, strip) {
     const keep = active?.closest?.('tr')?.dataset.row ? { row: active.closest('tr').dataset.row, f: active.dataset.f } : null;
     const tbody = table.querySelector('tbody');
     tbody.innerHTML = u.rows.map((x) => regRowHtml(x, false).__html).join('');
-    tbody.querySelectorAll('tr').forEach(bind);
+    tbody.querySelectorAll('tr[data-row]').forEach(bind);
     if (keep?.f) tbody.querySelector(`tr[data-row="${keep.row}"] [data-f="${keep.f}"]`)?.focus();
     document.getElementById('regsum').innerHTML = regSumHtml(u).__html;
     document.getElementById('rvbar').innerHTML = regBarHtml(u).__html;
@@ -1456,7 +1478,7 @@ function wireInlineRows(biz, u, strip) {
     queues.set(id, run);
     return run;
   };
-  const rowsShown = () => [...table.querySelectorAll('tbody tr')].filter((x) => x.offsetParent !== null);
+  const rowsShown = () => [...table.querySelectorAll('tbody tr[data-row]')].filter((x) => x.offsetParent !== null);
   const focusRow = (tr, f = 'billNo') => { const el = tr?.querySelector(`[data-f="${f}"]`) ?? tr?.querySelector('[data-f]'); el?.focus(); el?.select?.(); };
   const bind = (tr) => {
     tr.querySelectorAll('[data-f]').forEach((el) => el.addEventListener('change', () => save(tr, el)));
@@ -1474,6 +1496,12 @@ function wireInlineRows(biz, u, strip) {
       save(tr, amount);
     });
     tr.querySelector('[data-edit]')?.addEventListener('click', () => openRowForm(tr.dataset.row));
+    tr.querySelector('[data-addbelow]')?.addEventListener('click', async () => {
+      try {
+        const { id } = await api('POST', `/businesses/${biz.id}/register-rows/${tr.dataset.row}/insert-below`, {});
+        await reviewView(biz, u.id, id);
+      } catch (err) { showError(document.getElementById('rmsg'), err); }
+    });
     tr.querySelector('[data-delrow]')?.addEventListener('click', async () => {
       const r = u.rows.find((x) => x.id === tr.dataset.row);
       if (!confirm(`Delete line ${r.lineNo}${r.billNo ? ` (bill ${r.billNo})` : ''} from this page?`)) return;
@@ -1519,10 +1547,10 @@ function wireInlineRows(biz, u, strip) {
     });
   };
   let openRowForm = () => {};
-  table.querySelectorAll('tbody tr').forEach(bind);
+  table.querySelectorAll('tbody tr[data-row]').forEach(bind);
   wireBar();
   // Start on the first row that needs you, so the strip shows its line.
-  const first = table.querySelector('tbody tr.needs-you') ?? table.querySelector('tbody tr');
+  const first = table.querySelector('tbody tr.needs-you') ?? table.querySelector('tbody tr[data-row]');
   if (first) { const r = u.rows.find((x) => x.id === first.dataset.row); if (r) { first.classList.add('current'); strip.show(r); } }
   return (fn) => { openRowForm = fn; };
 }
@@ -1574,10 +1602,10 @@ function wireRegister(biz, u) {
   document.getElementById('photoside')?.addEventListener('click', () => { const on = !side(); try { localStorage.setItem(SIDE_KEY, on ? '1' : '0'); } catch { /* storage unavailable */ } applySide(on); });
   document.getElementById('photoside2')?.addEventListener('click', () => { try { localStorage.setItem(SIDE_KEY, '0'); } catch { /* storage unavailable */ } applySide(false); });
   if (u.shiftStatus === 'confirmed') {
-    const first = document.querySelector('#regtable tbody tr');
+    const first = document.querySelector('#regtable tbody tr[data-row]');
     const r = first && u.rows.find((x) => x.id === first.dataset.row);
     if (r) strip.show(r);
-    document.querySelectorAll('#regtable tbody tr').forEach((tr) => tr.addEventListener('click', () => { const x = u.rows.find((y) => y.id === tr.dataset.row); if (x) strip.show(x); }));
+    document.querySelectorAll('#regtable tbody tr[data-row]').forEach((tr) => tr.addEventListener('click', () => { const x = u.rows.find((y) => y.id === tr.dataset.row); if (x) strip.show(x); }));
   }
   wireFill = () => { wireUnslip(); wireFillBtn(); };
   const wireUnslip = () => document.getElementById('unslip')?.addEventListener('click', async (e) => {

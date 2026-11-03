@@ -211,6 +211,7 @@ details.menu > summary::-webkit-details-marker { display: none; }
   .regtable .c-dc { grid-area: dc; } .regtable .c-rm { grid-area: rm; } .regtable .c-tk { grid-area: tk; align-self: end; } .regtable .c-is { grid-area: is; } .regtable .c-ed { grid-area: ed; text-align: right; }
   .regtable td[data-l]::before { content: attr(data-l); display: block; font-size: 10px; color: var(--muted, #6B7280); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .regtable .cell { padding: 0 4px; font-size: 12px; }
+  .regtable tr.grptotal { display: block; padding: 4px 0 8px 28px; } .regtable tr.grptotal td.ln { display: none; }
   #striphint { display: none; }
 }
 
@@ -218,6 +219,10 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .regtable tr.grp td.ln { box-shadow: inset 4px 0 0 #8B5CF6; }
 .regtable tr.grp:not(.grp-first) td { border-top: 1px dashed #DDD6FE; }
 .regtable tr.grp.grp-first td.ln { border-top-left-radius: 6px; }
+.regtable tr.grptotal td { padding: 3px 8px 8px; font-size: 13px; font-weight: 600; border-top: 1px dashed #DDD6FE; }
+.regtable tr.grptotal td.ln { box-shadow: inset 4px 0 0 #8B5CF6; border-bottom-left-radius: 6px; }
+.regtable tr.grptotal.ok td:last-child { color: var(--teal-ink); }
+.regtable tr.grptotal.bad td:last-child { color: #B91C1C; }
 .regtable td.paidwith { color: #6D28D9; }
 
 .pickchip.taken { color: #6B7280; border-style: dashed; }

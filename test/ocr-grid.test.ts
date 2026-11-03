@@ -199,3 +199,19 @@ describe('Check reading accuracy (Owner)', () => {
     expect(Number(n)).toBe(2); // counts toward today's limit
   });
 });
+
+describe('Add a line below', () => {
+  it('puts a blank draft line just under the row, on the same line of the photo, and moves later lines down', async () => {
+    const p = await page();
+    mocked.mockResolvedValueOnce({ data: slipped(), model: 'claude-opus-5-5' } as never);
+    expect((await p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/read`)).status).toBe(200);
+    const [second] = await sql`SELECT id, ocr_original FROM register_rows WHERE line_no = 2`;
+    const res = await p.clients.entry_staff.post(`/businesses/${p.bid}/register-rows/${second.id}/insert-below`, {});
+    expect(res.status).toBe(201);
+    const rows = await sql`SELECT id, line_no, bill_no, amount_paise, status, ocr_original FROM register_rows ORDER BY line_no`;
+    expect(rows.map((r) => r.line_no)).toEqual([1, 2, 3, 4, 5]);
+    expect(rows[2]).toMatchObject({ id: res.json.id, bill_no: '', amount_paise: 0, status: 'draft' });
+    expect(JSON.parse(rows[2].ocr_original).y).toBe(JSON.parse(second.ocr_original).y);
+    expect((await p.clients.entry_staff.post(`/businesses/${p.bid}/register-rows/not-a-row/insert-below`, {})).status).toBe(404);
+  });
+});

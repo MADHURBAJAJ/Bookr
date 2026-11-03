@@ -297,3 +297,6 @@ An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tie
 - Top bar: checked count and progress, page-total and payments chips, "Needs you / All" filter, Next issue. Keyboard: Enter ticks the row and moves to the next unticked one; ↑ ↓ move between rows.
 - Photo strip: the page turned upright (from the reading's orientation; ⟳ turns it by hand), zoomed to the current row's line. The line's place comes from the reading (`ocr_original.y`, % of page height, asked of Claude from November 2026); for older readings it is estimated, and scrolling over the strip lines it up (remembered per page in the browser). "Whole page" shows the full photo beside the table instead.
 - Read page again, Open photo and Delete are in the ⋯ menu. On phones each row is a small card.
+- Two bills on one line of the page: ＋ on a row adds a blank draft line just below it (`POST register-rows/:id/insert-below`); later lines move down one and the new line uses the same place on the photo.
+- A bill number on more than one line of the shift (this page or another) is red: "Bill X is also on row N".
+- A group paid together ends with a total line: "Group of N bills: ₹ bills · paid ₹ paid", green when they match, red with how much over or short.

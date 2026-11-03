@@ -385,6 +385,37 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
   return c.json({ id }, 201);
 });
 
+// A blank line just below another, for two bills written on one line of the page. Later lines move down one.
+// The new line is placed on the same line of the photo as the one above it.
+captureRoutes.post('/businesses/:businessId/register-rows/:rowId/insert-below', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = c.req.param('rowId');
+  if (!isUuid(rowId)) fail(404, 'Row not found.');
+  const above = await one<{ upload_id: string; line_no: number; shift_day: string; bill_type: string | null; ocr_original: string | null }>(db,
+    'SELECT upload_id, line_no, shift_day, bill_type, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  if (!above) fail(404, 'Row not found.');
+  let place: { line?: number; y?: number } = {};
+  try { const o = above.ocr_original ? JSON.parse(above.ocr_original) : {}; place = { line: o.line, y: o.y }; } catch { /* not JSON */ }
+  const id = newId();
+  const t = now();
+  const user = c.get('user').id;
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE register_rows SET line_no = line_no + 1 WHERE upload_id = ? AND line_no > ?', above.upload_id, above.line_no),
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks, status, ocr_original, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, '', ?, 0, 0, 0, NULL, 'draft', ?, ?, ?, ?)`, id, bid, above.upload_id, above.line_no + 1, above.shift_day, above.bill_type,
+        JSON.stringify({ engine: 'manual', addedBelow: rowId, ...place }), user, t, t),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.insert_below', 'register_rows', ?, NULL, ?, ?)`, bid, user, id, JSON.stringify({ below: rowId, lineNo: above.line_no + 1 }), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  return c.json({ id }, 201);
+});
+
 captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
