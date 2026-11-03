@@ -231,6 +231,50 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   }
   if (wanted.size) statements.push(stmt(db, "UPDATE shifts SET status = 'comparing' WHERE business_id = ? AND shift_day = ? AND status = 'open'", businessId, day));
   if (statements.length) await db.batch([shiftStatement(db, businessId, day), ...statements]);
+  await decideOneSided(db, businessId, day, rgById, paysByRow, shares);
+}
+
+export const AUTO_COUNTED_NOTE = 'Counted automatically: waiting for its other side';
+
+/**
+ * Bills on one side only are decided without waiting for a person (approved 3 Nov 2026). A person can change
+ * any of these before the shift is confirmed; confirming stays with a person.
+ * - The same bill already counted on another day: "Already counted on <day>" here, so it is not counted (or
+ *   matched to the bank) twice, and the other day's bill stops waiting.
+ * - Otherwise it is counted here from the side there is, and waits for its other side:
+ *   only in the software report → the software amount and mode, as F&B unless changed;
+ *   only in the register → the register, once its payment is written and its discount is not large.
+ * A bill whose other day was decided by a person in another way (left out, carried forward) waits for a person.
+ */
+async function decideOneSided(db: DB, businessId: string, day: string, rgById: Map<string, RgRow>, paysByRow: Map<string, RgPay[]>,
+  shares: ReturnType<typeof discountShares>) {
+  const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
+  const open = comps.filter((c) => ONE_SIDED.includes(c.difference) && !c.decision);
+  if (!open.length) return;
+  const others = await otherDays(db, businessId, day, comps);
+  const t = now();
+  const statements: D1PreparedStatement[] = [];
+  const decide = (c: Comparison, decision: Decision, note: string, linkedTo: string | null, billType: string | null) => statements.push(
+    stmt(db, `UPDATE bill_comparisons SET decision = ?, decided_by = NULL, decided_at = ?, note = ?, linked_to_id = ?, bill_type = ?
+      WHERE id = ? AND decision IS NULL`, decision, t, note, linkedTo, billType, c.id),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, NULL, 'comparison.decide', 'bill_comparisons', ?, ?, ?, ?)`, businessId, c.id, JSON.stringify({ decision: null }),
+      JSON.stringify({ decision, note, linkedToId: linkedTo, billType, auto: true }), t));
+  for (const c of open) {
+    const o = others.get(c.id);
+    if (o && isCounted(o.decision)) { decide(c, 'leave_out', `Already counted on ${o.day}`, o.id, null); continue; }
+    if (o && o.decision) continue; // left out or carried forward there by a person
+    const link = o?.id ?? null;
+    if (c.difference === 'missing_in_register') {
+      if (c.sw_mode !== 'cash' && c.sw_mode !== 'upi' && c.sw_mode !== 'card') continue;
+      decide(c, 'use_software', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, 'fnb');
+    } else {
+      const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
+      if (!r || !paysByRow.get(r.paid_with_row_id ?? r.id)?.length || shares.get(r.id)?.large) continue;
+      decide(c, 'use_register', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, null);
+    }
+  }
+  if (statements.length) await db.batch(statements);
 }
 
 /**
@@ -401,6 +445,11 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const unmapped = [...neededTypes].filter((t) => !typed.has(t));
   if (unmapped.length) blockers.push(`Choose the income head for ${unmapped.map((t) => (t === 'fnb' ? 'F&B' : 'Room')).join(' and ')} bills on Heads and rules.`);
   if (!(await cashAccountId(db, businessId))) blockers.push('This business has no cash account.');
+  // Warnings do not stop confirming. A cash bill counted from the software but missing in the register is cash
+  // that should be in hand: it is flagged on its own day so it cannot go missing quietly.
+  const warnings = comparisons.filter((c) => c.difference === 'missing_in_register' && c.sw_mode === 'cash' && isCounted(c.decision))
+    .map((c) => ({ billNo: c.bill_no, amountPaise: c.sw_amount_paise ?? 0,
+      text: `Cash bill ${c.bill_no} (₹ ${Math.round((c.sw_amount_paise ?? 0) / 100).toLocaleString('en-IN')}) is in the software report but not in the register: check the cash.` }));
 
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
   const swByMode = (m: string) => sum(sw.filter((b) => b.mode === m).map((b) => ({ amount: b.amount_paise })));
@@ -414,6 +463,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     confirmedAt: shift?.confirmed_at ?? null,
     reopenedAt: shift?.reopened_at ?? null,
     reopenReason: shift?.reopen_reason ?? null,
+    warnings,
     window: cov.window,
     gaps: cov.gaps,
     reports: cov.reports.map((r) => ({ id: r.id, coversFrom: r.covers_from, coversTo: r.covers_to, firstPaidAt: r.first_paid_at, lastPaidAt: r.last_paid_at, billCount: r.bill_count })),
@@ -427,6 +477,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
         rowId: c.register_row_id, uploadId: rgById.get(c.register_row_id)?.upload_id ?? null } : null,
       largeDiscount: c.register_row_id && shares.get(c.register_row_id)?.large ? shares.get(c.register_row_id) : null,
       linkedToId: c.linked_to_id ?? null,
+      auto: !!c.decision && !c.decided_by && c.decided_at != null,
       otherDay: others.get(c.id) ?? null,
     })),
     conflicts: conflicts.map((k) => ({
@@ -481,17 +532,20 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     all<{ bill_type: string; head_id: string }>(db, 'SELECT bill_type, head_id FROM bill_type_heads WHERE business_id = ?', businessId),
   ]);
   const headFor = new Map(heads.map((h) => [h.bill_type, h.head_id]));
+  // A UPI bill on one side only is counted on the day its bank credit arrives, not on this shift (see settleOnCredit).
+  const onCredit = (r: NewRow) => r.mode === 'upi' && ONE_SIDED.includes(r.c.difference) && !r.c.linked_to_id;
   const t = now();
   const shift = await one<{ id: string }>(db, 'SELECT id FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day);
   const statements = [
     // First, so a second confirm running at the same moment fails here and rolls back whole.
     stmt(db, "UPDATE shifts SET status = 'confirmed', confirmed_by = ?, confirmed_at = ? WHERE id = ?", userId, t, shift!.id),
     ...rows.map((r) => stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status,
-      payment_mode, bill_no, pos_no, confirmed_source, comparison_id, shift_day, match_status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'income', ?, ?, 'software_report', 'approved', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      payment_mode, bill_no, pos_no, confirmed_source, comparison_id, shift_day, match_status, ocr_original, created_at)
+      VALUES (?, ?, ?, ?, ?, 'income', ?, ?, 'software_report', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       newId(), businessId, r.mode === 'cash' ? cashAccount : null, day, r.amount, headFor.get(r.billType) ?? null,
-      `Bill ${r.c.bill_no}`, r.mode, r.c.bill_no, r.c.pos_no || null, r.source, r.c.id, day,
-      r.mode === 'upi' ? 'awaiting_bank_match' : r.mode === 'card' ? 'awaiting_card_settlement' : null, t)),
+      `Bill ${r.c.bill_no}`, onCredit(r) ? 'reviewed' : 'approved', r.mode, r.c.bill_no, r.c.pos_no || null, r.source, r.c.id, day,
+      r.mode === 'upi' ? 'awaiting_bank_match' : r.mode === 'card' ? 'awaiting_card_settlement' : null,
+      onCredit(r) ? JSON.stringify({ countOnCredit: true }) : null, t)),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
       VALUES (?, ?, 'shift.confirm', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id,
       JSON.stringify({ shiftDay: day, incomeRows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0) }), t),

@@ -225,7 +225,7 @@ describe('comparison and decisions', () => {
     // Unknown mode in the software: cannot be used.
     expect((await put(h.clients.owner, '2610318', 'use_software')).json.error).toMatch(/does not say how/);
     expect((await put(h.clients.owner, '2611011', 'use_register')).status).toBe(400); // a match needs no decision
-    const [a] = await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide'`;
+    const [a] = await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide' AND user_id IS NOT NULL`; // not Bookr's own
     expect(a.n).toBe(1);
   });
 
@@ -240,7 +240,7 @@ describe('comparison and decisions', () => {
     });
     v = await view(h);
     expect(byBill(v, '2610317').decision).toBeNull();
-    const [a] = await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared'`;
+    const [a] = await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared' AND json_extract(before, '$.decided_by') IS NOT NULL`;
     expect(a.n).toBe(1);
     expect(pageId).toBeTruthy();
   });
@@ -264,7 +264,7 @@ describe('confirming a shift', () => {
     await fullShift(h);
     const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
     expect(res.status).toBe(409);
-    expect(res.json.problems.join(' ')).toMatch(/6 differences are not decided/);
+    expect(res.json.problems.join(' ')).toMatch(/4 differences are not decided/); // bills on one side only are decided by Bookr
   });
 
   it('creates approved income rows that follow each decision', async () => {
@@ -545,7 +545,7 @@ describe('register discounts', () => {
     v = await view(h);
     expect(byBill(v, '2610317')).toMatchObject({ difference: 'match', decision: null });
     expect(v.json.matchedAfterAdjustment).toEqual([{ billNo: '2610317', softwarePaise: 441000, registerPaise: 438000 }]);
-    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared'`)[0].n).toBe(1);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decision_cleared' AND json_extract(before, '$.decided_by') IS NOT NULL`)[0].n).toBe(1);
     await decideAll(h).catch(() => undefined);
     for (const [bill, d] of [['26103115', 'use_register'], ['2610318', 'use_register'], ['2610319', 'leave_out'], ['26103120', 'use_register'], ['26103125', 'use_register']]) {
       await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, bill).id}`, { decision: d, note: 'Cancelled in POS' });
@@ -1009,7 +1009,8 @@ describe('bills on one side only, followed across days', () => {
     expect(late.otherDay).toMatchObject({ day: '2026-10-31', side: 'register', decision: 'carry_forward', billType: 'fnb' });
     expect((await decide(h, late.id, { decision: 'use_software', linkedToId: late.otherDay.id })).status).toBe(200);
     const waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills;
-    expect(waiting.map((b: any) => b.billNo)).toEqual(['2610319']);
+    expect(waiting.map((b: any) => b.billNo)).toContain('2610319'); // with the bills Bookr counted and left waiting
+    expect(waiting.map((b: any) => b.billNo)).not.toContain('26103125');
   });
 
   it('left out on 31 Oct, then in the 1 Nov register: leaving it out again needs a reason; an old bill closes after the watch', async () => {
@@ -1084,7 +1085,8 @@ describe('old POS bills (6 digits) are counted from the register on their own', 
     const v = await view(h);
     expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register' });
     expect(byBill(v, '145236').note).toMatch(/Old POS/);
-    for (const b of ['145238', '145239', '7700001']) expect(byBill(v, b).decision ?? null).toBeNull();
+    for (const b of ['145238', '145239']) expect(byBill(v, b).decision ?? null).toBeNull();
+    expect(byBill(v, '7700001')).toMatchObject({ decision: 'use_register', auto: true }); // counted, waits for its software bill
     const [log] = await sql`SELECT user_id, after FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%oldPos%'`;
     expect(log.user_id).toBeNull();
   });
@@ -1373,5 +1375,59 @@ describe('bring in, sync all and the bill drawer', () => {
     expect(b.comparisons[0]).toMatchObject({ bill_no: '2610317', difference: 'amount' });
     expect(b.register[0]).toMatchObject({ bill_no: '2610317', amount_paise: 414000 });
     expect(b.money).toEqual([]);
+  });
+});
+
+describe('bills on one side only are decided by Bookr (approved 3 Nov 2026)', () => {
+  const NOV1 = '2026-11-01';
+  it('a software-only bill is counted as F&B and waits; a cash one is flagged on its day; the other side later is "already counted"', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    let v = await view(h);
+    expect(byBill(v, '2610319')).toMatchObject({ decision: 'use_software', billType: 'fnb', auto: true }); // cash 353, software only
+    expect(byBill(v, '26103125')).toMatchObject({ decision: 'use_register', auto: true });               // cash 500, register only
+    expect(v.json.warnings.map((w: any) => w.billNo)).toEqual(['2610319']);
+    expect((await sql`SELECT user_id FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%"auto":true%' LIMIT 1`)[0].user_id).toBeNull();
+    // The register side of 2610319 turns up on 1 Nov: already counted on 31 Oct, so not counted (or matched to the bank) again.
+    const page = await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=${NOV1}`, png(7), 'image/png');
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page.json.id}/register-rows`,
+      { billNo: '2610319', billType: 'fnb', amount: '353', status: 'checked', payments: [{ mode: 'cash', columnLabel: null, amount: '353' }] })).status).toBe(201);
+    const late = byBill(await view(h, NOV1), '2610319');
+    expect(late).toMatchObject({ decision: 'leave_out', auto: true, linkedToId: byBill(v, '2610319').id });
+    expect(late.note).toMatch(/Already counted on 2026-10-31/);
+    const waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills.map((b: any) => b.billNo);
+    expect(waiting).not.toContain('2610319');
+    // A person can still change it.
+    expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610319').id}`, { decision: 'leave_out', note: 'Cancelled in POS' })).status).toBe(200);
+    v = await view(h);
+    expect(byBill(v, '2610319')).toMatchObject({ decision: 'leave_out', auto: false });
+  });
+
+  it('a UPI bill on one side only is not counted until its bank credit is matched, then counted on the credit\'s shift', async () => {
+    const h = await hotel();
+    const page = await fullShift(h);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`,
+      { billNo: '26103199', billType: 'fnb', amount: '840', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '840' }] })).status).toBe(201);
+    await decideAll(h);
+    expect(byBill(await view(h), '26103199')).toMatchObject({ decision: 'use_register', auto: true });
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const [t] = await sql`SELECT id, status, day, ocr_original FROM transactions WHERE bill_no = '26103199'`;
+    expect(t).toMatchObject({ status: 'reviewed', day: '2026-10-31' });
+    expect(JSON.parse(t.ocr_original).countOnCredit).toBe(true);
+    expect((await sql`SELECT count(*) AS n FROM transactions WHERE shift_day = '2026-10-31' AND status = 'reviewed'`)[0].n).toBe(1); // only that one
+    const credit = (await h.clients.owner.get(`/businesses/${h.bid}/awaiting-credit`)).json.sales;
+    expect(credit.find((x: any) => x.billNo === '26103199')).toMatchObject({ onCredit: true, day: '2026-10-31' });
+    // The credit arrives on 2 Nov at 9:15 am: the 2 Nov shift.
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' })).status).toBe(200);
+    const line = ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t')
+      + '\n' + [1, 'S20000001', '02/11/2026', '02/11/2026 9:15:00 AM', '-', 'UPI/600000000009/Dinner/ab-1@okicici/SAMPLE BANK/ICIaaaa', 'CR', 840, '840'].join('\t');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: line })).status).toBe(200);
+    const [row] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S20000001'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${row.id}/match`, { transactionIds: [t.id] })).status).toBe(200);
+    expect((await sql`SELECT status, day, shift_day FROM transactions WHERE id = ${t.id}`)[0]).toEqual({ status: 'approved', day: '2026-11-02', shift_day: '2026-10-31' });
+    // Unmatched again: back to waiting, on its own shift.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${row.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT status, day FROM transactions WHERE id = ${t.id}`)[0]).toEqual({ status: 'reviewed', day: '2026-10-31' });
   });
 });

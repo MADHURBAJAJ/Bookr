@@ -453,6 +453,17 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/cash/shortage', requireRol
 
 // ---- Bills found on one side only, waiting for the other side on another day
 
+/** Confirmed UPI sales whose bank credit has not been matched yet, oldest first. countOnCredit: not counted until it is. */
+salesRoutes.get('/businesses/:businessId/awaiting-credit', requireRole('sales.view'), async (c) => {
+  const rows = await all<{ id: string; billNo: string; day: string; amountPaise: number; source: string; onCredit: number }>(c.env.DB, `
+    SELECT t.id, t.bill_no AS billNo, t.shift_day AS day, t.amount_paise AS amountPaise, t.confirmed_source AS source,
+      coalesce(json_extract(t.ocr_original, '$.countOnCredit'), 0) AS onCredit
+    FROM transactions t WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match'
+      AND t.matched_bank_row IS NULL ORDER BY t.shift_day, t.bill_no LIMIT 500`, c.get('businessId'));
+  const today = istDay(Date.now());
+  return c.json({ sales: rows.map((r) => ({ ...r, onCredit: !!r.onCredit, daysWaiting: Math.round((Date.parse(today) - Date.parse(r.day)) / 86400000) })) });
+});
+
 salesRoutes.get('/businesses/:businessId/waiting-bills', requireRole('sales.view'), async (c) => {
   return c.json({ watchDays: WATCH_DAYS, bills: await waitingBills(c.env.DB, c.get('businessId'), istDay(Date.now())) });
 });

@@ -307,3 +307,10 @@ An R2 bucket for photos and redacted CSVs, `bookr-demo-uploads`, on the free tie
 - Old POS bills are 6-digit numbers (`isOldPosBill`): never in the software report, so Review shows "Old POS bill" instead of "Not in software report", and they are left out of the bills-waiting lists.
 - The Review pager numbers pages within the day ("Page 2 of 3"); Previous and Next carry on into other days.
 - Old POS bills on the register are decided 'use register' automatically on comparison (approved 3 Nov 2026), once their payment is written and the discount is not large; audit_log 'comparison.decide' with user NULL and oldPos.
+
+### Compare sales: one-sided bills and bank credit (approved 3 Nov 2026)
+- A bill on one side only (missing_in_register / missing_in_software) is decided by Bookr on comparison (`decideOneSided`, audit 'comparison.decide' with user NULL and `auto:true`): software-only bills paid by cash, UPI or card are 'use software' as F&B; register-only bills with a payment written and no large discount are 'use register'. It waits for its other side for 7 days, as before.
+- When the other side turns up on another day and the first one was counted, the new one is left out with "Already counted on <day>" and linked, so it is never counted or matched with the bank twice. People can change any of these decisions.
+- A cash bill only in the software report shows a warning on the shift ("check the cash"); it is still counted.
+- UPI bills on one side only (not linked to another day) are confirmed with status 'reviewed' and `ocr_original.countOnCredit`: not counted until UPI matching matches a credit, then approved and moved to the credit's shift day (`settleOnCredit`, run after every bank change). Unmatching puts them back. Cash and card one-sided bills count on the bill's day (card settlements are not matched per bill).
+- A shift can be confirmed before its bank credits arrive. The Compare page has tabs: This shift, Waiting for other side, Waiting for bank credit (`GET awaiting-credit`: confirmed UPI sales not yet matched).

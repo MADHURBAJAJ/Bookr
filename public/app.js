@@ -2027,8 +2027,8 @@ async function compareView(biz, day) {
       <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
-  const [v, cash, waiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
-    api('GET', `/businesses/${biz.id}/waiting-bills`)]);
+  const [v, cash, waiting, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
+    api('GET', `/businesses/${biz.id}/waiting-bills`), api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
   v.reasons = cash.reasons;
   const canDecide = biz.actions.includes('sales.decide');
   const confirmed = v.status === 'confirmed';
@@ -2042,101 +2042,145 @@ async function compareView(biz, day) {
   const totalsRow = (label, sw, rg, bold) => html`<tr style="${bold ? 'font-weight:600' : ''}"><td>${label}</td><td class="amount">${money(sw)}</td><td class="amount">${money(rg)}</td><td class="amount" style="color:${sw === rg ? 'var(--muted)' : '#B45309'}">${rg - sw === 0 ? '0' : `${rg - sw > 0 ? '+' : ''}${money(rg - sw)}`}</td></tr>`;
   const swTotal = v.totals.reduce((s, t) => s + t.softwarePaise, 0) + v.unknownModePaise;
   const rgTotal = v.totals.reduce((s, t) => s + t.registerPaise, 0);
-  render(shell(biz, 'compare', 'Compare sales', 'Software report against the handwritten register, bill by bill. You decide every difference.', html`
-    <div class="form-row" style="justify-content:space-between;align-items:flex-end">
-      <div class="field" style="flex:0 1 320px"><label for="sh">Shift (8 am to 8 am)</label>
-        <select id="sh">${shiftOptions.map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${when(Date.parse(`${d}T08:00:00+05:30`))} to ${when(Date.parse(`${d}T08:00:00+05:30`) + 86400000)}</option>`)}</select></div>
-      ${confirmed ? html`<span class="chip ok" style="font-size:14px;padding:6px 14px">Confirmed</span>` : ''}
-    </div>
-    <div id="cmsg"></div>
-    <div class="row">
-      <section class="card grow1" style="gap:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2>Software report</h2>${v.gaps.length ? html`<span class="chip wait">Hours missing</span>` : html`<span class="chip ok">Shift covered</span>`}</div>
-        <div class="note">${v.softwareBills} bill${v.softwareBills === 1 ? '' : 's'} in this shift from ${v.reports.length} report${v.reports.length === 1 ? '' : 's'}.</div>
-        ${v.reports.map((r) => html`<div class="note">Report covering ${when(r.coversFrom)} to ${when(r.coversTo)}${confirmed || !biz.actions.includes('sales.import') ? '' : html` · <a href="#" data-cover="${r.id}" data-from="${r.coversFrom}" data-to="${r.coversTo}">Change</a>`}</div>`)}
-        ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
-        <div id="coveredit"></div>
-        ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/bringin/${day}">Bring in a report</a>` : ''}
-      </section>
-      <section class="card grow1" style="gap:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2>Handwritten register</h2>${v.registerRows ? html`<span class="chip ok">Pages entered</span>` : html`<span class="chip wait">No pages</span>`}</div>
-        <div class="note">${v.registerPages} page${v.registerPages === 1 ? '' : 's'}, ${v.registerRows} bill${v.registerRows === 1 ? '' : 's'}. Bills appear in the register only after they are settled.</div>
-        ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review">Open register pages</a>` : ''}
-      </section>
-    </div>
-    <div class="row">
-      ${[['Bills match', matches, 'var(--teal-ink)'], ['Differences', toDecide.length, '#B45309'], ['Decided', decided, 'var(--ink)'], ['Complimentary', comps.length, 'var(--ink)'], ['Hours missing', missingHours, missingHours ? '#B45309' : 'var(--ink)']]
-        .map(([l, n, col]) => html`<div class="card" style="flex:1 1 150px;padding:16px 20px;gap:2px"><div class="note" style="font-size:14px">${l}</div><div class="mono" style="font-size:26px;font-weight:600;color:${col}">${n}</div></div>`)}
-    </div>
-    ${v.conflicts.length ? html`<section class="card">
-      <h2>Bills that differ between two software reports</h2>
-      <div class="note">The same bill came in twice with different values. Nothing was overwritten. Choose which to keep.</div>
-      <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported</th><th>New file</th><th></th></tr></thead><tbody>
-        ${v.conflicts.map((k) => html`<tr><td class="mono">${k.billNo}</td>
-          <td><div class="mono">${money(k.existing.amountPaise)}</div><div class="note">${MODE_LABELS[k.existing.mode]} · ${when(k.existing.paidAt)}</div></td>
-          <td><div class="mono">${money(k.incoming.amountPaise)}</div><div class="note">${MODE_LABELS[k.incoming.mode]} · ${when(k.incoming.paidAt)}</div></td>
-          <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">Keep imported</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">Use new file</button></div>` : ''}</td></tr>`)}
-      </tbody></table></div></section>` : ''}
-    <section class="card">
-      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2>Differences to decide</h2><span class="note">${decided} of ${toDecide.length} decided</span></div>
-      ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so ${v.matchedAfterAdjustment.length > 1 ? 'they need' : 'it needs'} no decision. The register amount (what was received) is used, and is what bank matching will look for:
-        ${v.matchedAfterAdjustment.map((m) => `${m.billNo} (software ${money(m.softwarePaise)}, received ${money(m.registerPaise)})`).join(', ')}.</div>` : ''}
-      ${canDecide && !confirmed && toDecide.filter(bulkOk).length > 1 ? html`<form id="bulkreg" class="inset" style="gap:8px">
-        <div class="note"><strong>${toDecide.filter(bulkOk).length} bills are only in the register.</strong> For bills that will never be in a software report (e.g. pending bills of an old POS), tick them and count them from the register at once. They are then not watched for a software bill.</div>
-        <div class="form-row" style="align-items:flex-end">
-          <button class="btn plain" type="button" id="bulkall">Select all ${toDecide.filter(bulkOk).length}</button>
-          <div class="field"><label for="bulknote">Reason</label><input id="bulknote" name="note" value="Old POS bill" required></div>
-          <button class="btn" type="submit" id="bulkgo" disabled>Use register for 0 selected</button>
+  // Shift order for ‹ and ›: older to the left.
+  const asc = [...shiftOptions].reverse();
+  const at = asc.indexOf(day);
+  const prevDay = at > 0 ? asc[at - 1] : null;
+  const nextDay = at >= 0 && at < asc.length - 1 ? asc[at + 1] : null;
+  const auto = toDecide.filter((c) => c.decision && c.auto);
+  const byPerson = toDecide.filter((c) => c.decision && !c.auto);
+  const open = toDecide.filter((c) => !c.decision);
+  const kinds = [['all', 'All', open], ['sw', 'Only in software', open.filter((c) => c.difference === 'missing_in_register')],
+    ['rg', 'Only in register', open.filter((c) => c.difference === 'missing_in_software')], ['diff', 'Amount or mode', open.filter((c) => !c.difference.startsWith('missing'))]];
+  const onCredit = toDecide.filter((c) => c.difference.startsWith('missing') && (c.decision === 'use_software' || c.decision === 'use_register') && !c.linkedToId
+    && (c.software?.mode ?? c.register?.mode) === 'upi');
+  const onCreditPaise = onCredit.reduce((t, c) => t + ((c.software ?? c.register)?.amountPaise ?? 0), 0);
+  const total = Math.max(1, matches + toDecide.length);
+  const seg = (n, cls, label) => (n ? html`<span class="pg ${cls}" style="flex:${n}" title="${label}: ${n}"></span>` : '');
+  const status = confirmed ? html`<span class="chip ok">Confirmed</span>` : v.status === 'comparing' ? html`<span class="chip wait">Comparing</span>` : html`<span class="chip">Open</span>`;
+  const credit = awaiting?.sales ?? [];
+  const tab = (() => { try { return localStorage.getItem('bookr.compare.tab') || 'shift'; } catch { return 'shift'; } })();
+  const rowHtml = (c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
+      class="clickrow ${c.decision ? '' : 'undecided'}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
+    <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
+      <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}</td>
+    <td>${side(c.software)}</td><td>${side(c.register)}</td>
+    <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
+      ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
+      ${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html`<span class="chip wait">Mode differs</span>` : ''}` : ''}
+      ${c.auto ? html`<span class="tiny" style="color:var(--teal-ink)">Decided by Bookr${c.note ? `: ${c.note}` : ''}</span>` : ''}
+    </div></td>
+    <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
+        const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
+        if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
+          return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:40px">
+            <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
+            ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
+        }
+        return html`<button class="btn ${on ? 'ghost' : 'plain'} dchip" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}">${on ? '✓ ' : ''}${l}</button>`;
+      })}</div>`
+      : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
+  </tr>`;
+  const table = (rows) => html`<div class="scroll"><table class="cmptable" style="min-width:820px">
+    <colgroup><col style="width:190px"><col style="width:150px"><col style="width:150px"><col style="width:150px"><col></colgroup>
+    <thead><tr><th>Bill</th><th>Software</th><th>Register</th><th>What differs</th><th>Decision</th></tr></thead>
+    <tbody>${rows.map(rowHtml)}</tbody></table></div>`;
+  render(shell(biz, 'compare', 'Compare sales', '', html`
+    <section class="card cmp-bar">
+      <div class="cmp-top">
+        <div class="cmp-day">
+          ${prevDay ? html`<a class="btn plain" href="#/b/${biz.id}/compare/${prevDay}" aria-label="Previous shift" title="${dayLabel(prevDay)}">‹</a>` : html`<span class="btn plain off">‹</span>`}
+          <label class="cmp-pick"><span class="sr-only">Shift</span><select id="sh">${shiftOptions.map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}</select></label>
+          ${nextDay ? html`<a class="btn plain" href="#/b/${biz.id}/compare/${nextDay}" aria-label="Next shift" title="${dayLabel(nextDay)}">›</a>` : html`<span class="btn plain off">›</span>`}
+          ${status}
         </div>
-        <div class="form-msg"></div>
-      </form>` : ''}
-      ${toDecide.length ? html`<div class="scroll"><table style="min-width:860px">
-        <thead><tr><th>Bill</th><th>Paid at</th><th>Software</th><th>Register</th><th>What differs</th><th>Your decision</th></tr></thead>
-        <tbody>${toDecide.map((c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
-            class="clickrow" style="background:${c.decision ? 'transparent' : '#FFF7ED'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
-          <td class="mono">${bulkOk(c) ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}${otherDayNote(c)}</td><td style="white-space:nowrap">${c.paidAt ? when(c.paidAt) : 'Not in report'}</td>
-          <td>${side(c.software)}</td><td>${side(c.register)}</td>
-          <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
-            ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
-            ${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)} of bills${c.largeDiscount.grossPaise !== (c.register?.amountPaise ?? 0) + Math.max(c.register?.discountPaise ?? 0, 0) ? ' (bills paid together)' : ''}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html`<span class="chip wait">Mode differs</span>` : ''}` : ''}
-          </div></td>
-          <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
-              const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
-              if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
-                return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:44px">
-                  <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
-                  ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
-              }
-              return html`<button class="btn ${on ? 'ghost' : 'plain'}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}">${l}</button>`;
-            })}</div>`
-            : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
-        </tr>`)}</tbody></table></div>` : html`<div class="note">No differences in this shift.</div>`}
+        ${canDecide && !confirmed ? html`<button class="btn" id="confirm" ${v.canConfirm ? '' : 'aria-disabled="true"'} title="${v.canConfirm ? 'Turn this shift\'s sales into approved income' : 'Show what is left'}">${v.canConfirm ? 'Confirm shift' : `Confirm shift · ${open.length ? `${open.length} to decide` : `${v.blockers.length} left`}`}</button>` : ''}
+      </div>
+      <div class="cmp-inputs">
+        <span class="tchip ${v.gaps.length ? 'warn' : 'ok'}">Software · ${v.softwareBills} bills${v.gaps.length ? ` · ${missingHours} h missing` : ' · 8 am to 8 am'}</span>
+        <span class="tchip ${v.registerRows ? 'ok' : 'warn'}">Register · ${v.registerPages} page${v.registerPages === 1 ? '' : 's'}, ${v.registerRows} bills</span>
+        ${comps.length ? html`<span class="tchip">${comps.length} complimentary</span>` : ''}
+        <details class="menu"><summary class="linkbtn">Details</summary><div class="menu-pop" style="min-width:300px">
+          ${v.reports.map((r) => html`<div class="note">Report ${when(r.coversFrom)} to ${when(r.coversTo)}${confirmed || !biz.actions.includes('sales.import') ? '' : html` · <a href="#" data-cover="${r.id}" data-from="${r.coversFrom}" data-to="${r.coversTo}">Change</a>`}</div>`)}
+          ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/bringin/${day}">Bring in a report</a>` : ''}
+          ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review">Open register pages</a>` : ''}
+        </div></details>
+      </div>
+      <div class="cmp-progress" aria-label="Bills of this shift">
+        <div class="pgbar">${seg(matches, 'm', 'Match')}${seg(auto.length, 'a', 'Decided by Bookr')}${seg(byPerson.length, 'd', 'Decided')}${seg(open.length, 'o', 'To decide')}</div>
+        <div class="tiny">${matches} match · ${auto.length} by Bookr · ${byPerson.length} decided · <strong>${open.length} to decide</strong>${onCredit.length ? ` · ${onCredit.length} UPI on one side (₹ ${rs(onCreditPaise)}) counted when the bank credit arrives` : ''}</div>
+      </div>
+      <div id="coveredit"></div>
     </section>
-    <div class="row">
-      <section class="card" style="flex:3 1 420px;gap:10px">
-        <h2>Totals by payment mode</h2>
-        <div class="scroll"><table style="min-width:380px"><thead><tr><th>Mode</th><th style="text-align:right">Software</th><th style="text-align:right">Register</th><th style="text-align:right">Difference</th></tr></thead><tbody>
-          ${v.totals.map((t) => totalsRow(MODE_LABELS[t.mode], t.softwarePaise, t.registerPaise))}
-          ${v.unknownModePaise ? totalsRow('U/N (not given)', v.unknownModePaise, 0) : ''}
-          ${totalsRow('Total', swTotal, rgTotal, true)}
-        </tbody></table></div>
-        <div class="note">Complimentary bills (amount 0) are listed apart and never counted as sales${comps.length ? `: ${comps.map((c) => c.billNo).join(', ')}` : ''}.</div>
-      </section>
-      <section class="card" style="flex:2 1 320px;gap:10px">
-        <h2>Next step</h2>
-        ${confirmed ? html`
-          <div class="ok-msg">Confirmed ${when(v.confirmedAt)}. The confirmed sales are income rows; UPI and card sales wait for matching in Phase 3.</div>
-          ${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`
-        : html`
-          ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
-          ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="note">Everything is decided. Confirming turns the sales into approved income rows.</div>`}
-          ${v.assumedTypes?.length ? html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px">${v.assumedTypes.length} bill${v.assumedTypes.length > 1 ? 's were' : ' was'} taken as <strong>F&amp;B</strong> because the register's type could not be read: ${blockerHtml(v.assumedTypes.join(', '), v)}. Change any that were Room before confirming.</div>` : ''}
-          ${canDecide ? html`<button class="btn big" id="confirm" ${v.canConfirm ? '' : 'disabled'}>Confirm sales for this shift</button>` : ''}
-          <div class="note">Only Owner and Accountant can decide differences and confirm.</div>`}
-      </section>
+    <div id="cmsg"></div>
+    ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
+    ${(v.warnings ?? []).map((w) => html`<div class="cmp-warn">⚠ ${blockerHtml(w.text, v)}</div>`)}
+    <div class="seg cmp-tabs" role="tablist">
+      <button type="button" role="tab" data-tab="shift" class="${tab === 'shift' ? 'on' : ''}">This shift</button>
+      <button type="button" role="tab" data-tab="other" class="${tab === 'other' ? 'on' : ''}">Waiting for other side (${waiting?.bills?.length ?? 0})</button>
+      <button type="button" role="tab" data-tab="credit" class="${tab === 'credit' ? 'on' : ''}">Waiting for bank credit (${credit.length})</button>
     </div>
-    ${waitingHtml(biz, waiting, canDecide)}
-    ${cashPanelHtml(biz, cash)}`));
+    <div data-pane="shift" ${tab === 'shift' ? '' : 'hidden'}>
+      ${v.conflicts.length ? html`<section class="card">
+        <h2>Bills that differ between two software reports</h2>
+        <div class="note">The same bill came in twice with different values. Nothing was overwritten. Choose which to keep.</div>
+        <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported</th><th>New file</th><th></th></tr></thead><tbody>
+          ${v.conflicts.map((k) => html`<tr><td class="mono">${k.billNo}</td>
+            <td><div class="mono">${money(k.existing.amountPaise)}</div><div class="note">${MODE_LABELS[k.existing.mode]} · ${when(k.existing.paidAt)}</div></td>
+            <td><div class="mono">${money(k.incoming.amountPaise)}</div><div class="note">${MODE_LABELS[k.incoming.mode]} · ${when(k.incoming.paidAt)}</div></td>
+            <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">Keep imported</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">Use new file</button></div>` : ''}</td></tr>`)}
+        </tbody></table></div></section>` : ''}
+      <section class="card" style="gap:10px">
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2>To decide (${open.length})</h2>
+          ${open.length ? html`<span class="seg" role="group" aria-label="Show">${kinds.map(([k, l, list]) => list.length || k === 'all' ? html`<button type="button" data-kind="${k}" class="${k === 'all' ? 'on' : ''}">${l} (${list.length})</button>` : '')}</span>` : ''}</div>
+        ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so no decision is needed: ${v.matchedAfterAdjustment.map((m) => m.billNo).join(', ')}.</div>` : ''}
+        ${canDecide && !confirmed && open.filter(bulkOk).length > 1 ? html`<form id="bulkreg" class="inset" style="gap:8px">
+          <div class="note"><strong>${open.filter(bulkOk).length} bills are only in the register.</strong> Tick bills that will never be in a software report and count them from the register at once.</div>
+          <div class="form-row" style="align-items:flex-end">
+            <button class="btn plain" type="button" id="bulkall">Select all ${open.filter(bulkOk).length}</button>
+            <div class="field"><label for="bulknote">Reason</label><input id="bulknote" name="note" value="Old POS bill" required></div>
+            <button class="btn" type="submit" id="bulkgo" disabled>Use register for 0 selected</button>
+          </div>
+          <div class="form-msg"></div>
+        </form>` : ''}
+        ${open.length ? table(open) : html`<div class="ok-msg">${toDecide.length ? 'Every difference is decided.' : 'No differences in this shift.'}</div>`}
+      </section>
+      ${auto.length ? html`<details class="card cmp-fold"><summary><h2>Decided by Bookr (${auto.length})</h2><span class="note">Bills on one side only: counted and waiting for their other side, or already counted on another day. Change any of them below.</span></summary>${table(auto)}</details>` : ''}
+      ${byPerson.length ? html`<details class="card cmp-fold"><summary><h2>Decided (${byPerson.length})</h2></summary>${table(byPerson)}</details>` : ''}
+      <div class="row">
+        <section class="card" style="flex:2 1 320px;gap:10px" id="nextstep">
+          <h2>${confirmed ? 'Confirmed' : 'Before confirming'}</h2>
+          ${confirmed ? html`
+            <div class="ok-msg">Confirmed ${when(v.confirmedAt)}. UPI sales now wait for their bank credit${onCredit.length ? '; bills found on one side only count on the day their credit arrives' : ''}.</div>
+            ${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`
+          : html`
+            ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
+            ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="ok-msg">Everything is decided. Confirm the shift at the top.</div>`}
+            ${v.assumedTypes?.length ? html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px">${v.assumedTypes.length} bill${v.assumedTypes.length > 1 ? 's were' : ' was'} taken as <strong>F&amp;B</strong> because the register's type could not be read: ${blockerHtml(v.assumedTypes.join(', '), v)}.</div>` : ''}
+            <div class="note">Only Owner and Accountant can decide differences and confirm. The bank credit does not have to arrive first.</div>`}
+        </section>
+        <section class="card" style="flex:3 1 420px;gap:10px">
+          <h2>Totals by payment mode</h2>
+          <div class="scroll"><table style="min-width:380px"><thead><tr><th>Mode</th><th style="text-align:right">Software</th><th style="text-align:right">Register</th><th style="text-align:right">Difference</th></tr></thead><tbody>
+            ${v.totals.map((t) => totalsRow(MODE_LABELS[t.mode], t.softwarePaise, t.registerPaise))}
+            ${v.unknownModePaise ? totalsRow('U/N (not given)', v.unknownModePaise, 0) : ''}
+            ${totalsRow('Total', swTotal, rgTotal, true)}
+          </tbody></table></div>
+          <div class="note">Complimentary bills (amount 0) are never counted as sales${comps.length ? `: ${comps.map((c) => c.billNo).join(', ')}` : ''}.</div>
+        </section>
+      </div>
+      ${cashPanelHtml(biz, cash)}
+    </div>
+    <div data-pane="other" ${tab === 'other' ? '' : 'hidden'}>${waitingHtml(biz, waiting, canDecide) || html`<section class="card"><div class="note">No bill is waiting for its other side.</div></section>`}</div>
+    <div data-pane="credit" ${tab === 'credit' ? '' : 'hidden'}><section class="card" style="gap:10px">
+      <h2>Waiting for bank credit</h2>
+      <div class="note">Confirmed UPI sales whose credit has not been matched on UPI matching yet. A bill found on one side only is <strong>not counted</strong> until its credit is matched; it is then counted on the day the credit arrived.</div>
+      ${credit.length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Counted</th><th>Waiting</th></tr></thead><tbody>
+        ${credit.map((x) => html`<tr><td class="mono">${x.billNo}${drawerBtn(x.billNo, x.day)}</td><td><a href="#/b/${biz.id}/compare/${x.day}">${dayLabel(x.day)}</a></td><td class="amount">${money(x.amountPaise)}</td>
+          <td>${x.onCredit ? html`<span class="chip wait">When the credit arrives</span>` : html`<span class="note">On ${dayLabel(x.day)}</span>`}</td>
+          <td>${x.daysWaiting > 2 ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td></tr>`)}
+      </tbody></table></div>${biz.actions.includes('bank.link') ? html`<a href="#/b/${biz.id}/upi">Open UPI matching</a>` : ''}` : html`<div class="ok-msg">Every confirmed UPI sale has its bank credit.</div>`}
+    </section></div>`));
   wireShell();
   const msg = document.getElementById('cmsg');
   document.getElementById('sh').addEventListener('change', (e) => go(`#/b/${biz.id}/compare/${e.target.value}`));
@@ -2216,7 +2260,23 @@ async function compareView(biz, day) {
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
   }));
   app.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
-  document.getElementById('confirm')?.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {})));
+  document.getElementById('confirm')?.addEventListener('click', () => {
+    if (!v.canConfirm) { // not yet: show what is left
+      app.querySelector('[data-tab="shift"]')?.click();
+      document.getElementById('nextstep')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    act(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {}));
+  });
+  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+    try { localStorage.setItem('bookr.compare.tab', b.dataset.tab); } catch { /* storage unavailable */ }
+    app.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('on', x === b));
+    app.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== b.dataset.tab; });
+  }));
+  app.querySelectorAll('button[data-kind]').forEach((b) => b.addEventListener('click', () => {
+    app.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
+    b.closest('section').querySelectorAll('tbody tr[data-kind]').forEach((tr) => { tr.hidden = b.dataset.kind !== 'all' && tr.dataset.kind !== b.dataset.kind; });
+  }));
   const reopen = document.getElementById('reopen');
   reopen && onSubmit(reopen, async (d) => { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/reopen`, { reason: d.reason }); compareView(biz, day); });
   app.querySelectorAll('[data-cover]').forEach((a) => a.addEventListener('click', (e) => {

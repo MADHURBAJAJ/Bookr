@@ -225,3 +225,19 @@ export async function matchedSet(db: DB, rowId: string) {
   }
   return { rows: [...rows], transactions: [] as string[] };
 }
+
+/**
+ * A UPI bill found on one side only is counted on the day its bank credit arrives (approved 3 Nov 2026): until
+ * matched it is a reviewed (not approved) sale marked countOnCredit, on its own shift's day. Matched, it is
+ * approved on the shift (8 am to 8 am, India time) in which the credit arrived; unmatched again, it goes back to waiting. Run after any change
+ * to bank matches, so every way of matching or unmatching keeps it right.
+ */
+export const settleOnCredit = (db: DB, businessId: string) => [
+  stmt(db, `UPDATE transactions SET status = 'approved',
+      day = (SELECT date(max(r.posted_at) / 1000 + 19800 - 28800, 'unixepoch') FROM bank_matches m JOIN bank_rows r ON r.id = m.bank_row_id WHERE m.transaction_id = transactions.id)
+    WHERE business_id = ? AND type = 'income' AND status = 'reviewed' AND json_extract(ocr_original, '$.countOnCredit') = 1
+      AND EXISTS (SELECT 1 FROM bank_matches m WHERE m.transaction_id = transactions.id)`, businessId),
+  stmt(db, `UPDATE transactions SET status = 'reviewed', day = shift_day
+    WHERE business_id = ? AND type = 'income' AND status = 'approved' AND json_extract(ocr_original, '$.countOnCredit') = 1
+      AND NOT EXISTS (SELECT 1 FROM bank_matches m WHERE m.transaction_id = transactions.id)`, businessId),
+];

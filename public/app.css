@@ -286,3 +286,26 @@ details.menu > summary::-webkit-details-marker { display: none; }
 }
 
 .regtable tr.save-failed td { background: #FEF2F2; }
+
+/* Compare sales */
+.cmp-bar { gap: 10px; }
+.cmp-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cmp-day { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cmp-day .btn { min-height: 36px; padding: 0 12px; }
+.cmp-pick select { font-size: 18px; font-weight: 600; border: 0; background: transparent; padding: 4px 6px; min-height: 36px; }
+.cmp-inputs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cmp-progress { display: grid; gap: 4px; }
+.pgbar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #EEF0F2; }
+.pgbar .pg.m { background: #10B981; } .pgbar .pg.a { background: #5EADA4; } .pgbar .pg.d { background: #94A3B8; } .pgbar .pg.o { background: #F59E0B; }
+.cmp-warn { background: #FEF2F2; border: 1px solid #FECACA; color: #991B1B; border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
+.cmp-tabs { margin: 12px 0; flex-wrap: wrap; }
+.cmptable td { vertical-align: top; }
+.cmptable tr.undecided td:first-child { box-shadow: inset 3px 0 0 #F59E0B; }
+.cmptable .dchip { min-height: 34px; padding: 0 10px; font-size: 13px; }
+details.cmp-fold > summary { list-style: none; cursor: pointer; display: grid; gap: 2px; }
+details.cmp-fold > summary h2::before { content: '▸ '; color: var(--muted, #6B7280); }
+details.cmp-fold[open] > summary h2::before { content: '▾ '; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+#confirm[aria-disabled="true"] { background: #fff; color: var(--ink, #111827); border: 1px solid var(--field); }
+.tchip.warn { background: #FEF3C7; color: #92400E; }
+.cmp-tabs button { padding: 8px 16px; font-size: 14px; }

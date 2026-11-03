@@ -5,7 +5,7 @@ import { all, newId, now, one, stmt } from '../db';
 import { body, fail, isUuid, optionalPaise, text } from '../http';
 import { parseStatementRows, parseStatementText } from '../bankstatement';
 import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
-import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, ruleFor, suggestionsFor, type BankRow } from '../bank';
+import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, ruleFor, settleOnCredit, suggestionsFor, type BankRow } from '../bank';
 import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } from '../parties';
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
@@ -15,6 +15,14 @@ import { billDistance } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
 export const bankRoutes = new Hono<AppEnv>();
+
+// After any change made here, sales counted on their bank credit's day follow their matches (see settleOnCredit).
+bankRoutes.use('/businesses/:businessId/*', async (c, next) => {
+  await next();
+  if (c.req.method === 'GET' || c.res.status >= 300) return;
+  const bid = c.get('businessId');
+  if (bid) await c.env.DB.batch(settleOnCredit(c.env.DB, bid));
+});
 
 const MAX_PASTE = 2_000_000;
 const audit = (bid: string, user: string, action: string, id: string, before: unknown, after: unknown, t: number) =>
