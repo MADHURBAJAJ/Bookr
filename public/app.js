@@ -58,7 +58,7 @@ const rupeesForInput = (p) => { const r = rupeeParts(p); return `${r.neg ? '-' :
 /** Whole rupees without ".00" (paise shown only when there are any): for the register review. */
 const rs = (p) => { const r = rupeeParts(p); return r.paise === '00' ? `${r.neg ? '−' : ''}${inrWhole.format(r.rupees)}` : money(p); };
 const rsIn = (p) => { const r = rupeeParts(p); return r.paise === '00' ? `${r.neg ? '-' : ''}${r.rupees}` : rupeesForInput(p); };
-const home = (b) => `#/b/${b.id}/${b.actions.includes('reports.view') ? 'dashboard' : b.actions.includes('rows.upload') ? 'upload' : 'accounts'}`;
+const home = (b) => `#/b/${b.id}/${b.actions.includes('reports.view') ? 'dashboard' : b.actions.includes('rows.upload') ? 'bringin' : 'accounts'}`;
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
 
 function relative(ts) {
@@ -100,7 +100,6 @@ function render(view) {
 const NAV = [
   { key: 'dashboard', label: 'Dashboard', needs: 'reports.view' },
   { key: 'bringin', label: 'Bring in', needs: 'rows.upload' },
-  { key: 'upload', label: 'Upload', needs: 'rows.upload' },
   { key: 'review', label: 'Review', needs: 'rows.edit' },
   { key: 'compare', label: 'Compare sales', needs: 'sales.view' },
   { key: 'bank', label: 'Bank sync', needs: 'bank.link' },
@@ -650,100 +649,7 @@ async function apiFull(method, path, body) {
   return data;
 }
 
-// ---------- Upload
-
-async function uploadView(biz) {
-  const { uploads } = await api('GET', `/businesses/${biz.id}/uploads`);
-  render(shell(biz, 'upload', 'Upload', 'Each file is sent straight to the server. You check every row before it counts.', html`
-    <section class="card">
-      <form id="up" class="form-row" style="align-items:flex-end">
-        <div class="field"><label for="ud">Day</label><input id="ud" name="day" type="date" value="${todayIst()}" required></div>
-        <div class="field"><label for="uk">What is it?</label><select id="uk" name="kind">
-          ${Object.entries(KIND_LABELS).map(([k, l]) => html`<option value="${k}">${l}${k === 'software_sales_csv' ? ' (CSV)' : ''}</option>`)}</select></div>
-        <div class="field" style="flex:2 1 260px"><label for="uf">Files (up to 10)</label><input id="uf" name="file" type="file" accept=".csv,text/csv" multiple required></div>
-        <button class="btn" type="submit">Upload</button>
-      </form>
-      <div class="note" id="uhint">CSVs from the hotel software, up to 10 at a time. Each is checked against its own footer before anything is saved.</div>
-      <div id="umsg"></div>
-      <div id="preview"></div>
-    </section>
-    <section class="card" style="gap:4px">
-      <h2 style="margin-bottom:8px">Recent uploads</h2>
-      ${uploads.length ? uploads.map((u) => html`
-        <div class="list-row">
-          <span><strong>${kindLabel(u)}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}</span>
-          <span style="display:flex;gap:10px;align-items:center">${chip(u.status)}
-            ${u.kind === 'software_sales_csv' ? html`<a href="#/b/${biz.id}/compare">Compare sales</a>` : html`<a href="#/b/${biz.id}/review/${u.id}">Review</a>`}
-            ${deleteButton(biz, u)}</span>
-        </div>`) : html`<div class="note">Nothing uploaded yet.</div>`}
-    </section>`));
-  wireShell();
-  wireDeletes(biz, () => document.getElementById('umsg'), () => uploadView(biz));
-  const form = document.getElementById('up');
-  const kind = document.getElementById('uk');
-  const file = document.getElementById('uf');
-  const msg = document.getElementById('umsg');
-  kind.addEventListener('change', () => {
-    const csv = kind.value === 'software_sales_csv';
-    file.accept = csv ? '.csv,text/csv' : 'image/jpeg,image/png,application/pdf';
-    document.getElementById('uhint').textContent = csv
-      ? 'CSVs from the hotel software, up to 10 at a time. Each is checked against its own footer before anything is saved.'
-      : 'JPG, PNG or PDF, up to 10 at a time, all for the day and page type chosen. Claude starts reading them as soon as they are uploaded; you check every row on Review.';
-    document.getElementById('preview').innerHTML = '';
-  });
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    msg.innerHTML = '';
-    const files = [...file.files];
-    const day = document.getElementById('ud').value;
-    if (!files.length) return;
-    if (files.length > MAX_FILES) return showError(msg, new Error(`Choose at most ${MAX_FILES} files at a time.`));
-    const box = document.getElementById('preview');
-    box.innerHTML = '';
-    if (kind.value === 'software_sales_csv') {
-      // One preview card per CSV, each with its own covered period and Import button.
-      for (const f of files) {
-        const card = document.createElement('div');
-        box.appendChild(card);
-        await csvPreview(biz, day, await f.text(), undefined, card, f.name, files.length > 1);
-      }
-      return;
-    }
-    await uploadMany(biz, day, kind.value, files, box);
-  });
-}
-
 const MAX_FILES = 10;
-
-/** Uploads photos one after another with a status line each, then offers to read them all. */
-async function uploadMany(biz, day, kind, files, box) {
-  const lines = files.map((f) => ({ name: f.name, state: 'Waiting', id: null, error: null }));
-  const draw = () => {
-    box.innerHTML = html`<div class="inset" style="gap:6px">
-      <div style="font-size:15px;font-weight:600">${KIND_LABELS[kind]} · ${dayLabel(day)}</div>
-      ${lines.map((l) => html`<div class="list-row" style="padding:6px 0"><span class="mono" style="font-size:13px">${l.name}</span>
-        <span style="display:flex;gap:10px;align-items:center">${l.error ? html`<span class="error">${l.error}</span>`
-          : l.id ? html`<span class="chip ok">${l.state}</span><a href="#/b/${biz.id}/review/${l.id}">Review</a>`
-          : html`<span class="chip wait">${l.state}</span>`}</span></div>`)}
-      <div id="manyactions"></div>
-    </div>`.__html;
-  };
-  draw();
-  for (const l of lines) {
-    l.state = 'Uploading…';
-    draw();
-    try {
-      const { id } = await apiUpload(`/businesses/${biz.id}/uploads?kind=${kind}&day=${day}`, files[lines.indexOf(l)]);
-      l.id = id;
-      l.state = 'Uploaded';
-    } catch (err) { l.error = err.message; }
-    draw();
-  }
-  const done = lines.filter((l) => l.id);
-  if (!done.length || !READABLE.includes(kind) || !biz.actions.includes('rows.upload')) return;
-  // Reading starts by itself (approved 3 Nov 2026): every row read is still a draft that a person checks.
-  await readPages(biz, done.map((l) => ({ id: l.id, kind, set: (state, error) => { l.state = state; l.error = error ?? null; draw(); } })));
-}
 
 /**
  * Reads uploaded pages with Claude, a few at a time (the server's limit), waiting and trying again when it is busy.
@@ -770,45 +676,6 @@ async function readPages(biz, items) {
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(status.maxParallel ?? 2, 3)) }, worker));
-}
-
-async function csvPreview(biz, day, csv, replaces, box = document.getElementById('preview'), name = '', many = false) {
-  let p;
-  try { p = await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, dryRun: true, replaces }); }
-  catch (err) {
-    box.innerHTML = html`<div class="inset">${name ? html`<div class="mono" style="font-size:13px">${name}</div>` : ''}<div class="form-msg"></div></div>`.__html;
-    return showError(box.querySelector('.form-msg'), err);
-  }
-  const f = p.footer;
-  box.innerHTML = html`
-    <form class="inset" data-imp>
-      <div style="font-size:15px;font-weight:600">Check before importing${name ? html` <span class="mono" style="font-weight:400;font-size:13px">${name}</span>` : ''}</div>
-      <div class="note">${p.bills} bills (${p.complimentary} complimentary), ${when(p.firstPaidAt)} to ${when(p.lastPaidAt)}. The footer matches: UPI ₹ ${money(f.upiPaise)}, Card ₹ ${money(f.cardPaise)}, Cash ₹ ${money(f.cashPaise)}, total ₹ ${money(f.totalPaise)}.</div>
-      <div class="note">Shifts touched: ${p.shifts.map(dayLabel).join(', ')}. New bills: ${p.add}. Already imported with the same values (skipped): ${p.skip}. Already imported with different values (flagged for you to decide): ${p.flag}.</div>
-      ${p.confirmedShifts.length ? html`<div class="error">This file would change a confirmed shift (${p.confirmedShifts.map(dayLabel).join(', ')}). An Owner must reopen it first.</div>` : ''}
-      <div class="form-row">
-        <div class="field"><label>Covers from (India time)</label><input data-cf type="datetime-local" step="1" value="${toLocalInput(p.coversFrom)}" required></div>
-        <div class="field"><label>Covers to</label><input data-ct type="datetime-local" step="1" value="${toLocalInput(p.coversTo)}" required></div>
-        <button class="btn plain" type="button" data-whole>Whole day${p.shifts.length > 1 ? 's' : ''}</button>
-      </div>
-      <div class="note">These start at the first and last bill. If the report covers the whole day, set it from 00:00:00 to 23:59:59, or the shift will show missing hours.</div>
-      <div class="form-msg"></div>
-      <button class="btn" type="submit" ${p.confirmedShifts.length ? 'disabled' : ''}>Import ${p.add} bill${p.add === 1 ? '' : 's'}</button>
-    </form>`.__html;
-  const cf = box.querySelector('[data-cf]');
-  const ct = box.querySelector('[data-ct]');
-  box.querySelector('[data-whole]').addEventListener('click', () => {
-    cf.value = `${toLocalInput(p.firstPaidAt).slice(0, 10)}T00:00:00`;
-    ct.value = `${toLocalInput(p.lastPaidAt).slice(0, 10)}T23:59:59`;
-  });
-  onSubmit(box.querySelector('[data-imp]'), async () => {
-    try {
-      await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, coversFrom: fromLocalInput(cf.value), coversTo: fromLocalInput(ct.value), replaces });
-    } catch (err) { const e = new Error([err.message, ...(err.problems ?? [])].join(' ')); throw e; }
-    const last = p.shifts[p.shifts.length - 1];
-    if (!many) return go(`#/b/${biz.id}/compare/${last}`);
-    box.innerHTML = html`<div class="inset"><span><span class="chip ok">Imported</span> ${name}: ${p.add} bill${p.add === 1 ? '' : 's'} · <a href="#/b/${biz.id}/compare/${last}">Compare ${dayLabel(last)} shift</a></span></div>`.__html;
-  });
 }
 
 // ---------- Review
@@ -1014,7 +881,7 @@ async function reviewListView(biz, find) {
         <div class="list-row">
           <a href="#/b/${biz.id}/review/${u.id}" style="color:inherit"><strong>${kindLabel(u)}</strong> · ${dayLabel(u.day)}${u.rows != null ? ` · ${u.rows} row${u.rows === 1 ? '' : 's'}` : ''}${u.open ? ` · ${u.open} to check` : ''}</a>
           <span style="display:flex;gap:10px;align-items:center">${u.totalDiffers ? html`<span class="chip bad">Total differs</span>` : ''}${chip(u.status)}<a href="#/b/${biz.id}/review/${u.id}">Review</a>${deleteButton(biz, u)}</span>
-        </div>`) : html`<div class="note">No pages yet. <a href="#/b/${biz.id}/upload">Upload one</a>.</div>`}
+        </div>`) : html`<div class="note">No pages yet. <a href="#/b/${biz.id}/bringin">Bring one in</a>.</div>`}
     </section>`));
   wireShell();
   wireDeletes(biz, () => document.getElementById('rlmsg'), () => reviewListView(biz));
@@ -1991,7 +1858,7 @@ function cashPanelHtml(biz, k) {
       ${row('− Cash expenses', `approved lines${k.expensesWaiting ? `; ${k.expensesWaiting} still waiting for approval` : ''}`, k.expensesPaise, k.expensesWaiting ? html`<a href="#/b/${biz.id}/review">Review</a>` : '')}
       ${k.shortagePaise ? row('− Cash shortage', 'booked by an Owner', k.shortagePaise) : ''}
       ${row('= Should be in hand', '', k.shouldBePaise, '', true)}
-      ${row('Counted', 'cash in hand on this day\'s cash summary page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/upload">Upload it</a>`)}
+      ${row('Counted', 'cash in hand on this day\'s cash summary page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/bringin">Bring it in</a>`)}
       ${diff !== null ? row('Difference', diff < 0 ? 'short: less cash than there should be' : diff > 0 ? 'more cash than there should be' : '', diff, '', true) : ''}
     </table></div>
     ${k.accepted ? html`<div class="note">Accepted with a note: ${k.accepted}</div>` : ''}
@@ -2048,7 +1915,7 @@ async function compareView(biz, day) {
   if (!day) day = shifts.find((s) => s.status !== 'confirmed')?.day ?? shifts[0]?.day;
   if (!day) {
     render(shell(biz, 'compare', 'Compare sales', 'Software report against the handwritten register, bill by bill. You decide every difference.', html`
-      <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/upload">Upload a software sales report</a>.</div></section>`));
+      <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
   const [v, cash, waiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
@@ -2080,7 +1947,7 @@ async function compareView(biz, day) {
         ${v.reports.map((r) => html`<div class="note">Report covering ${when(r.coversFrom)} to ${when(r.coversTo)}${confirmed || !biz.actions.includes('sales.import') ? '' : html` · <a href="#" data-cover="${r.id}" data-from="${r.coversFrom}" data-to="${r.coversTo}">Change</a>`}</div>`)}
         ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
         <div id="coveredit"></div>
-        ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/upload">Upload a report</a>` : ''}
+        ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/bringin/${day}">Bring in a report</a>` : ''}
       </section>
       <section class="card grow1" style="gap:8px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2>Handwritten register</h2>${v.registerRows ? html`<span class="chip ok">Pages entered</span>` : html`<span class="chip wait">No pages</span>`}</div>
@@ -2921,8 +2788,14 @@ async function checkAccuracy(biz, btn) {
   } catch (err) { showError(out, err); } finally { btn.disabled = false; }
 }
 
+// The shift last open on Bring in, per business, so coming back shows the same day.
+const isDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '') && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
+const lastBringInDay = (bizId) => { try { const d = localStorage.getItem(`bookr.bringin.${bizId}`); return isDay(d) ? d : null; } catch { return null; } };
+const rememberBringInDay = (bizId, day) => { try { localStorage.setItem(`bookr.bringin.${bizId}`, day); } catch { /* private window: nothing remembered */ } };
+
 async function bringInView(biz, dayArg) {
-  const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : addDaysIso(currentShiftDay(), -1);
+  const day = isDay(dayArg) ? dayArg : lastBringInDay(biz.id) ?? addDaysIso(currentShiftDay(), -1);
+  rememberBringInDay(biz.id, day);
   const v = await api('GET', `/businesses/${biz.id}/shifts/${day}/inputs`);
   const pagesOf = (k) => v.pages.filter((p) => p.kind === k);
   const regs = pagesOf('bill_register');
@@ -2948,8 +2821,13 @@ async function bringInView(biz, dayArg) {
   const reviewLink = (p) => {
     const href = `#/b/${biz.id}/review/${p.id}`;
     if (!['ready', 'approved'].includes(p.status)) return html`<a href="${href}" class="rvw">Open</a>`;
-    if (p.unclear) return html`<a href="${href}" class="rvw todo" title="Open the page and tick the rows">To review${p.kind === 'cash_summary' ? '' : ` · ${p.unclear}`} →</a>`;
-    return html`<a href="${href}" class="rvw done" title="Every row is checked. Open the page">✓ Reviewed</a>`;
+    const total = (p.reviewed ?? 0) + (p.unclear ?? 0);
+    // A ring that fills as rows are ticked; full and green with a tick when nothing is left.
+    const ring = (frac, done) => html`<svg class="ring" viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="8"/>
+      <circle class="fill" cx="10" cy="10" r="8" pathLength="100" stroke-dasharray="${Math.round(frac * 100)} 100" transform="rotate(-90 10 10)"/>
+      ${done ? html`<path class="tick" d="M6 10.5l2.6 2.6L14 7.6"/>` : ''}</svg>`;
+    if (p.unclear) return html`<a href="${href}" class="rvw todo" title="${p.reviewed ?? 0} of ${total} reviewed. Open the page and tick the rest">${ring(total ? (p.reviewed ?? 0) / total : 0, false)}${p.unclear} left</a>`;
+    return html`<a href="${href}" class="rvw done" title="Every row is checked. Open the page">${ring(1, true)}Reviewed</a>`;
   };
   const canDel = (p) => v.shiftStatus !== 'confirmed' && canDeleteUpload(biz, p);
   const delBtn = (p) => canDel(p) ? html`<button type="button" class="iconbtn" data-delpage="${p.id}" data-reviewed="${p.reviewed}" title="Delete this page" aria-label="Delete this page">🗑</button>` : '';
@@ -3208,7 +3086,8 @@ async function route() {
       if (screen === 'users' && biz.role === 'owner') return usersView(biz, parts[3]);
       const item = NAV.find((n) => n.key === screen);
       if (item?.needs && !biz.actions.includes(item.needs)) return go(home(biz));
-      if (screen === 'upload') return uploadView(biz);
+      // The old Upload page is gone: Bring in takes every file now.
+      if (screen === 'upload') { history.replaceState(null, '', `#/b/${biz.id}/bringin`); return route(); }
       if (screen === 'review') return parts[3] ? reviewView(biz, parts[3], parts[4]) : reviewListView(biz, new URLSearchParams(query).get('find'));
       if (screen === 'compare') return compareView(biz, parts[3]);
       if (screen === 'bank') return bankView(biz, query);
