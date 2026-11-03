@@ -112,7 +112,7 @@ const NAV = [
   { key: 'users', label: 'Users and roles', owner: true },
 ];
 
-function shell(biz, current, title, subtitle, body) {
+function shell(biz, current, title, subtitle, body, opts = {}) {
   const nav = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))).map((n) => html`
     <a class="nav ${n.key === current ? 'on' : ''}" href="#/b/${biz.id}/${n.key}">
       <span>${n.label}</span>${n.phase ? html`<span class="soon">Phase ${n.phase}</span>` : ''}
@@ -130,12 +130,13 @@ function shell(biz, current, title, subtitle, body) {
       </div>
     </aside>
     <main class="main">
-      ${biz.isDemo ? html`<div class="demo-band">Demo business. Sample data only.</div>` : ''}
-      <div class="head">
+      ${biz.isDemo && !opts.tools ? html`<div class="demo-band">Demo business. Sample data only.</div>` : ''}
+      <div class="head ${opts.tools ? 'compact' : ''}">
         <div style="display:flex;flex-direction:column;gap:4px">
-          <h1>${title}</h1>
+          <h1>${biz.isDemo && opts.tools ? html`<span class="chip wait demo-tag" title="Demo business. Sample data only.">Demo</span>` : ''}${title}</h1>
           ${subtitle ? html`<div class="sub">${subtitle}</div>` : ''}
         </div>
+        ${opts.tools ?? ''}
         <div class="switcher">
           <button class="btn plain" id="switch" type="button" aria-haspopup="true" aria-expanded="false">${biz.name} ▾</button>
           <div class="menu" id="switch-menu" hidden>
@@ -855,24 +856,23 @@ async function reviewView(biz, uploadId, highlightRow) {
   else if (u.kind === 'expense_list') right = expensePanel(biz, u, heads, parties);
   else if (u.kind === 'cash_summary') right = summaryPanel(biz, u);
   else right = html`<section class="card grow3"><div class="note">Single printed bills are kept for reference. Nothing is read from them yet.</div></section>`;
-  render(shell(biz, 'review', `Review: ${kindLabel(u)}`, `${dayLabel(u.day)} · uploaded ${when(u.createdAt)}`, html`
-    <div class="form-row" style="justify-content:space-between;align-items:center;margin-bottom:-8px">
-      <div class="form-row" style="align-items:center">
-        ${backButton()}
-        ${prev ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${prev.id}" title="${KIND_LABELS[prev.kind]} · ${dayLabel(prev.day)}">← Previous page</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">← Previous page</span>`}
-        <span class="note">${at >= 0 ? `Page ${at + 1} of ${same.length}` : ''}</span>
-        ${next ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${next.id}" title="${KIND_LABELS[next.kind]} · ${dayLabel(next.day)}">Next page →</a>` : html`<span class="btn plain" style="display:inline-flex;align-items:center;opacity:.45">Next page →</span>`}
-      </div>
-      <div class="form-row" style="align-items:center">
-        ${(u.kind === 'expense_list' || u.kind === 'cash_summary') && biz.actions.includes('rows.edit') ? html`<form id="dayform" class="form-row" style="align-items:center;gap:6px" title="The shift this page belongs to"><label for="pday" class="note">Page is for</label><input id="pday" name="day" type="date" class="compact" value="${u.day}" max="${todayIst()}"><button class="btn plain" type="submit" hidden id="daysave">Move page</button></form>` : ''}
-        ${u.kind === 'bill_register' ? findBillBox() : ''}
-        ${pageMenu}
-        <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
-      </div>
-    </div>
+  const pageLink = (x, label, text) => x ? html`<a class="btn plain" href="#/b/${biz.id}/review/${x.id}" title="${label} page: ${KIND_LABELS[x.kind]} · ${dayLabel(x.day)}" aria-label="${label} page">${text}</a>`
+    : html`<span class="btn plain off" aria-hidden="true">${text}</span>`;
+  // One bar: title and date, the page pager, then find and page actions; the hotel switcher stays at the end.
+  const tools = html`
+    <div class="pager">${pageLink(prev, 'Previous', '‹')}<span class="note">${at >= 0 ? `Page ${at + 1} of ${same.length}` : ''}</span>${pageLink(next, 'Next', '›')}</div>
+    <div class="head-tools">
+      ${backButton()}
+      ${(u.kind === 'expense_list' || u.kind === 'cash_summary') && biz.actions.includes('rows.edit') ? html`<form id="dayform" class="form-row" style="align-items:center;gap:6px" title="The shift this page belongs to"><label for="pday" class="note">Page is for</label><input id="pday" name="day" type="date" class="compact" value="${u.day}" max="${todayIst()}"><button class="btn plain" type="submit" hidden id="daysave">Move page</button></form>` : ''}
+      ${u.kind === 'bill_register' ? findBillBox(true) : ''}
+      ${pageMenu}
+      <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
+    </div>`;
+  render(shell(biz, 'review', `${kindLabel(u)} · ${dayLabel(u.day)}`, `uploaded ${when(u.createdAt)}`, html`
+    ${isReg ? html`<div id="waiting"></div>` : ''}
     <div id="findresults"></div>
     <div id="rmsg"></div>
-    <div class="row ${isReg ? 'regrow' : ''}">${photo}${right}</div>`));
+    <div class="row ${isReg ? 'regrow' : ''}">${photo}${right}</div>`, { tools }));
   wireShell();
   wireDeletes(biz, () => document.getElementById('rmsg'), () => go(`#/b/${biz.id}/review`));
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
@@ -890,6 +890,7 @@ async function reviewView(biz, uploadId, highlightRow) {
   }
   wireExpand();
   wireFindBill(biz);
+  if (isReg) drawWaiting(biz, u);
   if (highlightRow) {
     const tr = document.querySelector(`#regtable tr[data-row="${CSS.escape(highlightRow)}"]`);
     if (tr) { tr.classList.add('row-found'); tr.scrollIntoView({ block: 'center' }); tr.querySelector('[data-f="billNo"]')?.focus(); }
@@ -916,7 +917,8 @@ function wireExpand() {
   try { on = localStorage.getItem(EXPAND_KEY) === '1'; } catch { /* storage unavailable */ }
   const apply = () => {
     document.body.classList.toggle('review-expanded', on);
-    btn.textContent = on ? 'Show photo' : 'Expand ⤢';
+    btn.textContent = on ? 'Show photo' : '⤢';
+    btn.setAttribute('aria-label', on ? 'Show photo' : 'Expand');
   };
   apply();
   btn.addEventListener('click', () => {
@@ -964,9 +966,9 @@ function wireReadPage(biz, u) {
 }
 
 /** Search box: register rows by bill number, or its last few digits, across every page. */
-const findBillBox = () => html`<form id="findbill" class="form-row" style="align-items:center;gap:6px" role="search">
+const findBillBox = (compact) => html`<form id="findbill" class="form-row" style="align-items:center;gap:6px" role="search">
   <input name="bill" class="cell mono" placeholder="Find bill, e.g. 3154" style="width:190px" aria-label="Find a bill number on register pages" autocomplete="off">
-  <button class="btn plain" type="submit" style="min-height:36px">Find</button></form>`;
+  ${compact ? '' : html`<button class="btn plain" type="submit" style="min-height:36px">Find</button>`}</form>`;
 
 function wireFindBill(biz, initial) {
   const form = document.getElementById('findbill');
@@ -1369,8 +1371,8 @@ function registerPanel(biz, u) {
   return html`
     <section class="card grow3 regpanel" style="gap:10px">
       ${locked ? html`<div class="demo-band">The shift for ${dayLabel(u.day)} is confirmed, so this page is locked. An Owner can reopen it on Compare sales.</div>`
-        : html`<div class="note">Fix anything that differs from the photo, then tick the row. <kbd>Enter</kbd> ticks and moves on, <kbd>↑</kbd><kbd>↓</kbd> move between rows.
-          <details class="howto"><summary>How this works</summary>Every change saves when you leave the cell. Red means it needs you: Claude could not read the cell, the bill number is not in the software report, or the payments do not add up. Amber was filled in by Bookr; check it against the photo. When every row is ticked and the payments match, an Owner or Accountant confirms the shift on <a href="#/b/${biz.id}/compare/${u.day}">Compare sales</a>, which locks this page. Use ✎ for a bill paid together with another, or paid in two ways in one column.</details></div>`}
+        : html`<div class="note">Fix anything that differs from the photo, then tick.
+          <details class="howto"><summary>How this works</summary><kbd>Enter</kbd> ticks the row and moves on, <kbd>↑</kbd><kbd>↓</kbd> move between rows. Every change saves when you leave the cell. Red means it needs you: Claude could not read the cell, the bill number is not in the software report, or the payments do not add up. Amber was filled in by Bookr; check it against the photo. When every row is ticked and the payments match, an Owner or Accountant confirms the shift on <a href="#/b/${biz.id}/compare/${u.day}">Compare sales</a>, which locks this page. Use ✎ for a bill paid together with another, or paid in two ways in one column.</details></div>`}
       <div class="rv-bar" id="rvbar">${regBarHtml(u)}</div>
       <div id="regtools">${regToolsHtml(u, locked)}</div>
       ${u.fromSoftware ? '' : html`<div class="strip" id="strip"><canvas></canvas><span class="band"></span>
@@ -1388,6 +1390,38 @@ function registerPanel(biz, u) {
       </div>
       ${locked ? '' : html`<dialog class="rowdlg" id="rdialog" aria-label="Bill from the page"><form class="inset" id="rform"></form></dialog>`}
     </section>`;
+}
+
+/** Bills of this shift on one side only: in the software report but on no register page, or on a page but not in
+ *  the report. A notice above the page; each count opens its list. Nothing when both sides agree. */
+function drawWaiting(biz, u) {
+  const host = document.getElementById('waiting');
+  if (!host) return;
+  const sw = u.softwareList ?? [];
+  const compare = html`<a href="#/b/${biz.id}/compare/${u.day}">Compare sales →</a>`;
+  if (!sw.length) {
+    host.innerHTML = html`<div class="waiting"><span>No software report for ${dayLabel(u.day)} yet, so bill numbers cannot be matched.</span>${compare}</div>`.__html;
+    return;
+  }
+  const inSw = new Set(sw.map((b) => b.billNo));
+  const swOnly = sw.filter((b) => !b.used);
+  const pageOnly = [...u.rows.map((r) => ({ ...r, uploadId: u.id, pageNo: u.pageNo })), ...(u.otherPageRows ?? [])]
+    .filter((r) => r.billNo && !inSw.has(r.billNo));
+  const n = swOnly.length + pageOnly.length;
+  if (!n) { host.innerHTML = ''; return; }
+  const open = host.dataset.open ?? '';
+  const part = (key, count, text) => count ? html`<button type="button" class="linkbtn" data-wait="${key}" aria-expanded="${open === key}">${count} ${text} ${open === key ? '▾' : '▸'}</button>` : '';
+  const list = open === 'sw' ? swOnly.map((b) => html`<div class="list-row"><span class="mono">${b.billNo}</span><span>₹ ${rs(b.amountPaise)}</span><span class="note">${MODE_LABELS[b.mode] ?? ''} · ${when(b.paidAt)}</span></div>`)
+    : open === 'page' ? pageOnly.map((r) => html`<a class="list-row" style="color:inherit" href="#/b/${biz.id}/review/${r.uploadId}/${r.id}"><span class="mono">${r.billNo}</span><span>₹ ${rs(r.amountPaise)}</span><span class="note">${r.pageNo ? `Page ${r.pageNo} · ` : ''}line ${r.lineNo}</span></a>`)
+    : null;
+  host.innerHTML = html`<div class="waiting"><strong>⚠ ${n} bill${n === 1 ? '' : 's'} waiting:</strong>
+    ${part('sw', swOnly.length, 'in software, not on any page')}${swOnly.length && pageOnly.length ? html`<span class="note">·</span>` : ''}${part('page', pageOnly.length, 'on the pages, not in software')}
+    ${compare}</div>
+    ${list ? html`<div class="waitlist">${list}</div>` : ''}`.__html;
+  host.querySelectorAll('[data-wait]').forEach((b) => b.addEventListener('click', () => {
+    host.dataset.open = open === b.dataset.wait ? '' : b.dataset.wait;
+    drawWaiting(biz, u);
+  }));
 }
 
 /** Where a row's line sits on the photo, as % of the upright page height: from the reading, else estimated. */
@@ -1493,7 +1527,7 @@ function wireInlineRows(biz, u, strip) {
     document.getElementById('regfoot').innerHTML = regFootHtml(u, false).__html; wireFoot(biz, u);
     document.getElementById('rvbar').innerHTML = regBarHtml(u).__html;
     document.getElementById('regtools').innerHTML = regToolsHtml(u, false).__html;
-    wireBar(); wireFill();
+    wireBar(); wireFill(); drawWaiting(biz, u);
   };
   const save = (tr, changed) => {
     const id = tr.dataset.row;
@@ -1612,8 +1646,8 @@ function rowForm(r) {
       <div class="field"><label>Bill number</label><input name="billNo" class="mono" value="${r?.billNo ?? ''}" required></div>
       <div class="field"><label>Type</label><select name="billType"><option value="">Choose</option>
         ${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r?.billType === k ? 'selected' : ''}>${l}</option>`)}</select></div>
-      <div class="field"><label>Bill amount (₹)</label><input name="amount" class="mono" value="${r ? rupeesForInput(r.amountPaise) : ''}" required></div>
-      <div class="field"><label>Discount (₹, a tip as negative)</label><input name="discount" class="mono" value="${r?.discountPaise ? rupeesForInput(r.discountPaise) : ''}" placeholder="0"></div>
+      <div class="field"><label>Bill amount (₹)</label><input name="amount" class="mono" value="${r ? rsIn(r.amountPaise) : ''}" required></div>
+      <div class="field"><label>Discount (₹, a tip as negative)</label><input name="discount" class="mono" value="${r?.discountPaise ? rsIn(r.discountPaise) : ''}" placeholder="0"></div>
     </div>
     <div class="field" style="max-width:320px"><label>Paid together with another bill</label><select name="paidWithRowId"><option value="">No: this bill has its own payment</option>
       ${(r && membersOf(r).length ? [] : regRows.filter((x) => !x.paidWithRowId && (!r || x.id !== r.id))).map((x) => html`<option value="${x.id}" ${r?.paidWithRowId === x.id ? 'selected' : ''}>Paid with ${rowLabel(x)} (${x.billNo || 'no number'})</option>`)}</select></div>
@@ -1636,7 +1670,7 @@ function payLine(p) {
   return html`<div class="form-row payline">
     <div class="field"><select name="pmode">${['cash', 'upi', 'card'].map((m) => html`<option value="${m}" ${p.mode === m ? 'selected' : ''}>${MODE_LABELS[m]}</option>`)}</select></div>
     <div class="field"><input name="plabel" placeholder="Column, e.g. UPI XOXO" value="${p.columnLabel ?? ''}"></div>
-    <div class="field"><input name="pamount" class="mono" placeholder="Amount" value="${p.amountPaise == null ? '' : rupeesForInput(p.amountPaise)}"></div>
+    <div class="field"><input name="pamount" class="mono" placeholder="Amount" value="${p.amountPaise == null ? '' : rsIn(p.amountPaise)}"></div>
     <button class="btn plain" type="button" data-rmpay>Remove</button>
   </div>`;
 }
