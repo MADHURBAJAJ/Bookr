@@ -694,6 +694,8 @@ async function reviewView(biz, uploadId, highlightRow) {
   const at = same.findIndex((x) => x.id === u.id);
   const prev = at > 0 ? same[at - 1] : null;
   const next = at >= 0 && at < same.length - 1 ? same[at + 1] : null;
+  // Numbered within the day; Previous and Next carry on into the days before and after.
+  const sameDay = same.filter((x) => x.day === u.day).map((x) => x.id);
   const fileUrl = `/api/businesses/${biz.id}/uploads/${u.id}/file`;
   const isReg = u.kind === 'bill_register';
   const ocrNote = html`<div class="note" id="ocrnote">${u.ocrEngine === 'claude_vision' ? 'Read by Claude. Every row is a draft: check each one against the photo.' : u.ocrEngine === 'manual' ? 'Rows typed in by hand.' : 'Press Read page to fill the rows from the photo, or type them in.'}</div>`;
@@ -723,11 +725,11 @@ async function reviewView(biz, uploadId, highlightRow) {
   else if (u.kind === 'expense_list') right = expensePanel(biz, u, heads, parties);
   else if (u.kind === 'cash_summary') right = summaryPanel(biz, u);
   else right = html`<section class="card grow3"><div class="note">Single printed bills are kept for reference. Nothing is read from them yet.</div></section>`;
-  const pageLink = (x, label, text) => x ? html`<a class="btn plain" href="#/b/${biz.id}/review/${x.id}" title="${label} page: ${KIND_LABELS[x.kind]} · ${dayLabel(x.day)}" aria-label="${label} page">${text}</a>`
+  const pageLink = (x, label, text) => x ? html`<a class="btn plain" href="#/b/${biz.id}/review/${x.id}" title="${label} page: ${KIND_LABELS[x.kind]} · ${dayLabel(x.day)}${x.day !== u.day ? ' (another day)' : ''}" aria-label="${label} page">${text}</a>`
     : html`<span class="btn plain off" aria-hidden="true">${text}</span>`;
   // One bar: title and date, the page pager, then find and page actions; the hotel switcher stays at the end.
   const tools = html`
-    <div class="pager">${pageLink(prev, 'Previous', '‹')}<span class="note">${at >= 0 ? `Page ${at + 1} of ${same.length}` : ''}</span>${pageLink(next, 'Next', '›')}</div>
+    <div class="pager">${pageLink(prev, 'Previous', '‹')}<span class="note">${at >= 0 ? `Page ${sameDay.indexOf(u.id) + 1} of ${sameDay.length}` : ''}</span>${pageLink(next, 'Next', '›')}</div>
     <div class="head-tools">
       ${backButton()}
       ${(u.kind === 'expense_list' || u.kind === 'cash_summary') && biz.actions.includes('rows.edit') ? html`<form id="dayform" class="form-row" style="align-items:center;gap:6px" title="The shift this page belongs to"><label for="pday" class="note">Page is for</label><input id="pday" name="day" type="date" class="compact" value="${u.day}" max="${todayIst()}"><button class="btn plain" type="submit" hidden id="daysave">Move page</button></form>` : ''}
@@ -961,7 +963,8 @@ function rowIssues(r) {
     if (q.size) red.push(html`Couldn't read ${[...q].map((f) => FIELD_WORDS[f] ?? f).join(', ')}`);
   }
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount' };
-  if (bm && !bm.exact) {
+  if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
+  else if (bm && !bm.exact) {
     flags.bill_no = 'red';
     red.push(html`Not in software report${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip ${x.taken ? 'taken' : ''}" data-pick="${x.billNo}" title="${why[x.why] ?? ''}${x.taken ? ' · already on another register line: one of the two may be wrong, or the bill was written twice' : ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}${x.taken ? ' · on register' : ''}</button>`)}</span>` : ''}`);
   }
@@ -1088,6 +1091,9 @@ function regSumHtml(u) {
     ${off.length ? html`<br><span class="error">${off.length} bill${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount after discount or tip (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
 }
 
+/** Bills of the old POS: 6-digit numbers, never in the software report. Shown as such, not as missing. */
+const isOldPos = (b) => /^\d{6}$/.test(b ?? '');
+
 const DELETE_REASONS = [['written_twice', 'Written twice on the page'], ['misread', 'Not on the page (read by mistake)'], ['not_a_bill', 'Not a bill (a note or total line)'], ['cancelled', 'Bill cancelled'], ['other', 'Other']];
 const deleteReasonLabel = (k) => (DELETE_REASONS.find(([x]) => x === k)?.[1] ?? 'Other').toLowerCase();
 
@@ -1118,14 +1124,15 @@ function askDeleteReason(r) {
 function deletedSums(u) {
   const d = u.deletedRows ?? [];
   const pay = (i) => d.reduce((t, r) => t + (r.payments ?? []).filter((p) => colOf(p) === i).reduce((a, p) => a + p.amountPaise, 0), 0);
-  return { amount: d.reduce((t, r) => t + (r.amountPaise ?? 0), 0), cash: pay(0), upi: pay(1), upi2: pay(2), card: pay(3), discount: d.reduce((t, r) => t + (r.discountPaise ?? 0), 0) };
+  return { amount: pay(0) + pay(1) + pay(2) + pay(3), cash: pay(0), upi: pay(1), upi2: pay(2), card: pay(3), discount: d.reduce((t, r) => t + (r.discountPaise ?? 0), 0) };
 }
 
 // The bottom line of the page: what each column adds up to here, against the total written under it on the paper.
-const TOTAL_COLS = [['amount', 'c-am', 'Amount'], ['cash', 'c-p0', 'Cash'], ['upi', 'c-p1', PAY_COLS[1][1]], ['upi2', 'c-p2', PAY_COLS[2][1]], ['card', 'c-p3', 'Card'], ['discount', 'c-dc', 'Disc']];
+const TOTAL_COLS = [['amount', 'c-am', 'Total paid'], ['cash', 'c-p0', 'Cash'], ['upi', 'c-p1', PAY_COLS[1][1]], ['upi2', 'c-p2', PAY_COLS[2][1]], ['card', 'c-p3', 'Card'], ['discount', 'c-dc', 'Disc']];
 function columnSums(u) {
   const pay = (i) => u.rows.reduce((t, r) => t + r.payments.filter((p) => colOf(p) === i).reduce((a, p) => a + p.amountPaise, 0), 0);
-  return { amount: u.rows.reduce((t, r) => t + r.amountPaise, 0), cash: pay(0), upi: pay(1), upi2: pay(2), card: pay(3), discount: u.rows.reduce((t, r) => t + (r.discountPaise ?? 0), 0) };
+  // The total written under Bill Amt is what was paid in all modes, not the bill amounts added up.
+  return { amount: pay(0) + pay(1) + pay(2) + pay(3), cash: pay(0), upi: pay(1), upi2: pay(2), card: pay(3), discount: u.rows.reduce((t, r) => t + (r.discountPaise ?? 0), 0) };
 }
 function regFootHtml(u, locked) {
   const sums = columnSums(u);
@@ -1151,10 +1158,11 @@ function regFootHtml(u, locked) {
     : !bad.length && !why.length ? html`<span class="ok-msg">✓ ${checked.length === cells.length ? 'Every column' : `${checked.length} column${checked.length > 1 ? 's' : ''}`} match${checked.length === 1 ? 'es' : ''} the page</span>`
     : html`${bad.length ? html`<span class="error">${bad.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'} than written`).join(' · ')}</span>` : ''}
       ${why.length ? html`<span class="tot-whymsg">${bad.length ? html`<br>` : ''}${why.map((x) => `${x.l} ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}`).join(', ')} than written, explained: ${goneText}</span>` : ''}`;
-  const sumTd = (k) => { const x = byKey[k]; return html`<td class="amount ${x.c} ${x.st}" data-l="${x.l}" title="${x.has && x.diff ? `Written ₹ ${rs(w[k])}: rows are ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}${x.explained ? ` because of deleted lines: ${goneText}` : ''}` : ''}">${rs(sums[k])}${x.has && x.diff ? html`<span class="tot-diff">${x.diff > 0 ? '+' : '−'}${rs(Math.abs(x.diff))}</span>` : ''}</td>`; };
+  const billsTotal = u.rows.reduce((t, r) => t + r.amountPaise, 0);
+  const sumTd = (k) => { const x = byKey[k]; return html`<td class="amount ${x.c} ${x.st}" data-l="${x.l}" title="${x.has && x.diff ? `Written ₹ ${rs(w[k])}: rows are ₹ ${rs(Math.abs(x.diff))} ${x.diff > 0 ? 'more' : 'less'}${x.explained ? ` because of deleted lines: ${goneText}` : ''}` : ''}">${rs(sums[k])}${x.has && x.diff ? html`<span class="tot-diff">${x.diff > 0 ? '+' : '−'}${rs(Math.abs(x.diff))}</span>` : ''}${k === 'amount' ? html`<span class="tot-sub" title="Bill amounts added up">bills ${rs(billsTotal)}</span>` : ''}</td>`; };
   const inTd = (k) => { const x = byKey[k]; return html`<td class="${x.c}" data-l="${x.l}">${locked ? html`<span class="amount mono" style="display:block">${x.has ? rs(w[k]) : ''}</span>`
     : html`<input class="cell mono ${x.st}" data-tot="${k}" value="${x.has ? rsIn(w[k]) : ''}" placeholder="–" style="width:100%;text-align:right" inputmode="decimal" aria-label="${x.l} total written on the page">`}</td>`; };
-  return html`<tr class="tot-rows"><td class="ln"></td><td class="c-bn"><strong>Rows add up to</strong></td>${sumTd('amount')}<td class="c-ty"></td>${sumTd('cash')}${sumTd('upi')}${sumTd('upi2')}${sumTd('card')}${sumTd('discount')}<td class="c-rm tot-verdict" colspan="4">${verdict}</td></tr>
+  return html`<tr class="tot-rows"><td class="ln"></td><td class="c-bn"><strong>Rows add up to</strong><span class="tot-sub">paid in all modes</span></td>${sumTd('amount')}<td class="c-ty"></td>${sumTd('cash')}${sumTd('upi')}${sumTd('upi2')}${sumTd('card')}${sumTd('discount')}<td class="c-rm tot-verdict" colspan="4">${verdict}</td></tr>
     <tr class="tot-written"><td class="ln"></td><td class="c-bn">Written on the page</td>${inTd('amount')}<td class="c-ty"></td>${inTd('cash')}${inTd('upi')}${inTd('upi2')}${inTd('card')}${inTd('discount')}<td class="c-rm" colspan="4"></td></tr>
     ${(u.deletedRows ?? []).length ? html`<tr class="tot-deleted"><td class="ln"></td><td class="c-bn" colspan="12"><span class="tiny">Deleted from this page:
       ${(u.deletedRows).map((r, i) => html`${i ? ' · ' : ''}row ${r.lineNo}${r.billNo ? ` bill ${r.billNo}` : ''}${r.amountPaise ? ` ₹ ${rs(r.amountPaise)}` : ''}, ${deleteReasonLabel(r.reason)}${r.note ? ` (${r.note})` : ''}${r.by ? ` by ${r.by}` : ''}`)}</span></td></tr>` : ''}`;
@@ -1327,7 +1335,7 @@ function drawWaiting(biz, u) {
   const inSw = new Set(sw.map((b) => b.billNo));
   const swOnly = sw.filter((b) => !b.used);
   const pageOnly = [...u.rows.map((r) => ({ ...r, uploadId: u.id, pageNo: u.pageNo })), ...(u.otherPageRows ?? [])]
-    .filter((r) => r.billNo && !inSw.has(r.billNo));
+    .filter((r) => r.billNo && !inSw.has(r.billNo) && !isOldPos(r.billNo)); // old POS bills are never in the report
   const n = swOnly.length + pageOnly.length;
   if (!n) { host.innerHTML = ''; return; }
   const open = host.dataset.open ?? '';

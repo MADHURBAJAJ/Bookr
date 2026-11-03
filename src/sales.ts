@@ -286,6 +286,9 @@ export async function otherDays(db: DB, businessId: string, day: string, comps: 
  * The watch list: bills found on one side only, decided, not closed, and not yet paired with the other
  * side on another day. After WATCH_DAYS they are unresolved and an Owner or Accountant closes them.
  */
+/** Bills of the old POS: 6-digit numbers, never in the software report, so never matched. */
+export const isOldPosBill = (billNo: string | null | undefined) => /^\d{6}$/.test(billNo ?? '');
+
 export async function waitingBills(db: DB, businessId: string, today: string) {
   const rows = await all<Comparison & { shift_day: string; shift_status: string | null }>(db, `
     SELECT c.*, s.status AS shift_status FROM bill_comparisons c
@@ -294,7 +297,8 @@ export async function waitingBills(db: DB, businessId: string, today: string) {
       AND c.closed_at IS NULL AND c.linked_to_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM bill_comparisons x WHERE x.linked_to_id = c.id)
     ORDER BY c.shift_day, c.bill_no`, businessId);
-  return rows.map((c) => {
+  // An old POS bill on the register will never meet a software bill: it does not wait.
+  return rows.filter((c) => !(c.difference === 'missing_in_software' && isOldPosBill(c.bill_no))).map((c) => {
     const days = Math.round((Date.parse(today) - Date.parse(c.shift_day)) / 86400000);
     return {
       id: c.id, day: c.shift_day, billNo: c.bill_no, side: c.difference === 'missing_in_register' ? 'software' : 'register',

@@ -237,6 +237,7 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .regtable tfoot td.tot-why { color: #92400E; background: #FFFBEB; }
 .regtable tfoot input.tot-why { border-color: #F59E0B; background: #FFFBEB; }
 .regtable tfoot .tot-whymsg { color: #92400E; }
+.regtable tfoot .tot-sub { display: block; font-size: 11px; font-weight: 400; color: var(--muted, #6B7280); }
 .regtable tfoot .tot-diff { display: block; font-size: 11px; font-weight: 600; }
 .regtable tfoot .tot-verdict { font-weight: 500; }
 .regtable tr.grptotal td { padding: 3px 8px 8px; font-size: 13px; font-weight: 600; border-top: 1px dashed #DDD6FE; }

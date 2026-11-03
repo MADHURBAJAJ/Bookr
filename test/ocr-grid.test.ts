@@ -9,7 +9,7 @@ vi.mock('../src/claude', async (importOriginal) => {
 
 import { readWithClaude } from '../src/claude';
 import { columnTotals, draftRegisterRows, findSlip, gridToReading, headingRole } from '../src/ocr';
-import { suggestBills } from '../src/sales';
+import { isOldPosBill, suggestBills } from '../src/sales';
 import { businessWithAllRoles, env, sql, resetDb } from './helpers';
 
 const mocked = vi.mocked(readWithClaude);
@@ -260,5 +260,12 @@ describe('Deleting a line', () => {
     expect(deletedRows).toHaveLength(1);
     expect(deletedRows[0]).toMatchObject({ lineNo: 2, billNo: '26110102', amountPaise: 82000, reason: 'written_twice', note: 'same as row 1' });
     expect(deletedRows[0].payments).toEqual([{ mode: 'upi', columnLabel: 'UPI XOXO', amountPaise: 30000 }]);
+  });
+});
+
+describe('Old POS bills', () => {
+  it('are the 6-digit numbers; the software report numbers are not', () => {
+    expect(['145232', '145187'].every(isOldPosBill)).toBe(true);
+    expect(['26110145', '2610307', '14523', '', null].some(isOldPosBill)).toBe(false);
   });
 });
