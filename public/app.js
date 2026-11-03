@@ -1383,9 +1383,10 @@ function registerPanel(biz, u) {
       </table></div>
       <div class="form-row" style="justify-content:space-between;align-items:flex-end">
         <div class="note" id="regsum" style="flex:1 1 320px">${regSumHtml(u)}</div>
+        ${locked ? '' : html`<button class="btn plain" type="button" id="addbill" title="A bill written on the page that has no line here yet">＋ Add a bill</button>`}
         ${locked ? '' : html`<form id="ptotal" class="form-row" style="align-items:flex-end"><div class="field"><label for="pt">Total written on the page (₹)</label><input id="pt" name="pageWrittenTotal" class="mono" value="${written == null ? '' : rsIn(written)}"></div><button class="btn plain" type="submit">Save total</button></form>`}
       </div>
-      ${locked ? '' : html`<form class="inset" id="rform"></form>`}
+      ${locked ? '' : html`<dialog class="rowdlg" id="rdialog" aria-label="Bill from the page"><form class="inset" id="rform"></form></dialog>`}
     </section>`;
 }
 
@@ -1605,7 +1606,8 @@ function wireInlineRows(biz, u, strip) {
 function rowForm(r) {
   const pays = r?.payments?.length ? r.payments : [{ mode: 'cash', columnLabel: '', amountPaise: null }];
   return html`
-    <div style="font-size:15px;font-weight:600">${r ? `Edit bill ${r.billNo}` : 'Add a bill from the page'}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="font-size:15px;font-weight:600">${r ? `Edit bill ${r.billNo}` : 'Add a bill from the page'}</div>
+      <button class="iconbtn" type="button" data-close title="Close" aria-label="Close">✕</button></div>
     <div class="form-row">
       <div class="field"><label>Bill number</label><input name="billNo" class="mono" value="${r?.billNo ?? ''}" required></div>
       <div class="field"><label>Type</label><select name="billType"><option value="">Choose</option>
@@ -1625,7 +1627,8 @@ function rowForm(r) {
     <div class="form-msg"></div>
     <div class="form-row">
       <button class="btn" type="submit">${r ? 'Save row' : 'Add row'}</button>
-      ${r ? html`<button class="btn plain" type="button" id="cancel">Cancel</button><button class="btn danger" type="button" id="delrow">Delete row</button>` : ''}
+      <button class="btn plain" type="button" data-close>Cancel</button>
+      ${r ? html`<button class="btn danger" type="button" id="delrow">Delete row</button>` : ''}
     </div>`;
 }
 
@@ -1674,17 +1677,22 @@ function wireRegister(biz, u) {
   const total = document.getElementById('ptotal');
   total && onSubmit(total, async (d) => { await api('PATCH', `/businesses/${biz.id}/uploads/${u.id}`, { pageWrittenTotal: d.pageWrittenTotal || null }); reviewView(biz, u.id); });
   if (!form) return;
+  // The bill form opens as a modal: from ✎ on a row, or ＋ Add a bill. Esc and a click outside close it too.
+  const dlg = document.getElementById('rdialog');
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
   const show = (r) => {
+    form.dataset.editing = r?.id ?? '';
     form.innerHTML = rowForm(r).__html;
     const pays = form.querySelector('#pays');
     form.querySelector('#addpay').addEventListener('click', () => pays.insertAdjacentHTML('beforeend', payLine({ mode: 'upi', columnLabel: '', amountPaise: null }).__html));
     pays.addEventListener('click', (e) => { if (e.target.matches('[data-rmpay]')) e.target.closest('.payline').remove(); });
-    form.querySelector('#cancel')?.addEventListener('click', () => show(null));
+    form.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => dlg.close()));
     form.querySelector('#delrow')?.addEventListener('click', async () => {
       if (!confirm(`Delete bill ${r.billNo} from this page?`)) return;
       try { await api('DELETE', `/businesses/${biz.id}/register-rows/${r.id}`, {}); reviewView(biz, u.id); } catch (err) { showError(form.querySelector('.form-msg'), err); }
     });
-    if (r) form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (!dlg.open) dlg.showModal();
+    form.querySelector('[name=billNo]')?.focus();
   };
   onSubmit(form, async (d) => {
     const payments = [...form.querySelectorAll('.payline')].map((line) => ({
@@ -1701,16 +1709,12 @@ function wireRegister(biz, u) {
       paidWithRowId: d.paidWithRowId || null, payments: d.paidWithRowId ? [] : payments, status: d.checked ? 'checked' : 'draft' };
     if (editing) await api('PUT', `/businesses/${biz.id}/register-rows/${editing}`, payload);
     else await api('POST', `/businesses/${biz.id}/uploads/${u.id}/register-rows`, payload);
+    dlg.close();
     reviewView(biz, u.id);
   });
   const setEdit = wireInlineRows(biz, u, strip);
-  setEdit?.((rowId) => {
-    const r = u.rows.find((x) => x.id === rowId);
-    form.dataset.editing = r.id;
-    show(r);
-  });
-  form.dataset.editing = '';
-  show(null);
+  setEdit?.((rowId) => show(u.rows.find((x) => x.id === rowId)));
+  document.getElementById('addbill')?.addEventListener('click', () => show(null));
 }
 
 function expensePanel(biz, u, heads, parties = []) {
