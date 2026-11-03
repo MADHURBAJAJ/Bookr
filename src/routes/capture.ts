@@ -346,7 +346,8 @@ function registerInput(data: Record<string, unknown>) {
   if (paidWith && payments.length) fail(400, 'A bill paid together with another row has no payment of its own. Remove its payment first.');
   return {
     paidWithRowId: paidWith,
-    billNo: text(data, 'billNo', 'Bill number', { max: 30 })!.replace(/\s+/g, ''), // bill numbers have no spaces
+    // Bill numbers have no spaces. A draft line may have none yet (a line just added below); a ticked one must.
+    billNo: (text(data, 'billNo', 'Bill number', { optional: status !== 'checked', max: 30 }) ?? '').replace(/\s+/g, ''),
     billType,
     amountPaise,
     discountPaise,

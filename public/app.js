@@ -1030,7 +1030,7 @@ function regLineHtml(r, locked, x, cols, head, cls) {
   return html`<tr data-row="${r.id}" class="${cls}">
     <td class="ln">${r.lineNo}</td>
     <td class="c-bn"><input class="cell mono ${flagClass(x.flags.bill_no)}" data-f="billNo" value="${r.billNo}" aria-label="Bill number" style="width:100%" autocomplete="off"></td>
-    <td class="c-am"><input class="cell mono ${flagClass(x.flags.amount)}" data-f="amount" value="${rsIn(r.amountPaise)}" style="width:100%;text-align:right" inputmode="decimal" aria-label="Bill amount"></td>
+    <td class="c-am"><input class="cell mono ${flagClass(x.flags.amount)}" data-f="amount" value="${r.amountPaise || r.billNo ? rsIn(r.amountPaise) : ''}" style="width:100%;text-align:right" inputmode="decimal" aria-label="Bill amount"></td>
     <td class="c-ty"><select class="cell ${flagClass(x.flags.bill_type)}" data-f="billType" aria-label="Type" style="width:100%"><option value="">–</option>${Object.entries(TYPE_LABELS).map(([k, l]) => html`<option value="${k}" ${r.billType === k ? 'selected' : ''}>${l}</option>`)}</select></td>
     ${r.paidWithRowId ? html`<td colspan="4" class="paidwith c-pw" data-l="Paid">↳ paid with ${head ? rowLabel(head) : 'another row'} <button type="button" class="linkbtn" data-unlink title="This bill has its own payment">Own payment</button></td>`
       : cols.map((c, i) => html`<td data-l="${PAY_COLS[i][1]}" class="c-p${i}"><input class="cell mono ${c.length ? flagClass(x.flags.payments) : ''}" data-f="pay${i}" value="${c.map((p) => rsIn(p.amountPaise)).join('+')}" style="width:100%;text-align:right"
@@ -1425,7 +1425,8 @@ function wireStrip(u, fileUrl) {
 function wireInlineRows(biz, u, strip) {
   const table = document.getElementById('regtable');
   if (!table) return;
-  const queues = new Map();
+  let chain = Promise.resolve();
+  let pending = 0;
   const val = (tr, f) => tr.querySelector(`[data-f="${f}"]`);
   const payloadOf = (tr, r) => {
     const unlinked = tr.dataset.unlinked === '1';
@@ -1441,17 +1442,26 @@ function wireInlineRows(biz, u, strip) {
     }
     return {
       paidWithRowId: unlinked ? null : r.paidWithRowId,
-      billNo: val(tr, 'billNo').value.trim(), billType: val(tr, 'billType').value || null, amount: val(tr, 'amount').value, discount: val(tr, 'discount').value || '0',
+      billNo: val(tr, 'billNo').value.trim(), billType: val(tr, 'billType').value || null, amount: val(tr, 'amount').value.trim() || '0', discount: val(tr, 'discount').value || '0',
       remarks: val(tr, 'remarks').value.trim() || null, payments, status: val(tr, 'checked').checked ? 'checked' : 'draft',
     };
   };
   const redraw = () => {
+    // The box being typed in keeps what was typed (not saved until you leave it) and where the cursor was.
     const active = document.activeElement;
-    const keep = active?.closest?.('tr')?.dataset.row ? { row: active.closest('tr').dataset.row, f: active.dataset.f } : null;
+    const keep = active?.closest?.('tr')?.dataset.row && active.dataset.f ? {
+      row: active.closest('tr').dataset.row, f: active.dataset.f, value: active.type === 'checkbox' ? null : active.value,
+      checked: active.type === 'checkbox' ? active.checked : null, start: active.selectionStart ?? null, end: active.selectionEnd ?? null,
+    } : null;
     const tbody = table.querySelector('tbody');
     tbody.innerHTML = u.rows.map((x) => regRowHtml(x, false).__html).join('');
     tbody.querySelectorAll('tr[data-row]').forEach(bind);
-    if (keep?.f) tbody.querySelector(`tr[data-row="${keep.row}"] [data-f="${keep.f}"]`)?.focus();
+    const back = keep && tbody.querySelector(`tr[data-row="${keep.row}"] [data-f="${keep.f}"]`);
+    if (back) {
+      if (keep.value !== null && back.value !== keep.value) back.value = keep.value;
+      back.focus();
+      if (keep.start !== null && back.setSelectionRange) { try { back.setSelectionRange(keep.start, keep.end); } catch { /* not a text box */ } }
+    }
     document.getElementById('regsum').innerHTML = regSumHtml(u).__html;
     document.getElementById('regfoot').innerHTML = regFootHtml(u, false).__html; wireFoot(biz, u);
     document.getElementById('rvbar').innerHTML = regBarHtml(u).__html;
@@ -1468,14 +1478,24 @@ function wireInlineRows(biz, u, strip) {
       if (a !== null && paid > 0) val(tr, 'discount').value = paid !== a ? rupeesForInput(a - paid) : '';
     }
     const body = payloadOf(tr, r);
-    const run = (queues.get(id) ?? Promise.resolve()).then(async () => {
+    // Saves go one at a time, in the order made. The rows are fetched again only after the last one, so an
+    // earlier save's answer never redraws a row whose later change (a tick, a number) is still on its way.
+    pending += 1;
+    const run = chain.then(async () => {
       try {
         await apiFull('PUT', `/businesses/${biz.id}/register-rows/${id}`, body);
         document.getElementById('rmsg').innerHTML = '';
       } catch (err) {
+        // Not saved: what was typed stays on screen with the reason, to be fixed, rather than snapping back.
         showError(document.getElementById('rmsg'), err);
+        tr.classList.add('save-failed');
+        const cell = tr.querySelector('.c-is');
+        if (cell) cell.innerHTML = html`<div class="error">Not saved: ${err.message}</div>`.__html + cell.innerHTML;
+        return;
       }
-      const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`);
+      if (pending > 1) return;
+      const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`).catch(() => null);
+      if (!fresh || pending > 1) return; // another save started meanwhile: it fetches and redraws
       u.rows = fresh.rows;
       u.otherPageRows = fresh.otherPageRows;
       u.slip = fresh.slip;
@@ -1484,8 +1504,8 @@ function wireInlineRows(biz, u, strip) {
       regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
       redraw();
-    });
-    queues.set(id, run);
+    }).finally(() => { pending -= 1; });
+    chain = run.catch(() => {});
     return run;
   };
   const rowsShown = () => [...table.querySelectorAll('tbody tr[data-row]')].filter((x) => x.offsetParent !== null);

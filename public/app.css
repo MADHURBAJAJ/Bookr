@@ -284,3 +284,5 @@ details.menu > summary::-webkit-details-marker { display: none; }
   .head.compact > :first-child { flex-basis: 100%; }
   .head-tools #findbill input { width: 130px !important; }
 }
+
+.regtable tr.save-failed td { background: #FEF2F2; }

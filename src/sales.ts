@@ -145,7 +145,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   // Register bills match a software bill by bill number. Only the first register row per number takes part;
   // a repeat is reported by shiftView and blocks confirmation.
   const rgByBill = new Map<string, RgRow>();
-  for (const r of rg) if (!rgByBill.has(r.bill_no)) rgByBill.set(r.bill_no, r);
+  for (const r of rg) if (r.bill_no && !rgByBill.has(r.bill_no)) rgByBill.set(r.bill_no, r); // a blank line just added has no bill yet
   const shares = discountShares(rg);
   const wanted = new Map<string, Omit<Comparison, 'id' | 'decision' | 'decided_by' | 'decided_at' | 'note' | 'bill_type'>>();
   const usedRg = new Set<string>();
