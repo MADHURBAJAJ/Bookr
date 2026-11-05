@@ -228,6 +228,12 @@ describe('bank evidence on Compare sales', () => {
     expect(two.evidence.size).toBe(0);
   });
 
+  it('a credit into an account with another UPI label does not pair with the bill', () => {
+    const b = bill('a', { paidAt: 100 * M, swAmount: 500, swMode: 'upi', rgAmount: 500, rgMode: 'upi', labels: 'UPI XOXO' });
+    expect(pairEvidence([b], [{ id: 'x', amount: 500, postedAt: 101 * M, label: 'UPI Bank 2' }], w).evidence.size).toBe(0);
+    expect(pairEvidence([b], [{ id: 'x', amount: 500, postedAt: 101 * M, label: 'UPI XOXO' }], w).evidence.get('a')).toMatchObject({ creditId: 'x' });
+  });
+
   it('money with no bill: a credit in the shift that no bill of the shift could be', () => {
     const bills = [bill('a', { swAmount: 500, swMode: 'upi' })];
     const credits = [{ id: 'x', amount: 300, postedAt: 10 }, { id: 'y', amount: 500, postedAt: 20 }, { id: 'z', amount: 300, postedAt: w.to + 10 }];

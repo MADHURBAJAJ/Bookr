@@ -11,6 +11,7 @@ import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
 import { explainShift } from '../explain';
+import { reconcileShift } from '../reconcile';
 import { billDistance } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
@@ -229,6 +230,16 @@ bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole
   if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
   await c.env.DB.batch(await undoRepayStatements(c.env.DB, c.get('businessId'), id, c.get('user').id, now()));
   return c.json({ ok: true });
+});
+
+bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const [r, shifts] = await Promise.all([reconcileShift(db, bid, day),
+    all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid)]);
+  return c.json({ ...r, confirmed: shifts.some((s) => s.day === day && s.status === 'confirmed'), shifts });
 });
 
 bankRoutes.get('/businesses/:businessId/shifts/:day/explain', requireRole('bank.link'), async (c) => {

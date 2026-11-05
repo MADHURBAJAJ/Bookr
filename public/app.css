@@ -312,3 +312,12 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 /* A choice the bank credit backs: pre-selected for the person to accept. */
 .cmptable .dchip.sugg { border: 2px solid var(--teal); color: var(--teal-ink); font-weight: 600; }
 .bank-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; background: var(--teal); color: #fff; border-radius: 4px; padding: 1px 4px; margin-left: 2px; vertical-align: 1px; }
+/* Reconcile */
+.rec-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.rec-n { font-size: 20px; font-weight: 600; }
+.lane-h { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.wit3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
+.wit { background: var(--ground); border-radius: 6px; padding: 6px 8px; }
+.wit-l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.wit.odd { background: #FEF2F2; }
+.wit.odd .wit-v { text-decoration: line-through; color: #991B1B; }

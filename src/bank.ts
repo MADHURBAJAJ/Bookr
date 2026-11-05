@@ -83,7 +83,7 @@ export const waitingUpi = (db: DB, businessId: string, from: string, to: string)
 
 const norm = (v: string | null | undefined) => (v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 /** A sale whose register column names an account label can only be paid into an account with that label. */
-const labelFits = (labels: string | null, accountLabel: string | null) =>
+export const labelFits = (labels: string | null, accountLabel: string | null) =>
   !labels || !accountLabel || labels.split(',').some((l) => !norm(l) || norm(l) === norm(accountLabel) || !/upi/.test(norm(l)) || norm(l) === 'upi');
 
 const STRONG_MIN = 20;

@@ -3,6 +3,7 @@
 // the credit settles a difference (mode or amount), that choice is suggested; the person accepts it. No credit
 // suggests nothing. On confirm, the credits shown here are matched to the bills' income rows (see confirmShift).
 
+import { labelFits } from './bank';
 import { all, one, type DB } from './db';
 import { shiftWindow } from './time';
 
@@ -12,8 +13,10 @@ const NEAR_MIN = 60;
 export interface EvidenceBill {
   id: string; paidAt: number | null; difference: string; decision: string | null; grouped: boolean;
   swAmount: number | null; swMode: string | null; rgAmount: number | null; rgMode: string | null;
+  /** The register's UPI column(s): the credit must have come into an account with that label, as on UPI matching. */
+  labels?: string | null;
 }
-export interface EvidenceCredit { id: string; amount: number; postedAt: number }
+export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null }
 export interface Evidence {
   creditId: string; amountPaise: number; postedAt: number; minutes: number | null;
   /** Which side's amount the credit equals. */
@@ -55,7 +58,7 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     if (b.grouped || b.decision === 'leave_out' || b.decision === 'carry_forward') continue;
     for (const a of upiAmounts(b)) {
       for (const c of credits) {
-        if (c.amount !== a.amount) continue;
+        if (c.amount !== a.amount || !labelFits(b.labels ?? null, c.label ?? null)) continue;
         if (b.paidAt != null) {
           const minutes = Math.round(Math.abs(c.postedAt - b.paidAt) / 60000);
           if (minutes <= NEAR_MIN) timed.push({ bill: b, credit: c, minutes, side: a.side });
@@ -102,8 +105,9 @@ export async function bankIn(db: DB, businessId: string, day: string) {
 /** Unmatched UPI credits that could pay this shift's bills: from an hour before it starts to three hours after it ends. */
 export const shiftCredits = (db: DB, businessId: string, day: string) => {
   const w = shiftWindow(day);
-  return all<EvidenceCredit>(db, `SELECT id, amount_paise AS amount, posted_at AS postedAt FROM bank_rows
-    WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched' AND posted_at >= ? AND posted_at < ? ORDER BY posted_at`,
+  return all<EvidenceCredit>(db, `SELECT r.id, r.amount_paise AS amount, r.posted_at AS postedAt, s.receives_upi_label AS label FROM bank_rows r
+    LEFT JOIN bank_sources s ON s.account_id = r.account_id
+    WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ? ORDER BY r.posted_at`,
     businessId, w.from - 3600e3, w.to + 3 * 3600e3);
 };
 

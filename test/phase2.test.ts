@@ -1441,7 +1441,7 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     const h = await hotel();
     await fullShift(h);
     const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
-    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' })).status).toBe(200);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI XOXO' })).status).toBe(200);
     const text = [HEAD,
       line(1, 'S30000001', '31/10/2026 1:00:00 PM', 403),   // bill 26103115: software UPI, register cash
       line(2, 'S30000002', '31/10/2026 1:10:00 PM', 4410),  // bill 2610317: software 4410, register 4140
@@ -1475,5 +1475,62 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect((await sql`SELECT tran_id, status FROM bank_rows WHERE tran_id IN ('S30000001', 'S30000002') ORDER BY tran_id`).map((r: any) => r.status)).toEqual(['unmatched', 'matched']);
     v = await view(h);
     expect(v.json.bank).toBeNull(); // confirmed: the evidence is done
+  });
+});
+
+describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () => {
+  const HEAD = ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t');
+  const line = (n: number, id: string, at: string, amount: number) =>
+    [n, id, at.slice(0, 10), at, '-', `UPI/70000000${n}/Paid/cd-${n}@okicici/SAMPLE BANK/ICIaaaa`, 'CR', amount, String(amount)].join('\t');
+
+  it('splits what is left into clear, likely and missing; each action moves it to done and can be undone', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/reconcile`;
+    expect((await h.clients.owner.get(url)).json).toMatchObject({ confirmed: false, clear: [], likely: [] });
+    await decideAll(h);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' })).status).toBe(200);
+    const xoxo = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF B', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${xoxo}/source`, { receivesUpiLabel: 'UPI XOXO' })).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${xoxo}/paste`, { text: [HEAD, line(1, 'S40000001', '31/10/2026 1:10:00 PM', 4410)].join('\n') })).status).toBe(200); // bill 2610317, 2 minutes after it
+    const text = [HEAD,
+      line(2, 'S40000002', '31/10/2026 6:00:00 PM', 650),  // bill 2610318, 160 minutes after it
+      line(3, 'S40000003', '31/10/2026 3:00:00 PM', 777),  // no bill of this amount
+      line(4, 'S40000004', '01/11/2026 8:30:00 AM', 1234)].join('\n');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text })).status).toBe(200);
+    let r = (await h.clients.owner.get(url)).json;
+    expect(r.confirmed).toBe(true);
+    expect(r.coverage.covered).toBe(true);
+    expect(r.clear.map((x: any) => [x.billNos, x.amountPaise, x.minutes])).toEqual([[['2610317'], 441000, 2]]);
+    expect(r.likely.map((x: any) => [x.billNos, x.minutes])).toEqual([[['2610318'], 160]]);
+    expect(r.noBill.map((x: any) => x.amountPaise)).toEqual([77700]);
+    expect(r.strip).toMatchObject({ creditsLeft: 3, creditsLeftPaise: 441000 + 65000 + 77700, matchedPaise: 0 });
+    // Clear: one click. Nothing was matched before the click.
+    const clearId = r.clear[0].creditId;
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/match-clear`, { ids: [clearId] })).json.matched).toBe(1);
+    // Likely: a person ticks it.
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/${r.likely[0].creditId}/match`, { transactionIds: r.likely[0].transactionIds })).status).toBe(200);
+    // Money with no bill: booked as an unbilled sale.
+    const fnb = r.unbilledHeads.find((x: any) => x.billType === 'fnb').headId;
+    const noBill = r.noBill[0].creditId;
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/${noBill}/book`, { headId: fnb, note: 'Unbilled F&B (Reconcile)' })).status).toBe(200);
+    r = (await h.clients.owner.get(url)).json;
+    expect(r.clear).toEqual([]);
+    expect(r.likely).toEqual([]);
+    expect(r.noBill).toEqual([]);
+    expect(r.done.flatMap((x: any) => x.bills).sort()).toEqual(['2610317', '2610318']);
+    expect(r.booked.map((x: any) => x.amountPaise)).toEqual([77700]);
+    expect(r.strip).toMatchObject({ creditsLeft: 0, creditsLeftPaise: 0, matchedPaise: 441000 + 65000 });
+    // Undone: back where it was.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${clearId}/match`)).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${noBill}/reopen`, {})).status).toBe(200);
+    r = (await h.clients.owner.get(url)).json;
+    expect(r.clear.map((x: any) => x.creditId)).toEqual([clearId]);
+    expect(r.noBill.map((x: any) => x.creditId)).toEqual([noBill]);
+    // The role is checked for this business on the server.
+    expect((await h.clients.viewer.get(url)).status).toBe(403);
+    expect((await h.clients.entry_staff.get(url)).status).toBe(403);
   });
 });

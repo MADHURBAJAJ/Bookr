@@ -395,10 +395,11 @@ export async function cashAccountId(db: DB, businessId: string): Promise<string 
 }
 
 /** Comparisons as the bank evidence sees them; bills paid together are left to UPI matching (one credit, many bills). */
-function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>): EvidenceBill[] {
+function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>, paysByRow: Map<string, RgPay[]>): EvidenceBill[] {
   return comps.map((c) => ({
     id: c.id, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
     swAmount: c.software_bill_id ? c.sw_amount_paise : null, swMode: c.sw_mode, rgAmount: c.register_row_id ? c.rg_amount_paise : null, rgMode: c.rg_mode,
+    labels: c.register_row_id ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'upi').map((p) => p.column_label).filter(Boolean).join(',') || null : null,
   }));
 }
 
@@ -465,7 +466,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[] } | null = null;
   if (shift?.status !== 'confirmed') {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), shiftCredits(db, businessId, day)]);
-    const ebills = evidenceBills(comparisons, grouped);
+    const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, credits, cov.window);
     bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window) : [] };
   }

@@ -10,7 +10,9 @@ import { cashCheck } from './cash';
 import { addDays, shiftWindow } from './time';
 
 export interface Action { label: string; method: 'POST'; path: string; body: Record<string, unknown>; primary?: boolean; needsNote?: string }
-export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[] }
+/** What each of the three says, and which one is wrong (shown struck out). */
+export interface Witnesses { software: string | null; register: string | null; bank: string; odd: 'software' | 'register' | 'bank' | null }
+export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[]; witnesses?: Witnesses }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rupees = (p: number) => (p / 100).toFixed(2);
@@ -19,8 +21,6 @@ const mins = (a: number, b: number) => Math.round(Math.abs(a - b) / 60000);
 
 interface Sale { id: string; net: number; billNo: string | null; comparisonId: string | null; paidAt: number | null; difference: string | null; regId: string | null;
   swAmount: number | null; gross: number | null; grouped: number; parts: number }
-/** Largest difference offered as "round the bill to the credit". */
-const ROUND_PAISE = 3000;
 const TABLE_MAX = 10;
 
 /**
@@ -107,6 +107,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
             `Fixing joins the two halves into one bill, so it is no longer counted twice.`,
           ],
           score: 90 - dist * 8 - (minutes ?? 30) / 3, uses: [`tx:${r.id}`, `cmp:${s.id}`, `cr:${m.id}`],
+          witnesses: { software: `Bill ${s.billNo} · ${rs(s.swAmount)}`, register: `Bill ${r.billNo} · ${rs(r.net)}`, bank: `${rs(m.amount)} at ${hm(m.postedAt)}`, odd: 'register' },
           actions: [{ label: `Fix: bill ${s.billNo}, ${gap >= 0 ? `discount ${rs(gap)}` : `tip ${rs(-gap)}`}`, primary: true, method: 'POST',
             path: `${base}/bank-rows/${m.id}/fix-bill`, body: { registerRowId: r.regId, billNo: s.billNo, amount: rupees(s.swAmount), discount: rupees(gap), note: `Register typo ${r.billNo} for ${s.billNo} (explainer)` } }],
         });
@@ -128,6 +129,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
           `Fixing sets the payment to ${rs(x.gross!)} and removes the ${d > 0 ? 'tip' : 'discount'}.`,
         ],
         score: 80 - (minutes ?? 30) / 3, uses: [`tx:${x.id}`, `cr:${m.id}`],
+        witnesses: { software: x.swAmount != null ? `Bill ${rs(x.swAmount)}` : null, register: `Paid ${rs(x.net)} (${d > 0 ? `${rs(d)} tip` : `${rs(-d)} discount`})`, bank: `${rs(m.amount)} at ${hm(m.postedAt)}`, odd: 'register' },
         actions: [{ label: `Fix: payment ${rs(x.gross!)}, no ${d > 0 ? 'tip' : 'discount'}`, primary: true, method: 'POST',
           path: `${base}/bank-rows/match-many`, body: { pairs: [{ rowId: m.id, transactionIds: [x.id], adjust: true }] } }],
       });
@@ -164,6 +166,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
             'Fixing writes the payments as the bank shows them and removes any discount the register needed to add up.',
           ],
           score: 85, uses: [...parts.map((p) => `tx:${p.id}`), ...combo.map((c) => `cr:${c.id}`)],
+          witnesses: { software: bill.swAmount != null ? `Bill ${rs(bill.swAmount)}` : null, register: `Paid ${written}`, bank: combo.map((c) => `${rs(c.amount)} at ${hm(c.postedAt)}`).join(' + '), odd: 'register' },
           actions: [{ label: `Fix: payments ${combo.map((c) => rs(c.amount)).join(' + ')}`, primary: true, method: 'POST', path: `${base}/bank-rows/match-set`,
             body: { rowIds: combo.map((c) => c.id), transactionIds: parts.map((p) => p.id), treat: 'bills', note: `Paid in ${combo.length} goes (explainer)` } }],
         });
@@ -173,7 +176,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
 
   // A credit some single bill of its amount could take is left to the plain matching.
   const single = (m: Credit) => sales.some((x) => (x.net === m.amount || x.gross === m.amount) && near(m, x.paidAt));
-  // Bills with no credit of their own amount near them: the ones a table credit or a rounded credit can explain.
+  // Bills with no credit of their own amount near them: the ones a table credit can explain.
   const loose = sales.filter((x) => x.parts === 1 && !x.grouped && x.paidAt != null
     && !credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt)));
 
@@ -197,29 +200,9 @@ export async function explainShift(db: DB, businessId: string, day: string) {
         'Probably one table paying at once. Matching ties the credit to all of them.',
       ],
       score: 75, uses: [...set.map((x) => `tx:${x.id}`), `cr:${m.id}`],
+      witnesses: { software: `${set.length} bills · ${rs(m.amount)}`, register: `${set.length} bills, each paid on its own`, bank: `One credit ${rs(m.amount)} at ${hm(m.postedAt)}`, odd: 'register' },
       actions: [{ label: `Match to ${set.length} bills`, primary: true, method: 'POST', path: `${base}/bank-rows/match-set`,
         body: { rowIds: [m.id], transactionIds: set.map((x) => x.id) } }],
-    });
-  }
-
-  // Round the bill to the credit: the bank received up to ₹30 more or less than one bill, close in time, and
-  // nothing else fits (approved 5 Nov 2026; most hand fixes on 2 Nov were ₹1 to ₹30).
-  for (const m of credits.filter((c) => !single(c))) {
-    const close = loose.filter((x) => Math.abs(x.net - m.amount) <= ROUND_PAISE && x.net !== m.amount && mins(m.postedAt, x.paidAt!) <= 20);
-    if (close.length !== 1) continue;
-    const x = close[0];
-    if (credits.some((o) => o.id !== m.id && Math.abs(x.net - o.amount) <= ROUND_PAISE && mins(o.postedAt, x.paidAt!) <= 20)) continue;
-    const d = m.amount - x.net;
-    cards.push({
-      key: `round:${x.id}:${m.id}`, kind: 'round_to_credit', billNos: [x.billNo ?? ''],
-      title: `Bill ${x.billNo}: ${rs(x.net)} written, ${rs(m.amount)} received`,
-      evidence: [
-        `The bank received ${rs(m.amount)} at ${hm(m.postedAt)}, ${mins(m.postedAt, x.paidAt!)} min from the bill: ${rs(Math.abs(d))} ${d > 0 ? 'more' : 'less'} than written.`,
-        'No other bill or credit is this close. Fixing changes the bill to what was received, with the difference as a tip or discount.',
-      ],
-      score: 65, uses: [`tx:${x.id}`, `cr:${m.id}`],
-      actions: [{ label: `Fix: bill ${rs(m.amount)} (${d > 0 ? `tip ${rs(d)}` : `discount ${rs(-d)}`})`, primary: true, method: 'POST', path: `${base}/bank-rows/match-set`,
-        body: { rowIds: [m.id], transactionIds: [x.id], treat: 'bills', note: `Rounded to the bank credit, ${d > 0 ? '+' : '−'}${rs(Math.abs(d))} (explainer)` } }],
     });
   }
 
