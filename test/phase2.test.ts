@@ -1431,3 +1431,49 @@ describe('bills on one side only are decided by Bookr (approved 3 Nov 2026)', ()
     expect((await sql`SELECT status, day FROM transactions WHERE id = ${t.id}`)[0]).toEqual({ status: 'reviewed', day: '2026-10-31' });
   });
 });
+
+describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', () => {
+  const HEAD = ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t');
+  const line = (n: number, id: string, at: string, amount: number) =>
+    [n, id, at.slice(0, 10), at, '-', `UPI/60000000${n}/Paid/ab-${n}@okicici/SAMPLE BANK/ICIaaaa`, 'CR', amount, String(amount)].join('\t');
+
+  it('suggests the side the credit backs, warns of money with no bill, and matches the credits on confirm', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' })).status).toBe(200);
+    const text = [HEAD,
+      line(1, 'S30000001', '31/10/2026 1:00:00 PM', 403),   // bill 26103115: software UPI, register cash
+      line(2, 'S30000002', '31/10/2026 1:10:00 PM', 4410),  // bill 2610317: software 4410, register 4140
+      line(3, 'S30000003', '31/10/2026 3:00:00 PM', 777),   // no bill of this amount
+      line(4, 'S30000004', '01/11/2026 8:30:00 AM', 1234)].join('\n'); // the statement reaches past the shift's end
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text })).status).toBe(200);
+    let v = await view(h);
+    expect(v.json.bank).toMatchObject({ covered: true });
+    expect(v.json.bank.noBill.map((x: any) => x.amountPaise)).toEqual([77700]);
+    expect(byBill(v, '26103115').bank).toMatchObject({ amountPaise: 40300, fits: 'both', suggest: 'use_software', minutes: 3 });
+    expect(byBill(v, '2610317').bank).toMatchObject({ amountPaise: 441000, fits: 'software', suggest: 'use_software' });
+    expect(byBill(v, '2610318').bank).toBeNull(); // no credit: nothing suggested
+    // Nothing is decided by the bank: the person accepts.
+    expect(byBill(v, '26103115').decision).toBeNull();
+    for (const b of ['26103115', '2610317']) {
+      expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, b).id}`, { decision: byBill(v, b).bank.suggest, note: 'Bank' })).status).toBe(200);
+    }
+    for (const b of ['2610318', '26103120']) expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, b).id}`, { decision: 'use_register' })).status).toBe(200);
+    const res = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect(res.status).toBe(200);
+    expect(res.json.matched).toBe(2);
+    const rows = await sql`SELECT r.tran_id, r.status, m.matched_by, m.matched_at, t.bill_no, t.match_status FROM bank_rows r
+      JOIN bank_matches m ON m.bank_row_id = r.id JOIN transactions t ON t.id = m.transaction_id ORDER BY r.tran_id`;
+    expect(rows.map((r: any) => [r.tran_id, r.bill_no, r.status, r.match_status])).toEqual([['S30000001', '26103115', 'matched', null], ['S30000002', '2610317', 'matched', null]]);
+    expect(rows[0].matched_by).toBe(h.users.accountant.id);
+    expect(rows[0].matched_at).not.toBe(rows[1].matched_at);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'bank.match' AND after LIKE '%confirming the shift%'`)[0].n).toBe(2);
+    // Unmatch undoes one, not both.
+    const [one] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S30000001'`;
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${one.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT tran_id, status FROM bank_rows WHERE tran_id IN ('S30000001', 'S30000002') ORDER BY tran_id`).map((r: any) => r.status)).toEqual(['unmatched', 'matched']);
+    v = await view(h);
+    expect(v.json.bank).toBeNull(); // confirmed: the evidence is done
+  });
+});

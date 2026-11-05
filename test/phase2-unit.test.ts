@@ -4,6 +4,8 @@ import { addDays, istDay, istToMs, missingInWindow, shiftDayOf, shiftWindow } fr
 import { csvRows, parseDateTime, parseSalesCsv } from '../src/salescsv';
 import { billDistance, classify, registerMode, suggestBills } from '../src/sales';
 import { parsePaise } from '../src/money';
+import { creditsWithoutBill, pairEvidence, type EvidenceBill } from '../src/bankEvidence';
+import { tableSets } from '../src/explain';
 import { buildSalesCsv, REPORT_1_NOV_EARLY, REPORT_31_OCT } from '../demo/sample-data';
 
 describe('shift rule (8 am to 8 am, India time)', () => {
@@ -194,5 +196,55 @@ describe('bill number suggestions', () => {
     expect(billDistance('12345', '12354')).toBe(1);
     expect(billDistance('12345', '1245')).toBe(1);
     expect(billDistance('12345', '12345')).toBe(0);
+  });
+});
+
+describe('bank evidence on Compare sales', () => {
+  const w = { from: 0, to: 24 * 3600e3 };
+  const bill = (id: string, o: Partial<EvidenceBill>): EvidenceBill => ({ id, paidAt: null, difference: 'match', decision: null, grouped: false,
+    swAmount: null, swMode: null, rgAmount: null, rgMode: null, ...o });
+  const M = 60000;
+
+  it('pairs by closest time, each credit once, and suggests only the UPI side the credit equals', () => {
+    const bills = [
+      bill('a', { paidAt: 100 * M, difference: 'mode', swAmount: 500, swMode: 'upi', rgAmount: 500, rgMode: 'cash' }),
+      bill('b', { paidAt: 130 * M, difference: 'match', swAmount: 500, swMode: 'upi', rgAmount: 500, rgMode: 'upi' }),
+      bill('c', { paidAt: 200 * M, difference: 'amount', swAmount: 900, swMode: 'upi', rgAmount: 990, rgMode: 'upi' }),
+      bill('d', { paidAt: 300 * M, difference: 'mode', swAmount: 700, swMode: 'cash', rgAmount: 700, rgMode: 'card' }), // no UPI side
+    ];
+    const credits = [{ id: 'x', amount: 500, postedAt: 128 * M }, { id: 'y', amount: 500, postedAt: 104 * M }, { id: 'z', amount: 990, postedAt: 205 * M },
+      { id: 'q', amount: 700, postedAt: 301 * M }];
+    const { evidence } = pairEvidence(bills, credits, w);
+    expect(evidence.get('a')).toMatchObject({ creditId: 'y', minutes: 4, suggest: 'use_software', fits: 'both' });
+    expect(evidence.get('b')).toMatchObject({ creditId: 'x', suggest: null });
+    expect(evidence.get('c')).toMatchObject({ creditId: 'z', suggest: 'use_register', fits: 'register' });
+    expect(evidence.has('d')).toBe(false);
+  });
+
+  it('pairs a bill with no time only when it and the credit are each other\'s only choice', () => {
+    const one = pairEvidence([bill('r', { difference: 'missing_in_software', rgAmount: 400, rgMode: 'upi' })], [{ id: 'k', amount: 400, postedAt: 3600e3 }], w);
+    expect(one.evidence.get('r')).toMatchObject({ creditId: 'k', minutes: null });
+    const two = pairEvidence([bill('r', { rgAmount: 400, rgMode: 'upi' }), bill('s', { rgAmount: 400, rgMode: 'upi' })], [{ id: 'k', amount: 400, postedAt: 3600e3 }], w);
+    expect(two.evidence.size).toBe(0);
+  });
+
+  it('money with no bill: a credit in the shift that no bill of the shift could be', () => {
+    const bills = [bill('a', { swAmount: 500, swMode: 'upi' })];
+    const credits = [{ id: 'x', amount: 300, postedAt: 10 }, { id: 'y', amount: 500, postedAt: 20 }, { id: 'z', amount: 300, postedAt: w.to + 10 }];
+    expect(creditsWithoutBill(credits, new Set(), bills, w).map((c) => c.id)).toEqual(['x']);
+  });
+});
+
+describe('one credit for a table', () => {
+  const b = (net: number, min: number) => ({ net, paidAt: min * 60000 });
+  it('finds the one set of bills adding up to the credit, up to 10 bills within 45 minutes', () => {
+    const bills = [b(900, 0), b(400, 5), b(350, 10), b(250, 12)].sort((x, y) => y.net - x.net);
+    expect(tableSets(bills, 1000).map((s) => s.map((x) => x.net))).toEqual([[400, 350, 250]]);
+    const ten = Array.from({ length: 10 }, (_, i) => b(100 + i, i));
+    expect(tableSets(ten, ten.reduce((t, x) => t + x.net, 0))[0]).toHaveLength(10);
+  });
+  it('offers nothing when two sets fit, or the bills are too far apart', () => {
+    expect(tableSets([b(500, 0), b(500, 1), b(500, 2)], 1000)).toHaveLength(2);
+    expect(tableSets([b(600, 0), b(400, 60)], 1000)).toHaveLength(0);
   });
 });

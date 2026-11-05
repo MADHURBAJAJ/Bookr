@@ -358,6 +358,16 @@ function registerInput(data: Record<string, unknown>) {
   };
 }
 
+/**
+ * A row that becomes the head of a group for the first time loses the Disc worked out for it alone (amount minus its
+ * own payment): its payment now pays the whole group, so that figure would count the other bills twice. A Disc that
+ * is anything else was typed and stays. "Fill discounts and tips" shares the group's real discount afterwards.
+ */
+const newHeadStatement = (db: D1Database, headId: string, memberId: string) => stmt(db, `UPDATE register_rows SET discount_paise = 0, tip_paise = 0
+  WHERE id = ? AND discount_paise - tip_paise <> 0
+    AND discount_paise - tip_paise = amount_paise - (SELECT coalesce(sum(amount_paise), 0) FROM register_payments WHERE register_row_id = ?)
+    AND NOT EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = ? AND m.id <> ?)`, headId, headId, headId, memberId);
+
 /** Checks a "paid with" link: same business and shift, not itself, no chains. */
 async function checkPaidWith(db: DB, businessId: string, rowId: string | null, shiftDay: string, headId: string | null) {
   if (!headId) return;
@@ -392,6 +402,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, u.id, last!.n + 1, u.business_day, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.tipPaise, r.paidWithRowId, r.remarks, r.status,
         c.get('user').id, t, t),
       ...paymentStatements(db, bid, id, r.payments, t),
+      ...(r.paidWithRowId ? [newHeadStatement(db, r.paidWithRowId, id)] : []),
       stmt(db, "UPDATE uploads SET ocr_engine = coalesce(ocr_engine, 'manual') WHERE id = ?", u.id),
     ]);
   } catch (e) {
@@ -471,6 +482,7 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
         WHERE id = ? AND business_id = ?`, r.billNo, r.billType, r.amountPaise, r.discountPaise, r.tipPaise, r.paidWithRowId, r.remarks, r.status, c.get('user').id, t, ocr, rowId, bid),
       stmt(db, 'DELETE FROM register_payments WHERE register_row_id = ?', rowId),
       ...paymentStatements(db, bid, rowId, r.payments, t),
+      ...(r.paidWithRowId && r.paidWithRowId !== old.paid_with_row_id ? [newHeadStatement(db, r.paidWithRowId, rowId)] : []),
     ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);

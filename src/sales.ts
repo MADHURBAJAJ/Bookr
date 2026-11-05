@@ -2,6 +2,8 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
+import { bankIn, creditsWithoutBill, pairEvidence, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
+import { settleOnCredit } from './bank';
 import { all, newId, now, one, stmt, type DB } from './db';
 import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
 
@@ -392,6 +394,14 @@ export async function cashAccountId(db: DB, businessId: string): Promise<string 
   return a?.id ?? null;
 }
 
+/** Comparisons as the bank evidence sees them; bills paid together are left to UPI matching (one credit, many bills). */
+function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>): EvidenceBill[] {
+  return comps.map((c) => ({
+    id: c.id, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
+    swAmount: c.software_bill_id ? c.sw_amount_paise : null, swMode: c.sw_mode, rgAmount: c.register_row_id ? c.rg_amount_paise : null, rgMode: c.rg_mode,
+  }));
+}
+
 /** Everything the Compare sales screen shows for one shift, plus what still blocks confirming it. */
 export async function shiftView(db: DB, businessId: string, day: string) {
   const [{ sw, rg, paysByRow, groups }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
@@ -451,6 +461,15 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     .map((c) => ({ billNo: c.bill_no, amountPaise: c.sw_amount_paise ?? 0,
       text: `Cash bill ${c.bill_no} (₹ ${Math.round((c.sw_amount_paise ?? 0) / 100).toLocaleString('en-IN')}) is in the software report but not in the register: check the cash.` }));
 
+  // The bank as a third witness, while the shift is still open.
+  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[] } | null = null;
+  if (shift?.status !== 'confirmed') {
+    const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), shiftCredits(db, businessId, day)]);
+    const ebills = evidenceBills(comparisons, grouped);
+    const { evidence, used } = pairEvidence(ebills, credits, cov.window);
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window) : [] };
+  }
+
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
   const swByMode = (m: string) => sum(sw.filter((b) => b.mode === m).map((b) => ({ amount: b.amount_paise })));
   const rgByMode = (m: string) => sum(rg.flatMap((r) => (paysByRow.get(r.id) ?? []).filter((p) => p.mode === m).map((p) => ({ amount: p.amount_paise }))));
@@ -479,7 +498,10 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       linkedToId: c.linked_to_id ?? null,
       auto: !!c.decision && !c.decided_by && c.decided_at != null,
       otherDay: others.get(c.id) ?? null,
+      // A large discount is accepted only with a reason, so the bank's choice is not offered for one.
+      bank: bank?.evidence.get(c.id) ? { ...bank.evidence.get(c.id)!, suggest: c.register_row_id && shares.get(c.register_row_id)?.large ? null : bank.evidence.get(c.id)!.suggest } : null,
     })),
+    bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })) } : null,
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,
       existing: { paidAt: k.existing_paid_at, mode: k.existing_mode, amountPaise: k.existing_amount_paise },
@@ -520,8 +542,23 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
   return rows;
 }
 
+/** Matches a credit to a sale made by this confirm, only while the credit is still unmatched. */
+function confirmMatchStatements(db: DB, businessId: string, rowId: string, txId: string, amount: number, userId: string, t: number) {
+  const free = "EXISTS (SELECT 1 FROM bank_rows WHERE id = ? AND status = 'unmatched' AND business_id = ?)";
+  return [
+    stmt(db, `INSERT INTO bank_matches (id, business_id, bank_row_id, transaction_id, amount_paise, matched_by, matched_at)
+      SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${free}`, newId(), businessId, rowId, txId, amount, userId, t, rowId, businessId),
+    stmt(db, `UPDATE transactions SET matched_bank_row = ?, match_status = NULL WHERE id = ? AND match_status = 'awaiting_bank_match'
+      AND EXISTS (SELECT 1 FROM bank_matches m WHERE m.transaction_id = ? AND m.bank_row_id = ?)`, rowId, txId, txId, rowId),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      SELECT ?, ?, 'bank.match', 'bank_rows', ?, NULL, ?, ? WHERE ${free}`, businessId, userId, rowId,
+      JSON.stringify({ transactionIds: [txId], how: 'matched on confirming the shift' }), t, rowId, businessId),
+    stmt(db, "UPDATE bank_rows SET status = 'matched', done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched' AND business_id = ?", userId, t, rowId, businessId),
+  ];
+}
+
 /** Confirms a shift in one batch: approved income rows, the shift marked confirmed, audit rows. */
-export async function confirmShift(db: DB, businessId: string, day: string, userId: string): Promise<{ rows: number; totalPaise: number } | { blockers: string[] }> {
+export async function confirmShift(db: DB, businessId: string, day: string, userId: string): Promise<{ rows: number; totalPaise: number; matched: number } | { blockers: string[] }> {
   await refreshComparisons(db, businessId, day, userId);
   const view = await shiftView(db, businessId, day);
   if (view.status === 'confirmed') return { blockers: ['This shift is already confirmed.'] };
@@ -536,13 +573,14 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   const onCredit = (r: NewRow) => r.mode === 'upi' && ONE_SIDED.includes(r.c.difference) && !r.c.linked_to_id;
   const t = now();
   const shift = await one<{ id: string }>(db, 'SELECT id FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day);
+  const ids = rows.map(() => newId());
   const statements = [
     // First, so a second confirm running at the same moment fails here and rolls back whole.
     stmt(db, "UPDATE shifts SET status = 'confirmed', confirmed_by = ?, confirmed_at = ? WHERE id = ?", userId, t, shift!.id),
-    ...rows.map((r) => stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status,
+    ...rows.map((r, i) => stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status,
       payment_mode, bill_no, pos_no, confirmed_source, comparison_id, shift_day, match_status, ocr_original, created_at)
       VALUES (?, ?, ?, ?, ?, 'income', ?, ?, 'software_report', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      newId(), businessId, r.mode === 'cash' ? cashAccount : null, day, r.amount, headFor.get(r.billType) ?? null,
+      ids[i], businessId, r.mode === 'cash' ? cashAccount : null, day, r.amount, headFor.get(r.billType) ?? null,
       `Bill ${r.c.bill_no}`, onCredit(r) ? 'reviewed' : 'approved', r.mode, r.c.bill_no, r.c.pos_no || null, r.source, r.c.id, day,
       r.mode === 'upi' ? 'awaiting_bank_match' : r.mode === 'card' ? 'awaiting_card_settlement' : null,
       onCredit(r) ? JSON.stringify({ countOnCredit: true }) : null, t)),
@@ -550,8 +588,19 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       VALUES (?, ?, 'shift.confirm', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id,
       JSON.stringify({ shiftDay: day, incomeRows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0) }), t),
   ];
+  // The credits shown as evidence are matched to the bills they paid (approved 5 Nov 2026), by the person confirming.
+  // Only a bill counted as one UPI payment of the credit's amount. Each match gets its own time, so Unmatch undoes one.
+  let matched = 0;
+  for (const c of view.comparisons) {
+    if (!c.bank) continue;
+    const upi = rows.map((r, i) => ({ r, id: ids[i] })).filter((x) => x.r.c.id === c.id && x.r.mode === 'upi');
+    if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
+    statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, upi[0].id, upi[0].r.amount, userId, t + 1 + matched));
+    matched += 1;
+  }
+  if (matched) statements.push(...settleOnCredit(db, businessId));
   await db.batch(statements);
-  return { rows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0) };
+  return { rows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0), matched };
 }
 
 /** Owner only (checked by the route). Removes the rows confirmation made, keeping them in the audit log. */

@@ -19,6 +19,38 @@ const mins = (a: number, b: number) => Math.round(Math.abs(a - b) / 60000);
 
 interface Sale { id: string; net: number; billNo: string | null; comparisonId: string | null; paidAt: number | null; difference: string | null; regId: string | null;
   swAmount: number | null; gross: number | null; grouped: number; parts: number }
+/** Largest difference offered as "round the bill to the credit". */
+const ROUND_PAISE = 3000;
+const TABLE_MAX = 10;
+
+/**
+ * Sets of 2 to 10 bills adding up exactly to an amount, bills within 45 minutes of each other. Stops at two sets
+ * (two means a person decides) or after a fixed amount of searching. Bills come sorted largest first.
+ */
+export function tableSets<T extends { net: number; paidAt: number | null }>(bills: T[], amount: number): T[][] {
+  const found: T[][] = [];
+  let steps = 0;
+  const pick: T[] = [];
+  const walk = (i: number, left: number) => {
+    if (found.length > 1 || ++steps > 200_000) return;
+    if (left === 0) {
+      const times = pick.map((x) => x.paidAt!);
+      if (pick.length >= 2 && Math.max(...times) - Math.min(...times) <= 45 * 60000) found.push([...pick]);
+      return;
+    }
+    if (pick.length === TABLE_MAX) return;
+    for (let j = i; j < bills.length; j++) {
+      if (bills[j].net > left) continue;
+      pick.push(bills[j]);
+      walk(j + 1, left - bills[j].net);
+      pick.pop();
+      if (found.length > 1) return;
+    }
+  };
+  walk(0, amount);
+  return steps > 200_000 ? [] : found;
+}
+
 interface Credit { id: string; amount: number; postedAt: number; vpa: string | null; tranId: string }
 
 export async function explainShift(db: DB, businessId: string, day: string) {
@@ -137,6 +169,58 @@ export async function explainShift(db: DB, businessId: string, day: string) {
         });
       }
     }
+  }
+
+  // A credit some single bill of its amount could take is left to the plain matching.
+  const single = (m: Credit) => sales.some((x) => (x.net === m.amount || x.gross === m.amount) && near(m, x.paidAt));
+  // Bills with no credit of their own amount near them: the ones a table credit or a rounded credit can explain.
+  const loose = sales.filter((x) => x.parts === 1 && !x.grouped && x.paidAt != null
+    && !credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt)));
+
+  // One credit for a table: 2 to 10 bills paid within 45 minutes of each other, not marked paid together, that add up
+  // exactly to one credit (approved 5 Nov 2026; tables of up to 8 bills were matched by hand on 2 Nov). Offered only
+  // when exactly one set of bills fits.
+  for (const m of credits.filter((c) => !single(c))) {
+    const pool = loose.filter((x) => x.net < m.amount && mins(m.postedAt, x.paidAt!) <= 60)
+      .sort((a, b) => mins(m.postedAt, a.paidAt!) - mins(m.postedAt, b.paidAt!)).slice(0, 24)
+      .sort((a, b) => b.net - a.net);
+    const sets = tableSets(pool, m.amount);
+    if (sets.length !== 1) continue;
+    const set = sets[0];
+    const times = set.map((x) => x.paidAt!);
+    cards.push({
+      key: `table:${m.id}`, kind: 'one_credit_many_bills', billNos: set.map((x) => x.billNo ?? ''),
+      title: `${rs(m.amount)} at ${hm(m.postedAt)} pays ${set.length} bills: ${set.map((x) => x.billNo).join(', ')}`,
+      evidence: [
+        `Bills ${set.map((x) => `${x.billNo} (${rs(x.net)})`).join(', ')} add up to exactly ${rs(m.amount)}.`,
+        `They were paid between ${hm(Math.min(...times))} and ${hm(Math.max(...times))}; the credit came at ${hm(m.postedAt)}. No other set of bills fits.`,
+        'Probably one table paying at once. Matching ties the credit to all of them.',
+      ],
+      score: 75, uses: [...set.map((x) => `tx:${x.id}`), `cr:${m.id}`],
+      actions: [{ label: `Match to ${set.length} bills`, primary: true, method: 'POST', path: `${base}/bank-rows/match-set`,
+        body: { rowIds: [m.id], transactionIds: set.map((x) => x.id) } }],
+    });
+  }
+
+  // Round the bill to the credit: the bank received up to ₹30 more or less than one bill, close in time, and
+  // nothing else fits (approved 5 Nov 2026; most hand fixes on 2 Nov were ₹1 to ₹30).
+  for (const m of credits.filter((c) => !single(c))) {
+    const close = loose.filter((x) => Math.abs(x.net - m.amount) <= ROUND_PAISE && x.net !== m.amount && mins(m.postedAt, x.paidAt!) <= 20);
+    if (close.length !== 1) continue;
+    const x = close[0];
+    if (credits.some((o) => o.id !== m.id && Math.abs(x.net - o.amount) <= ROUND_PAISE && mins(o.postedAt, x.paidAt!) <= 20)) continue;
+    const d = m.amount - x.net;
+    cards.push({
+      key: `round:${x.id}:${m.id}`, kind: 'round_to_credit', billNos: [x.billNo ?? ''],
+      title: `Bill ${x.billNo}: ${rs(x.net)} written, ${rs(m.amount)} received`,
+      evidence: [
+        `The bank received ${rs(m.amount)} at ${hm(m.postedAt)}, ${mins(m.postedAt, x.paidAt!)} min from the bill: ${rs(Math.abs(d))} ${d > 0 ? 'more' : 'less'} than written.`,
+        'No other bill or credit is this close. Fixing changes the bill to what was received, with the difference as a tip or discount.',
+      ],
+      score: 65, uses: [`tx:${x.id}`, `cr:${m.id}`],
+      actions: [{ label: `Fix: bill ${rs(m.amount)} (${d > 0 ? `tip ${rs(d)}` : `discount ${rs(-d)}`})`, primary: true, method: 'POST', path: `${base}/bank-rows/match-set`,
+        body: { rowIds: [m.id], transactionIds: [x.id], treat: 'bills', note: `Rounded to the bank credit, ${d > 0 ? '+' : '−'}${rs(Math.abs(d))} (explainer)` } }],
+    });
   }
 
   // 4. Clear matches waiting for a click.

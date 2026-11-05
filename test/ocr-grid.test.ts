@@ -269,3 +269,23 @@ describe('Old POS bills', () => {
     expect(['26110145', '2610307', '14523', '', null].some(isOldPosBill)).toBe(false);
   });
 });
+
+describe('Grouping bills to a row that already has its payment', () => {
+  it('drops the tip worked out for that row alone, so the group is not counted twice', async () => {
+    const p = await page();
+    const add = (b: Record<string, unknown>) => p.clients.entry_staff.post(`/businesses/${p.bid}/uploads/${p.id}/register-rows`, { billType: 'fnb', status: 'draft', ...b });
+    // Row 2 typed first: ₹136 bill, ₹3,199 paid, so Review filled a ₹3,063 tip.
+    const head = (await add({ billNo: '26103121', amount: '136', discount: '-3063', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '3199' }] })).json.id;
+    const kept = (await add({ billNo: '26103122', amount: '500', discount: '50', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '400' }] })).json.id;
+    // A new line grouped to it, and an existing one moved into the group.
+    expect((await add({ billNo: '145072', amount: '633', paidWithRowId: head, payments: [] })).status).toBe(201);
+    const other = (await add({ billNo: '145139', amount: '132', payments: [] })).json.id;
+    expect((await p.clients.entry_staff.put(`/businesses/${p.bid}/register-rows/${other}`, { billNo: '145139', billType: 'fnb', amount: '132', paidWithRowId: head, status: 'draft', payments: [] })).status).toBe(200);
+    const rows = await sql`SELECT id, discount_paise, tip_paise FROM register_rows WHERE id IN (${head}, ${kept})`;
+    expect(rows.find((r: any) => r.id === head)).toMatchObject({ discount_paise: 0, tip_paise: 0 });
+    // A Disc a person typed that is not "amount minus payment" stays (₹500 bill, ₹400 paid, ₹50 written).
+    expect(await sql`SELECT id FROM register_rows WHERE paid_with_row_id = ${kept}`).toHaveLength(0);
+    expect((await add({ billNo: '145140', amount: '50', paidWithRowId: kept, payments: [] })).status).toBe(201);
+    expect((await sql`SELECT discount_paise FROM register_rows WHERE id = ${kept}`)[0].discount_paise).toBe(5000);
+  });
+});

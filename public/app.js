@@ -2049,7 +2049,25 @@ async function compareView(biz, day) {
   const nextDay = at >= 0 && at < asc.length - 1 ? asc[at + 1] : null;
   const auto = toDecide.filter((c) => c.decision && c.auto);
   const byPerson = toDecide.filter((c) => c.decision && !c.auto);
-  const open = toDecide.filter((c) => !c.decision);
+  // Bank-backed first, then bills with a credit, then the rest: the puzzles come last.
+  const rank = (c) => (c.bank?.suggest ? 0 : c.bank ? 1 : 2);
+  const open = toDecide.filter((c) => !c.decision).sort((a, b) => rank(a) - rank(b));
+  const backed = canDecide && !confirmed ? open.filter((c) => c.bank?.suggest) : [];
+  const isUpi = (c) => c.software?.mode === 'upi' || c.register?.mode === 'upi';
+  const bankChip = (c) => {
+    if (!v.bank || !isUpi(c)) return '';
+    if (c.bank) {
+      const fits = c.bank.fits === 'both' ? 'both sides' : c.bank.fits === 'software' ? 'the software' : 'the register';
+      return html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(c.bank.amountPaise)} came in at ${when(c.bank.postedAt)}. It equals ${fits}. Confirming matches it to this bill.">Bank ₹ ${rs(c.bank.amountPaise)} · ${hhmm(c.bank.postedAt)}${c.bank.minutes != null ? ` · ${c.bank.minutes} min` : ''}</span>`;
+    }
+    return v.bank.covered ? html`<span class="chip" title="No unmatched UPI credit of this amount near the bill.">No bank credit</span>`
+      : html`<span class="chip" title="The bank statement does not reach the end of this shift yet.">Bank not in yet</span>`;
+  };
+  // What confirming will do with the bank.
+  const counted = v.comparisons.filter((c) => c.difference === 'match' || c.decision === 'use_software' || c.decision === 'use_register');
+  const upiSide = (c) => (c.decision === 'use_software' ? c.software : c.decision === 'use_register' || c.difference === 'match' ? c.register : null);
+  const countedUpi = counted.filter((c) => upiSide(c)?.mode === 'upi');
+  const matchNow = countedUpi.filter((c) => c.bank && (c.bank.fits === 'both' || (c.bank.fits === 'software') === (c.decision === 'use_software')));
   const kinds = [['all', 'All', open], ['sw', 'Only in software', open.filter((c) => c.difference === 'missing_in_register')],
     ['rg', 'Only in register', open.filter((c) => c.difference === 'missing_in_software')], ['diff', 'Amount or mode', open.filter((c) => !c.difference.startsWith('missing'))]];
   const onCredit = toDecide.filter((c) => c.difference.startsWith('missing') && (c.decision === 'use_software' || c.decision === 'use_register') && !c.linkedToId
@@ -2069,6 +2087,7 @@ async function compareView(biz, day) {
       ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
       ${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html`<span class="chip wait">Mode differs</span>` : ''}` : ''}
       ${c.auto ? html`<span class="tiny" style="color:var(--teal-ink)">Decided by Bookr${c.note ? `: ${c.note}` : ''}</span>` : ''}
+      ${confirmed ? '' : bankChip(c)}
     </div></td>
     <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
         const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
@@ -2077,7 +2096,8 @@ async function compareView(biz, day) {
             <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
             ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
         }
-        return html`<button class="btn ${on ? 'ghost' : 'plain'} dchip" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}">${on ? '✓ ' : ''}${l}</button>`;
+        const sugg = !c.decision && c.bank?.suggest === k && !type && !link;
+        return html`<button class="btn ${on ? 'ghost' : 'plain'} dchip ${sugg ? 'sugg' : ''}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}" ${sugg ? `title="The bank backs this: ₹ ${money(c.bank.amountPaise)} came in at ${hhmm(c.bank.postedAt)}"` : ''}>${on ? '✓ ' : ''}${l}${sugg ? html` <span class="bank-tag">bank</span>` : ''}</button>`;
       })}</div>`
       : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
   </tr>`;
@@ -2100,6 +2120,7 @@ async function compareView(biz, day) {
         <span class="tchip ${v.gaps.length ? 'warn' : 'ok'}">Software · ${v.softwareBills} bills${v.gaps.length ? ` · ${missingHours} h missing` : ' · 8 am to 8 am'}</span>
         <span class="tchip ${v.registerRows ? 'ok' : 'warn'}">Register · ${v.registerPages} page${v.registerPages === 1 ? '' : 's'}, ${v.registerRows} bills</span>
         ${comps.length ? html`<span class="tchip">${comps.length} complimentary</span>` : ''}
+        ${v.bank ? html`<span class="tchip ${v.bank.covered ? 'ok' : 'warn'}" title="${v.bank.lastBankAt ? `Latest UPI line in Bookr: ${when(v.bank.lastBankAt)}` : 'No UPI bank lines in Bookr yet'}">${v.bank.covered ? 'Bank in' : v.bank.lastBankAt ? `Bank up to ${when(v.bank.lastBankAt)}` : 'Bank not in yet'}</span>` : ''}
         <details class="menu"><summary class="linkbtn">Details</summary><div class="menu-pop" style="min-width:300px">
           ${v.reports.map((r) => html`<div class="note">Report ${when(r.coversFrom)} to ${when(r.coversTo)}${confirmed || !biz.actions.includes('sales.import') ? '' : html` · <a href="#" data-cover="${r.id}" data-from="${r.coversFrom}" data-to="${r.coversTo}">Change</a>`}</div>`)}
           ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/bringin/${day}">Bring in a report</a>` : ''}
@@ -2115,6 +2136,7 @@ async function compareView(biz, day) {
     <div id="cmsg"></div>
     ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
     ${(v.warnings ?? []).map((w) => html`<div class="cmp-warn">⚠ ${blockerHtml(w.text, v)}</div>`)}
+    ${v.bank?.noBill?.length ? html`<div class="cmp-warn">⚠ ${v.bank.noBill.length} UPI credit${v.bank.noBill.length > 1 ? 's' : ''} in this shift ${v.bank.noBill.length > 1 ? 'have' : 'has'} no bill of that amount: ${v.bank.noBill.slice(0, 6).map((x) => `₹ ${rs(x.amountPaise)} at ${hhmm(x.postedAt)}`).join(', ')}${v.bank.noBill.length > 6 ? ' …' : ''}. Check for a sale not written down, or a table paid at once. It does not stop confirming.</div>` : ''}
     <div class="seg cmp-tabs" role="tablist">
       <button type="button" role="tab" data-tab="shift" class="${tab === 'shift' ? 'on' : ''}">This shift</button>
       <button type="button" role="tab" data-tab="other" class="${tab === 'other' ? 'on' : ''}">Waiting for other side (${waiting?.bills?.length ?? 0})</button>
@@ -2132,6 +2154,7 @@ async function compareView(biz, day) {
         </tbody></table></div></section>` : ''}
       <section class="card" style="gap:10px">
         <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2>To decide (${open.length})</h2>
+          ${backed.length ? html`<button class="btn" type="button" id="acceptbank" title="Each choice marked 'bank' is the side the bank credit agrees with">Accept ${backed.length} bank-backed choice${backed.length > 1 ? 's' : ''}</button>` : ''}
           ${open.length ? html`<span class="seg" role="group" aria-label="Show">${kinds.map(([k, l, list]) => list.length || k === 'all' ? html`<button type="button" data-kind="${k}" class="${k === 'all' ? 'on' : ''}">${l} (${list.length})</button>` : '')}</span>` : ''}</div>
         ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so no decision is needed: ${v.matchedAfterAdjustment.map((m) => m.billNo).join(', ')}.</div>` : ''}
         ${canDecide && !confirmed && open.filter(bulkOk).length > 1 ? html`<form id="bulkreg" class="inset" style="gap:8px">
@@ -2157,6 +2180,7 @@ async function compareView(biz, day) {
             ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
             ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="ok-msg">Everything is decided. Confirm the shift at the top.</div>`}
             ${v.assumedTypes?.length ? html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px">${v.assumedTypes.length} bill${v.assumedTypes.length > 1 ? 's were' : ' was'} taken as <strong>F&amp;B</strong> because the register's type could not be read: ${blockerHtml(v.assumedTypes.join(', '), v)}.</div>` : ''}
+            ${v.bank && countedUpi.length ? html`<div class="note"><strong>On confirming:</strong> ${matchNow.length} of ${countedUpi.length} UPI bill${countedUpi.length > 1 ? 's are' : ' is'} matched to ${matchNow.length === 1 ? 'its' : 'their'} bank credit at once${countedUpi.length - matchNow.length ? `; ${countedUpi.length - matchNow.length} wait${countedUpi.length - matchNow.length === 1 ? 's' : ''} for ${countedUpi.length - matchNow.length === 1 ? 'its' : 'their'} credit on UPI matching` : ''}. Unmatch undoes any of them.</div>` : ''}
             <div class="note">Only Owner and Accountant can decide differences and confirm. The bank credit does not have to arrive first.</div>`}
         </section>
         <section class="card" style="flex:3 1 420px;gap:10px">
@@ -2260,6 +2284,15 @@ async function compareView(biz, day) {
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
   }));
   app.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
+  document.getElementById('acceptbank')?.addEventListener('click', (e) => {
+    e.target.disabled = true;
+    act(async () => {
+      for (const c of backed) {
+        await apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: c.bank.suggest, billType: null, linkedToId: null,
+          note: `Bank: ₹ ${rs(c.bank.amountPaise)} came in at ${hhmm(c.bank.postedAt)}` });
+      }
+    });
+  });
   document.getElementById('confirm')?.addEventListener('click', () => {
     if (!v.canConfirm) { // not yet: show what is left
       app.querySelector('[data-tab="shift"]')?.click();
