@@ -1046,7 +1046,7 @@ describe('bills paid together across register pages', () => {
     expect(res.status).toBe(201);
     const d2 = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${p2}`)).json;
     expect(d2.pageNo).toBe(2);
-    expect(d2.otherPageRows).toEqual([expect.objectContaining({ id: head, pageNo: 1, uploadId: p1, amountPaise: 60000, payments: [expect.objectContaining({ amountPaise: 100000 })] })]);
+    expect(d2.otherPageRows).toEqual([expect.objectContaining({ id: head, pageNo: 1, uploadId: p1, amountPaise: 60000, billType: 'fnb', status: 'draft', remarks: null, payments: [expect.objectContaining({ amountPaise: 100000 })] })]);
     // 600 + 500 = 1,100 against 1,000 paid: Fill on page 2 shares the 100 discount over both pages' bills.
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/fill-discounts`)).json.filled).toBe(2);
     const rows = await sql`SELECT discount_paise FROM register_rows WHERE id IN (${head}, ${res.json.id})`;

@@ -1293,6 +1293,104 @@ function regBarHtml(u) {
 }
 let regFilter = 'all';
 
+// Issue cards: what Bookr can see clearly on a shift's rows but a person must agree to (5 Nov 2026). Nothing happens
+// until a button is pressed. "As on the register" hides them and leaves the page laid out as the paper is.
+const REG_VIEW_KEY = 'bookr.review.view';
+let regView = (() => { try { return localStorage.getItem(REG_VIEW_KEY) === 'register' ? 'register' : 'cards'; } catch { return 'cards'; } })();
+const pageRowLabel = (u, x) => `Page ${x.pageNo ?? u.pageNo ?? '?'}, row ${x.lineNo}`;
+
+/** The cards for rows on this page. A row holding a group's payment is never offered for deleting: its bills would lose it. */
+function reviewCards(u) {
+  const gone = dismissed();
+  const here = (xs) => xs.some((x) => !x.elsewhere);
+  const at = (x) => (x.pageNo ?? u.pageNo ?? 0) * 10000 + x.lineNo;
+  const cards = [];
+  const byNo = new Map();
+  for (const r of regRows) if (r.billNo) byNo.set(r.billNo, [...(byNo.get(r.billNo) ?? []), r]);
+  for (const [no, list] of byNo) {
+    if (list.length < 2 || !here(list)) continue;
+    const rows = [...list].sort((a, b) => at(a) - at(b));
+    const software = (u.softwareList ?? []).find((b) => b.billNo === no) ?? null;
+    if (new Set(rows.map((r) => r.amountPaise)).size > 1) {
+      cards.push({ key: `rv:two:${no}`, kind: 'two', title: `Bill ${no} has two amounts`, reason: 'Same number, different amounts', rows, software,
+        note: 'Bookr cannot tell which is right. Open each row and compare it with the photo.' });
+      continue;
+    }
+    // The later line is taken as the repeat, unless the earlier one has less on it (no payment, no group).
+    const weight = (x) => (membersOf(x).length ? 2 : x.paidWithRowId || x.payments.length ? 1 : 0);
+    for (const later of rows.slice(1)) {
+      const [keep, odd] = weight(later) > weight(rows[0]) ? [later, rows[0]] : [rows[0], later];
+      if (!here([keep, odd])) continue;
+      cards.push({ key: `rv:dup:${[keep.id, odd.id].sort().join(':')}`, kind: 'dup', title: `Bill ${no} is written twice`, reason: 'Same number, same amount', rows: [keep, odd], odd, software });
+    }
+  }
+  for (const head of regRows) {
+    const ms = membersOf(head);
+    const short = groupNet(head) - paidOf(head);
+    if (!ms.length || short <= 0 || !here([head, ...ms])) continue;
+    const fits = ms.filter((m) => netOf(m) === short);
+    if (!fits.length) continue;
+    cards.push({ key: `rv:grp:${head.id}:${short}`, kind: 'group', title: `Bills paid together are ₹ ${rs(short)} short`, reason: `${fits.length > 1 ? 'Bills' : 'A bill'} of exactly that amount`,
+      rows: [head, ...fits], fits, note: 'Taking a bill out does not delete it: it then needs its own payment, or deleting if it was written twice.' });
+  }
+  return cards.filter((c) => !gone.has(c.key));
+}
+
+function cardRowHtml(u, x, odd) {
+  const label = pageRowLabel(u, x);
+  const pays = x.paidWithRowId ? `Paid with ${rowLabel(headOf(x) ?? { lineNo: '?' })}`
+    : x.payments.length ? x.payments.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${rs(p.amountPaise)}`).join(' + ') : 'No payment';
+  return html`<div class="wit ${odd ? 'odd' : ''}">
+    <div class="wit-l">${x.elsewhere ? html`<a href="#/b/${currentBizId()}/review/${x.uploadId}/${x.id}">${label}</a>` : html`<button type="button" class="linkbtn" data-cardrow="${x.id}" title="Show this row on the photo">${label} · photo</button>`}</div>
+    <div class="wit-v"><span class="mono">${x.billNo || 'No number'}</span> · ₹ ${rs(x.amountPaise)}</div>
+    <div class="tiny">${pays}${membersOf(x).length ? ` · pays for ${membersOf(x).length + 1} bills` : ''}</div>
+  </div>`;
+}
+
+function cardActionsHtml(u, c) {
+  const del = (x, other, cls, text) => html`<button class="btn ${cls}" type="button" data-carddel="${x.id}" data-note="${`same as ${pageRowLabel(u, other).toLowerCase()}`}">${text}</button>`;
+  const not = html`<button class="btn plain" type="button" data-rvnot="${c.key}">Not this</button>`;
+  if (c.kind === 'dup') {
+    const keep = c.rows.find((x) => x !== c.odd);
+    return html`${membersOf(c.odd).length ? '' : del(c.odd, keep, '', `Delete ${pageRowLabel(u, c.odd).toLowerCase()} (written twice)`)}
+      ${membersOf(keep).length ? '' : del(keep, c.odd, 'plain', `Delete ${pageRowLabel(u, keep).toLowerCase()} instead`)}${not}`;
+  }
+  if (c.kind === 'group') {
+    return html`${c.fits.map((x) => html`<button class="btn ${c.fits.length > 1 ? 'plain' : ''}" type="button" data-cardout="${x.id}">Take ${pageRowLabel(u, x).toLowerCase()} out of the group</button>`)}${not}`;
+  }
+  return not;
+}
+
+function reviewCardHtml(u, c) {
+  return html`<div class="rv-card" data-rvcard="${c.key}">
+    <div class="lane-h"><strong>${c.title}</strong><span class="tchip ok">${c.reason}</span></div>
+    <div class="wit3">${c.rows.map((x) => cardRowHtml(u, x, x === c.odd))}
+      ${c.software ? html`<div class="wit"><div class="wit-l">Software report</div><div class="wit-v"><span class="mono">${c.software.billNo}</span> · ₹ ${rs(c.software.amountPaise)}</div><div class="tiny">${MODE_LABELS[c.software.mode] ?? ''}</div></div>` : ''}
+    </div>
+    ${c.note ? html`<div class="note">${c.note}</div>` : ''}
+    <div class="form-row">${cardActionsHtml(u, c)}</div>
+    <div class="form-msg"></div>
+  </div>`;
+}
+
+/** The toggle, then the cards when they are on. */
+function regCardsHtml(u) {
+  const cards = reviewCards(u);
+  return html`<div class="lane-h">
+      <strong>${regView === 'register' ? 'As on the register' : cards.length ? `${cards.length} issue${cards.length === 1 ? '' : 's'} for you to decide` : 'No major issues found'}</strong>
+      <span class="seg" role="group" aria-label="View"><button type="button" data-regview="cards" class="${regView === 'cards' ? 'on' : ''}">Issue cards (${cards.length})</button><button type="button" data-regview="register" class="${regView === 'register' ? 'on' : ''}">As on the register</button></span>
+    </div>
+    ${regView === 'cards' ? cards.map((c) => reviewCardHtml(u, c)) : ''}`;
+}
+
+/** Unticked rows of this page with nothing red or amber on them, and not in a group that does not add up (told only on its payment row). */
+const cleanRows = (u) => u.rows.filter((r) => { if (r.status === 'checked' || payDiffers(r)) return false; const i = rowIssues(r); return !i.red.length && !i.amber.length; });
+function regRowsHeadHtml(u) {
+  if (regView !== 'cards') return '';
+  const n = cleanRows(u).length;
+  return html`<div class="lane-h"><strong>Rows</strong>${n ? html`<button class="btn plain" type="button" id="tickclean" style="min-height:32px;font-size:13px" title="Rows with nothing red or amber. Ticking says they match the photo.">Tick the ${n} clean row${n === 1 ? '' : 's'}</button>` : ''}</div>`;
+}
+
 function registerPanel(biz, u) {
   regRows = shiftRowsOf(u);
   const locked = u.shiftStatus === 'confirmed';
@@ -1304,6 +1402,7 @@ function registerPanel(biz, u) {
           <details class="howto"><summary>How this works</summary><kbd>Enter</kbd> ticks the row and moves on, <kbd>↑</kbd><kbd>↓</kbd> move between rows. Every change saves when you leave the cell. Red means it needs you: Claude could not read the cell, the bill number is not in the software report, or the payments do not add up. Amber was filled in by Bookr; check it against the photo. When every row is ticked and the payments match, an Owner or Accountant confirms the shift on <a href="#/b/${biz.id}/compare/${u.day}">Compare sales</a>, which locks this page. Use ✎ for a bill paid together with another, or paid in two ways in one column.</details></div>`}
       <div class="rv-bar" id="rvbar">${regBarHtml(u)}</div>
       <div id="regtools">${regToolsHtml(u, locked)}</div>
+      ${locked ? '' : html`<div class="rv-cards" id="regcards"></div><div id="rowshead"></div>`}
       ${u.fromSoftware ? '' : html`<div class="strip" id="strip"><canvas></canvas><span class="band"></span>
         <span class="strip-tools"><span class="tiny" id="striphint"></span><button type="button" class="iconbtn" id="striprot" title="Turn the photo" aria-label="Turn the photo">⟳</button><button type="button" class="btn plain" id="photoside" style="min-height:28px;padding:0 10px;font-size:12px">Whole page</button></span></div>`}
       <div class="scroll"><table id="regtable" class="regtable ${regFilter === 'needs' ? 'only-needs' : ''}">
@@ -1466,7 +1565,7 @@ function wireInlineRows(biz, u, strip) {
     document.getElementById('regfoot').innerHTML = regFootHtml(u, false).__html; wireFoot(biz, u);
     document.getElementById('rvbar').innerHTML = regBarHtml(u).__html;
     document.getElementById('regtools').innerHTML = regToolsHtml(u, false).__html;
-    wireBar(); wireFill(); drawWaiting(biz, u);
+    wireBar(); wireFill(); drawWaiting(biz, u); drawCards();
   };
   const save = (tr, changed) => {
     const id = tr.dataset.row;
@@ -1577,10 +1676,56 @@ function wireInlineRows(biz, u, strip) {
       if (next) { next.scrollIntoView({ block: 'center', behavior: 'smooth' }); focusRow(next, next.querySelector('.flag')?.dataset.f ?? 'billNo'); }
     });
   };
+  // Issue cards, and the toggle back to the page as the register has it.
+  const drawCards = () => {
+    const host = document.getElementById('regcards');
+    if (!host) return;
+    host.innerHTML = regCardsHtml(u).__html;
+    document.getElementById('rowshead').innerHTML = regRowsHeadHtml(u).__html;
+    host.querySelectorAll('[data-regview]').forEach((b) => b.addEventListener('click', () => {
+      regView = b.dataset.regview;
+      try { localStorage.setItem(REG_VIEW_KEY, regView); } catch { /* storage unavailable */ }
+      drawCards();
+    }));
+    host.querySelectorAll('[data-cardrow]').forEach((b) => b.addEventListener('click', () => {
+      const tr = table.querySelector(`tr[data-row="${b.dataset.cardrow}"]`);
+      if (tr) { tr.scrollIntoView({ block: 'center', behavior: 'smooth' }); focusRow(tr); }
+    }));
+    host.querySelectorAll('[data-rvnot]').forEach((b) => b.addEventListener('click', () => {
+      const gone = dismissed(); gone.add(b.dataset.rvnot);
+      try { localStorage.setItem(DISMISS_KEY, JSON.stringify([...gone].slice(-500))); } catch { /* storage unavailable */ }
+      drawCards();
+    }));
+    const act = (b, run, done) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await run();
+        await reviewView(biz, u.id);
+        document.getElementById('rmsg').innerHTML = html`<div class="ok-msg">${done}</div>`.__html;
+      } catch (err) { b.disabled = false; showError(b.closest('[data-rvcard]').querySelector('.form-msg'), err); }
+    });
+    host.querySelectorAll('[data-carddel]').forEach((b) => {
+      const x = regRows.find((y) => y.id === b.dataset.carddel);
+      act(b, () => api('DELETE', `/businesses/${biz.id}/register-rows/${x.id}`, { reason: 'written_twice', note: b.dataset.note }), `${pageRowLabel(u, x)} deleted as written twice. It stays on record.`);
+    });
+    host.querySelectorAll('[data-cardout]').forEach((b) => {
+      const x = regRows.find((y) => y.id === b.dataset.cardout);
+      act(b, () => api('PUT', `/businesses/${biz.id}/register-rows/${x.id}`, { paidWithRowId: null, payments: [], status: 'draft', billNo: x.billNo ?? '', billType: x.billType ?? null,
+        amount: rupeesForInput(x.amountPaise), discount: rupeesForInput(x.discountPaise ?? 0), remarks: x.remarks ?? null }), `${pageRowLabel(u, x)} taken out of the group. It now needs its own payment, or deleting if it was written twice.`);
+    });
+    document.getElementById('tickclean')?.addEventListener('click', () => {
+      for (const r of cleanRows(u)) {
+        const tr = table.querySelector(`tr[data-row="${r.id}"]`);
+        const box = tr && val(tr, 'checked');
+        if (box && !box.checked) { box.checked = true; save(tr, box); }
+      }
+    });
+  };
   let openRowForm = () => {};
   table.querySelectorAll('tbody tr[data-row]').forEach(bind);
   wireFoot(biz, u);
   wireBar();
+  drawCards();
   // Start on the first row that needs you, so the strip shows its line.
   const first = table.querySelector('tbody tr.needs-you') ?? table.querySelector('tbody tr[data-row]');
   if (first) { const r = u.rows.find((x) => x.id === first.dataset.row); if (r) { first.classList.add('current'); strip.show(r); } }

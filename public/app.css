@@ -320,4 +320,6 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 .wit { background: var(--ground); border-radius: 6px; padding: 6px 8px; }
 .wit-l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .wit.odd { background: #FEF2F2; }
+.rv-cards { display: grid; gap: 8px; }
+.rv-card { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .wit.odd .wit-v { text-decoration: line-through; color: #991B1B; }

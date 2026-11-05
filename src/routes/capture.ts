@@ -231,8 +231,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id);
     const pageNo = new Map(pages.map((p, i) => [p.id, i + 1]));
     const [others, otherPays] = await Promise.all([
-      all<{ id: string; uploadId: string }>(db, `SELECT id, upload_id AS uploadId, line_no AS lineNo, bill_no AS billNo, amount_paise AS amountPaise,
-        discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId FROM register_rows
+      all<{ id: string; uploadId: string }>(db, `SELECT id, upload_id AS uploadId, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
+        discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status FROM register_rows
         WHERE business_id = ? AND shift_day = ? AND upload_id <> ? ORDER BY line_no`, bid, u.business_day, u.id),
       all<{ registerRowId: string }>(db, `SELECT p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel, p.amount_paise AS amountPaise
         FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
