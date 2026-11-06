@@ -526,6 +526,7 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRol
   const ok = chosen.filter((x) => {
     const o = others.get(x.id);
     const why = x.difference !== 'missing_in_software' ? 'it is in the software report'
+      : /old pos/i.test(note) && isNewPosBill(x.bill_no) ? 'its number is in the new POS format, so it is not an old POS bill'
       : !x.register_row_id || !paid.has(x.register_row_id) ? 'no payment is written for it in the register'
       : !isNewPosBill(x.bill_no) && regRows.find((r) => r.id === x.register_row_id)?.status !== 'checked' ? 'its register row is not reviewed yet'
       : o && isCounted(o.decision) ? `it is already counted on ${o.day}`

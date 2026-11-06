@@ -1107,8 +1107,9 @@ const startsWithDate = (b) => {
   return d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
 };
 const isOldPos = (b) => /^\d{6}$/.test(b ?? '') && !startsWithDate(b); // mirrors src/sales.ts
+const isNewPos = (b) => /^\d{7,9}$/.test(b ?? '') && startsWithDate(b);
 /** A number of neither format, new POS (YYMMDD and a running number) nor old POS. It can never meet a software bill. */
-const isOddBill = (b) => !!b && !(/^\d{7,9}$/.test(b) && startsWithDate(b)) && !isOldPos(b);
+const isOddBill = (b) => !!b && !isNewPos(b) && !isOldPos(b);
 const SHORT_OLD_POS_NOTE = 'Old POS bill, short number';
 const OLD_POS_NOTE = 'Old POS bill';
 /** Why a register number may be a typo. Bookr changes nothing: a person checks it against the photo. */
@@ -2093,8 +2094,8 @@ function blockerHtml(text, v) {
   return { __html: parts.map((p) => (bills.has(p) ? `<a href="#" data-gobill="${esc(p)}" class="mono">${esc(p)}</a>` : esc(p))).join('') };
 }
 
-/** A register-only bill that can be counted from the register in bulk (not matched to another day's software bill). */
-const bulkOk = (c) => c.difference === 'missing_in_software' && !needsReview(c) && !c.numberFlags?.length && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
+/** A register-only bill that can be counted from the register in bulk (not matched to another day's software bill). A new POS number is expected in a report, so it is never in the bulk choice. */
+const bulkOk = (c) => c.difference === 'missing_in_software' && !isNewPos(c.billNo) && !needsReview(c) && !c.numberFlags?.length && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
 
 /** One line under a one-sided bill: the same bill on the other side, on another day. */
 function otherDayNote(c) {

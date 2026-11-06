@@ -1176,6 +1176,15 @@ describe('register numbers of neither format can never match, so they do not wai
 });
 
 describe('register-only bills in bulk (e.g. an old POS)', () => {
+  it('a new POS number cannot be marked as an old POS bill', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const v = await view(h);
+    const r = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '26103125').id], note: 'Old POS bill' });
+    expect(r.json).toMatchObject({ decided: 0, skipped: [{ billNo: '26103125', reason: 'its number is in the new POS format, so it is not an old POS bill' }] });
+    expect(byBill(await view(h), '26103125').decision ?? null).toBeNull();
+  });
+
   it('counts them from the register with a reason, keeps them off the watch list, and skips what cannot be done this way', async () => {
     const h = await hotel();
     const page = await fullShift(h);
