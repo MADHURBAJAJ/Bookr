@@ -198,7 +198,7 @@ kbd { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; bo
 details.howto { display: inline; }
 details.howto summary { display: inline; cursor: pointer; color: var(--teal); margin-left: 6px; }
 details.howto[open] { display: block; margin-top: 6px; }
-details.menu { position: relative; border: 0; background: none; padding: 0; width: auto; min-width: 0; margin: 0; }
+details.menu { position: relative; top: 0; border: 0; background: none; padding: 0; width: auto; min-width: 0; margin: 0; }
 details.menu > summary { list-style: none; display: inline-flex; align-items: center; min-width: 44px; justify-content: center; }
 details.menu:not([open]) .menu-pop { display: none; }
 details.menu > summary::-webkit-details-marker { display: none; }
@@ -271,7 +271,6 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .pager .btn { display: inline-flex; align-items: center; justify-content: center; width: 36px; padding: 0; font-size: 18px; }
 .pager .btn.off { opacity: .4; cursor: default; }
 .head-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; }
-.head-tools details.menu { top: 0; }
 #waiting:empty, #findresults:empty, #rmsg:empty { display: none; }
 .waiting { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; background: var(--wait-bg); color: var(--wait); font-size: 14px; padding: 8px 12px; border-radius: 8px; }
 .waiting > a { margin-left: auto; }

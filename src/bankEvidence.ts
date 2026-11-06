@@ -112,10 +112,11 @@ export const shiftCredits = (db: DB, businessId: string, day: string) => {
 };
 
 /**
- * Credits inside the shift that no bill of this shift could explain (no bill of that amount at all): money in with
- * no bill. A warning only; it may belong to another shift or not be a sale.
+ * Credits inside the shift that no bill of this shift could explain (no bill of that amount at all, nor a group of
+ * bills paid together by UPI, whose one credit is the group's total): money in with no bill. A warning only; it may
+ * belong to another shift or not be a sale.
  */
-export function creditsWithoutBill(credits: EvidenceCredit[], used: Set<string>, bills: EvidenceBill[], window: { from: number; to: number }) {
-  const amounts = new Set(bills.flatMap((b) => [b.swAmount, b.rgAmount]).filter((x): x is number => x != null));
+export function creditsWithoutBill(credits: EvidenceCredit[], used: Set<string>, bills: EvidenceBill[], window: { from: number; to: number }, groupPaid: number[] = []) {
+  const amounts = new Set([...bills.flatMap((b) => [b.swAmount, b.rgAmount]).filter((x): x is number => x != null), ...groupPaid]);
   return credits.filter((c) => !used.has(c.id) && c.postedAt >= window.from && c.postedAt < window.to && !amounts.has(c.amount));
 }

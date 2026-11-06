@@ -468,7 +468,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), shiftCredits(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, credits, cov.window);
-    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window) : [] };
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map((g) => g.paidPaise)) : [] };
   }
 
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
