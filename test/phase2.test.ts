@@ -1625,6 +1625,99 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     expect(later.clear).toEqual([]);
   });
 
+  const incomeFor = async (bid: string, amount: number) => sql`SELECT source, day, status, match_status, matched_bank_row, head_id FROM transactions WHERE business_id = ${bid} AND type = 'income' AND amount_paise = ${amount} ORDER BY source`;
+
+  it('a credit booked directly and its bill that came later become one sale on the booked day; undo puts the booking back', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const acc = await upiAccount(h, 'UPI Bank 2');
+    // Bill 2610318 (₹650, both sides after deciding) was paid; the credit came the day before and was booked as a sale.
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(1, 'S40000011', '30/10/2026 7:00:00 PM', 650)].join('\n') })).status).toBe(200);
+    const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000011'`;
+    const book = (more = {}) => h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb, note: 'Sale', ...more });
+    // Before booking the screen is told a bill of this amount waits, and nothing is booked; the person may go on.
+    const asked = await book({ checkBills: true });
+    expect(asked.json.ok).toBe(false);
+    expect(asked.json.waitingBills.map((b: any) => b.billNo)).toContain('2610318');
+    expect((await book()).status).toBe(200);
+    await decideAll(h);
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/reconcile`;
+    let r = (await h.clients.owner.get(url)).json;
+    const trialCard = r.fixes.find((c: any) => c.kind === 'same_sale');
+    expect(trialCard.billNos).toEqual(['2610318']);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    // Not chosen before confirming: both count, until a person joins them.
+    expect((await incomeFor(h.bid, 65000)).length).toBe(2);
+    r = (await h.clients.owner.get(url)).json;
+    const card = r.fixes.find((c: any) => c.kind === 'same_sale');
+    expect(card.title).toContain('2610318');
+    expect(r.noCredit.some((c: any) => c.billNos.includes('2610318'))).toBe(false);
+    const act = card.actions[0];
+    expect((await h.clients.entry_staff.post(act.path, act.body)).status).toBe(403);
+    expect((await h.clients.owner.post(act.path, act.body)).status).toBe(200);
+    let income = await incomeFor(h.bid, 65000);
+    expect(income).toEqual([expect.objectContaining({ source: 'software_report', day: '2026-10-30', status: 'approved', match_status: null, matched_bank_row: credit.id })]);
+    expect((await sql`SELECT status, transaction_id FROM bank_rows WHERE id = ${credit.id}`)[0]).toMatchObject({ status: 'matched', transaction_id: null });
+    // Undo: the booking is back with its note, and the bill waits on its own day again.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${credit.id}/match`)).status).toBe(200);
+    income = await incomeFor(h.bid, 65000);
+    expect(income.length).toBe(2);
+    expect(income.find((x: any) => x.source === 'bank_sheet')).toMatchObject({ day: '2026-10-30', matched_bank_row: credit.id });
+    expect(income.find((x: any) => x.source === 'software_report')).toMatchObject({ day: '2026-10-31', match_status: 'awaiting_bank_match', matched_bank_row: null });
+    expect((await sql`SELECT status, note FROM bank_rows WHERE id = ${credit.id}`)[0]).toMatchObject({ status: 'booked', note: 'Sale' });
+    expect((await sql`SELECT count(*) AS n FROM bank_matches WHERE bank_row_id = ${credit.id}`)[0].n).toBe(0);
+  });
+
+  it('chosen before confirming, the confirm joins them, so the sale is never counted twice; Keep them apart cancels', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const acc = await upiAccount(h, 'UPI Bank 2');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(1, 'S40000012', '30/10/2026 7:00:00 PM', 650)].join('\n') })).status).toBe(200);
+    const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000012'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb })).status).toBe(200);
+    await decideAll(h);
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/reconcile`;
+    const find = async () => (await h.clients.owner.get(url)).json.fixes.find((c: any) => c.kind === 'same_sale');
+    const act = (await find()).actions[0];
+    expect(act.path).toContain('/comparisons/');
+    expect((await h.clients.owner.post(act.path, act.body)).status).toBe(200);
+    const plan = await find();
+    expect(plan.actions[0].label).toBe('Keep them apart');
+    expect((await h.clients.owner.del(plan.actions[0].path, plan.actions[0].body)).status).toBe(200);
+    expect((await find()).actions[0].label).toBe('Same sale');
+    expect((await h.clients.owner.post(act.path, act.body)).status).toBe(200);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    expect(await incomeFor(h.bid, 65000)).toEqual([expect.objectContaining({ source: 'software_report', day: '2026-10-30', status: 'approved', match_status: null, matched_bank_row: credit.id })]);
+    expect((await sql`SELECT status FROM bank_rows WHERE id = ${credit.id}`)[0].status).toBe('matched');
+    // Unmatch still works after a join made by the confirm.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${credit.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT status FROM bank_rows WHERE id = ${credit.id}`)[0].status).toBe('booked');
+    expect((await incomeFor(h.bid, 65000)).find((x: any) => x.source === 'software_report')).toMatchObject({ day: '2026-10-31', status: 'approved', match_status: 'awaiting_bank_match' });
+  });
+
+  it('a bill on one side only, stuck because its credit was booked, is counted on the booked day once joined', async () => {
+    const h = await hotel();
+    const page = await fullShift(h);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo: '26103199', billType: 'fnb', amount: '1111', discount: '0', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '1111' }] })).status).toBe(201);
+    const acc = await upiAccount(h, 'UPI Bank 2');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(1, 'S40000013', '30/10/2026 7:00:00 PM', 1111)].join('\n') })).status).toBe(200);
+    const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000013'`;
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb })).status).toBe(200);
+    await decideAll(h);
+    const v = await view(h);
+    expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '26103199').id}`, { decision: 'use_register' })).status).toBe(200);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    expect((await incomeFor(h.bid, 111100)).find((x: any) => x.source === 'software_report')).toMatchObject({ status: 'reviewed', day: '2026-10-31' });
+    const r = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    const act = r.fixes.find((c: any) => c.kind === 'same_sale').actions[0];
+    expect((await h.clients.owner.post(act.path, act.body)).status).toBe(200);
+    expect(await incomeFor(h.bid, 111100)).toEqual([expect.objectContaining({ source: 'software_report', status: 'approved', day: '2026-10-30', matched_bank_row: credit.id })]);
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${credit.id}/match`)).status).toBe(200);
+    const back = await incomeFor(h.bid, 111100);
+    expect(back.find((x: any) => x.source === 'software_report')).toMatchObject({ status: 'reviewed', day: '2026-10-31', match_status: 'awaiting_bank_match' });
+    expect(back.find((x: any) => x.source === 'bank_sheet')).toMatchObject({ status: 'approved', day: '2026-10-30' });
+  });
+
   it('closes a bill whose credit never came, after the watch and with a reason; it stays in income and can be reopened', async () => {
     const h = await hotel();
     await fullShift(h);

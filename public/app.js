@@ -2541,7 +2541,8 @@ async function compareView(biz, day) {
   const trialWarn = document.getElementById('trialwarn');
   if (trialWarn) api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).then((t) => {
     const link = html`<a href="#/b/${biz.id}/reconcile/${day}">Try reconcile</a>`;
-    trialWarn.innerHTML = (!t.coverage.covered ? html`The bank is not in for this whole shift yet. You can confirm, and reconcile later. ${link}`
+    const twice = t.fixes.filter((c) => c.kind === 'same_sale' && c.actions[0]?.label === 'Same sale').length;
+    trialWarn.innerHTML = (twice ? html`<strong>Before you confirm:</strong> ${twice} bill${twice === 1 ? '' : 's'} may be a credit already booked directly, which would count the sale twice. You can still confirm. ${link}` : !t.coverage.covered ? html`The bank is not in for this whole shift yet. You can confirm, and reconcile later. ${link}`
       : !t.strip.billsLeft && !t.strip.creditsLeft ? html`<strong>UPI reconciled:</strong> every bill and credit of this shift is explained.`
       : html`<strong>Before you confirm:</strong> ${t.strip.billsLeft} UPI bill${t.strip.billsLeft === 1 ? '' : 's'} not in the bank yet, ${t.strip.creditsLeft} credit${t.strip.creditsLeft === 1 ? '' : 's'} with no bill. You can still confirm. ${link}`).__html;
   }).catch(() => { /* only a hint */ });
@@ -2815,7 +2816,7 @@ async function bankView(biz, query = '') {
   app.querySelectorAll('[data-book]').forEach((x) => x.addEventListener('click', () => { const f = app.querySelector(`[data-bookform="${x.dataset.book}"]`); f.hidden = !f.hidden; }));
   app.querySelectorAll('[data-bookform]').forEach((f) => f.addEventListener('submit', async (e) => {
     e.preventDefault();
-    try { await apiFull('POST', `/businesses/${biz.id}/bank-rows/${f.dataset.bookform}/book`, { headId: f.headId.value, party: f.party.value || null, note: f.note.value || null }); bankView(biz, query); }
+    try { if (await bookCredit(biz, f.dataset.bookform, { headId: f.headId.value, party: f.party.value || null, note: f.note.value || null })) bankView(biz, query); }
     catch (err) { showError(f.querySelector('.form-msg'), err); }
   }));
   // Fix the bill: a small editor under the line, for a register bill the bank shows differently (typo in number or amount).
@@ -2946,7 +2947,7 @@ async function bankView(biz, query = '') {
 // ---------- Reconcile: one screen per confirmed shift (approved 5 Nov 2026)
 
 const CARD_TAGS = { number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
-  clear_matches: 'Same amount, close in time', bank_backs: 'Bank agrees', no_upi_credit: 'No credit in the bank', no_bill: 'No bill' };
+  clear_matches: 'Same amount, close in time', same_sale: 'Booked directly', bank_backs: 'Bank agrees', no_upi_credit: 'No credit in the bank', no_bill: 'No bill' };
 const witnessHtml = (label, value, odd) => html`<div class="wit ${odd ? 'odd' : ''}"><div class="wit-l">${label}</div><div class="wit-v">${value ?? 'Not found'}</div></div>`;
 /** A suggestion: what Bookr saw, its reason as a tag, and one click to act. A person always makes the click. */
 function suggestionCard(c, day) {
@@ -3113,7 +3114,7 @@ async function reconcileView(biz, dayArg) {
   });
   app.querySelectorAll('[data-book]').forEach((b) => b.addEventListener('click', () => {
     b.disabled = true;
-    act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.book}/book`, { headId: b.dataset.head, note: `Unbilled ${b.dataset.label} (Reconcile)` }),
+    act(async () => { if (!await bookCredit(biz, b.dataset.book, { headId: b.dataset.head, note: `Unbilled ${b.dataset.label} (Reconcile)` })) throw new Error('Not booked.'); },
       { text: `Booked to Unbilled ${b.dataset.label}.`, undo: () => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.book}/reopen`, {}) });
   }));
   app.querySelectorAll('[data-unmatch]').forEach((b) => b.addEventListener('click', () => {
@@ -3125,6 +3126,17 @@ async function reconcileView(biz, dayArg) {
     act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.putback}/reopen`, {}));
   }));
   wirePairPanel(biz, v, heads, reload);
+}
+
+/** Books a credit, asking first if a bill of its amount is waiting: both would count one sale twice. False if the person stops. */
+async function bookCredit(biz, rowId, payload) {
+  const path = `/businesses/${biz.id}/bank-rows/${rowId}/book`;
+  const first = await apiFull('POST', path, { ...payload, checkBills: true });
+  if (first.ok) return true;
+  const list = first.waitingBills.map((b) => `${b.billNo} (${dayLabel(b.day)} shift)`).join(', ');
+  if (!confirm(`A bill of this amount is waiting: ${list}.\n\nIf this credit pays it, match them instead, or this sale is counted twice. Book it anyway?`)) return false;
+  await apiFull('POST', path, payload);
+  return true;
 }
 
 /** Tab 2: what is still open on every shift, oldest first. Closing a bill takes Owner or Accountant, and a reason. */
@@ -3239,7 +3251,7 @@ async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
   const run = async (fn, text, undo) => { try { await fn(); await reload(); doneToast(text, undo, reload); } catch (err) { fail(err); } };
   const reason = (q) => (prompt(q) ?? '').trim();
   body.querySelectorAll('[data-umbook]').forEach((b) => b.addEventListener('click', () => run(
-    () => apiFull('POST', `${base}/bank-rows/${x.id}/book`, { headId: b.dataset.umbook, note: `Unbilled ${b.dataset.label} (All unmatched)` }),
+    async () => { if (!await bookCredit(biz, x.id, { headId: b.dataset.umbook, note: `Unbilled ${b.dataset.label} (All unmatched)` })) throw new Error('Not booked.'); },
     `Booked to Unbilled ${b.dataset.label}.`, () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}))));
   body.querySelector('[data-umignore]')?.addEventListener('click', () => {
     const note = reason('Why is this money not a sale?');
@@ -3319,6 +3331,10 @@ async function changeRegisterRow(biz, a) {
 function undoFor(biz, a, res) {
   const base = `/businesses/${biz.id}`;
   const path = a.path ?? '';
+  if (path.endsWith('/same-sale')) {
+    if (a.method === 'DELETE') return null;
+    return path.includes('/comparisons/') ? () => apiFull('DELETE', path, a.body) : () => apiFull('DELETE', `${base}/bank-rows/${a.body.rowId}/match`, {});
+  }
   if (path.endsWith('/sales/repay')) return res?.auditId ? () => apiFull('POST', `${base}/sales/repay/${res.auditId}/undo`, {}) : null;
   if (!path.includes('/bank-rows/')) return null;
   const inPath = path.match(/\/bank-rows\/([0-9a-f-]{36})\//)?.[1];

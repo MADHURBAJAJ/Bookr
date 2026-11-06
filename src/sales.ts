@@ -4,6 +4,7 @@
 
 import { bankIn, creditsWithoutBill, pairEvidence, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
 import { settleOnCredit } from './bank';
+import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
 import { all, newId, now, one, stmt, type DB } from './db';
 import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
 
@@ -627,6 +628,20 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     const upi = rows.map((r, i) => ({ r, id: ids[i] })).filter((x) => x.r.c.id === c.id && x.r.mode === 'upi');
     if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
     statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, upi[0].id, upi[0].r.amount, userId, t + 1 + matched));
+    matched += 1;
+  }
+  // Bills a person marked as one sale with a credit booked directly: the booking goes, and the sale keeps its day.
+  const handled = new Set(view.comparisons.filter((c) => c.bank).map((c) => c.id));
+  for (const plan of await plansFor(db, businessId, day)) {
+    if (handled.has(plan.comparisonId)) continue;
+    const at = rows.findIndex((r) => r.c.id === plan.comparisonId && r.mode === 'upi');
+    if (at < 0 || rows.filter((r) => r.c.id === plan.comparisonId).length !== 1) continue;
+    const [booked, row] = await Promise.all([bookedTx(db, businessId, plan.rowId),
+      one<{ id: string; note: string | null; done_by: string | null; done_at: number | null }>(db, 'SELECT id, note, done_by, done_at FROM bank_rows WHERE id = ?', plan.rowId)]);
+    if (!booked || !row || booked.amount_paise !== rows[at].amount) continue;
+    const r = rows[at];
+    statements.push(...sameSaleStatements(db, businessId, row, booked, { id: ids[at], day, status: onCredit(r) ? 'reviewed' : 'approved',
+      ocr_original: onCredit(r) ? JSON.stringify({ countOnCredit: true }) : null, head_id: headFor.get(r.billType) ?? null }, userId, t + 100 + matched));
     matched += 1;
   }
   if (matched) statements.push(...settleOnCredit(db, businessId));

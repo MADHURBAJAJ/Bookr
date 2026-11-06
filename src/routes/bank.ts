@@ -12,6 +12,7 @@ import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
+import { bookedTx, joinedBill, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
 import { billDistance, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
@@ -268,6 +269,45 @@ bankRoutes.post('/businesses/:businessId/sales/:txId/close', requireRole('sales.
     stmt(db, 'INSERT INTO closed_bills (transaction_id, business_id, note, closed_by, closed_at) VALUES (?, ?, ?, ?, ?)', id, bid, note, user, t),
     stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.closed', id, { matchStatus: 'awaiting_bank_match' }, { note }, t)),
   ]);
+  return c.json({ ok: true });
+});
+
+/** A credit booked directly and a bill that came later are one sale. A person says so. */
+bankRoutes.post('/businesses/:businessId/sales/:txId/same-sale', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = (await body(c)).rowId;
+  if (typeof rowId !== 'string' || !isUuid(rowId)) fail(400, 'Choose the credit.');
+  const [row, booked, bill] = await Promise.all([getRow(db, bid, rowId), bookedTx(db, bid, rowId),
+    one<{ id: string; day: string; status: string; ocr_original: string | null; head_id: string | null; amount_paise: number; payment_mode: string; match_status: string | null; matched_bank_row: string | null }>(db,
+      "SELECT id, day, status, ocr_original, head_id, amount_paise, payment_mode, match_status, matched_bank_row FROM transactions WHERE id = ? AND business_id = ? AND type = 'income'", c.req.param('txId'), bid)]);
+  if (!row || !bill) fail(404, 'Not found.');
+  if (!booked) fail(409, 'This credit is no longer booked as a sale.');
+  if (bill.payment_mode !== 'upi' || bill.match_status !== 'awaiting_bank_match' || bill.matched_bank_row) fail(409, 'This bill is not waiting for a credit.');
+  if (bill.amount_paise !== row.amount_paise) fail(400, 'The bill and the credit are not the same amount.');
+  await db.batch(sameSaleStatements(db, bid, row, booked, { id: bill.id, day: bill.day, status: bill.status, ocr_original: bill.ocr_original, head_id: bill.head_id }, c.get('user').id, now()));
+  return c.json({ ok: true });
+});
+
+/** Before confirming there is no sale to join yet: the wish is recorded, and the confirm does it. */
+bankRoutes.post('/businesses/:businessId/comparisons/:id/same-sale', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = (await body(c)).rowId;
+  if (typeof rowId !== 'string' || !isUuid(rowId)) fail(400, 'Choose the credit.');
+  const cmp = await one<{ id: string; shift_day: string }>(db, 'SELECT id, shift_day FROM bill_comparisons WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  if (!cmp) fail(404, 'Not found.');
+  if ((await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day))?.status === 'confirmed') fail(409, 'This shift is already confirmed.');
+  if (!(await bookedTx(db, bid, rowId))) fail(409, 'This credit is no longer booked as a sale.');
+  await db.batch([stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.same_sale_planned', rowId, null, { comparisonId: cmp.id, shiftDay: cmp.shift_day }, now()))]);
+  return c.json({ ok: true });
+});
+
+bankRoutes.delete('/businesses/:businessId/comparisons/:id/same-sale', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const rowId = (await body(c)).rowId;
+  if (typeof rowId !== 'string' || !isUuid(rowId)) fail(400, 'Choose the credit.');
+  await db.batch([stmt(db, AUDIT, ...audit(c.get('businessId'), c.get('user').id, 'bank.same_sale_unplanned', rowId, null, { comparisonId: c.req.param('id') }, now()))]);
   return c.json({ ok: true });
 });
 
@@ -617,6 +657,11 @@ bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole(
   const row = await getRow(db, bid, c.req.param('rowId'));
   if (!row) fail(404, 'Not found.');
   if (row.status !== 'matched') fail(409, 'This line is not matched.');
+  // A credit joined to a later bill goes back to being booked, as it was.
+  if (await joinedBill(db, row.id)) {
+    const back = await undoSameSaleStatements(db, bid, row.id, c.get('user').id, now());
+    if (back) { await db.batch(back); return c.json({ ok: true, unmatched: 1, bookingRestored: true }); }
+  }
   // Credits that share a bill are undone together, so no bill is left half matched.
   const set = await matchedSet(db, row.id);
   const inRows = set.rows.map(() => '?').join(',');
@@ -686,6 +731,11 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('ba
   const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose a head.');
   const partyName = text(data, 'party', 'Party', { optional: true, max: 120 });
   const note = text(data, 'note', 'Note', { optional: true, max: 300 });
+  // Asked first by the screens: a bill of this amount waiting means booking this too may count one sale twice.
+  if (data.checkBills === true && row.kind === 'upi_in') {
+    const bills = await waitingBillsLike(db, bid, row.amount_paise, row.day);
+    if (bills.length) return c.json({ ok: false, waitingBills: bills });
+  }
   const t = now();
   const statements: D1PreparedStatement[] = [];
   let partyId: string | null = null;

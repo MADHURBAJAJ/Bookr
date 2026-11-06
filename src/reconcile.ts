@@ -8,6 +8,7 @@ import { bankIn } from './bankEvidence';
 import { suggestionsFor } from './bank';
 import { cashCheck } from './cash';
 import { explainShift, tableSets, type Card } from './explain';
+import { bookedSalesAround, dayName, pairBooked, plansFor, sameSaleCard, sameSaleCards, type WaitingBill } from './sameSale';
 import { billDistance, creditsForShift, sameBillNo, shiftView, WATCH_DAYS } from './sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from './time';
 
@@ -70,6 +71,9 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     o.k.transactionIds.forEach((x) => used.add(`tx:${x}`));
   }
 
+  // A credit booked directly whose bill came later. Bills that have a free credit to try are left to that.
+  const same = await sameSaleCards(db, businessId, day, new Set([...clear, ...likely].flatMap((x) => x.transactionIds)));
+
   // Missing: credits inside the shift that no bill of any shift could be.
   const noBill = sug.credits
     .filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !(sug.candidates.get(c.id) ?? []).length)
@@ -96,9 +100,9 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
       creditsLeft: creditsLeft.length, creditsLeftPaise: creditsLeft.reduce((t, c) => t + c.amount_paise, 0),
     },
     clear,
-    fixes: ex.cards.filter((c) => c.kind !== 'clear_matches' && c.kind !== 'no_upi_credit'),
+    fixes: [...same, ...ex.cards.filter((c) => c.kind !== 'clear_matches' && c.kind !== 'no_upi_credit')],
     likely,
-    noCredit: ex.cards.filter((c) => c.kind === 'no_upi_credit'),
+    noCredit: ex.cards.filter((c) => c.kind === 'no_upi_credit' && !c.uses.some((u) => same.some((x) => x.uses.includes(u)))),
     noBill,
     unbilledHeads: typeHeads,
     done: [...matched.values()].sort((a, b) => (a.postedAt ?? 0) - (b.postedAt ?? 0)),
@@ -208,6 +212,29 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       score: 75, uses: [`cr:${m.id}`], witnesses: { software: null, register: `${sets[0].length} bills · ${rs(m.amount)}`, bank: `One credit ${rs(m.amount)} at ${hm(m.postedAt)}`, odd: null }, actions: [] });
   }
 
+  // A credit booked directly whose bill came later: chosen before confirming, done by the confirm.
+  const [booked, plans] = await Promise.all([bookedSalesAround(db, businessId, day), plansFor(db, businessId, day)]);
+  const planned = new Set(plans.map((x) => x.comparisonId));
+  const headOfType = new Map(typeHeads.map((h) => [h.billType, h.headName]));
+  for (const plan of plans) {
+    const b = bills.find((x) => x.c.id === plan.comparisonId);
+    const m = booked.find((x) => x.id === plan.rowId);
+    if (!b || !m) { planned.delete(plan.comparisonId); continue; }
+    billOf.add(b.c.id);
+    cards.push({ key: `same-sale-plan:${m.id}`, kind: 'same_sale', billNos: [b.c.billNo], title: `Bill ${b.c.billNo} will join the ${rs(m.amountPaise)} booked on ${dayName(m.txDay)}`,
+      evidence: ['You marked them as one sale. Confirming the shift does it, and the sale stays on the booked day.'], score: 90, uses: [`cmp:${b.c.id}`],
+      actions: [{ label: 'Keep them apart', method: 'DELETE', path: `${base}/comparisons/${b.c.id}/same-sale`, body: { rowId: m.id } }] });
+  }
+  const single = left.filter((x) => !x.grouped && !billOf.has(x.c.id) && !x.c.bank && !(paysOf(x.c.register?.rowId ?? '').length > 1));
+  const waiting: WaitingBill[] = single.map((x) => ({ billNo: x.c.billNo, amountPaise: x.amount, day, comparisonId: x.c.id, swPaise: (x.c.software?.amountPaise as number | null) ?? null, rgPaise: (x.c.register?.amountPaise as number | null) ?? null,
+    headName: headOfType.get((x.c.register?.billType ?? '') as string) ?? null }));
+  const fromPlans = new Set(plans.map((x) => x.rowId));
+  for (const p of pairBooked(waiting, booked.filter((x) => !fromPlans.has(x.id)), day)) {
+    const b = single.find((x) => x.c.id === p.bill.comparisonId)!;
+    billOf.add(b.c.id);
+    cards.push(sameSaleCard(base, p, b.c.difference.startsWith('missing') === false));
+  }
+
   // Only with the bank in: a UPI bill with no credit of its amount near it, and money with no bill.
   const noCredit: Card[] = [];
   if (cov.covered) {
@@ -236,7 +263,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   cards.sort((a, b) => b.score - a.score);
   noCredit.sort((a, b) => b.score - a.score);
 
-  const openBills = left.map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
+  const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
   const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null }));
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   return {

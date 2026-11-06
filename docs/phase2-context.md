@@ -345,3 +345,11 @@ Typo flags (`numberFlags`, also 6 Nov 2026), for a register number with no exact
 - **All unmatched** (`/reconcile/all`, `GET /unmatched`): every shift's leftovers grouped by age (today and yesterday, 2 to 7 days, over 7 days), with search. An opened row gives why it is open, its source, the closest possible matches and the actions.
 - **Closed bills** (migration 0017, table `closed_bills`): `POST sales/:txId/close` needs a reason, `sales.decide` (Owner, Accountant) and a bill past `WATCH_DAYS`. It clears `match_status`, so the chase stops, and the sale stays in income. `POST sales/:txId/reopen` puts it back. Both are in the audit log. A table is used rather than a new `match_status` value because changing that CHECK means rebuilding `transactions`.
 
+## A credit booked directly, and its bill later (approved 7 Nov 2026)
+
+`src/sameSale.ts`. A UPI credit booked under a head a bill type uses, and a bill of the same amount from the watch after it (or the day before), get a card; a person says "Same sale". Never joined automatically; small amounts with more than one bill of the amount get no card.
+- **Result:** the booking is removed, the credit is matched to the bill, and the sale counts on the **booked day**, so that day's total does not move. The head follows the bill.
+- **Undo:** Undo and Unmatch both put the booking back from the audit entry `bank.same_sale`, and the bill goes back to its shift's day, waiting.
+- **Before confirming:** there is no sale yet, so `bank.same_sale_planned` in the audit log records the wish (`bank.same_sale_unplanned` cancels), the same way `sale.repaid` is read as current state. The confirm joins them in its batch. No table or column was added.
+- **The other order:** the screens book with `checkBills: true`; if a bill of the amount waits within the watch, the server answers `waitingBills` and books nothing until the person says go on.
+
