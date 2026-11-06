@@ -964,9 +964,12 @@ function rowIssues(r) {
   }
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount' };
   if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
-  else if (bm && !bm.exact) {
+  else if (!bm && isOddBill(r.billNo)) {
     flags.bill_no = 'red';
-    red.push(html`Not in software report${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip ${x.taken ? 'taken' : ''}" data-pick="${x.billNo}" title="${why[x.why] ?? ''}${x.taken ? ' · already on another register line: one of the two may be wrong, or the bill was written twice' : ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}${x.taken ? ' · on register' : ''}</button>`)}</span>` : ''}`);
+    red.push(html`Number is neither new POS (date and running number) nor old POS (6 digits)`);
+  } else if (bm && !bm.exact) {
+    flags.bill_no = 'red';
+    red.push(html`${isOddBill(r.billNo) ? 'Number is neither new POS (date and running number) nor old POS (6 digits)' : 'Not in software report'}${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip ${x.taken ? 'taken' : ''}" data-pick="${x.billNo}" title="${why[x.why] ?? ''}${x.taken ? ' · already on another register line: one of the two may be wrong, or the bill was written twice' : ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}${x.taken ? ' · on register' : ''}</button>`)}</span>` : ''}`);
   }
   // Bills paid together: the group is told once, on the row where the payment is written. Its other rows say nothing about it.
   const member = !!r.paidWithRowId;
@@ -1092,7 +1095,16 @@ function regSumHtml(u) {
 }
 
 /** Bills of the old POS: 6-digit numbers, never in the software report. Shown as such, not as missing. */
-const isOldPos = (b) => /^\d{6}$/.test(b ?? '');
+const startsWithDate = (b) => {
+  const m = /^(\d{2})(\d{2})(\d{2})/.exec(b);
+  if (!m || +m[1] < 24) return false;
+  const d = new Date(Date.UTC(2000 + +m[1], +m[2] - 1, +m[3]));
+  return d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
+};
+const isOldPos = (b) => /^\d{6}$/.test(b ?? '') && !startsWithDate(b); // mirrors src/sales.ts
+/** A number of neither format, new POS (YYMMDD and a running number) nor old POS. It can never meet a software bill. */
+const isOddBill = (b) => !!b && !(/^\d{7,9}$/.test(b) && startsWithDate(b)) && !isOldPos(b);
+const SHORT_OLD_POS_NOTE = 'Old POS bill, short number';
 
 const DELETE_REASONS = [['written_twice', 'Written twice on the page'], ['misread', 'Not on the page (read by mistake)'], ['not_a_bill', 'Not a bill (a note or total line)'], ['cancelled', 'Bill cancelled'], ['other', 'Other']];
 const deleteReasonLabel = (k) => (DELETE_REASONS.find(([x]) => x === k)?.[1] ?? 'Other').toLowerCase();
@@ -2046,6 +2058,7 @@ function baseChoices(c) {
   const carry = !c.register || !c.software ? [['carry_forward', 'Carry forward']] : [];
   if (c.largeDiscount && c.software) return [['use_register', 'Accept discount'], ['use_software', 'Payment missing · use software'], ['leave_out', 'Leave out']];
   if (!c.register) return [['use_software', 'Add to register · F&B', 'fnb'], ['use_software', 'Add to register · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
+  if (!c.software && isOddBill(c.billNo)) return [['__oldpos', SHORT_OLD_POS_NOTE], ['leave_out', 'Leave out']];
   if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out'], ...carry];
   return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
 }
@@ -2071,6 +2084,25 @@ function otherDayNote(c) {
 }
 
 // ---------- Bills on one side only, waiting for the other side on another day
+
+/** Bills counted before the number rule (6 Nov 2026) whose number can never match: not waiting, but not settled either. */
+function oddNumbersHtml(biz, w, canDecide) {
+  const list = w?.oddNumbers ?? [];
+  if (!list.length) return '';
+  return html`<section class="card" id="oddnumbers" style="gap:10px">
+    <h2>Bill numbers that can never match (${list.length})</h2>
+    <div class="note">These are only in the register, and each number fits neither the new POS format nor the old one, so no software bill will ever match it. They are counted from the register until you settle them. To correct a number or leave a bill out, open its shift, if it is not confirmed.</div>
+    <div class="scroll"><table style="min-width:520px">
+      <thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Note</th><th></th></tr></thead>
+      <tbody>${list.map((b) => html`<tr>
+        <td class="mono">${b.billNo}</td><td><a href="#/b/${biz.id}/compare/${b.day}">${dayLabel(b.day)}</a>${b.confirmed ? html` <span class="note">confirmed</span>` : ''}</td>
+        <td class="amount">${money(b.amountPaise ?? 0)}${b.mode ? html` <span class="note">${MODE_LABELS[b.mode] ?? b.mode}</span>` : ''}</td>
+        <td class="note">${b.note ?? ''}</td>
+        <td>${canDecide ? html`<button class="btn plain" type="button" data-oddclose="${b.id}">${SHORT_OLD_POS_NOTE}</button>` : ''}</td>
+      </tr>`)}</tbody>
+    </table></div>
+  </section>`;
+}
 
 function waitingHtml(biz, w, canDecide) {
   if (!w?.bills?.length) return '';
@@ -2226,7 +2258,8 @@ async function compareView(biz, day) {
   const rowHtml = (c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
       class="clickrow ${c.decision ? '' : 'undecided'}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
-      <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}</td>
+      <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}
+      ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}</td>
     <td>${side(c.software)}</td><td>${side(c.register)}</td>
     <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
       ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
@@ -2282,6 +2315,7 @@ async function compareView(biz, day) {
     ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
     ${(v.warnings ?? []).map((w) => html`<div class="cmp-warn">⚠ ${blockerHtml(w.text, v)}</div>`)}
     ${v.bank?.noBill?.length ? html`<div class="cmp-warn">⚠ ${v.bank.noBill.length} UPI credit${v.bank.noBill.length > 1 ? 's' : ''} in this shift ${v.bank.noBill.length > 1 ? 'have' : 'has'} no bill of that amount: ${v.bank.noBill.slice(0, 6).map((x) => `₹ ${rs(x.amountPaise)} at ${hhmm(x.postedAt)}`).join(', ')}${v.bank.noBill.length > 6 ? ' …' : ''}. Check for a sale not written down, or a table paid at once. It does not stop confirming.</div>` : ''}
+    ${oddNumbersHtml(biz, waiting, canDecide)}
     <div class="seg cmp-tabs" role="tablist">
       <button type="button" role="tab" data-tab="shift" class="${tab === 'shift' ? 'on' : ''}">This shift</button>
       <button type="button" role="tab" data-tab="other" class="${tab === 'other' ? 'on' : ''}">Waiting for other side (${waiting?.bills?.length ?? 0})</button>
@@ -2356,6 +2390,13 @@ async function compareView(biz, day) {
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
   app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => {
     const c = v.comparisons.find((x) => x.id === b.dataset.cmp);
+    if (b.dataset.d === '__oldpos') {
+      act(async () => {
+        const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids: [c.id], note: SHORT_OLD_POS_NOTE });
+        if (r.skipped?.length) throw new Error(`Bill ${c.billNo} was not changed: ${r.skipped[0].reason}.`);
+      });
+      return;
+    }
     let note = null;
     if (c?.largeDiscount && b.dataset.d === 'use_register') {
       note = (prompt(`Why is the ${c.largeDiscount.pct}% discount on bill ${c.billNo} accepted? (e.g. owner's guest, group rate)`) ?? '').trim();
@@ -2424,6 +2465,7 @@ async function compareView(biz, day) {
     row.classList.add('row-found');
     row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }));
+  app.querySelectorAll('[data-oddclose]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.oddclose}/close`, { note: SHORT_OLD_POS_NOTE }))));
   app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
     const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));

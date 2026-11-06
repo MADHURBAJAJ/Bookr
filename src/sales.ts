@@ -245,7 +245,8 @@ export const AUTO_COUNTED_NOTE = 'Counted automatically: waiting for its other s
  *   matched to the bank) twice, and the other day's bill stops waiting.
  * - Otherwise it is counted here from the side there is, and waits for its other side:
  *   only in the software report → the software amount and mode, as F&B unless changed;
- *   only in the register → the register, once its payment is written and its discount is not large.
+ *   only in the register → the register, once its payment is written and its discount is not large, and its
+ *   number is one a software bill could have (an odd number waits for a person instead).
  * A bill whose other day was decided by a person in another way (left out, carried forward) waits for a person.
  */
 async function decideOneSided(db: DB, businessId: string, day: string, rgById: Map<string, RgRow>, paysByRow: Map<string, RgPay[]>,
@@ -271,6 +272,7 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
       if (c.sw_mode !== 'cash' && c.sw_mode !== 'upi' && c.sw_mode !== 'card') continue;
       decide(c, 'use_software', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, 'fnb');
     } else {
+      if (isOddBill(c.bill_no)) continue;
       const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
       if (!r || !paysByRow.get(r.paid_with_row_id ?? r.id)?.length || shares.get(r.id)?.large) continue;
       decide(c, 'use_register', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, null);
@@ -355,8 +357,22 @@ export async function otherDays(db: DB, businessId: string, day: string, comps: 
  */
 const OLD_POS_NOTE = 'Old POS bill: never in the software report, counted from the register';
 
-/** Bills of the old POS: 6-digit numbers, never in the software report, so never matched. */
-export const isOldPosBill = (billNo: string | null | undefined) => /^\d{6}$/.test(billNo ?? '');
+/** Does a number start with a real date as YYMMDD, from the years the new POS could have printed it? */
+function startsWithDate(billNo: string) {
+  const m = /^(\d{2})(\d{2})(\d{2})/.exec(billNo);
+  if (!m || +m[1] < 24) return false;
+  const d = new Date(Date.UTC(2000 + +m[1], +m[2] - 1, +m[3]));
+  return d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
+}
+/** Bills of the new POS: YYMMDD, then a running number with no padding, so 7 to 9 digits. */
+export const isNewPosBill = (billNo: string | null | undefined) => /^\d{7,9}$/.test(billNo ?? '') && startsWithDate(billNo!);
+/** Bills of the old POS: 6-digit numbers, never in the software report, so never matched. A date with no running number is a new one cut short. */
+export const isOldPosBill = (billNo: string | null | undefined) => /^\d{6}$/.test(billNo ?? '') && !startsWithDate(billNo!);
+/**
+ * A register number of neither format (approved 6 Nov 2026), such as a short "230". It can never meet a software
+ * bill, so it does not wait: a person corrects it, marks it as an old POS bill, or leaves it out.
+ */
+export const isOddBill = (billNo: string | null | undefined) => !!billNo && !isNewPosBill(billNo) && !isOldPosBill(billNo);
 
 export async function waitingBills(db: DB, businessId: string, today: string) {
   const rows = await all<Comparison & { shift_day: string; shift_status: string | null }>(db, `
@@ -374,6 +390,7 @@ export async function waitingBills(db: DB, businessId: string, today: string) {
       amountPaise: c.difference === 'missing_in_register' ? c.sw_amount_paise : c.rg_amount_paise,
       mode: c.difference === 'missing_in_register' ? c.sw_mode : c.rg_mode,
       decision: c.decision, note: c.note, confirmed: c.shift_status === 'confirmed', daysWaiting: days, unresolved: days > WATCH_DAYS,
+      oddNumber: c.difference === 'missing_in_software' && isOddBill(c.bill_no),
     };
   });
 }

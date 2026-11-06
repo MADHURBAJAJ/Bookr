@@ -465,7 +465,8 @@ salesRoutes.get('/businesses/:businessId/awaiting-credit', requireRole('sales.vi
 });
 
 salesRoutes.get('/businesses/:businessId/waiting-bills', requireRole('sales.view'), async (c) => {
-  return c.json({ watchDays: WATCH_DAYS, bills: await waitingBills(c.env.DB, c.get('businessId'), istDay(Date.now())) });
+  const all = await waitingBills(c.env.DB, c.get('businessId'), istDay(Date.now()));
+  return c.json({ watchDays: WATCH_DAYS, bills: all.filter((b) => !b.oddNumber), oddNumbers: all.filter((b) => b.oddNumber) });
 });
 
 /** The shift's "Added from software report" register page (no photo), made the first time it is needed. */
@@ -487,7 +488,7 @@ salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/close', requ
   const note = text(await body(c), 'note', 'Reason', { max: 500 })!;
   const w = (await waitingBills(db, bid, istDay(Date.now()))).find((x) => x.id === id);
   if (!w) fail(404, 'This bill is not waiting for its other side.');
-  if (!w.unresolved) fail(400, `This bill is watched for ${WATCH_DAYS} days; it can be closed after that.`);
+  if (!w.unresolved && !w.oddNumber) fail(400, `This bill is watched for ${WATCH_DAYS} days; it can be closed after that.`);
   const t = now();
   const user = c.get('user').id;
   await db.batch([

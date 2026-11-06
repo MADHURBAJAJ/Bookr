@@ -1081,14 +1081,46 @@ describe('old POS bills (6 digits) are counted from the register on their own', 
     await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
     await add('145238', '200', []);                                                   // no payment written
     await add('145239', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // 50% discount
-    await add('7700001', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]); // not old POS
+    await add('26103199', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]); // new POS format
     const v = await view(h);
     expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register' });
     expect(byBill(v, '145236').note).toMatch(/Old POS/);
     for (const b of ['145238', '145239']) expect(byBill(v, b).decision ?? null).toBeNull();
-    expect(byBill(v, '7700001')).toMatchObject({ decision: 'use_register', auto: true }); // counted, waits for its software bill
+    expect(byBill(v, '26103199')).toMatchObject({ decision: 'use_register', auto: true }); // counted, waits for its software bill
     const [log] = await sql`SELECT user_id, after FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%oldPos%'`;
     expect(log.user_id).toBeNull();
+  });
+});
+
+describe('register numbers of neither format can never match, so they do not wait', () => {
+  it('stay for a person, are marked old POS or decided, and old decisions leave the waiting list', async () => {
+    const h = await hotel();
+    const page = await fullShift(h);
+    const add = (billNo: string) => h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`,
+      { billNo, billType: 'fnb', amount: '230', payments: [{ mode: 'cash', columnLabel: null, amount: '230' }], status: 'checked' });
+    await add('230');
+    await add('193');
+    let v = await view(h);
+    expect(byBill(v, '230').decision ?? null).toBeNull();
+    expect(v.json.canConfirm).toBe(false);
+
+    // Marked as an old POS bill: counted from the register and closed, with nothing to type.
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '230').id], note: 'Old POS bill, short number' })).status).toBe(200);
+    v = await view(h);
+    expect(byBill(v, '230')).toMatchObject({ decision: 'use_register', note: 'Old POS bill, short number' });
+    let w = (await h.clients.accountant.get(`/businesses/${h.bid}/waiting-bills`)).json;
+    expect([...w.bills, ...w.oddNumbers].map((b: any) => b.billNo)).not.toContain('230');
+
+    // Decided the old way: not waiting, listed apart, and closable without the watch running out.
+    expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '193').id}`, { decision: 'use_register', note: 'to check' })).status).toBe(200);
+    w = (await h.clients.accountant.get(`/businesses/${h.bid}/waiting-bills`)).json;
+    expect(w.bills.map((b: any) => b.billNo)).not.toContain('193');
+    const odd = w.oddNumbers.find((b: any) => b.billNo === '193');
+    expect(odd).toMatchObject({ oddNumber: true, unresolved: false });
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/comparisons/${odd.id}/close`, { note: 'Old POS bill, short number' })).status).toBe(403);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/comparisons/${odd.id}/close`, { note: 'Old POS bill, short number' })).status).toBe(200);
+    w = (await h.clients.accountant.get(`/businesses/${h.bid}/waiting-bills`)).json;
+    expect(w.oddNumbers).toEqual([]);
   });
 });
 

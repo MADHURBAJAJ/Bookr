@@ -9,7 +9,7 @@ vi.mock('../src/claude', async (importOriginal) => {
 
 import { readWithClaude } from '../src/claude';
 import { columnTotals, draftRegisterRows, findSlip, gridToReading, headingRole } from '../src/ocr';
-import { isOldPosBill, suggestBills } from '../src/sales';
+import { isNewPosBill, isOddBill, isOldPosBill, suggestBills } from '../src/sales';
 import { businessWithAllRoles, env, sql, resetDb } from './helpers';
 
 const mocked = vi.mocked(readWithClaude);
@@ -267,6 +267,14 @@ describe('Old POS bills', () => {
   it('are the 6-digit numbers; the software report numbers are not', () => {
     expect(['145232', '145187'].every(isOldPosBill)).toBe(true);
     expect(['26110145', '2610307', '14523', '', null].some(isOldPosBill)).toBe(false);
+    expect(isOldPosBill('261101')).toBe(false); // a new number with its running number cut off
+  });
+
+  it('new POS numbers are YYMMDD and a running number; anything else on a register is odd', () => {
+    expect(['2611036', '26110157', '261101100'].every(isNewPosBill)).toBe(true);
+    expect(['230', '076', '26133105', '26110032', '1412251', '2611011000', '145232', 'B100'].some(isNewPosBill)).toBe(false);
+    expect(['230', '076', '26133105', '261101', 'B100', '14523'].every(isOddBill)).toBe(true);
+    expect(['2611036', '26110157', '261101100', '145232', '', null].some(isOddBill)).toBe(false);
   });
 });
 
