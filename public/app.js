@@ -2388,6 +2388,7 @@ async function compareView(biz, day) {
             ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="ok-msg">Everything is decided. Confirm the shift at the top.</div>`}
             ${v.assumedTypes?.length ? html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px">${v.assumedTypes.length} bill${v.assumedTypes.length > 1 ? 's were' : ' was'} taken as <strong>F&amp;B</strong> because the register's type could not be read: ${blockerHtml(v.assumedTypes.join(', '), v)}.</div>` : ''}
             ${v.bank && countedUpi.length ? html`<div class="note"><strong>On confirming:</strong> ${matchNow.length} of ${countedUpi.length} UPI bill${countedUpi.length > 1 ? 's' : ''} ${matchNow.length === 1 ? 'is' : 'are'} matched to ${matchNow.length === 1 ? 'its' : 'their'} bank credit at once${countedUpi.length - matchNow.length ? `; ${countedUpi.length - matchNow.length} wait${countedUpi.length - matchNow.length === 1 ? 's' : ''} for ${countedUpi.length - matchNow.length === 1 ? 'its' : 'their'} credit on Reconcile` : ''}. Unmatch undoes any of them.</div>` : ''}
+            ${v.bank && biz.actions.includes('bank.link') ? html`<div class="note" id="trialwarn"></div>` : ''}
             <div class="note">Only Owner and Accountant can decide differences and confirm. The bank credit does not have to arrive first.</div>`}
         </section>
         <section class="card" style="flex:3 1 420px;gap:10px">
@@ -2536,6 +2537,14 @@ async function compareView(biz, day) {
     app.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
     b.closest('section').querySelectorAll('tbody tr[data-kind]').forEach((tr) => { tr.hidden = b.dataset.kind !== 'all' && tr.dataset.kind !== b.dataset.kind; });
   }));
+  // A warning from the trial reconcile; it never stops a confirm.
+  const trialWarn = document.getElementById('trialwarn');
+  if (trialWarn) api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).then((t) => {
+    const link = html`<a href="#/b/${biz.id}/reconcile/${day}">Try reconcile</a>`;
+    trialWarn.innerHTML = (!t.coverage.covered ? html`The bank is not in for this whole shift yet. You can confirm, and reconcile later. ${link}`
+      : !t.strip.billsLeft && !t.strip.creditsLeft ? html`<strong>UPI reconciled:</strong> every bill and credit of this shift is explained.`
+      : html`<strong>Before you confirm:</strong> ${t.strip.billsLeft} UPI bill${t.strip.billsLeft === 1 ? '' : 's'} not in the bank yet, ${t.strip.creditsLeft} credit${t.strip.creditsLeft === 1 ? '' : 's'} with no bill. You can still confirm. ${link}`).__html;
+  }).catch(() => { /* only a hint */ });
   const reopen = document.getElementById('reopen');
   reopen && onSubmit(reopen, async (d) => { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/reopen`, { reason: d.reason }); compareView(biz, day); });
   app.querySelectorAll('[data-cover]').forEach((a) => a.addEventListener('click', (e) => {
@@ -2936,8 +2945,30 @@ async function bankView(biz, query = '') {
 
 // ---------- Reconcile: one screen per confirmed shift (approved 5 Nov 2026)
 
+const CARD_TAGS = { number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
+  clear_matches: 'Same amount, close in time', bank_backs: 'Bank agrees', no_upi_credit: 'No credit in the bank', no_bill: 'No bill' };
+const witnessHtml = (label, value, odd) => html`<div class="wit ${odd ? 'odd' : ''}"><div class="wit-l">${label}</div><div class="wit-v">${value ?? 'Not found'}</div></div>`;
+/** A suggestion: what Bookr saw, its reason as a tag, and one click to act. A person always makes the click. */
+function suggestionCard(c, day) {
+  return html`<div class="rv-card" data-card="${c.key}">
+    <div class="lane-h"><span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><strong>${c.title}</strong>${(c.billNos ?? []).filter(Boolean).map((b) => drawerBtn(b, day))}</span>
+      <span class="tchip ${c.score >= 75 ? 'ok' : 'warn'}">${CARD_TAGS[c.kind] ?? 'Check'}</span></div>
+    ${c.witnesses ? html`<div class="wit3">${witnessHtml('Software', c.witnesses.software, c.witnesses.odd === 'software')}${witnessHtml('Register', c.witnesses.register, c.witnesses.odd === 'register')}${witnessHtml('Bank', c.witnesses.bank, c.witnesses.odd === 'bank')}</div>` : ''}
+    <ul class="note" style="margin:0;padding-left:18px">${c.evidence.map((e) => html`<li>${e}</li>`)}</ul>
+    <div class="form-row" style="gap:6px">${c.actions.map((a, i) => a.href ? html`<a class="btn ${a.primary ? '' : 'plain'}" style="display:inline-flex;align-items:center;min-height:36px" href="${a.href}">${a.label}</a>`
+      : html`<button class="btn ${a.primary ? '' : 'plain'}" type="button" data-cardact="${c.key}" data-i="${i}" style="min-height:36px">${a.label}</button>`)}
+      <button class="btn plain" type="button" data-carddismiss="${c.key}" style="min-height:36px" title="Hide this suggestion on this device">Not this</button></div>
+    <div class="form-msg"></div></div>`;
+}
+const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist" aria-label="Reconcile">
+  <a role="tab" class="${tab === 'shift' ? 'on' : ''}" href="#/b/${biz.id}/reconcile${day ? `/${day}` : ''}">This shift</a>
+  <a role="tab" class="${tab === 'all' ? 'on' : ''}" href="#/b/${biz.id}/reconcile/all">All unmatched</a></div>`;
+const RECONCILE_VIEW_KEY = 'bookr.reconcile.view';
+const reconcileViewPref = () => { try { return localStorage.getItem(RECONCILE_VIEW_KEY) === 'open' ? 'open' : 'cards'; } catch { return 'cards'; } };
+
 async function reconcileView(biz, dayArg) {
   const [dayPart, qs = ''] = String(dayArg ?? '').split('?');
+  if (dayPart === 'all') return unmatchedView(biz);
   const more = Number(new URLSearchParams(qs).get('more')) || 1;
   let day = isDay(dayPart) ? dayPart : null;
   if (!day) {
@@ -2957,87 +2988,117 @@ async function reconcileView(biz, dayArg) {
   const prevDay = at > 0 ? days[at - 1] : null;
   const nextDay = at < days.length - 1 ? days[at + 1] : null;
   const covered = !r.coverage || r.coverage.covered;
-  const done = r.confirmed && !s.billsLeft && !s.creditsLeft && covered;
+  const done = !s.billsLeft && !s.creditsLeft && covered;
   const gone = dismissed();
   const fixes = r.fixes.filter((c) => !gone.has(c.key));
   const noCredit = r.noCredit.filter((c) => !gone.has(c.key));
-  const witness = (label, value, odd) => html`<div class="wit ${odd ? 'odd' : ''}"><div class="wit-l">${label}</div><div class="wit-v">${value ?? 'Not found'}</div></div>`;
-  const cardHtml = (c) => html`<div class="inset" data-card="${c.key}" style="display:flex;flex-direction:column;gap:8px;${c.score >= 60 ? 'border-left:3px solid var(--teal)' : 'border-left:3px solid #F59E0B'}">
-    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center"><strong>${c.title}</strong>${(c.billNos ?? []).filter(Boolean).map((b) => drawerBtn(b, day))}
-      <span class="chip ${c.score >= 60 ? 'ok' : 'wait'}">${c.score >= 75 ? 'Very likely' : c.score >= 60 ? 'Likely' : 'Check'}</span></div>
-    ${c.witnesses ? html`<div class="wit3">${witness('Software', c.witnesses.software, c.witnesses.odd === 'software')}${witness('Register', c.witnesses.register, c.witnesses.odd === 'register')}${witness('Bank', c.witnesses.bank, c.witnesses.odd === 'bank')}</div>` : ''}
-    <ul class="note" style="margin:0;padding-left:18px">${c.evidence.map((e) => html`<li>${e}</li>`)}</ul>
-    <div class="form-row" style="gap:6px">${c.actions.map((a, i) => html`<button class="btn ${a.primary ? '' : 'plain'}" type="button" data-cardact="${c.key}" data-i="${i}" style="min-height:36px">${a.label}</button>`)}
-      <button class="btn plain" type="button" data-carddismiss="${c.key}" style="min-height:36px" title="Hide this suggestion on this device">Not this</button></div>
-    <div class="form-msg"></div></div>`;
+  const view = reconcileViewPref();
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;
   const billsCell = (x) => html`<span class="mono">${x.billNos.join(' + ')}</span>${x.part ? html`<div class="tiny">${x.part}</div>` : ''}`;
-  const pairTable = (rows, attr, ticked) => html`<div class="scroll"><table style="min-width:560px"><thead><tr><th style="width:36px"></th><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th></tr></thead><tbody>
-    ${rows.map((x) => html`<tr><td><input type="checkbox" ${attr}="${x.creditId}" ${ticked ? 'checked' : ''} aria-label="Match bill ${x.billNos.join(' + ')}" style="width:18px;height:18px;min-height:0"></td>
+  const pairTable = (rows, attr, ticked) => html`<div class="scroll"><table style="min-width:560px"><thead><tr>${attr ? html`<th style="width:36px"></th>` : ''}<th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th></tr></thead><tbody>
+    ${rows.map((x) => html`<tr>${attr ? html`<td><input type="checkbox" ${attr}="${x.creditId}" ${ticked ? 'checked' : ''} aria-label="Match bill ${x.billNos.join(' + ')}" style="width:18px;height:18px;min-height:0"></td>` : ''}
       <td>${billsCell(x)}${x.others ? html`<div class="tiny" style="color:#92400E">${x.others} other possible match${x.others > 1 ? 'es' : ''}: check before ticking</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${creditCell(x)}</td></tr>`)}
   </tbody></table></div>`;
   const waiting = v.sales.filter((x) => !x.bankRowId);
+  const clearCard = r.clear.length ? html`<div class="rv-card" id="laneclear">
+    <div class="lane-h"><strong>${r.clear.length} bill${r.clear.length === 1 ? '' : 's'} match the bank exactly</strong><span class="tchip ok">${CARD_TAGS.clear_matches}</span></div>
+    <div class="note">Same amount, closest in time, within an hour; each bill and credit used once.${r.confirmed ? '' : ' They are matched when you confirm the shift.'}</div>
+    ${r.confirmed ? html`<div class="form-row" style="gap:6px"><button class="btn" type="button" id="matchclear" style="min-height:36px">Match all ${r.clear.length}</button></div>` : ''}
+    <details class="cmp-fold"><summary>See the list</summary>${pairTable(r.clear, r.confirmed ? 'data-clear' : '', true)}</details>
+    <div class="form-msg" id="clearmsg"></div></div>` : '';
+  const likelyCard = r.likely.length ? html`<div class="rv-card">
+    <div class="lane-h"><strong>${r.likely.length} likely match${r.likely.length === 1 ? '' : 'es'} for you to check</strong><span class="tchip warn">Likely, not certain</span></div>
+    <div class="note">The same amount, but further apart in time or with another possible match. Tick the ones you agree with.</div>
+    <details class="cmp-fold"><summary>See the list</summary>${pairTable(r.likely, 'data-likely', false)}</details>
+    <div class="form-row" style="gap:6px"><button class="btn" type="button" id="matchlikely" disabled style="min-height:36px">Match 0 ticked</button></div><div class="form-msg" id="likelymsg"></div></div>` : '';
+  const noBillCards = r.noBill.map((x) => html`<div class="rv-card">
+    <div class="lane-h"><strong>₹ ${money(x.amountPaise)} came in at ${when(x.postedAt)} with no bill</strong><span class="tchip warn">${CARD_TAGS.no_bill}</span></div>
+    <div class="tiny">${x.accountName}${x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? ` · ${x.remark}` : ''}</div>
+    <div class="note">No bill of this amount: a sale not written down, or money that is not a sale.</div>
+    <div class="form-row" style="gap:6px">${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-book="${x.creditId}" data-head="${h.headId}" data-label="${h.billType === 'room' ? 'Room' : 'F&B'}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
+      <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/bank?from=${day}&to=${addDaysIso(day, 1)}">Another head…</a></div></div>`);
+  const nothing = !r.clear.length && !fixes.length && !r.likely.length && !noCredit.length && !r.noBill.length;
+  const suggestions = html`<section class="card lane" style="gap:10px">
+    <div class="rv-cards">${clearCard}${fixes.map((c) => suggestionCard(c, day))}${likelyCard}${noCredit.map((c) => suggestionCard(c, day))}${noBillCards}</div>
+    ${nothing ? html`<div class="note">${done ? 'No suggestions: nothing is left to explain.' : 'No suggestions for what is left. Open the entries to compare them yourself.'}</div>` : ''}
+  </section>`;
+  const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
+    <div class="note">To correct a bill, open its row on Review. Tick entries to compare their totals; matching by hand starts after confirming.</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
+      <div><strong>Credits with no bill yet</strong> <span class="chip">${r.open.credits.length}</span>
+        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>`)}</div>
+      <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
+        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.uploadId ? html` <a class="tiny" href="#/b/${biz.id}/review/${b.uploadId}/${b.rowId}">Open row</a>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>`)}</div>
+    </div>
+    <div id="trialsum" class="note">Tick entries to compare them.</div></section>` : '';
+  const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
+      <div class="scroll"><table style="min-width:620px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th><th></th></tr></thead><tbody>
+        ${r.done.map((x) => html`<tr><td class="mono">${x.bills.join(' + ')}</td><td class="amount">${money(x.creditPaise ?? x.billsPaise)}</td><td>${when(x.postedAt)}<div class="tiny">${x.accountName}</div></td>
+          <td><button class="btn plain dchip" type="button" data-unmatch="${x.rowId}">Unmatch</button></td></tr>`)}
+        ${r.booked.map((x) => html`<tr><td>${x.headName ?? 'Booked'}${x.note ? html`<div class="tiny">${x.note}</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${when(x.postedAt)}</td>
+          <td><button class="btn plain dchip" type="button" data-putback="${x.id}">Put back</button></td></tr>`)}
+      </tbody></table></div></details>` : '';
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
+    ${recTabs(biz, day, 'shift')}
     <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
           ${prevDay ? html`<a class="btn plain" href="#/b/${biz.id}/reconcile/${prevDay}" aria-label="Previous shift" title="${dayLabel(prevDay)}">‹</a>` : html`<span class="btn plain off">‹</span>`}
           <label class="cmp-pick"><span class="sr-only">Shift</span><select id="recday">${[...days].reverse().map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}</select></label>
           ${nextDay ? html`<a class="btn plain" href="#/b/${biz.id}/reconcile/${nextDay}" aria-label="Next shift" title="${dayLabel(nextDay)}">›</a>` : html`<span class="btn plain off">›</span>`}
-          ${done ? html`<span class="chip ok">Bank reconciled</span>` : r.confirmed ? html`<span class="chip wait">Left to explain: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}</span>` : html`<span class="chip">Not confirmed</span>`}
+          ${done ? html`<span class="chip ok">UPI reconciled</span>` : html`<span class="chip wait">Left to explain: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}</span>`}
+          ${r.confirmed ? '' : html`<span class="chip">Not confirmed</span>`}
         </div>
         <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${day}&to=${day}">Bank sync</a>
       </div>
-      ${r.confirmed ? html`<div class="rec-strip">
-        <div><div class="tiny">UPI counted</div><div class="amount rec-n">₹ ${money(s.upiSalesPaise)}</div><div class="tiny">${s.bills} bill${s.bills === 1 ? '' : 's'}</div></div>
-        <div><div class="tiny">Matched to the bank</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(s.matchedPaise)}</div></div>
-        <div><div class="tiny">Bills not matched</div><div class="amount rec-n" style="color:${s.billsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.billsLeftPaise)}</div><div class="tiny">${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}</div></div>
-        <div><div class="tiny">Credits not matched</div><div class="amount rec-n" style="color:${s.creditsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.creditsLeftPaise)}</div><div class="tiny">${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}</div></div>
-      </div>` : ''}
+      <div class="rec-strip">
+        <div><div class="tiny">UPI ${r.confirmed ? 'counted' : 'on this shift'}</div><div class="amount rec-n">₹ ${money(s.upiSalesPaise)}</div><div class="tiny">${s.bills} bill${s.bills === 1 ? '' : 's'}</div></div>
+        <div><div class="tiny">${r.confirmed ? 'Matched to the bank' : 'Would match the bank'}</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(s.matchedPaise)}</div></div>
+        <div><div class="tiny">Bills not in the bank yet</div><div class="amount rec-n" style="color:${s.billsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.billsLeftPaise)}</div><div class="tiny">${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}</div></div>
+        <div><div class="tiny">Credits with no bill yet</div><div class="amount rec-n" style="color:${s.creditsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.creditsLeftPaise)}</div><div class="tiny">${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}</div></div>
+      </div>
     </section>
     <div id="recmsg"></div>
-    ${!r.confirmed ? html`<section class="card"><div class="note">This shift is not confirmed yet. <a href="#/b/${biz.id}/compare/${day}">Confirm it on Compare sales</a>, then what is left is reconciled here.</div></section>` : html`
+    ${r.confirmed ? html`<div class="note">Confirmed shift: each fix here is a recorded correction, and can be undone.</div>`
+      : html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px"><strong>Trial reconcile.</strong> Nothing is saved until you <a href="#/b/${biz.id}/compare/${day}">confirm the shift on Compare sales</a>. Corrections here change the register row, and only Owner and Accountant decide differences. It is optional, and never stops a confirm.</div>`}
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
-    ${done ? html`<div class="ok-msg">Every UPI bill and credit of this shift is explained.</div>` : ''}
-    ${r.clear.length ? html`<section class="card lane" id="laneclear" style="gap:10px">
-      <div class="lane-h"><h2>Clear (${r.clear.length})</h2><button class="btn" type="button" id="matchclear">Match ${r.clear.length} ticked</button></div>
-      <div class="note">Same amount, closest in time, within an hour; each bill and credit used once.</div>
-      ${pairTable(r.clear, 'data-clear', true)}<div class="form-msg" id="clearmsg"></div></section>` : ''}
-    ${fixes.length ? html`<section class="card lane" style="gap:10px"><div class="lane-h"><h2>Fix and match (${fixes.length})</h2><span class="note">The one struck out is the mistake. Each fix is recorded, and Unmatch undoes it.</span></div>${fixes.map(cardHtml)}</section>` : ''}
-    <section class="card lane" style="gap:10px">
-      <div class="lane-h"><h2>Needs you (${r.likely.length})</h2>${r.likely.length ? html`<button class="btn" type="button" id="matchlikely" disabled>Match 0 ticked</button>` : ''}</div>
-      ${r.likely.length ? html`<div class="note">Likely, not certain: the same amount, but further apart in time or with another possible match. Tick the ones you agree with.</div>${pairTable(r.likely, 'data-likely', false)}<div class="form-msg" id="likelymsg"></div>` : html`<div class="note">No likely matches left to check.</div>`}
-      ${v.credits.length || waiting.length || v.repaid?.length ? html`<details class="cmp-fold" id="byhand"><summary><strong>Match by hand</strong> <span class="note">A typo in the register, or a guest who paid in two goes.</span></summary>${pairPanel(v, waiting)}</details>` : ''}
-    </section>
-    ${noCredit.length || r.noBill.length ? html`<section class="card lane" style="gap:10px"><h2>Missing (${noCredit.length + r.noBill.length})</h2>
-      ${noCredit.map(cardHtml)}
-      ${r.noBill.length ? html`<div class="note"><strong>Credits with no bill of that amount.</strong> A sale not written down, or money that is not a sale.</div>
-      <div class="scroll"><table style="min-width:620px"><thead><tr><th>Credit</th><th style="text-align:right">Amount</th><th>Book it as</th></tr></thead><tbody>
-        ${r.noBill.map((x) => html`<tr><td>${when(x.postedAt)}<div class="tiny">${x.accountName}${x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? ` · ${x.remark}` : ''}</div></td><td class="amount">${money(x.amountPaise)}</td>
-          <td><div class="form-row" style="gap:6px">${r.unbilledHeads.map((h) => html`<button class="btn plain dchip" type="button" data-book="${x.creditId}" data-head="${h.headId}" data-label="${h.billType === 'room' ? 'Room' : 'F&B'}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
-            <a class="btn plain dchip" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${day}&to=${addDaysIso(day, 1)}">Another head…</a></div></td></tr>`)}
-      </tbody></table></div>` : ''}</section>` : ''}
-    ${r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
-      <div class="scroll"><table style="min-width:620px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th><th></th></tr></thead><tbody>
-        ${r.done.map((x) => html`<tr><td class="mono">${x.bills.join(' + ')}</td><td class="amount">${money(x.creditPaise ?? x.billsPaise)}</td><td>${when(x.postedAt)}<div class="tiny">${x.accountName}</div></td>
-          <td><button class="btn plain dchip" type="button" data-unmatch="${x.rowId}">Unmatch</button></td></tr>`)}
-        ${r.booked.map((x) => html`<tr><td>${x.headName ?? 'Booked'}${x.note ? html`<div class="tiny">${x.note}</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${when(x.postedAt)}</td>
-          <td><button class="btn plain dchip" type="button" data-putback="${x.id}">Put back</button></td></tr>`)}
-      </tbody></table></div></details>` : ''}`}`));
+    <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
+    ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
+    ${doneFold}`));
   wireShell();
   const msg = document.getElementById('recmsg');
   document.getElementById('recday').addEventListener('change', (e) => go(`#/b/${biz.id}/reconcile/${e.target.value}`));
+  document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {
+    try { localStorage.setItem(RECONCILE_VIEW_KEY, b.dataset.view); } catch { /* storage unavailable */ }
+    reload();
+  }));
+  // Fixes and open entries work on both sides of confirming; the matching below needs a confirmed shift.
+  wireExplain({ cards: [...fixes, ...noCredit] }, reload, biz);
+  const trialBox = document.getElementById('trialopen');
+  trialBox?.querySelectorAll('[data-tside]').forEach((x) => x.addEventListener('change', () => {
+    const sum = (side) => [...trialBox.querySelectorAll(`[data-tside="${side}"]`)].filter((c) => c.checked).reduce((t, c) => t + Number(c.dataset.amt), 0);
+    const bank = sum('cr'); const bills = sum('bl'); const diff = bank - bills;
+    document.getElementById('trialsum').innerHTML = html`Bank <strong>₹ ${money(bank)}</strong> · Bills <strong>₹ ${money(bills)}</strong> · Difference <strong style="color:${diff ? 'var(--danger)' : 'var(--teal)'}">₹ ${money(Math.abs(diff))}</strong>`.__html;
+  }));
   if (!r.confirmed) return;
-  const act = async (fn) => { try { await fn(); await reload(); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
+  const act = async (fn, toast) => {
+    try {
+      await fn(); await reload();
+      if (toast) doneToast(toast.text, toast.undo, reload);
+    } catch (err) { showError(document.getElementById('recmsg') ?? msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  };
+  const unmatch = (id) => apiFull('DELETE', `/businesses/${biz.id}/bank-rows/${id}/match`, {}).catch((e) => { if (!/not matched|nothing/i.test(e.message)) throw e; });
   const ticked = (attr) => [...app.querySelectorAll(`[${attr}]`)].filter((x) => x.checked);
   const clearBtn = document.getElementById('matchclear');
   app.querySelectorAll('[data-clear]').forEach((x) => x.addEventListener('change', () => {
     const n = ticked('data-clear').length;
-    clearBtn.textContent = `Match ${n} ticked`; clearBtn.disabled = !n;
+    clearBtn.textContent = n === r.clear.length ? `Match all ${n}` : `Match ${n} ticked`; clearBtn.disabled = !n;
   }));
   clearBtn?.addEventListener('click', () => {
     clearBtn.disabled = true;
-    act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-clear`, { ids: ticked('data-clear').map((x) => x.dataset.clear) }));
+    const ids = ticked('data-clear').map((x) => x.dataset.clear);
+    act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-clear`, { ids }),
+      { text: `Matched ${ids.length} bill${ids.length === 1 ? '' : 's'} to the bank.`, undo: async () => { for (const id of ids) await unmatch(id); } });
   });
   const likelyBtn = document.getElementById('matchlikely');
   app.querySelectorAll('[data-likely]').forEach((x) => x.addEventListener('change', () => {
@@ -3047,11 +3108,13 @@ async function reconcileView(biz, dayArg) {
   likelyBtn?.addEventListener('click', () => {
     likelyBtn.disabled = true;
     const pairs = ticked('data-likely').map((x) => r.likely.find((l) => l.creditId === x.dataset.likely));
-    act(async () => { for (const p of pairs) await apiFull('POST', `/businesses/${biz.id}/bank-rows/${p.creditId}/match`, { transactionIds: p.transactionIds }); });
+    act(async () => { for (const p of pairs) await apiFull('POST', `/businesses/${biz.id}/bank-rows/${p.creditId}/match`, { transactionIds: p.transactionIds }); },
+      { text: `Matched ${pairs.length} bill${pairs.length === 1 ? '' : 's'} to the bank.`, undo: async () => { for (const p of pairs) await unmatch(p.creditId); } });
   });
   app.querySelectorAll('[data-book]').forEach((b) => b.addEventListener('click', () => {
     b.disabled = true;
-    act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.book}/book`, { headId: b.dataset.head, note: `Unbilled ${b.dataset.label} (Reconcile)` }));
+    act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.book}/book`, { headId: b.dataset.head, note: `Unbilled ${b.dataset.label} (Reconcile)` }),
+      { text: `Booked to Unbilled ${b.dataset.label}.`, undo: () => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.book}/reopen`, {}) });
   }));
   app.querySelectorAll('[data-unmatch]').forEach((b) => b.addEventListener('click', () => {
     if (!confirm('Unmatch this credit? Its bills go back to waiting for a credit.')) return;
@@ -3062,8 +3125,140 @@ async function reconcileView(biz, dayArg) {
     act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.putback}/reopen`, {}));
   }));
   wirePairPanel(biz, v, heads, reload);
-  wireExplain({ cards: [...fixes, ...noCredit] }, reload);
 }
+
+/** Tab 2: what is still open on every shift, oldest first. Closing a bill takes Owner or Accountant, and a reason. */
+const unmatchedState = { seg: 'all', q: '' };
+async function unmatchedView(biz) {
+  const u = await api('GET', `/businesses/${biz.id}/unmatched`);
+  const reload = () => unmatchedView(biz);
+  const canClose = biz.actions.includes('sales.decide');
+  const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
+  const bills = u.bills.map((x) => ({ ...x, side: 'bill' }));
+  const credits = u.credits.map((x) => ({ ...x, side: 'credit' }));
+  const entries = [...bills, ...credits].sort((a, b) => a.day.localeCompare(b.day) || a.amountPaise - b.amountPaise);
+  const old = entries.filter((x) => x.age > u.watchDays);
+  const matches = (x) => {
+    const q = unmatchedState.q.trim().replace(/[₹,\s]/g, '');
+    if (!q) return true;
+    return (x.billNo ?? '').includes(q) || String(x.amountPaise / 100).startsWith(q) || (x.remark ?? '').toLowerCase().includes(q.toLowerCase());
+  };
+  const shown = () => entries.filter((x) => (unmatchedState.seg === 'all' || unmatchedState.seg === x.side) && matches(x));
+  const rowHtml = (x) => html`<details class="um-row" data-um="${x.id}"><summary>
+      <span style="flex:1;min-width:0">${x.side === 'bill' ? html`Bill <span class="mono">${x.billNo ?? ''}</span>` : html`Credit at ${when(x.postedAt)}`}
+        <span class="tiny" style="display:block">${dayLabel(x.day)} shift · ${x.age === 0 ? 'today' : x.age === 1 ? 'yesterday' : `${x.age} days ago`}${x.accountName ? ` · ${x.accountName}` : ''}${x.labels ? ` · ${x.labels}` : ''}</span></span>
+      <strong class="amount">₹ ${money(x.amountPaise)}</strong></summary><div class="um-body note">Loading…</div></details>`;
+  const groupHtml = (title, cls, xs) => xs.length ? html`<section class="card" style="gap:6px"><div class="lane-h"><h2>${title}</h2><span class="tchip ${cls}">${xs.length} · ₹ ${money(sum(xs))}</span></div>${xs.map(rowHtml)}</section>` : '';
+  const listHtml = () => {
+    if (unmatchedState.seg === 'closed') {
+      return u.closed.length ? html`<section class="card" style="gap:6px">${u.closed.map((x) => html`<div class="um-line" style="flex-wrap:wrap"><span style="flex:1;min-width:220px">Bill <span class="mono">${x.billNo ?? ''}</span>
+        <span class="tiny" style="display:block">${dayLabel(x.day)} shift · closed ${when(x.closedAt)}${x.closedBy ? ` by ${x.closedBy}` : ''}: ${x.note}</span></span><strong class="amount">₹ ${money(x.amountPaise)}</strong>
+        ${canClose ? html`<button class="btn plain dchip" type="button" data-umreopen="${x.id}">Reopen</button>` : ''}</div>`)}</section>` : html`<section class="card"><div class="note">No bills have been closed.</div></section>`;
+    }
+    const xs = shown();
+    if (!xs.length) return html`<section class="card"><div class="note">${entries.length ? 'Nothing matches this search.' : 'Every UPI bill and credit is explained.'}</div></section>`;
+    return html`${groupHtml(`Over ${u.watchDays} days: needs closing`, 'bad', xs.filter((x) => x.age > u.watchDays))}
+      ${groupHtml(`2 to ${u.watchDays} days`, 'warn', xs.filter((x) => x.age >= 2 && x.age <= u.watchDays))}
+      ${groupHtml('Today and yesterday', '', xs.filter((x) => x.age < 2))}`;
+  };
+  render(shell(biz, 'reconcile', 'Reconcile', '', html`
+    ${recTabs(biz, null, 'all')}
+    <section class="card" style="gap:10px">
+      <div class="rec-strip">
+        <div><div class="tiny">Bills not in the bank yet</div><div class="amount rec-n">₹ ${money(sum(bills))}</div><div class="tiny">${bills.length} bill${bills.length === 1 ? '' : 's'}</div></div>
+        <div><div class="tiny">Credits with no bill yet</div><div class="amount rec-n">₹ ${money(sum(credits))}</div><div class="tiny">${credits.length} credit${credits.length === 1 ? '' : 's'}</div></div>
+        <div><div class="tiny">Over ${u.watchDays} days</div><div class="amount rec-n" style="color:${old.length ? 'var(--danger)' : 'inherit'}">₹ ${money(sum(old))}</div><div class="tiny">${old.length} entr${old.length === 1 ? 'y' : 'ies'}</div></div>
+      </div>
+      <div class="form-row" style="align-items:center;gap:10px">
+        <div class="seg" id="umseg">${[['all', 'All'], ['bill', 'Bills'], ['credit', 'Credits'], ['closed', `Closed (${u.closed.length})`]].map(([k, l]) => html`<button type="button" data-seg="${k}" class="${unmatchedState.seg === k ? 'on' : ''}">${l}</button>`)}</div>
+        <input id="umq" class="compact" type="search" placeholder="Search amount or bill number" value="${unmatchedState.q}" style="min-width:220px" aria-label="Search amount or bill number">
+      </div>
+    </section>
+    <div id="recmsg"></div>
+    <div id="umlist" style="display:contents">${listHtml()}</div>`));
+  wireShell();
+  const list = document.getElementById('umlist');
+  const wireList = () => {
+    list.querySelectorAll('[data-um]').forEach((d) => d.addEventListener('toggle', () => {
+      if (d.open && !d.dataset.loaded) { d.dataset.loaded = '1'; loadUnmatchedRow(biz, entries.find((x) => x.id === d.dataset.um), d, entries, canClose, u, reload); }
+    }));
+    list.querySelectorAll('[data-umreopen]').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try { await apiFull('POST', `/businesses/${biz.id}/sales/${b.dataset.umreopen}/reopen`, {}); await reload(); }
+      catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); }
+    }));
+  };
+  const redraw = () => { list.innerHTML = listHtml().__html; wireList(); };
+  wireList();
+  document.querySelectorAll('#umseg [data-seg]').forEach((b) => b.addEventListener('click', () => {
+    unmatchedState.seg = b.dataset.seg;
+    document.querySelectorAll('#umseg [data-seg]').forEach((x) => x.classList.toggle('on', x === b));
+    redraw();
+  }));
+  document.getElementById('umq').addEventListener('input', (e) => { unmatchedState.q = e.target.value; redraw(); });
+}
+
+/** A row opened: why it is open, where it came from, what it could be, and what a person can do about it. */
+async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
+  const body = box.querySelector('.um-body');
+  const base = `/businesses/${biz.id}`;
+  let r = null;
+  try { r = await api('GET', `${base}/shifts/${x.day}/reconcile`); } catch (err) { showError(body, err); return; }
+  const tag = x.side === 'bill' ? `tx:${x.id}` : `cr:${x.id}`;
+  const gone = dismissed();
+  const cards = [...r.fixes, ...r.noCredit].filter((c) => c.uses?.includes(tag) && !gone.has(c.key) && c.kind !== 'no_bill');
+  const pair = [...r.clear, ...r.likely].find((p) => (x.side === 'bill' ? p.transactionIds?.includes(x.id) : p.creditId === x.id));
+  if (pair && r.confirmed) {
+    cards.unshift({ key: `um-pair:${x.id}`, kind: 'clear_matches', title: `Bill ${pair.billNos.join(' + ')} and the credit at ${when(pair.postedAt)}`, score: 80, billNos: [],
+      evidence: [`Both are ₹ ${money(pair.amountPaise)}${pair.minutes != null ? `, ${pair.minutes} minutes apart` : ''}.`], uses: [],
+      actions: [{ label: 'Match', primary: true, method: 'POST', path: `${base}/bank-rows/${pair.creditId}/match`, body: { transactionIds: pair.transactionIds } }] });
+  }
+  const others = entries.filter((o) => o.side !== x.side && Math.abs(o.amountPaise - x.amountPaise) <= 2000)
+    .sort((a, b) => Math.abs(a.amountPaise - x.amountPaise) - Math.abs(b.amountPaise - x.amountPaise) || Math.abs(a.age - x.age) - Math.abs(b.age - x.age)).slice(0, 3);
+  const why = x.side === 'bill'
+    ? (x.bankIn ? 'No credit of this amount has been matched to this bill.' : 'The bank is not in up to the end of this shift, so its credit may simply not be here yet.')
+    : 'No bill has been matched to this money. It may be a sale not written down, or money that is not a sale.';
+  const closeHint = x.side === 'bill' && !x.canClose ? `Watched for ${u.watchDays} days; it can be closed with a reason after that.` : '';
+  body.className = 'um-body';
+  body.innerHTML = html`<div class="note">${why}</div>
+    <div class="tiny">${x.side === 'bill' ? html`${x.paidAt ? `Paid at ${when(x.paidAt)}` : 'Register only, no bill time'}${x.labels ? ` · written under ${x.labels}` : ''}`
+      : html`${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}${x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? ` · ${x.remark}` : ''}`}</div>
+    ${cards.length ? html`<div class="rv-cards">${cards.map((c) => suggestionCard(c, x.day))}</div>` : ''}
+    ${others.length ? html`<div><strong>Closest possible</strong>${others.map((o) => html`<div class="um-line" style="cursor:default"><span style="flex:1">${o.side === 'bill' ? html`Bill <span class="mono">${o.billNo ?? ''}</span>` : `Credit at ${when(o.postedAt)}`}
+      <span class="tiny" style="display:block">${dayLabel(o.day)} shift${o.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(o.amountPaise - x.amountPaise))} ${o.amountPaise > x.amountPaise ? 'more' : 'less'}` : ' · same amount'}</span></span><span class="amount">₹ ${money(o.amountPaise)}</span></div>`)}</div>` : html`<div class="tiny">Nothing open comes close to this amount.</div>`}
+    <div class="form-row" style="gap:6px">
+      ${x.side === 'credit' ? html`${r.confirmed ? r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-umbook="${h.headId}" data-label="${h.billType === 'room' ? 'Room' : 'F&B'}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`) : ''}
+        <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/bank?from=${x.day}&to=${addDaysIso(x.day, 1)}">Another head…</a>
+        <button class="btn plain" type="button" style="min-height:36px" data-umignore="1">Not a sale, close</button>`
+      : html`<button class="btn plain" type="button" style="min-height:36px" data-umrepay="cash">Was cash</button><button class="btn plain" type="button" style="min-height:36px" data-umrepay="card">Was card</button>
+        ${canClose && x.canClose ? html`<button class="btn plain" type="button" style="min-height:36px" data-umclose="1">Close with a reason</button>` : ''}`}
+      <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/reconcile/${x.day}">Open the shift</a>
+    </div>${closeHint ? html`<div class="tiny">${closeHint}</div>` : ''}<div class="form-msg"></div>`.__html;
+  wireExplain({ cards }, reload, biz, body);
+  const fail = (err) => showError(body.querySelector('.form-msg'), err);
+  const run = async (fn, text, undo) => { try { await fn(); await reload(); doneToast(text, undo, reload); } catch (err) { fail(err); } };
+  const reason = (q) => (prompt(q) ?? '').trim();
+  body.querySelectorAll('[data-umbook]').forEach((b) => b.addEventListener('click', () => run(
+    () => apiFull('POST', `${base}/bank-rows/${x.id}/book`, { headId: b.dataset.umbook, note: `Unbilled ${b.dataset.label} (All unmatched)` }),
+    `Booked to Unbilled ${b.dataset.label}.`, () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}))));
+  body.querySelector('[data-umignore]')?.addEventListener('click', () => {
+    const note = reason('Why is this money not a sale?');
+    if (note) run(() => apiFull('POST', `${base}/bank-rows/${x.id}/ignore`, { note }), 'Closed: not a sale.', () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}));
+  });
+  body.querySelectorAll('[data-umrepay]').forEach((b) => b.addEventListener('click', async () => {
+    const mode = b.dataset.umrepay;
+    const note = reason(`This bill was paid by ${mode} (the register said UPI). Reason?`);
+    if (!note) return;
+    let audit = null;
+    await run(async () => { audit = (await apiFull('POST', `${base}/sales/repay`, { transactionIds: [x.id], mode, note })).auditId; },
+      `Bill ${x.billNo ?? ''} is now ${mode}.`, () => apiFull('POST', `${base}/sales/repay/${audit}/undo`, {}));
+  }));
+  body.querySelector('[data-umclose]')?.addEventListener('click', () => {
+    const note = reason('Why will this credit never come? The sale stays in income; closing only stops the chase.');
+    if (note) run(() => apiFull('POST', `${base}/sales/${x.id}/close`, { note }), `Bill ${x.billNo ?? ''} closed.`, () => apiFull('POST', `${base}/sales/${x.id}/reopen`, {}));
+  });
+}
+
 /**
  * One row per bill as the register has it: a bill paid in several UPI goes is one row with its payments inside;
  * bills paid together with one payment are one row. Matching underneath stays per payment.
@@ -3096,19 +3291,60 @@ function billUnits(waiting) {
 // ---- Bookr's explanations for what is left (one click each; each fix is recorded and can be undone)
 const DISMISS_KEY = 'bookr.dismissedCards';
 const dismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(DISMISS_KEY) || '[]')); } catch { return new Set(); } };
-function wireExplain(ex, reload) {
+/** A done message with Undo, at the top of the screen. */
+function doneToast(text, undo, reload) {
+  const box = document.getElementById('recmsg');
+  if (!box) return;
+  box.innerHTML = html`<div class="ok-msg" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${text}</span>${undo ? html`<button class="btn plain dchip" type="button" id="recundo">Undo</button>` : ''}</div>`.__html;
+  document.getElementById('recundo')?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { await undo(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); }
+  });
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+/** Changes a register row in one click (trial reconcile), and hands back how to put it as it was. */
+async function changeRegisterRow(biz, a) {
+  const u = await api('GET', `/businesses/${biz.id}/uploads/${a.uploadId}`);
+  const r = u.rows.find((x) => x.id === a.rowId);
+  if (!r) throw new Error('This row is no longer there. Open Review to check it.');
+  const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
+    payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+  const put = (b) => apiFull('PUT', `/businesses/${biz.id}/register-rows/${r.id}`, b);
+  const changed = a.op === 'fixNumber' ? { ...payload, billNo: a.billNo }
+    : { ...payload, payments: payload.payments.map((p) => ({ ...p, mode: a.mode, columnLabel: PAY_COLS.find(([m]) => m === a.mode)?.[1] ?? null })) };
+  await put(changed);
+  return () => put(payload);
+}
+/** How to take back what an action did, where there is a simple way. Decisions are changed on Compare instead. */
+function undoFor(biz, a, res) {
+  const base = `/businesses/${biz.id}`;
+  const path = a.path ?? '';
+  if (path.endsWith('/sales/repay')) return res?.auditId ? () => apiFull('POST', `${base}/sales/repay/${res.auditId}/undo`, {}) : null;
+  if (!path.includes('/bank-rows/')) return null;
+  const inPath = path.match(/\/bank-rows\/([0-9a-f-]{36})\//)?.[1];
+  const ids = [...(a.body?.ids ?? []), ...(a.body?.rowIds ?? []), ...(a.body?.rowId ? [a.body.rowId] : []), ...(inPath ? [inPath] : [])];
+  if (!ids.length) return null;
+  return async () => {
+    for (const id of ids) {
+      await apiFull('DELETE', `${base}/bank-rows/${id}/match`, {}).catch((e) => { if (ids.length === 1) throw e; });
+    }
+  };
+}
+function wireExplain(ex, reload, biz, root = document) {
   if (!ex) return;
-  document.querySelectorAll('[data-cardact]').forEach((b) => b.addEventListener('click', async () => {
+  root.querySelectorAll('[data-cardact]').forEach((b) => b.addEventListener('click', async () => {
     const c = ex.cards.find((x) => x.key === b.dataset.cardact);
     const a = c.actions[Number(b.dataset.i)];
     b.disabled = true;
     try {
-      await apiFull(a.method, `${a.path}`, a.body);
+      let undo = null;
+      if (a.op) undo = await changeRegisterRow(biz, a);
+      else undo = undoFor(biz, a, await apiFull(a.method, `${a.path}`, a.body));
       await reload();
-      document.getElementById('recmsg')?.insertAdjacentHTML('afterbegin', html`<div class="ok-msg">Done: ${c.title}.</div>`.__html);
-    } catch (err) { b.disabled = false; showError(document.querySelector(`[data-card="${CSS.escape(c.key)}"] .form-msg`), err); }
+      doneToast(c.billNos?.length ? `${a.label}: bill ${c.billNos.join(' + ')}.` : `Done: ${c.title}.`, undo, reload);
+    } catch (err) { b.disabled = false; showError(root.querySelector(`[data-card="${CSS.escape(c.key)}"] .form-msg`), err); }
   }));
-  document.querySelectorAll('[data-carddismiss]').forEach((b) => b.addEventListener('click', () => {
+  root.querySelectorAll('[data-carddismiss]').forEach((b) => b.addEventListener('click', () => {
     const gone = dismissed(); gone.add(b.dataset.carddismiss);
     try { localStorage.setItem(DISMISS_KEY, JSON.stringify([...gone].slice(-500))); } catch { /* storage unavailable */ }
     b.closest('[data-card]').remove();

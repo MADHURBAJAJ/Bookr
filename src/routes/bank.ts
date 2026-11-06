@@ -11,8 +11,8 @@ import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
 import { explainShift } from '../explain';
-import { reconcileShift } from '../reconcile';
-import { billDistance } from '../sales';
+import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
+import { billDistance, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 
 export const bankRoutes = new Hono<AppEnv>();
@@ -29,6 +29,7 @@ const MAX_PASTE = 2_000_000;
 const audit = (bid: string, user: string, action: string, id: string, before: unknown, after: unknown, t: number) =>
   [bid, user, action, id, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), t] as const;
 const AUDIT = `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, 'bank_rows', ?, ?, ?, ?)`;
+const TX_AUDIT = AUDIT.replace("'bank_rows'", "'transactions'");
 
 async function bankAccount(db: D1Database, bid: string, id: string) {
   if (!isUuid(id)) fail(404, 'Not found.');
@@ -195,7 +196,8 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
     LEFT JOIN register_rows rr ON rr.id = c.register_row_id
     LEFT JOIN bank_rows r ON r.id = t.matched_bank_row LEFT JOIN accounts a ON a.id = r.account_id
     WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.source = 'software_report'
-    ORDER BY coalesce(sb.paid_at, 0), t.bill_no`, bid, day);
+      AND t.id NOT IN (SELECT transaction_id FROM closed_bills WHERE business_id = ?)
+    ORDER BY coalesce(sb.paid_at, 0), t.bill_no`, bid, day, bid);
   // Credits not matched yet: the shift's own, then up to an hour either side (late or early postings), more on request.
   const w = shiftWindow(day);
   const more = Math.min(Math.max(Number(c.req.query('more') ?? 1) || 1, 1), 48);
@@ -221,8 +223,9 @@ bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'),
   const mode = data.mode === 'cash' || data.mode === 'card' ? data.mode : fail(400, 'Choose cash or card.');
   const note = text(data, 'note', 'Reason', { max: 300 })!;
   const r = await repayStatements(db, bid, ids, mode, note, c.get('user').id, now());
-  await db.batch(r.statements);
-  return c.json({ ok: true, bills: r.bills, amountPaise: r.amountPaise });
+  const done = await db.batch(r.statements);
+  // The audit entry is the last statement; its id is what Undo puts back from.
+  return c.json({ ok: true, bills: r.bills, amountPaise: r.amountPaise, auditId: done.at(-1)?.meta.last_row_id ?? null });
 });
 
 bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole('bank.link'), async (c) => {
@@ -237,9 +240,52 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
   const db = c.env.DB;
   const bid = c.get('businessId');
-  const [r, shifts] = await Promise.all([reconcileShift(db, bid, day),
-    all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid)]);
-  return c.json({ ...r, confirmed: shifts.some((s) => s.day === day && s.status === 'confirmed'), shifts });
+  const shifts = await all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid);
+  const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
+  const r = status === 'confirmed' ? await reconcileShift(db, bid, day) : await trialReconcile(db, bid, day);
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts });
+});
+
+bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
+
+/** Closes a bill whose credit will never come, after the watch and with a reason. The sale stays in income. Owner or Accountant. */
+bankRoutes.post('/businesses/:businessId/sales/:txId/close', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('txId');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const note = text(await body(c), 'note', 'Reason', { max: 300 })!;
+  const tx = await one<{ shift_day: string; match_status: string | null; matched_bank_row: string | null; payment_mode: string }>(db,
+    "SELECT shift_day, match_status, matched_bank_row, payment_mode FROM transactions WHERE id = ? AND business_id = ? AND type = 'income'", id, bid);
+  if (!tx) fail(404, 'Not found.');
+  if (tx.payment_mode !== 'upi' || tx.matched_bank_row || tx.match_status !== 'awaiting_bank_match') fail(409, 'Only a UPI bill still waiting for its credit can be closed.');
+  const days = Math.round((Date.parse(istDay(Date.now())) - Date.parse(tx.shift_day)) / 86400000);
+  if (days <= WATCH_DAYS) fail(400, `This bill is watched for ${WATCH_DAYS} days; it can be closed after that.`);
+  const t = now();
+  const user = c.get('user').id;
+  await db.batch([
+    stmt(db, "UPDATE transactions SET match_status = NULL WHERE id = ? AND match_status = 'awaiting_bank_match'", id),
+    stmt(db, 'INSERT INTO closed_bills (transaction_id, business_id, note, closed_by, closed_at) VALUES (?, ?, ?, ?, ?)', id, bid, note, user, t),
+    stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.closed', id, { matchStatus: 'awaiting_bank_match' }, { note }, t)),
+  ]);
+  return c.json({ ok: true });
+});
+
+bankRoutes.post('/businesses/:businessId/sales/:txId/reopen', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('txId');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const closed = await one<{ note: string }>(db, 'SELECT note FROM closed_bills WHERE transaction_id = ? AND business_id = ?', id, bid);
+  if (!closed) fail(404, 'This bill is not closed.');
+  const t = now();
+  const user = c.get('user').id;
+  await db.batch([
+    stmt(db, "UPDATE transactions SET match_status = 'awaiting_bank_match' WHERE id = ? AND matched_bank_row IS NULL", id),
+    stmt(db, 'DELETE FROM closed_bills WHERE transaction_id = ?', id),
+    stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.reopened', id, { note: closed.note }, { matchStatus: 'awaiting_bank_match' }, t)),
+  ]);
+  return c.json({ ok: true });
 });
 
 bankRoutes.get('/businesses/:businessId/shifts/:day/explain', requireRole('bank.link'), async (c) => {

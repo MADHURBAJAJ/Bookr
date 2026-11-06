@@ -1577,6 +1577,86 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
   const line = (n: number, id: string, at: string, amount: number) =>
     [n, id, at.slice(0, 10), at, '-', `UPI/70000000${n}/Paid/cd-${n}@okicici/SAMPLE BANK/ICIaaaa`, 'CR', amount, String(amount)].join('\t');
 
+  const upiAccount = async (h: Awaited<ReturnType<typeof hotel>>, label: string, name = 'HUF A') => {
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name, kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: label })).status).toBe(200);
+    return acc as string;
+  };
+
+  it('trial reconcile: shows the picture before confirming, saves nothing, and never stops the confirm', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    const xoxo = await upiAccount(h, 'UPI XOXO', 'HUF B');
+    const acc = await upiAccount(h, 'UPI Bank 2');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${xoxo}/paste`, { text: [HEAD, line(1, 'S40000001', '31/10/2026 1:10:00 PM', 4410)].join('\n') })).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(2, 'S40000003', '31/10/2026 3:00:00 PM', 777), line(3, 'S40000004', '01/11/2026 8:30:00 AM', 1234)].join('\n') })).status).toBe(200);
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/reconcile`;
+    const r = (await h.clients.owner.get(url)).json;
+    expect(r).toMatchObject({ confirmed: false, trial: true, coverage: { covered: true } });
+    expect(r.clear.map((x: any) => [x.billNos, x.amountPaise])).toEqual([[['2610317'], 441000]]);
+    expect(r.strip.matchedPaise).toBe(441000);
+    const kinds = r.noCredit.map((c: any) => c.kind);
+    expect(kinds).toContain('no_bill');
+    expect(kinds).toContain('no_upi_credit');
+    expect(r.noCredit.find((c: any) => c.kind === 'no_bill').title).toContain('777');
+    // Looking saves nothing: no credit matched, no income made.
+    expect((await sql`SELECT count(*) AS n FROM bank_rows WHERE status = 'matched'`)[0].n).toBe(0);
+    expect((await sql`SELECT count(*) AS n FROM transactions WHERE shift_day = '2026-10-31' AND type = 'income'`)[0].n).toBe(0);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const after = (await h.clients.owner.get(url)).json;
+    expect(after.confirmed).toBe(true);
+    expect(after.trial).toBeUndefined();
+  });
+
+  it('an earlier open shift takes a credit near the shift change', async () => {
+    const h = await hotel();
+    const oct31 = await fullShift(h);
+    const acc = await upiAccount(h, 'UPI XOXO');
+    // Register-only bills of the same amount on both shifts, and one credit minutes after 8 am: it could look right for either.
+    const row = (billNo: string) => ({ billNo, billType: 'fnb', amount: '1111', discount: '0', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI XOXO', amount: '1111' }] });
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${oct31}/register-rows`, row('26103199'))).status).toBe(201);
+    const page = await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-11-01`, png(2), 'image/png');
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page.json.id}/register-rows`, row('2611019'))).status).toBe(201);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(1, 'S40000001', '01/11/2026 8:10:00 AM', 1111)].join('\n') })).status).toBe(200);
+    const earlier = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    expect(earlier.clear.map((x: any) => x.billNos)).toEqual([['26103199']]);
+    const later = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-11-01/reconcile`)).json;
+    expect(later.clear).toEqual([]);
+  });
+
+  it('closes a bill whose credit never came, after the watch and with a reason; it stays in income and can be reopened', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    await decideAll(h);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const list = () => h.clients.owner.get(`/businesses/${h.bid}/unmatched`);
+    const bill = (await list()).json.bills.find((b: any) => b.billNo === '2610317');
+    expect(bill).toBeTruthy();
+    const close = (c: Client, body: unknown) => c.post(`/businesses/${h.bid}/sales/${bill.id}/close`, body);
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    await sql`UPDATE transactions SET shift_day = ${today} WHERE id = ${bill.id}`;
+    expect((await close(h.clients.owner, { note: 'Guest never paid' })).status).toBe(400);   // still being watched
+    await sql`UPDATE transactions SET shift_day = '2026-01-01' WHERE id = ${bill.id}`;
+    expect((await list()).json.bills.find((b: any) => b.id === bill.id)).toMatchObject({ canClose: true });
+    expect((await close(h.clients.entry_staff, { note: 'x' })).status).toBe(403);
+    expect((await close(h.clients.owner, {})).status).toBe(400);                             // a reason is required
+    expect((await close(h.clients.accountant, { note: 'Guest never paid' })).status).toBe(200);
+    expect((await close(h.clients.owner, { note: 'Again' })).status).toBe(409);
+    let u = (await list()).json;
+    expect(u.bills.find((b: any) => b.id === bill.id)).toBeUndefined();
+    expect(u.closed[0]).toMatchObject({ id: bill.id, note: 'Guest never paid' });
+    const income = await sql`SELECT amount_paise, match_status FROM transactions WHERE id = ${bill.id}`;
+    expect(income[0]).toMatchObject({ amount_paise: 441000, match_status: null });
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/sales/${bill.id}/reopen`)).status).toBe(403);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/sales/${bill.id}/reopen`)).status).toBe(200);
+    u = (await list()).json;
+    expect(u.bills.find((b: any) => b.id === bill.id)).toBeTruthy();
+    expect(u.closed).toEqual([]);
+    const log = await sql`SELECT action FROM audit_log WHERE row_id = ${bill.id} AND action IN ('sale.closed', 'sale.reopened') ORDER BY id`;
+    expect(log.map((x: any) => x.action)).toEqual(['sale.closed', 'sale.reopened']);
+  });
+
   it('splits what is left into clear, likely and missing; each action moves it to done and can be undone', async () => {
     const h = await hotel();
     await fullShift(h);

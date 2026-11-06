@@ -9,7 +9,9 @@ import { suggestionsFor } from './bank';
 import { cashCheck } from './cash';
 import { addDays, shiftWindow } from './time';
 
-export interface Action { label: string; method: 'POST'; path: string; body: Record<string, unknown>; primary?: boolean; needsNote?: string }
+/** A call, or on a trial reconcile a change to a register row (op) or a link to open (href). */
+export interface Action { label: string; method?: 'POST' | 'PUT'; path?: string; body?: Record<string, unknown>; primary?: boolean; needsNote?: string;
+  op?: 'fixNumber' | 'setMode'; rowId?: string; uploadId?: string; billNo?: string; mode?: string; href?: string }
 /** What each of the three says, and which one is wrong (shown struck out). */
 export interface Witnesses { software: string | null; register: string | null; bank: string; odd: 'software' | 'register' | 'bank' | null }
 export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[]; witnesses?: Witnesses }

@@ -405,6 +405,26 @@ function evidenceBills(comps: (Comparison & { paid_at: number | null })[], group
   }));
 }
 
+/**
+ * The unmatched credits a shift may pair with. Nothing is saved before confirming, so a credit near the shift change
+ * could look right for two open shifts: the earlier open shift takes it first.
+ */
+export async function creditsForShift(db: DB, businessId: string, day: string) {
+  const credits = await shiftCredits(db, businessId, day);
+  const prev = addDays(day, -1);
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, prev);
+  if (!credits.length || !shift || shift.status === 'confirmed') return credits;
+  const [{ rg, paysByRow, groups }, comps, earlier] = await Promise.all([
+    loadShiftData(db, businessId, prev),
+    all<Comparison & { paid_at: number | null }>(db, `SELECT c.*, b.paid_at FROM bill_comparisons c LEFT JOIN software_bills b ON b.id = c.software_bill_id
+      WHERE c.business_id = ? AND c.shift_day = ?`, businessId, prev),
+    shiftCredits(db, businessId, prev),
+  ]);
+  const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
+  const { used } = pairEvidence(evidenceBills(comps, grouped, paysByRow), earlier, shiftWindow(prev));
+  return credits.filter((c) => !used.has(c.id));
+}
+
 /** Everything the Compare sales screen shows for one shift, plus what still blocks confirming it. */
 export async function shiftView(db: DB, businessId: string, day: string) {
   const [{ sw, rg, paysByRow, groups }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
@@ -474,7 +494,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   // The bank as a third witness, while the shift is still open.
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[] } | null = null;
   if (shift?.status !== 'confirmed') {
-    const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), shiftCredits(db, businessId, day)]);
+    const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, credits, cov.window);
     bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map((g) => g.paidPaise)) : [] };
