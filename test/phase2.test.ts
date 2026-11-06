@@ -264,7 +264,7 @@ describe('confirming a shift', () => {
     await fullShift(h);
     const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
     expect(res.status).toBe(409);
-    expect(res.json.problems.join(' ')).toMatch(/4 differences are not decided/); // bills on one side only are decided by Bookr
+    expect(res.json.problems.join(' ')).toMatch(/5 differences are not decided/); // bills on one side only are decided by Bookr, except 26103125: past its date's last running number
   });
 
   it('creates approved income rows that follow each decision', async () => {
@@ -1079,7 +1079,7 @@ describe('old POS bills (6 digits) wait for a person to confirm them', () => {
     const add = (billNo: string, amount: string, payments: unknown[]) =>
       h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked' });
     await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
-    await add('26103199', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]);
+    await add('2610315', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]);
     await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo: '145237', billType: 'fnb', amount: '100', payments: [{ mode: 'cash', columnLabel: null, amount: '100' }], status: 'draft' });
     let v = await view(h);
     expect(byBill(v, '145236').decision ?? null).toBeNull();
@@ -1089,7 +1089,7 @@ describe('old POS bills (6 digits) wait for a person to confirm them', () => {
     const early = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '145237').id], note: 'Old POS bill' });
     expect(early.json).toMatchObject({ decided: 0, skipped: [{ billNo: '145237', reason: 'its register row is not reviewed yet' }] });
     expect(v.json.canConfirm).toBe(false);
-    expect(byBill(v, '26103199')).toMatchObject({ decision: 'use_register', auto: true }); // counted, waits for its software bill
+    expect(byBill(v, '2610315')).toMatchObject({ decision: 'use_register', auto: true }); // counted, waits for its software bill
 
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '145236').id], note: 'Old POS bill' })).status).toBe(200);
     v = await view(h);
@@ -1097,6 +1097,45 @@ describe('old POS bills (6 digits) wait for a person to confirm them', () => {
     expect(byBill(v, '145236').auto).toBeFalsy();
     const [log] = await sql`SELECT user_id FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%noSoftwareBillExpected%'`;
     expect(log.user_id).not.toBeNull();
+  });
+});
+
+describe('typo flags on register numbers', () => {
+  it('a number one digit off a free bill of the shift is not counted by Bookr, and shows until a person decides', async () => {
+    const h = await hotel();
+    const [left, ...rest] = REGISTER_31_OCT;
+    const page = await fullShift(h, rest);
+    const typo = `${left.billNo.slice(0, -1)}${left.billNo.endsWith('9') ? '8' : '9'}`;
+    const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo: typo, billType: left.billType, amount: left.amount, discount: (left as { discount?: string }).discount ?? '0',
+      payments: left.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: p.amount })), status: 'checked' });
+    expect(res.status).toBe(201);
+    let v = await view(h);
+    expect(byBill(v, typo).decision ?? null).toBeNull();
+    expect(byBill(v, typo).numberFlags).toEqual([expect.objectContaining({ kind: 'pending_typo', billNo: left.billNo, sameShift: true })]);
+    let d = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${page}`)).json;
+    expect(d.rows.find((r: any) => r.billNo === typo).numberFlags[0]).toMatchObject({ kind: 'pending_typo', billNo: left.billNo });
+
+    // A person decides: the flag has done its job.
+    expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, typo).id}`, { decision: 'use_register', note: 'checked the photo' })).status).toBe(200);
+    v = await view(h);
+    expect(byBill(v, typo).numberFlags).toEqual([]);
+    d = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${page}`)).json;
+    expect(d.rows.find((r: any) => r.billNo === typo).numberFlags).toEqual([]);
+  });
+
+  it('a short number with a date prefix equal to a bill still waiting on an earlier shift, same amount', async () => {
+    const h = await hotel();
+    const left = REGISTER_31_OCT.find((r) => r.billNo === '2610311')!;
+    await fullShift(h, REGISTER_31_OCT.filter((r) => r !== left));
+    const v31 = await view(h);
+    expect(byBill(v31, left.billNo).difference).toBe('missing_in_register');
+    const p = await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-11-01`, png(2), 'image/png');
+    const short = left.billNo.slice(6);
+    const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p.json.id}/register-rows`, { billNo: short, billType: left.billType, amount: left.amount, discount: (left as { discount?: string }).discount ?? '0',
+      payments: left.payments.map((x) => ({ mode: x.mode, columnLabel: x.columnLabel, amount: x.amount })), status: 'checked' });
+    expect(res.status).toBe(201);
+    const d = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${p.json.id}`)).json;
+    expect(d.rows[0].numberFlags).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'pending', billNo: left.billNo, day: '2026-10-31' })]));
   });
 });
 
@@ -1429,7 +1468,9 @@ describe('bills on one side only are decided by Bookr (approved 3 Nov 2026)', ()
     await fullShift(h);
     let v = await view(h);
     expect(byBill(v, '2610319')).toMatchObject({ decision: 'use_software', billType: 'fnb', auto: true }); // cash 353, software only
-    expect(byBill(v, '26103125')).toMatchObject({ decision: 'use_register', auto: true });               // cash 500, register only
+    // Cash 500, register only, and running number 25 is past the date's last bill (24): a person checks it.
+    expect(byBill(v, '26103125').decision ?? null).toBeNull();
+    expect(byBill(v, '26103125').numberFlags).toEqual([expect.objectContaining({ kind: 'beyond_range', seq: 25, max: 24, date: '2026-10-31' })]);
     expect(v.json.warnings.map((w: any) => w.billNo)).toEqual(['2610319']);
     expect((await sql`SELECT user_id FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%"auto":true%' LIMIT 1`)[0].user_id).toBeNull();
     // The register side of 2610319 turns up on 1 Nov: already counted on 31 Oct, so not counted (or matched to the bank) again.
@@ -1451,16 +1492,16 @@ describe('bills on one side only are decided by Bookr (approved 3 Nov 2026)', ()
     const h = await hotel();
     const page = await fullShift(h);
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`,
-      { billNo: '26103199', billType: 'fnb', amount: '840', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '840' }] })).status).toBe(201);
+      { billNo: '2610315', billType: 'fnb', amount: '840', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '840' }] })).status).toBe(201);
     await decideAll(h);
-    expect(byBill(await view(h), '26103199')).toMatchObject({ decision: 'use_register', auto: true });
+    expect(byBill(await view(h), '2610315')).toMatchObject({ decision: 'use_register', auto: true });
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
-    const [t] = await sql`SELECT id, status, day, ocr_original FROM transactions WHERE bill_no = '26103199'`;
+    const [t] = await sql`SELECT id, status, day, ocr_original FROM transactions WHERE bill_no = '2610315'`;
     expect(t).toMatchObject({ status: 'reviewed', day: '2026-10-31' });
     expect(JSON.parse(t.ocr_original).countOnCredit).toBe(true);
     expect((await sql`SELECT count(*) AS n FROM transactions WHERE shift_day = '2026-10-31' AND status = 'reviewed'`)[0].n).toBe(1); // only that one
     const credit = (await h.clients.owner.get(`/businesses/${h.bid}/awaiting-credit`)).json.sales;
-    expect(credit.find((x: any) => x.billNo === '26103199')).toMatchObject({ onCredit: true, day: '2026-10-31' });
+    expect(credit.find((x: any) => x.billNo === '2610315')).toMatchObject({ onCredit: true, day: '2026-10-31' });
     // The credit arrives on 2 Nov at 9:15 am: the 2 Nov shift.
     const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
     expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' })).status).toBe(200);
@@ -1503,7 +1544,7 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     for (const b of ['26103115', '2610317']) {
       expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, b).id}`, { decision: byBill(v, b).bank.suggest, note: 'Bank' })).status).toBe(200);
     }
-    for (const b of ['2610318', '26103120']) expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, b).id}`, { decision: 'use_register' })).status).toBe(200);
+    for (const b of ['2610318', '26103120', '26103125']) expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, b).id}`, { decision: 'use_register' })).status).toBe(200);
     const res = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
     expect(res.status).toBe(200);
     expect(res.json.matched).toBe(2);

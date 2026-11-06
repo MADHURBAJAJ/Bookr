@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { addDays, istDay, istToMs, missingInWindow, shiftDayOf, shiftWindow } from '../src/time';
 import { csvRows, parseDateTime, parseSalesCsv } from '../src/salescsv';
-import { billDistance, classify, registerMode, suggestBills } from '../src/sales';
+import { billDistance, classify, numberFlags, registerMode, suggestBills, withDatePrefix, type NumberContext } from '../src/sales';
 import { parsePaise } from '../src/money';
 import { creditsWithoutBill, pairEvidence, type EvidenceBill } from '../src/bankEvidence';
 import { tableSets } from '../src/explain';
@@ -258,5 +258,48 @@ describe('one credit for a table', () => {
   it('offers nothing when two sets fit, or the bills are too far apart', () => {
     expect(tableSets([b(500, 0), b(500, 1), b(500, 2)], 1000)).toHaveLength(2);
     expect(tableSets([b(600, 0), b(400, 60)], 1000)).toHaveLength(0);
+  });
+});
+
+describe('typo flags on register numbers', () => {
+  const ctx = (o: Partial<NumberContext> = {}): NumberContext => ({ day: '2026-11-01', pending: [], ranges: new Map(), taken: new Set(), ...o });
+  const row = (bill_no: string, amount_paise = 53200) => ({ bill_no, amount_paise });
+
+  it('tries the shift date, the next and previous day as a prefix, also where the number holds part of the date', () => {
+    expect(withDatePrefix('110157', '2026-11-01')).toEqual(['26110157']);
+    expect(withDatePrefix('76', '2026-11-01')).toEqual(expect.arrayContaining(['26110176', '26110276', '26103176']));
+    expect(withDatePrefix('076', '2026-11-01')).toContain('26110176');
+    expect(withDatePrefix('145232', '2026-11-01')).toEqual([]);
+    expect(withDatePrefix('000', '2026-11-01')).toEqual([]);
+    expect(withDatePrefix('26110157', '2026-11-01')).toEqual([]);
+  });
+
+  it('a prefixed number equal to a waiting bill with the same amount is flagged; another amount is not', () => {
+    const pending = [{ billNo: '26103157', day: '2026-10-31', amountPaise: 53200 }];
+    expect(numberFlags(row('157'), ctx({ pending }))).toEqual([expect.objectContaining({ kind: 'pending', billNo: '26103157', day: '2026-10-31', sameShift: false })]);
+    expect(numberFlags(row('157', 100), ctx({ pending }))).toEqual([]);
+    expect(numberFlags({ ...row('157', 100), gross_paise: 53200 }, ctx({ pending }))).toHaveLength(1);
+  });
+
+  it('one digit off a pending bill with the same amount is flagged, in this shift or an earlier one', () => {
+    const pending = [{ billNo: '26110151', day: '2026-11-01', amountPaise: 53200 }, { billNo: '26103158', day: '2026-10-31', amountPaise: 53200 }];
+    const f = numberFlags(row('26110157'), ctx({ pending }));
+    expect(f).toEqual([expect.objectContaining({ kind: 'pending_typo', billNo: '26110151', sameShift: true })]);
+    expect(numberFlags(row('26103168'), ctx({ pending }))).toEqual([expect.objectContaining({ kind: 'pending_typo', billNo: '26103158', sameShift: false })]);
+    expect(numberFlags(row('26110157'), ctx({ pending, taken: new Set(['26110151']) }))).toEqual([]); // that bill has its own line
+  });
+
+  it('running numbers: only speaks when the reports for that date are complete', () => {
+    const ranges = new Map([['261101', { max: 109, complete: true }], ['261102', { max: 40, complete: false }]]);
+    expect(numberFlags(row('261101157'), ctx({ ranges }))).toEqual([expect.objectContaining({ kind: 'beyond_range', seq: 157, max: 109, date: '2026-11-01' })]);
+    expect(numberFlags(row('26110199'), ctx({ ranges }))).toEqual([]);
+    expect(numberFlags(row('26110299'), ctx({ ranges }))).toEqual([]);
+    expect(numberFlags(row('76'), ctx({ ranges }))).toEqual([expect.objectContaining({ kind: 'in_range', billNo: '26110176', max: 109 })]);
+    expect(numberFlags(row('230'), ctx({ ranges }))).toEqual([]); // past every date's range
+    expect(numberFlags(row('76'), ctx({ ranges, taken: new Set(['26110176']) }))).toEqual([]);
+  });
+
+  it('an old POS number far from any date says nothing', () => {
+    expect(numberFlags(row('145232'), ctx({ ranges: new Map([['261101', { max: 109, complete: true }]]) }))).toEqual([]);
   });
 });

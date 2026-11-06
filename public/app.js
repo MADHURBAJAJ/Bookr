@@ -984,6 +984,10 @@ function rowIssues(r) {
   if (!member && largePct(r)) { flags.discount = 'red'; red.push(`Discount ${largePct(r)}%${ms.length ? ' on these bills' : ''}: was a payment missed?`); }
   const other = [r, ...ms].find((m) => m.elsewhere);
   if (!member && other) info.push(html`<a href="#/b/${currentBizId()}/review/${other.uploadId}/${other.id}">Open page ${other.pageNo}</a>`);
+  if (r.numberFlags?.length) {
+    flags.bill_no = 'red';
+    for (const f of r.numberFlags) red.push(html`${numberFlagText(f)}${f.billNo ? html`<span class="chips"><button type="button" class="pickchip" data-pick="${f.billNo}" title="Writes this number on the row. Check it against the photo first.">Use ${f.billNo}</button></span>` : ''}`);
+  }
   const h = r.hint;
   if (h && h.amountPaise !== r.amountPaise) {
     red.push(html`<button type="button" class="pickchip" data-usehint="${r.id}" data-amt="${rsIn(h.amountPaise)}" data-mode="${h.mode}" data-pay="${h.fields.includes('payments') ? '1' : ''}"
@@ -1107,6 +1111,14 @@ const isOldPos = (b) => /^\d{6}$/.test(b ?? '') && !startsWithDate(b); // mirror
 const isOddBill = (b) => !!b && !(/^\d{7,9}$/.test(b) && startsWithDate(b)) && !isOldPos(b);
 const SHORT_OLD_POS_NOTE = 'Old POS bill, short number';
 const OLD_POS_NOTE = 'Old POS bill';
+/** Why a register number may be a typo. Bookr changes nothing: a person checks it against the photo. */
+function numberFlagText(f) {
+  const where = () => (f.sameShift ? "in this shift's report" : `waiting on ${dayLabel(f.day)}`);
+  if (f.kind === 'pending') return `Could be ${f.billNo}: ${where()}, same amount ₹ ${rs(f.amountPaise)}.`;
+  if (f.kind === 'pending_typo') return `One digit off ${f.billNo}: ${where()}, same amount ₹ ${rs(f.amountPaise)}.`;
+  if (f.kind === 'in_range') return `Could be ${f.billNo}: fits ${dayLabel(f.date)}'s running numbers, 1 to ${f.max}.`;
+  return `Running number ${f.seq} is past ${dayLabel(f.date)}'s last bill, ${f.max}: probably a typo.`;
+}
 /** An old POS or odd number uses the register only after a person has reviewed its row: nothing else can check it. */
 const needsReview = (c) => !c.software && c.register && !c.register.reviewed && (isOldPos(c.billNo) || isOddBill(c.billNo));
 
@@ -2046,6 +2058,11 @@ function wireSummary(biz, u) {
 /** Decision buttons for one difference. A bill missing in the register takes its type with "Use software". */
 /** [decision, label, billType, linkedToId] choices for a bill; a bill on one side only can match another day's entry. */
 function decisionChoices(c) {
+  const list = choicesOf(c);
+  // A flagged number offers the check first, so counting it is never the only obvious path.
+  return c.numberFlags?.length && !list.some(([k]) => k === '__review') ? [['__review', 'Check the number'], ...list] : list;
+}
+function choicesOf(c) {
   const o = c.otherDay;
   if (o && !o.closed) {
     const here = c.register ? 'use_register' : 'use_software';
@@ -2077,7 +2094,7 @@ function blockerHtml(text, v) {
 }
 
 /** A register-only bill that can be counted from the register in bulk (not matched to another day's software bill). */
-const bulkOk = (c) => c.difference === 'missing_in_software' && !needsReview(c) && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
+const bulkOk = (c) => c.difference === 'missing_in_software' && !needsReview(c) && !c.numberFlags?.length && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
 
 /** One line under a one-sided bill: the same bill on the other side, on another day. */
 function otherDayNote(c) {
@@ -2265,6 +2282,7 @@ async function compareView(biz, day) {
       class="clickrow ${c.decision ? '' : 'undecided'}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
       <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}
+      ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
       ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
       ${!c.software && !c.decision && isOldPos(c.billNo) ? html`<div class="tiny">Old POS bill. ${c.register?.reviewed ? 'Row reviewed: you can use the register.' : 'Review its row, then use the register.'}</div>` : ''}</td>
     <td>${side(c.software)}</td><td>${side(c.register)}</td>
@@ -2321,6 +2339,7 @@ async function compareView(biz, day) {
     <div id="cmsg"></div>
     ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
     ${(v.warnings ?? []).map((w) => html`<div class="cmp-warn">⚠ ${blockerHtml(w.text, v)}</div>`)}
+    ${auto.some((c) => c.numberFlags?.length) ? html`<div class="cmp-warn">⚠ ${blockerHtml(`Bookr counted these before their numbers looked wrong. Check them under Decided by Bookr: ${auto.filter((c) => c.numberFlags?.length).map((c) => c.billNo).join(', ')}.`, v)}</div>` : ''}
     ${v.bank?.noBill?.length ? html`<div class="cmp-warn">⚠ ${v.bank.noBill.length} UPI credit${v.bank.noBill.length > 1 ? 's' : ''} in this shift ${v.bank.noBill.length > 1 ? 'have' : 'has'} no bill of that amount: ${v.bank.noBill.slice(0, 6).map((x) => `₹ ${rs(x.amountPaise)} at ${hhmm(x.postedAt)}`).join(', ')}${v.bank.noBill.length > 6 ? ' …' : ''}. Check for a sale not written down, or a table paid at once. It does not stop confirming.</div>` : ''}
     ${oddNumbersHtml(biz, waiting, canDecide)}
     <div class="seg cmp-tabs" role="tablist">

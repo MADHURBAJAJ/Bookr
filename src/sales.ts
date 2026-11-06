@@ -239,6 +239,7 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
   const open = comps.filter((c) => ONE_SIDED.includes(c.difference) && !c.decision);
   if (!open.length) return;
   const others = await otherDays(db, businessId, day, comps);
+  const numbers = open.some((c) => c.difference === 'missing_in_software' && isNewPosBill(c.bill_no)) ? await numberContext(db, businessId, day) : null;
   const t = now();
   const statements: D1PreparedStatement[] = [];
   const decide = (c: Comparison, decision: Decision, note: string, linkedTo: string | null, billType: string | null) => statements.push(
@@ -259,6 +260,8 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
       if (!isNewPosBill(c.bill_no)) continue;
       const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
       if (!r || !paysByRow.get(r.paid_with_row_id ?? r.id)?.length || shares.get(r.id)?.large) continue;
+      // A number that looks like a typo is not counted by itself: it could be a bill counted from the software too.
+      if (!o && numbers && numberFlags({ ...r, gross_paise: r.amount_paise + r.discount_paise }, numbers).length) continue;
       decide(c, 'use_register', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, null);
     }
   }
@@ -426,6 +429,13 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   if (cov.gaps.length) blockers.push('Some hours of this shift are not covered by a software report.');
   if (conflicts.length) blockers.push(`${conflicts.length} overlapping bill${conflicts.length > 1 ? 's differ' : ' differs'} between two software reports. Decide which values to keep.`);
   const others = await otherDays(db, businessId, day, comparisons);
+  // What is odd about a register number, until a person has decided the bill.
+  const toCheck = comparisons.filter((c) => c.difference === 'missing_in_software' && c.register_row_id && !c.decided_by && !c.closed_at);
+  const numbers = toCheck.length && shift?.status !== 'confirmed' ? await numberContext(db, businessId, day) : null;
+  const flagsOf = new Map(numbers ? toCheck.map((c) => {
+    const r = rg.find((x) => x.id === c.register_row_id);
+    return [c.id, r ? numberFlags({ ...r, gross_paise: r.amount_paise + r.discount_paise }, numbers) : []] as const;
+  }) : []);
   const twice = comparisons.filter((c) => isCounted(c.decision) && others.has(c.id) && isCounted(others.get(c.id)!.decision)
     && (c.linked_to_id === others.get(c.id)!.id || others.get(c.id)!.linksHere || others.get(c.id)!.billNo === c.bill_no));
   if (twice.length) blockers.push(`Bill ${twice.map((c) => `${c.bill_no} (also counted on ${others.get(c.id)!.day})`).join(', ')} would be counted twice. Choose "Already counted" for it here.`);
@@ -498,6 +508,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       linkedToId: c.linked_to_id ?? null,
       auto: !!c.decision && !c.decided_by && c.decided_at != null,
       otherDay: others.get(c.id) ?? null,
+      numberFlags: flagsOf.get(c.id) ?? [],
       // A large discount is accepted only with a reason, so the bank's choice is not offered for one.
       bank: bank?.evidence.get(c.id) ? { ...bank.evidence.get(c.id)!, suggest: c.register_row_id && shares.get(c.register_row_id)?.large ? null : bank.evidence.get(c.id)!.suggest } : null,
     })),
@@ -746,6 +757,109 @@ export function suggestBills(
     out.set(r.id, { exact: false, options: options.slice(0, 6) });
   }
   return out;
+}
+
+// ---- Number checks for a register bill with no exact software bill (6 Nov 2026). Each only raises a flag; a person verifies it.
+
+export interface PendingBill { billNo: string; day: string; amountPaise: number }
+export interface NumberContext {
+  day: string;
+  /** Software bills with no register line: this shift's, and earlier shifts' still waiting. */
+  pending: PendingBill[];
+  /** Highest running number by YYMMDD, and whether the reports are complete enough to trust it. */
+  ranges: Map<string, { max: number; complete: boolean }>;
+  /** Numbers already written on a register line. */
+  taken: Set<string>;
+}
+export interface NumberFlag {
+  kind: 'pending' | 'pending_typo' | 'in_range' | 'beyond_range';
+  billNo: string | null; day: string | null; sameShift: boolean; amountPaise: number | null;
+  date: string | null; seq: number | null; max: number | null;
+}
+
+const yymmdd = (day: string) => day.replace(/-/g, '').slice(2);
+const dayOfYymmdd = (d: string) => `20${d.slice(0, 2)}-${d.slice(2, 4)}-${d.slice(4, 6)}`;
+
+/**
+ * New POS numbers a short number could be, trying the shift's date, the next day's and the previous day's as the
+ * prefix. The number may already hold the end of the date: "110157" is 26110157 and "230" is 261030 + 230.
+ */
+export function withDatePrefix(billNo: string, day: string): string[] {
+  const w = digits(billNo);
+  if (!w || w.length > 6 || /^0+$/.test(w)) return [];
+  const out = new Set<string>();
+  for (const date of [day, addDays(day, 1), addDays(day, -1)].map(yymmdd)) {
+    for (let n = 1; n <= Math.min(3, w.length); n++) {
+      const seq = w.slice(-n);
+      const head = w.slice(0, -n);
+      if (seq[0] !== '0' && (!head || date.endsWith(head))) out.add(date + seq);
+    }
+    if (w.length <= 3) out.add(date + w.replace(/^0+/, '')); // a running number has no padding: "076" is 76
+  }
+  return [...out].filter(isNewPosBill);
+}
+
+/** What can be said about one register number that has no exact software bill. */
+export function numberFlags(row: { bill_no: string; amount_paise: number; gross_paise?: number }, ctx: NumberContext): NumberFlag[] {
+  const w = digits(row.bill_no ?? '');
+  if (!w) return [];
+  const blank = { billNo: null, day: null, sameShift: false, amountPaise: null, date: null, seq: null, max: null };
+  const candidates = withDatePrefix(row.bill_no, ctx.day);
+  const out: NumberFlag[] = [];
+  for (const p of ctx.pending) {
+    if (p.billNo === row.bill_no || ctx.taken.has(p.billNo) || !p.amountPaise) continue;
+    if (p.amountPaise !== row.amount_paise && p.amountPaise !== row.gross_paise) continue;
+    const kind = candidates.includes(p.billNo) ? 'pending' : w.length >= 5 && billDistance(w, digits(p.billNo)) === 1 ? 'pending_typo' : null;
+    if (kind) out.push({ ...blank, kind, billNo: p.billNo, day: p.day, sameShift: p.day === ctx.day, amountPaise: p.amountPaise });
+  }
+  for (const c of candidates) {
+    const r = ctx.ranges.get(c.slice(0, 6));
+    if (r?.complete && +c.slice(6) <= r.max && !ctx.taken.has(c) && !out.some((f) => f.billNo === c)) {
+      out.push({ ...blank, kind: 'in_range', billNo: c, date: dayOfYymmdd(c), seq: +c.slice(6), max: r.max });
+    }
+  }
+  if (isNewPosBill(row.bill_no)) {
+    const r = ctx.ranges.get(row.bill_no.slice(0, 6));
+    const seq = +row.bill_no.slice(6);
+    if (r?.complete && seq > r.max) out.push({ ...blank, kind: 'beyond_range', date: dayOfYymmdd(row.bill_no), seq, max: r.max });
+  }
+  return out.slice(0, 4);
+}
+
+/** Everything numberFlags needs for one shift. */
+export async function numberContext(db: DB, businessId: string, day: string): Promise<NumberContext> {
+  const from = addDays(day, -WATCH_DAYS);
+  // A date's numbers appear from midnight in the shift before, and bills can be paid a shift later.
+  const [bills, waiting, written, reports] = await Promise.all([
+    all<{ bill_no: string; shift_day: string; amount_paise: number }>(db, 'SELECT bill_no, shift_day, amount_paise FROM software_bills WHERE business_id = ? AND shift_day BETWEEN ? AND ?',
+      businessId, addDays(from, -2), addDays(day, 2)),
+    all<{ bill_no: string; shift_day: string; sw_amount_paise: number | null }>(db, `SELECT c.bill_no, c.shift_day, c.sw_amount_paise FROM bill_comparisons c
+      LEFT JOIN register_rows r ON r.id = c.register_row_id
+      WHERE c.business_id = ? AND c.shift_day BETWEEN ? AND ? AND c.closed_at IS NULL AND c.linked_to_id IS NULL
+        AND (c.difference = 'missing_in_register' OR json_extract(r.ocr_original, '$.source') = 'software_report')
+        AND NOT EXISTS (SELECT 1 FROM bill_comparisons x WHERE x.linked_to_id = c.id)`, businessId, from, addDays(day, -1)),
+    all<{ bill_no: string }>(db, `SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day BETWEEN ? AND ?
+      AND coalesce(json_extract(ocr_original, '$.source'), '') <> 'software_report'`, businessId, from, addDays(day, 2)),
+    all<{ covers_from: number; covers_to: number }>(db, 'SELECT covers_from, covers_to FROM sales_reports WHERE business_id = ? AND replaced_by IS NULL AND covers_to >= ?',
+      businessId, shiftWindow(addDays(from, -3)).from),
+  ]);
+  const covers = reports.map((r) => ({ from: r.covers_from, to: r.covers_to }));
+  const ranges = new Map<string, { max: number; complete: boolean }>();
+  for (const b of bills) {
+    if (!isNewPosBill(b.bill_no)) continue;
+    const date = b.bill_no.slice(0, 6);
+    const w = shiftWindow(dayOfYymmdd(date));
+    const had = ranges.get(date);
+    const complete = had?.complete ?? missingInWindow({ from: w.from - 8 * 3600e3, to: w.to }, covers).length === 0;
+    ranges.set(date, { max: Math.max(had?.max ?? 0, +b.bill_no.slice(6)), complete });
+  }
+  return {
+    day, ranges, taken: new Set(written.map((r) => r.bill_no)),
+    pending: [
+      ...bills.filter((b) => b.shift_day === day).map((b) => ({ billNo: b.bill_no, day, amountPaise: b.amount_paise })),
+      ...waiting.filter((c) => c.sw_amount_paise != null).map((c) => ({ billNo: c.bill_no, day: c.shift_day, amountPaise: c.sw_amount_paise! })),
+    ],
+  };
 }
 
 /** The discount share of a register row's bills (its group's, when paid together), straight from the table. */

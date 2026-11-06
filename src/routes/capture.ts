@@ -4,7 +4,7 @@ import { requireRole } from '../auth';
 import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, date, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
-import { cashSummaryChecks, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
+import { cashSummaryChecks, numberContext, numberFlags, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { spreadDifference } from '../discounts';
@@ -199,7 +199,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       (SELECT count(*) FROM register_bank_adjustments a WHERE a.target_id = register_rows.id AND a.reverses_id IS NULL
          AND NOT EXISTS (SELECT 1 FROM register_bank_adjustments x WHERE x.reverses_id = a.id)) > 0 AS bankAdjusted,
       (SELECT CASE WHEN c.decision = 'leave_out' THEN 'Left out' ELSE c.close_note END FROM bill_comparisons c
-         WHERE c.register_row_id = register_rows.id AND (c.closed_at IS NOT NULL OR c.decision = 'leave_out') LIMIT 1) AS numberSettled
+         WHERE c.register_row_id = register_rows.id AND (c.closed_at IS NOT NULL OR c.decision = 'leave_out') LIMIT 1) AS numberSettled,
+      (SELECT 1 FROM bill_comparisons c WHERE c.register_row_id = register_rows.id AND c.decided_by IS NOT NULL LIMIT 1) AS numberDecided
       FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
     const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
@@ -208,10 +209,18 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     const [swBills, shiftRows] = await Promise.all([
       all<{ bill_no: string; pos_no: string; amount_paise: number; mode: string; paid_at: number }>(db,
         'SELECT bill_no, pos_no, amount_paise, mode, paid_at FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
-      all<{ id: string; bill_no: string; amount_paise: number }>(db,
-        'SELECT id, bill_no, amount_paise - discount_paise + tip_paise AS amount_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+      all<{ id: string; bill_no: string; amount_paise: number; gross_paise: number }>(db,
+        'SELECT id, bill_no, amount_paise - discount_paise + tip_paise AS amount_paise, amount_paise AS gross_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
     ]);
     const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
+    // Typos: a number that fits another bill or its date's running numbers. Until a person has decided the bill.
+    const toCheck = shift?.status === 'confirmed' ? [] : (rows as unknown as { id: string; numberSettled: string | null; numberDecided: number | null }[])
+      .filter((r) => !r.numberSettled && !r.numberDecided && !matches?.get(r.id)?.exact);
+    const numbers = toCheck.length ? await numberContext(db, bid, u.business_day) : null;
+    const flagsOf = new Map(numbers ? toCheck.map((r) => {
+      const x = shiftRows.find((y) => y.id === r.id);
+      return [r.id, x ? numberFlags(x, numbers) : []] as const;
+    }) : []);
     // A cell Claude could not read (amount or payment): the software's amount for this bill, and a bank credit of that
     // amount near the bill's time, offered as a hint. Never applied by itself; clearly read cells get no hint.
     const credits = await all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows
@@ -249,7 +258,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
       // The shift's software bills, for the bill box's suggestions as you type.
       softwareList: swBills.map((b) => ({ billNo: b.bill_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, used: shiftRows.some((r) => r.bill_no === b.bill_no) })),
-      rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null,
+      rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null, numberFlags: flagsOf.get(r.id) ?? [],
         hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }) })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });
