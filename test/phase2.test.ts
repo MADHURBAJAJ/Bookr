@@ -1072,23 +1072,31 @@ describe('a shift with many one-sided bills', () => {
   });
 });
 
-describe('old POS bills (6 digits) are counted from the register on their own', () => {
-  it('once paid and without a large discount; others still wait for a person', async () => {
+describe('old POS bills (6 digits) wait for a person to confirm them', () => {
+  it('are not decided by Bookr, while new POS numbers still are', async () => {
     const h = await hotel();
     const page = await fullShift(h);
-    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
-      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    const add = (billNo: string, amount: string, payments: unknown[]) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked' });
     await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
-    await add('145238', '200', []);                                                   // no payment written
-    await add('145239', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // 50% discount
-    await add('26103199', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]); // new POS format
-    const v = await view(h);
-    expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register' });
-    expect(byBill(v, '145236').note).toMatch(/Old POS/);
-    for (const b of ['145238', '145239']) expect(byBill(v, b).decision ?? null).toBeNull();
+    await add('26103199', '300', [{ mode: 'cash', columnLabel: null, amount: '300' }]);
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo: '145237', billType: 'fnb', amount: '100', payments: [{ mode: 'cash', columnLabel: null, amount: '100' }], status: 'draft' });
+    let v = await view(h);
+    expect(byBill(v, '145236').decision ?? null).toBeNull();
+    expect(byBill(v, '145236').register.reviewed).toBe(true);
+
+    // Not reviewed yet: it cannot use the register, alone or in bulk.
+    const early = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '145237').id], note: 'Old POS bill' });
+    expect(early.json).toMatchObject({ decided: 0, skipped: [{ billNo: '145237', reason: 'its register row is not reviewed yet' }] });
+    expect(v.json.canConfirm).toBe(false);
     expect(byBill(v, '26103199')).toMatchObject({ decision: 'use_register', auto: true }); // counted, waits for its software bill
-    const [log] = await sql`SELECT user_id, after FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%oldPos%'`;
-    expect(log.user_id).toBeNull();
+
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '145236').id], note: 'Old POS bill' })).status).toBe(200);
+    v = await view(h);
+    expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register', note: 'Old POS bill' });
+    expect(byBill(v, '145236').auto).toBeFalsy();
+    const [log] = await sql`SELECT user_id FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%noSoftwareBillExpected%'`;
+    expect(log.user_id).not.toBeNull();
   });
 });
 
@@ -1121,6 +1129,10 @@ describe('register numbers of neither format can never match, so they do not wai
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/comparisons/${odd.id}/close`, { note: 'Old POS bill, short number' })).status).toBe(200);
     w = (await h.clients.accountant.get(`/businesses/${h.bid}/waiting-bills`)).json;
     expect(w.oddNumbers).toEqual([]);
+
+    // Settled, so Review no longer asks about the number.
+    const d = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${page}`)).json;
+    expect(d.rows.find((r: any) => r.billNo === '193').numberSettled).toBe('Old POS bill, short number');
   });
 });
 

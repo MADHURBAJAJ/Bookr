@@ -964,6 +964,7 @@ function rowIssues(r) {
   }
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount' };
   if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
+  else if (!bm?.exact && isOddBill(r.billNo) && r.numberSettled) info.push(r.numberSettled); // a person settled it on Compare
   else if (!bm && isOddBill(r.billNo)) {
     flags.bill_no = 'red';
     red.push(html`Number is neither new POS (date and running number) nor old POS (6 digits)`);
@@ -1105,6 +1106,9 @@ const isOldPos = (b) => /^\d{6}$/.test(b ?? '') && !startsWithDate(b); // mirror
 /** A number of neither format, new POS (YYMMDD and a running number) nor old POS. It can never meet a software bill. */
 const isOddBill = (b) => !!b && !(/^\d{7,9}$/.test(b) && startsWithDate(b)) && !isOldPos(b);
 const SHORT_OLD_POS_NOTE = 'Old POS bill, short number';
+const OLD_POS_NOTE = 'Old POS bill';
+/** An old POS or odd number uses the register only after a person has reviewed its row: nothing else can check it. */
+const needsReview = (c) => !c.software && c.register && !c.register.reviewed && (isOldPos(c.billNo) || isOddBill(c.billNo));
 
 const DELETE_REASONS = [['written_twice', 'Written twice on the page'], ['misread', 'Not on the page (read by mistake)'], ['not_a_bill', 'Not a bill (a note or total line)'], ['cancelled', 'Bill cancelled'], ['other', 'Other']];
 const deleteReasonLabel = (k) => (DELETE_REASONS.find(([x]) => x === k)?.[1] ?? 'Other').toLowerCase();
@@ -2058,7 +2062,9 @@ function baseChoices(c) {
   const carry = !c.register || !c.software ? [['carry_forward', 'Carry forward']] : [];
   if (c.largeDiscount && c.software) return [['use_register', 'Accept discount'], ['use_software', 'Payment missing · use software'], ['leave_out', 'Leave out']];
   if (!c.register) return [['use_software', 'Add to register · F&B', 'fnb'], ['use_software', 'Add to register · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
-  if (!c.software && isOddBill(c.billNo)) return [['__oldpos', SHORT_OLD_POS_NOTE], ['leave_out', 'Leave out']];
+  if (needsReview(c) && !c.largeDiscount) return [['__review', 'Review the row first'], ['leave_out', 'Leave out']];
+  if (!c.software && !c.largeDiscount && isOddBill(c.billNo)) return [['__oldpos', SHORT_OLD_POS_NOTE], ['leave_out', 'Leave out']];
+  if (!c.software && !c.largeDiscount && isOldPos(c.billNo)) return [['__oldpos', 'Use register'], ['leave_out', 'Leave out']];
   if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out'], ...carry];
   return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
 }
@@ -2071,7 +2077,7 @@ function blockerHtml(text, v) {
 }
 
 /** A register-only bill that can be counted from the register in bulk (not matched to another day's software bill). */
-const bulkOk = (c) => c.difference === 'missing_in_software' && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
+const bulkOk = (c) => c.difference === 'missing_in_software' && !needsReview(c) && !(c.otherDay && (c.otherDay.decision === 'use_software' || c.otherDay.decision === 'use_register')) && !c.largeDiscount;
 
 /** One line under a one-sided bill: the same bill on the other side, on another day. */
 function otherDayNote(c) {
@@ -2259,7 +2265,8 @@ async function compareView(biz, day) {
       class="clickrow ${c.decision ? '' : 'undecided'}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
       <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}
-      ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}</td>
+      ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
+      ${!c.software && !c.decision && isOldPos(c.billNo) ? html`<div class="tiny">Old POS bill. ${c.register?.reviewed ? 'Row reviewed: you can use the register.' : 'Review its row, then use the register.'}</div>` : ''}</td>
     <td>${side(c.software)}</td><td>${side(c.register)}</td>
     <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
       ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
@@ -2340,6 +2347,7 @@ async function compareView(biz, day) {
           <div class="note"><strong>${open.filter(bulkOk).length} bills are only in the register.</strong> Tick bills that will never be in a software report and count them from the register at once.</div>
           <div class="form-row" style="align-items:flex-end">
             <button class="btn plain" type="button" id="bulkall">Select all ${open.filter(bulkOk).length}</button>
+            ${open.some((c) => bulkOk(c) && isOldPos(c.billNo)) ? html`<button class="btn plain" type="button" id="bulkold">Select ${open.filter((c) => bulkOk(c) && isOldPos(c.billNo)).length} reviewed old POS</button>` : ''}
             <div class="field"><label for="bulknote">Reason</label><input id="bulknote" name="note" value="Old POS bill" required></div>
             <button class="btn" type="submit" id="bulkgo" disabled>Use register for 0 selected</button>
           </div>
@@ -2390,9 +2398,15 @@ async function compareView(biz, day) {
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
   app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => {
     const c = v.comparisons.find((x) => x.id === b.dataset.cmp);
+    if (b.dataset.d === '__review') {
+      const tr = b.closest('tr');
+      setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: tr.dataset.bill, label: `${dayLabel(day)} shift` });
+      location.hash = tr.dataset.open;
+      return;
+    }
     if (b.dataset.d === '__oldpos') {
       act(async () => {
-        const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids: [c.id], note: SHORT_OLD_POS_NOTE });
+        const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids: [c.id], note: isOldPos(c.billNo) ? OLD_POS_NOTE : SHORT_OLD_POS_NOTE });
         if (r.skipped?.length) throw new Error(`Bill ${c.billNo} was not changed: ${r.skipped[0].reason}.`);
       });
       return;
@@ -2439,6 +2453,11 @@ async function compareView(biz, day) {
       go.textContent = `Use register for ${n} selected`;
     };
     boxes().forEach((x) => x.addEventListener('change', count));
+    document.getElementById('bulkold')?.addEventListener('click', () => {
+      const old = new Set(v.comparisons.filter((c) => isOldPos(c.billNo)).map((c) => c.id));
+      boxes().forEach((x) => { x.checked = old.has(x.dataset.bulk); });
+      count();
+    });
     document.getElementById('bulkall').addEventListener('click', () => { const all = boxes().every((x) => x.checked); boxes().forEach((x) => { x.checked = !all; }); count(); });
     bulk.addEventListener('submit', async (e) => {
       e.preventDefault();

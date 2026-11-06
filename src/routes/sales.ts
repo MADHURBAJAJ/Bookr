@@ -8,7 +8,7 @@ import { parseSalesCsv } from '../salescsv';
 import { istDay, shiftDayOf } from '../time';
 import { storageKey } from '../files';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { confirmShift, discountShares, isCounted, largeDiscountOf, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { confirmShift, discountShares, isCounted, isNewPosBill, largeDiscountOf, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -519,14 +519,15 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRol
   const others = await otherDays(db, bid, day, comps as never);
   const paid = new Set((await all<{ id: string }>(db, `SELECT r.id FROM register_rows r WHERE r.business_id = ? AND r.shift_day = ?
     AND EXISTS (SELECT 1 FROM register_payments p WHERE p.register_row_id = coalesce(r.paid_with_row_id, r.id))`, bid, day)).map((r) => r.id));
-  const regRows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null }>(db,
-    'SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day);
+  const regRows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; status: string }>(db,
+    'SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id, status FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day);
   const shares = discountShares(regRows.map((r) => ({ ...r, amount_paise: r.amount_paise - r.discount_paise + r.tip_paise, discount_paise: r.discount_paise - r.tip_paise })));
   const skipped: { billNo: string; reason: string }[] = [];
   const ok = chosen.filter((x) => {
     const o = others.get(x.id);
     const why = x.difference !== 'missing_in_software' ? 'it is in the software report'
       : !x.register_row_id || !paid.has(x.register_row_id) ? 'no payment is written for it in the register'
+      : !isNewPosBill(x.bill_no) && regRows.find((r) => r.id === x.register_row_id)?.status !== 'checked' ? 'its register row is not reviewed yet'
       : o && isCounted(o.decision) ? `it is already counted on ${o.day}`
       : shares.get(x.register_row_id)?.large ? `it has a ${shares.get(x.register_row_id)!.pct}% discount: decide it on its own` : null;
     if (why) skipped.push({ billNo: x.bill_no, reason: why });

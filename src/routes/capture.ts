@@ -197,7 +197,9 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
       discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt,
       (SELECT count(*) FROM register_bank_adjustments a WHERE a.target_id = register_rows.id AND a.reverses_id IS NULL
-         AND NOT EXISTS (SELECT 1 FROM register_bank_adjustments x WHERE x.reverses_id = a.id)) > 0 AS bankAdjusted
+         AND NOT EXISTS (SELECT 1 FROM register_bank_adjustments x WHERE x.reverses_id = a.id)) > 0 AS bankAdjusted,
+      (SELECT CASE WHEN c.decision = 'leave_out' THEN 'Left out' ELSE c.close_note END FROM bill_comparisons c
+         WHERE c.register_row_id = register_rows.id AND (c.closed_at IS NOT NULL OR c.decision = 'leave_out') LIMIT 1) AS numberSettled
       FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
     const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
