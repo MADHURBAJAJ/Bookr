@@ -1247,17 +1247,17 @@ function digitDistance(a, b) {
   return d[a.length][b.length];
 }
 
-/** Software bills of the shift the typed number probably means: its last digits, a digit wrong, extra or missing,
- *  or containing it. Same amount as the line first; bills already on the register last. */
+/** Software bills of the shift the typed number probably means: exactly it, its last digits, a digit wrong, extra or
+ *  missing, or containing it. An exact number first, then the same amount as the line; bills already on the register last. */
 function billCandidates(typed, row, list) {
   const w = typed.replace(/\D/g, '');
   if (!w) return list.filter((b) => b.amountPaise === row?.amountPaise && !b.used).slice(0, 6).map((b) => ({ ...b, why: 'same amount' }));
   const out = [];
   for (const b of list) {
     const s2 = b.billNo.replace(/\D/g, '');
-    if (b.billNo === typed.trim()) continue;
     let why = null, score = 0;
-    if (s2 === w) why = 'same digits';
+    if (b.billNo === typed.trim()) { why = 'exact number'; score = -100; }
+    else if (s2 === w) why = 'same digits';
     else if (w.length >= 2 && s2.endsWith(w)) why = 'last digits';
     else if (w.length >= 4 && digitDistance(w, s2) === 1) { why = w.length > s2.length ? 'extra digit' : w.length < s2.length ? 'missing digit' : 'one digit off'; score = 1; }
     else if (w.length >= 3 && s2.includes(w)) { why = 'contains'; score = 2; }
@@ -1280,13 +1280,15 @@ function billSuggest(input, u, rowOf, pick) {
     if (!items.length) return;
     pop = document.createElement('div');
     pop.className = 'billpop';
-    pop.innerHTML = items.map((b, i) => html`<button type="button" data-i="${i}" class="${b.used ? 'taken' : ''}">
+    pop.innerHTML = items.map((b, i) => html`<button type="button" data-i="${i}" class="${b.used && b.billNo !== row?.billNo ? 'taken' : ''}">
       <span class="mono">${b.billNo}</span><span>₹ ${rs(b.amountPaise)}${row && b.amountPaise === row.amountPaise ? ' ✓' : ''}</span>
-      <span class="tiny">${MODE_LABELS[b.mode] ?? ''} · ${when(b.paidAt)} · ${b.why}${b.used ? ' · on register' : ''}</span></button>`.__html).join('');
+      <span class="tiny">${MODE_LABELS[b.mode] ?? ''} · ${when(b.paidAt)} · ${b.why}${b.used && b.billNo !== row?.billNo ? ' · on register' : ''}</span></button>`.__html).join('');
     const r = input.getBoundingClientRect();
     Object.assign(pop.style, { left: `${r.left + window.scrollX}px`, top: `${r.bottom + window.scrollY + 2}px` });
     document.body.appendChild(pop);
-    pop.addEventListener('mousedown', (e) => { const b = e.target.closest('[data-i]'); if (!b) return; e.preventDefault(); const v = items[+b.dataset.i].billNo; close(); pick(v); });
+    // The exact number is already chosen, so Enter takes it.
+    if (items[0].why === 'exact number') { at = 0; mark(); }
+    pop.addEventListener('mousedown', (e) => { const b = e.target.closest('[data-i]'); if (!b) return; e.preventDefault(); const v = items[+b.dataset.i]; close(); pick(v.billNo, v); });
   };
   const mark = () => pop?.querySelectorAll('[data-i]').forEach((b, i) => b.classList.toggle('on', i === at));
   input.addEventListener('input', show);
@@ -1295,7 +1297,7 @@ function billSuggest(input, u, rowOf, pick) {
   input.addEventListener('keydown', (e) => {
     if (!pop) return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); at = (at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; mark(); }
-    else if (e.key === 'Enter' && at >= 0) { e.preventDefault(); const v = items[at].billNo; close(); pick(v); }
+    else if (e.key === 'Enter' && at >= 0) { e.preventDefault(); const v = items[at]; close(); pick(v.billNo, v); }
     else if (e.key === 'Escape') { e.preventDefault(); close(); }
   });
 }
@@ -1667,7 +1669,14 @@ function wireInlineRows(biz, u, strip) {
       try { await api('DELETE', `/businesses/${biz.id}/register-rows/${r.id}`, why); reviewView(biz, u.id); }
       catch (err) { showError(document.getElementById('rmsg'), err); }
     });
-    billSuggest(val(tr, 'billNo'), u, () => u.rows.find((x) => x.id === tr.dataset.row), (b) => { val(tr, 'billNo').value = b; save(tr, val(tr, 'billNo')); });
+    billSuggest(val(tr, 'billNo'), u, () => u.rows.find((x) => x.id === tr.dataset.row), (b, bill) => {
+      val(tr, 'billNo').value = b;
+      // An empty amount takes the software's for the bill picked. A person still checks and ticks the row.
+      const amt = val(tr, 'amount');
+      const blank = !parsePaiseText(amt.value.trim() || '0');
+      if (blank && bill?.amountPaise) amt.value = rsIn(bill.amountPaise);
+      save(tr, blank && bill?.amountPaise ? amt : val(tr, 'billNo'));
+    });
     tr.addEventListener('focusin', () => {
       table.querySelectorAll('tr.current').forEach((x) => x.classList.remove('current'));
       tr.classList.add('current');

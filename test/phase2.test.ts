@@ -636,9 +636,9 @@ describe('bills paid together', () => {
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(0);
     v = await view(h);
     expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
-    // Each bill received less than the software after its share of the discount: matched after a discount, no decision.
+    // The paying row received less than the software after the discount, the others their full amount: all matched, no decision.
     for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
-    expect(v.json.matchedAfterAdjustment.map((x: any) => x.billNo).sort()).toEqual(['2610311', '2610314', '26103122'].sort());
+    expect(v.json.matchedAfterAdjustment.map((x: any) => x.billNo)).toEqual(['2610311']);
   });
 
   it('confirming books one income row per bill, in the group mode', async () => {
@@ -992,11 +992,12 @@ describe('large discounts', () => {
     const head = (await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '1500' }])).json.id;
     await add('2610314', '1180', [], { paidWithRowId: head });
     await add('26103122', '780', [], { paidWithRowId: head });
-    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(3);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(1);
     let v = await view(h);
-    for (const b of ['2610311', '2610314', '26103122']) {
+    // The paying row, and the bill the rest of the discount came off, need a reason. The third bill's own amount is untouched.
+    for (const [b, difference] of [['2610311', 'amount'], ['2610314', 'amount'], ['26103122', 'match']]) {
       const c = byBill(v, b);
-      expect(c.difference).toBe('amount');
+      expect(c.difference).toBe(difference);
       expect(c.largeDiscount).toMatchObject({ pct: 37, discountPaise: 88000, grossPaise: 238000, large: true });
     }
     const id = byBill(v, '2610314').id;
@@ -1095,8 +1096,8 @@ describe('bills paid together across register pages', () => {
     const d2 = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${p2}`)).json;
     expect(d2.pageNo).toBe(2);
     expect(d2.otherPageRows).toEqual([expect.objectContaining({ id: head, pageNo: 1, uploadId: p1, amountPaise: 60000, billType: 'fnb', status: 'draft', remarks: null, payments: [expect.objectContaining({ amountPaise: 100000 })] })]);
-    // 600 + 500 = 1,100 against 1,000 paid: Fill on page 2 shares the 100 discount over both pages' bills.
-    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/fill-discounts`)).json.filled).toBe(2);
+    // 600 + 500 = 1,100 against 1,000 paid: Fill on page 2 writes the 100 discount on the paying row on page 1.
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/fill-discounts`)).json.filled).toBe(1);
     const rows = await sql`SELECT discount_paise FROM register_rows WHERE id IN (${head}, ${res.json.id})`;
     expect(rows.reduce((t, r) => t + r.discount_paise, 0)).toBe(10000);
   });
