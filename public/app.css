@@ -300,6 +300,11 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .cmp-tabs { margin: 12px 0; flex-wrap: wrap; }
 .cmptable td { vertical-align: top; }
 .cmptable tr.undecided td:first-child { box-shadow: inset 3px 0 0 #F59E0B; }
+.cmptable tr.grp-head { cursor: pointer; }
+.cmptable tr.grp-head td { background: #F8FAFC; }
+.cmptable tr.grp-head td:first-child strong::before { content: '▸ '; color: var(--muted, #6B7280); }
+.cmptable tr.grp-head.open td:first-child strong::before { content: '▾ '; }
+.cmptable tr.grp-bill td:first-child { padding-left: 24px; }
 .cmptable .dchip { min-height: 34px; padding: 0 10px; font-size: 13px; }
 details.cmp-fold > summary { list-style: none; cursor: pointer; display: grid; gap: 2px; }
 details.cmp-fold > summary h2::before { content: '▸ '; color: var(--muted, #6B7280); }

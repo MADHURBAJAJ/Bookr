@@ -44,7 +44,7 @@ export function registerMode(pays: RgPay[]): string | null {
  * amount before them. A bill with a discount or tip matches when the software shows either figure:
  * the register's received amount is then used (approved rule, 2 Nov 2026).
  */
-/** A discount above this share of the bill(s) is never matched by itself: a person checks for a missing payment. */
+/** A discount above this share of the bill(s) is listed on Reports (Large discounts). It needs no decision (7 Nov 2026). */
 export const LARGE_DISCOUNT_PCT = 20;
 
 /**
@@ -68,13 +68,13 @@ export function discountShares(rows: { id: string; amount_paise: number; discoun
   return out;
 }
 
-export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null; gross?: number; largeDiscount?: boolean } | null): Difference {
+export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null; gross?: number } | null): Difference {
   if (sw && sw.amount === 0) return 'complimentary';
   if (!sw && rg && rg.amount === 0) return 'complimentary';
   if (sw && !rg) return 'missing_in_register';
   if (!sw && rg) return 'missing_in_software';
-  // Matched after a discount or tip, unless the discount is large (more than LARGE_DISCOUNT_PCT of the bills).
-  const amountDiffers = sw!.amount !== rg!.amount && !(rg!.gross !== undefined && rg!.gross !== rg!.amount && sw!.amount === rg!.gross && !rg!.largeDiscount);
+  // Matched after a discount or tip.
+  const amountDiffers = sw!.amount !== rg!.amount && !(rg!.gross !== undefined && rg!.gross !== rg!.amount && sw!.amount === rg!.gross);
   const modeDiffers = sw!.mode === 'unknown' || sw!.mode !== rg!.mode;
   if (amountDiffers && modeDiffers) return 'amount_and_mode';
   if (amountDiffers) return 'amount';
@@ -82,7 +82,28 @@ export function classify(sw: { amount: number; mode: string } | null, rg: { amou
   return 'match';
 }
 
-export interface PaidGroup { headId: string; billNos: string[]; billsPaise: number; paidPaise: number; modes: string[] }
+export interface PaidGroup { headId: string; rowIds: string[]; billNos: string[]; billsPaise: number; grossPaise: number; paidPaise: number; modes: string[] }
+
+const inRupees = (paise: number) => `₹ ${(paise / 100).toLocaleString('en-IN')}`;
+
+/**
+ * Bills paid together match on their total (approved 7 Nov 2026): what was paid equals the software's total, as it
+ * stands or before the discount (the software may not have the discount). Every bill must be on both sides and the
+ * software must show the group's one mode. Returns why they do not match; null when they do.
+ */
+export function groupMismatch(g: PaidGroup, comps: { bill_no: string; software_bill_id: string | null; sw_amount_paise: number | null; sw_mode: string | null }[]): string | null {
+  if (g.modes.length !== 1) return 'Paid more than one way';
+  if (g.paidPaise !== g.billsPaise) return 'The payment does not equal the bills after discount';
+  if (comps.length !== g.rowIds.length) return 'A bill number is blank or repeated';
+  const missing = comps.filter((c) => !c.software_bill_id);
+  if (missing.length) return `Not in the software: bill ${missing.map((c) => c.bill_no).join(', ')}`;
+  if (comps.some((c) => !c.sw_amount_paise)) return 'A bill has no amount in the software';
+  const otherMode = comps.filter((c) => c.sw_mode !== g.modes[0]);
+  if (otherMode.length) return `Mode differs: bill ${otherMode.map((c) => c.bill_no).join(', ')}`;
+  const total = comps.reduce((t, c) => t + c.sw_amount_paise!, 0);
+  if (total !== g.paidPaise && total !== g.grossPaise) return `Software ${inRupees(total)}, paid ${inRupees(g.paidPaise)}`;
+  return null;
+}
 
 /**
  * Bills paid together: one payment written on the head row covers the head and every row that points
@@ -101,7 +122,7 @@ export function applyPaidTogether(rows: RgRow[], written: Map<string, RgPay[]>) 
     const pays = written.get(head.id) ?? [];
     const modes = [...new Set(pays.map((p) => p.mode))];
     const all = [head, ...ms];
-    groups.push({ headId: head.id, billNos: all.map((r) => r.bill_no), billsPaise: all.reduce((t, r) => t + r.amount_paise, 0), paidPaise: pays.reduce((t, p) => t + p.amount_paise, 0), modes });
+    groups.push({ headId: head.id, rowIds: all.map((r) => r.id), billNos: all.map((r) => r.bill_no), billsPaise: all.reduce((t, r) => t + r.amount_paise, 0), grossPaise: all.reduce((t, r) => t + r.amount_paise + r.discount_paise, 0), paidPaise: pays.reduce((t, p) => t + p.amount_paise, 0), modes });
     if (modes.length === 1) {
       for (const r of all) paysByRow.set(r.id, [{ register_row_id: r.id, mode: modes[0], amount_paise: r.amount_paise, column_label: pays[0].column_label }]);
     } else {
@@ -143,14 +164,13 @@ async function loadShiftData(db: DB, businessId: string, day: string) {
  * its decision is cleared and the clearing is audit-logged. Nothing happens on a confirmed shift.
  */
 export async function refreshComparisons(db: DB, businessId: string, day: string, userId: string | null): Promise<void> {
-  const { status, sw, rg, paysByRow, existing } = await loadShiftData(db, businessId, day);
+  const { status, sw, rg, paysByRow, groups, existing } = await loadShiftData(db, businessId, day);
   if (status === 'confirmed') return;
 
   // Register bills match a software bill by bill number. Only the first register row per number takes part;
   // a repeat is reported by shiftView and blocks confirmation.
   const rgByBill = new Map<string, RgRow>();
   for (const r of rg) if (r.bill_no && !rgByBill.has(r.bill_no)) rgByBill.set(r.bill_no, r); // a blank line just added has no bill yet
-  const shares = discountShares(rg);
   const wanted = new Map<string, Omit<Comparison, 'id' | 'decision' | 'decided_by' | 'decided_at' | 'note' | 'bill_type'>>();
   const usedRg = new Set<string>();
   for (const b of sw) {
@@ -160,7 +180,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     wanted.set(`${b.pos_no}\u0000${b.bill_no}`, {
       pos_no: b.pos_no, bill_no: b.bill_no, software_bill_id: b.id, register_row_id: r?.id ?? null,
       sw_amount_paise: b.amount_paise, sw_mode: b.mode, rg_amount_paise: r?.amount_paise ?? null, rg_mode: rgMode,
-      difference: classify({ amount: b.amount_paise, mode: b.mode }, r ? { amount: r.amount_paise, mode: rgMode, gross: r.amount_paise + r.discount_paise, largeDiscount: shares.get(r.id)?.large } : null),
+      difference: classify({ amount: b.amount_paise, mode: b.mode }, r ? { amount: r.amount_paise, mode: rgMode, gross: r.amount_paise + r.discount_paise } : null),
     });
   }
   for (const r of rgByBill.values()) {
@@ -171,6 +191,10 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
       sw_amount_paise: null, sw_mode: null, rg_amount_paise: r.amount_paise, rg_mode: rgMode,
       difference: classify(null, { amount: r.amount_paise, mode: rgMode }),
     });
+  }
+  for (const g of groups) {
+    const members = [...wanted.values()].filter((w) => w.register_row_id && g.rowIds.includes(w.register_row_id));
+    if (!groupMismatch(g, members)) for (const w of members) w.difference = 'match';
   }
 
   const t = now();
@@ -218,7 +242,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   }
   if (wanted.size) statements.push(stmt(db, "UPDATE shifts SET status = 'comparing' WHERE business_id = ? AND shift_day = ? AND status = 'open'", businessId, day));
   if (statements.length) await db.batch([shiftStatement(db, businessId, day), ...statements]);
-  await decideOneSided(db, businessId, day, rgById, paysByRow, shares);
+  await decideOneSided(db, businessId, day, rgById, paysByRow);
 }
 
 export const AUTO_COUNTED_NOTE = 'Counted automatically: waiting for its other side';
@@ -230,13 +254,11 @@ export const AUTO_COUNTED_NOTE = 'Counted automatically: waiting for its other s
  *   matched to the bank) twice, and the other day's bill stops waiting.
  * - Otherwise it is counted here from the side there is, and waits for its other side:
  *   only in the software report → the software amount and mode, as F&B unless changed;
- *   only in the register → the register, once its payment is written and its discount is not large, and its
- *   number is a new POS one. An old POS or odd number waits for a person (old POS by decision of 6 Nov 2026), who
+ *   only in the register → the register, once its payment is written and its number is a new POS one. An old POS or odd number waits for a person (old POS by decision of 6 Nov 2026), who
  *   uses the register once its row is reviewed: a typo could look just like a real bill, and no software bill will check it.
  * A bill whose other day was decided by a person in another way (left out, carried forward) waits for a person.
  */
-async function decideOneSided(db: DB, businessId: string, day: string, rgById: Map<string, RgRow>, paysByRow: Map<string, RgPay[]>,
-  shares: ReturnType<typeof discountShares>) {
+async function decideOneSided(db: DB, businessId: string, day: string, rgById: Map<string, RgRow>, paysByRow: Map<string, RgPay[]>) {
   const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
   const open = comps.filter((c) => ONE_SIDED.includes(c.difference) && !c.decision);
   if (!open.length) return;
@@ -261,7 +283,7 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
     } else {
       if (!isNewPosBill(c.bill_no)) continue;
       const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
-      if (!r || !paysByRow.get(r.paid_with_row_id ?? r.id)?.length || shares.get(r.id)?.large) continue;
+      if (!r || !paysByRow.get(r.paid_with_row_id ?? r.id)?.length) continue;
       // A number that looks like a typo is not counted by itself: it could be a bill counted from the software too.
       if (!o && numbers && numberFlags({ ...r, gross_paise: r.amount_paise + r.discount_paise }, numbers).length) continue;
       decide(c, 'use_register', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, null);
@@ -479,7 +501,6 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const typed = new Set(typeHeads.map((t) => t.bill_type));
   const counted = comparisons.filter((c) => c.difference === 'match' || isCounted(c.decision));
   const rgById = new Map(rg.map((r) => [r.id, r]));
-  const shares = discountShares(rg);
   const typeOf = (c: Comparison) => (c.register_row_id ? rgById.get(c.register_row_id)?.bill_type : c.bill_type) ?? null;
   const missingType = counted.filter((c) => !typeOf(c));
   if (missingType.length) blockers.push(`Bill ${missingType.map((c) => c.bill_no).join(', ')} has no type (F&B or Room) in the register.`);
@@ -526,13 +547,12 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       software: c.software_bill_id ? { amountPaise: c.sw_amount_paise, mode: c.sw_mode } : null,
       register: c.register_row_id ? { reviewed: rgById.get(c.register_row_id)?.status === 'checked', amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0,
         rowId: c.register_row_id, uploadId: rgById.get(c.register_row_id)?.upload_id ?? null } : null,
-      largeDiscount: c.register_row_id && shares.get(c.register_row_id)?.large ? shares.get(c.register_row_id) : null,
+      groupId: c.register_row_id ? groups.find((g) => g.rowIds.includes(c.register_row_id!))?.headId ?? null : null,
       linkedToId: c.linked_to_id ?? null,
       auto: !!c.decision && !c.decided_by && c.decided_at != null,
       otherDay: others.get(c.id) ?? null,
       numberFlags: flagsOf.get(c.id) ?? [],
-      // A large discount is accepted only with a reason, so the bank's choice is not offered for one.
-      bank: bank?.evidence.get(c.id) ? { ...bank.evidence.get(c.id)!, suggest: c.register_row_id && shares.get(c.register_row_id)?.large ? null : bank.evidence.get(c.id)!.suggest } : null,
+      bank: bank?.evidence.get(c.id) ?? null,
     })),
     bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })) } : null,
     conflicts: conflicts.map((k) => ({
@@ -540,12 +560,19 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       existing: { paidAt: k.existing_paid_at, mode: k.existing_mode, amountPaise: k.existing_amount_paise },
       incoming: { paidAt: k.incoming_paid_at, mode: k.incoming_mode, amountPaise: k.incoming_amount_paise },
     })),
+    // Bills paid together, shown as one line on Compare sales. Each bill stays its own comparison, for the detail and for decisions.
+    paidGroups: groups.map((g) => {
+      const members = comparisons.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
+      const matched = members.length === g.rowIds.length && members.every((c) => c.difference === 'match');
+      return { id: g.headId, billNos: g.billNos, softwarePaise: members.reduce((t, c) => t + (c.sw_amount_paise ?? 0), 0), grossPaise: g.grossPaise, paidPaise: g.paidPaise,
+        mode: g.modes.length === 1 ? g.modes[0] : g.modes.length ? 'mixed' : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
+    }),
     totals,
     unknownModePaise: unknownPaise,
     // Types taken as F&B because the register's type could not be read, and not changed since.
     assumedTypes: rg.filter((r) => { try { const o = JSON.parse((r as unknown as { ocr_original?: string }).ocr_original ?? 'null'); return o && (o.inferred ?? []).includes('bill_type') && !(o.resolved ?? []).includes('bill_type'); } catch { return false; } }).map((r) => r.bill_no),
     matchedAfterAdjustment: comparisons
-      .filter((c) => c.difference === 'match' && c.sw_amount_paise !== c.rg_amount_paise)
+      .filter((c) => c.difference === 'match' && c.sw_amount_paise !== c.rg_amount_paise && !grouped.has(c.register_row_id ?? ''))
       .map((c) => ({ billNo: c.bill_no, softwarePaise: c.sw_amount_paise, registerPaise: c.rg_amount_paise })),
     blockers: shift?.status === 'confirmed' ? [] : blockers,
     canConfirm: shift?.status !== 'confirmed' && blockers.length === 0,
@@ -556,10 +583,18 @@ interface NewRow { amount: number; mode: 'cash' | 'upi' | 'card'; billType: stri
 
 /** The income rows confirmation would create. The app follows each decision; it never picks a side. */
 async function plannedRows(db: DB, businessId: string, day: string): Promise<NewRow[]> {
-  const { rg, paysByRow } = await loadShiftData(db, businessId, day);
+  const { rg, paysByRow, groups } = await loadShiftData(db, businessId, day);
   const rgById = new Map(rg.map((r) => [r.id, r]));
   const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
   const rows: NewRow[] = [];
+  // A group matched on a software total equal to the payment books the software's figure for each bill, so Room and F&B
+  // split as billed. When the software lacks the discount its figures add up to more than was paid, so the register's are booked.
+  const asBilled = new Map<string, string>();
+  for (const g of groups) {
+    const members = comps.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
+    if (g.modes.length === 1 && members.length === g.rowIds.length && members.every((c) => c.difference === 'match' && c.sw_amount_paise)
+      && members.reduce((t, c) => t + c.sw_amount_paise!, 0) === g.paidPaise) for (const c of members) asBilled.set(c.id, g.modes[0]);
+  }
   for (const c of comps) {
     const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
     const billType = r?.bill_type ?? c.bill_type ?? '';
@@ -569,7 +604,8 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
     };
     // Matched after a discount or tip: the software shows the bill amount, the register what was received.
     // The register's figure is booked, so it is what bank matching will look for.
-    if (c.difference === 'match') fromRegister(c.sw_amount_paise === c.rg_amount_paise ? 'both_matched' : 'register');
+    if (asBilled.has(c.id)) rows.push({ amount: c.sw_amount_paise!, mode: asBilled.get(c.id) as NewRow['mode'], billType, source: 'both_matched', c });
+    else if (c.difference === 'match') fromRegister(c.sw_amount_paise === c.rg_amount_paise ? 'both_matched' : 'register');
     else if (c.decision === 'use_register') fromRegister('register');
     else if (c.decision === 'use_software') rows.push({ amount: c.sw_amount_paise!, mode: c.sw_mode as NewRow['mode'], billType, source: 'software', c });
   }
@@ -899,11 +935,24 @@ export async function numberContext(db: DB, businessId: string, day: string): Pr
   };
 }
 
-/** The discount share of a register row's bills (its group's, when paid together), straight from the table. */
-export async function largeDiscountOf(db: DB, rowId: string) {
-  const rows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null }>(db, `
-    SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id FROM register_rows
-    WHERE coalesce(paid_with_row_id, id) = (SELECT coalesce(paid_with_row_id, id) FROM register_rows WHERE id = ?)`, rowId);
-  const net = rows.map((r) => ({ ...r, amount_paise: r.amount_paise - r.discount_paise + r.tip_paise, discount_paise: r.discount_paise - r.tip_paise }));
-  return discountShares(net).get(rowId) ?? null;
+/** For Reports: bills whose discount is over LARGE_DISCOUNT_PCT of the bills, as one line per payment, newest shift first. */
+export async function largeDiscounts(db: DB, businessId: string, from: string, to: string) {
+  const [rows, pays, sw] = await Promise.all([
+    all<{ id: string; bill_no: string; shift_day: string; amount_paise: number; discount_paise: number; paid_with_row_id: string | null; remarks: string | null; upload_id: string }>(db, `
+      SELECT id, bill_no, shift_day, amount_paise - discount_paise + tip_paise AS amount_paise, discount_paise - tip_paise AS discount_paise, paid_with_row_id, remarks, upload_id
+      FROM register_rows WHERE business_id = ? AND shift_day BETWEEN ? AND ?`, businessId, from, to),
+    all<{ register_row_id: string; mode: string; amount_paise: number }>(db, `SELECT p.register_row_id, p.mode, p.amount_paise FROM register_payments p
+      JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day BETWEEN ? AND ?`, businessId, from, to),
+    all<{ bill_no: string; shift_day: string; amount_paise: number }>(db, 'SELECT bill_no, shift_day, amount_paise FROM software_bills WHERE business_id = ? AND shift_day BETWEEN ? AND ?', businessId, from, to),
+  ]);
+  const shares = discountShares(rows);
+  return rows.filter((r) => !r.paid_with_row_id && shares.get(r.id)?.large).map((head) => {
+    const bills = rows.filter((r) => r.id === head.id || r.paid_with_row_id === head.id);
+    const paid = pays.filter((p) => p.register_row_id === head.id);
+    const share = shares.get(head.id)!;
+    return { day: head.shift_day, billNos: bills.map((r) => r.bill_no), billsPaise: share.grossPaise, discountPaise: share.discountPaise, pct: share.pct,
+      paidPaise: paid.reduce((t, p) => t + p.amount_paise, 0), modes: [...new Set(paid.map((p) => p.mode))],
+      softwarePaise: sw.filter((b) => b.shift_day === head.shift_day && bills.some((r) => r.bill_no === b.bill_no)).reduce((t, b) => t + b.amount_paise, 0),
+      remarks: bills.map((r) => r.remarks).filter(Boolean).join(' · ') || null, uploadId: head.upload_id, rowId: head.id };
+  }).sort((a, b) => b.day.localeCompare(a.day));
 }

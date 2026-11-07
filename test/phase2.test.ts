@@ -638,7 +638,7 @@ describe('bills paid together', () => {
     expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
     // The paying row received less than the software after the discount, the others their full amount: all matched, no decision.
     for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
-    expect(v.json.matchedAfterAdjustment.map((x: any) => x.billNo)).toEqual(['2610311']);
+    expect(v.json.matchedAfterAdjustment).toEqual([]); // shown as a group instead
   });
 
   it('confirming books one income row per bill, in the group mode', async () => {
@@ -981,36 +981,110 @@ describe('discount for bills paid together, on the row with the payment (approve
   });
 });
 
-describe('large discounts', () => {
-  it('a discount over 20% is not matched by itself; accepting it needs a reason; paid-together bills are judged as a group', async () => {
+describe('large discounts need no decision; they are listed on Reports (approved 7 Nov 2026)', () => {
+  const setup = async () => {
     const h = await hotel();
     const reg = REGISTER_31_OCT.filter((r) => !['2610311', '2610314', '26103122'].includes(r.billNo));
     const pageId = await fullShift(h, reg);
     const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
       h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
-    // 420 + 1180 + 780 = 2,380 of bills, 1,500 paid: 880 discount (37%) over the group.
+    return { h, pageId, add };
+  };
+
+  it('a 37% discount on bills paid together matches on the total, and shows on the report', async () => {
+    const { h, pageId, add } = await setup();
+    // 420 + 1180 + 780 = 2,380 of bills, 1,500 paid: 880 discount (37%).
     const head = (await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '1500' }])).json.id;
     await add('2610314', '1180', [], { paidWithRowId: head });
     await add('26103122', '780', [], { paidWithRowId: head });
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(1);
-    let v = await view(h);
-    // The paying row, and the bill the rest of the discount came off, need a reason. The third bill's own amount is untouched.
-    for (const [b, difference] of [['2610311', 'amount'], ['2610314', 'amount'], ['26103122', 'match']]) {
-      const c = byBill(v, b);
-      expect(c.difference).toBe(difference);
-      expect(c.largeDiscount).toMatchObject({ pct: 37, discountPaise: 88000, grossPaise: 238000, large: true });
-    }
-    const id = byBill(v, '2610314').id;
-    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_register' })).status).toBe(400);
-    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${id}`, { decision: 'use_register', note: 'Group rate' })).status).toBe(200);
-    expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '2610311').id}`, { decision: 'use_software' })).status).toBe(200);
-    // A small discount still matches by itself.
-    await sql`UPDATE register_payments SET amount_paise = 230000 WHERE register_row_id = ${head}`;
-    await sql`UPDATE register_rows SET discount_paise = 0, tip_paise = 0 WHERE upload_id = ${pageId}`;
+    const v = await view(h);
+    for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
+    expect(v.json.paidGroups).toEqual([expect.objectContaining({ id: head, softwarePaise: 238000, grossPaise: 238000, paidPaise: 150000, mode: 'upi', matched: true, why: null })]);
+    const r = await h.clients.viewer.get(`/businesses/${h.bid}/reports/large-discounts?from=2026-10-31&to=2026-10-31`);
+    expect(r.json.lines).toEqual([expect.objectContaining({ day: '2026-10-31', billNos: ['2610311', '2610314', '26103122'], billsPaise: 238000, discountPaise: 88000, pct: 37, paidPaise: 150000, modes: ['upi'], softwarePaise: 238000 })]);
+    await decideAll(h);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    // The software has no discount, so the register's figures are booked: the sales add up to what was paid.
+    const sales = await sql`SELECT bill_no, amount_paise FROM transactions WHERE bill_no IN ('2610311', '2610314', '26103122') AND type = 'income' ORDER BY bill_no`;
+    expect(sales).toEqual([{ bill_no: '26103122', amount_paise: 78000 }, { bill_no: '2610314', amount_paise: 72000 }]);
+  });
+
+  it('a large discount on one bill matches when the software shows the bill before it; a small one stays off the report', async () => {
+    const { h, add } = await setup();
+    await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '300' }], { discount: '120' });
+    await add('2610314', '1180', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '1170' }], { discount: '10' });
+    const v = await view(h);
+    expect(byBill(v, '2610311').difference).toBe('match');
+    expect(byBill(v, '2610311').largeDiscount).toBeUndefined();
+    const r = await h.clients.owner.get(`/businesses/${h.bid}/reports/large-discounts?from=2026-10-31&to=2026-10-31`);
+    expect(r.json.lines.map((l: any) => l.billNos)).toEqual([['2610311']]);
+  });
+
+  it('only those who can see reports get the report', async () => {
+    const { h } = await setup();
+    expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/reports/large-discounts`)).status).toBe(403);
+    expect((await h.clients.accountant.get(`/businesses/${h.bid}/reports/large-discounts`)).status).toBe(200);
+  });
+});
+
+describe('bills paid together match on their total (approved 7 Nov 2026)', () => {
+  const setup = async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => !['2610311', '2610314', '26103122'].includes(r.billNo));
+    const pageId = await fullShift(h, reg);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    const head = (await add('2610311', '420', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '2180' }])).json.id;
+    await add('2610314', '1180', [], { paidWithRowId: head, billType: 'room' });
+    await add('26103122', '780', [], { paidWithRowId: head });
+    // 2,380 of bills, 2,180 paid.
     await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
-    v = await view(h);
-    expect(byBill(v, '2610314').difference).toBe('match');
-    expect(byBill(v, '2610314').largeDiscount).toBeNull();
+    return { h, pageId, add, head };
+  };
+  const refresh = (h: Awaited<ReturnType<typeof hotel>>, id: string) =>
+    h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${id}`, { billNo: '2610311', billType: 'fnb', amount: '420', discount: '200', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '2180' }] });
+
+  it('software total after the discount: matches, and each bill is booked at the software figure, so Room and F&B split as billed', async () => {
+    const { h, head } = await setup();
+    await sql`UPDATE software_bills SET amount_paise = 30000 WHERE bill_no = '2610311'`; // 300 + 1,100 + 780 = 2,180 in the software
+    await sql`UPDATE software_bills SET amount_paise = 110000 WHERE bill_no = '2610314'`;
+    await refresh(h, head);
+    const v = await view(h);
+    for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
+    expect(v.json.paidGroups[0]).toMatchObject({ softwarePaise: 218000, paidPaise: 218000, matched: true });
+    await decideAll(h);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const sales = await sql`SELECT bill_no, amount_paise FROM transactions WHERE bill_no IN ('2610311', '2610314', '26103122') AND type = 'income' ORDER BY bill_no`;
+    expect(sales).toEqual([{ bill_no: '2610311', amount_paise: 30000 }, { bill_no: '26103122', amount_paise: 78000 }, { bill_no: '2610314', amount_paise: 110000 }]);
+  });
+
+  it('a total that is neither figure waits for a person, and says why', async () => {
+    const { h, head } = await setup();
+    await sql`UPDATE software_bills SET amount_paise = 100000 WHERE bill_no = '2610314'`; // 2,200: neither 2,380 nor 2,180
+    await refresh(h, head);
+    const v = await view(h);
+    expect(byBill(v, '2610314').difference).toBe('amount');
+    expect(v.json.paidGroups[0]).toMatchObject({ matched: false, why: `Software ₹ ${(2200).toLocaleString('en-IN')}, paid ₹ ${(2180).toLocaleString('en-IN')}` });
+  });
+
+  it('another mode in the software waits for a person, even when the total agrees', async () => {
+    const { h, head } = await setup();
+    await sql`UPDATE software_bills SET mode = 'cash' WHERE bill_no = '26103122'`;
+    await refresh(h, head);
+    const v = await view(h);
+    expect(byBill(v, '26103122').difference).toBe('mode');
+    expect(v.json.paidGroups[0]).toMatchObject({ matched: false, why: 'Mode differs: bill 26103122' });
+  });
+
+  it('a bill not in the software waits for a person, even when the total agrees', async () => {
+    const { h, add, head } = await setup();
+    // 88888888 is written with them but is not in the software. With ₹ 300 off, the ₹ 2,180 paid still balances.
+    await add('88888888', '100', [], { paidWithRowId: head });
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, { billNo: '2610311', billType: 'fnb', amount: '420', discount: '300', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '2180' }] });
+    const v = await view(h);
+    expect(byBill(v, '88888888').difference).toBe('missing_in_software');
+    expect(v.json.paidGroups[0]).toMatchObject({ matched: false, why: 'Not in the software: bill 88888888' });
   });
 });
 
@@ -1242,18 +1316,18 @@ describe('register-only bills in bulk (e.g. an old POS)', () => {
     await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
     await add('145237', '131', [{ mode: 'cash', columnLabel: null, amount: '131' }]);
     await add('076', '200', []);                                                  // no payment written
-    await add('078', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // 50% discount
+    await add('078', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // a 50% discount no longer holds it back
     let v = await view(h);
     const ids = ['145236', '145237', '076', '078', '2610319'].map((b) => byBill(v, b).id);
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids, note: 'Old POS bill' })).status).toBe(403);
     const r = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids, note: 'Old POS bill' });
-    expect(r.json.decided).toBe(2);
-    expect(r.json.skipped.map((x: any) => x.billNo).sort()).toEqual(['076', '078', '2610319']);
+    expect(r.json.decided).toBe(3);
+    expect(r.json.skipped.map((x: any) => x.billNo).sort()).toEqual(['076', '2610319']);
     v = await view(h);
     expect(byBill(v, '145236')).toMatchObject({ decision: 'use_register', note: 'Old POS bill' });
     const waiting = (await h.clients.owner.get(`/businesses/${h.bid}/waiting-bills`)).json.bills.map((b: any) => b.billNo);
     expect(waiting).not.toContain('145236');
-    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%noSoftwareBillExpected%'`)[0].n).toBe(2);
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'comparison.decide' AND after LIKE '%noSoftwareBillExpected%'`)[0].n).toBe(3);
   });
 });
 

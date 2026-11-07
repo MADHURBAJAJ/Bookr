@@ -5,10 +5,10 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt } from 
 import { body, fail, isUuid, text } from '../http';
 import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
-import { istDay, shiftDayOf } from '../time';
+import { addDays, istDay, shiftDayOf } from '../time';
 import { storageKey } from '../files';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { confirmShift, discountShares, isCounted, isNewPosBill, largeDiscountOf, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -299,9 +299,6 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
     const pays = await one<{ n: number }>(db, `SELECT count(*) AS n FROM register_payments
       WHERE register_row_id = coalesce((SELECT paid_with_row_id FROM register_rows WHERE id = ?), ?)`, cmp.register_row_id, cmp.register_row_id);
     if (!pays!.n) fail(400, 'The register row has no payment written, and is not paid together with another row. Add its payment in Review first.');
-    // A large discount is accepted only with a reason, so a missing payment cannot pass as a discount.
-    const share = await largeDiscountOf(db, cmp.register_row_id);
-    if (share?.large && !note) fail(400, `This bill has a ${share.pct}% discount. Say why it is accepted (e.g. owner's guest, group rate), or choose Payment missing.`);
   }
   const t = now();
   const user = c.get('user').id;
@@ -504,6 +501,13 @@ salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/close', requ
  * from the register with the reason given, and closed at once because no software bill is expected for it.
  * Each bill is checked as on its own; bills that cannot be decided this way are returned, not changed.
  */
+salesRoutes.get('/businesses/:businessId/reports/large-discounts', requireRole('reports.view'), async (c) => {
+  const q = c.req.query();
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
+  return c.json({ from, to, limitPct: LARGE_DISCOUNT_PCT, lines: await largeDiscounts(c.env.DB, c.get('businessId'), from, to) });
+});
+
 salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRole('sales.decide'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
@@ -519,9 +523,7 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRol
   const others = await otherDays(db, bid, day, comps as never);
   const paid = new Set((await all<{ id: string }>(db, `SELECT r.id FROM register_rows r WHERE r.business_id = ? AND r.shift_day = ?
     AND EXISTS (SELECT 1 FROM register_payments p WHERE p.register_row_id = coalesce(r.paid_with_row_id, r.id))`, bid, day)).map((r) => r.id));
-  const regRows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; status: string }>(db,
-    'SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id, status FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day);
-  const shares = discountShares(regRows.map((r) => ({ ...r, amount_paise: r.amount_paise - r.discount_paise + r.tip_paise, discount_paise: r.discount_paise - r.tip_paise })));
+  const regRows = await all<{ id: string; status: string }>(db, 'SELECT id, status FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day);
   const skipped: { billNo: string; reason: string }[] = [];
   const ok = chosen.filter((x) => {
     const o = others.get(x.id);
@@ -529,8 +531,7 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRol
       : /old pos/i.test(note) && isNewPosBill(x.bill_no) ? 'its number is in the new POS format, so it is not an old POS bill'
       : !x.register_row_id || !paid.has(x.register_row_id) ? 'no payment is written for it in the register'
       : !isNewPosBill(x.bill_no) && regRows.find((r) => r.id === x.register_row_id)?.status !== 'checked' ? 'its register row is not reviewed yet'
-      : o && isCounted(o.decision) ? `it is already counted on ${o.day}`
-      : shares.get(x.register_row_id)?.large ? `it has a ${shares.get(x.register_row_id)!.pct}% discount: decide it on its own` : null;
+      : o && isCounted(o.decision) ? `it is already counted on ${o.day}` : null;
     if (why) skipped.push({ billNo: x.bill_no, reason: why });
     return !why;
   });

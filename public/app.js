@@ -106,7 +106,7 @@ const NAV = [
   { key: 'reconcile', label: 'Reconcile', needs: 'bank.link' },
   { key: 'accounts', label: 'Accounts' },
   { key: 'heads', label: 'Heads and rules' },
-  { key: 'reports', label: 'Reports', phase: 4, needs: 'reports.view' },
+  { key: 'reports', label: 'Reports', needs: 'reports.view' },
   { key: 'export', label: 'Export', phase: 5 },
   { key: 'users', label: 'Users and roles', owner: true },
 ];
@@ -548,6 +548,38 @@ async function usersView(biz, selectedId) {
       input.select();
       navigator.clipboard?.writeText(input.value);
     });
+  });
+}
+
+/** Reports: discounts over the limit, for a person to look through. They need no decision on Compare sales. */
+async function reportsView(biz, query) {
+  const q = new URLSearchParams(query);
+  const r = await api('GET', `/businesses/${biz.id}/reports/large-discounts?${new URLSearchParams({ from: q.get('from') ?? '', to: q.get('to') ?? '' })}`);
+  const total = r.lines.reduce((t, l) => t + l.discountPaise, 0);
+  render(shell(biz, 'reports', 'Reports', '', html`
+    <section class="card" style="gap:10px">
+      <h2>Large discounts</h2>
+      <div class="note">Discounts over ${r.limitPct}% of the bills, one line per payment. Look for a payment that was missed in the register. Nothing here stops a shift being confirmed.</div>
+      <form id="repdates" class="form-row" style="align-items:flex-end">
+        <div class="field"><label for="repfrom">From shift</label><input id="repfrom" type="date" name="from" value="${r.from}" required></div>
+        <div class="field"><label for="repto">To shift</label><input id="repto" type="date" name="to" value="${r.to}" required></div>
+        <button class="btn plain" type="submit">Show</button>
+      </form>
+      ${r.lines.length ? html`<div class="note"><strong>${r.lines.length} large discount${r.lines.length > 1 ? 's' : ''}</strong> · ₹ ${money(total)} in all</div>
+      <div class="scroll"><table style="min-width:760px">
+        <thead><tr><th>Shift</th><th>Bills</th><th style="text-align:right">Bills ₹</th><th style="text-align:right">Discount ₹</th><th style="text-align:right">%</th><th style="text-align:right">Paid ₹</th><th>Mode</th><th style="text-align:right">Software ₹</th><th>Remarks</th></tr></thead>
+        <tbody>${r.lines.map((l) => html`<tr>
+          <td><a href="#/b/${biz.id}/compare/${l.day}">${dayLabel(l.day)}</a></td>
+          <td class="mono" style="white-space:normal">${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${l.uploadId}/${l.rowId}">${l.billNos.join(' + ')}</a>` : l.billNos.join(' + ')}</td>
+          <td class="amount">${money(l.billsPaise)}</td><td class="amount">${money(l.discountPaise)}</td><td class="amount">${l.pct}</td><td class="amount">${money(l.paidPaise)}</td>
+          <td>${l.modes.map((m) => MODE_LABELS[m] ?? m).join(', ') || 'None written'}</td><td class="amount">${money(l.softwarePaise)}</td><td class="note">${l.remarks ?? ''}</td></tr>`)}</tbody>
+      </table></div>` : html`<div class="ok-msg">No large discounts in these shifts.</div>`}
+    </section>`));
+  wireShell();
+  document.getElementById('repdates').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const d = new FormData(e.target);
+    location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
   });
 }
 
@@ -2087,11 +2119,10 @@ function choicesOf(c) {
 }
 function baseChoices(c) {
   const carry = !c.register || !c.software ? [['carry_forward', 'Carry forward']] : [];
-  if (c.largeDiscount && c.software) return [['use_register', 'Accept discount'], ['use_software', 'Payment missing · use software'], ['leave_out', 'Leave out']];
   if (!c.register) return [['use_software', 'Add to register · F&B', 'fnb'], ['use_software', 'Add to register · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
-  if (needsReview(c) && !c.largeDiscount) return [['__review', 'Review the row first'], ['leave_out', 'Leave out']];
-  if (!c.software && !c.largeDiscount && isOddBill(c.billNo)) return [['__oldpos', SHORT_OLD_POS_NOTE], ['leave_out', 'Leave out']];
-  if (!c.software && !c.largeDiscount && isOldPos(c.billNo)) return [['__oldpos', 'Use register'], ['leave_out', 'Leave out']];
+  if (needsReview(c)) return [['__review', 'Review the row first'], ['leave_out', 'Leave out']];
+  if (!c.software && isOddBill(c.billNo)) return [['__oldpos', SHORT_OLD_POS_NOTE], ['leave_out', 'Leave out']];
+  if (!c.software && isOldPos(c.billNo)) return [['__oldpos', 'Use register'], ['leave_out', 'Leave out']];
   if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out'], ...carry];
   return Object.entries(DECISION_LABELS).filter(([k]) => k !== 'carry_forward');
 }
@@ -2288,8 +2319,8 @@ async function compareView(biz, day) {
   const status = confirmed ? html`<span class="chip ok">Confirmed</span>` : v.status === 'comparing' ? html`<span class="chip wait">Comparing</span>` : html`<span class="chip">Open</span>`;
   const credit = awaiting?.sales ?? [];
   const tab = (() => { try { return localStorage.getItem('bookr.compare.tab') || 'shift'; } catch { return 'shift'; } })();
-  const rowHtml = (c) => html`<tr data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
-      class="clickrow ${c.decision ? '' : 'undecided'}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
+  const rowHtml = (c, inGroup = '', closed = false) => html`<tr ${inGroup ? html`data-group="${inGroup}"` : ''} ${closed ? 'hidden' : ''} data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
+      class="clickrow ${c.decision || c.difference === 'match' ? '' : 'undecided'} ${inGroup ? 'grp-bill' : ''}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
       <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}
       ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
@@ -2297,12 +2328,12 @@ async function compareView(biz, day) {
       ${!c.software && !c.decision && isOldPos(c.billNo) ? html`<div class="tiny">Old POS bill. ${c.register?.reviewed ? 'Row reviewed: you can use the register.' : 'Review its row, then use the register.'}</div>` : ''}</td>
     <td>${side(c.software)}</td><td>${side(c.register)}</td>
     <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
-      ${!c.largeDiscount || c.difference.startsWith('missing') || c.difference === 'mode' ? html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>` : ''}
-      ${c.largeDiscount ? html`<span class="chip bad" title="Discount of ₹ ${money(c.largeDiscount.discountPaise)} on ₹ ${money(c.largeDiscount.grossPaise)}. Check that no payment was missed in the register.">Large discount ${c.largeDiscount.pct}%</span>${c.difference === 'amount_and_mode' ? html`<span class="chip wait">Mode differs</span>` : ''}` : ''}
+      ${c.difference === 'match' ? (c.software?.amountPaise !== c.register?.amountPaise ? html`<span class="chip wait" title="The group matches on its total. This bill's own figures differ.">This bill differs by ₹ ${rs(Math.abs((c.software?.amountPaise ?? 0) - (c.register?.amountPaise ?? 0)))}</span>` : html`<span class="chip ok">Same</span>`)
+        : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}
       ${c.auto ? html`<span class="tiny" style="color:var(--teal-ink)">Decided by Bookr${c.note ? `: ${c.note}` : ''}</span>` : ''}
       ${confirmed ? '' : bankChip(c)}
     </div></td>
-    <td>${canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
+    <td>${c.difference === 'match' ? html`<span class="note">No decision needed</span>` : canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
         const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
         if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
           return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:40px">
@@ -2314,10 +2345,25 @@ async function compareView(biz, day) {
       })}</div>`
       : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
   </tr>`;
+  // Bills paid together: one line with the totals, each bill underneath when opened.
+  const groupOf = (c) => v.paidGroups.find((g) => g.id === c.groupId);
+  const groupRow = (g, members, start) => html`<tr class="grp-head ${start ? 'open' : ''}" data-grouphead="${g.id}" tabindex="0" aria-expanded="${start ? 'true' : 'false'}">
+    <td><strong>Group of ${g.billNos.length} bills</strong><div class="tiny mono" style="white-space:normal">${g.billNos.join(' + ')}</div>${members.length < g.billNos.length ? html`<div class="tiny">${members.length} of them in this list</div>` : ''}</td>
+    <td><div class="mono">${money(g.softwarePaise)}</div></td>
+    <td><div class="mono">${money(g.paidPaise)}</div><div class="note">${MODE_LABELS[g.mode] ?? 'No payment written'}${g.grossPaise > g.paidPaise ? ` · after ₹ ${money(g.grossPaise - g.paidPaise)} discount` : g.grossPaise < g.paidPaise ? ` · incl. ₹ ${money(g.paidPaise - g.grossPaise)} tip` : ''}</div></td>
+    <td>${g.matched ? html`<span class="chip ok">Total matches</span>` : html`<span class="chip wait" style="white-space:normal">${g.why}</span>`}</td>
+    <td class="note">${g.matched ? 'No decision needed. Open to see each bill.' : 'Open to see each bill and decide.'}</td></tr>`;
+  const matchedGroups = v.paidGroups.filter((g) => g.matched);
   const table = (rows) => html`<div class="scroll"><table class="cmptable" style="min-width:820px">
     <colgroup><col style="width:190px"><col style="width:150px"><col style="width:150px"><col style="width:150px"><col></colgroup>
     <thead><tr><th>Bill</th><th>Software</th><th>Register</th><th>What differs</th><th>Decision</th></tr></thead>
-    <tbody>${rows.map(rowHtml)}</tbody></table></div>`;
+    <tbody>${rows.flatMap((c, i) => {
+      if (!c.groupId) return [rowHtml(c)];
+      if (rows.findIndex((x) => x.groupId === c.groupId) !== i) return [];
+      const members = rows.filter((x) => x.groupId === c.groupId);
+      const start = members.some((x) => bulkOk(x) && !x.decision); // a tick box must not be out of sight
+      return [groupRow(groupOf(c), members, start), ...members.map((x) => rowHtml(x, c.groupId, !start))];
+    })}</tbody></table></div>`;
   render(shell(biz, 'compare', 'Compare sales', '', html`
     <section class="card cmp-bar">
       <div class="cmp-top">
@@ -2384,6 +2430,7 @@ async function compareView(biz, day) {
         </form>` : ''}
         ${open.length ? table(open) : html`<div class="ok-msg">${toDecide.length ? 'Every difference is decided.' : 'No differences in this shift.'}</div>`}
       </section>
+      ${matchedGroups.length ? html`<details class="card cmp-fold"><summary><h2>Paid together, total matches (${matchedGroups.length})</h2><span class="note">What was paid equals the software total, with or without the discount.</span></summary>${table(v.comparisons.filter((c) => matchedGroups.some((g) => g.id === c.groupId)))}</details>` : ''}
       ${auto.length ? html`<details class="card cmp-fold"><summary><h2>Decided by Bookr (${auto.length})</h2><span class="note">Bills on one side only: counted and waiting for their other side, or already counted on another day. Change any of them below.</span></summary>${table(auto)}</details>` : ''}
       ${byPerson.length ? html`<details class="card cmp-fold"><summary><h2>Decided (${byPerson.length})</h2></summary>${table(byPerson)}</details>` : ''}
       <div class="row">
@@ -2442,10 +2489,6 @@ async function compareView(biz, day) {
       return;
     }
     let note = null;
-    if (c?.largeDiscount && b.dataset.d === 'use_register') {
-      note = (prompt(`Why is the ${c.largeDiscount.pct}% discount on bill ${c.billNo} accepted? (e.g. owner's guest, group rate)`) ?? '').trim();
-      if (!note) return;
-    }
     if (!note && b.dataset.d === 'leave_out' && b.dataset.link && c?.otherDay?.decision === 'leave_out') {
       note = (prompt(`Bill ${c.billNo} was left out on ${dayLabel(c.otherDay.day)}${c.otherDay.note ? ` (${c.otherDay.note})` : ''} and now appears here. Why leave it out again?`) ?? '').trim();
       if (!note) return;
@@ -2459,10 +2502,32 @@ async function compareView(biz, day) {
     setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: tr.dataset.bill, label: `${dayLabel(day)} shift` });
     location.hash = tr.dataset.open;
   }));
+  // A group line opens and closes its bills. The list's filter applies inside an open group too.
+  const showGroups = (root) => root.querySelectorAll('tr[data-grouphead]').forEach((head) => {
+    const bills = [...root.querySelectorAll(`tr[data-group="${head.dataset.grouphead}"]`)];
+    const kind = root.querySelector('button[data-kind].on')?.dataset.kind ?? 'all';
+    const fits = (tr) => kind === 'all' || tr.dataset.kind === kind;
+    head.hidden = !bills.some(fits);
+    for (const tr of bills) tr.hidden = !head.classList.contains('open') || !fits(tr);
+    head.setAttribute('aria-expanded', head.classList.contains('open') ? 'true' : 'false');
+  });
+  const openGroupOf = (row) => {
+    if (!row.dataset.group) return;
+    row.closest('details')?.setAttribute('open', '');
+    const root = row.closest('section, details');
+    root.querySelector(`tr[data-grouphead="${row.dataset.group}"]`)?.classList.add('open');
+    showGroups(root);
+  };
+  app.querySelectorAll('tr[data-grouphead]').forEach((head) => {
+    const flip = () => { head.classList.toggle('open'); showGroups(head.closest('section, details')); };
+    head.addEventListener('click', flip);
+    head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
+  });
   const back = getBackTo();
   if (back?.bill && back.hash === `#/b/${biz.id}/compare/${day}`) {
     clearBackTo();
     const row = app.querySelector(`tr[data-bill="${CSS.escape(back.bill)}"]`);
+    if (row) openGroupOf(row);
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
   app.querySelectorAll('[data-leaveout]').forEach((sel) => sel.addEventListener('change', () => {
@@ -2504,6 +2569,7 @@ async function compareView(biz, day) {
   app.querySelectorAll('[data-gobill]').forEach((a) => a.addEventListener('click', (e) => {
     e.preventDefault();
     const row = app.querySelector(`tr[data-bill="${CSS.escape(a.dataset.gobill)}"]`);
+    if (row) openGroupOf(row);
     if (!row) {
       // Not a difference (e.g. a matched bill with no type): open it in its register page.
       const c = v.comparisons.find((x) => x.billNo === a.dataset.gobill);
@@ -2544,7 +2610,9 @@ async function compareView(biz, day) {
   }));
   app.querySelectorAll('button[data-kind]').forEach((b) => b.addEventListener('click', () => {
     app.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
-    b.closest('section').querySelectorAll('tbody tr[data-kind]').forEach((tr) => { tr.hidden = b.dataset.kind !== 'all' && tr.dataset.kind !== b.dataset.kind; });
+    const list = b.closest('section');
+    list.querySelectorAll('tbody tr[data-kind]:not([data-group])').forEach((tr) => { tr.hidden = b.dataset.kind !== 'all' && tr.dataset.kind !== b.dataset.kind; });
+    showGroups(list);
   }));
   // A warning from the trial reconcile; it never stops a confirm.
   const trialWarn = document.getElementById('trialwarn');
@@ -3844,6 +3912,7 @@ async function route() {
       if (screen === 'bank') return bankView(biz, query);
       if (screen === 'bringin') return bringInView(biz, parts[3]);
       if (screen === 'reconcile' || screen === 'upi') return reconcileView(biz, parts[3]);
+      if (screen === 'reports') return reportsView(biz, query);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);
