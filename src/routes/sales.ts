@@ -5,10 +5,11 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt } from 
 import { body, fail, isUuid, text } from '../http';
 import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
-import { addDays, istDay, shiftDayOf } from '../time';
+import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
 import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
+import { shiftSlips } from '../slips';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
@@ -243,13 +244,41 @@ salesRoutes.get('/businesses/:businessId/shifts', requireRole('sales.view'), asy
   return c.json({ shifts });
 });
 
+/**
+ * What is left on a shift, for the shift bar's tabs (7 Nov 2026): rows to check, bills to decide, and (for people who
+ * can see the bank) UPI bills and credits not matched yet. Counts only, from what is stored; nothing is recomputed.
+ */
+salesRoutes.get('/businesses/:businessId/shifts/:day/progress', requireRole('sales.view'), async (c) => {
+  const day = dayParam(c.req.param('day'));
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const n = async (sql: string, ...args: unknown[]) => (await one<{ n: number }>(db, sql, ...args))?.n ?? 0;
+  const w = shiftWindow(day);
+  const [rows, toCheck, toDecide, status, bills, credits] = await Promise.all([
+    n('SELECT count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day),
+    n("SELECT count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day = ? AND status <> 'checked'", bid, day),
+    n(`SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND decision IS NULL
+      AND difference IN (${NEEDS_DECISION.map(() => '?').join(',')})`, bid, day, ...NEEDS_DECISION),
+    one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day),
+    can(c.get('role'), 'bank.link') ? n(`SELECT count(*) AS n FROM transactions WHERE business_id = ? AND shift_day = ? AND type = 'income' AND payment_mode = 'upi'
+      AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL`, bid, day) : null,
+    can(c.get('role'), 'bank.link') ? n(`SELECT count(*) AS n FROM bank_rows WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched'
+      AND posted_at >= ? AND posted_at < ?`, bid, w.from, w.to) : null,
+  ]);
+  return c.json({ rows, toCheck, toDecide, status: status?.status ?? null, bank: bills == null ? null : { billsLeft: bills, creditsLeft: credits } });
+});
+
 salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view'), async (c) => {
   const day = dayParam(c.req.param('day'));
   const bid = c.get('businessId');
   await refreshComparisons(c.env.DB, bid, day, c.get('user').id);
   // Wrong UPI column hints come from the bank: only for people who can match it.
   const [view, hints] = await Promise.all([shiftView(c.env.DB, bid, day), can(c.get('role'), 'bank.link') ? columnHints(c.env.DB, bid, day) : []]);
-  return c.json({ ...view, columnHints: hints });
+  // Register slips a credit with no bill explains (see slips.ts): same people, before confirming.
+  const hinted = new Set(hints.map((h) => h.creditId));
+  const slips = can(c.get('role'), 'bank.link') && view.status !== 'confirmed' && view.bank
+    ? await shiftSlips(c.env.DB, bid, day, view.bank.noBill.map((x) => x.id).filter((id) => !hinted.has(id))) : [];
+  return c.json({ ...view, columnHints: hints, slips });
 });
 
 salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole('sales.decide'), async (c) => {

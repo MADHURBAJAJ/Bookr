@@ -100,10 +100,9 @@ function render(view) {
 const NAV = [
   { key: 'dashboard', label: 'Dashboard', needs: 'reports.view' },
   { key: 'bringin', label: 'Bring in', needs: 'rows.upload' },
-  { key: 'review', label: 'Review', needs: 'rows.edit' },
-  { key: 'compare', label: 'Compare sales', needs: 'sales.view' },
+  // Review, Compare sales and Reconcile are tabs of one shift (the shift bar at the top of each).
+  { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'reconcile'] },
   { key: 'bank', label: 'Bank sync', needs: 'bank.link' },
-  { key: 'reconcile', label: 'Reconcile', needs: 'bank.link' },
   { key: 'accounts', label: 'Accounts' },
   { key: 'heads', label: 'Heads and rules' },
   { key: 'reports', label: 'Reports', needs: 'reports.view' },
@@ -111,9 +110,83 @@ const NAV = [
   { key: 'users', label: 'Users and roles', owner: true },
 ];
 
+// The shift being worked on (7 Nov 2026): Review, Compare sales and Reconcile open on the day last worked on anywhere,
+// on this device. Their menu links carry it; the day changes when a page of another day is opened.
+const dayKey = (bizId) => `bookr.day.${bizId}`;
+const lastDay = (bizId) => { try { const d = localStorage.getItem(dayKey(bizId)); return isDay(d) ? d : null; } catch { return null; } };
+const rememberDay = (bizId, day) => { if (!isDay(day)) return; try { localStorage.setItem(dayKey(bizId), day); } catch { /* storage unavailable */ } };
+const sheetKey = (bizId) => `bookr.sheet.${bizId}`;
+const lastSheet = (bizId) => { try { return JSON.parse(localStorage.getItem(sheetKey(bizId)) ?? 'null'); } catch { return null; } };
+const rememberSheet = (bizId, u) => { try { localStorage.setItem(sheetKey(bizId), JSON.stringify({ id: u.id, day: u.day })); } catch { /* storage unavailable */ } };
+const screenKey = (bizId) => `bookr.screen.${bizId}`;
+const SHIFT_SCREENS = [['review', 'Register', 'rows.edit'], ['compare', 'Compare sales', 'sales.view'], ['reconcile', 'Reconcile', 'bank.link']];
+/** Where a shift screen opens for a day. Review: the sheet last opened, if it is of that day; else the day's first page. */
+function screenHref(biz, key, day) {
+  if (!day) return `#/b/${biz.id}/${key}`;
+  if (key !== 'review') return `#/b/${biz.id}/${key}/${day}`;
+  const sh = lastSheet(biz.id);
+  return sh?.day === day ? `#/b/${biz.id}/review/${sh.id}` : `#/b/${biz.id}/review?day=${day}`;
+}
+function navHref(biz, key) {
+  if (key === 'shifts') {
+    let last = null;
+    try { last = localStorage.getItem(screenKey(biz.id)); } catch { /* storage unavailable */ }
+    const allowed = SHIFT_SCREENS.filter(([, , need]) => biz.actions.includes(need)).map(([k]) => k);
+    const k = allowed.includes(last) ? last : allowed.includes('compare') ? 'compare' : allowed[0] ?? 'compare';
+    // Review with no day yet: the sheet last opened, else the list.
+    if (k === 'review' && !lastDay(biz.id)) { const sh = lastSheet(biz.id); return sh ? `#/b/${biz.id}/review/${sh.id}` : `#/b/${biz.id}/review`; }
+    return screenHref(biz, k, lastDay(biz.id));
+  }
+  return `#/b/${biz.id}/${key}`;
+}
+
+/**
+ * The shift bar (7 Nov 2026): one day for Register, Compare sales and Reconcile, and a tab for each with what is left.
+ * The days and the counts load after the page shows.
+ */
+function shiftBar(biz, day, screen) {
+  try { localStorage.setItem(screenKey(biz.id), screen); } catch { /* storage unavailable */ }
+  const tabs = SHIFT_SCREENS.filter(([, , need]) => biz.actions.includes(need));
+  return html`<nav class="shiftbar" aria-label="Shift" data-day="${day}" data-screen="${screen}">
+    <div class="sb-day"><a class="btn plain" data-sbstep="-1" href="#" aria-label="Previous shift">‹</a>
+      <label class="cmp-pick"><span class="sr-only">Shift</span><select data-sbpick><option value="${day}" selected>${dayLabel(day)} shift</option></select></label>
+      <a class="btn plain" data-sbstep="1" href="#" aria-label="Next shift">›</a></div>
+    <div class="sb-tabs" role="tablist">${tabs.map(([k, label], i) => html`<a role="tab" class="${k === screen ? 'on' : ''}" aria-selected="${k === screen}" href="${screenHref(biz, k, day)}">
+      <span class="sb-i">${i + 1}</span>${label}<span class="sb-n" data-sbn="${k}"></span></a>`)}</div>
+  </nav>`;
+}
+async function wireShiftBar(biz, days = null) {
+  const bar = document.querySelector('.shiftbar');
+  if (!bar) return;
+  const day = bar.dataset.day;
+  const screen = bar.dataset.screen;
+  const [list, p] = await Promise.all([days ? { shifts: days.map((d) => ({ day: d })) } : api('GET', `/businesses/${biz.id}/shifts`).catch(() => ({ shifts: [] })),
+    api('GET', `/businesses/${biz.id}/shifts/${day}/progress`).catch(() => null)]);
+  if (!bar.isConnected) return;
+  const all = [...new Set([day, ...list.shifts.map((x) => x.day)])].sort();
+  const pick = bar.querySelector('[data-sbpick]');
+  pick.innerHTML = html`${[...all].reverse().map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}`.__html;
+  const to = (d) => go(screenHref(biz, screen, d));
+  pick.addEventListener('change', () => to(pick.value));
+  bar.querySelectorAll('[data-sbstep]').forEach((a) => {
+    const d = all[all.indexOf(day) + Number(a.dataset.sbstep)];
+    if (!d) { a.classList.add('off'); a.removeAttribute('href'); return; }
+    a.title = dayLabel(d);
+    a.addEventListener('click', (e) => { e.preventDefault(); to(d); });
+  });
+  if (!p) return;
+  const set = (k, text, cls) => { const el = bar.querySelector(`[data-sbn="${k}"]`); if (el) { el.textContent = text; el.className = `sb-n ${cls}`; } };
+  set('review', !p.rows ? 'no page' : p.toCheck ? `${p.toCheck} to check` : '✓', p.rows && !p.toCheck ? 'ok' : p.toCheck ? 'wait' : '');
+  set('compare', p.status === 'confirmed' ? 'confirmed ✓' : p.toDecide ? `${p.toDecide} to decide` : 'ready to confirm', p.status === 'confirmed' ? 'ok' : p.toDecide ? 'wait' : '');
+  if (p.bank) {
+    const left = p.bank.billsLeft + p.bank.creditsLeft;
+    set('reconcile', p.status !== 'confirmed' ? 'after confirming' : left ? `${left} left` : '✓', p.status !== 'confirmed' ? '' : left ? 'wait' : 'ok');
+  }
+}
+
 function shell(biz, current, title, subtitle, body, opts = {}) {
   const nav = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))).map((n) => html`
-    <a class="nav ${n.key === current ? 'on' : ''}" href="#/b/${biz.id}/${n.key}">
+    <a class="nav ${(n.screens ?? [n.key]).includes(current) ? 'on' : ''}" href="${navHref(biz, n.key)}">
       <span>${n.label}</span>${n.phase ? html`<span class="soon">Phase ${n.phase}</span>` : ''}
     </a>`);
   const others = me.businesses.map((b) => html`
@@ -721,6 +794,7 @@ async function reviewView(biz, uploadId, highlightRow) {
     api('GET', `/businesses/${biz.id}/uploads`),
     api('GET', `/businesses/${biz.id}/parties`),
   ]);
+  rememberDay(biz.id, u.day);
   // Pages of the same type in day order, then upload order: for Previous and Next.
   const same = list.uploads.filter((x) => x.kind === u.kind).sort((a, b) => a.day.localeCompare(b.day) || a.createdAt - b.createdAt);
   const at = same.findIndex((x) => x.id === u.id);
@@ -769,12 +843,15 @@ async function reviewView(biz, uploadId, highlightRow) {
       ${pageMenu}
       <button class="btn plain" type="button" id="expand" title="Hide the photo and the menu to give the entries the full width, e.g. when checking against a printout"></button>
     </div>`;
+  rememberSheet(biz.id, u);
   render(shell(biz, 'review', `${kindLabel(u)} · ${dayLabel(u.day)}`, `uploaded ${when(u.createdAt)}`, html`
+    ${shiftBar(biz, u.day, 'review')}
     ${isReg ? html`<div id="waiting"></div>` : ''}
     <div id="findresults"></div>
     <div id="rmsg"></div>
     <div class="row ${isReg ? 'regrow' : ''}">${photo}${right}</div>`, { tools }));
   wireShell();
+  wireShiftBar(biz);
   wireDeletes(biz, () => document.getElementById('rmsg'), () => go(`#/b/${biz.id}/review`));
   document.getElementById('pimg')?.addEventListener('error', (e) => { e.target.replaceWith(Object.assign(document.createElement('div'), { className: 'note', textContent: 'This file is a PDF. Use Open full size.' })); });
   wireReadPage(biz, u);
@@ -1532,13 +1609,13 @@ const ROT = { rotated_90_clockwise: 270, rotated_180: 180, rotated_90_counterclo
 
 /** The photo strip above the table: the page turned upright, zoomed to the line of the row you are on.
  *  Scroll over the strip to line it up when the place is estimated; the nudge is remembered for the page. */
-function wireStrip(u, fileUrl) {
-  const box = document.getElementById('strip');
+function wireStrip(u, fileUrl, root = document) {
+  const box = root.querySelector('.strip');
   const none = { show() {} };
   if (!box) return none;
   const cv = box.querySelector('canvas');
   const band = box.querySelector('.band');
-  const hint = document.getElementById('striphint');
+  const hint = box.querySelector('.strip-tools .tiny');
   const key = `bookr.strip.${u.id}`;
   let orient = 'upright';
   for (const r of u.rows) { try { orient = JSON.parse(r.ocrOriginal ?? '{}').orientation ?? orient; } catch { /* not JSON */ } if (orient !== 'upright') break; }
@@ -1582,7 +1659,7 @@ function wireStrip(u, fileUrl) {
     nudge += e.deltaY > 0 ? 0.6 : -0.6;
     remember(); draw();
   }, { passive: false });
-  document.getElementById('striprot')?.addEventListener('click', () => { rot = (rot + 90) % 360; remember(); if (img.complete) build(); });
+  box.querySelector('.strip-tools .iconbtn')?.addEventListener('click', () => { rot = (rot + 90) % 360; remember(); if (img.complete) build(); });
   window.addEventListener('resize', draw);
   return { show(r) { cur = rowY(r); draw(); } };
 }
@@ -2279,12 +2356,14 @@ const backButton = () => {
 
 async function compareView(biz, day) {
   const { shifts } = await api('GET', `/businesses/${biz.id}/shifts`);
-  if (!day) day = shifts.find((s) => s.status !== 'confirmed')?.day ?? shifts[0]?.day;
+  if (!day) day = shifts.find((s) => s.day === lastDay(biz.id))?.day ?? shifts.find((s) => s.status !== 'confirmed')?.day ?? shifts[0]?.day;
+  rememberDay(biz.id, day);
   if (!day) {
     render(shell(biz, 'compare', 'Compare sales', 'Software report against the handwritten register, bill by bill. You decide every difference.', html`
       <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
+  drawerReload = () => compareView(biz, day);
   const [v, cash, waiting, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
     api('GET', `/businesses/${biz.id}/waiting-bills`), api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
   v.reasons = cash.reasons;
@@ -2311,11 +2390,16 @@ async function compareView(biz, day) {
   const rank = (c) => (c.bank?.suggest ? 0 : c.bank ? 1 : 2);
   const open = toDecide.filter((c) => !c.decision).sort((a, b) => rank(a) - rank(b));
   const backed = canDecide && !confirmed ? open.filter((c) => c.bank?.suggest) : [];
+  // Credits a register slip or a wrong column explains are told on their bill's row, not as money with no bill.
+  if (v.bank) v.bank.noBill = v.bank.noBill.filter((x) => !(v.slips ?? []).some((y) => y.creditId === x.id || y.others.some((o) => o.creditId === x.id))
+    && !(v.columnHints ?? []).some((h) => h.creditId === x.id));
   const isUpi = (c) => c.software?.mode === 'upi' || c.register?.mode === 'upi';
   // Wrong UPI column (Owner and Accountant only: the server sends no hints to anyone else).
   const colHintOf = (rowIds) => (v.columnHints ?? []).find((h) => rowIds.includes(h.rowId)) ?? null;
   const colChip = (h) => html`<span class="chip wait" style="white-space:normal" title="${colHintText(h)}">Came into ${h.accountName} · ${hhmm(h.postedAt)}</span>
     <button class="btn plain dchip" type="button" data-setcol="${h.paymentId}" title="${colHintText(h)}">Change column to ${h.toLabel}</button>`;
+  const slipChip = (x) => html`<span class="chip wait" style="white-space:normal" title="${slipCard(x, false, day).evidence.slice(0, 2).join(' ')}">Bank ${[x.creditPaise, ...x.others.map((o) => o.amountPaise)].map(rs).join(' + ')} fits if ${slipShort(x)}</span>
+    <button class="btn plain dchip" type="button" data-slip="${x.key}" title="Changes the register row. Check it against the photo.">Correct the register</button>`;
   const bankChip = (c) => {
     if (!v.bank || (!isUpi(c) && !c.bank)) return '';
     if (c.bank?.parts) {
@@ -2327,6 +2411,8 @@ async function compareView(biz, day) {
     }
     const h = colHintOf([c.register?.rowId]);
     if (h) return colChip(h);
+    const sl = (v.slips ?? []).find((x) => x.rowId === c.register?.rowId);
+    if (sl) return slipChip(sl);
     return v.bank.covered ? html`<span class="chip" title="No unmatched UPI credit of this amount near the bill.">No bank credit</span>`
       : html`<span class="chip" title="The bank statement does not reach the end of this shift yet.">Bank not in yet</span>`;
   };
@@ -2407,12 +2493,10 @@ async function compareView(biz, day) {
       return [groupRow(groupOf(c), members), ...members.map((x) => rowHtml(x, c.groupId, true))];
     })}</tbody></table></div>`;
   render(shell(biz, 'compare', 'Compare sales', '', html`
+    ${shiftBar(biz, day, 'compare')}
     <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
-          ${prevDay ? html`<a class="btn plain" href="#/b/${biz.id}/compare/${prevDay}" aria-label="Previous shift" title="${dayLabel(prevDay)}">‹</a>` : html`<span class="btn plain off">‹</span>`}
-          <label class="cmp-pick"><span class="sr-only">Shift</span><select id="sh">${shiftOptions.map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}</select></label>
-          ${nextDay ? html`<a class="btn plain" href="#/b/${biz.id}/compare/${nextDay}" aria-label="Next shift" title="${dayLabel(nextDay)}">›</a>` : html`<span class="btn plain off">›</span>`}
           ${status}
         </div>
         ${canDecide && !confirmed ? html`<button class="btn" id="confirm" ${v.canConfirm ? '' : 'aria-disabled="true"'} title="${v.canConfirm ? 'Turn this shift\'s sales into approved income' : 'Show what is left'}">${v.canConfirm ? 'Confirm shift' : `Confirm shift · ${open.length ? `${open.length} to decide` : `${v.blockers.length} left`}`}</button>` : ''}
@@ -2513,7 +2597,7 @@ async function compareView(biz, day) {
     </section></div>`));
   wireShell();
   const msg = document.getElementById('cmsg');
-  document.getElementById('sh').addEventListener('change', (e) => go(`#/b/${biz.id}/compare/${e.target.value}`));
+  wireShiftBar(biz, shiftOptions);
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
   app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => {
     const c = v.comparisons.find((x) => x.id === b.dataset.cmp);
@@ -2549,6 +2633,16 @@ async function compareView(biz, day) {
       if (skipped.length) throw new Error(`Not changed: ${skipped.map((x) => `bill ${x.billNo}, ${x.reason}`).join('; ')}.`);
     });
   }));
+  app.querySelectorAll('[data-slip]').forEach((b) => b.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    b.disabled = true;
+    const x = v.slips.find((y) => y.key === b.dataset.slip);
+    try {
+      const undo = await applySlip(biz, { slip: x, confirmed: false, day });
+      await compareView(biz, day);
+      doneToast(`Bill ${x.billNo}: register corrected (${slipShort(x)}).`, undo, () => compareView(biz, day));
+    } catch (err) { b.disabled = false; showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  }));
   app.querySelectorAll('[data-setcol]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation();
     b.disabled = true;
@@ -2563,8 +2657,8 @@ async function compareView(biz, day) {
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     if (e.target.closest('button, select, input')) return;
     e.preventDefault();
-    setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: tr.dataset.bill, label: `${dayLabel(day)} shift` });
-    location.hash = tr.dataset.open;
+    // The bill opens beside the list (its sides, the photo of its register line, and the row to correct), not on Review.
+    openBillDrawer(biz, tr.dataset.bill, day);
   }));
   // A group line opens and closes its bills. The list's filter applies inside an open group too.
   const showGroups = (root) => root.querySelectorAll('tr[data-grouphead]').forEach((head) => {
@@ -3103,7 +3197,7 @@ async function bankView(biz, query = '') {
 
 // ---------- Reconcile: one screen per confirmed shift (approved 5 Nov 2026)
 
-const CARD_TAGS = { wrong_column: 'Wrong UPI column', number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
+const CARD_TAGS = { wrong_column: 'Wrong UPI column', register_slip: 'Register slip', number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
   clear_matches: 'Same amount, close in time', same_sale: 'Booked directly', bank_backs: 'Bank agrees', no_upi_credit: 'No credit in the bank', no_bill: 'No bill' };
 const witnessHtml = (label, value, odd) => html`<div class="wit ${odd ? 'odd' : ''}"><div class="wit-l">${label}</div><div class="wit-v">${value ?? 'Not found'}</div></div>`;
 /** A suggestion: what Bookr saw, its reason as a tag, and one click to act. A person always makes the click. */
@@ -3126,6 +3220,48 @@ async function setColumn(biz, a) {
     if (a.match) await apiFull('DELETE', `${base}/bank-rows/${h.creditId}/match`, {});
     await apiFull('POST', `${base}/register-payments/${h.paymentId}/column`, { columnLabel: h.fromLabel });
   };
+}
+// A register slip a credit with no bill explains (7 Nov 2026): a payment written as a discount, or one payment's
+// amount written wrong. Before confirming the button edits the register row; after, it is a recorded correction
+// with the match, undone by Unmatch.
+const paysText = (pays) => pays.map((p) => rs(p.amountPaise)).join(' + ') || 'nothing';
+const offText = (x) => (x.discountPaise ? `, ₹ ${rs(x.discountPaise)} discount` : x.tipPaise ? `, ₹ ${rs(x.tipPaise)} tip` : '');
+function slipTitle(s) {
+  if (s.kind === 'change_payment') return `Bill ${s.billNo}: ₹ ${rs(s.fromPaise)} was probably ₹ ${rs(s.creditPaise)}`;
+  return s.before.discountPaise === s.creditPaise ? `Bill ${s.billNo}: the ₹ ${rs(s.creditPaise)} discount was a payment` : `Bill ${s.billNo}: a ₹ ${rs(s.creditPaise)} UPI payment is missing`;
+}
+const slipShort = (s) => (s.kind === 'change_payment' ? `${rs(s.fromPaise)} → ${rs(s.creditPaise)}` : `add ₹ ${rs(s.creditPaise)} UPI`)
+  + (s.after.discountPaise !== s.before.discountPaise || s.after.tipPaise !== s.before.tipPaise ? (s.after.discountPaise || s.after.tipPaise ? offText(s.after).replace(/^, /, ', ') : ', no discount') : '');
+function slipCard(s, confirmed, day) {
+  const bank = [`₹ ${rs(s.creditPaise)} at ${hhmm(s.postedAt)}`, ...s.others.map((o) => `₹ ${rs(o.amountPaise)} at ${hhmm(o.postedAt)}`)];
+  return { key: s.key, kind: 'register_slip', title: slipTitle(s), score: 85, billNos: [s.billNo],
+    witnesses: { software: `Bill ₹ ${rs(s.softwarePaise)}`, register: `Paid ${paysText(s.before.pays)}${offText(s.before)}`, bank: bank.join(' + '), odd: 'register' },
+    evidence: [
+      `₹ ${rs(s.creditPaise)} came in${s.accountName ? ` to ${s.accountName}` : ''} at ${when(s.postedAt)}, ${s.minutes} min from the bill, with no bill of its own.`,
+      `The register says ${paysText(s.before.pays)}${offText(s.before)}. As ${paysText(s.after.pays)}${offText(s.after) || ', no discount'}, it equals the software's ₹ ${rs(s.softwarePaise)}${s.others.length ? ' and every payment has its credit' : ''}.`,
+      confirmed ? 'Correcting records the change on the register and matches the credit. Unmatch puts it back.' : 'Correcting changes the register row. Check it against the photo.',
+    ],
+    actions: [{ label: confirmed ? `Correct (${slipShort(s)}) and match` : `Correct the register (${slipShort(s)})`, primary: true, op: 'slip', slip: s, confirmed, day }] };
+}
+/** Applies a slip correction; returns the undo. */
+async function applySlip(biz, a) {
+  const s = a.slip;
+  const base = `/businesses/${biz.id}`;
+  if (a.confirmed) {
+    await apiFull('POST', `${base}/bank-rows/${s.creditId}/slip-fix`, { day: a.day, key: s.key });
+    return () => apiFull('DELETE', `${base}/bank-rows/${s.creditId}/match`, {});
+  }
+  const u = await api('GET', `${base}/uploads/${s.uploadId}`);
+  const r = u.rows.find((x) => x.id === s.rowId);
+  const sig = (ps) => ps.map((p) => `${p.mode}:${p.amountPaise}`).sort().join(',');
+  const same = r && sig(r.payments) === sig(s.before.pays);
+  if (!same) throw new Error(`Bill ${s.billNo}'s row has changed since this was worked out. Reload the page.`);
+  const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
+    payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+  const put = (b) => apiFull('PUT', `${base}/register-rows/${r.id}`, b);
+  await put({ ...payload, discount: rupeesForInput(s.after.discountPaise - s.after.tipPaise),
+    payments: s.after.pays.map((p) => ({ mode: p.mode, columnLabel: p.label, amount: rupeesForInput(p.amountPaise) })) });
+  return () => put(payload);
 }
 function suggestionCard(c, day) {
   return html`<div class="rv-card" data-card="${c.key}">
@@ -3151,8 +3287,9 @@ async function reconcileView(biz, dayArg) {
   let day = isDay(dayPart) ? dayPart : null;
   if (!day) {
     const { shifts } = await api('GET', `/businesses/${biz.id}/shifts`);
-    day = shifts.find((s) => s.status === 'confirmed')?.day ?? shifts[0]?.day;
+    day = shifts.find((s) => s.day === lastDay(biz.id))?.day ?? shifts.find((s) => s.status === 'confirmed')?.day ?? shifts[0]?.day;
   }
+  rememberDay(biz.id, day);
   if (!day) {
     render(shell(biz, 'reconcile', 'Reconcile', '', html`<section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
@@ -3160,6 +3297,7 @@ async function reconcileView(biz, dayArg) {
   const [r, v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
     api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`)]);
   const reload = () => reconcileView(biz, `${day}?more=${v.moreHours}`);
+  drawerReload = reload;
   const s = r.strip;
   const days = [...new Set([day, ...r.shifts.map((x) => x.day)])].sort();
   const at = days.indexOf(day);
@@ -3168,12 +3306,15 @@ async function reconcileView(biz, dayArg) {
   const covered = !r.coverage || r.coverage.covered;
   const done = !s.billsLeft && !s.creditsLeft && covered;
   const gone = dismissed();
-  const cols = (r.columnHints ?? []).map((h) => columnCard(h, r.confirmed)).filter((c) => !gone.has(c.key));
-  // A bill or credit a column card explains is not also told as having no credit, or no bill.
-  const hinted = r.columnHints ?? [];
-  const fixes = r.fixes.filter((c) => !gone.has(c.key));
-  const noCredit = r.noCredit.filter((c) => !gone.has(c.key) && !(c.billNos ?? []).some((b) => hinted.some((h) => h.billNo === b)));
-  const noBillLeft = r.noBill.filter((x) => !hinted.some((h) => h.creditId === x.creditId));
+  const slips = r.slips ?? [];
+  const cols = [...slips.map((x) => slipCard(x, r.confirmed, day)), ...(r.columnHints ?? []).map((h) => columnCard(h, r.confirmed))].filter((c) => !gone.has(c.key));
+  // A bill or credit a column or slip card explains is not also told as having no credit, or no bill.
+  const hinted = [...(r.columnHints ?? []).map((h) => ({ billNo: h.billNo, credits: [h.creditId] })),
+    ...slips.map((x) => ({ billNo: x.billNo, credits: [x.creditId, ...x.others.map((o) => o.creditId)] }))];
+  const explained = (c) => (c.billNos ?? []).some((b) => hinted.some((h) => h.billNo === b)) || (c.uses ?? []).some((u) => hinted.some((h) => h.credits.some((id) => u === `cr:${id}`)));
+  const fixes = r.fixes.filter((c) => !gone.has(c.key) && !(c.kind === 'paid_in_parts' && explained(c)));
+  const noCredit = r.noCredit.filter((c) => !gone.has(c.key) && !explained(c));
+  const noBillLeft = r.noBill.filter((x) => !hinted.some((h) => h.credits.includes(x.creditId)));
   const view = reconcileViewPref();
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;
   const billsCell = (x) => html`<span class="mono">${x.billNos.join(' + ')}</span>${x.part ? html`<div class="tiny">${x.part}</div>` : ''}`;
@@ -3221,13 +3362,11 @@ async function reconcileView(biz, dayArg) {
           <td><button class="btn plain dchip" type="button" data-putback="${x.id}">Put back</button></td></tr>`)}
       </tbody></table></div></details>` : '';
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
+    ${shiftBar(biz, day, 'reconcile')}
     ${recTabs(biz, day, 'shift')}
     <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
-          ${prevDay ? html`<a class="btn plain" href="#/b/${biz.id}/reconcile/${prevDay}" aria-label="Previous shift" title="${dayLabel(prevDay)}">‹</a>` : html`<span class="btn plain off">‹</span>`}
-          <label class="cmp-pick"><span class="sr-only">Shift</span><select id="recday">${[...days].reverse().map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}</select></label>
-          ${nextDay ? html`<a class="btn plain" href="#/b/${biz.id}/reconcile/${nextDay}" aria-label="Next shift" title="${dayLabel(nextDay)}">›</a>` : html`<span class="btn plain off">›</span>`}
           ${done ? html`<span class="chip ok">UPI reconciled</span>` : html`<span class="chip wait">Left to explain: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}</span>`}
           ${r.confirmed ? '' : html`<span class="chip">Not confirmed</span>`}
         </div>
@@ -3249,7 +3388,7 @@ async function reconcileView(biz, dayArg) {
     ${doneFold}`));
   wireShell();
   const msg = document.getElementById('recmsg');
-  document.getElementById('recday').addEventListener('change', (e) => go(`#/b/${biz.id}/reconcile/${e.target.value}`));
+  wireShiftBar(biz, days);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {
     try { localStorage.setItem(RECONCILE_VIEW_KEY, b.dataset.view); } catch { /* storage unavailable */ }
     reload();
@@ -3486,14 +3625,23 @@ const DISMISS_KEY = 'bookr.dismissedCards';
 const dismissed = () => { try { return new Set(JSON.parse(localStorage.getItem(DISMISS_KEY) || '[]')); } catch { return new Set(); } };
 /** A done message with Undo, at the top of the screen. */
 function doneToast(text, undo, reload) {
-  const box = document.getElementById('recmsg');
-  if (!box) return;
+  let box = document.getElementById('recmsg');
+  const floating = !box;
+  // Pages without a message line (Compare sales, Review, the bill drawer) get a toast at the bottom for a while.
+  if (floating) {
+    document.getElementById('floattoast')?.remove();
+    box = document.createElement('div');
+    box.id = 'floattoast';
+    box.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:60;width:min(560px,calc(100vw - 32px));box-shadow:0 6px 24px rgba(0,0,0,.18);border-radius:8px';
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 15000);
+  }
   box.innerHTML = html`<div class="ok-msg" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${text}</span>${undo ? html`<button class="btn plain dchip" type="button" id="recundo">Undo</button>` : ''}</div>`.__html;
   document.getElementById('recundo')?.addEventListener('click', async (e) => {
     e.target.disabled = true;
-    try { await undo(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); }
+    try { await undo(); await reload(); if (floating) box.remove(); } catch (err) { showError(box, err); }
   });
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (!floating) window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 /** Changes a register row in one click (trial reconcile), and hands back how to put it as it was. */
 async function changeRegisterRow(biz, a) {
@@ -3536,6 +3684,7 @@ function wireExplain(ex, reload, biz, root = document) {
     try {
       let undo = null;
       if (a.op === 'setColumn') undo = await setColumn(biz, a);
+      else if (a.op === 'slip') undo = await applySlip(biz, a);
       else if (a.op) undo = await changeRegisterRow(biz, a);
       else undo = undoFor(biz, a, await apiFull(a.method, `${a.path}`, a.body));
       await reload();
@@ -3968,6 +4117,56 @@ async function openBillDrawer(biz, billNo, day) {
     ${section('History', b.history.length ? b.history.map((h) => html`<div class="tiny">${when(h.at)} · ${h.user ?? 'Bookr'} · ${HISTORY_LABELS[h.action] ?? h.action}</div>`) : html`<div class="note">Nothing yet.</div>`)}
     ${c0 && b.sales.some((x) => x.match_status === 'awaiting_bank_match') ? html`<div><a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${c0.shift_day}">Match or fix on Reconcile</a></div>` : ''}`.__html;
   document.getElementById('drawerclose').addEventListener('click', () => d.remove());
+  // The register line, editable here with its photo, so a slip is corrected without leaving the page (7 Nov 2026).
+  const lines = b.register.filter((r) => r.upload_id);
+  for (const r of lines.slice(0, 2).reverse()) await drawerEditor(biz, d, r, billNo, day);
+}
+/** What the page under the drawer reloads after a change (set by Compare sales and Reconcile). */
+let drawerReload = null;
+async function drawerEditor(biz, d, r0, billNo, day) {
+  let u;
+  try { u = await api('GET', `/businesses/${biz.id}/uploads/${r0.upload_id}`); } catch { return; } // no rows.edit: the drawer only shows
+  const r = u.rows.find((x) => x.id === r0.id);
+  if (!r || !d.isConnected) return;
+  const locked = u.shiftStatus === 'confirmed';
+  const member = !!r.paidWithRowId;
+  const cols = PAY_COLS.map((_, i) => r.payments.filter((p) => colOf(p) === i));
+  const field = (f, label, value, extra = '') => html`<label style="display:flex;flex-direction:column;gap:2px;font-size:12px">${label}
+    <input class="cell mono" data-df="${f}" value="${value}" ${locked ? 'disabled' : ''} ${extra} style="min-height:34px"></label>`;
+  const box = document.createElement('section');
+  box.style.cssText = 'border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:8px';
+  box.innerHTML = html`<strong>Register line · page ${u.pageNo ?? 1}, row ${r.lineNo}</strong>
+    ${u.fromSoftware ? '' : html`<div class="strip" style="height:110px"><canvas></canvas><span class="band"></span>
+      <span class="strip-tools"><span class="tiny"></span><button type="button" class="iconbtn" title="Turn the photo" aria-label="Turn the photo">⟳</button></span></div>`}
+    ${locked ? html`<div class="note">The shift is confirmed, so this line is locked. Corrections from the bank are made on Reconcile.</div>` : ''}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px">
+      ${field('billNo', 'Bill no.', r.billNo ?? '')}${field('amount', 'Amount', rsIn(r.amountPaise))}${field('discount', 'Discount (− tip)', rsIn(r.discountPaise))}
+      ${member ? '' : PAY_COLS.map(([, label], i) => field(`pay${i}`, label, cols[i].map((p) => rsIn(p.amountPaise)).join(' + '), 'placeholder="0" title="1000 + 500 is two payments"'))}
+    </div>
+    ${member ? html`<div class="note">Paid with another bill's payment: change the payment on that bill.</div>` : ''}
+    ${locked ? '' : html`<div class="form-row" style="gap:6px"><button class="btn" type="button" data-dsave>Save the row</button>
+      <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${u.id}/${r.id}">Open on Review</a></div>`}
+    <div class="form-msg"></div>`.__html;
+  d.children[0].after(box);
+  if (!u.fromSoftware) wireStrip(u, `/api/businesses/${biz.id}/uploads/${u.id}/file`, box).show(r);
+  const before = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
+    payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+  box.querySelector('[data-dsave]')?.addEventListener('click', async (e) => {
+    const v = (f) => box.querySelector(`[data-df="${f}"]`)?.value.trim() ?? '';
+    const payments = member ? before.payments : PAY_COLS.flatMap(([mode, label], i) => v(`pay${i}`).split('+').map((x) => x.trim()).filter(Boolean)
+      .map((amount) => ({ mode, columnLabel: cols[i][0]?.columnLabel ?? label, amount })));
+    const after = { ...before, billNo: v('billNo'), amount: v('amount') || '0', discount: v('discount') || '0', payments };
+    const put = (x) => apiFull('PUT', `/businesses/${biz.id}/register-rows/${r.id}`, x);
+    const reload = async () => { await (drawerReload ?? route)(); };
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      await put(after);
+      await reload();
+      await openBillDrawer(biz, after.billNo || billNo, day);
+      doneToast(`Bill ${after.billNo || billNo}: register row saved.`, async () => { await put(before); }, async () => { await reload(); if (document.getElementById('billdrawer')) await openBillDrawer(biz, billNo, day); });
+    } catch (err) { btn.disabled = false; showError(box.querySelector('.form-msg'), err); }
+  });
 }
 const HISTORY_LABELS = {
   'comparison.decide': 'Decided', 'comparison.decision_cleared': 'Decision cleared (data changed)', 'register.added_from_software': 'Added to the register from the software report',
@@ -3990,6 +4189,7 @@ const drawerBtn = (billNo, day) => html`<button type="button" class="btn plain" 
 
 async function route() {
   document.body.classList.remove('review-expanded');
+  drawerReload = null;
   const hash = location.hash || '#/';
   const parts = hash.slice(2).split('/');
   try {
@@ -4012,7 +4212,20 @@ async function route() {
       if (item?.needs && !biz.actions.includes(item.needs)) return go(home(biz));
       // The old Upload page is gone: Bring in takes every file now.
       if (screen === 'upload') { history.replaceState(null, '', `#/b/${biz.id}/bringin`); return route(); }
-      if (screen === 'review') return parts[3] ? reviewView(biz, parts[3], parts[4]) : reviewListView(biz, new URLSearchParams(query).get('find'));
+      if (screen === 'review') {
+        if (parts[3]) return reviewView(biz, parts[3], parts[4]);
+        const q = new URLSearchParams(query);
+        // From the menu: the day's first register page, if it has one; else the list.
+        if (isDay(q.get('day'))) {
+          const { uploads } = await api('GET', `/businesses/${biz.id}/uploads`);
+          const ofDay = uploads.filter((x) => x.kind !== 'software_sales_csv' && x.day === q.get('day')).sort((a, b) => (a.kind !== 'bill_register') - (b.kind !== 'bill_register') || a.createdAt - b.createdAt);
+          const sh = lastSheet(biz.id);
+          // The day's register page; with no page that day, the sheet last opened. Replace, so Back does not land here again.
+          const target = ofDay[0]?.id ?? (uploads.some((x) => x.id === sh?.id) ? sh.id : null);
+          if (target) return location.replace(`#/b/${biz.id}/review/${target}`);
+        }
+        return reviewListView(biz, q.get('find'));
+      }
       if (screen === 'compare') return compareView(biz, parts[3]);
       if (screen === 'bank') return bankView(biz, query);
       if (screen === 'bringin') return bringInView(biz, parts[3]);

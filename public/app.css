@@ -337,3 +337,25 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 .um-line input { width: 18px; height: 18px; min-height: 0; }
 .rec-tabs { align-self: flex-start; }
 .rec-tabs a { padding: 7px 16px; font-size: 14px; }
+
+/* Shift bar: one day for Register, Compare sales and Reconcile, a tab for each with what is left (7 Nov 2026). */
+.shiftbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 12px; margin-bottom: 14px; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
+.shiftbar .sb-day { display: flex; align-items: center; gap: 6px; }
+.shiftbar .sb-day .btn { min-height: 40px; padding: 0 12px; display: inline-flex; align-items: center; }
+.shiftbar .sb-day .btn.off { opacity: .4; pointer-events: none; }
+.shiftbar .sb-day select { min-height: 40px; width: auto; font-weight: 600; }
+.shiftbar .sb-tabs { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
+.shiftbar .sb-tabs a { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 12px; border-radius: 8px; color: var(--ink); border: 1px solid transparent; }
+.shiftbar .sb-tabs a:hover { background: var(--line-soft); }
+.shiftbar .sb-tabs a.on { border-color: var(--teal); background: #E3F1EF; font-weight: 600; }
+.shiftbar .sb-i { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: var(--line-soft); font-size: 12px; font-weight: 600; }
+.shiftbar a.on .sb-i { background: var(--teal); color: #fff; }
+.shiftbar .sb-n { font-size: 12px; font-weight: 400; color: var(--muted); }
+.shiftbar .sb-n:empty { display: none; }
+.shiftbar .sb-n.wait { color: #92400E; } .shiftbar .sb-n.ok { color: var(--teal-ink); }
+@media (max-width: 640px) {
+  .shiftbar .sb-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); width: 100%; }
+  .shiftbar .sb-tabs a { flex-direction: column; justify-content: center; gap: 2px; min-height: 52px; padding: 4px; font-size: 13px; text-align: center; line-height: 1.2; }
+  .shiftbar .sb-i { display: none; }
+  .shiftbar .sb-n { font-size: 11px; }
+}

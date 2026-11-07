@@ -384,3 +384,41 @@ an unmatched credit of the same amount in another account. Each credit once.
   shift, so no reopening is needed.
 - Only Owner and Accountant: the shift and Review routes send hints (and Review's bank time on an unclear amount) only
   to roles with bank.link. Entry staff get none.
+
+## Register slips the bank explains (approved 7 Nov 2026)
+
+`src/slips.ts`. For each credit with no bill (Compare's "no bill of that amount", Reconcile's no-bill credits), Bookr
+tries corrections on single bills (not paid together) paid within an hour by the software's time:
+- a payment left out, often written as a discount (₹8 received, written as ₹8 off): add a UPI payment of the credit;
+- one UPI payment written wrong (282 written 218; digit swaps rank first), when no credit of the written amount came.
+It is offered only when the bill then equals the software. The bill's other UPI payments are paired with their credits
+too (the ₹210 of 210 + 282). Each credit and each bill once, closest first.
+
+- Compare sales: on the bill's row ("Bank 282 + 210 fits if 218 → 282, no discount" + Correct the register), and the
+  credits it explains leave the "no bill" warning. Reconcile: a Register slip card; the no-credit/no-bill cards it
+  explains are hidden. Owner and Accountant only (bank.link); entry staff get none.
+- Before confirming the button edits the register row (PUT), with undo. After confirming,
+  `POST bank-rows/:id/slip-fix {day, key}` works the correction out again, records each change in
+  register_bank_adjustments under the credit (an added payment or sale is recorded as target_id with
+  after_text 'added', which undo deletes) and matches the credit(s). Unmatch puts everything back.
+
+## The bill drawer edits the register line (7 Nov 2026)
+
+Clicking a bill on Compare sales opens the bill drawer instead of going to Review. For people with rows.edit it shows
+the photo strip of the register line and the row's fields (bill no., amount, discount, the four payment columns,
+"1000 + 500" for two payments) with Save; the page under it reloads and an undo toast shows. A confirmed shift's line
+is shown locked. Review stays the page-by-page entry screen. Toasts now float at the bottom on pages without a
+message line.
+
+## One shift, three tabs (7 Nov 2026)
+
+The left menu has one **Shifts** entry instead of Review, Compare sales and Reconcile. Each of the three shows the
+shift bar at the top: ‹ day › and the tabs 1 Register · 2 Compare sales · 3 Reconcile (each only for roles that may
+open it), with what is left from `GET shifts/:day/progress` (rows to check, bills to decide, UPI bills and credits not
+matched: the bank counts only for bank.link).
+
+The day last worked on (any of the three, or a Review page) is remembered per business on this device
+(`bookr.day.<biz>`), and so are the sheet last opened (`bookr.sheet.<biz>`) and the tab last used. Shifts opens the
+last tab on that day; the Register tab opens the sheet last opened if it is of that day, else the day's register page
+(`#/review?day=`), else the last sheet. Changing the day in the bar keeps the tab. The list of all pages is still
+reachable from Review's own links.

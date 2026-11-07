@@ -122,7 +122,11 @@ export async function undoAll(db: DB, businessId: string, bankRowIds: string[], 
   const of = (target: string, field?: string) => open.filter((a) => a.target === target && (!field || a.field === field));
   // 2. Removed comparisons and sales come back; moved sales go back.
   for (const a of of('comparison_removed')) s.push(insertRow(db, 'bill_comparisons', JSON.parse(a.before_json!)));
-  for (const a of of('transaction', 'row')) {
+  // A sale or register payment added by a correction (see slips.ts) goes; its bank match goes with it.
+  for (const a of open.filter((x) => x.after_text === 'added')) {
+    s.push(stmt(db, a.target === 'transaction' ? 'DELETE FROM transactions WHERE id = ?' : 'DELETE FROM register_payments WHERE id = ?', a.target_id));
+  }
+  for (const a of of('transaction', 'row').filter((x) => x.after_text !== 'added')) {
     const x = JSON.parse(a.before_json!);
     s.push(stmt(db, 'UPDATE transactions SET comparison_id = ?, bill_no = ?, pos_no = ?, amount_paise = ? WHERE id = ?', x.comparison_id, x.bill_no, x.pos_no, x.amount_paise, a.target_id));
   }
@@ -146,6 +150,6 @@ export async function undoAll(db: DB, businessId: string, bankRowIds: string[], 
     const cols = Object.keys(r);
     s.push(stmt(db, `UPDATE register_rows SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, ...cols.map((c) => r[c] as never), id));
   }
-  for (const a of of('register_payment')) s.push(stmt(db, 'UPDATE register_payments SET amount_paise = ? WHERE id = ?', a.before_paise, a.target_id));
+  for (const a of of('register_payment', 'amount_paise')) s.push(stmt(db, 'UPDATE register_payments SET amount_paise = ? WHERE id = ?', a.before_paise, a.target_id));
   return s;
 }

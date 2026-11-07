@@ -16,6 +16,7 @@ import { bookedTx, joinedBill, sameSaleStatements, undoSameSaleStatements, waiti
 import { billDistance, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
+import { shiftSlips, slipFixStatements } from '../slips';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -245,7 +246,12 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   const shifts = await all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid);
   const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
   const [r, hints] = await Promise.all([status === 'confirmed' ? reconcileShift(db, bid, day) : trialReconcile(db, bid, day), columnHints(db, bid, day)]);
-  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints });
+  // Credits with no bill that a register slip on a nearby bill explains (a column hint explains its own credit).
+  const hinted = new Set(hints.map((h) => h.creditId));
+  const noBillIds = [...(r.noBill as { creditId: string }[]).map((x) => x.creditId),
+    ...r.noCredit.filter((k) => k.kind === 'no_bill').flatMap((k) => k.uses.filter((u) => u.startsWith('cr:')).map((u) => u.slice(3)))];
+  const slips = await shiftSlips(db, bid, day, noBillIds.filter((id) => !hinted.has(id)));
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips });
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
@@ -398,6 +404,27 @@ bankRoutes.post('/businesses/:businessId/register-payments/:paymentId/column', r
   }
   await db.batch(statements);
   return c.json({ ok: true, matched });
+});
+
+/**
+ * A register slip on a confirmed shift, corrected from this credit (see slips.ts): the correction is worked out again
+ * here, recorded, and the credit matched, all in one step. Unmatch puts it all back. Before confirming, the register
+ * row is simply edited.
+ */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/slip-fix', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row.status !== 'unmatched') fail(409, 'This credit is already matched, booked or ignored.');
+  const data = await body(c);
+  const day = typeof data.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.day) ? data.day : fail(400, 'Unknown shift.');
+  const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
+  if (status !== 'confirmed') fail(400, 'This shift is not confirmed yet: correct the bill on its register row.');
+  const slip = (await shiftSlips(db, bid, day, [row.id])).find((x) => x.key === data.key);
+  if (!slip) fail(409, 'This correction no longer fits the bill. Reload the page.');
+  await db.batch(await slipFixStatements(db, bid, row, slip, c.get('user').id, now()));
+  return c.json({ ok: true });
 });
 
 /** The person ticks clear suggestions and confirms them together; each is checked again here. */
