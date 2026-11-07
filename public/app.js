@@ -625,12 +625,64 @@ async function usersView(biz, selectedId) {
   });
 }
 
+const MISSED_STATUS = {
+  open: ['wait', 'Not decided'], added: ['ok', 'Added from the software report'], counted: ['ok', 'Counted'],
+  left_out: ['', 'Left out'], other_day: ['', 'Written on another day'], carried: ['', 'Carried forward'],
+};
+
+/**
+ * Missed entries (approved 7 Nov 2026): bills the register missed, bills the software missed, and money in the bank
+ * with neither. Totals per shift, then each line with a link to where it is handled.
+ */
+function missedReport(biz, m) {
+  const sum = (xs) => xs.reduce((t, x) => t + (x.amountPaise ?? 0), 0);
+  const days = [...new Set([...m.notInRegister, ...m.notInSoftware, ...m.inNeither].map((x) => x.day))].sort();
+  const per = (xs, d) => xs.filter((x) => x.day === d);
+  const cell = (xs) => (xs.length ? html`${xs.length} · ₹ ${money(sum(xs))}` : html`<span class="tiny">–</span>`);
+  const shiftLink = (d) => html`<a href="#/b/${biz.id}/compare/${d}">${dayLabel(d)}</a>`;
+  const status = (x) => { const [k, l] = MISSED_STATUS[x.status] ?? ['', x.status]; return html`<span class="chip ${k}">${l}${x.otherDay ? ` (${dayLabel(x.otherDay)})` : ''}</span>`; };
+  const billTable = (xs, timed) => (xs.length ? html`<div class="scroll"><table style="min-width:640px">
+    <thead><tr><th>Shift</th><th>Bill</th>${timed ? html`<th>Time</th>` : ''}<th style="text-align:right">Amount ₹</th><th>Mode</th><th>What was decided</th><th>Note</th></tr></thead>
+    <tbody>${xs.map((x) => html`<tr><td>${shiftLink(x.day)}</td><td class="mono">${x.billNo}</td>${timed ? html`<td>${x.paidAt ? when(x.paidAt) : ''}</td>` : ''}
+      <td class="amount">${money(x.amountPaise ?? 0)}</td><td>${MODE_LABELS[x.mode] ?? x.mode ?? ''}</td><td>${status(x)}</td><td class="note">${x.note ?? ''}</td></tr>`)}</tbody>
+  </table></div>` : html`<div class="ok-msg">None in these shifts.</div>`);
+  const canBank = biz.actions.includes('bank.link');
+  const part = (title, why, xs, body) => html`<div style="display:flex;flex-direction:column;gap:6px">
+    <h3 style="margin:6px 0 0">${title} <span class="chip">${xs.length}</span> <span class="note">₹ ${money(sum(xs))}</span></h3><div class="note">${why}</div>${body}</div>`;
+  return html`<section class="card" style="gap:12px" id="missed">
+    <h2>Missed entries</h2>
+    <div class="note">What one record left out: a bill missed in the register, a bill missed in the software report, or money in the bank with no bill in either.</div>
+    <form class="form-row repdates" style="align-items:flex-end">
+      <div class="field"><label for="misfrom">From shift</label><input id="misfrom" type="date" name="from" value="${m.from}" required></div>
+      <div class="field"><label for="misto">To shift</label><input id="misto" type="date" name="to" value="${m.to}" required></div>
+      <button class="btn plain" type="submit">Show</button>
+    </form>
+    ${days.length ? html`<div class="scroll"><table style="min-width:560px">
+      <thead><tr><th>Shift</th><th>Missed in register</th><th>Missed in software</th><th>Missed in both</th></tr></thead>
+      <tbody>${days.map((d) => html`<tr><td>${shiftLink(d)}</td><td>${cell(per(m.notInRegister, d))}</td><td>${cell(per(m.notInSoftware, d))}</td><td>${cell(per(m.inNeither, d))}</td></tr>`)}
+        <tr><td><strong>All</strong></td><td><strong>${cell(m.notInRegister)}</strong></td><td><strong>${cell(m.notInSoftware)}</strong></td><td><strong>${cell(m.inNeither)}</strong></td></tr></tbody>
+    </table></div>` : ''}
+    ${part('Missed in the register', 'In the software report, but nobody wrote it in the register.', m.notInRegister, billTable(m.notInRegister, true))}
+    ${part('Missed in the software', 'Written in the register, but not in the software report.', m.notInSoftware, billTable(m.notInSoftware, false))}
+    ${part('Missed in both', 'Money that came into the bank by UPI with no bill in the register or the software: booked under a head, or still not matched after its shift was confirmed.', m.inNeither,
+      m.inNeither.length ? html`<div class="scroll"><table style="min-width:700px">
+        <thead><tr><th>Shift</th><th>Received</th><th style="text-align:right">Amount ₹</th><th>Account</th><th>From / remark</th><th>Now</th></tr></thead>
+        <tbody>${m.inNeither.map((x) => html`<tr><td>${canBank ? html`<a href="#/b/${biz.id}/reconcile/${x.day}">${dayLabel(x.day)}</a>` : dayLabel(x.day)}</td><td>${when(x.postedAt)}</td>
+          <td class="amount">${money(x.amountPaise)}</td><td>${x.accountName ?? ''}</td>
+          <td class="note">${[x.vpa, x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? x.remark : null].filter(Boolean).join(' · ')}</td>
+          <td>${x.status === 'booked' ? html`<span class="chip ok">Booked</span> <span class="note">${x.headName ?? ''}${x.note ? ` · ${x.note}` : ''}</span>` : html`<span class="chip wait">Not matched</span>`}</td></tr>`)}</tbody>
+      </table></div>` : html`<div class="ok-msg">None in these shifts.</div>`)}
+  </section>`;
+}
+
 /** Reports: discounts over the limit, for a person to look through. They need no decision on Compare sales. */
 async function reportsView(biz, query) {
   const q = new URLSearchParams(query);
-  const r = await api('GET', `/businesses/${biz.id}/reports/large-discounts?${new URLSearchParams({ from: q.get('from') ?? '', to: q.get('to') ?? '' })}`);
+  const range = new URLSearchParams({ from: q.get('from') ?? '', to: q.get('to') ?? '' });
+  const [r, m] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`), api('GET', `/businesses/${biz.id}/reports/missed?${range}`)]);
   const total = r.lines.reduce((t, l) => t + l.discountPaise, 0);
   render(shell(biz, 'reports', 'Reports', '', html`
+    ${missedReport(biz, m)}
     <section class="card" style="gap:10px">
       <h2>Large discounts</h2>
       <div class="note">Discounts over ${r.limitPct}% of the bills, one line per payment. Look for a payment that was missed in the register. Nothing here stops a shift being confirmed.</div>
@@ -650,11 +702,12 @@ async function reportsView(biz, query) {
       </table></div>` : html`<div class="ok-msg">No large discounts in these shifts.</div>`}
     </section>`));
   wireShell();
-  document.getElementById('repdates').addEventListener('submit', (e) => {
+  // Both reports share one range: either form sets it.
+  document.querySelectorAll('#repdates, #missed .repdates').forEach((f) => f.addEventListener('submit', (e) => {
     e.preventDefault();
     const d = new FormData(e.target);
     location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
-  });
+  }));
 }
 
 /**
@@ -1815,6 +1868,8 @@ function wireInlineRows(biz, u, strip) {
         // Not saved: what was typed stays on screen with the reason, to be fixed, rather than snapping back.
         showError(document.getElementById('rmsg'), err);
         tr.classList.add('save-failed');
+        // A tick that was refused comes off, so the row does not look checked.
+        if (changed.dataset.f === 'checked') changed.checked = false;
         const cell = tr.querySelector('.c-is');
         if (cell) cell.innerHTML = html`<div class="error">Not saved: ${err.message}</div>`.__html + cell.innerHTML;
         return;

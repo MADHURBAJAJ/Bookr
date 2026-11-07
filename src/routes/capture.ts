@@ -361,6 +361,11 @@ function registerInput(data: Record<string, unknown>) {
   const paidWith = typeof data.paidWithRowId === 'string' && data.paidWithRowId ? data.paidWithRowId : null;
   if (paidWith && !isUuid(paidWith)) fail(400, 'Unknown row to be paid with.');
   if (paidWith && payments.length) fail(400, 'A bill paid together with another row has no payment of its own. Remove its payment first.');
+  // A ticked bill says how it was paid (approved 7 Nov 2026): a bill with no payment, if its credit never came, would
+  // be missed. Bills paid together with another row are paid there; a bill discounted to nothing needs no payment.
+  if (status === 'checked' && !paidWith && amountPaise - discountPaise > 0 && !payments.some((p) => p.amountPaise > 0)) {
+    fail(400, 'Write how this bill was paid (cash, UPI or card) before ticking it. If it was paid together with another bill, link it to that row.');
+  }
   return {
     paidWithRowId: paidWith,
     // Bill numbers have no spaces. A draft line may have none yet (a line just added below); a ticked one must.

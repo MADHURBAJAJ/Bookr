@@ -387,8 +387,9 @@ an unmatched credit of the same amount in another account. Each credit once.
 
 ## Register slips the bank explains (approved 7 Nov 2026)
 
-`src/slips.ts`. For each credit with no bill (Compare's "no bill of that amount", Reconcile's no-bill credits), Bookr
-tries corrections on single bills (not paid together) paid within an hour by the software's time:
+`src/slips.ts`. For each credit nothing pairs (since 7 Nov also those whose amount some other bill has: a ₹32 credit
+is left over when two ₹32 bills exist and neither is its own; Compare's `bank.left`, kept off the response, the trial's
+open credits minus those a card uses, the confirmed Reconcile's `left`), Bookr tries corrections on single bills (not paid together) paid within an hour by the software's time:
 - a payment left out, often written as a discount (₹8 received, written as ₹8 off): add a UPI payment of the credit;
 - one UPI payment written wrong (282 written 218; digit swaps rank first), when no credit of the written amount came.
 It is offered only when the bill then equals the software. The bill's other UPI payments are paired with their credits
@@ -401,6 +402,23 @@ too (the ₹210 of 210 + 282). Each credit and each bill once, closest first.
   `POST bank-rows/:id/slip-fix {day, key}` works the correction out again, records each change in
   register_bank_adjustments under the credit (an added payment or sale is recorded as target_id with
   after_text 'added', which undo deletes) and matches the credit(s). Unmatch puts everything back.
+
+## A ticked bill has a payment (approved 7 Nov 2026)
+
+A register row cannot be saved as checked with no payment: if its credit never came, nothing would tie the two
+together. Allowed: a draft row, a row paid together with another (the payment is on that row), and a bill discounted to
+nothing. The check is in `registerInput` (capture.ts), so it holds for the Review table, the row form and the drawer.
+On the Review table a refused tick comes off again, with the reason.
+
+## Missed entries report (approved 7 Nov 2026)
+
+`src/missed.ts`, `GET reports/missed?from&to` (reports.view: Owner, Accountant, Viewer), on Reports above Large
+discounts, sharing its date range. Read-only, three parts with counts and totals per shift:
+- Missed in the register: comparisons `missing_in_register`, and bills written in from the software report (the
+  register row's ocr_original has source software_report, so the comparison now matches). With the decision.
+- Missed in the software: comparisons `missing_in_software`, with the decision.
+- Missed in both: UPI credits booked under a head, and unmatched ones once their shift is confirmed (before that they
+  may still be paired). Shift links go to Reconcile for people who can match the bank.
 
 ## The bill drawer edits the register line (7 Nov 2026)
 

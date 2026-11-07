@@ -246,11 +246,17 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   const shifts = await all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid);
   const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
   const [r, hints] = await Promise.all([status === 'confirmed' ? reconcileShift(db, bid, day) : trialReconcile(db, bid, day), columnHints(db, bid, day)]);
-  // Credits with no bill that a register slip on a nearby bill explains (a column hint explains its own credit).
+  // Credits nothing pairs that a register slip on a nearby bill explains (a column hint explains its own credit). Every
+  // leftover credit is tried, not only those with no bill of their amount: a ₹32 credit is left over when two ₹32 bills
+  // exist and neither is its own.
   const hinted = new Set(hints.map((h) => h.creditId));
-  const noBillIds = [...(r.noBill as { creditId: string }[]).map((x) => x.creditId),
-    ...r.noCredit.filter((k) => k.kind === 'no_bill').flatMap((k) => k.uses.filter((u) => u.startsWith('cr:')).map((u) => u.slice(3)))];
-  const slips = await shiftSlips(db, bid, day, noBillIds.filter((id) => !hinted.has(id)));
+  let leftIds: string[];
+  if ('left' in r) leftIds = r.left;
+  else {
+    const carded = new Set(r.fixes.flatMap((k) => k.uses).filter((u) => u.startsWith('cr:')).map((u) => u.slice(3)));
+    leftIds = r.open.credits.map((x) => x.id).filter((id) => !carded.has(id));
+  }
+  const slips = await shiftSlips(db, bid, day, leftIds.filter((id) => !hinted.has(id)));
   return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips });
 });
 

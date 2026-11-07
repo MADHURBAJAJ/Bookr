@@ -74,6 +74,10 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
   // A credit booked directly whose bill came later. Bills that have a free credit to try are left to that.
   const same = await sameSaleCards(db, businessId, day, new Set([...clear, ...likely].flatMap((x) => x.transactionIds)));
 
+  // Credits inside the shift nothing above pairs: a register slip on a nearby bill may explain one (see slips.ts).
+  const sameUses = new Set(same.flatMap((x) => x.uses));
+  const leftCredits = sug.credits.filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !sameUses.has(`cr:${c.id}`)).map((c) => c.id);
+
   // Missing: credits inside the shift that no bill of any shift could be.
   const noBill = sug.credits
     .filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !(sug.candidates.get(c.id) ?? []).length)
@@ -104,6 +108,7 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     likely,
     noCredit: ex.cards.filter((c) => c.kind === 'no_upi_credit' && !c.uses.some((u) => same.some((x) => x.uses.includes(u)))),
     noBill,
+    left: leftCredits,
     unbilledHeads: typeHeads,
     done: [...matched.values()].sort((a, b) => (a.postedAt ?? 0) - (b.postedAt ?? 0)),
     booked,

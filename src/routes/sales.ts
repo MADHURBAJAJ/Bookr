@@ -10,6 +10,7 @@ import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
 import { shiftSlips } from '../slips';
+import { missedEntries } from '../missed';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
@@ -274,11 +275,12 @@ salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view')
   await refreshComparisons(c.env.DB, bid, day, c.get('user').id);
   // Wrong UPI column hints come from the bank: only for people who can match it.
   const [view, hints] = await Promise.all([shiftView(c.env.DB, bid, day), can(c.get('role'), 'bank.link') ? columnHints(c.env.DB, bid, day) : []]);
-  // Register slips a credit with no bill explains (see slips.ts): same people, before confirming.
+  // Register slips a leftover credit explains (see slips.ts): same people, before confirming.
   const hinted = new Set(hints.map((h) => h.creditId));
   const slips = can(c.get('role'), 'bank.link') && view.status !== 'confirmed' && view.bank
-    ? await shiftSlips(c.env.DB, bid, day, view.bank.noBill.map((x) => x.id).filter((id) => !hinted.has(id))) : [];
-  return c.json({ ...view, columnHints: hints, slips });
+    ? await shiftSlips(c.env.DB, bid, day, view.bank.left.filter((id) => !hinted.has(id))) : [];
+  const bank = view.bank && (({ left: _l, ...b }) => b)(view.bank);
+  return c.json({ ...view, bank, columnHints: hints, slips });
 });
 
 salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole('sales.decide'), async (c) => {
@@ -539,6 +541,15 @@ salesRoutes.get('/businesses/:businessId/reports/large-discounts', requireRole('
   const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
   const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
   return c.json({ from, to, limitPct: LARGE_DISCOUNT_PCT, lines: await largeDiscounts(c.env.DB, c.get('businessId'), from, to) });
+});
+
+salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.view'), async (c) => {
+  const q = c.req.query();
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
+  let from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
+  if (from > to) fail(400, 'From must be on or before To.');
+  if (from < addDays(to, -366)) from = addDays(to, -366);
+  return c.json({ from, to, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });
 });
 
 salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRole('sales.decide'), async (c) => {

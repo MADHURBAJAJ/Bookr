@@ -547,14 +547,17 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   // The bank as a third witness, while the shift is still open.
   const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
-  let groupCredits = new Map<string, { amount: number; postedAt: number }>();
-  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[] } | null = null;
+  let groupCredits = new Map<string, { id: string; amount: number; postedAt: number }>();
+  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[] } | null = null;
   if (shift?.status !== 'confirmed') {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, credits, cov.window);
-    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [] };
     groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), credits, used, cov.window);
+    // Every credit in the shift no bill or group took: what a register slip may explain (see slips.ts).
+    const taken = new Set([...used, ...[...groupCredits.values()].map((c) => c.id)]);
+    const left = cov2.covered ? credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to).map((c) => c.id) : [];
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left };
   }
 
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
@@ -588,7 +591,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       numberFlags: flagsOf.get(c.id) ?? [],
       bank: bank?.evidence.get(c.id) ?? null,
     })),
-    bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })) } : null,
+    bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left } : null,
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,
       existing: { paidAt: k.existing_paid_at, mode: k.existing_mode, amountPaise: k.existing_amount_paise },

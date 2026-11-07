@@ -500,8 +500,9 @@ describe('register discounts', () => {
   it('Fill discounts sets amount - payments on rows with none yet: a discount, or a tip when paid more', async () => {
     const h = await hotel();
     const page = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(32), 'image/png')).json.id;
+    // A bill with no payment cannot be ticked, so it is a draft.
     const add = (billNo: string, amount: string, payments: unknown[], discount = '0') =>
-      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, discount, payments, status: 'checked' });
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, discount, payments, status: payments.length ? 'checked' : 'draft' });
     await add('1', '230', [{ mode: 'card', amount: '219' }]);          // fills 11
     await add('2', '10899', [{ mode: 'upi', amount: '10500' }]);       // fills 399
     await add('3', '179', [{ mode: 'upi', amount: '188' }]);           // paid more: a tip of 9
@@ -511,7 +512,7 @@ describe('register discounts', () => {
     expect(res.json.filled).toBe(3);
     const rows = await sql`SELECT bill_no, discount_paise, tip_paise, status FROM register_rows WHERE upload_id = ${page} ORDER BY bill_no`;
     expect(rows.map((r) => [r.bill_no, r.discount_paise, r.tip_paise])).toEqual([['1', 1100, 0], ['2', 39900, 0], ['3', 0, 900], ['4', 0, 0], ['5', 3000, 0]]);
-    expect(rows.every((r) => r.status === 'checked')).toBe(true);
+    expect(rows.map((r) => r.status)).toEqual(['checked', 'checked', 'checked', 'draft', 'checked']);
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'register.fill_discounts'`)[0].n).toBe(1);
     expect((await h.clients.viewer.post(`/businesses/${h.bid}/uploads/${page}/fill-discounts`)).status).toBe(403);
   });
@@ -763,7 +764,7 @@ describe('use register for a bill paid together', () => {
       billNo: '193', billType: 'fnb', amount: '676', payments: [], paidWithRowId: head.id, status: 'checked',
     })).json.id;
     const lone = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, {
-      billNo: '194', billType: 'fnb', amount: '50', payments: [], status: 'checked',
+      billNo: '194', billType: 'fnb', amount: '50', payments: [], status: 'draft', // no payment: cannot be ticked
     })).json.id;
     const v = await view(h);
     expect((await h.clients.owner.put(`/businesses/${h.bid}/comparisons/${byBill(v, '193').id}`, { decision: 'use_register' })).status).toBe(200);
@@ -1339,7 +1340,7 @@ describe('register-only bills in bulk (e.g. an old POS)', () => {
       h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
     await add('145236', '553', [{ mode: 'upi', columnLabel: null, amount: '553' }]);
     await add('145237', '131', [{ mode: 'cash', columnLabel: null, amount: '131' }]);
-    await add('076', '200', []);                                                  // no payment written
+    await add('076', '200', [], { status: 'draft' });                              // no payment written (so not ticked)
     await add('078', '1000', [{ mode: 'cash', columnLabel: null, amount: '500' }], { discount: '500' }); // a 50% discount no longer holds it back
     let v = await view(h);
     const ids = ['145236', '145237', '076', '078', '2610319'].map((b) => byBill(v, b).id);
@@ -1835,6 +1836,58 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect(after.json.slips).toEqual([]);
     expect(byBill(after, '2610317')).toMatchObject({ difference: 'match', bank: { amountPaise: 441000 } });
     expect(byBill(after, '26103120')).toMatchObject({ difference: 'match', bank: { amountPaise: 256000 } });
+  });
+
+  it('a leftover credit is tried even when some other bill has its amount', async () => {
+    const { h, pageId, b } = await slipShift();
+    // A ₹ 8 bill elsewhere, paid in cash: the ₹ 8 credit is no longer "no bill", but nothing pairs it either.
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`,
+      { billNo: '145999', billType: 'fnb', amount: '8', discount: '0', payments: [{ mode: 'cash', columnLabel: null, amount: '8' }], status: 'checked' })).status).toBe(201);
+    const v = await view(h);
+    expect(v.json.bank.noBill.map((x: any) => x.amountPaise)).not.toContain(800);
+    expect(v.json.bank.left).toBeUndefined();
+    expect(v.json.slips.find((x: any) => x.rowId === b)).toMatchObject({ kind: 'add_payment', creditPaise: 800 });
+    const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    expect(trial.slips.find((x: any) => x.rowId === b)).toMatchObject({ kind: 'add_payment', creditPaise: 800 });
+  });
+
+  it('the Missed entries report lists bills missed in the register, in the software, and money in neither', async () => {
+    const { h, pageId } = await slipShift(); // 2610317 and 26103120 written; the rest of 31 Oct from the register
+    // A bill only in the register.
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`,
+      { billNo: '145999', billType: 'fnb', amount: '75', discount: '0', payments: [{ mode: 'cash', columnLabel: null, amount: '75' }], status: 'checked' })).status).toBe(201);
+    // The ₹ 12.34 credit after the shift belongs to 1 Nov; book one inside the shift instead: the ₹ 8 (in no bill once it is booked).
+    const credit = (await sql`SELECT id FROM bank_rows WHERE business_id = ${h.bid} AND amount_paise = 800`)[0];
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb, note: 'Tip' })).status).toBe(200);
+    const get = (client: any) => client.get(`/businesses/${h.bid}/reports/missed?from=2026-10-31&to=2026-10-31`);
+    expect((await get(h.clients.entry_staff)).status).toBe(403);
+    const r = (await get(h.clients.viewer)).json;
+    expect(r.notInSoftware.map((x: any) => x.billNo)).toContain('145999');
+    expect(r.notInSoftware.find((x: any) => x.billNo === '145999')).toMatchObject({ day: '2026-10-31', amountPaise: 7500, status: 'open' });
+    const v = await view(h);
+    const swOnly = v.json.comparisons.filter((x: any) => x.difference === 'missing_in_register').map((x: any) => x.billNo).sort();
+    expect(r.notInRegister.map((x: any) => x.billNo).sort()).toEqual(swOnly);
+    // Booked: listed. Unmatched credits wait until the shift is confirmed.
+    expect(r.inNeither).toEqual([expect.objectContaining({ id: credit.id, amountPaise: 800, status: 'booked', note: 'Tip', day: '2026-10-31' })]);
+    expect((await h.clients.viewer.get(`/businesses/${h.bid}/reports/missed?from=2026-11-02&to=2026-11-01`)).status).toBe(400);
+  });
+
+  it('a bill cannot be ticked without a payment, unless it is paid with another row or discounted to nothing', async () => {
+    const h = await hotel();
+    const pageId = await fullShift(h, REGISTER_31_OCT.slice(0, 3));
+    const add = (body: Record<string, unknown>) => h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`,
+      { billType: 'fnb', discount: '0', payments: [], ...body });
+    const refused = await add({ billNo: '145901', amount: '500', status: 'checked' });
+    expect(refused.status).toBe(400);
+    expect(refused.json.error).toMatch(/how this bill was paid/);
+    const draft = await add({ billNo: '145901', amount: '500', status: 'draft' });
+    expect(draft.status).toBe(201);
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${draft.json.id}`,
+      { billNo: '145901', billType: 'fnb', amount: '500', discount: '0', payments: [], status: 'checked' })).status).toBe(400);
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${draft.json.id}`,
+      { billNo: '145901', billType: 'fnb', amount: '500', discount: '0', payments: [{ mode: 'cash', columnLabel: null, amount: '500' }], status: 'checked' })).status).toBe(200);
+    expect((await add({ billNo: '145902', amount: '200', paidWithRowId: draft.json.id, status: 'checked' })).status).toBe(201);
+    expect((await add({ billNo: '145903', amount: '200', discount: '200', status: 'checked' })).status).toBe(201);
   });
 
   it('on a confirmed shift the slip fix is recorded and matched in one step; Unmatch puts the register and the sales back', async () => {
