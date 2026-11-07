@@ -103,6 +103,7 @@ const NAV = [
   // Review, Compare sales and Reconcile are tabs of one shift (the shift bar at the top of each).
   { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'reconcile'] },
   { key: 'bank', label: 'Bank sync', needs: 'bank.link' },
+  { key: 'money-out', label: 'Money out', needs: 'bank.link' },
   { key: 'accounts', label: 'Accounts' },
   { key: 'heads', label: 'Heads and rules' },
   { key: 'reports', label: 'Reports', needs: 'reports.view' },
@@ -654,6 +655,87 @@ async function reportsView(biz, query) {
     const d = new FormData(e.target);
     location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
   });
+}
+
+/**
+ * Money out: every payment from a bank account or from Cash in one list, read-only. Each line links to where it is
+ * handled (Bank sync for the shift, the expense-list page on Review, Compare sales for a cash shortage).
+ */
+const MONEY_OUT_STATUS = {
+  not_booked: ['wait', 'Not booked yet'], booked: ['ok', 'Booked'], matched: ['ok', 'Matched'], left_out: ['', 'Left out'],
+  draft: ['wait', 'Draft, not approved'], approved: ['ok', 'Approved'],
+};
+async function moneyOutView(biz, query) {
+  const q = new URLSearchParams(query);
+  const pick = (k) => q.get(k) ?? '';
+  const r = await api('GET', `/businesses/${biz.id}/money-out?${new URLSearchParams({ from: pick('from'), to: pick('to'), account: pick('account'), head: pick('head'), party: pick('party'), waiting: pick('waiting') })}`);
+  const f = r.filters;
+  const link = (over) => `#/b/${biz.id}/money-out?${new URLSearchParams({ from: r.from, to: r.to, account: f.account ?? '', head: f.head ?? '', party: f.party ?? '', waiting: f.waiting ? '1' : '', ...over })}`;
+  const where = (l) => {
+    if (l.source === 'bank') return `#/b/${biz.id}/bank?${new URLSearchParams({ from: l.day, to: l.day, account: l.accountId, tab: l.status === 'not_booked' ? 'out' : 'done' })}`;
+    if (l.source === 'cash_photo' && l.uploadId) return `#/b/${biz.id}/review/${l.uploadId}`;
+    return `#/b/${biz.id}/compare/${l.day}`;
+  };
+  const whereLabel = (l) => (l.source === 'bank' ? (l.status === 'not_booked' ? 'Book on Bank sync' : 'Bank sync') : l.source === 'cash_photo' ? 'Expense page' : 'Cash for the shift');
+  const opt = (v, label, cur) => html`<option value="${v}" ${v === (cur ?? '') ? 'selected' : ''}>${label}</option>`;
+  const subtotal = (title, groups, key) => html`<div style="flex:1 1 280px;min-width:0">
+    <h3 style="margin:0 0 6px;font-size:15px">${title}</h3>
+    <table><tbody>${groups.map((g) => html`<tr>
+      <td><a href="${link({ [key]: g.id })}">${g.name}</a> <span class="tiny">${g.count}</span></td><td class="amount">${money(g.paise)}</td></tr>`)}</tbody></table></div>`;
+  const filtered = f.account || f.head || f.party || f.waiting;
+  render(shell(biz, 'money-out', 'Money out', '', html`
+    <section class="card" style="gap:10px">
+      <h2>All payments</h2>
+      <div class="note">Every payment from a bank account or from Cash, by shift (8 am to 8 am). A bank line booked to a head is one payment, shown once. Booking stays on Bank sync and Review.</div>
+      <form id="moform" class="form-row" style="align-items:flex-end">
+        <div class="field"><label for="mofrom">From shift</label><input id="mofrom" type="date" name="from" value="${r.from}" required></div>
+        <div class="field"><label for="moto">To shift</label><input id="moto" type="date" name="to" value="${r.to}" required></div>
+        <div class="field"><label for="moacc">Paid from</label><select id="moacc" name="account">${opt('', 'All accounts', f.account)}${r.options.accounts.map((a) => opt(a.id, a.name, f.account))}</select></div>
+        <div class="field"><label for="mohead">Head</label><select id="mohead" name="head">${opt('', 'All heads', f.head)}${opt('none', 'No head yet', f.head)}${r.options.heads.map((h) => opt(h.id, h.name, f.head))}</select></div>
+        <div class="field"><label for="moparty">Party</label><select id="moparty" name="party">${opt('', 'All parties', f.party)}${opt('none', 'No party', f.party)}${r.options.parties.map((p) => opt(p.id, p.name, f.party))}</select></div>
+        <label style="display:flex;gap:6px;align-items:center;min-height:44px;white-space:nowrap"><input type="checkbox" name="waiting" value="1" style="width:18px;height:18px;min-height:0" ${f.waiting ? 'checked' : ''}> Not booked yet</label>
+        <button class="btn plain" type="submit">Show</button>
+      </form>
+      <div class="note"><strong>${r.total.count} payment${r.total.count === 1 ? '' : 's'} · ₹ ${money(r.total.paise)}</strong>
+        ${r.waiting.count && !f.waiting ? html` · <a href="${link({ waiting: '1' })}">${r.waiting.count} not booked or approved yet</a> (₹ ${money(r.waiting.paise)})` : ''}
+        ${r.leftOut.count ? html` · ${r.leftOut.count} bank line${r.leftOut.count === 1 ? '' : 's'} left out, not counted (₹ ${money(r.leftOut.paise)})` : ''}
+        ${filtered ? html` · <a href="${`#/b/${biz.id}/money-out?${new URLSearchParams({ from: r.from, to: r.to })}`}">Clear filters</a>` : ''}</div>
+      ${r.total.count ? html`<div style="display:flex;flex-wrap:wrap;gap:16px 28px">
+        ${subtotal('By head', r.byHead, 'head')}${subtotal('By paid from', r.byAccount, 'account')}</div>` : ''}
+    </section>
+    <section class="card" style="gap:10px">
+      ${r.lines.length ? html`<ul class="mo-list">${r.lines.map((l) => {
+        const [cls, label] = MONEY_OUT_STATUS[l.status] ?? ['', l.status];
+        return html`<li class="${l.status === 'left_out' ? 'off' : ''}">
+          <div class="mo-top"><span>${dayLabel(l.day)}${l.at ? html` <span class="tiny">${when(l.at).replace(/^.*?,\s*/, '')}</span>` : ''}</span><strong class="amount">₹ ${money(l.amountPaise)}</strong></div>
+          <div>${l.narration || html`<span class="note">No item written</span>`}</div>
+          <div class="tiny">${[l.accountName, l.head ?? 'No head yet', l.party].filter(Boolean).join(' · ')}</div>
+          <div class="mo-top"><span><span class="chip ${cls}">${label}</span>${l.note ? html` <span class="tiny">${l.note}</span>` : ''}</span><span class="tiny"><a href="${where(l)}">${whereLabel(l)}</a></span></div></li>`;
+      })}</ul>
+      <div class="scroll mo-table"><table style="min-width:900px">
+        <thead><tr><th>Shift · time</th><th>Paid from</th><th>Party</th><th>Head</th><th>Narration</th><th style="text-align:right">₹</th><th>Status</th></tr></thead>
+        <tbody>${r.lines.map((l) => {
+          const [cls, label] = MONEY_OUT_STATUS[l.status] ?? ['', l.status];
+          return html`<tr style="${l.status === 'left_out' ? 'color:var(--muted)' : ''}">
+          <td style="white-space:nowrap">${dayLabel(l.day)}${l.at ? html`<div class="tiny">${when(l.at)}</div>` : ''}</td>
+          <td>${l.accountName}</td>
+          <td>${l.party ?? html`<span class="note">—</span>`}</td>
+          <td>${l.head ?? html`<span class="note">No head yet</span>`}</td>
+          <td style="white-space:normal;min-width:220px">${l.narration || html`<span class="note">No item written</span>`}${l.detail && l.detail !== l.narration ? html`<div class="tiny mono" style="word-break:break-all">${l.detail}</div>` : ''}${l.source === 'cash_shortage' ? html`<div class="tiny">Cash shortage booked by an Owner</div>` : ''}</td>
+          <td class="amount" style="${l.status === 'left_out' ? 'text-decoration:line-through' : ''}">${money(l.amountPaise)}</td>
+          <td style="white-space:nowrap"><span class="chip ${cls}">${label}</span>${l.note ? html`<div class="tiny" style="white-space:normal">${l.note}</div>` : ''}
+            <div class="tiny"><a href="${where(l)}">${whereLabel(l)}</a></div></td></tr>`;
+        })}</tbody>
+      </table></div>` : html`<div class="ok-msg">No money out in these shifts${filtered ? ' with these filters' : ''}.</div>`}
+    </section>`));
+  wireShell();
+  const form = document.getElementById('moform');
+  const show = () => {
+    const d = new FormData(form);
+    location.hash = link({ from: d.get('from'), to: d.get('to'), account: d.get('account'), head: d.get('head'), party: d.get('party'), waiting: d.get('waiting') ? '1' : '' });
+  };
+  form.addEventListener('submit', (e) => { e.preventDefault(); show(); });
+  form.querySelectorAll('select, input[type=checkbox]').forEach((el) => el.addEventListener('change', show));
 }
 
 function laterView(biz, key) {
@@ -4231,6 +4313,7 @@ async function route() {
       if (screen === 'bringin') return bringInView(biz, parts[3]);
       if (screen === 'reconcile' || screen === 'upi') return reconcileView(biz, parts[3]);
       if (screen === 'reports') return reportsView(biz, query);
+      if (screen === 'money-out') return moneyOutView(biz, query);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);
