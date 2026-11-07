@@ -89,16 +89,16 @@ const inRupees = (paise: number) => `₹ ${(paise / 100).toLocaleString('en-IN')
 /**
  * Bills paid together match on their total (approved 7 Nov 2026): what was paid equals the software's total, as it
  * stands or before the discount (the software may not have the discount). Every bill must be on both sides and the
- * software must show the group's one mode. Returns why they do not match; null when they do.
+ * software must show a mode the group was paid in. Returns why they do not match; null when they do.
  */
 export function groupMismatch(g: PaidGroup, comps: { bill_no: string; software_bill_id: string | null; sw_amount_paise: number | null; sw_mode: string | null }[]): string | null {
-  if (g.modes.length !== 1) return 'Paid more than one way';
+  if (!g.modes.length) return 'No payment written';
   if (g.paidPaise !== g.billsPaise) return 'The payment does not equal the bills after discount';
   if (comps.length !== g.rowIds.length) return 'A bill number is blank or repeated';
   const missing = comps.filter((c) => !c.software_bill_id);
   if (missing.length) return `Not in the software: bill ${missing.map((c) => c.bill_no).join(', ')}`;
   if (comps.some((c) => !c.sw_amount_paise)) return 'A bill has no amount in the software';
-  const otherMode = comps.filter((c) => c.sw_mode !== g.modes[0]);
+  const otherMode = comps.filter((c) => !g.modes.includes(c.sw_mode ?? ''));
   if (otherMode.length) return `Mode differs: bill ${otherMode.map((c) => c.bill_no).join(', ')}`;
   const total = comps.reduce((t, c) => t + c.sw_amount_paise!, 0);
   if (total !== g.paidPaise && total !== g.grossPaise) return `Software ${inRupees(total)}, paid ${inRupees(g.paidPaise)}`;
@@ -106,10 +106,37 @@ export function groupMismatch(g: PaidGroup, comps: { bill_no: string; software_b
 }
 
 /**
- * Bills paid together: one payment written on the head row covers the head and every row that points
- * to it. When the group was paid one way, each bill is treated as paid that way for its own amount
- * after discount and tip, so each bill can match its own software bill and becomes its own income row.
- * The group as a whole must balance (see shiftView); a group paid more than one way is a blocker.
+ * Shares a group's payments over its bills. Paid one way, each bill is paid that way for its own amount. Paid several
+ * ways (approved 7 Nov 2026), the bills take the payments in turn, card, then cash, then UPI, so a bill can have part of two.
+ */
+function sharePayments(bills: { id: string; amount: number }[], pays: RgPay[]) {
+  const modes = [...new Set(pays.map((p) => p.mode))];
+  const out = new Map<string, RgPay[]>();
+  if (modes.length === 1) {
+    for (const b of bills) out.set(b.id, [{ register_row_id: b.id, mode: modes[0], amount_paise: b.amount, column_label: pays[0].column_label }]);
+    return out;
+  }
+  const left = [...pays].sort((a, b) => a.mode.localeCompare(b.mode) || b.amount_paise - a.amount_paise).map((p) => ({ ...p }));
+  for (const b of bills) {
+    const mine: RgPay[] = [];
+    let due = b.amount;
+    for (const p of left) {
+      const take = Math.min(due, p.amount_paise);
+      if (take <= 0) continue;
+      mine.push({ register_row_id: b.id, mode: p.mode, amount_paise: take, column_label: p.column_label });
+      p.amount_paise -= take;
+      due -= take;
+    }
+    // A bill with nothing to pay is still paid with the group: its discount took it all.
+    out.set(b.id, mine.length ? mine : [{ register_row_id: b.id, mode: modes[0], amount_paise: 0, column_label: null }]);
+  }
+  return out;
+}
+
+/**
+ * Bills paid together: the payments written on the head row cover the head and every row that points to it. Each bill
+ * takes its share after discount and tip, so it can match its own software bill and becomes its own income row or rows.
+ * The group as a whole must balance (see shiftView).
  */
 export function applyPaidTogether(rows: RgRow[], written: Map<string, RgPay[]>) {
   const paysByRow = new Map(written);
@@ -123,8 +150,9 @@ export function applyPaidTogether(rows: RgRow[], written: Map<string, RgPay[]>) 
     const modes = [...new Set(pays.map((p) => p.mode))];
     const all = [head, ...ms];
     groups.push({ headId: head.id, rowIds: all.map((r) => r.id), billNos: all.map((r) => r.bill_no), billsPaise: all.reduce((t, r) => t + r.amount_paise, 0), grossPaise: all.reduce((t, r) => t + r.amount_paise + r.discount_paise, 0), paidPaise: pays.reduce((t, p) => t + p.amount_paise, 0), modes });
-    if (modes.length === 1) {
-      for (const r of all) paysByRow.set(r.id, [{ register_row_id: r.id, mode: modes[0], amount_paise: r.amount_paise, column_label: pays[0].column_label }]);
+    const paid = pays.reduce((t, p) => t + p.amount_paise, 0);
+    if (modes.length === 1 || (modes.length && paid === all.reduce((t, r) => t + r.amount_paise, 0))) {
+      for (const [id, share] of sharePayments(all.map((r) => ({ id: r.id, amount: r.amount_paise })), pays)) paysByRow.set(id, share);
     } else {
       for (const m of ms) paysByRow.set(m.id, []);
     }
@@ -152,6 +180,7 @@ async function loadShiftData(db: DB, businessId: string, day: string) {
     status: (status.results[0] as { status: string } | undefined)?.status ?? null,
     sw: sw.results as SwBill[],
     rg: rows,
+    written,
     paysByRow,
     groups,
     existing: existing.results as Comparison[],
@@ -451,7 +480,7 @@ export async function creditsForShift(db: DB, businessId: string, day: string) {
 
 /** Everything the Compare sales screen shows for one shift, plus what still blocks confirming it. */
 export async function shiftView(db: DB, businessId: string, day: string) {
-  const [{ sw, rg, paysByRow, groups }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
+  const [{ sw, rg, written, paysByRow, groups }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
     loadShiftData(db, businessId, day),
     coverage(db, businessId, day),
     all<Comparison & { paid_at: number | null }>(db, `
@@ -494,8 +523,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
   const unbalanced = rg.filter((r) => !grouped.has(r.id) && (paysByRow.get(r.id) ?? []).reduce((s, p) => s + p.amount_paise, 0) !== r.amount_paise && r.amount_paise !== 0);
   for (const g of groups) {
-    if (g.modes.length !== 1) blockers.push(`Bills ${g.billNos.join(', ')} are paid together, so their one payment must be a single mode (cash, UPI or card).`);
-    else if (g.paidPaise !== g.billsPaise) blockers.push(`Bills ${g.billNos.join(', ')} are paid together: the payment does not equal the bills after discounts and tips.`);
+    if (g.paidPaise !== g.billsPaise) blockers.push(`Bills ${g.billNos.join(', ')} are paid together: the payment does not equal the bills after discounts and tips.`);
   }
   if (unbalanced.length) blockers.push(`The payments written for bill ${unbalanced.map((r) => r.bill_no).join(', ')} do not add up to the bill amount.`);
   const typed = new Set(typeHeads.map((t) => t.bill_type));
@@ -520,7 +548,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, credits, cov.window);
-    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map((g) => g.paidPaise)) : [] };
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map((g) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi').reduce((t, p) => t + p.amount_paise, 0))) : [] };
   }
 
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
@@ -565,7 +593,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       const members = comparisons.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
       const matched = members.length === g.rowIds.length && members.every((c) => c.difference === 'match');
       return { id: g.headId, billNos: g.billNos, softwarePaise: members.reduce((t, c) => t + (c.sw_amount_paise ?? 0), 0), grossPaise: g.grossPaise, paidPaise: g.paidPaise,
-        mode: g.modes.length === 1 ? g.modes[0] : g.modes.length ? 'mixed' : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
+        modes: g.modes, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
     }),
     totals,
     unknownModePaise: unknownPaise,
@@ -583,17 +611,19 @@ interface NewRow { amount: number; mode: 'cash' | 'upi' | 'card'; billType: stri
 
 /** The income rows confirmation would create. The app follows each decision; it never picks a side. */
 async function plannedRows(db: DB, businessId: string, day: string): Promise<NewRow[]> {
-  const { rg, paysByRow, groups } = await loadShiftData(db, businessId, day);
+  const { rg, written, paysByRow, groups } = await loadShiftData(db, businessId, day);
   const rgById = new Map(rg.map((r) => [r.id, r]));
   const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
   const rows: NewRow[] = [];
   // A group matched on a software total equal to the payment books the software's figure for each bill, so Room and F&B
   // split as billed. When the software lacks the discount its figures add up to more than was paid, so the register's are booked.
-  const asBilled = new Map<string, string>();
+  const asBilled = new Map<string, RgPay[]>();
   for (const g of groups) {
     const members = comps.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
-    if (g.modes.length === 1 && members.length === g.rowIds.length && members.every((c) => c.difference === 'match' && c.sw_amount_paise)
-      && members.reduce((t, c) => t + c.sw_amount_paise!, 0) === g.paidPaise) for (const c of members) asBilled.set(c.id, g.modes[0]);
+    if (!g.modes.length || members.length !== g.rowIds.length || !members.every((c) => c.difference === 'match' && c.sw_amount_paise)
+      || members.reduce((t, c) => t + c.sw_amount_paise!, 0) !== g.paidPaise) continue;
+    const shares = sharePayments(members.map((c) => ({ id: c.id, amount: c.sw_amount_paise! })), written.get(g.headId) ?? []);
+    for (const [id, share] of shares) asBilled.set(id, share);
   }
   for (const c of comps) {
     const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
@@ -604,7 +634,7 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
     };
     // Matched after a discount or tip: the software shows the bill amount, the register what was received.
     // The register's figure is booked, so it is what bank matching will look for.
-    if (asBilled.has(c.id)) rows.push({ amount: c.sw_amount_paise!, mode: asBilled.get(c.id) as NewRow['mode'], billType, source: 'both_matched', c });
+    if (asBilled.has(c.id)) for (const p of asBilled.get(c.id)!) rows.push({ amount: p.amount_paise, mode: p.mode as NewRow['mode'], billType, source: 'both_matched', c });
     else if (c.difference === 'match') fromRegister(c.sw_amount_paise === c.rg_amount_paise ? 'both_matched' : 'register');
     else if (c.decision === 'use_register') fromRegister('register');
     else if (c.decision === 'use_software') rows.push({ amount: c.sw_amount_paise!, mode: c.sw_mode as NewRow['mode'], billType, source: 'software', c });

@@ -2350,9 +2350,14 @@ async function compareView(biz, day) {
   const groupRow = (g, members) => html`<tr class="grp-head" data-grouphead="${g.id}" tabindex="0" aria-expanded="false">
     <td><strong>Group of ${g.billNos.length} bills</strong><div class="tiny mono" style="white-space:normal">${g.billNos.join(' + ')}</div>${members.length < g.billNos.length ? html`<div class="tiny">${members.length} of them in this list</div>` : ''}</td>
     <td><div class="mono">${money(g.softwarePaise)}</div></td>
-    <td><div class="mono">${money(g.paidPaise)}</div><div class="note">${MODE_LABELS[g.mode] ?? 'No payment written'}${g.grossPaise > g.paidPaise ? ` · after ₹ ${money(g.grossPaise - g.paidPaise)} discount` : g.grossPaise < g.paidPaise ? ` · incl. ₹ ${money(g.paidPaise - g.grossPaise)} tip` : ''}</div></td>
+    <td><div class="mono">${money(g.paidPaise)}</div><div class="note">${g.modes.map((m) => MODE_LABELS[m] ?? m).join(' + ') || 'No payment written'}${g.grossPaise > g.paidPaise ? ` · after ₹ ${money(g.grossPaise - g.paidPaise)} discount` : g.grossPaise < g.paidPaise ? ` · incl. ₹ ${money(g.paidPaise - g.grossPaise)} tip` : ''}</div></td>
     <td>${g.matched ? html`<span class="chip ok">Total matches</span>` : html`<span class="chip wait" style="white-space:normal">${g.why}</span>`}</td>
-    <td class="note">${g.matched ? 'No decision needed. Open to see each bill.' : 'Open to see each bill and decide.'}</td></tr>`;
+    <td class="note">${g.matched ? 'No decision needed. Open to see each bill.' : (() => {
+      // Bills no software report will ever have: one button for the group. New POS numbers and rows not reviewed stay with the person.
+      const can = canDecide && !confirmed ? members.filter((x) => bulkOk(x) && !x.decision) : [];
+      const rest = members.filter((x) => !x.decision).length - can.length;
+      return can.length ? html`<button class="btn plain dchip" type="button" data-groupreg="${g.id}">Use register for ${can.length} bill${can.length > 1 ? 's' : ''}</button>${rest ? html`<div class="tiny">${rest} more to decide inside</div>` : ''}` : 'Open to see each bill and decide.';
+    })()}</td></tr>`;
   const matchedGroups = v.paidGroups.filter((g) => g.matched);
   const table = (rows) => html`<div class="scroll"><table class="cmptable" style="min-width:820px">
     <colgroup><col style="width:190px"><col style="width:150px"><col style="width:150px"><col style="width:150px"><col></colgroup>
@@ -2493,6 +2498,18 @@ async function compareView(biz, day) {
       if (!note) return;
     }
     act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null, note, linkedToId: b.dataset.link || null }));
+  }));
+  app.querySelectorAll('[data-groupreg]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const bills = v.comparisons.filter((c) => c.groupId === b.dataset.groupreg && bulkOk(c) && !c.decision);
+    if (!confirm(`Count ${bills.length} bill${bills.length > 1 ? 's' : ''} from the register: ${bills.map((c) => c.billNo).join(', ')}? No software bill will be expected for them.`)) return;
+    act(async () => {
+      const skipped = [];
+      for (const [note, ids] of [[OLD_POS_NOTE, bills.filter((c) => isOldPos(c.billNo))], [SHORT_OLD_POS_NOTE, bills.filter((c) => !isOldPos(c.billNo))]]) {
+        if (ids.length) skipped.push(...(await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids: ids.map((c) => c.id), note })).skipped);
+      }
+      if (skipped.length) throw new Error(`Not changed: ${skipped.map((x) => `bill ${x.billNo}, ${x.reason}`).join('; ')}.`);
+    });
   }));
   // A difference opens its bill in Review; Review offers a way back to this bill here.
   app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {

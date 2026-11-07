@@ -668,13 +668,37 @@ describe('bills paid together', () => {
     expect((await put(far, { paidWithRowId: head })).json.error).toMatch(/same shift/);
   });
 
-  it('a group paid more than one way cannot be confirmed', async () => {
+  it('a group paid more than one way can be confirmed: the bills take the payments in turn, and they add up by mode', async () => {
     const { h, head } = await setup();
     await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, {
       billNo: '2610311', billType: 'fnb', amount: '420', status: 'checked',
       payments: [{ mode: 'upi', amount: '2000' }, { mode: 'cash', amount: '380' }],
     });
-    expect((await view(h)).json.blockers.join(' ')).toMatch(/single mode/);
+    const v = await view(h);
+    expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
+    expect(v.json.paidGroups[0]).toMatchObject({ modes: expect.arrayContaining(['upi', 'cash']), paidPaise: 238000, matched: true });
+    await decideAll(h);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const rows = await sql`SELECT bill_no, amount_paise, payment_mode FROM transactions WHERE bill_no IN ('2610311', '2610314', '26103122') AND type = 'income' ORDER BY bill_no, payment_mode`;
+    expect(rows).toEqual([
+      { bill_no: '2610311', amount_paise: 38000, payment_mode: 'cash' },
+      { bill_no: '2610311', amount_paise: 4000, payment_mode: 'upi' },
+      { bill_no: '26103122', amount_paise: 78000, payment_mode: 'upi' },
+      { bill_no: '2610314', amount_paise: 118000, payment_mode: 'upi' },
+    ]);
+  });
+
+  it('a group paid more than one way, not in the software, can be counted from the register', async () => {
+    const { h, head } = await setup();
+    await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, {
+      billNo: '144698', billType: 'fnb', amount: '420', status: 'checked',
+      payments: [{ mode: 'upi', amount: '2000' }, { mode: 'cash', amount: '380' }],
+    });
+    const v = await view(h);
+    expect(v.json.paidGroups[0].why).toMatch(/Not in the software: bill 144698/);
+    expect(byBill(v, '144698').register.mode).toBe('mixed');
+    const r = await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids: [byBill(v, '144698').id], note: 'Old POS bill' });
+    expect(r.json).toMatchObject({ decided: 1, skipped: [] });
   });
 });
 
@@ -1000,7 +1024,7 @@ describe('large discounts need no decision; they are listed on Reports (approved
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(1);
     const v = await view(h);
     for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
-    expect(v.json.paidGroups).toEqual([expect.objectContaining({ id: head, softwarePaise: 238000, grossPaise: 238000, paidPaise: 150000, mode: 'upi', matched: true, why: null })]);
+    expect(v.json.paidGroups).toEqual([expect.objectContaining({ id: head, softwarePaise: 238000, grossPaise: 238000, paidPaise: 150000, modes: ['upi'], matched: true, why: null })]);
     const r = await h.clients.viewer.get(`/businesses/${h.bid}/reports/large-discounts?from=2026-10-31&to=2026-10-31`);
     expect(r.json.lines).toEqual([expect.objectContaining({ day: '2026-10-31', billNos: ['2610311', '2610314', '26103122'], billsPaise: 238000, discountPaise: 88000, pct: 37, paidPaise: 150000, modes: ['upi'], softwarePaise: 238000 })]);
     await decideAll(h);
