@@ -2347,7 +2347,7 @@ async function compareView(biz, day) {
   </tr>`;
   // Bills paid together: one line with the totals, each bill underneath when opened.
   const groupOf = (c) => v.paidGroups.find((g) => g.id === c.groupId);
-  const groupRow = (g, members, start) => html`<tr class="grp-head ${start ? 'open' : ''}" data-grouphead="${g.id}" tabindex="0" aria-expanded="${start ? 'true' : 'false'}">
+  const groupRow = (g, members) => html`<tr class="grp-head" data-grouphead="${g.id}" tabindex="0" aria-expanded="false">
     <td><strong>Group of ${g.billNos.length} bills</strong><div class="tiny mono" style="white-space:normal">${g.billNos.join(' + ')}</div>${members.length < g.billNos.length ? html`<div class="tiny">${members.length} of them in this list</div>` : ''}</td>
     <td><div class="mono">${money(g.softwarePaise)}</div></td>
     <td><div class="mono">${money(g.paidPaise)}</div><div class="note">${MODE_LABELS[g.mode] ?? 'No payment written'}${g.grossPaise > g.paidPaise ? ` · after ₹ ${money(g.grossPaise - g.paidPaise)} discount` : g.grossPaise < g.paidPaise ? ` · incl. ₹ ${money(g.paidPaise - g.grossPaise)} tip` : ''}</div></td>
@@ -2361,8 +2361,7 @@ async function compareView(biz, day) {
       if (!c.groupId) return [rowHtml(c)];
       if (rows.findIndex((x) => x.groupId === c.groupId) !== i) return [];
       const members = rows.filter((x) => x.groupId === c.groupId);
-      const start = members.some((x) => bulkOk(x) && !x.decision); // a tick box must not be out of sight
-      return [groupRow(groupOf(c), members, start), ...members.map((x) => rowHtml(x, c.groupId, !start))];
+      return [groupRow(groupOf(c), members), ...members.map((x) => rowHtml(x, c.groupId, true))];
     })}</tbody></table></div>`;
   render(shell(biz, 'compare', 'Compare sales', '', html`
     <section class="card cmp-bar">
@@ -2546,6 +2545,8 @@ async function compareView(biz, day) {
       const go = document.getElementById('bulkgo');
       go.disabled = !n;
       go.textContent = `Use register for ${n} selected`;
+      // Nothing ticked stays out of sight inside a closed group.
+      boxes().filter((x) => x.checked).forEach((x) => openGroupOf(x.closest('tr')));
     };
     boxes().forEach((x) => x.addEventListener('change', count));
     document.getElementById('bulkold')?.addEventListener('click', () => {
