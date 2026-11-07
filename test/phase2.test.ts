@@ -1703,6 +1703,36 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect((await sql`SELECT count(*) AS n FROM bank_rows WHERE tran_id = 'S30000011' AND status = 'matched'`)[0].n).toBe(0); // shown, not matched
   });
 
+  it('a bill paid in several UPI goes pairs each payment with its own credit, and confirming matches all of them', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => r.billNo !== '2610317');
+    const pageId = await fullShift(h, reg);
+    // Software: 2610317, ₹ 4,410 by UPI. Register: the same, written as three UPI payments.
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: '2610317', billType: 'fnb', amount: '4410', status: 'checked',
+      payments: [{ mode: 'upi', columnLabel: null, amount: '2000' }, { mode: 'upi', columnLabel: null, amount: '1410' }, { mode: 'upi', columnLabel: null, amount: '1000' }] })).status).toBe(201);
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI XOXO' })).status).toBe(200);
+    const text = [HEAD, line(1, 'S30000021', '31/10/2026 12:50:00 PM', 1000), line(2, 'S30000022', '31/10/2026 12:55:00 PM', 2000),
+      line(3, 'S30000023', '31/10/2026 1:20:00 PM', 1410), line(4, 'S30000024', '01/11/2026 8:30:00 AM', 1234)].join('\n');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text })).status).toBe(200);
+    const v = await view(h);
+    const c = byBill(v, '2610317');
+    expect(c.bank).toMatchObject({ amountPaise: 441000, fits: 'both' });
+    expect(c.bank.parts.map((p: any) => p.amountPaise)).toEqual([100000, 200000, 141000]);
+    expect(v.json.bank.noBill.map((x: any) => x.amountPaise)).not.toContain(100000);
+    const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    expect(trial.clear.filter((x: any) => x.billNos[0] === '2610317').map((x: any) => x.part)).toEqual(['part 1 of 3 UPI payments', 'part 2 of 3 UPI payments', 'part 3 of 3 UPI payments']);
+    expect(trial.open.bills.map((x: any) => x.billNo)).not.toContain('2610317');
+    for (const x of v.json.comparisons) {
+      if (x.decision || x.difference === 'match' || x.difference === 'complimentary') continue;
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${x.id}`, { decision: x.register ? 'use_register' : 'use_software', billType: 'fnb', note: 'Test' });
+    }
+    const done = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect(done.json.blockers ?? done.json.error ?? null).toBeNull();
+    const matched = await sql`SELECT t.amount_paise AS sale, b.amount_paise AS credit FROM transactions t JOIN bank_rows b ON b.id = t.matched_bank_row WHERE t.bill_no = '2610317' ORDER BY t.amount_paise`;
+    expect(matched).toEqual([{ sale: 100000, credit: 100000 }, { sale: 141000, credit: 141000 }, { sale: 200000, credit: 200000 }]);
+  });
+
   it('suggests the side the credit backs, warns of money with no bill, and matches the credits on confirm', async () => {
     const h = await hotel();
     await fullShift(h);

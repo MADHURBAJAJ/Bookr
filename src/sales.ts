@@ -455,6 +455,8 @@ function evidenceBills(comps: (Comparison & { paid_at: number | null })[], group
     id: c.id, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
     swAmount: c.software_bill_id ? c.sw_amount_paise : null, swMode: c.sw_mode, rgAmount: c.register_row_id ? c.rg_amount_paise : null, rgMode: c.rg_mode,
     labels: c.register_row_id ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'upi').map((p) => p.column_label).filter(Boolean).join(',') || null : null,
+    parts: c.register_row_id && !grouped.has(c.register_row_id) && (paysByRow.get(c.register_row_id) ?? []).length > 1
+      ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'upi').map((p) => p.amount_paise) : undefined,
   }));
 }
 
@@ -698,6 +700,17 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   for (const c of view.comparisons) {
     if (!c.bank) continue;
     const upi = rows.map((r, i) => ({ r, id: ids[i] })).filter((x) => x.r.c.id === c.id && x.r.mode === 'upi');
+    // Paid in several goes: each UPI payment is matched to its own credit, only when every one has its credit.
+    if (c.bank.parts) {
+      const free = [...upi];
+      const pairs = c.bank.parts.map((p) => { const i = free.findIndex((x) => x.r.amount === p.amountPaise); return i < 0 ? null : { p, x: free.splice(i, 1)[0] }; });
+      if (free.length || pairs.some((x) => !x)) continue;
+      for (const { p, x } of pairs as { p: { creditId: string; amountPaise: number }; x: (typeof upi)[number] }[]) {
+        statements.push(...confirmMatchStatements(db, businessId, p.creditId, x.id, x.r.amount, userId, t + 1 + matched));
+        matched += 1;
+      }
+      continue;
+    }
     if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
     statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, upi[0].id, upi[0].r.amount, userId, t + 1 + matched));
     matched += 1;

@@ -15,6 +15,8 @@ export interface EvidenceBill {
   swAmount: number | null; swMode: string | null; rgAmount: number | null; rgMode: string | null;
   /** The register's UPI column(s): the credit must have come into an account with that label, as on UPI matching. */
   labels?: string | null;
+  /** UPI payments written for a bill paid in several goes (or partly another way): each needs its own credit. */
+  parts?: number[];
 }
 export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null }
 export interface Evidence {
@@ -23,6 +25,8 @@ export interface Evidence {
   fits: 'both' | 'software' | 'register';
   /** The decision the credit points to, when it settles a difference; null when there is nothing to decide. */
   suggest: 'use_software' | 'use_register' | null;
+  /** A bill paid in several UPI goes: one credit per payment. creditId and postedAt are the first; amountPaise is their total. */
+  parts?: { creditId: string; amountPaise: number; postedAt: number }[];
 }
 
 /** Amounts a bill could have been paid by UPI: a side counts when it says UPI, or when the other side does (mode slips). */
@@ -90,6 +94,28 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     if (sameBill.size !== 1 || sameCredit.size !== 1 || wanted) continue;
     out.set(p.bill.id, make(p.bill, p.credit, null));
     used.add(p.credit.id);
+  }
+  // A bill paid in several goes (7 Nov 2026): each UPI payment pairs with its own credit of that amount, within an hour
+  // of the bill, closest first. Without a software time, each part must have only one credit in the shift. All or none.
+  for (const b of bills) {
+    if (!b.parts?.length || out.has(b.id) || b.grouped || b.decision === 'leave_out' || b.decision === 'carry_forward') continue;
+    const picks: { c: EvidenceCredit; minutes: number | null }[] = [];
+    for (const amount of [...b.parts].sort((x, y) => y - x)) {
+      const fits = credits.filter((c) => c.amount === amount && !used.has(c.id) && !picks.some((x) => x.c.id === c.id) && labelFits(b.labels ?? null, c.label ?? null)
+        && (b.paidAt != null ? Math.abs(c.postedAt - b.paidAt) <= NEAR_MIN * 60000 : c.postedAt >= window.from && c.postedAt < window.to + 3600e3));
+      if (b.paidAt == null && fits.length !== 1) break;
+      const best = fits.map((c) => ({ c, minutes: b.paidAt != null ? Math.round(Math.abs(c.postedAt - b.paidAt) / 60000) : null }))
+        .sort((x, y) => (x.minutes ?? 0) - (y.minutes ?? 0))[0];
+      if (!best) break;
+      picks.push(best);
+    }
+    if (picks.length !== b.parts.length) continue;
+    const total = picks.reduce((t, x) => t + x.c.amount, 0);
+    const ordered = [...picks].sort((x, y) => x.c.postedAt - y.c.postedAt);
+    out.set(b.id, { ...make(b, ordered[0].c, b.paidAt != null ? Math.max(...picks.map((x) => x.minutes ?? 0)) : null), amountPaise: total,
+      fits: b.swAmount === total ? 'both' : 'register', suggest: suggestion(b, total),
+      parts: ordered.map((x) => ({ creditId: x.c.id, amountPaise: x.c.amount, postedAt: x.c.postedAt })) });
+    for (const x of picks) used.add(x.c.id);
   }
   return { evidence: out, used };
 }

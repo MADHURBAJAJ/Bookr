@@ -148,11 +148,13 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     if (!side || side.mode !== 'upi' || !side.amountPaise) return [];
     return [{ c, amount: side.amountPaise as number, grouped: inGroup(c.register?.rowId) }];
   });
-  const clear = bills.filter((b) => b.c.bank).map((b) => {
-    const d = detail.get(b.c.bank!.creditId);
-    return { creditId: b.c.bank!.creditId, tranId: d?.tranId ?? null, accountName: d?.accountName ?? null, postedAt: b.c.bank!.postedAt, amountPaise: b.c.bank!.amountPaise,
-      vpa: d?.vpa ?? null, remark: d?.remark ?? null, transactionIds: [] as string[], billNos: [b.c.billNo], minutes: b.c.bank!.minutes, part: null };
-  });
+  // A bill paid in several goes has one line per credit.
+  const clear = bills.filter((b) => b.c.bank).flatMap((b) => (b.c.bank!.parts ?? [{ creditId: b.c.bank!.creditId, amountPaise: b.c.bank!.amountPaise, postedAt: b.c.bank!.postedAt }]).map((p, i, all) => {
+    const d = detail.get(p.creditId);
+    return { creditId: p.creditId, tranId: d?.tranId ?? null, accountName: d?.accountName ?? null, postedAt: p.postedAt, amountPaise: p.amountPaise,
+      vpa: d?.vpa ?? null, remark: d?.remark ?? null, transactionIds: [] as string[], billNos: [b.c.billNo], minutes: b.c.bank!.minutes,
+      part: all.length > 1 ? `part ${i + 1} of ${all.length} UPI payments` : null };
+  }));
   const used = new Set(clear.map((x) => x.creditId));
   const free = () => credits.filter((c) => !used.has(c.id));
   const nearAt = (postedAt: number, at: number | null, limit: number) => (at == null ? postedAt >= w.from && postedAt < w.to + 3600e3 : Math.abs(postedAt - at) <= limit * 60000);

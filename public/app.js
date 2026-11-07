@@ -2296,7 +2296,10 @@ async function compareView(biz, day) {
   const backed = canDecide && !confirmed ? open.filter((c) => c.bank?.suggest) : [];
   const isUpi = (c) => c.software?.mode === 'upi' || c.register?.mode === 'upi';
   const bankChip = (c) => {
-    if (!v.bank || !isUpi(c)) return '';
+    if (!v.bank || (!isUpi(c) && !c.bank)) return '';
+    if (c.bank?.parts) {
+      return html`<span class="chip ok" title="One unmatched UPI credit for each UPI payment written for this bill: ${c.bank.parts.map((p) => `₹ ${money(p.amountPaise)} at ${when(p.postedAt)}`).join(', ')}. Confirming matches each to its payment.">Bank ${c.bank.parts.map((p) => `₹ ${rs(p.amountPaise)}`).join(' + ')} · ${hhmm(c.bank.parts[0].postedAt)}–${hhmm(c.bank.parts[c.bank.parts.length - 1].postedAt)}</span>`;
+    }
     if (c.bank) {
       const fits = c.bank.fits === 'both' ? 'both sides' : c.bank.fits === 'software' ? 'the software' : 'the register';
       return html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(c.bank.amountPaise)} came in at ${when(c.bank.postedAt)}. It equals ${fits}. Confirming matches it to this bill.">Bank ₹ ${rs(c.bank.amountPaise)} · ${hhmm(c.bank.postedAt)}${c.bank.minutes != null ? ` · ${c.bank.minutes} min` : ''}</span>`;
