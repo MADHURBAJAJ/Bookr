@@ -1816,9 +1816,9 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     const v = await view(h);
     const slip = (rowId: string) => v.json.slips.find((x: any) => x.rowId === rowId);
     expect(slip(a)).toMatchObject({ kind: 'change_payment', fromPaise: 114000, creditPaise: 141000, after: { discountPaise: 0 }, others: [{ amountPaise: 300000 }] });
-    expect(slip(a).after.pays.map((p: any) => p.amountPaise)).toEqual([300000, 141000]);
+    expect(slip(a).after.pays.map((p: any) => p.amountPaise).sort((x: number, y: number) => x - y)).toEqual([141000, 300000]); // saved together: any order
     expect(slip(b)).toMatchObject({ kind: 'add_payment', creditPaise: 800, before: { discountPaise: 800 }, after: { discountPaise: 0 } });
-    expect(slip(b).after.pays.map((p: any) => p.amountPaise)).toEqual([255200, 800]);
+    expect(slip(b).after.pays.map((p: any) => p.amountPaise).sort((x: number, y: number) => x - y)).toEqual([800, 255200]);
     expect(v.json.bank.noBill.map((x: any) => x.amountPaise).sort((p: number, q: number) => p - q)).toEqual([800, 141000, 300000]); // the page hides the ones a slip explains
     expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31`)).json.slips).toEqual([]);
     const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
