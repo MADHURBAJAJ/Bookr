@@ -2310,7 +2310,9 @@ async function compareView(biz, day) {
   const countedUpi = counted.filter((c) => upiSide(c)?.mode === 'upi');
   const matchNow = countedUpi.filter((c) => c.bank && (c.bank.fits === 'both' || (c.bank.fits === 'software') === (c.decision === 'use_software')));
   const kinds = [['all', 'All', open], ['sw', 'Only in software', open.filter((c) => c.difference === 'missing_in_register')],
-    ['rg', 'Only in register', open.filter((c) => c.difference === 'missing_in_software')], ['diff', 'Amount or mode', open.filter((c) => !c.difference.startsWith('missing'))]];
+    ['rg', 'Only in register', open.filter((c) => c.difference === 'missing_in_software')], ['diff', 'Amount or mode', open.filter((c) => !c.difference.startsWith('missing'))],
+    ['match', 'Matched', v.comparisons.filter((c) => c.difference === 'match')]];
+  const matched = kinds[4][2];
   const onCredit = toDecide.filter((c) => c.difference.startsWith('missing') && (c.decision === 'use_software' || c.decision === 'use_register') && !c.linkedToId
     && (c.software?.mode ?? c.register?.mode) === 'upi');
   const onCreditPaise = onCredit.reduce((t, c) => t + ((c.software ?? c.register)?.amountPaise ?? 0), 0);
@@ -2320,7 +2322,7 @@ async function compareView(biz, day) {
   const credit = awaiting?.sales ?? [];
   const tab = (() => { try { return localStorage.getItem('bookr.compare.tab') || 'shift'; } catch { return 'shift'; } })();
   const rowHtml = (c, inGroup = '', closed = false) => html`<tr ${inGroup ? html`data-group="${inGroup}"` : ''} ${closed ? 'hidden' : ''} data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
-      class="clickrow ${c.decision || c.difference === 'match' ? '' : 'undecided'} ${inGroup ? 'grp-bill' : ''}" data-kind="${c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
+      class="clickrow ${c.decision || c.difference === 'match' ? '' : 'undecided'} ${inGroup ? 'grp-bill' : ''}" data-kind="${c.difference === 'match' ? 'match' : c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
       <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}
       ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
@@ -2361,7 +2363,6 @@ async function compareView(biz, day) {
       const rest = members.filter((x) => !x.decision).length - can.length;
       return can.length ? html`<button class="btn plain dchip" type="button" data-groupreg="${g.id}">Use register for ${can.length} bill${can.length > 1 ? 's' : ''}</button>${rest ? html`<div class="tiny">${rest} more to decide inside</div>` : ''}` : 'Open to see each bill and decide.';
     })()}</td></tr>`;
-  const matchedGroups = v.paidGroups.filter((g) => g.matched);
   const table = (rows) => html`<div class="scroll"><table class="cmptable" style="min-width:820px">
     <colgroup><col style="width:190px"><col style="width:150px"><col style="width:150px"><col style="width:150px"><col></colgroup>
     <thead><tr><th>Bill</th><th>Software</th><th>Register</th><th>What differs</th><th>Decision</th></tr></thead>
@@ -2421,9 +2422,9 @@ async function compareView(biz, day) {
             <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">Keep imported</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">Use new file</button></div>` : ''}</td></tr>`)}
         </tbody></table></div></section>` : ''}
       <section class="card" style="gap:10px">
-        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2>To decide (${open.length})</h2>
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2 id="decidehead">To decide (${open.length})</h2>
           ${backed.length ? html`<button class="btn" type="button" id="acceptbank" title="Each choice marked 'bank' is the side the bank credit agrees with">Accept ${backed.length} bank-backed choice${backed.length > 1 ? 's' : ''}</button>` : ''}
-          ${open.length ? html`<span class="seg" role="group" aria-label="Show">${kinds.map(([k, l, list]) => list.length || k === 'all' ? html`<button type="button" data-kind="${k}" class="${k === 'all' ? 'on' : ''}">${l} (${list.length})</button>` : '')}</span>` : ''}</div>
+          ${open.length || matched.length ? html`<span class="seg" role="group" aria-label="Show">${kinds.map(([k, l, list]) => list.length || k === 'all' ? html`<button type="button" data-kind="${k}" class="${k === 'all' ? 'on' : ''}">${l} (${list.length})</button>` : '')}</span>` : ''}</div>
         ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so no decision is needed: ${v.matchedAfterAdjustment.map((m) => m.billNo).join(', ')}.</div>` : ''}
         ${canDecide && !confirmed && open.filter(bulkOk).length > 1 ? html`<form id="bulkreg" class="inset" style="gap:8px">
           <div class="note"><strong>${open.filter(bulkOk).length} bills are only in the register.</strong> Tick bills that will never be in a software report and count them from the register at once.</div>
@@ -2435,9 +2436,9 @@ async function compareView(biz, day) {
           </div>
           <div class="form-msg"></div>
         </form>` : ''}
-        ${open.length ? table(open) : html`<div class="ok-msg">${toDecide.length ? 'Every difference is decided.' : 'No differences in this shift.'}</div>`}
+        ${open.length ? '' : html`<div class="ok-msg" id="nonemsg">${toDecide.length ? 'Every difference is decided.' : 'No differences in this shift.'}</div>`}
+        ${open.length || matched.length ? table([...open, ...matched]) : ''}
       </section>
-      ${matchedGroups.length ? html`<details class="card cmp-fold"><summary><h2>Paid together, total matches (${matchedGroups.length})</h2><span class="note">What was paid equals the software total, with or without the discount.</span></summary>${table(v.comparisons.filter((c) => matchedGroups.some((g) => g.id === c.groupId)))}</details>` : ''}
       ${auto.length ? html`<details class="card cmp-fold"><summary><h2>Decided by Bookr (${auto.length})</h2><span class="note">Bills on one side only: counted and waiting for their other side, or already counted on another day. Change any of them below.</span></summary>${table(auto)}</details>` : ''}
       ${byPerson.length ? html`<details class="card cmp-fold"><summary><h2>Decided (${byPerson.length})</h2></summary>${table(byPerson)}</details>` : ''}
       <div class="row">
@@ -2525,11 +2526,22 @@ async function compareView(biz, day) {
   const showGroups = (root) => root.querySelectorAll('tr[data-grouphead]').forEach((head) => {
     const bills = [...root.querySelectorAll(`tr[data-group="${head.dataset.grouphead}"]`)];
     const kind = root.querySelector('button[data-kind].on')?.dataset.kind ?? 'all';
-    const fits = (tr) => kind === 'all' || tr.dataset.kind === kind;
+    const fits = (tr) => (kind === 'all' ? tr.dataset.kind !== 'match' : tr.dataset.kind === kind);
     head.hidden = !bills.some(fits);
     for (const tr of bills) tr.hidden = !head.classList.contains('open') || !fits(tr);
     head.setAttribute('aria-expanded', head.classList.contains('open') ? 'true' : 'false');
   });
+  // To decide lists every difference; Matched lists the bills that need nothing, in the same table.
+  const showKind = (list, kind) => {
+    list.querySelectorAll('tbody tr[data-kind]:not([data-group])').forEach((tr) => { tr.hidden = kind === 'all' ? tr.dataset.kind === 'match' : tr.dataset.kind !== kind; });
+    showGroups(list);
+    const head = document.getElementById('decidehead');
+    if (head) head.textContent = kind === 'match' ? `Matched (${matched.length})` : `To decide (${open.length})`;
+    const none = document.getElementById('nonemsg');
+    if (none) none.hidden = kind === 'match';
+  };
+  const decideList = document.getElementById('decidehead')?.closest('section');
+  if (decideList) showKind(decideList, 'all');
   const openGroupOf = (row) => {
     if (!row.dataset.group) return;
     row.closest('details')?.setAttribute('open', '');
@@ -2542,11 +2554,16 @@ async function compareView(biz, day) {
     head.addEventListener('click', flip);
     head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
   });
+  // A matched bill is shown on the Matched tab.
+  const reveal = (row) => {
+    if (row.dataset.kind === 'match' && decideList?.contains(row)) document.querySelector('button[data-kind="match"]')?.click();
+    openGroupOf(row);
+  };
   const back = getBackTo();
   if (back?.bill && back.hash === `#/b/${biz.id}/compare/${day}`) {
     clearBackTo();
     const row = app.querySelector(`tr[data-bill="${CSS.escape(back.bill)}"]`);
-    if (row) openGroupOf(row);
+    if (row) reveal(row);
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
   app.querySelectorAll('[data-leaveout]').forEach((sel) => sel.addEventListener('change', () => {
@@ -2590,7 +2607,7 @@ async function compareView(biz, day) {
   app.querySelectorAll('[data-gobill]').forEach((a) => a.addEventListener('click', (e) => {
     e.preventDefault();
     const row = app.querySelector(`tr[data-bill="${CSS.escape(a.dataset.gobill)}"]`);
-    if (row) openGroupOf(row);
+    if (row) reveal(row);
     if (!row) {
       // Not a difference (e.g. a matched bill with no type): open it in its register page.
       const c = v.comparisons.find((x) => x.billNo === a.dataset.gobill);
@@ -2631,9 +2648,7 @@ async function compareView(biz, day) {
   }));
   app.querySelectorAll('button[data-kind]').forEach((b) => b.addEventListener('click', () => {
     app.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
-    const list = b.closest('section');
-    list.querySelectorAll('tbody tr[data-kind]:not([data-group])').forEach((tr) => { tr.hidden = b.dataset.kind !== 'all' && tr.dataset.kind !== b.dataset.kind; });
-    showGroups(list);
+    showKind(b.closest('section'), b.dataset.kind);
   }));
   // A warning from the trial reconcile; it never stops a confirm.
   const trialWarn = document.getElementById('trialwarn');
