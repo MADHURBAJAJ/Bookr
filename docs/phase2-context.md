@@ -422,3 +422,17 @@ The day last worked on (any of the three, or a Review page) is remembered per bu
 last tab on that day; the Register tab opens the sheet last opened if it is of that day, else the day's register page
 (`#/review?day=`), else the last sheet. Changing the day in the bar keeps the tab. The list of all pages is still
 reachable from Review's own links.
+
+## Money out (7 Nov 2026, for the owner's review)
+
+One read-only list of every payment, from a bank account or from Cash: menu entry **Money out**, below Bank sync. API: `GET /api/businesses/:id/money-out?from&to&account&head&party&waiting=1` (`src/routes/moneyout.ts`). No new tables, roles or permission actions.
+
+- **Who:** Owner and Accountant, checked on the server per business with `requireRole('bank.link')`, the same action as Bank sync. `reports.view` was not used because it includes Viewer, and this list shows bank lines. Entry staff and Viewer get 403.
+- **What is listed:** every bank debit (`bank_rows.direction = 'DR'`), whatever its status, with the head and party of the expense booked from it; expense-list rows from Cash (`source = 'cash_photo'`, draft or approved); and cash shortages (`source = 'cash_shortage'`).
+- **Each payment once:** a booked debit and its `bank_sheet` expense are one line (the bank line). Other `bank_sheet` expenses are differences on UPI credits (less came in than billed), not payments, so they are not listed. Nothing writes `type = 'transfer'` yet, so there are none to list.
+- **Days are shifts** (8 am to 8 am, India time): a bank line is on the shift of its posted time, as on Bank sync; cash lines on their page's day. Default: this month so far.
+- **Status:** bank Not booked yet / Booked / Left out (ignored, e.g. a payment and its reversal: shown struck through, not counted); cash Draft / Approved. The "Not booked yet" filter shows unbooked debits and draft cash rows.
+- **Totals** are for what the filters show, with subtotals by head and by paid-from (each subtotal links to that filter).
+- **Links:** a bank line opens Bank sync on its shift and account (the Money out tab when not booked); a cash row opens its expense-list page on Review; a shortage opens Compare sales for the shift. Booking stays where it was.
+- **Phone:** below 640 px the table becomes a stacked list, so amounts show without scrolling sideways.
+- Tests: `test/moneyout.test.ts`.

@@ -359,3 +359,15 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
   .shiftbar .sb-i { display: none; }
   .shiftbar .sb-n { font-size: 11px; }
 }
+
+/* Money out: a table on wide screens, a stacked list on phones so each amount shows without scrolling sideways. */
+.mo-list { display: none; list-style: none; margin: 0; padding: 0; }
+.mo-list li { display: flex; flex-direction: column; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.mo-list li:first-child { border-top: 0; }
+.mo-list li.off { color: var(--muted); }
+.mo-list li.off .amount { text-decoration: line-through; }
+.mo-list .mo-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+@media (max-width: 640px) {
+  .mo-list { display: block; }
+  .mo-table { display: none; }
+}
