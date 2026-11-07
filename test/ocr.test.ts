@@ -143,9 +143,9 @@ describe('Read page: register', () => {
     expect(rows[1].paid_with_row_id).toBe(rows[0].id);
     expect(rows[2].paid_with_row_id).toBe(rows[0].id);
     expect(rows.map((x) => x.pays)).toEqual([1, 0, 0]);
-    // 1,890 + 836 + 676 = 3,402 against 3,400 paid: a discount of 2 shared over the bills by amount, in rupees.
-    expect(rows.reduce((t, x) => t + x.discount_paise, 0)).toBe(200);
-    expect(rows.every((x) => x.discount_paise % 100 === 0 && x.tip_paise === 0)).toBe(true);
+    // 1,890 + 836 + 676 = 3,402 against 3,400 paid: a discount of 2, on the row with the payment.
+    expect(rows.map((x) => x.discount_paise)).toEqual([200, 0, 0]);
+    expect(rows.every((x) => x.tip_paise === 0)).toBe(true);
     expect(JSON.parse(rows[0].ocr_original).inferred).toEqual(['discount']);
     expect(JSON.parse(rows[1].ocr_original).inferred).toContain('payments');
   });

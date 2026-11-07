@@ -7,7 +7,7 @@ import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files'
 import { cashSummaryChecks, numberContext, numberFlags, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
-import { spreadDifference } from '../discounts';
+import { onPayingRow, spreadDifference } from '../discounts';
 import { findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
 import { can, type Role } from '../permissions';
 
@@ -349,7 +349,6 @@ function registerInput(data: Record<string, unknown>) {
   const amountPaise = paise(data, 'amount', 'Bill amount');
   // One signed figure from the screen: positive = discount, negative = tip. Stored apart.
   const signed = optionalPaise(data, 'discount', 'Discount') ?? 0;
-  if (signed > amountPaise) fail(400, 'Discount cannot be more than the bill amount.');
   const discountPaise = signed > 0 ? signed : 0;
   const tipPaise = signed < 0 ? -signed : 0;
   const paidWith = typeof data.paidWithRowId === 'string' && data.paidWithRowId ? data.paidWithRowId : null;
@@ -372,12 +371,30 @@ function registerInput(data: Record<string, unknown>) {
 /**
  * A row that becomes the head of a group for the first time loses the Disc worked out for it alone (amount minus its
  * own payment): its payment now pays the whole group, so that figure would count the other bills twice. A Disc that
- * is anything else was typed and stays. "Fill discounts and tips" shares the group's real discount afterwards.
+ * is anything else was typed and stays. "Fill discounts and tips" writes the group's real discount on this row afterwards.
  */
 const newHeadStatement = (db: D1Database, headId: string, memberId: string) => stmt(db, `UPDATE register_rows SET discount_paise = 0, tip_paise = 0
   WHERE id = ? AND discount_paise - tip_paise <> 0
     AND discount_paise - tip_paise = amount_paise - (SELECT coalesce(sum(amount_paise), 0) FROM register_payments WHERE register_row_id = ?)
     AND NOT EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = ? AND m.id <> ?)`, headId, headId, headId, memberId);
+
+/**
+ * A discount can be no more than the bills it covers: its own row, or for the row with the payment, the whole group.
+ * rowId is null for a new line. Also checks the group a changed or removed bill leaves or stays in, which may now be too small.
+ */
+async function checkDiscount(db: DB, businessId: string, rowId: string | null, r: { amountPaise: number; discountPaise: number; paidWithRowId: string | null }, oldHead: string | null) {
+  const others = rowId ? (await one<{ n: number }>(db, 'SELECT coalesce(sum(amount_paise), 0) AS n FROM register_rows WHERE paid_with_row_id = ?', rowId))!.n : 0;
+  if (r.discountPaise > r.amountPaise + (r.paidWithRowId ? 0 : others)) fail(400, others ? 'Discount cannot be more than the bills paid with this row.' : 'Discount cannot be more than the bill amount.');
+  if (rowId && oldHead) await checkHeadDiscount(db, businessId, oldHead, rowId, oldHead === r.paidWithRowId ? r.amountPaise : 0);
+  if (r.paidWithRowId && r.paidWithRowId !== oldHead) await checkHeadDiscount(db, businessId, r.paidWithRowId, rowId, r.amountPaise);
+}
+
+/** The paying row's discount against its group, with one member counted at a new amount (0 when it is leaving). */
+async function checkHeadDiscount(db: DB, businessId: string, headId: string, memberId: string | null, memberPaise: number) {
+  const g = await one<{ discount: number; bills: number }>(db, `SELECT h.discount_paise AS discount, h.amount_paise + coalesce((SELECT sum(m.amount_paise) FROM register_rows m
+    WHERE m.paid_with_row_id = h.id AND m.id <> coalesce(?, '')), 0) AS bills FROM register_rows h WHERE h.id = ? AND h.business_id = ?`, memberId, headId, businessId);
+  if (g && g.discount > g.bills + memberPaise) fail(400, 'The discount on the row with the payment would be more than its bills. Change that discount first.');
+}
 
 /** Checks a "paid with" link: same business and shift, not itself, no chains. */
 async function checkPaidWith(db: DB, businessId: string, rowId: string | null, shiftDay: string, headId: string | null) {
@@ -404,6 +421,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
   if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
   const r = registerInput(await body(c));
   await checkPaidWith(db, bid, null, u.business_day, r.paidWithRowId);
+  await checkDiscount(db, bid, null, r, null);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM register_rows WHERE upload_id = ?', u.id);
   const id = newId();
   const t = now();
@@ -465,6 +483,7 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   if (!old) fail(404, 'Row not found.');
   const r = registerInput(await body(c));
   await checkPaidWith(db, bid, rowId, old.shift_day, r.paidWithRowId);
+  await checkDiscount(db, bid, rowId, r, old.paid_with_row_id);
   const t = now();
   // A field a person changes counts as resolved: its "Needs input" mark goes, the others stay until the row is checked.
   // The original reading and its "unclear" list are kept as they were.
@@ -593,8 +612,8 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
   const bid = c.get('businessId');
   const u = await getUpload(db, bid, c.req.param('uploadId'));
   if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
-  // For bills paid together, the bills of the whole group are compared with the one payment. A discount is
-  // spread over the group's bills by amount; a tip goes on the row with the payment. A group is filled only
+  // For bills paid together, the bills of the whole group are compared with the one payment, and a discount
+  // or tip goes on the row with the payment. A group is filled only
   // when none of its discounts or tips were typed by a person (amounts filled in earlier are worked out again).
   const rows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; ocr_original: string | null; paid: number; n: number }>(db, `
     SELECT r.id, r.amount_paise, r.discount_paise, r.tip_paise, r.paid_with_row_id, r.ocr_original,
@@ -609,7 +628,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
   for (const head of rows.filter((r) => !r.paid_with_row_id && r.n > 0 && r.paid > 0 && onPage.has(r.id))) {
     const group = [head, ...rows.filter((m) => m.paid_with_row_id === head.id)];
     if (!group.every(autoOrNone)) continue;
-    const spread = spreadDifference({ id: head.id, amountPaise: head.amount_paise }, group.slice(1).map((m) => ({ id: m.id, amountPaise: m.amount_paise })), head.paid);
+    const spread = onPayingRow({ id: head.id, amountPaise: head.amount_paise }, group.slice(1).map((m) => ({ id: m.id, amountPaise: m.amount_paise })), head.paid);
     if (!spread) continue;
     for (const r of group) {
       const v = spread.get(r.id)!;
@@ -650,9 +669,10 @@ captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ shift_day: string; upload_id: string; line_no: number; bill_no: string; amount_paise: number; discount_paise: number }>(db,
-    'SELECT shift_day, upload_id, line_no, bill_no, amount_paise, discount_paise FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  const old = await one<{ shift_day: string; upload_id: string; line_no: number; bill_no: string; amount_paise: number; discount_paise: number; paid_with_row_id: string | null }>(db,
+    'SELECT shift_day, upload_id, line_no, bill_no, amount_paise, discount_paise, paid_with_row_id FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
+  if (old.paid_with_row_id) await checkHeadDiscount(db, bid, old.paid_with_row_id, rowId, 0);
   // Why the line went: the page's totals still include it, so Review explains the difference with it.
   const data = await body(c).catch(() => ({} as Record<string, unknown>));
   const reason = typeof data.reason === 'string' && DELETE_REASONS.includes(data.reason) ? data.reason : 'other';

@@ -1234,7 +1234,7 @@ function regToolsHtml(u, locked) {
     ${!locked && [...new Set(u.rows.map((r) => headOf(r) ?? r))].some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
         && [r, ...membersOf(r)].every((m) => (!m.discountPaise && !m.tipPaise) || inferredOf(m.ocrOriginal).has('discount')))
         ? html`<div class="form-row" style="align-items:center;gap:8px"><button class="btn plain" type="button" id="filldisc" style="min-height:32px;font-size:13px"
-            title="Sets Disc = bill amount − payments where nobody has typed one: a discount when less was paid, a tip (negative) when more was paid. For bills paid together, the discount is shared across the bills by amount.">Fill discounts and tips</button>
+            title="Sets Disc = bill amount − payments where nobody has typed one: a discount when less was paid, a tip (negative) when more was paid. For bills paid together, it goes on the row with the payment.">Fill discounts and tips</button>
             <span class="tiny">where the payment differs from the bill and no discount is typed</span></div>` : ''}
   `;
 }

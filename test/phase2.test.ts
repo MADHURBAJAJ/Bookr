@@ -626,12 +626,12 @@ describe('bills paid together', () => {
     let v = await view(h);
     for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
     expect(v.json.blockers.join(' ')).toMatch(/paid together: the payment does not equal/);
-    // 2,370 paid for 2,380 of bills: Fill shares the 10 discount over the three bills by amount, in rupees.
+    // 2,370 paid for 2,380 of bills: Fill writes the 10 discount on the row with the payment.
     const fill = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
-    expect(fill.json.filled).toBe(3);
-    const disc = await sql`SELECT bill_no, discount_paise FROM register_rows WHERE bill_no IN ('2610311', '2610314', '26103122')`;
+    expect(fill.json.filled).toBe(1);
+    const disc = await sql`SELECT bill_no, discount_paise, paid_with_row_id FROM register_rows WHERE bill_no IN ('2610311', '2610314', '26103122')`;
     expect(disc.reduce((t, x) => t + x.discount_paise, 0)).toBe(1000);
-    expect(disc.every((x) => x.discount_paise > 0 && x.discount_paise % 100 === 0)).toBe(true);
+    expect(disc.filter((x) => x.discount_paise > 0).every((x) => !x.paid_with_row_id)).toBe(true);
     // Filling again changes nothing; a group whose discount a person typed is left alone.
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(0);
     v = await view(h);
@@ -913,23 +913,71 @@ describe('moving a page to another day', () => {
   });
 });
 
-describe('discount for bills paid together, worked out again', () => {
-  it('an earlier fill that did not add up is spread again over the group; typed discounts are kept', async () => {
+describe('discount for bills paid together, on the row with the payment (approved 7 Nov 2026)', () => {
+  const start = async () => {
     const h = await hotel();
     const pageId = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(94), 'image/png')).json.id;
     const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
       h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, ...extra });
+    return { h, pageId, add };
+  };
+  it('Fill puts a discount larger than the paying row on that row; a typed discount is kept', async () => {
+    const { h, pageId, add } = await start();
     const head = (await add('144743', '3481', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '8600' }])).json.id;
     for (const [b, a] of [['144898', '385'], ['144899', '1626'], ['144986', '13820'], ['145003', '795']]) await add(b, a, [], { paidWithRowId: head });
-    // The old fill: the whole discount on the paying row, cut to its own amount, marked as worked out.
-    await sql`UPDATE register_rows SET discount_paise = 348100, ocr_original = '{"inferred":["discount"]}' WHERE id = ${head}`;
+    // An older fill, shared over the bills and marked as worked out, is written again on the paying row.
+    await sql`UPDATE register_rows SET discount_paise = 100, ocr_original = '{"inferred":["discount"]}' WHERE paid_with_row_id = ${head}`;
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBeGreaterThan(1);
-    const rows = await sql`SELECT amount_paise, discount_paise FROM register_rows WHERE upload_id = ${pageId}`;
+    const rows = await sql`SELECT id, amount_paise, discount_paise FROM register_rows WHERE upload_id = ${pageId}`;
     expect(rows.reduce((t, r) => t + r.amount_paise - r.discount_paise, 0)).toBe(860000);
-    expect(rows.every((r) => r.discount_paise <= r.amount_paise)).toBe(true);
+    expect(rows.find((r) => r.id === head).discount_paise).toBe(2010700 - 860000);
+    expect(rows.filter((r) => r.id !== head).every((r) => r.discount_paise === 0)).toBe(true);
     // A person types a discount on one bill of the group: Fill leaves the group alone.
     await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, { billNo: '144743', billType: 'fnb', amount: '3481', discount: '100', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '8600' }] });
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`)).json.filled).toBe(0);
+  });
+  it('a typed discount may pass its row up to the group, and no further; a bill leaving cannot strand it', async () => {
+    const { h, add } = await start();
+    const pay = [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '700' }];
+    const head = (await add('2610317', '100', pay)).json.id;
+    const b = (await add('2610318', '900', [], { paidWithRowId: head })).json.id;
+    const put = (discount: string) => h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${head}`, { billNo: '2610317', billType: 'fnb', amount: '100', discount, payments: pay });
+    expect((await put('1001')).status).toBe(400);
+    expect((await put('300')).status).toBe(200);
+    expect((await sql`SELECT discount_paise FROM register_rows WHERE id = ${head}`)[0].discount_paise).toBe(30000);
+    // A row of its own still cannot have more discount than its amount.
+    expect((await add('2610319', '100', [], { discount: '101' })).status).toBe(400);
+    // The other bill cannot leave, or shrink below what the discount needs, or go.
+    const member = (extra: Record<string, unknown>) => h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${b}`, { billNo: '2610318', billType: 'fnb', amount: '900', paidWithRowId: head, payments: [], ...extra });
+    expect((await member({ amount: '100' })).status).toBe(400);
+    expect((await member({ paidWithRowId: null })).status).toBe(400);
+    expect((await h.clients.entry_staff.del(`/businesses/${h.bid}/register-rows/${b}`, { reason: 'other' })).status).toBe(400);
+    expect((await member({ amount: '200' })).status).toBe(200);
+  });
+  it('each bill stays right when the discount passes the paying row: no negative sale, and the group adds up to the payment', async () => {
+    const h = await hotel();
+    // 2610317 is ₹4,410 in the software and 2610318 ₹650. Make the paying row the small one.
+    const page = await fullShift(h, REGISTER_31_OCT.filter((r) => !['2610317', '2610318'].includes(r.billNo)));
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${page}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    // ₹650 + ₹4,410 of bills, ₹860 discount written on the ₹650 row, ₹4,200 paid.
+    const head = await add('2610318', '650', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '4200' }], { discount: '860' });
+    expect(head.status).toBe(400); // the group does not exist yet
+    const made = await add('2610318', '650', [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '4200' }]);
+    await add('2610317', '4410', [], { paidWithRowId: made.json.id });
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/register-rows/${made.json.id}`, { billNo: '2610318', billType: 'fnb', amount: '650', discount: '860', status: 'checked', payments: [{ mode: 'upi', columnLabel: 'UPI Bank 2', amount: '4200' }] })).status).toBe(200);
+    const v = await view(h);
+    expect(byBill(v, '2610318').register.amountPaise).toBe(0);
+    expect(byBill(v, '2610317').register.amountPaise).toBe(420000);
+    expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
+    for (const c of v.json.comparisons) {
+      if (c.decision || c.difference === 'match' || c.difference === 'complimentary') continue;
+      const decision = c.register ? 'use_register' : 'use_software';
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${c.id}`, { decision, note: 'Test' });
+    }
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const sales = await sql`SELECT bill_no, amount_paise FROM transactions WHERE bill_no IN ('2610317', '2610318') AND type = 'income'`;
+    expect(sales).toEqual([expect.objectContaining({ bill_no: '2610317', amount_paise: 420000 })]);
   });
 });
 

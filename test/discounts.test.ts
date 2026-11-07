@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { spreadDifference } from '../src/discounts';
+import { onPayingRow, spillGroupDiscount, spreadDifference } from '../src/discounts';
 
 const r = (id: string, rupees: number) => ({ id, amountPaise: rupees * 100 });
 
@@ -25,5 +25,29 @@ describe('discount or tip for bills paid together', () => {
     const s = spreadDifference(r('a', 1), [r('b', 1), r('c', 1)], 1)!;
     expect([...s.values()].reduce((t, v) => t + v.discountPaise, 0)).toBe(299);
     for (const v of s.values()) expect(v.discountPaise).toBeLessThanOrEqual(100);
+  });
+});
+
+describe('a group discount written on the row with the payment', () => {
+  const row = (id: string, net: number, disc: number, head: string | null = null) => ({ id, amount_paise: net, discount_paise: disc, paid_with_row_id: head });
+  it('puts all of it on the paying row, even past its own amount', () => {
+    const s = onPayingRow(r('a', 100), [r('b', 900)], 50000)!;
+    expect(s.get('a')).toEqual({ discountPaise: 50000, tipPaise: 0 });
+    expect(s.get('b')).toEqual({ discountPaise: 0, tipPaise: 0 });
+    expect(onPayingRow(r('a', 100), [r('b', 50)], 16000)!.get('a')).toEqual({ discountPaise: 0, tipPaise: 1000 });
+    expect(onPayingRow(r('a', 100), [], -1)).toBeNull();
+  });
+  it('past its own amount, the paying row counts as nil and the rest comes off the other bills, adding up exactly', () => {
+    // ₹100 + ₹900 + ₹300 of bills, ₹500 discount on the ₹100 row: net −400 before.
+    const out = spillGroupDiscount([row('h', -40000, 50000), row('b', 90000, 0, 'h'), row('c', 30000, 0, 'h'), row('solo', 5000, 0)]);
+    expect(out.find((x) => x.id === 'h')).toMatchObject({ amount_paise: 0, discount_paise: 10000 });
+    expect(out.find((x) => x.id === 'b')).toMatchObject({ amount_paise: 50000, discount_paise: 40000 });
+    expect(out.find((x) => x.id === 'c')).toMatchObject({ amount_paise: 30000, discount_paise: 0 });
+    expect(out.find((x) => x.id === 'solo')).toMatchObject({ amount_paise: 5000, discount_paise: 0 });
+    expect(out.filter((x) => x.id !== 'solo').reduce((t, x) => t + x.amount_paise, 0)).toBe(80000);
+  });
+  it('leaves a discount within the paying row alone', () => {
+    const rows = [row('h', 40000, 10000), row('b', 90000, 0, 'h')];
+    expect(spillGroupDiscount(rows)).toEqual(rows);
   });
 });

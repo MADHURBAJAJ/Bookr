@@ -4,6 +4,7 @@
 
 import { bankIn, creditsWithoutBill, pairEvidence, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
 import { settleOnCredit } from './bank';
+import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
 import { all, newId, now, one, stmt, type DB } from './db';
 import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
@@ -124,7 +125,7 @@ async function loadShiftData(db: DB, businessId: string, day: string) {
   ]);
   const written = new Map<string, RgPay[]>();
   for (const p of pays.results as RgPay[]) written.set(p.register_row_id, [...(written.get(p.register_row_id) ?? []), p]);
-  const rows = rg.results as RgRow[];
+  const rows = spillGroupDiscount(rg.results as RgRow[]);
   const { paysByRow, groups } = applyPaidTogether(rows, written);
   return {
     status: (status.results[0] as { status: string } | undefined)?.status ?? null,
@@ -563,7 +564,8 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
     const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
     const billType = r?.bill_type ?? c.bill_type ?? '';
     const fromRegister = (source: NewRow['source']) => {
-      for (const p of paysByRow.get(r!.id) ?? []) rows.push({ amount: p.amount_paise, mode: p.mode as NewRow['mode'], billType, source, c });
+      // A paying row whose whole amount went on the group's discount has no sale of its own.
+      for (const p of (paysByRow.get(r!.id) ?? []).filter((x) => x.amount_paise > 0)) rows.push({ amount: p.amount_paise, mode: p.mode as NewRow['mode'], billType, source, c });
     };
     // Matched after a discount or tip: the software shows the bill amount, the register what was received.
     // The register's figure is booked, so it is what bank matching will look for.

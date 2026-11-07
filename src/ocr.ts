@@ -7,7 +7,7 @@ import { newId, now, stmt, type DB } from './db';
 import { parsePaise } from './money';
 import type { PageImage } from './claude';
 import { byName, inText, pickHead, type Party, type PastLine } from './parties';
-import { spreadDifference } from './discounts';
+import { onPayingRow } from './discounts';
 
 const Orientation = z.enum(['upright', 'rotated_90_clockwise', 'rotated_180', 'rotated_90_counterclockwise']);
 const Amount = z.string().nullable().describe('Digits exactly as written, with a decimal point if written, no currency sign. null if unreadable or blank.');
@@ -262,7 +262,7 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
     if (amt === null) unclear.add('amount');
     let disc = amount(row.discount);
     if (row.discount && disc === null) unclear.add('discount');
-    if (disc !== null && (disc < 0 || disc > (amt ?? 0))) { unclear.add('discount'); disc = null; }
+    if (disc !== null && disc < 0) { unclear.add('discount'); disc = null; }
     if (!row.bill_no) unclear.add('bill_no');
     // Most sales are F&B: an unreadable type is taken as F&B and shown as assumed, for a person to change if wrong.
     const assumedType = row.bill_type === 'unclear';
@@ -297,6 +297,12 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
     x.inferred.push('payments');
   }
 
+  // A discount may run past its own row only on the row with the payment, up to the bills it pays for.
+  for (const x of rows) {
+    const billed = x.paidWith ? x.amt ?? 0 : rows.filter((m) => m === x || m.paidWith === x.id).reduce((t, m) => t + (m.amt ?? 0), 0);
+    if (x.disc !== null && x.disc > billed) { x.unclear.add('discount'); x.disc = null; }
+  }
+
   // Payments read a line off: those lines' payments are marked unclear, and the page offers to move them back.
   const paidOf = (x: DraftRow) => (x.pays.length && x.pays.every((p) => p.paise !== null) ? x.pays.reduce((t, p) => t + p.paise!, 0) : null);
   const grouped = new Set(rows.flatMap((x) => (x.paidWith ? [x.id, x.paidWith] : [])));
@@ -305,8 +311,8 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
   if (slip) for (const x of rows) if (slipped.has(x.line)) x.unclear.add('payments');
 
   // No discount written but the payment differs from the bill(s): fill the difference in, marked as worked out.
-  // A positive difference is a discount, a negative one a tip. For bills paid together a discount is spread
-  // over the group's bills by amount; a tip goes on the row with the payment. Written discounts are kept.
+  // A positive difference is a discount, a negative one a tip. For bills paid together either goes on the row
+  // with the payment, as the register writes it. Written discounts are kept.
   // A difference nothing explains is marked unclear instead of being taken on trust: a large discount or tip
   // with no remark about it, or a written discount that still does not add up to the payment.
   for (const x of rows) {
@@ -325,7 +331,7 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
       if (paid !== billed - group.reduce((t, m) => t + (m.disc ?? 0), 0) && !explainedInRemark(x.read.remarks)) x.unclear.add('payments');
       continue;
     }
-    const spread = spreadDifference({ id: x.id, amountPaise: x.amt }, members.map((m) => ({ id: m.id, amountPaise: m.amt! })), paid);
+    const spread = onPayingRow({ id: x.id, amountPaise: x.amt }, members.map((m) => ({ id: m.id, amountPaise: m.amt! })), paid);
     if (!spread) continue;
     const gap = billed - paid;
     const large = gap > 0 ? gap * 100 > LARGE_DISCOUNT_PCT * billed : -gap * 100 > LARGE_TIP_PCT * billed;
