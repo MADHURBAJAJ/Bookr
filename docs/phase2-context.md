@@ -410,6 +410,17 @@ together. Allowed: a draft row, a row paid together with another (the payment is
 nothing. The check is in `registerInput` (capture.ts), so it holds for the Review table, the row form and the drawer.
 On the Review table a refused tick comes off again, with the reason.
 
+## One set of numbers for a shift (approved 7 Nov 2026)
+
+- Bills paid together: the credit Compare shows on the group's line (`paidGroups[].bank`, now with creditId) is the
+  pairing everywhere. The trial reconcile takes it instead of its own search, and confirming matches it to the
+  group's UPI sales when they add up to it (one credit, several sales; Unmatch undoes it).
+- Reconcile's top line: Would match = UPI on this shift − Bills not in the bank yet, so the boxes always add up
+  (on 30 Oct the 41 bills paid together, ₹26,769, were in neither box).
+- Compare's "On confirming" counts a group's bills as matched at once when its credit came in, as Reconcile does.
+- Totals by payment mode: Software and Register are the full reports; Difference (`openPaise`, `unknownOpenPaise`)
+  counts only the bills still to decide (the blocker's list), so it reads 0 once every difference is decided.
+
 ## Missed entries report (approved 7 Nov 2026)
 
 `src/missed.ts`, `GET reports/missed?from&to` (reports.view: Owner, Accountant, Viewer), on Reports above Large

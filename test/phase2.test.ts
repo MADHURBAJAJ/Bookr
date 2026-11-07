@@ -1702,6 +1702,34 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect(v.json.bank.covered).toBe(true);
     expect(v.json.bank.noBill).toEqual([]);
     expect((await sql`SELECT count(*) AS n FROM bank_rows WHERE tran_id = 'S30000011' AND status = 'matched'`)[0].n).toBe(0); // shown, not matched
+
+    // Reconcile's top line adds up: every UPI bill is matched (its own credit or its group's) or not in the bank yet.
+    const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    expect(trial.strip.matchedPaise + trial.strip.billsLeftPaise).toBe(trial.strip.upiSalesPaise);
+    expect(trial.open.bills.map((x: any) => x.billNo)).not.toContain('2610314');
+    expect(trial.open.bills.map((x: any) => x.billNo)).toContain('2610317'); // its group's credit never came
+
+    // The Difference column counts only bills still to decide: 0 once every one is decided.
+    const open = (x: any) => x.json.totals.reduce((t: number, m: any) => t + m.openPaise, 0) + x.json.unknownOpenPaise;
+    expect(open(v)).not.toBe(0);
+    for (const x of v.json.comparisons) {
+      if (x.decision || x.difference === 'match' || x.difference === 'complimentary') continue;
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${x.id}`, { decision: x.register ? 'use_register' : 'use_software', billType: 'fnb', note: 'Test' });
+    }
+    const decided = await view(h);
+    expect(open(decided)).toBe(0);
+    expect(decided.json.totals.find((m: any) => m.mode === 'upi').registerPaise).toBe(v.json.totals.find((m: any) => m.mode === 'upi').registerPaise); // the full reports stay
+
+    // Confirming matches the group's credit to the group's UPI sales, and Unmatch undoes it.
+    const done = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect(done.json.blockers ?? done.json.error ?? null).toBeNull();
+    const [credit] = await sql`SELECT id, status FROM bank_rows WHERE tran_id = 'S30000011'`;
+    expect(credit.status).toBe('matched');
+    const sales = await sql`SELECT t.amount_paise, t.bill_no FROM transactions t WHERE t.matched_bank_row = ${credit.id}`;
+    expect(sales.reduce((a: number, x: any) => a + x.amount_paise, 0)).toBe(200000);
+    expect(sales.every((x: any) => ['2610311', '2610314', '26103122'].includes(x.bill_no))).toBe(true);
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${credit.id}/match`)).status).toBe(200);
+    expect((await sql`SELECT count(*) AS n FROM transactions WHERE matched_bank_row = ${credit.id}`)[0].n).toBe(0);
   });
 
   it('a bill paid in several UPI goes pairs each payment with its own credit, and confirming matches all of them', async () => {

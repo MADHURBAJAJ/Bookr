@@ -164,13 +164,11 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   const free = () => credits.filter((c) => !used.has(c.id));
   const nearAt = (postedAt: number, at: number | null, limit: number) => (at == null ? postedAt >= w.from && postedAt < w.to + 3600e3 : Math.abs(postedAt - at) <= limit * 60000);
 
-  // Bills paid together have one credit for the whole group, which Bookr looks for after confirming.
-  const groupTotals = new Map<string, number>();
-  for (const r of rows.filter((x) => heads.has(x.id))) groupTotals.set(r.id, paysOf(r.id).filter((p) => p.mode === 'upi').reduce((t, p) => t + p.amountPaise, 0));
+  // Bills paid together have one credit for the whole group: the one Compare sales shows on the group's line, which
+  // confirming matches (the same pairing everywhere).
   const groupsFit = new Set<string>();
-  for (const [head, total] of groupTotals) {
-    const m = free().find((c) => c.amount === total);
-    if (m) { used.add(m.id); groupsFit.add(head); }
+  for (const g of view.paidGroups) {
+    if (g.bank && !used.has(g.bank.creditId)) { used.add(g.bank.creditId); groupsFit.add(g.id); }
   }
   const settled = new Set(used);
   const headOf = (id: string | null | undefined) => rows.find((r) => r.id === id)?.paidWith ?? id ?? null;
@@ -276,7 +274,8 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   return {
     trial: true as const, day, note: null,
     coverage: { covered: cov.covered, lastBankAt: cov.lastBankAt, shiftEnd: w.to },
-    strip: { upiSalesPaise: bills.reduce((t, b) => t + b.amount, 0), bills: bills.length, matchedPaise: sum(clear),
+    // Every UPI bill is either matched (its own credit, its group's, or a booked credit it joins) or not in the bank yet.
+    strip: { upiSalesPaise: bills.reduce((t, b) => t + b.amount, 0), bills: bills.length, matchedPaise: bills.reduce((t, b) => t + b.amount, 0) - sum(openBills),
       billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits) },
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit, noBill: [], unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
   };

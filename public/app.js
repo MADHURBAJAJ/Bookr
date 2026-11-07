@@ -2513,7 +2513,9 @@ async function compareView(biz, day) {
   const missingHours = Math.round(v.gaps.reduce((s, g) => s + g.to - g.from, 0) / 3600000 * 10) / 10;
   const side = (s) => (s ? html`<div class="mono">${money(s.amountPaise)}</div><div class="note">${MODE_LABELS[s.mode] ?? 'No payment written'}${s.billType ? ` · ${TYPE_LABELS[s.billType]}` : ''}${s.discountPaise > 0 ? ` · after ₹ ${money(s.discountPaise)} discount` : s.discountPaise < 0 ? ` · incl. ₹ ${money(-s.discountPaise)} tip` : ''}</div>` : html`<div class="note">Not found</div>`);
   const shiftOptions = [...new Set([day, ...shifts.map((s) => s.day)])].sort().reverse();
-  const totalsRow = (label, sw, rg, bold) => html`<tr style="${bold ? 'font-weight:600' : ''}"><td>${label}</td><td class="amount">${money(sw)}</td><td class="amount">${money(rg)}</td><td class="amount" style="color:${sw === rg ? 'var(--muted)' : '#B45309'}">${rg - sw === 0 ? '0' : `${rg - sw > 0 ? '+' : ''}${money(rg - sw)}`}</td></tr>`;
+  // Difference: only bills still to decide, so it reads 0 once every difference is decided.
+  const totalsRow = (label, sw, rg, open, bold) => html`<tr style="${bold ? 'font-weight:600' : ''}"><td>${label}</td><td class="amount">${money(sw)}</td><td class="amount">${money(rg)}</td><td class="amount" style="color:${open ? '#B45309' : 'var(--muted)'}">${open === 0 ? '0' : `${open > 0 ? '+' : ''}${money(open)}`}</td></tr>`;
+  const openTotal = v.totals.reduce((s, t) => s + t.openPaise, 0) + (v.unknownOpenPaise ?? 0);
   const swTotal = v.totals.reduce((s, t) => s + t.softwarePaise, 0) + v.unknownModePaise;
   const rgTotal = v.totals.reduce((s, t) => s + t.registerPaise, 0);
   // Shift order for ‹ and ›: older to the left.
@@ -2557,7 +2559,9 @@ async function compareView(biz, day) {
   const counted = v.comparisons.filter((c) => c.difference === 'match' || c.decision === 'use_software' || c.decision === 'use_register');
   const upiSide = (c) => (c.decision === 'use_software' ? c.software : c.decision === 'use_register' || c.difference === 'match' ? c.register : null);
   const countedUpi = counted.filter((c) => upiSide(c)?.mode === 'upi');
-  const matchNow = countedUpi.filter((c) => c.bank && (c.bank.fits === 'both' || (c.bank.fits === 'software') === (c.decision === 'use_software')));
+  // A bill paid together is matched with its group when the group's one credit came in, as on Reconcile.
+  const groupPaid = new Set((v.paidGroups ?? []).filter((g) => g.bank).flatMap((g) => g.billNos));
+  const matchNow = countedUpi.filter((c) => groupPaid.has(c.billNo) || (c.bank && (c.bank.fits === 'both' || (c.bank.fits === 'software') === (c.decision === 'use_software'))));
   const kinds = [['all', 'All', open], ['sw', 'Only in software', open.filter((c) => c.difference === 'missing_in_register')],
     ['rg', 'Only in register', open.filter((c) => c.difference === 'missing_in_software')], ['diff', 'Amount or mode', open.filter((c) => !c.difference.startsWith('missing'))],
     ['match', 'Matched', v.comparisons.filter((c) => c.difference === 'match')]];
@@ -2605,7 +2609,7 @@ async function compareView(biz, day) {
     <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">${g.matched ? html`<span class="chip ok">Total matches</span>`
         : members.every((x) => x.decision) ? html`<span class="chip ok">Decided</span><span class="tiny" style="white-space:normal">${g.why}</span>`
         : html`<span class="chip wait" style="white-space:normal">${g.why}</span>`}
-      ${confirmed || !v.bank || !g.upiPaise ? '' : g.bank ? html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(g.bank.amountPaise)} came in at ${when(g.bank.postedAt)}. It equals this group's UPI total. It is not matched until you match it.">Bank ₹ ${rs(g.bank.amountPaise)} · ${hhmm(g.bank.postedAt)}</span>`
+      ${confirmed || !v.bank || !g.upiPaise ? '' : g.bank ? html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(g.bank.amountPaise)} came in at ${when(g.bank.postedAt)}. It equals this group's UPI total. Confirming the shift matches it to the group's bills.">Bank ₹ ${rs(g.bank.amountPaise)} · ${hhmm(g.bank.postedAt)}</span>`
         : colHintOf([g.id]) ? colChip(colHintOf([g.id]))
         : v.bank.covered ? html`<span class="chip" title="No unmatched UPI credit in this shift equals this group's UPI total.">No bank credit</span>`
         : html`<span class="chip" title="The bank statement does not reach the end of this shift yet.">Bank not in yet</span>`}</div></td>
@@ -2712,11 +2716,12 @@ async function compareView(biz, day) {
         </section>
         <section class="card" style="flex:3 1 420px;gap:10px">
           <h2>Totals by payment mode</h2>
-          <div class="scroll"><table style="min-width:380px"><thead><tr><th>Mode</th><th style="text-align:right">Software</th><th style="text-align:right">Register</th><th style="text-align:right">Difference</th></tr></thead><tbody>
-            ${v.totals.map((t) => totalsRow(MODE_LABELS[t.mode], t.softwarePaise, t.registerPaise))}
-            ${v.unknownModePaise ? totalsRow('U/N (not given)', v.unknownModePaise, 0) : ''}
-            ${totalsRow('Total', swTotal, rgTotal, true)}
+          <div class="scroll"><table style="min-width:380px"><thead><tr><th>Mode</th><th style="text-align:right">Software</th><th style="text-align:right">Register</th><th style="text-align:right" title="Bills not decided yet">Difference</th></tr></thead><tbody>
+            ${v.totals.map((t) => totalsRow(MODE_LABELS[t.mode], t.softwarePaise, t.registerPaise, t.openPaise))}
+            ${v.unknownModePaise ? totalsRow('U/N (not given)', v.unknownModePaise, 0, v.unknownOpenPaise ?? 0) : ''}
+            ${totalsRow('Total', swTotal, rgTotal, openTotal, true)}
           </tbody></table></div>
+          <div class="note">Difference counts only bills not decided yet${openTotal ? '' : ': every difference is decided'}. Software and Register are the full reports as they stand.</div>
           <div class="note">Complimentary bills (amount 0) are never counted as sales${comps.length ? `: ${comps.map((c) => c.billNo).join(', ')}` : ''}.</div>
         </section>
       </div>

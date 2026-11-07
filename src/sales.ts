@@ -563,8 +563,15 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
   const swByMode = (m: string) => sum(sw.filter((b) => b.mode === m).map((b) => ({ amount: b.amount_paise })));
   const rgByMode = (m: string) => sum(rg.flatMap((r) => (paysByRow.get(r.id) ?? []).filter((p) => p.mode === m).map((p) => ({ amount: p.amount_paise }))));
-  const totals = (['cash', 'upi', 'card'] as const).map((m) => ({ mode: m, softwarePaise: swByMode(m), registerPaise: rgByMode(m) }));
+  // The difference counts only bills still to decide (approved 7 Nov 2026), the same ones the blocker lists: a decided
+  // bill is settled whichever side it took.
+  const openRg = (m: string) => undecided.reduce((t, c) => t + (c.rg_mode === 'mixed' && c.register_row_id
+    ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === m).reduce((a, p) => a + p.amount_paise, 0)
+    : c.rg_mode === m ? c.rg_amount_paise ?? 0 : 0), 0);
+  const openSw = (m: string) => undecided.reduce((t, c) => t + (c.sw_mode === m ? c.sw_amount_paise ?? 0 : 0), 0);
+  const totals = (['cash', 'upi', 'card'] as const).map((m) => ({ mode: m, softwarePaise: swByMode(m), registerPaise: rgByMode(m), openPaise: openRg(m) - openSw(m) }));
   const unknownPaise = swByMode('unknown');
+  const unknownOpenPaise = -openSw('unknown');
 
   return {
     day,
@@ -602,10 +609,11 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       const members = comparisons.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
       const matched = members.length === g.rowIds.length && members.every((c) => c.difference === 'match');
       return { id: g.headId, billNos: g.billNos, softwarePaise: members.reduce((t, c) => t + (c.sw_amount_paise ?? 0), 0), grossPaise: g.grossPaise, paidPaise: g.paidPaise,
-        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt } : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
+        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { creditId: groupCredits.get(g.headId)!.id, amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt } : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
     }),
     totals,
     unknownModePaise: unknownPaise,
+    unknownOpenPaise,
     // Types taken as F&B because the register's type could not be read, and not changed since.
     assumedTypes: rg.filter((r) => { try { const o = JSON.parse((r as unknown as { ocr_original?: string }).ocr_original ?? 'null'); return o && (o.inferred ?? []).includes('bill_type') && !(o.resolved ?? []).includes('bill_type'); } catch { return false; } }).map((r) => r.bill_no),
     matchedAfterAdjustment: comparisons
@@ -651,17 +659,19 @@ async function plannedRows(db: DB, businessId: string, day: string): Promise<New
   return rows;
 }
 
-/** Matches a credit to a sale made by this confirm, only while the credit is still unmatched. */
-function confirmMatchStatements(db: DB, businessId: string, rowId: string, txId: string, amount: number, userId: string, t: number) {
+/** Matches a credit to the sale(s) made by this confirm it pays, only while the credit is still unmatched. */
+function confirmMatchStatements(db: DB, businessId: string, rowId: string, txs: { id: string; amount: number }[], userId: string, t: number) {
   const free = "EXISTS (SELECT 1 FROM bank_rows WHERE id = ? AND status = 'unmatched' AND business_id = ?)";
   return [
-    stmt(db, `INSERT INTO bank_matches (id, business_id, bank_row_id, transaction_id, amount_paise, matched_by, matched_at)
-      SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${free}`, newId(), businessId, rowId, txId, amount, userId, t, rowId, businessId),
-    stmt(db, `UPDATE transactions SET matched_bank_row = ?, match_status = NULL WHERE id = ? AND match_status = 'awaiting_bank_match'
-      AND EXISTS (SELECT 1 FROM bank_matches m WHERE m.transaction_id = ? AND m.bank_row_id = ?)`, rowId, txId, txId, rowId),
+    ...txs.flatMap((x) => [
+      stmt(db, `INSERT INTO bank_matches (id, business_id, bank_row_id, transaction_id, amount_paise, matched_by, matched_at)
+        SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${free}`, newId(), businessId, rowId, x.id, x.amount, userId, t, rowId, businessId),
+      stmt(db, `UPDATE transactions SET matched_bank_row = ?, match_status = NULL WHERE id = ? AND match_status = 'awaiting_bank_match'
+        AND EXISTS (SELECT 1 FROM bank_matches m WHERE m.transaction_id = ? AND m.bank_row_id = ?)`, rowId, x.id, x.id, rowId),
+    ]),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
       SELECT ?, ?, 'bank.match', 'bank_rows', ?, NULL, ?, ? WHERE ${free}`, businessId, userId, rowId,
-      JSON.stringify({ transactionIds: [txId], how: 'matched on confirming the shift' }), t, rowId, businessId),
+      JSON.stringify({ transactionIds: txs.map((x) => x.id), how: 'matched on confirming the shift' }), t, rowId, businessId),
     stmt(db, "UPDATE bank_rows SET status = 'matched', done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched' AND business_id = ?", userId, t, rowId, businessId),
   ];
 }
@@ -709,13 +719,24 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       const pairs = c.bank.parts.map((p) => { const i = free.findIndex((x) => x.r.amount === p.amountPaise); return i < 0 ? null : { p, x: free.splice(i, 1)[0] }; });
       if (free.length || pairs.some((x) => !x)) continue;
       for (const { p, x } of pairs as { p: { creditId: string; amountPaise: number }; x: (typeof upi)[number] }[]) {
-        statements.push(...confirmMatchStatements(db, businessId, p.creditId, x.id, x.r.amount, userId, t + 1 + matched));
+        statements.push(...confirmMatchStatements(db, businessId, p.creditId, [{ id: x.id, amount: x.r.amount }], userId, t + 1 + matched));
         matched += 1;
       }
       continue;
     }
     if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
-    statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, upi[0].id, upi[0].r.amount, userId, t + 1 + matched));
+    statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, [{ id: upi[0].id, amount: upi[0].r.amount }], userId, t + 1 + matched));
+    matched += 1;
+  }
+  // Bills paid together whose one credit came in (shown on the group's line): the credit pays the group's UPI sales,
+  // when they add up to it (approved 7 Nov 2026).
+  const paidWith = new Map((await all<{ id: string; head: string | null }>(db, 'SELECT id, paid_with_row_id AS head FROM register_rows WHERE business_id = ? AND shift_day = ?', businessId, day))
+    .map((r) => [r.id, r.head ?? r.id]));
+  for (const g of view.paidGroups) {
+    if (!g.bank) continue;
+    const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && x.r.c.register_row_id && paidWith.get(x.r.c.register_row_id) === g.id);
+    if (!upi.length || upi.reduce((a, x) => a + x.amount, 0) !== g.bank.amountPaise) continue;
+    statements.push(...confirmMatchStatements(db, businessId, g.bank.creditId, upi.map(({ id, amount }) => ({ id, amount })), userId, t + 1 + matched));
     matched += 1;
   }
   // Bills a person marked as one sale with a credit booked directly: the booking goes, and the sale keeps its day.
