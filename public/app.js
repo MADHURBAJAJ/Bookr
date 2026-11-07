@@ -2351,7 +2351,10 @@ async function compareView(biz, day) {
     <td><strong>Group of ${g.billNos.length} bills</strong><div class="tiny mono" style="white-space:normal">${g.billNos.join(' + ')}</div>${members.length < g.billNos.length ? html`<div class="tiny">${members.length} of them in this list</div>` : ''}</td>
     <td><div class="mono">${money(g.softwarePaise)}</div></td>
     <td><div class="mono">${money(g.paidPaise)}</div><div class="note">${g.modes.map((m) => MODE_LABELS[m] ?? m).join(' + ') || 'No payment written'}${g.grossPaise > g.paidPaise ? ` · after ₹ ${money(g.grossPaise - g.paidPaise)} discount` : g.grossPaise < g.paidPaise ? ` · incl. ₹ ${money(g.paidPaise - g.grossPaise)} tip` : ''}</div></td>
-    <td>${g.matched ? html`<span class="chip ok">Total matches</span>` : html`<span class="chip wait" style="white-space:normal">${g.why}</span>`}</td>
+    <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">${g.matched ? html`<span class="chip ok">Total matches</span>` : html`<span class="chip wait" style="white-space:normal">${g.why}</span>`}
+      ${confirmed || !v.bank || !g.upiPaise ? '' : g.bank ? html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(g.bank.amountPaise)} came in at ${when(g.bank.postedAt)}. It equals this group's UPI total. It is not matched until you match it.">Bank ₹ ${rs(g.bank.amountPaise)} · ${hhmm(g.bank.postedAt)}</span>`
+        : v.bank.covered ? html`<span class="chip" title="No unmatched UPI credit in this shift equals this group's UPI total.">No bank credit</span>`
+        : html`<span class="chip" title="The bank statement does not reach the end of this shift yet.">Bank not in yet</span>`}</div></td>
     <td class="note">${g.matched ? 'No decision needed. Open to see each bill.' : (() => {
       // Bills no software report will ever have: one button for the group. New POS numbers and rows not reviewed stay with the person.
       const can = canDecide && !confirmed ? members.filter((x) => bulkOk(x) && !x.decision) : [];

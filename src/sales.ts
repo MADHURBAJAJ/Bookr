@@ -2,7 +2,7 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
-import { bankIn, creditsWithoutBill, pairEvidence, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
+import { bankIn, creditsWithoutBill, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
@@ -543,12 +543,16 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       text: `Cash bill ${c.bill_no} (₹ ${Math.round((c.sw_amount_paise ?? 0) / 100).toLocaleString('en-IN')}) is in the software report but not in the register: check the cash.` }));
 
   // The bank as a third witness, while the shift is still open.
+  const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
+  const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
+  let groupCredits = new Map<string, { amount: number; postedAt: number }>();
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[] } | null = null;
   if (shift?.status !== 'confirmed') {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, credits, cov.window);
-    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map((g) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi').reduce((t, p) => t + p.amount_paise, 0))) : [] };
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [] };
+    groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), credits, used, cov.window);
   }
 
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
@@ -593,7 +597,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       const members = comparisons.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
       const matched = members.length === g.rowIds.length && members.every((c) => c.difference === 'match');
       return { id: g.headId, billNos: g.billNos, softwarePaise: members.reduce((t, c) => t + (c.sw_amount_paise ?? 0), 0), grossPaise: g.grossPaise, paidPaise: g.paidPaise,
-        modes: g.modes, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
+        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt } : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
     }),
     totals,
     unknownModePaise: unknownPaise,

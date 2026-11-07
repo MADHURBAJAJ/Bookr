@@ -1678,6 +1678,31 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
   const line = (n: number, id: string, at: string, amount: number) =>
     [n, id, at.slice(0, 10), at, '-', `UPI/60000000${n}/Paid/ab-${n}@okicici/SAMPLE BANK/ICIaaaa`, 'CR', amount, String(amount)].join('\t');
 
+  it('a group paid together shows the credit equal to its UPI total, each credit once, and a split payment looks for its UPI part', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => !['2610311', '2610314', '26103122', '2610317', '2610318'].includes(r.billNo));
+    const pageId = await fullShift(h, reg);
+    const add = (billNo: string, amount: string, payments: unknown[], extra: Record<string, unknown> = {}) =>
+      h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo, billType: 'fnb', amount, payments, status: 'checked', ...extra });
+    // 2,380 in all: 380 cash and 2,000 UPI. Then 5,060 by UPI, for which no credit came.
+    const split = (await add('2610311', '420', [{ mode: 'upi', columnLabel: null, amount: '2000' }, { mode: 'cash', columnLabel: null, amount: '380' }])).json.id;
+    await add('2610314', '1180', [], { paidWithRowId: split });
+    await add('26103122', '780', [], { paidWithRowId: split });
+    const none = (await add('2610318', '650', [{ mode: 'upi', columnLabel: null, amount: '5060' }])).json.id;
+    await add('2610317', '4410', [], { paidWithRowId: none });
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI XOXO' })).status).toBe(200);
+    const text = [HEAD, line(1, 'S30000011', '31/10/2026 1:00:00 PM', 2000), line(2, 'S30000012', '01/11/2026 8:30:00 AM', 1234)].join('\n');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text })).status).toBe(200);
+    const v = await view(h);
+    const group = (id: string) => v.json.paidGroups.find((g: any) => g.id === id);
+    expect(group(split)).toMatchObject({ upiPaise: 200000, bank: { amountPaise: 200000 } });
+    expect(group(none)).toMatchObject({ upiPaise: 506000, bank: null });
+    expect(v.json.bank.covered).toBe(true);
+    expect(v.json.bank.noBill).toEqual([]);
+    expect((await sql`SELECT count(*) AS n FROM bank_rows WHERE tran_id = 'S30000011' AND status = 'matched'`)[0].n).toBe(0); // shown, not matched
+  });
+
   it('suggests the side the credit backs, warns of money with no bill, and matches the credits on confirm', async () => {
     const h = await hotel();
     await fullShift(h);

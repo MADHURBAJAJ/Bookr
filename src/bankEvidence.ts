@@ -112,6 +112,21 @@ export const shiftCredits = (db: DB, businessId: string, day: string) => {
 };
 
 /**
+ * Bills paid together, for Compare sales: the first credit in the shift equal to a group's UPI total, each credit used
+ * once and none a single bill has taken. Shown only: it says nothing about which bills the money paid for.
+ */
+export function pairGroups(groups: { id: string; upiPaise: number; labels: string | null }[], credits: EvidenceCredit[], used: Set<string>, window: { from: number; to: number }) {
+  const taken = new Set(used);
+  const out = new Map<string, EvidenceCredit>();
+  for (const g of groups) {
+    if (!g.upiPaise) continue;
+    const c = credits.find((x) => !taken.has(x.id) && x.amount === g.upiPaise && x.postedAt >= window.from && x.postedAt < window.to + 3600e3 && labelFits(g.labels, x.label ?? null));
+    if (c) { taken.add(c.id); out.set(g.id, c); }
+  }
+  return out;
+}
+
+/**
  * Credits inside the shift that no bill of this shift could explain (no bill of that amount at all, nor a group of
  * bills paid together by UPI, whose one credit is the group's total): money in with no bill. A warning only; it may
  * belong to another shift or not be a sale.
