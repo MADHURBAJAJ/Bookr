@@ -10,6 +10,7 @@ import { addDays, istDay, shiftDayOf } from '../time';
 import { onPayingRow, spreadDifference } from '../discounts';
 import { findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
 import { can, type Role } from '../permissions';
+import { columnHints } from '../columnHints';
 
 export const captureRoutes = new Hono<AppEnv>();
 
@@ -223,8 +224,14 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     }) : []);
     // A cell Claude could not read (amount or payment): the software's amount for this bill, and a bank credit of that
     // amount near the bill's time, offered as a hint. Never applied by itself; clearly read cells get no hint.
-    const credits = await all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows
-      WHERE business_id = ? AND kind = 'upi_in' AND day BETWEEN ? AND ?`, bid, u.business_day, addDays(u.business_day, 1));
+    // The bank is shown only to people who can match it (Owner, Accountant); entry staff get the software's figure only.
+    const bankOk = can(c.get('role') as Role, 'bank.link');
+    const [credits, colHints] = bankOk ? await Promise.all([
+      all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows
+        WHERE business_id = ? AND kind = 'upi_in' AND day BETWEEN ? AND ?`, bid, u.business_day, addDays(u.business_day, 1)),
+      // A confirmed shift's column is changed on Reconcile, together with the match.
+      shift?.status === 'confirmed' ? [] : columnHints(db, bid, u.business_day),
+    ]) : [[], []];
     const hintFor = (r: { billNo: string; ocrOriginal: string | null }) => {
       if (!r.ocrOriginal) return null;
       let o: { unclear?: string[]; resolved?: string[] };
@@ -259,7 +266,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       // The shift's software bills, for the bill box's suggestions as you type.
       softwareList: swBills.map((b) => ({ billNo: b.bill_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, used: shiftRows.some((r) => r.bill_no === b.bill_no) })),
       rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null, numberFlags: flagsOf.get(r.id) ?? [],
-        hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }) })),
+        hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }), columnHint: colHints.find((h) => h.rowId === r.id) ?? null })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });
   }

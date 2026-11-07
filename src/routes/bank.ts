@@ -15,6 +15,7 @@ import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
 import { billDistance, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
+import { accountLabels, columnHints } from '../columnHints';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -243,8 +244,8 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   const bid = c.get('businessId');
   const shifts = await all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid);
   const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
-  const r = status === 'confirmed' ? await reconcileShift(db, bid, day) : await trialReconcile(db, bid, day);
-  return c.json({ ...r, confirmed: status === 'confirmed', shifts });
+  const [r, hints] = await Promise.all([status === 'confirmed' ? reconcileShift(db, bid, day) : trialReconcile(db, bid, day), columnHints(db, bid, day)]);
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints });
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
@@ -361,6 +362,42 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match', requireRole('b
   await checkMatch(db, bid, row, ids);
   await db.batch(matchStatements(db, bid, row.id, ids, c.get('user').id, now()));
   return c.json({ ok: true });
+});
+
+/**
+ * A UPI payment written under the wrong account's column: the person changes the column to the account the money
+ * came into (see columnHints). On a confirmed shift the credit can be matched in the same step. Both are recorded.
+ */
+bankRoutes.post('/businesses/:businessId/register-payments/:paymentId/column', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const pay = await one<{ id: string; mode: string; column_label: string | null; register_row_id: string }>(db,
+    `SELECT p.id, p.mode, p.column_label, p.register_row_id FROM register_payments p WHERE p.id = ? AND p.business_id = ?`, c.req.param('paymentId'), bid);
+  if (!pay) fail(404, 'Not found.');
+  if (pay.mode !== 'upi') fail(400, 'Only a UPI payment has an account column.');
+  const data = await body(c);
+  const labels = await accountLabels(db, bid);
+  // Written as given ("UPI BANK 2" and "UPI Bank 2" are one column), so undo puts back what was there.
+  const key = (v: unknown) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const label = typeof data.columnLabel === 'string' ? data.columnLabel.trim().slice(0, 40) : '';
+  if (!label || !labels.some((l) => key(l) === key(label))) fail(400, 'Choose the column of an account that receives UPI.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements = [
+    stmt(db, 'UPDATE register_payments SET column_label = ? WHERE id = ?', label, pay.id),
+    stmt(db, AUDIT.replace("'bank_rows'", "'register_payments'"), ...audit(bid, user, 'register.column_changed', pay.id, { columnLabel: pay.column_label }, { columnLabel: label }, t)),
+  ];
+  let matched = false;
+  if (typeof data.creditId === 'string') {
+    const row = await getRow(db, bid, data.creditId);
+    if (!row) fail(404, 'That credit was not found.');
+    const ids = Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string').slice(0, 30) : [];
+    await checkMatch(db, bid, row, ids);
+    statements.push(...matchStatements(db, bid, row.id, ids, user, t));
+    matched = true;
+  }
+  await db.batch(statements);
+  return c.json({ ok: true, matched });
 });
 
 /** The person ticks clear suggestions and confirms them together; each is checked again here. */

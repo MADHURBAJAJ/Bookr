@@ -1733,6 +1733,66 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect(matched).toEqual([{ sale: 100000, credit: 100000 }, { sale: 141000, credit: 141000 }, { sale: 200000, credit: 200000 }]);
   });
 
+  it('a UPI payment under the wrong account column: Owner and Accountant are told and change it; on a confirmed shift change and match go together', async () => {
+    const h = await hotel();
+    const reg = REGISTER_31_OCT.filter((r) => r.billNo !== '2610317');
+    const pageId = await fullShift(h, reg);
+    // Written under UPI Bank 2; the money came into the UPI XOXO account. Nothing of that amount came into Bank 2.
+    const row = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`, { billNo: '2610317', billType: 'fnb', amount: '4410', status: 'checked',
+      payments: [{ mode: 'upi', columnLabel: 'UPI BANK 2', amount: '4410' }] })).json.id;
+    const xoxo = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    const bank2 = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF B', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${xoxo}/source`, { receivesUpiLabel: 'UPI XOXO' })).status).toBe(200);
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${bank2}/source`, { receivesUpiLabel: 'UPI Bank 2' })).status).toBe(200);
+    const paste = (acc: string, text: string) => h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text });
+    expect((await paste(xoxo, [HEAD, line(1, 'S30000031', '31/10/2026 1:05:00 PM', 4410), line(2, 'S30000032', '01/11/2026 8:30:00 AM', 1234)].join('\n'))).status).toBe(200);
+    expect((await paste(bank2, [HEAD, line(1, 'S30000041', '01/11/2026 8:40:00 AM', 777)].join('\n'))).status).toBe(200);
+
+    const v = await view(h);
+    expect(v.json.columnHints).toEqual([expect.objectContaining({ billNo: '2610317', rowId: row, fromLabel: 'UPI BANK 2', toLabel: 'UPI XOXO', accountName: 'HUF A', amountPaise: 441000 })]);
+    expect(byBill(v, '2610317').bank).toBeNull(); // the column's account has no such credit
+    // Entry staff are told nothing about the bank: no hints, no bank time on Review.
+    expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31`)).json.columnHints).toEqual([]);
+    const staffPage = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${pageId}`)).json;
+    expect(staffPage.rows.find((r: any) => r.id === row).columnHint).toBeNull();
+    const ownerPage = (await h.clients.owner.get(`/businesses/${h.bid}/uploads/${pageId}`)).json;
+    const hint = ownerPage.rows.find((r: any) => r.id === row).columnHint;
+    expect(hint).toMatchObject({ toLabel: 'UPI XOXO', minutes: expect.any(Number) });
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.columnHints.map((x: any) => x.billNo)).toEqual(['2610317']);
+
+    // Only people who can match the bank may change it, and only to an account's column.
+    const change = (client: any, body: unknown) => client.post(`/businesses/${h.bid}/register-payments/${hint.paymentId}/column`, body);
+    expect((await change(h.clients.entry_staff, { columnLabel: 'UPI XOXO' })).status).toBe(403);
+    expect((await change(h.clients.owner, { columnLabel: 'UPI Bank 9' })).status).toBe(400);
+    // Before confirming: the change alone; then the bank backs the bill and the hint is gone. Put back for the next part.
+    expect((await change(h.clients.accountant, { columnLabel: 'UPI XOXO' })).status).toBe(200);
+    const after = await view(h);
+    expect(after.json.columnHints).toEqual([]);
+    expect(byBill(after, '2610317').bank).toMatchObject({ amountPaise: 441000 });
+    expect((await change(h.clients.owner, { columnLabel: 'UPI BANK 2' })).status).toBe(200);
+    expect((await sql`SELECT column_label FROM register_payments WHERE id = ${hint.paymentId}`)[0].column_label).toBe('UPI BANK 2');
+
+    // Confirmed with the wrong column: Reconcile offers the change and the match in one step.
+    for (const x of (await view(h)).json.comparisons) {
+      if (x.decision || x.difference === 'match' || x.difference === 'complimentary') continue;
+      await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${x.id}`, { decision: x.register ? 'use_register' : 'use_software', billType: 'fnb', note: 'Test' });
+    }
+    const done = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
+    expect(done.json.blockers ?? done.json.error ?? null).toBeNull();
+    const rec = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    const ch = rec.columnHints.find((x: any) => x.billNo === '2610317');
+    expect(ch.transactionIds).toHaveLength(1);
+    expect((await change(h.clients.owner, { columnLabel: ch.toLabel, creditId: ch.creditId, transactionIds: ch.transactionIds })).json).toEqual({ ok: true, matched: true });
+    expect((await sql`SELECT status FROM bank_rows WHERE id = ${ch.creditId}`)[0].status).toBe('matched');
+    expect((await sql`SELECT column_label FROM register_payments WHERE id = ${ch.paymentId}`)[0].column_label).toBe('UPI XOXO');
+    expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'register.column_changed'`)[0].n).toBe(3);
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.columnHints).toEqual([]);
+    // Undo: unmatch, then the column back.
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${ch.creditId}/match`)).status).toBe(200);
+    expect((await change(h.clients.owner, { columnLabel: 'UPI BANK 2' })).status).toBe(200);
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.columnHints.map((x: any) => x.billNo)).toEqual(['2610317']);
+  });
+
   it('suggests the side the credit backs, warns of money with no bill, and matches the credits on confirm', async () => {
     const h = await hotel();
     await fullShift(h);

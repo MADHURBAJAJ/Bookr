@@ -367,3 +367,20 @@ The register writes a group's discount once, on the paying row, and it may be mo
 - **One button on the group line**: "Use register for N bills" counts a group's bills that no software report will have, through `register-only`. It takes the same bills as the bulk tick boxes (old POS and short numbers, reviewed, not flagged); anything else stays to decide inside the group.
 - **Bank on the group line** (`pairGroups`): while a shift is open, the group line shows the first unmatched UPI credit in the shift equal to the group's UPI total (a split payment looks for its UPI part), each credit once and none a single bill has taken. It only shows; it matches nothing.
 - **Bills paid in several goes** (7 Nov 2026, `pairEvidence`): a bill whose register has several payments pairs each UPI payment with its own credit of that amount, within an hour of the bill (or the only such credit in the shift when it has no software time). All or none. Compare sales shows "Bank ₹ a + ₹ b", the trial reconcile lists one line per credit, and confirming matches each credit to its payment's sale.
+
+## Wrong UPI column (approved 7 Nov 2026)
+
+A UPI payment written under one account's column (e.g. "UPI Bank 2") whose money came into another account (UPI XOXO)
+never matches, because a column that names an account only matches that account's credits. `src/columnHints.ts`
+finds these: each shift's UPI payments first take credits in their own column's account (closest to the bill's
+software time, within an hour; without a time, only the one credit in the shift); a payment left with none is offered
+an unmatched credit of the same amount in another account. Each credit once.
+
+- Review (row note), Compare sales (beside the bank chip, also on a group line) and Reconcile (a card) show it, with a
+  button that changes the column. On a confirmed shift Reconcile's button changes the column and matches the credit in
+  one step. Undo puts the match and the column back. Nothing changes by itself.
+- `POST /businesses/:id/register-payments/:paymentId/column` (bank.link): the label must be an account's UPI label
+  (case and spaces ignored); recorded as `register.column_changed`. Register payments are not locked on a confirmed
+  shift, so no reopening is needed.
+- Only Owner and Accountant: the shift and Review routes send hints (and Review's bank time on an unclear amount) only
+  to roles with bank.link. Entry staff get none.

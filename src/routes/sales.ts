@@ -7,6 +7,8 @@ import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { storageKey } from '../files';
+import { can } from '../permissions';
+import { columnHints } from '../columnHints';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
@@ -245,7 +247,9 @@ salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view')
   const day = dayParam(c.req.param('day'));
   const bid = c.get('businessId');
   await refreshComparisons(c.env.DB, bid, day, c.get('user').id);
-  return c.json(await shiftView(c.env.DB, bid, day));
+  // Wrong UPI column hints come from the bank: only for people who can match it.
+  const [view, hints] = await Promise.all([shiftView(c.env.DB, bid, day), can(c.get('role'), 'bank.link') ? columnHints(c.env.DB, bid, day) : []]);
+  return c.json({ ...view, columnHints: hints });
 });
 
 salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole('sales.decide'), async (c) => {
