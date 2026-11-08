@@ -429,6 +429,12 @@ the account's label, now on `open.credits[].label`), other payments stay, and am
 a tip). The same PUT as Open row, with Undo. Not for bills paid together, several bills, or a bill only in the software
 report (no row: match it by hand after confirming).
 
+## Deleting a software report on Bring in (8 Nov 2026)
+
+The sales report card lists each file covering the shift (`software.files` on `GET shifts/:day/inputs`: its span,
+bill count and the shifts its bills are in) with a 🗑 that deletes the upload (the existing DELETE uploads/:id, which
+refuses a confirmed shift or a file that replaced another). Not shown on a confirmed shift or for such a file.
+
 ## Missed entries report (approved 7 Nov 2026)
 
 `src/missed.ts`, `GET reports/missed?from&to` (reports.view: Owner, Accountant, Viewer), on Reports above Large

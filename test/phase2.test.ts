@@ -582,6 +582,18 @@ describe('deleting an upload', () => {
     expect((await sql`SELECT count(*) AS n FROM audit_log WHERE action = 'upload.delete'`)[0].n).toBe(1);
   });
 
+  it('Bring in lists the report files covering a shift, with the shifts each covers, and one can be deleted from there', async () => {
+    const h = await hotel();
+    await fullShift(h);
+    const files = (await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31/inputs`)).json.software.files;
+    expect(files.length).toBeGreaterThan(0);
+    const f = files.find((x: any) => x.billCount === 16);
+    expect(f).toMatchObject({ uploadId: expect.any(String), replaces: false, days: expect.arrayContaining(['2026-10-31']) });
+    expect((await h.clients.owner.del(`/businesses/${h.bid}/uploads/${f.uploadId}`)).status).toBe(200);
+    const after = (await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31/inputs`)).json.software.files;
+    expect(after.map((x: any) => x.uploadId)).not.toContain(f.uploadId);
+  });
+
   it('Entry staff can delete only their own uploads; Viewer none', async () => {
     const h = await hotel();
     const mine = (await h.clients.entry_staff.upload(`/businesses/${h.bid}/uploads?kind=bill_register&day=2026-10-31`, png(21), 'image/png')).json.id;

@@ -4124,6 +4124,8 @@ async function bringInView(biz, dayArg) {
     <section class="card step-card" id="step-sales">
       ${head('📄', softwareOk, v.software.reports > 0, 'Software sales report',
         v.software.reports ? `${v.software.bills} bills${v.software.gaps.length ? ' · some hours of the shift not covered yet' : ' · the whole shift is covered'}` : 'The CSV from the hotel software')}
+      ${(v.software.files ?? []).map((f) => html`<div class="fileline"><span class="nm">${when(f.coversFrom)} → ${when(f.coversTo)} · ${f.billCount} bill${f.billCount === 1 ? '' : 's'}${f.days.length > 1 ? html` <span class="tiny">· shifts ${f.days.map(dayLabel).join(', ')}</span>` : ''}</span>
+        ${v.shiftStatus !== 'confirmed' && !f.replaces && canDeleteUpload(biz, { uploadedBy: f.uploadedBy }) ? html`<button type="button" class="iconbtn" data-delreport="${f.uploadId}" data-bills="${f.billCount}" data-days="${f.days.map(dayLabel).join(', ')}" title="Delete this report file" aria-label="Delete this report file">🗑</button>` : ''}</div>`)}
       <div data-csvbox></div>
       ${softwareOk ? html`<div><button class="linkbtn" type="button" data-reveal="csv">+ Add another file</button></div><div data-revealed="csv" hidden>${drop('csv', '📄', 'Drop the CSV here', 'or tap to choose · up to 10 files', '.csv,text/csv')}</div>`
         : drop('csv', '📄', 'Drop the CSV here', 'or tap to choose · up to 10 files', '.csv,text/csv')}
@@ -4158,12 +4160,18 @@ async function bringInView(biz, dayArg) {
   wireShell();
   const reload = () => bringInView(biz, day);
   document.getElementById('accgo')?.addEventListener('click', (e) => checkAccuracy(biz, e.currentTarget));
+  app.querySelectorAll('[data-delreport]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm(`Delete this software report file? Its ${b.dataset.bills} bills are removed from shift ${b.dataset.days}, and their comparisons are worked out again. This cannot be undone; you can bring the file in again.`)) return;
+    b.disabled = true;
+    try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delreport}`); reload(); }
+    catch (err) { b.disabled = false; showError(msg, err); msg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+  }));
   app.querySelectorAll('[data-delpage]').forEach((b) => b.addEventListener('click', async () => {
     const n = Number(b.dataset.reviewed);
     if (!confirm(n ? `Delete this page? ${n} row${n === 1 ? ' you have' : 's you have'} already checked on it will be removed too. This cannot be undone.` : 'Delete this page and its draft rows? This cannot be undone.')) return;
     b.disabled = true;
     try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delpage}`); reload(); }
-    catch (err) { b.disabled = false; showError(msg, err); }
+    catch (err) { b.disabled = false; showError(msg, err); msg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
   }));
   const msg = document.getElementById('bmsg');
   document.getElementById('bid').addEventListener('change', (e) => go(`#/b/${biz.id}/bringin/${e.target.value}`));
