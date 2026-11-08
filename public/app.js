@@ -21,7 +21,10 @@ function html(strings, ...values) {
 }
 const asHtml = (v) => (v && typeof v === 'object' && '__html' in v ? v.__html : esc(v));
 
+// A change always goes as JSON (the server refuses anything else, see app.ts), so one with no body sends {}.
+const bodyFor = (method, body) => (body === undefined && method !== 'GET' ? {} : body);
 async function api(method, path, body) {
+  body = bodyFor(method, body);
   const res = await fetch(`/api${path}`, {
     method,
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
@@ -884,6 +887,7 @@ function showError(el, err) {
   el.innerHTML = html`<div class="error">${err.message}</div>${err.problems?.length ? html`<ul class="error">${err.problems.map((p) => html`<li>${p}</li>`)}</ul>` : ''}`.__html;
 }
 async function apiFull(method, path, body) {
+  body = bodyFor(method, body);
   const res = await fetch(`/api${path}`, { method, headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
   const data = await res.json().catch(() => null);
   if (!res.ok) { const e = new Error(data?.error ?? 'Something went wrong.'); e.problems = data?.problems; throw e; }
@@ -4163,14 +4167,14 @@ async function bringInView(biz, dayArg) {
   app.querySelectorAll('[data-delreport]').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm(`Delete this software report file? Its ${b.dataset.bills} bills are removed from shift ${b.dataset.days}, and their comparisons are worked out again. This cannot be undone; you can bring the file in again.`)) return;
     b.disabled = true;
-    try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delreport}`); reload(); }
+    try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delreport}`, {}); reload(); }
     catch (err) { b.disabled = false; showError(msg, err); msg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
   }));
   app.querySelectorAll('[data-delpage]').forEach((b) => b.addEventListener('click', async () => {
     const n = Number(b.dataset.reviewed);
     if (!confirm(n ? `Delete this page? ${n} row${n === 1 ? ' you have' : 's you have'} already checked on it will be removed too. This cannot be undone.` : 'Delete this page and its draft rows? This cannot be undone.')) return;
     b.disabled = true;
-    try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delpage}`); reload(); }
+    try { await api('DELETE', `/businesses/${biz.id}/uploads/${b.dataset.delpage}`, {}); reload(); }
     catch (err) { b.disabled = false; showError(msg, err); msg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
   }));
   const msg = document.getElementById('bmsg');
