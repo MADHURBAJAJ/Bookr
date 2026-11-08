@@ -11,6 +11,10 @@ export interface Env {
   MAIL_ROUTES?: string;
   /** Senders whose mail is read (comma-separated addresses or @domains). Others are turned away. Empty: all are kept. */
   CARD_MAIL_FROM?: string;
+  /** The Owner's Gmail script (Apps Script web app) that saves card mails into the Drive folder; Sync calls it first. Secret. */
+  CARD_SCRIPT_URL?: string;
+  /** The code the script checks before it runs. Secret. */
+  CARD_SCRIPT_TOKEN?: string;
   /** Worker settings (wrangler.jsonc vars). */
   CLAUDE_OCR_MODEL?: string;
   OCR_DAILY_PAGE_LIMIT?: string;

@@ -8,6 +8,24 @@ import { downloadFile, listFolder } from './google';
 import { isCardReportName } from './cardsettlement';
 import { readReportFile } from './mail';
 
+/**
+ * Asks the Owner's Gmail script to save new card mails into the folder now (approved 8 Nov 2026), so one Sync brings
+ * the day's report in without waiting for the script's hourly run. The script is an Apps Script web app; its address
+ * and a shared code are Worker secrets. Null when not set up; a failure is said, and the folder is read anyway.
+ */
+export async function runCardScript(env: Env): Promise<{ saved: number } | { error: string } | null> {
+  if (!env.CARD_SCRIPT_URL || !env.CARD_SCRIPT_TOKEN) return null;
+  try {
+    const res = await fetch(env.CARD_SCRIPT_URL, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: env.CARD_SCRIPT_TOKEN }), redirect: 'follow', signal: AbortSignal.timeout(25_000) });
+    const r = await res.json().catch(() => null) as { saved?: unknown; error?: unknown } | null;
+    if (r && typeof r.saved === 'number') return { saved: r.saved };
+    return { error: `The Gmail script did not save the card mails${r && typeof r.error === 'string' ? `: ${r.error.slice(0, 200)}` : ` (it answered ${res.status})`}. The folder was read anyway.` };
+  } catch {
+    return { error: 'The Gmail script did not answer in time. The folder was read anyway; its hourly run will catch up.' };
+  }
+}
+
 /** At most this many new files a sync, so one sync stays quick; the rest come next time. */
 const MAX_FILES = 30;
 
@@ -16,6 +34,7 @@ export async function syncCardFolder(env: Env, businessId: string) {
   const db = env.DB;
   const b = await one<{ card_drive_folder: string | null }>(db, 'SELECT card_drive_folder FROM businesses WHERE id = ?', businessId);
   if (!b?.card_drive_folder) return null;
+  const script = await runCardScript(env);
   const files = (await listFolder(env, b.card_drive_folder)).filter((f) => isCardReportName(f.name));
   const fresh: typeof files = [];
   for (const f of files) {
@@ -39,5 +58,5 @@ export async function syncCardFolder(env: Env, businessId: string) {
     added += r.added;
     if (!r.ok) problems.push(r.note);
   }
-  return { files: take.length, more: fresh.length - take.length, added, problems };
+  return { files: take.length, more: fresh.length - take.length, added, problems, script };
 }

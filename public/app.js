@@ -4522,11 +4522,14 @@ function syncResultHtml(r) {
     : html`<div class="note">No account has a Google Sheet set up. Use Set up on Bank sync.</div>`}${cardSyncHtml(r.cards)}</div>`;
 }
 /** The card reports read from the Drive folder by the same Sync (nothing when no folder is set). */
+/** What the Gmail script did on this Sync (empty when it is not set up). */
+const scriptText = (x) => (!x ? '' : 'error' in x ? `${x.error} ` : `Gmail: ${x.saved ? `${x.saved} new report mail${x.saved === 1 ? '' : 's'} saved to Drive` : 'no new report mails'}. `);
+
 function cardSyncHtml(k) {
   if (!k) return '';
   const biz = currentBizId();
   return html`<div class="list-row" style="padding:4px 0"><span><a href="#/b/${biz}/cards">Card reports</a> <span class="tiny">· Drive folder</span></span>
-    ${k.ok ? html`<span class="${k.problems.length ? 'error' : 'ok-msg'}" style="font-size:14px">${k.problems.length ? '' : '✓ '}${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'no new files'}${k.more ? ` (${k.more} more next Sync)` : ''}${k.problems.length ? ` · ${k.problems.join(' ')}` : ''}</span>`
+    ${k.ok ? html`<span class="${k.problems.length || k.script?.error ? 'error' : 'ok-msg'}" style="font-size:14px">${k.problems.length || k.script?.error ? '' : '✓ '}${scriptText(k.script)}${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'no new files'}${k.more ? ` (${k.more} more next Sync)` : ''}${k.problems.length ? ` · ${k.problems.join(' ')}` : ''}</span>`
       : html`<span class="error" style="font-size:14px">${k.error}</span>`}</div>`;
 }
 
@@ -4774,7 +4777,7 @@ async function cardsView(biz, query = '') {
   document.getElementById('cdsync')?.addEventListener('click', (e) => act(e.currentTarget, async () => {
     const k = await api('POST', `/businesses/${biz.id}/cards/sync`);
     await reload();
-    doneToast(`${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'No new files in the folder'}${k.more ? ` (${k.more} more: check again)` : ''}.${k.problems.length ? ` ${k.problems.join(' ')}` : ''}`, null, reload);
+    doneToast(`${scriptText(k.script)}${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'No new files in the folder'}${k.more ? ` (${k.more} more: check again)` : ''}.${k.problems.length ? ` ${k.problems.join(' ')}` : ''}`, null, reload);
   }));
   // The report file: tap or drop. Payments already in Bookr are not added twice.
   const zone = app.querySelector('[data-drop="cards"]');

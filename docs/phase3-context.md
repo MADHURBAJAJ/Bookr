@@ -65,6 +65,10 @@ Migration 0020: `card_rules` (one per card machine/terminal: fee head, GST head)
 - **Shift bar**: card items (needs + no swipe) count in Reconcile's "N left" once the shift is confirmed.
 - **Card settlements** keeps the folder link, the reports received, every day's payments and the history; settling there uses the rule.
 
+### Sync runs the Gmail script (approved 8 Nov 2026)
+
+The Owner's Apps Script (saves `ICICI_POS…xlsx` attachments of card mails without the `bookr-saved` label into the Drive folder, then labels them) is also deployed as a web app (run as the Owner, anyone with the link). Its `doPost` runs only when the body carries the shared code. Worker secrets `CARD_SCRIPT_URL` (the web app address) and `CARD_SCRIPT_TOKEN` (the code; also in the Mac's Keychain as bookr-card-script-token). Sync on Card settlements and Sync all bank accounts call it first (25 s limit), then read the folder; when it fails the folder is still read and the problem is said. The hourly trigger stays as a backup.
+
 ### Setting up the mail (Owner, once)
 
 1. A domain on Cloudflare (nameservers at Cloudflare). If the domain already receives company mail, use a subdomain such as `mail.<domain>`: Email Routing replaces the MX records.

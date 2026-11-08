@@ -316,9 +316,15 @@ describe('card settlements end to end', () => {
     let listed = [{ id: 'file1', name: '900000000000001_HOTEL_05112026_ICICI_POS_CD.xlsx', modifiedTime: '2026-11-05T02:14:00Z' },
       { id: 'other', name: 'notes.xlsx', modifiedTime: '2026-11-05T02:14:00Z' }];
     let denied = false;
+    let scriptCalls: unknown[] = [];
+    let scriptDown = false;
     const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: string) => {
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
       const u = String(url);
+      if (u.startsWith('https://script.google.com/')) {
+        scriptCalls.push(JSON.parse(String(init?.body)));
+        return scriptDown ? new Response('<html>Sorry</html>', { status: 500 }) : new Response(JSON.stringify({ saved: 1 }));
+      }
       if (u.includes('oauth2')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
       if (denied) return new Response('{"error":{"status":"PERMISSION_DENIED"}}', { status: 404 });
       if (u.includes('/drive/v3/files?')) return new Response(JSON.stringify({ files: listed }));
@@ -340,6 +346,17 @@ describe('card settlements end to end', () => {
       const got = v.mails[0];
       expect(got).toMatchObject({ from: 'Google Drive', status: 'read' });
       expect((await o.post(`/businesses/${h.bid}/inbound-mails/${got.id}/read`)).json.note).toMatch(/0 new payments, 2 already in Bookr/);
+      // Not set up: the script is not called. Set up (Worker secrets): Sync asks it to save new mails first, with the code.
+      expect(scriptCalls).toEqual([]);
+      expect(sync.cards.script).toBeNull();
+      env.CARD_SCRIPT_URL = 'https://script.google.com/macros/s/abc/exec';
+      env.CARD_SCRIPT_TOKEN = 'code-1';
+      expect((await o.post(`/businesses/${h.bid}/cards/sync`)).json).toMatchObject({ files: 0, script: { saved: 1 } });
+      expect(scriptCalls).toEqual([{ token: 'code-1' }]);
+      scriptDown = true;
+      expect((await o.post(`/businesses/${h.bid}/bank/sync-all`)).json.cards).toMatchObject({ ok: true, script: { error: expect.stringMatching(/did not save.*read anyway/) } });
+      delete env.CARD_SCRIPT_URL;
+      delete env.CARD_SCRIPT_TOKEN;
       denied = true;
       listed = [];
       expect((await o.post(`/businesses/${h.bid}/bank/sync-all`)).json.cards).toMatchObject({ ok: false, error: expect.stringMatching(/Share it with bookr@test/) });
