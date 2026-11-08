@@ -12,7 +12,7 @@ import { columnHints } from '../columnHints';
 import { shiftSlips } from '../slips';
 import { missedEntries } from '../missed';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { CASH_BY_UPI_MIN, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -280,7 +280,11 @@ salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view')
   const slips = can(c.get('role'), 'bank.link') && view.status !== 'confirmed' && view.bank
     ? await shiftSlips(c.env.DB, bid, day, view.bank.left.filter((id) => !hinted.has(id))) : [];
   const bank = view.bank && (({ left: _l, ...b }) => b)(view.bank);
-  return c.json({ ...view, bank, columnHints: hints, slips });
+  // The UPI credit behind a "cash" warning is bank data: only for people who can match the bank.
+  const warnings = can(c.get('role'), 'bank.link') ? view.warnings : view.warnings.filter((w) => w.counted).map(({ byUpi: _b, ...w }) => w);
+  // "No UPI credit" reads the bank too: same people.
+  const comparisons = can(c.get('role'), 'bank.link') ? view.comparisons : view.comparisons.map(({ bankNone: _n, ...x }) => x);
+  return c.json({ ...view, comparisons, bank, warnings, columnHints: hints, slips });
 });
 
 salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole('sales.decide'), async (c) => {
@@ -379,6 +383,68 @@ salesRoutes.put('/businesses/:businessId/comparisons/:comparisonId', requireRole
     throw e;
   }
   return c.json({ ok: true });
+});
+
+/**
+ * A "cash" bill only in the software report that the bank shows was paid by UPI (approved 8 Nov 2026): it is written
+ * into the register on the shift's "Added from software report" page as UPI, under the credit's account column, and
+ * counted from the register. The credit is matched when the shift is confirmed. Delete the line there to undo.
+ */
+salesRoutes.post('/businesses/:businessId/comparisons/:id/paid-by-upi', requireRole('sales.decide'), async (c) => {
+  if (!can(c.get('role'), 'bank.link')) fail(403, 'Only people who can match the bank can do this.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const data = await body(c);
+  const cmp = await one<{ shift_day: string; bill_no: string; difference: string; sw_mode: string | null; sw_amount_paise: number | null; register_row_id: string | null; bill_type: string | null; paid_at: number | null }>(db,
+    `SELECT c.shift_day, c.bill_no, c.difference, c.sw_mode, c.sw_amount_paise, c.register_row_id, c.bill_type, b.paid_at
+     FROM bill_comparisons c LEFT JOIN software_bills b ON b.id = c.software_bill_id WHERE c.id = ? AND c.business_id = ?`, id, bid);
+  if (!cmp) fail(404, 'Not found.');
+  if (cmp.difference !== 'missing_in_register' || cmp.register_row_id || cmp.sw_mode !== 'cash' || !cmp.sw_amount_paise) fail(400, 'Only a cash bill that is in the software report but not in the register can be added as UPI.');
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day);
+  if (shift?.status === 'confirmed') fail(409, CONFIRMED);
+  const creditId = typeof data.creditId === 'string' && isUuid(data.creditId) ? data.creditId : fail(400, 'Choose the bank credit.');
+  const credit = await one<{ amount_paise: number; posted_at: number; status: string; kind: string; label: string | null }>(db, `SELECT r.amount_paise, r.posted_at, r.status, r.kind, s.receives_upi_label AS label
+    FROM bank_rows r LEFT JOIN bank_sources s ON s.account_id = r.account_id WHERE r.id = ? AND r.business_id = ?`, creditId, bid);
+  if (!credit || credit.kind !== 'upi_in' || credit.status !== 'unmatched') fail(400, 'That bank credit is not an unmatched UPI credit.');
+  if (credit.amount_paise !== cmp.sw_amount_paise) fail(400, 'The credit is not the amount of the bill.');
+  if (cmp.paid_at != null && Math.abs(credit.posted_at - cmp.paid_at) > CASH_BY_UPI_MIN * 60000) fail(400, 'The credit is not near the bill\'s time.');
+  const billType = cmp.bill_type ?? (data.billType === 'fnb' || data.billType === 'room' ? data.billType : fail(400, 'Choose the bill\'s type: F&B or Room.'));
+  const t = now();
+  const user = c.get('user').id;
+  const at = new Date(credit.posted_at + 5.5 * 3600e3).toISOString().slice(11, 16);
+  const note = `Paid by UPI: the bank got ₹ ${(credit.amount_paise / 100).toLocaleString('en-IN')} at ${at}; the software said cash`;
+  const page = await softwarePage(db, bid, cmp.shift_day, user, t);
+  const line = (await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) + 1 AS n FROM register_rows WHERE upload_id = ?', page.id))?.n ?? 1;
+  const rowId = newId();
+  try {
+    await db.batch([
+      ...page.statements,
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, remarks, status, ocr_original, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'checked', ?, ?, ?, ?)`, rowId, bid, page.id, line, cmp.shift_day, cmp.bill_no, billType, cmp.sw_amount_paise,
+        `Added from software report: ${note}`, JSON.stringify({ source: 'software_report', addedBy: user, comparisonId: id, paidByUpi: creditId }), user, t, t),
+      stmt(db, "INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at) VALUES (?, ?, ?, 'upi', ?, ?, ?)",
+        newId(), bid, rowId, credit.label ?? 'UPI', cmp.sw_amount_paise, t),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.added_from_software', 'register_rows', ?, NULL, ?, ?)`, bid, user, rowId,
+        JSON.stringify({ billNo: cmp.bill_no, billType, amountPaise: cmp.sw_amount_paise, mode: 'upi', creditId, note, comparisonId: id }), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  // Now software says cash and the register UPI: counted from the register, which the bank backs.
+  await refreshComparisons(db, bid, cmp.shift_day, user);
+  const now2 = await one<{ id: string; difference: string; decision: string | null }>(db, 'SELECT id, difference, decision FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
+  if (now2 && NEEDS_DECISION.includes(now2.difference as never) && !now2.decision) {
+    await db.batch([
+      stmt(db, 'UPDATE bill_comparisons SET decision = \'use_register\', decided_by = ?, decided_at = ?, note = ?, linked_to_id = NULL WHERE id = ?', user, t, note, now2.id),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, NULL, ?, ?)`, bid, user, now2.id, JSON.stringify({ decision: 'use_register', note }), t),
+    ]);
+  }
+  return c.json({ ok: true, rowId, uploadId: page.id });
 });
 
 salesRoutes.post('/businesses/:businessId/shifts/:day/confirm', requireRole('sales.decide'), async (c) => {

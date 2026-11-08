@@ -4,12 +4,18 @@
 // hour, and offers one only when the bill then equals the software and the credit pays the changed payment. A person
 // presses the button; before confirming it edits the register row, after confirming it is a recorded correction
 // (register_bank_adjustments) that Unmatch puts back. Bills paid together are left to the person.
+// Money moved between two bills (approved 8 Nov 2026): bills of 449 and 63, credits of 450 and 62, all within
+// SWAP_MIN minutes. Each bill takes the credit nearest its amount; the difference is a tip or a discount. One button
+// corrects both rows; on a confirmed shift both are recorded and matched in one step, so Unmatch on either puts both back.
 
 import { all, newId, one, stmt, type DB } from './db';
 import { fail } from './http';
 import { matchStatements, type BankRow } from './bank';
 
 const NEAR_MIN = 60;
+/** Two bills and two credits that trade a little money: each credit this close to its bill, and this close in amount. */
+const SWAP_MIN = 15;
+const SWAP_PAISE = 500;
 
 export interface SlipPay { id: string; mode: string; label: string | null; amountPaise: number }
 export interface SlipBill {
@@ -20,7 +26,7 @@ export interface SlipBill {
 }
 export interface SlipCredit { id: string; amountPaise: number; postedAt: number; accountName: string | null; label: string | null }
 export interface Slip {
-  key: string; kind: 'add_payment' | 'change_payment';
+  key: string; kind: 'add_payment' | 'change_payment' | 'swap';
   rowId: string; uploadId: string; billNo: string; softwarePaise: number;
   creditId: string; creditPaise: number; postedAt: number; accountName: string | null; minutes: number;
   /** The payment written wrong (change_payment). */
@@ -29,6 +35,8 @@ export interface Slip {
   after: { discountPaise: number; tipPaise: number; pays: (Omit<SlipPay, 'id'> & { id: string | null })[] };
   /** The bill's other UPI payments and the credits that pay them (e.g. the ₹210 of 210 + 282): matched with it. */
   others: { paymentId: string; creditId: string; amountPaise: number; postedAt: number }[];
+  /** A swap: the other bill's payment and credit, corrected with this one. Its own kind is change_payment. */
+  partner?: Slip;
 }
 
 const digits = (n: number) => String(Math.round(n / 100)).split('').sort().join('');
@@ -70,6 +78,8 @@ export function findSlips(bills: SlipBill[], credits: SlipCredit[], unmatched: {
     usedCredit.add(s.creditId); usedBill.add(s.rowId);
     out.push(s);
   }
+  out.push(...findSwaps(bills.filter((b) => !usedBill.has(b.rowId)), credits.filter((c) => !usedCredit.has(c.id)), unmatched));
+  for (const s of out) { usedCredit.add(s.creditId); if (s.partner) usedCredit.add(s.partner.creditId); }
   // The bill's other UPI payments: the closest unmatched credit of each amount near the bill, each credit once.
   for (const s of out) {
     const b = bills.find((x) => x.rowId === s.rowId)!;
@@ -81,6 +91,47 @@ export function findSlips(bills: SlipBill[], credits: SlipCredit[], unmatched: {
     }
   }
   return out;
+}
+
+/**
+ * Money moved between two bills: two bills that equal the software, each with one UPI payment no credit backs, and two
+ * credits with no bill that total the same as the two payments. Each bill takes the credit nearest its payment (within
+ * SWAP_PAISE, within SWAP_MIN minutes); the bill then ends in a tip or a discount. Offered only when it is the one way.
+ */
+export function findSwaps(bills: SlipBill[], credits: SlipCredit[], unmatched: { id: string; amountPaise: number; postedAt: number }[]): Slip[] {
+  const sumOf = (b: SlipBill) => b.pays.reduce((t, p) => t + p.amountPaise, 0);
+  // The bill's one UPI payment that no credit backs, when the bill equals the software and its payments add up.
+  const loose = bills.flatMap((b) => {
+    const upi = b.pays.filter((p) => p.mode === 'upi');
+    if (upi.length !== 1 || b.backed.has(upi[0].id) || b.grossPaise !== b.swPaise || sumOf(b) !== b.grossPaise - b.discountPaise + b.tipPaise) return [];
+    if (unmatched.some((u) => u.amountPaise === upi[0].amountPaise && Math.abs(u.postedAt - b.paidAt) <= NEAR_MIN * 60000)) return [];
+    return [{ b, p: upi[0] }];
+  });
+  const fits = (x: (typeof loose)[number], c: SlipCredit) => c.amountPaise !== x.p.amountPaise && Math.abs(c.amountPaise - x.p.amountPaise) <= SWAP_PAISE
+    && Math.abs(c.postedAt - x.b.paidAt) <= SWAP_MIN * 60000;
+  const options: { x: (typeof loose)[number]; c: SlipCredit; y: (typeof loose)[number]; d: SlipCredit; rank: number }[] = [];
+  for (let i = 0; i < loose.length; i++) for (let j = i + 1; j < loose.length; j++) {
+    const [x, y] = [loose[i], loose[j]];
+    for (const c of credits) for (const d of credits) {
+      if (c.id === d.id || x.p.amountPaise + y.p.amountPaise !== c.amountPaise + d.amountPaise || !fits(x, c) || !fits(y, d)) continue;
+      options.push({ x, c, y, d, rank: Math.abs(c.amountPaise - x.p.amountPaise) + Math.abs(d.amountPaise - y.p.amountPaise) });
+    }
+  }
+  // The one way: no other option shares a bill or a credit with it.
+  const touches = (a: (typeof options)[number], o: (typeof options)[number]) => [a.x.b.rowId, a.y.b.rowId].some((r) => [o.x.b.rowId, o.y.b.rowId].includes(r))
+    || [a.c.id, a.d.id].some((r) => [o.c.id, o.d.id].includes(r));
+  const one = (x: (typeof loose)[number], c: SlipCredit, key: string): Slip => {
+    const paid = sumOf(x.b) - x.p.amountPaise + c.amountPaise;
+    return { key, kind: 'change_payment', rowId: x.b.rowId, uploadId: x.b.uploadId, billNo: x.b.billNo, softwarePaise: x.b.swPaise, creditId: c.id, creditPaise: c.amountPaise,
+      postedAt: c.postedAt, accountName: c.accountName, minutes: Math.round(Math.abs(c.postedAt - x.b.paidAt) / 60000), paymentId: x.p.id, fromPaise: x.p.amountPaise,
+      before: { discountPaise: x.b.discountPaise, tipPaise: x.b.tipPaise, pays: x.b.pays },
+      after: { discountPaise: Math.max(x.b.grossPaise - paid, 0), tipPaise: Math.max(paid - x.b.grossPaise, 0), pays: x.b.pays.map((q) => (q.id === x.p.id ? { ...q, amountPaise: c.amountPaise } : q)) },
+      others: [] };
+  };
+  return options.filter((a) => options.every((o) => o === a || !touches(a, o))).map((a) => {
+    const key = `slip:swap:${a.x.p.id}:${a.c.id}:${a.y.p.id}:${a.d.id}`;
+    return { ...one(a.x, a.c, key), kind: 'swap' as const, partner: one(a.y, a.d, key) };
+  });
 }
 
 /**
@@ -115,7 +166,8 @@ export async function shiftSlips(db: DB, businessId: string, day: string, credit
     const backed = new Set(mine.filter((p) => p.mode === 'upi' && sold.some((s) => s.matched && s.amountPaise === p.amountPaise)).map((p) => p.id));
     return { ...r, pays: mine.map(({ rowId: _r, ...p }) => p), backed };
   });
-  return findSlips(bills, credits, unmatched).filter((s) => !confirmed || s.kind === 'add_payment' || sales.some((x) => x.rowId === s.rowId && !x.matched && x.amountPaise === s.fromPaise));
+  const waits = (s: Slip) => sales.some((x) => x.rowId === s.rowId && !x.matched && x.amountPaise === s.fromPaise);
+  return findSlips(bills, credits, unmatched).filter((s) => !confirmed || s.kind === 'add_payment' || (waits(s) && (!s.partner || waits(s.partner))));
 }
 
 /**
@@ -136,7 +188,7 @@ export async function slipFixStatements(db: DB, businessId: string, credit: Bank
   if (s.after.tipPaise !== s.before.tipPaise) record('register_row', s.rowId, 'tip_paise', { bp: s.before.tipPaise, ap: s.after.tipPaise });
   statements.push(stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ? WHERE id = ?', s.after.discountPaise, s.after.tipPaise, s.rowId));
   let txId: string;
-  if (s.kind === 'change_payment') {
+  if (s.kind === 'change_payment' || s.kind === 'swap') {
     const tx = sales.find((x) => x.payment_mode === 'upi' && !x.matched_bank_row && x.match_status === 'awaiting_bank_match' && x.amount_paise === s.fromPaise);
     if (!tx) fail(409, `Bill ${s.billNo}'s ₹${(s.fromPaise! / 100).toFixed(2)} sale is not waiting for the bank.`);
     record('register_payment', s.paymentId!, 'amount_paise', { bp: s.fromPaise, ap: s.creditPaise });
@@ -166,6 +218,12 @@ export async function slipFixStatements(db: DB, businessId: string, credit: Bank
     const i = free.findIndex((x) => x.amount_paise === o.amountPaise);
     if (i < 0) continue;
     statements.push(...matchStatements(db, businessId, o.creditId, [free.splice(i, 1)[0].id], userId, t));
+  }
+  // A swap: the other bill, recorded under its own credit.
+  if (s.partner) {
+    const other = await one<BankRow>(db, "SELECT * FROM bank_rows WHERE id = ? AND business_id = ? AND status = 'unmatched'", s.partner.creditId, businessId);
+    if (!other) fail(409, `The ₹${(s.partner.creditPaise / 100).toFixed(2)} credit for bill ${s.partner.billNo} is already matched, booked or ignored.`);
+    statements.push(...(await slipFixStatements(db, businessId, other!, s.partner, userId, t)));
   }
   return statements;
 }

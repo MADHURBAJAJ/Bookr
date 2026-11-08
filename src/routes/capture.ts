@@ -493,7 +493,10 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; ocr_original: string | null }>(db,
     'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
-  const r = registerInput(await body(c));
+  const data = await body(c);
+  const r = registerInput(data);
+  // Fields a person confirmed as they are (e.g. the bill number picked from the software list, the same as read).
+  const confirmed = (Array.isArray(data.confirm) ? data.confirm : []).filter((f): f is string => typeof f === 'string' && ['bill_no', 'amount'].includes(f));
   await checkPaidWith(db, bid, rowId, old.shift_day, r.paidWithRowId);
   await checkDiscount(db, bid, rowId, r, old.paid_with_row_id);
   const t = now();
@@ -511,6 +514,7 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
       (old.discount_paise !== r.discountPaise || old.tip_paise !== r.tipPaise) && 'discount',
       (old.remarks ?? null) !== r.remarks && 'remarks',
       (old.paid_with_row_id !== r.paidWithRowId || key(oldPays.map((p) => ({ mode: p.mode, amount: p.amount_paise, label: p.column_label }))) !== key(r.payments.map((p) => ({ mode: p.mode, amount: p.amountPaise, label: p.columnLabel })))) && 'payments',
+      ...confirmed,
     ].filter(Boolean) as string[];
     if (changed.length) {
       const o = JSON.parse(ocr) as { resolved?: string[] };

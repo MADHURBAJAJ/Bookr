@@ -435,6 +435,50 @@ The sales report card lists each file covering the shift (`software.files` on `G
 bill count and the shifts its bills are in) with a 🗑 that deletes the upload (the existing DELETE uploads/:id, which
 refuses a confirmed shift or a file that replaced another). Not shown on a confirmed shift or for such a file.
 
+## A "cash" bill the bank shows was paid by UPI (approved 8 Nov 2026)
+
+A software-only cash bill (counted, or undecided) with an unmatched UPI credit of its amount within
+`CASH_BY_UPI_MIN` (60) minutes of its software time: the warning on Compare says so (`warnings[].byUpi`, bank.link only;
+others see the plain "check the cash" for counted bills). "Add to the register as UPI" (`POST comparisons/:id/paid-by-upi`,
+sales.decide and bank.link) writes it on the "Added from software report" page as a UPI payment under the credit's
+account column, ticked, with the reason in its remarks, then decides it Use register (software cash, register UPI).
+Confirming books it as UPI and matches the credit; the cash check no longer expects it. Deleting that line undoes it.
+On 31 Oct: 2610302, ₹1,698 cash at 12:58 pm, and a UPI credit of ₹1,698 at 12:51 pm.
+
+## One count of credits not matched yet (approved 8 Nov 2026)
+Compare and Reconcile show the same number: UPI credits inside the shift that no bill or group paired
+(`shiftView` → `bank.open`; trial Reconcile's `open.credits`, `strip.creditsLeft`). Its parts: those with no bill of
+that amount (`bank.noBill`; `strip.creditsNoBill`, `open.credits[].noBill`), those whose bill of that amount did not
+pair, and (on Compare) those explained on the page by a slip, a wrong column or a "cash" bill paid by UPI. Compare's
+warning names all three and links to Reconcile; the labels read "Credits not matched yet" everywhere.
+
+## Money moved between two bills (approved 8 Nov 2026)
+Two bills that equal the software, each with one UPI payment no credit backs, and two leftover credits that total the
+same as the two payments: each bill takes the credit nearest its payment (within ₹5 and 15 minutes), ending in a tip
+or a discount. `findSwaps` in slips.ts; offered only when no other option shares a bill or credit. It is a slip of kind
+`swap` with a `partner` (the other bill's change_payment): one button corrects both rows before confirming; after,
+`slip-fix` takes `partnerCreditId`, records both corrections and matches both credits in one step, so Unmatch on either
+puts both back. On 31 Oct: 26103118 ₹449 and 26103119 ₹63, credits ₹450 and ₹62. Chosen over matching them as one
+group, which would need a data model change.
+
+## Looking back two hours for a bill's credit (approved 8 Nov 2026)
+The software's time is when the bill was closed, which can be well after the guest paid. After the one-hour pairing,
+a timed bill still without a credit (not grouped, not paid in parts, not left out or carried) takes a credit of its
+amount from `FAR_BACK_MIN` (120) minutes before its time to 60 after, only when that stretch holds just one credit of
+that amount (taken or not) and no other bill still without a credit could take it. Reconcile and confirming follow,
+since they use the same evidence. "No UPI credit" (below) looks over the same stretch. On 31 Oct: 26103160, closed
+9:29 pm, ₹385 at 8:26 pm.
+
+## A mode difference the bank settles (approved 8 Nov 2026)
+On a mode or amount-and-mode difference where one side says UPI and the other cash or card: if the bank pairs a credit
+(`pairEvidence`), its `suggest` already backs the UPI side. If not, and the bank is in for the shift, and no unused UPI
+credit of the UPI side's amount (any account) came in from `FAR_BACK_MIN` before the bill to an hour after, the comparison carries
+`bankNone {suggest, upiPaise, mode, takenBy}`: the other side's way is most likely right; `takenBy` names the bill that
+took a credit of that amount. Skipped for bills paid together, rows with several payments, left-out or carried bills.
+Compare shows one line ("No UPI credit of ₹ X near this bill: most likely card, as the register says") and highlights
+the button; a wrong-column hint or a slip on the row wins. Not in "Accept bank suggestions": a person presses it.
+Owner and Accountant only (the shift GET strips `bankNone` for others).
+
 ## Missed entries report (approved 7 Nov 2026)
 
 `src/missed.ts`, `GET reports/missed?from&to` (reports.view: Owner, Accountant, Viewer), on Reports above Large

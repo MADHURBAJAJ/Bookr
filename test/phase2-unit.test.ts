@@ -5,6 +5,7 @@ import { csvRows, parseDateTime, parseSalesCsv } from '../src/salescsv';
 import { billDistance, classify, numberFlags, registerMode, suggestBills, withDatePrefix, type NumberContext } from '../src/sales';
 import { parsePaise } from '../src/money';
 import { creditsWithoutBill, pairEvidence, type EvidenceBill } from '../src/bankEvidence';
+import { findSwaps } from '../src/slips';
 import { tableSets } from '../src/explain';
 import { buildSalesCsv, REPORT_1_NOV_EARLY, REPORT_31_OCT } from '../demo/sample-data';
 
@@ -199,6 +200,29 @@ describe('bill number suggestions', () => {
   });
 });
 
+describe('money moved between two bills (approved 8 Nov 2026)', () => {
+  const M = 60000;
+  const bill = (rowId: string, amount: number, paidAt: number) => ({ rowId, uploadId: 'u', billNo: rowId, grossPaise: amount, discountPaise: 0, tipPaise: 0, swPaise: amount, paidAt,
+    pays: [{ id: `p-${rowId}`, mode: 'upi', label: 'UPI', amountPaise: amount }], backed: new Set<string>() });
+  const credit = (id: string, amountPaise: number, postedAt: number) => ({ id, amountPaise, postedAt, accountName: 'A', label: 'UPI' });
+
+  it('pairs each bill with the credit nearest its amount when the totals agree, and only when it is the one way', () => {
+    // 26103118 ₹ 449 at 12:12 and 26103119 ₹ 63 at 12:11; the bank got ₹ 450 at 12:11 and ₹ 62 at 12:03.
+    const bills = [bill('a', 44900, 732 * M), bill('b', 6300, 731 * M)];
+    const credits = [credit('x', 45000, 731 * M), credit('y', 6200, 723 * M)];
+    const [s] = findSwaps(bills, credits, credits);
+    expect([s.rowId, s.creditId, s.after.tipPaise, s.partner!.rowId, s.partner!.creditId, s.partner!.after.discountPaise]).toEqual(['a', 'x', 100, 'b', 'y', 100]);
+    // Totals differ: nothing.
+    expect(findSwaps(bills, [credit('x', 45000, 731 * M), credit('y', 6100, 723 * M)], [])).toEqual([]);
+    // Too far in time: nothing.
+    expect(findSwaps(bills, [credit('x', 45000, 760 * M), credit('y', 6200, 723 * M)], [])).toEqual([]);
+    // A credit of the payment's own amount near the bill: the payment is fine, nothing.
+    expect(findSwaps(bills, credits, [...credits, credit('z', 6300, 735 * M)])).toEqual([]);
+    // Two ways to pair (a third bill could trade with either credit): nothing.
+    expect(findSwaps([...bills, bill('c', 6300, 733 * M)], credits, credits)).toEqual([]);
+  });
+});
+
 describe('bank evidence on Compare sales', () => {
   const w = { from: 0, to: 24 * 3600e3 };
   const bill = (id: string, o: Partial<EvidenceBill>): EvidenceBill => ({ id, paidAt: null, difference: 'match', decision: null, grouped: false,
@@ -226,6 +250,23 @@ describe('bank evidence on Compare sales', () => {
     expect(one.evidence.get('r')).toMatchObject({ creditId: 'k', minutes: null });
     const two = pairEvidence([bill('r', { rgAmount: 400, rgMode: 'upi' }), bill('s', { rgAmount: 400, rgMode: 'upi' })], [{ id: 'k', amount: 400, postedAt: 3600e3 }], w);
     expect(two.evidence.size).toBe(0);
+  });
+
+  it('a bill closed well after it was paid looks back two hours, only when one credit of its amount lies there', () => {
+    // 26103160 on 31 Oct: closed at 9:29 pm, ₹ 385 by UPI at 8:26 pm (63 minutes earlier), another at 7:04 pm (outside).
+    const b = bill('a', { paidAt: 500 * M, difference: 'match', swAmount: 385, swMode: 'upi', rgAmount: 385, rgMode: 'upi' });
+    expect(pairEvidence([b], [{ id: 'x', amount: 385, postedAt: 437 * M }, { id: 'y', amount: 385, postedAt: 355 * M }], w).evidence.get('a')).toMatchObject({ creditId: 'x', minutes: 63 });
+    // Two credits of that amount in the two hours: no telling which, so nothing.
+    expect(pairEvidence([b], [{ id: 'x', amount: 385, postedAt: 437 * M }, { id: 'y', amount: 385, postedAt: 400 * M }], w).evidence.size).toBe(0);
+    // Not after the bill: still an hour.
+    expect(pairEvidence([b], [{ id: 'x', amount: 385, postedAt: 563 * M }], w).evidence.size).toBe(0);
+    // Another bill still without a credit could take it: nothing.
+    const other = bill('o', { paidAt: 480 * M, difference: 'match', swAmount: 385, swMode: 'upi', rgAmount: 385, rgMode: 'upi' });
+    expect(pairEvidence([b, other], [{ id: 'x', amount: 385, postedAt: 380 * M }], w).evidence.size).toBe(0);
+    // A bill that pairs within the hour still does so first.
+    const near = bill('n', { paidAt: 440 * M, difference: 'match', swAmount: 385, swMode: 'upi', rgAmount: 385, rgMode: 'upi' });
+    const both = pairEvidence([b, near], [{ id: 'x', amount: 385, postedAt: 437 * M }], w).evidence;
+    expect([...both.keys()]).toEqual(['n']);
   });
 
   it('a credit into an account with another UPI label does not pair with the bill', () => {

@@ -102,6 +102,8 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
       matchedPaise: sum(sales.filter((s) => s.bankRowId)),
       billsLeft: left.length, billsLeftPaise: sum(left),
       creditsLeft: creditsLeft.length, creditsLeftPaise: creditsLeft.reduce((t, c) => t + c.amount_paise, 0),
+      // Of those, credits no bill of that amount could be (the rest have one that did not pair).
+      creditsNoBill: noBill.length,
     },
     clear,
     fixes: [...same, ...ex.cards.filter((c) => c.kind !== 'clear_matches' && c.kind !== 'no_upi_credit')],
@@ -269,14 +271,16 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   noCredit.sort((a, b) => b.score - a.score);
 
   const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
-  const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null }));
+  // The same credits Compare counts as not matched yet; noBill marks those no bill of that amount could be.
+  const noBillIds = new Set((view.bank?.noBill ?? []).map((n) => n.id));
+  const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id) }));
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   return {
     trial: true as const, day, note: null,
     coverage: { covered: cov.covered, lastBankAt: cov.lastBankAt, shiftEnd: w.to },
     // Every UPI bill is either matched (its own credit, its group's, or a booked credit it joins) or not in the bank yet.
     strip: { upiSalesPaise: bills.reduce((t, b) => t + b.amount, 0), bills: bills.length, matchedPaise: bills.reduce((t, b) => t + b.amount, 0) - sum(openBills),
-      billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits) },
+      billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits), creditsNoBill: openCredits.filter((c) => c.noBill).length },
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit, noBill: [], unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
   };
 }

@@ -9,6 +9,11 @@ import { shiftWindow } from './time';
 
 /** Paired within this many minutes of the software's time. */
 const NEAR_MIN = 60;
+/**
+ * The software's time is when the bill was closed, which can be well after the guest paid (approved 8 Nov 2026): a bill
+ * with no credit within the hour looks back this far, when that stretch holds only one credit of its amount.
+ */
+export const FAR_BACK_MIN = 120;
 
 export interface EvidenceBill {
   id: string; paidAt: number | null; difference: string; decision: string | null; grouped: boolean;
@@ -94,6 +99,21 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     if (sameBill.size !== 1 || sameCredit.size !== 1 || wanted) continue;
     out.set(p.bill.id, make(p.bill, p.credit, null));
     used.add(p.credit.id);
+  }
+  // Paid well before the bill was closed: a timed bill still without a credit takes the one credit of its amount from
+  // FAR_BACK_MIN before its time to NEAR_MIN after, when no other credit of that amount lies there (taken or not) and no
+  // other bill still without a credit could take it.
+  const reach = (b: EvidenceBill, c: EvidenceCredit) => b.paidAt != null && c.postedAt >= b.paidAt - FAR_BACK_MIN * 60000 && c.postedAt <= b.paidAt + NEAR_MIN * 60000;
+  const looking = (b: EvidenceBill) => b.paidAt != null && !out.has(b.id) && !b.grouped && !b.parts?.length && b.decision !== 'leave_out' && b.decision !== 'carry_forward';
+  for (const b of bills) {
+    if (!looking(b)) continue;
+    const fits = [...new Map(upiAmounts(b).flatMap((a) => credits.filter((c) => c.amount === a.amount && labelFits(b.labels ?? null, c.label ?? null) && reach(b, c)))
+      .map((c) => [c.id, c])).values()];
+    if (fits.length !== 1 || used.has(fits[0].id)) continue;
+    const c = fits[0];
+    if (bills.some((o) => o.id !== b.id && looking(o) && upiAmounts(o).some((a) => a.amount === c.amount) && reach(o, c))) continue;
+    out.set(b.id, make(b, c, Math.round(Math.abs(c.postedAt - b.paidAt!) / 60000)));
+    used.add(c.id);
   }
   // A bill paid in several goes (7 Nov 2026): each UPI payment pairs with its own credit of that amount, within an hour
   // of the bill, closest first. Without a software time, each part must have only one credit in the shift. All or none.

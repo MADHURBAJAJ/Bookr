@@ -2,7 +2,7 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
-import { bankIn, creditsWithoutBill, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
+import { bankIn, creditsWithoutBill, FAR_BACK_MIN, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
@@ -403,6 +403,14 @@ function startsWithDate(billNo: string) {
   return d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
 }
 /** Bills of the new POS: YYMMDD, then a running number with no padding, so 7 to 9 digits. */
+/** How far from a "cash" bill's software time a UPI credit of its amount is taken as its payment. */
+export const CASH_BY_UPI_MIN = 60;
+/** A mode difference the bank settles by its silence: no UPI credit of the UPI side's amount near the bill. */
+export interface NoUpi {
+  suggest: 'use_software' | 'use_register'; upiPaise: number; mode: string;
+  /** A credit of that amount did come in, but another bill of the shift took it. */
+  takenBy: { billNo: string; postedAt: number } | null;
+}
 export const isNewPosBill = (billNo: string | null | undefined) => /^\d{7,9}$/.test(billNo ?? '') && startsWithDate(billNo!);
 /** Bills of the old POS: 6-digit numbers, never in the software report, so never matched. A date with no running number is a new one cut short. */
 export const isOldPosBill = (billNo: string | null | undefined) => /^\d{6}$/.test(billNo ?? '') && !startsWithDate(billNo!);
@@ -540,15 +548,17 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   if (!(await cashAccountId(db, businessId))) blockers.push('This business has no cash account.');
   // Warnings do not stop confirming. A cash bill counted from the software but missing in the register is cash
   // that should be in hand: it is flagged on its own day so it cannot go missing quietly.
-  const warnings = comparisons.filter((c) => c.difference === 'missing_in_register' && c.sw_mode === 'cash' && isCounted(c.decision))
-    .map((c) => ({ billNo: c.bill_no, amountPaise: c.sw_amount_paise ?? 0,
+  // Undecided ones too: the bank may show one was paid by UPI (warned only then, below).
+  const cashOnly = comparisons.filter((c) => c.difference === 'missing_in_register' && c.sw_mode === 'cash' && (isCounted(c.decision) || !c.decision));
+  let warnings: { comparisonId: string; billNo: string; amountPaise: number; text: string; counted: boolean; byUpi?: { creditId: string; amountPaise: number; postedAt: number; label: string | null } }[] = cashOnly
+    .map((c) => ({ comparisonId: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise ?? 0, counted: isCounted(c.decision),
       text: `Cash bill ${c.bill_no} (₹ ${Math.round((c.sw_amount_paise ?? 0) / 100).toLocaleString('en-IN')}) is in the software report but not in the register: check the cash.` }));
 
   // The bank as a third witness, while the shift is still open.
   const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
   let groupCredits = new Map<string, { id: string; amount: number; postedAt: number }>();
-  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[] } | null = null;
+  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: { id: string; amount: number; postedAt: number }[] } | null = null;
   if (shift?.status !== 'confirmed') {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
@@ -556,10 +566,47 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), credits, used, cov.window);
     // Every credit in the shift no bill or group took: what a register slip may explain (see slips.ts).
     const taken = new Set([...used, ...[...groupCredits.values()].map((c) => c.id)]);
+    // Not matched yet (approved 8 Nov 2026): the one count Compare and Reconcile both show, before anything explains them.
+    const open = credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to);
+    // A "cash" bill missing in the register, with a UPI credit of its amount near its time: probably paid by UPI
+    // (approved 8 Nov 2026). Closest first, each credit once; the person adds it to the register as UPI.
+    for (const w of warnings) {
+      const at = cashOnly.find((c) => c.id === w.comparisonId)!.paid_at;
+      const c = credits.filter((x) => !taken.has(x.id) && x.amount === w.amountPaise && (at == null ? x.postedAt >= cov.window.from && x.postedAt < cov.window.to : Math.abs(x.postedAt - at) <= CASH_BY_UPI_MIN * 60000))
+        .sort((x, y) => Math.abs(x.postedAt - (at ?? x.postedAt)) - Math.abs(y.postedAt - (at ?? y.postedAt)))[0];
+      if (!c) continue;
+      taken.add(c.id);
+      w.byUpi = { creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, label: c.label ?? null };
+    }
+    warnings = warnings.filter((w) => w.byUpi || w.counted);
+    // A mode difference where one side says UPI and no UPI credit of that amount came in near the bill (approved 8 Nov
+    // 2026): once the bank is in, it was most likely paid the other side's way. Credits in any account count, so a
+    // payment under the wrong column is not taken for cash. A person still decides.
+    const noUpi = new Map<string, NoUpi>();
+    if (cov2.covered) {
+      const billOf = new Map([...evidence].flatMap(([id, e]) => (e.parts ?? [e]).map((p) => [p.creditId, id] as const)));
+      const byId = new Map(comparisons.map((c) => [c.id, c]));
+      const plain = (m: string | null) => m === 'cash' || m === 'card';
+      for (const c of comparisons) {
+        if ((c.difference !== 'mode' && c.difference !== 'amount_and_mode') || evidence.has(c.id) || c.decision === 'leave_out' || c.decision === 'carry_forward') continue;
+        if (c.register_row_id && (grouped.has(c.register_row_id) || (paysByRow.get(c.register_row_id) ?? []).length > 1)) continue;
+        const side = c.sw_mode === 'upi' && plain(c.rg_mode) ? 'software' : c.rg_mode === 'upi' && plain(c.sw_mode) ? 'register' : null;
+        if (!side) continue;
+        const amount = (side === 'software' ? c.sw_amount_paise : c.rg_amount_paise) ?? 0;
+        // As far as a credit could pair: FAR_BACK_MIN before the bill's time to an hour after.
+        const near = credits.filter((x) => x.amount === amount && (c.paid_at != null ? x.postedAt >= c.paid_at - FAR_BACK_MIN * 60000 && x.postedAt <= c.paid_at + CASH_BY_UPI_MIN * 60000
+          : x.postedAt >= cov.window.from && x.postedAt < cov.window.to));
+        if (near.some((x) => !taken.has(x.id))) continue;
+        const other = near.find((x) => billOf.has(x.id));
+        noUpi.set(c.id, { suggest: side === 'software' ? 'use_register' : 'use_software', upiPaise: amount, mode: (side === 'software' ? c.rg_mode : c.sw_mode)!,
+          takenBy: other ? { billNo: byId.get(billOf.get(other.id)!)!.bill_no, postedAt: other.postedAt } : null });
+      }
+    }
     const left = cov2.covered ? credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to).map((c) => c.id) : [];
-    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left };
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left, noUpi, open };
   }
 
+  if (!bank) warnings = warnings.filter((w) => w.counted);
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
   const swByMode = (m: string) => sum(sw.filter((b) => b.mode === m).map((b) => ({ amount: b.amount_paise })));
   const rgByMode = (m: string) => sum(rg.flatMap((r) => (paysByRow.get(r.id) ?? []).filter((p) => p.mode === m).map((p) => ({ amount: p.amount_paise }))));
@@ -597,8 +644,10 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       otherDay: others.get(c.id) ?? null,
       numberFlags: flagsOf.get(c.id) ?? [],
       bank: bank?.evidence.get(c.id) ?? null,
+      bankNone: bank?.noUpi.get(c.id) ?? null,
     })),
-    bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left } : null,
+    bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left,
+      open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })) } : null,
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,
       existing: { paidAt: k.existing_paid_at, mode: k.existing_mode, amountPaise: k.existing_amount_paise },

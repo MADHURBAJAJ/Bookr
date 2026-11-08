@@ -116,6 +116,20 @@ describe('Read page: register', () => {
     expect(o.read.bill_type).toBe('unclear');
   });
 
+  it('a bill number confirmed as read (picked from the software list) clears its "Couldn\'t read", unchanged', async () => {
+    const p = await page('bill_register');
+    mocked.mockResolvedValueOnce(registerReading() as never);
+    await p.read();
+    const [row] = await sql`SELECT id, bill_no, amount_paise, bill_type FROM register_rows WHERE line_no = 4`;
+    const body = { billNo: row.bill_no, billType: row.bill_type, amount: String(row.amount_paise / 100), status: 'draft', payments: [{ mode: 'card', columnLabel: 'Card', amount: '942' }] };
+    await p.clients.entry_staff.put(`/businesses/${p.bid}/register-rows/${row.id}`, body);
+    expect(JSON.parse((await sql`SELECT ocr_original FROM register_rows WHERE id = ${row.id}`)[0].ocr_original).resolved ?? []).not.toContain('bill_no');
+    await p.clients.entry_staff.put(`/businesses/${p.bid}/register-rows/${row.id}`, { ...body, confirm: ['bill_no', 'status'] });
+    const o = JSON.parse((await sql`SELECT bill_no, ocr_original FROM register_rows WHERE id = ${row.id}`)[0].ocr_original);
+    expect(o.resolved).toContain('bill_no');
+    expect(o.resolved).not.toContain('status'); // only fields a person can confirm
+  });
+
   it('fills in a discount when less was paid, a tip when more was, marked as worked out', async () => {
     const p = await page('bill_register');
     const r = registerReading();

@@ -427,7 +427,9 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/slip-fix', requireRole
   const day = typeof data.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.day) ? data.day : fail(400, 'Unknown shift.');
   const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
   if (status !== 'confirmed') fail(400, 'This shift is not confirmed yet: correct the bill on its register row.');
-  const slip = (await shiftSlips(db, bid, day, [row.id])).find((x) => x.key === data.key);
+  // A swap is worked out from both its credits.
+  const partner = typeof data.partnerCreditId === 'string' && isUuid(data.partnerCreditId) ? [data.partnerCreditId] : [];
+  const slip = (await shiftSlips(db, bid, day, [row.id, ...partner])).find((x) => x.key === data.key);
   if (!slip) fail(409, 'This correction no longer fits the bill. Reload the page.');
   await db.batch(await slipFixStatements(db, bid, row, slip, c.get('user').id, now()));
   return c.json({ ok: true });
