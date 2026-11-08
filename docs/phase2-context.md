@@ -451,6 +451,10 @@ Compare and Reconcile show the same number: UPI credits inside the shift that no
 that amount (`bank.noBill`; `strip.creditsNoBill`, `open.credits[].noBill`), those whose bill of that amount did not
 pair, and (on Compare) those explained on the page by a slip, a wrong column or a "cash" bill paid by UPI. Compare's
 warning names all three and links to Reconcile; the labels read "Credits not matched yet" everywhere.
+Each open credit carries `why` (8 Nov 2026): `no_bill`; `extra` (every bill or group of its amount already has a
+credit, `billsOfAmount` of them: most likely a sale not written down); or `unpaired` with `bills` (up to 5 bills or
+groups of its amount still without a credit, closest first, `minutes` = bill time − credit time). Compare's warning
+shows each part as a line that opens to its list; Reconcile's open entries tag each credit with its reason.
 
 ## Money moved between two bills (approved 8 Nov 2026)
 Two bills that equal the software, each with one UPI payment no credit backs, and two leftover credits that total the

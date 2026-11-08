@@ -297,6 +297,7 @@ details.menu > summary::-webkit-details-marker { display: none; }
 .pgbar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #EEF0F2; }
 .pgbar .pg.m { background: #10B981; } .pgbar .pg.a { background: #5EADA4; } .pgbar .pg.d { background: #94A3B8; } .pgbar .pg.o { background: #F59E0B; }
 .cmp-warn { background: #FEF2F2; border: 1px solid #FECACA; color: #991B1B; border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
+.nm-part { margin-top: 6px; } .nm-part summary { cursor: pointer; } .nm-part li { margin: 2px 0; }
 .cmp-tabs { margin: 12px 0; flex-wrap: wrap; }
 .cmptable td { vertical-align: top; }
 .cmptable tr.undecided td:first-child { box-shadow: inset 3px 0 0 #F59E0B; }

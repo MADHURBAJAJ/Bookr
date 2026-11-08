@@ -2045,6 +2045,24 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect((await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.slips.map((x: any) => x.rowId).sort()).toEqual([a, b].sort());
   });
 
+  it('credits not matched yet say why: no bill of the amount, extra money of a common amount, or a bill still without a credit (with its time)', async () => {
+    const h = await hotel();
+    await fullShift(h); // 2610311 ₹ 420 UPI at 9:17 am, 2610314 ₹ 1,180 UPI at 12:10 pm
+    const acc = (await h.clients.owner.post(`/businesses/${h.bid}/accounts`, { name: 'HUF A', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    expect((await h.clients.owner.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI XOXO' })).status).toBe(200);
+    const text = [HEAD, line(1, 'S30000091', '31/10/2026 9:18:00 AM', 420), line(2, 'S30000092', '31/10/2026 3:00:00 PM', 420), line(3, 'S30000093', '31/10/2026 4:00:00 PM', 1180),
+      line(4, 'S30000094', '31/10/2026 2:00:00 PM', 777), line(5, 'S30000095', '01/11/2026 8:30:00 AM', 1234)].join('\n');
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text })).status).toBe(200);
+    const v = await view(h);
+    const of = (paise: number) => v.json.bank.open.find((x: any) => x.amountPaise === paise);
+    expect(v.json.bank.open.map((x: any) => x.amountPaise).sort((p: number, q: number) => p - q)).toEqual([42000, 77700, 118000]); // the 9:18 one paired
+    expect(of(77700)).toMatchObject({ why: 'no_bill', bills: [] });
+    expect(of(42000)).toMatchObject({ why: 'extra', billsOfAmount: 1, bills: [] });
+    expect(of(118000)).toMatchObject({ why: 'unpaired', bills: [{ billNo: '2610314', minutes: -230 }] });
+    const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    expect(trial.open.credits.map((x: any) => [x.amountPaise, x.why]).sort((p: any, q: any) => p[0] - q[0])).toEqual([[42000, 'extra'], [77700, 'no_bill'], [118000, 'unpaired']]);
+  });
+
   it('two bills and two credits that trade ₹ 1: offered as one correction, ₹ 1 tip and ₹ 1 off; on a confirmed shift both are matched and one Unmatch puts both back', async () => {
     const h = await hotel();
     await fullShift(h); // 2610311 ₹ 420 UPI at 9:17 am, 2610314 ₹ 1,180 UPI at 12:10 pm, both matching the software

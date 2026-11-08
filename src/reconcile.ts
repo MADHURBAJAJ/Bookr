@@ -273,7 +273,9 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
   // The same credits Compare counts as not matched yet; noBill marks those no bill of that amount could be.
   const noBillIds = new Set((view.bank?.noBill ?? []).map((n) => n.id));
-  const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id) }));
+  const whyOf = new Map((view.bank?.open ?? []).map((o) => [o.id, o]));
+  const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id),
+    why: whyOf.get(c.id)?.why ?? null, bills: whyOf.get(c.id)?.bills ?? [], billsOfAmount: whyOf.get(c.id)?.billsOfAmount ?? 0 }));
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   return {
     trial: true as const, day, note: null,

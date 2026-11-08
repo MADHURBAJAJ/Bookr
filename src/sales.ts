@@ -405,6 +405,14 @@ function startsWithDate(billNo: string) {
 /** Bills of the new POS: YYMMDD, then a running number with no padding, so 7 to 9 digits. */
 /** How far from a "cash" bill's software time a UPI credit of its amount is taken as its payment. */
 export const CASH_BY_UPI_MIN = 60;
+/** A credit inside the shift no bill or group paired, and why. */
+export interface OpenCredit {
+  id: string; amount: number; postedAt: number;
+  why: 'no_bill' | 'extra' | 'unpaired';
+  /** Bills (or groups) of its amount still without a credit, closest in time first; minutes is the bill's time less the credit's. */
+  bills: { billNo: string; paidAt: number | null; minutes: number | null }[];
+  billsOfAmount: number;
+}
 /** A mode difference the bank settles by its silence: no UPI credit of the UPI side's amount near the bill. */
 export interface NoUpi {
   suggest: 'use_software' | 'use_register'; upiPaise: number; mode: string;
@@ -558,7 +566,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
   let groupCredits = new Map<string, { id: string; amount: number; postedAt: number }>();
-  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: { id: string; amount: number; postedAt: number }[] } | null = null;
+  let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: OpenCredit[] } | null = null;
   if (shift?.status !== 'confirmed') {
     const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
@@ -567,7 +575,21 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     // Every credit in the shift no bill or group took: what a register slip may explain (see slips.ts).
     const taken = new Set([...used, ...[...groupCredits.values()].map((c) => c.id)]);
     // Not matched yet (approved 8 Nov 2026): the one count Compare and Reconcile both show, before anything explains them.
-    const open = credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to);
+    // Why each did not pair (approved 8 Nov 2026): no bill of its amount; every bill of its amount already has a credit
+    // (extra money of a common amount); or bills of its amount still without a credit, told with their times.
+    const noBillIds = new Set(creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)).map((c) => c.id));
+    const upiBills = comparisons.filter((c) => c.decision !== 'leave_out' && c.decision !== 'carry_forward' && !(c.register_row_id && grouped.has(c.register_row_id)));
+    const open: OpenCredit[] = credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to).map((x) => {
+      const base = { id: x.id, amount: x.amount, postedAt: x.postedAt };
+      if (noBillIds.has(x.id)) return { ...base, why: 'no_bill' as const, bills: [], billsOfAmount: 0 };
+      const bills = upiBills.filter((c) => (c.sw_mode === 'upi' && c.sw_amount_paise === x.amount) || (c.rg_mode === 'upi' && c.rg_amount_paise === x.amount));
+      const tables = groups.filter((g) => upiTotal(g) === x.amount);
+      const waiting = [
+        ...bills.filter((c) => !evidence.has(c.id)).map((c) => ({ billNo: c.bill_no, paidAt: c.paid_at, minutes: c.paid_at != null ? Math.round((c.paid_at - x.postedAt) / 60000) : null })),
+        ...tables.filter((g) => !groupCredits.has(g.headId)).map((g) => ({ billNo: g.billNos.join(' + '), paidAt: null, minutes: null })),
+      ].sort((a, b) => Math.abs(a.minutes ?? 1e9) - Math.abs(b.minutes ?? 1e9));
+      return { ...base, why: waiting.length ? 'unpaired' as const : 'extra' as const, bills: waiting.slice(0, 5), billsOfAmount: bills.length + tables.length };
+    });
     // A "cash" bill missing in the register, with a UPI credit of its amount near its time: probably paid by UPI
     // (approved 8 Nov 2026). Closest first, each credit once; the person adds it to the register as UPI.
     for (const w of warnings) {
@@ -647,7 +669,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       bankNone: bank?.noUpi.get(c.id) ?? null,
     })),
     bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left,
-      open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })) } : null,
+      open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, why: c.why, bills: c.bills, billsOfAmount: c.billsOfAmount })) } : null,
     conflicts: conflicts.map((k) => ({
       id: k.id, billNo: k.bill_no, posNo: k.pos_no,
       existing: { paidAt: k.existing_paid_at, mode: k.existing_mode, amountPaise: k.existing_amount_paise },

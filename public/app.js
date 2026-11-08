@@ -2554,9 +2554,9 @@ async function compareView(biz, day) {
   const notMatched = (() => {
     if (!v.bank?.covered || !v.bank.open?.length) return null;
     const told = new Set([...(v.slips ?? []).flatMap(slipCredits), ...(v.columnHints ?? []).map((h) => h.creditId), ...(v.warnings ?? []).filter((w) => w.byUpi).map((w) => w.byUpi.creditId)]);
-    const noBill = new Set(v.bank.noBill.map((x) => x.id));
-    const explained = v.bank.open.filter((x) => told.has(x.id));
-    return { all: v.bank.open, explained, noBill: v.bank.noBill, unpaired: v.bank.open.filter((x) => !told.has(x.id) && !noBill.has(x.id)) };
+    const left = v.bank.open.filter((x) => !told.has(x.id));
+    return { all: v.bank.open, explained: v.bank.open.filter((x) => told.has(x.id)), noBill: left.filter((x) => x.why === 'no_bill'),
+      extra: left.filter((x) => x.why === 'extra'), unpaired: left.filter((x) => x.why === 'unpaired') };
   })();
   const isUpi = (c) => c.software?.mode === 'upi' || c.register?.mode === 'upi';
   // Wrong UPI column (Owner and Accountant only: the server sends no hints to anyone else).
@@ -3420,13 +3420,28 @@ async function setColumn(biz, a) {
  * the ones with no bill of that amount are listed; the rest are told on their bill's row or found on Reconcile.
  */
 function notMatchedHtml(n, href) {
-  const amounts = (xs) => xs.slice(0, 6).map((x) => `₹ ${rs(x.amountPaise)} at ${hhmm(x.postedAt)}`).join(', ') + (xs.length > 6 ? ' …' : '');
-  const parts = [
-    n.noBill.length ? `${n.noBill.length} ${n.noBill.length === 1 ? 'has' : 'have'} no bill of that amount (${amounts(n.noBill)}): a sale not written down, a table paid at once, or money that is not a sale` : '',
-    n.unpaired.length ? `${n.unpaired.length} ${n.unpaired.length === 1 ? 'has' : 'have'} a bill of that amount that did not pair: too far in time, or more than one bill fits` : '',
-    n.explained.length ? `${n.explained.length} ${n.explained.length === 1 ? 'is' : 'are'} explained on this page, with a button on the bill` : '',
-  ].filter(Boolean);
-  return html`<div class="cmp-warn">⚠ <strong>${n.all.length} UPI credit${n.all.length === 1 ? '' : 's'} not matched yet</strong>: ${parts.join('; ')}. <a href="${href}">See them on Reconcile</a>. It does not stop confirming.</div>`;
+  const one = (x) => `₹ ${rs(x.amountPaise)} at ${hhmm(x.postedAt)}`;
+  const line = (xs, head, item) => (xs.length ? html`<details class="nm-part"><summary><strong>${xs.length}</strong> ${head}</summary>
+    <ul style="margin:4px 0 0 18px;padding:0">${xs.map((x) => html`<li>${item(x)}</li>`)}</ul></details>` : '');
+  return html`<div class="cmp-warn">⚠ <strong>${n.all.length} UPI credit${n.all.length === 1 ? '' : 's'} not matched yet</strong>. Open a line to see them. It does not stop confirming.
+    ${line(n.noBill, `${n.noBill.length === 1 ? 'has' : 'have'} no bill of that amount: a sale not written down, a table paid at once, or money that is not a sale`, one)}
+    ${line(n.extra, `${n.extra.length === 1 ? 'is' : 'are'} extra money of a common amount: every bill of that amount already has its credit, so most likely a sale not written down`,
+      (x) => `${one(x)} · ${x.billsOfAmount} bill${x.billsOfAmount === 1 ? '' : 's'} of ₹ ${rs(x.amountPaise)}, each with its credit`)}
+    ${line(n.unpaired, `could belong to a bill still without a credit: check the bill against the register`, (x) => `${one(x)} ↔ ${creditBillsText(x)}`)}
+    ${line(n.explained, `${n.explained.length === 1 ? 'is' : 'are'} explained on this page, with a button on the bill or the warning`, one)}
+    <div><a href="${href}">See them on Reconcile</a>, where they are matched after confirming.</div></div>`;
+}
+/** The bills a credit not matched yet could belong to, with how far each is from it in time. */
+function creditBillsText(x) {
+  const gap = (m) => (m == null ? 'no time' : m === 0 ? 'same minute' : `${Math.abs(m) >= 120 ? `${Math.round(Math.abs(m) / 6) / 10} h` : `${Math.abs(m)} min`} ${m > 0 ? 'later' : 'earlier'}`);
+  return x.bills.map((b) => `bill ${b.billNo}${b.paidAt ? ` (${hhmm(b.paidAt)}, ${gap(b.minutes)})` : ''}`).join(', ') + (x.bills.length > 1 ? ': more than one fits' : '');
+}
+/** The reason tag for a credit not matched yet on Reconcile's open entries. */
+function creditWhyHtml(c) {
+  if (c.why === 'no_bill') return html` · <span style="color:var(--danger)">no bill of this amount</span>`;
+  if (c.why === 'extra') return html` · <span style="color:var(--danger)">extra: all ${c.billsOfAmount} bill${c.billsOfAmount === 1 ? '' : 's'} of this amount have their credit</span>`;
+  if (c.why === 'unpaired') return html` · <span style="color:#92400E">could be ${creditBillsText(c)}</span>`;
+  return '';
 }
 /** Every credit and register row a slip uses: a swap's other bill and credit too. */
 const slipCredits = (s) => [s.creditId, ...s.others.map((o) => o.creditId), ...(s.partner ? [s.partner.creditId] : [])];
@@ -3603,8 +3618,8 @@ async function reconcileView(biz, dayArg) {
   const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
     <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick entries to compare their totals; matching by hand starts after confirming.</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
-      <div><strong>Credits not matched yet</strong> <span class="chip">${r.open.credits.length}</span>${covered && r.open.credits.length ? html`<div class="tiny">${r.open.credits.filter((c) => c.noBill).length} with no bill of that amount (marked); the rest have a bill of that amount that did not pair.</div>` : ''}
-        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${c.noBill && covered ? html` · <span style="color:var(--danger)">no bill of this amount</span>` : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}</div>
+      <div><strong>Credits not matched yet</strong> <span class="chip">${r.open.credits.length}</span>${covered && r.open.credits.length ? html`<div class="tiny">${r.open.credits.filter((c) => c.why === 'no_bill').length} with no bill of that amount, ${r.open.credits.filter((c) => c.why === 'extra').length} extra money of a common amount, ${r.open.credits.filter((c) => c.why === 'unpaired').length} that could belong to a bill still without a credit. Each is marked.</div>` : ''}
+        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}</div>
       <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
         ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
     </div>
