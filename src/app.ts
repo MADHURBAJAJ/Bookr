@@ -10,6 +10,7 @@ import { salesRoutes } from './routes/sales';
 import { captureRoutes } from './routes/capture';
 import { ocrRoutes } from './routes/ocr';
 import { bankRoutes } from './routes/bank';
+import { cardRoutes } from './routes/cards';
 import { dayRoutes } from './routes/day';
 import { moneyOutRoutes } from './routes/moneyout';
 
@@ -42,6 +43,7 @@ app.route('/', salesRoutes);
 app.route('/', captureRoutes);
 app.route('/', ocrRoutes);
 app.route('/', bankRoutes);
+app.route('/', cardRoutes);
 app.route('/', dayRoutes);
 app.route('/', moneyOutRoutes);
 

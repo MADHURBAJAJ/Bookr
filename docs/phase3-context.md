@@ -45,9 +45,40 @@ No., Transaction ID, Value Date, Txn Posted Date, ChequeNo., Description, Cr/Dr,
 - **Undo** on a booked or left-out line removes its entry (kept in the audit log).
 - Permissions: bank work is Owner and Accountant (`bank.link`); rules are `rules.edit`. Every action is audited.
 
+## Part 2: card settlements (approved 8 Nov 2026)
+
+Tables `inbound_mails`, `card_settlements`, `card_matches` (migration 0018). Screen: **Card settlements** (Owner and Accountant, `bank.link`).
+
+- **The report.** ICICI POS sends one Excel file per settlement day (`<MID>_<NAME>_<DDMMYYYY>_ICICI_POS_CD.xlsx`): one row per card payment with its time, amount, fee (Transaction Charges, negative), GST (negative), net amount, RRN, Transaction ID (unique, the key), card brand and last 4, then TID / MID subtotals and a Grand Total (used as a control total). The UTR column is blank. A file holds the previous day's payments, so its payments fall in different shifts: each payment's shift comes from its own time. Read by `src/cardsettlement.ts` (a small zip and sheet reader; Workers have no Excel library). Fee and GST are kept positive.
+- **Getting it in.** Dropped on Card settlements, or by mail: Gmail forwards the mail to Bookr's address, Cloudflare Email Routing hands it to the Worker's `email()` handler (`src/mail.ts`). The raw mail is kept in R2 (`mail/<business>/<id>.eml`) before anything is read; Message-ID stops a mail being read twice and the Transaction ID stops a payment being added twice. Mail from senders not in `CARD_MAIL_FROM` is turned away (it bounces back to Gmail); Gmail's forwarding confirmation is kept and its link shown on the screen. "Read again" rereads a stored mail.
+- **Payment → bill.** Like UPI: same amount, within 3 hours of the software's bill time; register-only bills (no time) fit a payment in their shift but are never ticked. Paired by closest time first, each used once, up to an hour apart → ticked. Bills paid together count as one; one payment can pay several bills and one bill several payments (`card_matches`), totals must agree. Only PURCHASE rows are matched. Matching clears `awaiting_card_settlement`; Unmatch puts it back. A shift with a card-matched sale cannot be reopened.
+- **Day → bank.** A settlement day's net total is matched to an open `EZY/ICICIPOS_SET_…_ddmmyy` credit of exactly that amount (the date at the end is the settlement day; credits from the day before to four days after are offered). Settling books the credit (status booked, note says what it settled) and the fee and the GST by the Card settlement rule (below). Undo on Card settlements, or Undo on Bank sync, takes it apart and removes the fee and GST entries (audit-logged).
+
+### Card on Reconcile, automatic where safe (approved 8 Nov 2026)
+
+Migration 0020: `card_rules` (one per card machine/terminal: fee head, GST head) and `card_settlements.gst_tx_id`. Code: `src/cards.ts` (`autoPairs`, `runCardAuto`, `settleStatements`, `shiftCards`), routes in `src/routes/cards.ts`.
+
+- **Bookr matches on its own** a payment and a card bill of the same amount within 20 minutes when neither has another candidate (`autoPairs`). `card_matches.matched_by` is empty and the audit entry says `auto`. It runs after a card report comes in, after a shift is confirmed and after a card rule is saved. Everything else waits for a person.
+- **Card settlement rule** (Heads and rules, per terminal, Owner and Accountant `heads.edit`): the fee (MDR) head, e.g. "Card machine charges" (Tally: Bank Charges), and the GST head, e.g. "GST on card charges". No input credit is claimed; both are expense heads. Fee and GST are booked as **two** expense rows on the bank account and the credit's day.
+- **Bookr settles on its own** a settlement day whose open `EZY/ICICIPOS_SET_…_ddmmyy` credit carries that date and exactly its net, when it is the only such credit and the day is the only one claiming it, and the terminal has a rule (`done_by` empty, audit `auto`). Runs after a card report, after bank lines are brought in (paste or sync) and after a rule is saved. Without a rule nothing is settled. Settling by hand uses the rule too ("Set the Card settlement rule on Heads and rules first" when missing). Two or three days in a row that add up exactly to one open credit are offered as "Settle these days together" (never done by Bookr). Undo (Reconcile, Card settlements or Bank sync) removes both rows.
+- **Reconcile → Card** (confirmed shifts, beside UPI, by swipe time): a strip (card bills, matched with how many by Bookr, bills with no swipe, swipes with no bill); "Needs you" cards: several bills fit (pick buttons), one further away in time, more than its bill ("Match, ₹X tip": the difference becomes an income row on the shift, `source` bank_sheet, removed on Unmatch), refund or void (shown only), no bill (Book to an income head, removed on Unmatch; or Find the bill on Compare); card bills with no swipe once the card report is in for the shift (a later swipe, or a settlement two days on): **Was cash / Was UPI** (paid another way, now also for card sales not matched; Was cash is highlighted when the shift's cash is over by exactly that amount); Done with Undo ("by Bookr" marked); the settlement (gross, fee, GST, net, "Settled by Bookr" / "No card rule" / waiting) with Undo.
+- **Shift bar**: card items (needs + no swipe) count in Reconcile's "N left" once the shift is confirmed.
+- **Card settlements** keeps the folder link, the reports received, every day's payments and the history; settling there uses the rule.
+
+### Setting up the mail (Owner, once)
+
+1. A domain on Cloudflare (nameservers at Cloudflare). If the domain already receives company mail, use a subdomain such as `mail.<domain>`: Email Routing replaces the MX records.
+2. Dashboard → the domain → Email → Email Routing → Enable.
+3. Worker settings (wrangler.jsonc `vars` or the dashboard): `MAIL_ROUTES` = `{"cards@<domain>": "<business id>"}`, `CARD_MAIL_FROM` = the card company's sender address (or `@theirdomain`). Deploy.
+4. Email Routing → Routing rules → Create address `cards@<domain>` → Send to a Worker → bookr.
+5. Gmail → Settings → Forwarding → Add `cards@<domain>`. Gmail's confirmation mail shows on Card settlements with a "Confirm forwarding" link: open it.
+6. Gmail filter: `from:<card company sender>` → Forward to `cards@<domain>`.
+
 ## Not yet (part 2 and later)
 
-- Card company daily email (Gmail) and card settlement matching with fees.
+- Refunds and voids on the card report: shown, never matched.
+- A card payment less than its bill (a discount given at the machine): matched by hand only after a person corrects the bill.
+
 - Transfers between own accounts as transfer pairs (today: Leave out with a reason).
 - A "Owner drawings" head type that is not an expense (needs approval).
 - Bank sync screen: tabs Money in / Money out / Done; lines grouped by shift (8 am to 8 am), folded until opened; bulk "Confirm clear matches" and "Book by rules" per shift. Actions named Match to bill / Book under a head / Skip (not business).

@@ -106,6 +106,7 @@ const NAV = [
   // Review, Compare sales and Reconcile are tabs of one shift (the shift bar at the top of each).
   { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'reconcile'] },
   { key: 'bank', label: 'Bank sync', needs: 'bank.link' },
+  { key: 'cards', label: 'Card settlements', needs: 'bank.link' },
   { key: 'money-out', label: 'Money out', needs: 'bank.link' },
   { key: 'accounts', label: 'Accounts' },
   { key: 'heads', label: 'Heads and rules' },
@@ -183,7 +184,7 @@ async function wireShiftBar(biz, days = null) {
   set('review', !p.rows ? 'no page' : p.toCheck ? `${p.toCheck} to check` : '✓', p.rows && !p.toCheck ? 'ok' : p.toCheck ? 'wait' : '');
   set('compare', p.status === 'confirmed' ? 'confirmed ✓' : p.toDecide ? `${p.toDecide} to decide` : 'ready to confirm', p.status === 'confirmed' ? 'ok' : p.toDecide ? 'wait' : '');
   if (p.bank) {
-    const left = p.bank.billsLeft + p.bank.creditsLeft;
+    const left = p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0);
     set('reconcile', p.status !== 'confirmed' ? 'after confirming' : left ? `${left} left` : '✓', p.status !== 'confirmed' ? '' : left ? 'wait' : 'ok');
   }
 }
@@ -385,11 +386,12 @@ async function accountsView(biz, editId) {
 }
 
 async function headsView(biz, editId) {
-  const [{ heads }, { billTypeHeads }, { parties }, { rules }] = await Promise.all([
+  const [{ heads }, { billTypeHeads }, { parties }, { rules }, { terminals }] = await Promise.all([
     api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/bill-type-heads`),
     api('GET', `/businesses/${biz.id}/parties`),
     api('GET', `/businesses/${biz.id}/rules`),
+    api('GET', `/businesses/${biz.id}/cards/rules`).catch(() => ({ terminals: [] })),
     api('GET', `/businesses/${biz.id}/parties`),
   ]);
   const canRules = biz.actions.includes('rules.edit');
@@ -458,6 +460,22 @@ async function headsView(biz, editId) {
           </div>`)}
           <div id="btmsg"></div>
         </div>
+        <div style="border-top:1px solid var(--line-soft);padding-top:14px;display:flex;flex-direction:column;gap:10px">
+          <h2>Card settlement rule</h2>
+          <div class="note">For each card machine: where the card company's fee (MDR) and the GST on it are booked when a settlement reaches the bank. With a rule set, Bookr settles a day on its own when the bank credit carries its date and exactly its net amount, and books the fee and the GST as two expense rows. Every settlement can be undone on Reconcile.</div>
+          ${terminals.length ? terminals.map((t) => {
+            const exp = heads.filter((h) => h.type === 'expense');
+            const sel = (k, cur) => canEdit ? html`<select class="compact" data-cr${k}="${t.terminalId}" style="min-width:200px"><option value="">Choose a head</option>
+              ${exp.map((h) => html`<option value="${h.id}" ${cur === h.id ? 'selected' : ''}>${h.name}</option>`)}</select>` : html`<span>${exp.find((h) => h.id === cur)?.name ?? 'Not set'}</span>`;
+            return html`<div class="form-row" style="align-items:center;border-top:1px solid var(--line-soft);padding-top:8px">
+              <span style="flex:0 0 150px"><strong class="mono">${t.terminalId}</strong><span class="tiny" style="display:block">${t.payments} payment${t.payments === 1 ? '' : 's'}${t.merchantId ? ` · merchant ${t.merchantId}` : ''}</span></span>
+              <span class="field" style="margin:0"><label class="tiny">Fee (MDR)</label>${sel('fee', t.rule?.feeHeadId)}</span>
+              <span class="field" style="margin:0"><label class="tiny">GST on the fee</label>${sel('gst', t.rule?.gstHeadId)}</span>
+              ${t.rule ? html`<span class="chip ok">Set</span>` : html`<span class="chip wait">Not set</span>`}</div>`;
+          }) : html`<div class="note">No card machine yet: the rule is set once the first card settlement report is in (Card settlements).</div>`}
+          ${canEdit && terminals.length ? html`<div class="note">Suggested: an expense head "Card machine charges" (Tally ledger: Bank Charges) for the fee, and "GST on card charges" for the GST.</div>` : ''}
+          <div id="crmsg"></div>
+        </div>
         <div style="border-top:1px solid var(--line-soft);padding-top:14px;display:flex;flex-direction:column;gap:8px">
           <h2>Parties</h2>
           <div class="note">Each party is remembered under the heads it is booked to, e.g. Blinkit under Kitchen purchases and Housekeeping. Its first head is its main head. With several heads, a line gets the head its item had before, or a one-click choice.${canEdit ? ' Change the main head or rename a party here.' : ''}</div>
@@ -482,6 +500,18 @@ async function headsView(biz, editId) {
   };
   app.querySelectorAll('[data-vhead]').forEach((el) => el.addEventListener('change', () => saveVendor(el.dataset.vhead)));
   app.querySelectorAll('[data-vname]').forEach((el) => el.addEventListener('change', () => saveVendor(el.dataset.vname)));
+  const saveCardRule = async (tid) => {
+    const msg = document.getElementById('crmsg');
+    const feeHeadId = app.querySelector(`[data-crfee="${tid}"]`).value;
+    const gstHeadId = app.querySelector(`[data-crgst="${tid}"]`).value;
+    if (!feeHeadId || !gstHeadId) { msg.innerHTML = '<div class="note">Choose both heads to save the rule.</div>'; return; }
+    try {
+      const r = await apiFull('PUT', `/businesses/${biz.id}/cards/rules/${encodeURIComponent(tid)}`, { feeHeadId, gstHeadId });
+      await headsView(biz, editId);
+      document.getElementById('crmsg').innerHTML = html`<div class="ok-msg">Saved.${r.autoSettled ? ` Bookr settled ${r.autoSettled} day${r.autoSettled === 1 ? '' : 's'} waiting on this rule.` : ''}</div>`.__html;
+    } catch (e) { showError(msg, e); }
+  };
+  app.querySelectorAll('[data-crfee],[data-crgst]').forEach((el) => el.addEventListener('change', () => saveCardRule(el.dataset.crfee ?? el.dataset.crgst)));
   app.querySelectorAll('[data-billtype]').forEach((sel) => sel.addEventListener('change', async () => {
     const msg = document.getElementById('btmsg');
     try { await api('PUT', `/businesses/${biz.id}/bill-type-heads/${sel.dataset.billtype}`, { headId: sel.value }); msg.innerHTML = '<div class="ok-msg">Saved.</div>'; }
@@ -3073,6 +3103,7 @@ async function bankView(biz, query = '') {
         : html`<span class="note">No confirmed UPI bill of this amount near this time.</span>`);
     }
     if (r.kind === 'upi_fee') parts.push(html`<div class="note">Fee on a credit card paid through UPI${r.pairRowId ? '' : ' (its credit is not in Bookr yet)'}.</div>`);
+    if (r.kind === 'card_settlement') parts.push(html`<div class="note">Money from the card machine. <a href="#/b/${biz.id}/cards">Settle it on Card settlements</a>, which books the fee.</div>`);
     if (r.kind === 'reversal') parts.push(html`<div class="note">${r.pairRowId ? 'Gives back a failed payment: both cancel out.' : 'A reversal; its payment is not in Bookr yet.'}</div>`);
     if (r.rule) parts.push(html`<div class="form-row" style="gap:6px;align-items:center"><input type="checkbox" data-byrule="${r.id}" checked aria-label="Book by this rule" style="width:18px;height:18px;min-height:0">
       <span>Rule <strong>${r.rule.name}</strong> → ${heads.find((h) => h.id === r.rule.headId)?.name ?? ''}</span></div>`);
@@ -3655,7 +3686,8 @@ async function reconcileView(biz, dayArg) {
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
     <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
-    ${doneFold}`));
+    ${doneFold}
+    ${r.cards ? cardSection(biz, r.cards, heads) : ''}`));
   wireShell();
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz, days);
@@ -3748,6 +3780,107 @@ async function reconcileView(biz, dayArg) {
     act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.putback}/reopen`, {}));
   }));
   wirePairPanel(biz, v, heads, reload);
+  wireCardSection(biz, r.cards, act);
+}
+
+// ---- Card, on Reconcile (approved 8 Nov 2026): a confirmed shift's card bills against the card company's payments,
+// next to UPI. Bookr matches the safe pairs and settles by the Card settlement rule; the rest waits here for a person.
+
+function cardSection(biz, k, heads) {
+  const st = k.strip;
+  const at = (ms) => (ms ? when(ms) : 'register only');
+  const card = (p) => `${p.cardType ?? 'Card'}${p.cardLast4 ? ` ··${p.cardLast4}` : ''}`;
+  const income = heads.filter((h) => h.type === 'income');
+  const left = k.left;
+  const need = (n) => {
+    const p = n.payment;
+    const head = html`<div class="lane-h"><strong>₹ ${money(p.amountPaise)} on the card at ${when(p.paidAt)}</strong><span class="tchip warn">${
+      n.why === 'several' ? 'More than one bill fits' : n.why === 'one' ? 'Check before matching' : n.why === 'tip' ? 'More than its bill' : n.why === 'not_purchase' ? 'Refund or void' : 'No bill of this amount'}</span></div>
+      <div class="tiny">${card(p)} · machine ${p.terminalId}</div>`;
+    if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
+    if (n.why === 'tip') return html`<div class="rv-card">${head}
+      <div class="note">Bill <span class="mono">${n.tip.billNo}</span> is ₹ ${money(n.tip.amountPaise)}, ${at(n.tip.paidAt)}: the guest paid ₹ ${money(n.tip.tipPaise)} more on the card.</div>
+      <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-cardtip="${p.id}" data-tx="${n.tip.transactionId}">Match, ₹ ${money(n.tip.tipPaise)} tip</button></div><div class="form-msg"></div></div>`;
+    if (n.candidates.length) return html`<div class="rv-card">${head}
+      <div class="note">${n.candidates.length > 1 ? 'Pick the bill this payment was for.' : 'The bill of this amount is further away in time than Bookr matches on its own.'}</div>
+      <div class="form-row" style="gap:6px">${n.candidates.map((x) => html`<button class="btn plain" type="button" style="min-height:36px" data-cardpick="${p.id}" data-tx="${x.transactionIds.join(',')}">Bill ${x.billNos.join(' + ')}${x.minutes != null ? ` · ${x.minutes} min` : ' · no bill time'}${x.shiftDay !== k.day && x.shiftDay ? ` · ${dayLabel(x.shiftDay)}` : ''}</button>`)}</div><div class="form-msg"></div></div>`;
+    return html`<div class="rv-card">${head}
+      <div class="note">No card bill of this amount is waiting: a bill written as cash or UPI, or money that is not a bill (an advance, a room).</div>
+      <div class="form-row" style="gap:6px;align-items:center"><select data-cardhead="${p.id}" style="min-height:36px;max-width:220px"><option value="">Book to a head…</option>${income.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>
+        <button class="btn plain" type="button" style="min-height:36px" data-cardbook="${p.id}">Book</button>
+        <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/compare/${k.day}">Find the bill</a></div><div class="form-msg"></div></div>`;
+  };
+  const noSwipe = (x) => html`<div class="rv-card" ${x.cashFits ? 'style="border-color:var(--teal)"' : ''}>
+    <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
+    <div class="tiny">${at(x.paidAt)}</div>
+    <div class="note">The card report is in for this shift and has no payment for this bill.${x.cashFits ? html` <strong>The shift's cash is over by exactly ₹ ${money(x.amountPaise)}</strong>: it was most likely paid in cash.` : ' Was it paid another way?'}</div>
+    <div class="form-row" style="gap:6px"><button class="btn ${x.cashFits ? '' : 'plain'}" type="button" style="min-height:36px" data-cardwas="cash" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was cash</button>
+      <button class="btn plain" type="button" style="min-height:36px" data-cardwas="upi" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was UPI</button></div><div class="form-msg"></div></div>`;
+  const settle = (x) => html`<tr><td>${dayLabel(x.settledOn)}<div class="tiny">${x.payments} payment${x.payments === 1 ? '' : 's'} · merchant ${x.merchantId}</div></td>
+    <td class="amount">${money(x.amountPaise)}</td><td class="amount">${money(x.feePaise)}</td><td class="amount">${money(x.gstPaise)}</td><td class="amount"><strong>${money(x.netPaise)}</strong></td>
+    <td>${x.bank ? html`<span class="chip ok">${x.bank.byBookr ? 'Settled by Bookr' : 'Settled'}</span><div class="tiny">${when(x.bank.postedAt)} · ${x.bank.accountName}</div>
+      <button class="btn plain dchip" type="button" data-cardunsettle="${x.bank.id}">Undo</button>`
+      : !x.ruleSet ? html`<span class="chip wait">No card rule</span><div class="tiny"><a href="#/b/${biz.id}/heads">Set the Card settlement rule</a></div>`
+      : html`<span class="chip">Waiting for the bank</span><div class="tiny"><a href="#/b/${biz.id}/cards">Card settlements</a></div>`}</td></tr>`;
+  return html`<section class="card" style="gap:10px" id="cardsec">
+    <div class="lane-h"><h2 style="margin:0">Card</h2>${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>`
+      : left ? html`<span class="chip wait">${left} left</span>` : html`<span class="chip ok">Card reconciled</span>`}</div>
+    <div class="rec-strip">
+      <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
+      <div><div class="tiny">Matched to card payments</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.matchedPaise)}</div><div class="tiny">${st.matched} bill${st.matched === 1 ? '' : 's'}${st.byBookr ? ` · ${st.byBookr} by Bookr` : ''}</div></div>
+      <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : 'after the report'}</div></div>
+      <div><div class="tiny">Swipes with no bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
+    </div>
+    ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
+    ${k.done.length ? html`<details class="cmp-fold"><summary>Done (${k.done.length})</summary><div class="scroll"><table style="min-width:560px"><thead><tr><th>Card payment</th><th style="text-align:right">Amount</th><th>Bill</th><th></th></tr></thead><tbody>
+      ${k.done.map((d) => html`<tr><td>${when(d.payment.paidAt)}<div class="tiny">${card(d.payment)}</div></td><td class="amount">${money(d.payment.amountPaise)}</td>
+        <td>${d.booked ? 'Booked to a head' : html`<span class="mono">${d.bills.join(' + ')}</span>`}${d.tipPaise ? html`<div class="tiny">₹ ${money(d.tipPaise)} tip</div>` : ''}${d.byBookr ? html` <span class="chip">by Bookr</span>` : ''}</td>
+        <td><button class="btn plain dchip" type="button" data-cardunmatch="${d.payment.id}">Undo</button></td></tr>`)}</tbody></table></div></details>` : ''}
+    ${k.settlements.length ? html`<div><strong>Settlement</strong><div class="scroll"><table style="min-width:620px"><thead><tr><th>Settled</th><th style="text-align:right">Gross</th><th style="text-align:right">Fee</th><th style="text-align:right">GST</th><th style="text-align:right">Net</th><th>Bank</th></tr></thead>
+      <tbody>${k.settlements.map(settle)}</tbody></table></div></div>` : ''}
+    <div id="cardmsg" class="form-msg"></div>
+  </section>`;
+}
+
+function wireCardSection(biz, k, act) {
+  const box = document.getElementById('cardsec');
+  if (!box || !k) return;
+  const B = `/businesses/${biz.id}/cards`;
+  const unmatch = (pid) => apiFull('POST', `${B}/${pid}/unmatch`, {});
+  box.querySelectorAll('[data-cardpick]').forEach((b) => b.addEventListener('click', () => {
+    b.disabled = true;
+    const pid = b.dataset.cardpick;
+    act(() => apiFull('POST', `${B}/match`, { sets: [{ paymentIds: [pid], transactionIds: b.dataset.tx.split(',') }] }),
+      { text: `Matched ${b.textContent.split(' · ')[0]} to its card payment.`, undo: () => unmatch(pid) });
+  }));
+  box.querySelectorAll('[data-cardtip]').forEach((b) => b.addEventListener('click', () => {
+    b.disabled = true;
+    const pid = b.dataset.cardtip;
+    act(() => apiFull('POST', `${B}/${pid}/tip`, { transactionId: b.dataset.tx }), { text: 'Matched, with the tip booked.', undo: () => unmatch(pid) });
+  }));
+  box.querySelectorAll('[data-cardbook]').forEach((b) => b.addEventListener('click', () => {
+    const pid = b.dataset.cardbook;
+    const headId = box.querySelector(`[data-cardhead="${pid}"]`)?.value;
+    if (!headId) { showError(b.closest('.rv-card').querySelector('.form-msg'), new Error('Choose the head first.')); return; }
+    b.disabled = true;
+    act(() => apiFull('POST', `${B}/${pid}/book`, { headId }), { text: 'Card payment booked.', undo: () => unmatch(pid) });
+  }));
+  box.querySelectorAll('[data-cardwas]').forEach((b) => b.addEventListener('click', () => {
+    const mode = b.dataset.cardwas;
+    const ids = b.dataset.group ? k.noSwipe.filter((x) => x.groupHead === b.dataset.group).map((x) => x.transactionId) : [b.dataset.tx];
+    b.disabled = true;
+    let auditId = null;
+    act(async () => { auditId = (await apiFull('POST', `/businesses/${biz.id}/sales/repay`, { transactionIds: ids, mode, note: 'No card payment in the card report (Reconcile)' })).auditId; },
+      { text: `Changed to ${mode === 'upi' ? 'UPI' : 'cash'}.`, undo: () => apiFull('POST', `/businesses/${biz.id}/sales/repay/${auditId}/undo`, {}) });
+  }));
+  box.querySelectorAll('[data-cardunmatch]').forEach((b) => b.addEventListener('click', () => {
+    if (!confirm('Undo this match? The bill waits for its card payment again; a tip or booking added with it is removed.')) return;
+    act(() => unmatch(b.dataset.cardunmatch));
+  }));
+  box.querySelectorAll('[data-cardunsettle]').forEach((b) => b.addEventListener('click', () => {
+    if (!confirm('Undo this settlement? The bank credit is open again and the fee and GST rows are removed.')) return;
+    act(() => apiFull('POST', `${B}/unsettle`, { bankRowId: b.dataset.cardunsettle }));
+  }));
 }
 
 /** Books a credit, asking first if a bill of its amount is waiting: both would count one sale twice. False if the person stops. */
@@ -4386,7 +4519,15 @@ async function csvCard(biz, day, csv, name, card, done, cancel) {
 function syncResultHtml(r) {
   return html`<div class="inset" style="gap:4px">${r.results.length ? r.results.map((x) => html`<div class="list-row" style="padding:4px 0"><span>${x.name}</span>
     ${x.ok ? html`<span class="ok-msg" style="font-size:14px">✓ ${x.added} new line${x.added === 1 ? '' : 's'}${x.lastAt ? ` · up to ${when(x.lastAt)}` : ''}</span>` : html`<span class="error" style="font-size:14px">${x.error}</span>`}</div>`)
-    : html`<div class="note">No account has a Google Sheet set up. Use Set up on Bank sync.</div>`}</div>`;
+    : html`<div class="note">No account has a Google Sheet set up. Use Set up on Bank sync.</div>`}${cardSyncHtml(r.cards)}</div>`;
+}
+/** The card reports read from the Drive folder by the same Sync (nothing when no folder is set). */
+function cardSyncHtml(k) {
+  if (!k) return '';
+  const biz = currentBizId();
+  return html`<div class="list-row" style="padding:4px 0"><span><a href="#/b/${biz}/cards">Card reports</a> <span class="tiny">· Drive folder</span></span>
+    ${k.ok ? html`<span class="${k.problems.length ? 'error' : 'ok-msg'}" style="font-size:14px">${k.problems.length ? '' : '✓ '}${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'no new files'}${k.more ? ` (${k.more} more next Sync)` : ''}${k.problems.length ? ` · ${k.problems.join(' ')}` : ''}</span>`
+      : html`<span class="error" style="font-size:14px">${k.error}</span>`}</div>`;
 }
 
 // ---------- The bill drawer: everything about one bill, from anywhere (approved 3 Nov 2026)
@@ -4497,6 +4638,217 @@ const drawerBtn = (billNo, day) => html`<button type="button" class="btn plain" 
 
 // ---------- router
 
+// ---------- Card settlements: the card machine's daily report (by mail or dropped in), each payment to its bill,
+// each settlement day's net amount to the bank's ICICIPOS_SET credit with the fee booked. A person confirms each step.
+
+const CARD_MAIL_STATUS = { read: ['ok', 'Read'], failed: ['bad', 'Not read'], ignored: ['', 'Nothing to read'] };
+const fileBase64 = (file) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1] ?? '');
+  r.onerror = () => reject(new Error('The file could not be read.'));
+  r.readAsDataURL(file);
+});
+
+async function cardsView(biz, query = '') {
+  const q = new URLSearchParams(query);
+  const to = isDay(q.get('to')) ? q.get('to') : todayIst();
+  const from = isDay(q.get('from')) ? q.get('from') : addDaysIso(to, -13);
+  const r = await api('GET', `/businesses/${biz.id}/cards?from=${from}&to=${to}`);
+  const reload = () => cardsView(biz, query);
+  const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
+  const bills = (k) => `Bill ${k.billNos.join(' + ')}${k.minutes != null ? ` · ${k.minutes} min apart` : ` · ${dayLabel(k.shiftDay)} shift`}`;
+  const others = (p) => r.waiting.filter((w) => !p.candidates.some((k) => k.transactionIds.includes(w.id)));
+  const billCell = (p) => {
+    if (p.matched) {
+      return html`<span class="chip ok">Bill ${p.matched.bills.join(' + ')}</span>${p.matched.payments > 1 ? html` <span class="tiny">with ${p.matched.payments - 1} other payment${p.matched.payments > 2 ? 's' : ''}</span>` : ''}
+        <button class="btn plain" type="button" data-cunmatch="${p.id}" style="${SMALL}">Unmatch</button>`;
+    }
+    if (p.txnType !== 'PURCHASE') return html`<span class="note">${p.txnType.toLowerCase()}: not matched to a bill</span>`;
+    const rest = others(p);
+    if (!p.candidates.length && !rest.length) return html`<span class="note">No confirmed card bill waiting. Confirm the shift on Compare sales first.</span>`;
+    return html`<div class="form-row" style="gap:6px;align-items:center;flex-wrap:nowrap">
+      <input type="checkbox" data-ctick="${p.id}" ${p.clear ? 'checked' : ''} aria-label="Match this payment" style="width:18px;height:18px;min-height:0">
+      <select class="compact" data-cpick="${p.id}" aria-label="Bill" style="max-width:280px">
+        ${p.candidates.length ? '' : html`<option value="">Choose the bill</option>`}
+        ${p.candidates.map((k) => html`<option value="${k.transactionIds.join(',')}">${bills(k)}</option>`)}
+        ${rest.length ? html`<optgroup label="Other card bills waiting">${rest.map((w) => html`<option value="${w.id}">Bill ${w.billNo ?? '?'} · ₹ ${rs(w.amountPaise)} · ${dayLabel(w.shiftDay)}${w.paidAt ? ` ${hhmm(w.paidAt)}` : ''}</option>`)}</optgroup>` : ''}
+      </select></div>
+      ${p.candidates.length ? '' : html`<div class="tiny">No card bill of ₹ ${rs(p.amountPaise)} near this time.</div>`}`;
+  };
+  const ruleOf = (s) => { const k = s.terminals.map((t) => (r.rules ?? []).find((x) => x.terminalId === t)); return k.every(Boolean) ? k[0] : null; };
+  const headName = (id) => r.feeHeads.find((h) => h.id === id)?.name ?? 'its head';
+  const bankBlock = (s) => {
+    if (s.bank) {
+      return html`<div class="form-row" style="gap:8px;align-items:center"><span class="chip ok">In the bank</span>
+        <span>₹ ${money(s.bank.amountPaise)} on ${dayLabel(s.bank.day)} ${hhmm(s.bank.postedAt)} · ${s.bank.accountName}${s.bank.feeHead ? ` · fee booked under ${s.bank.feeHead}` : ''}</span>
+        <button class="btn plain" type="button" data-cunsettle="${s.bank.id}" style="${SMALL}">Undo</button></div>
+        ${s.partlySettled ? html`<div class="error">Some payments of this day came in after it was settled. Undo and settle it again.</div>` : ''}`;
+    }
+    const tog = (r.together ?? []).findIndex((x) => x.merchantId === s.merchantId && x.days.includes(s.settledOn));
+    if (!s.credits.length && tog >= 0) {
+      const x = r.together[tog];
+      return html`<div class="form-row" style="gap:8px;align-items:center"><span class="note">The card company paid ${x.days.map(dayLabel).join(' + ')} in one bank credit of <strong>₹ ${money(x.netPaise)}</strong>.</span>
+        <button class="btn" type="button" data-ctogether="${tog}" style="${SMALL}">Settle these days together</button></div>`;
+    }
+    if (!s.credits.length) {
+      return html`<div class="note">The bank's card credit of <strong>₹ ${money(s.netPaise)}</strong> (EZY/ICICIPOS_SET…) is not in Bookr yet.
+        <a href="#/b/${biz.id}/bank?${new URLSearchParams({ from: addDaysIso(s.settledOn, -1), to: addDaysIso(s.settledOn, 3), tab: 'in' })}">Sync or paste the statement on Bank sync</a>.</div>`;
+    }
+    const fee = s.feePaise + s.gstPaise;
+    return html`<form class="form-row" data-csettle="${s.settledOn}|${s.merchantId}" style="gap:8px;align-items:flex-end">
+      <div class="field" style="flex:2 1 260px"><label>Bank credit</label><select name="bankRowId" class="compact">${s.credits.map((c) => html`<option value="${c.id}">₹ ${money(c.amountPaise)} · ${dayLabel(c.day)} ${hhmm(c.postedAt)} · ${c.accountName}</option>`)}</select></div>
+      ${fee && !ruleOf(s) ? html`<div class="note">Set the <a href="#/b/${biz.id}/heads">Card settlement rule on Heads and rules</a> first: it says where the fee and the GST are booked.</div>`
+        : html`${fee ? html`<div class="note" style="flex:1 1 200px">Fee ₹ ${money(s.feePaise)} → ${headName(ruleOf(s).feeHeadId)}${s.gstPaise ? html`, GST ₹ ${money(s.gstPaise)} → ${headName(ruleOf(s).gstHeadId)}` : ''}</div>` : ''}
+      <button class="btn" type="submit" style="${SMALL}">Settle with the bank</button>`}</form>`;
+  };
+  const dayCard = (s) => {
+    const open = s.payments.filter((p) => !p.matched && p.txnType === 'PURCHASE');
+    const matched = s.payments.length - open.length;
+    return html`<section class="card" style="gap:10px" data-cday="${s.settledOn}|${s.merchantId}">
+      <div class="form-row" style="justify-content:space-between;align-items:baseline">
+        <h2>Settled ${dayLabel(s.settledOn)}</h2>
+        <span class="chip ${s.bank && !open.length ? 'ok' : 'wait'}">${matched} of ${s.payments.length} matched to bills${s.bank ? ' · in the bank' : ''}</span></div>
+      <div class="note">${s.payments.length} payment${s.payments.length === 1 ? '' : 's'}: ₹ ${money(s.amountPaise)} less fee ₹ ${money(s.feePaise)}${s.gstPaise ? html` and GST ₹ ${money(s.gstPaise)}` : ''}
+        = <strong>₹ ${money(s.netPaise)} to the bank</strong> · terminal ${s.terminals.join(', ')}</div>
+      <div class="scroll"><table style="min-width:760px">
+        <thead><tr><th>Paid</th><th>Card</th><th style="text-align:right">₹</th><th style="text-align:right">Fee + GST</th><th>Bill</th></tr></thead>
+        <tbody>${s.payments.map((p) => html`<tr>
+          <td style="white-space:nowrap">${hhmm(p.paidAt)}<div class="tiny">${dayLabel(p.shiftDay)} shift</div></td>
+          <td style="white-space:nowrap">${p.scheme ?? ''} ${p.cardLast4 ? `•••• ${p.cardLast4}` : ''}<div class="tiny mono">RRN ${p.rrn ?? '—'}</div></td>
+          <td class="amount">${money(p.amountPaise)}</td>
+          <td class="amount">${money(p.feePaise + p.gstPaise)}</td>
+          <td style="white-space:normal">${billCell(p)}</td></tr>`)}</tbody></table></div>
+      ${open.length ? html`<div><button class="btn" type="button" data-cmatch="${s.settledOn}|${s.merchantId}" style="${SMALL}">Match ticked payments</button></div>` : ''}
+      <div class="inset" style="gap:8px"><strong>Bank</strong>${bankBlock(s)}</div>
+    </section>`;
+  };
+  const mailNote = (m) => {
+    const link = /https:\/\/\S+/.exec(m.note ?? '')?.[0];
+    return link ? html`${m.note.replace(link, '').replace(/\s*Open\s*/, ' ')} <a href="${link}" target="_blank" rel="noopener">Confirm forwarding</a>` : m.note;
+  };
+  render(shell(biz, 'cards', 'Card settlements', 'The card machine\'s daily report: each payment to its bill, each day\'s money to the bank.', html`
+    <section class="card" style="gap:12px">
+      <div id="recmsg"></div>
+      <label class="drop small" data-drop="cards"><span class="big">💳</span><strong>Drop the card company's report</strong>
+        <span class="tiny">The ICICI POS Excel file (…_ICICI_POS_CD.xlsx), for a report not in the Drive folder.</span>
+        <input type="file" accept=".xlsx" multiple hidden></label>
+      <form id="cdfolder" class="form-row" style="align-items:flex-end">
+        <div class="field" style="flex:2 1 300px"><label for="cdfold">Google Drive folder of the card reports</label>
+          <input id="cdfold" name="folder" value="${r.driveFolder ? `https://drive.google.com/drive/folders/${r.driveFolder}` : ''}" placeholder="Paste the folder's link"></div>
+        <button class="btn plain" type="submit">Save</button>
+        ${r.driveFolder ? html`<button class="btn" type="button" id="cdsync">Check the folder now</button>` : ''}</form>
+      <div class="tiny">${r.driveFolder ? 'New files are read whenever you Sync on Bring in or Bank sync.' : 'A script in Gmail saves each report there; Bookr reads new files whenever you Sync.'}${r.googleEmail ? html` Share the folder with <span class="mono">${r.googleEmail}</span> as Viewer.` : ' Google access is not set up yet (see Bank sync).'}</div>
+      <form id="cdrange" class="form-row" style="align-items:flex-end">
+        <div class="field"><label for="cdfrom">Settled from</label><input id="cdfrom" type="date" name="from" value="${r.from}" required></div>
+        <div class="field"><label for="cdto">To</label><input id="cdto" type="date" name="to" value="${r.to}" required></div>
+        <button class="btn plain" type="submit">Show</button></form>
+    </section>
+    ${r.mails.length ? html`<section class="card" style="gap:8px"><h2>Reports received</h2>
+      <table><tbody>${r.mails.map((m) => {
+        const [cls, label] = CARD_MAIL_STATUS[m.status] ?? ['', m.status];
+        return html`<tr><td style="white-space:nowrap">${when(m.receivedAt)}<div class="tiny">${m.from}</div></td>
+          <td style="white-space:normal">${m.subject || html`<span class="note">No subject</span>`}<div class="tiny">${mailNote(m)}</div></td>
+          <td style="white-space:nowrap;text-align:right"><span class="chip ${cls}">${label}</span>
+            ${m.status !== 'ignored' ? html` <button class="btn plain" type="button" data-cread="${m.id}" style="${SMALL}">Read again</button>` : ''}</td></tr>`;
+      })}</tbody></table></section>` : ''}
+    ${r.settlements.length ? r.settlements.map(dayCard) : html`<section class="card"><div class="note">No card payments settled between ${dayLabel(r.from)} and ${dayLabel(r.to)}.</div></section>`}`));
+  wireShell();
+  const msg = document.getElementById('recmsg');
+  const act = async (btn, fn) => {
+    btn.disabled = true;
+    try { await fn(); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); btn.disabled = false; }
+  };
+  document.getElementById('cdrange').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const d = new FormData(e.target);
+    location.hash = `#/b/${biz.id}/cards?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
+  });
+  document.getElementById('cdfolder').addEventListener('submit', (e) => {
+    e.preventDefault();
+    act(e.target.querySelector('button[type=submit]'), async () => {
+      await api('PUT', `/businesses/${biz.id}/cards/folder`, { folder: new FormData(e.target).get('folder') });
+      await reload();
+      doneToast('Folder saved.', null, reload);
+    });
+  });
+  document.getElementById('cdsync')?.addEventListener('click', (e) => act(e.currentTarget, async () => {
+    const k = await api('POST', `/businesses/${biz.id}/cards/sync`);
+    await reload();
+    doneToast(`${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'No new files in the folder'}${k.more ? ` (${k.more} more: check again)` : ''}.${k.problems.length ? ` ${k.problems.join(' ')}` : ''}`, null, reload);
+  }));
+  // The report file: tap or drop. Payments already in Bookr are not added twice.
+  const zone = app.querySelector('[data-drop="cards"]');
+  const input = zone.querySelector('input');
+  const bringIn = async (files) => {
+    msg.innerHTML = html`<div class="note"><span class="spinner"></span> Reading ${files.length} file${files.length === 1 ? '' : 's'}…</div>`.__html;
+    const said = [];
+    let ok = 0;
+    for (const f of files) {
+      try {
+        const res = await api('POST', `/businesses/${biz.id}/cards/file`, { name: f.name, data: await fileBase64(f) });
+        ok += 1;
+        said.push(`${f.name}: ${res.added} new payment${res.added === 1 ? '' : 's'}${res.skipped ? `, ${res.skipped} already in Bookr` : ''}${res.problems.length ? `. ${res.problems.join(' ')}` : ''}`);
+      } catch (err) { said.push(`${f.name}: ${err.message}`); }
+    }
+    if (ok) await reload();
+    const box = document.getElementById('recmsg');
+    box.innerHTML = html`<div class="${ok === files.length ? 'ok-msg' : 'error'}">${said.map((s) => html`<div>${s}</div>`)}</div>`.__html;
+  };
+  input.addEventListener('change', () => { if (input.files.length) bringIn([...input.files]); input.value = ''; });
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('over'); const f = [...e.dataTransfer.files]; if (f.length) bringIn(f); });
+  // Choosing a bill ticks the payment.
+  app.querySelectorAll('[data-cpick]').forEach((s) => s.addEventListener('change', () => {
+    const tick = app.querySelector(`[data-ctick="${s.dataset.cpick}"]`);
+    if (tick) tick.checked = !!s.value;
+  }));
+  app.querySelectorAll('[data-cmatch]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
+    const card = app.querySelector(`[data-cday="${b.dataset.cmatch}"]`);
+    const sets = [...card.querySelectorAll('[data-ctick]:checked')].map((t) => ({
+      paymentIds: [t.dataset.ctick], transactionIds: (card.querySelector(`[data-cpick="${t.dataset.ctick}"]`)?.value ?? '').split(',').filter(Boolean),
+    })).filter((s) => s.transactionIds.length);
+    if (!sets.length) throw new Error('Tick the payments to match and choose their bills.');
+    const res = await api('POST', `/businesses/${biz.id}/cards/match`, { sets });
+    await reload();
+    doneToast(`${res.matched} payment${res.matched === 1 ? '' : 's'} matched to ${res.matched === 1 ? 'its bill' : 'their bills'}.${res.problems.length ? ` Not matched: ${res.problems.join(' ')}` : ''}`, null, reload);
+  })));
+  app.querySelectorAll('[data-cunmatch]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
+    await api('POST', `/businesses/${biz.id}/cards/${b.dataset.cunmatch}/unmatch`);
+    await reload();
+    doneToast('Unmatched. The bill waits for its card payment again.', null, reload);
+  })));
+  app.querySelectorAll('[data-csettle]').forEach((f) => f.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const btn = f.querySelector('button[type=submit]');
+    act(btn, async () => {
+      const [settledOn, merchantId] = f.dataset.csettle.split('|');
+      const d = new FormData(f);
+      const res = await api('POST', `/businesses/${biz.id}/cards/settle`, { settledOn, merchantId, bankRowId: d.get('bankRowId') });
+      const rowId = d.get('bankRowId');
+      await reload();
+      doneToast(`Settled with the bank${res.feePaise ? `; fee ₹ ${money(res.feePaise)}${res.gstPaise ? ` and GST ₹ ${money(res.gstPaise)}` : ''} booked` : ''}.`,
+        () => api('POST', `/businesses/${biz.id}/cards/unsettle`, { bankRowId: rowId }), reload);
+    });
+  }));
+  app.querySelectorAll('[data-ctogether]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
+    const x = r.together[Number(b.dataset.ctogether)];
+    await api('POST', `/businesses/${biz.id}/cards/settle`, { days: x.days, merchantId: x.merchantId, bankRowId: x.creditId });
+    await reload();
+    doneToast(`${x.days.length} days settled with one bank credit.`, () => api('POST', `/businesses/${biz.id}/cards/unsettle`, { bankRowId: x.creditId }), reload);
+  })));
+  app.querySelectorAll('[data-cunsettle]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
+    await api('POST', `/businesses/${biz.id}/cards/unsettle`, { bankRowId: b.dataset.cunsettle });
+    await reload();
+    doneToast('Taken apart from the bank credit; the fee and GST rows are removed.', null, reload);
+  })));
+  app.querySelectorAll('[data-cread]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
+    const res = await api('POST', `/businesses/${biz.id}/inbound-mails/${b.dataset.cread}/read`);
+    await reload();
+    doneToast(res.note, null, reload);
+  })));
+}
+
 async function route() {
   document.body.classList.remove('review-expanded');
   drawerReload = null;
@@ -4538,6 +4890,7 @@ async function route() {
       }
       if (screen === 'compare') return compareView(biz, parts[3]);
       if (screen === 'bank') return bankView(biz, query);
+      if (screen === 'cards') return cardsView(biz, query);
       if (screen === 'bringin') return bringInView(biz, parts[3]);
       if (screen === 'reconcile' || screen === 'upi') return reconcileView(biz, parts[3]);
       if (screen === 'reports') return reportsView(biz, query);

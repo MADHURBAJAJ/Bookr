@@ -10,6 +10,7 @@ import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
 import { shiftSlips } from '../slips';
+import { runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { CASH_BY_UPI_MIN, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
@@ -266,7 +267,9 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/progress', requireRole('sal
     can(c.get('role'), 'bank.link') ? n(`SELECT count(*) AS n FROM bank_rows WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched'
       AND posted_at >= ? AND posted_at < ?`, bid, w.from, w.to) : null,
   ]);
-  return c.json({ rows, toCheck, toDecide, status: status?.status ?? null, bank: bills == null ? null : { billsLeft: bills, creditsLeft: credits } });
+  // Card items count too once the shift is confirmed: swipes with no bill, and card bills with no swipe once the report is in.
+  const cardsLeft = bills != null && status?.status === 'confirmed' ? (await shiftCards(db, bid, day, null)).left : 0;
+  return c.json({ rows, toCheck, toDecide, status: status?.status ?? null, bank: bills == null ? null : { billsLeft: bills, creditsLeft: credits, cardsLeft } });
 });
 
 salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view'), async (c) => {
@@ -452,7 +455,9 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/confirm', requireRole('sal
   try {
     const result = await confirmShift(c.env.DB, c.get('businessId'), day, c.get('user').id);
     if ('blockers' in result) return c.json({ error: 'This shift cannot be confirmed yet.', problems: result.blockers }, 409);
-    return c.json(result);
+    // Its card sales are matched by Bookr to card payments already in, where safe.
+    const auto = await runCardAuto(c.env.DB, c.get('businessId'));
+    return c.json({ ...result, cardMatched: auto.matched });
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, 'This shift is already confirmed.');
     throw e;

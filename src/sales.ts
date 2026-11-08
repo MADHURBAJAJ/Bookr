@@ -834,7 +834,8 @@ export async function reopenShift(db: DB, businessId: string, day: string, userI
   const shift = await one<{ id: string; status: string }>(db, 'SELECT id, status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day);
   if (!shift || shift.status !== 'confirmed') return { error: 'This shift is not confirmed.' };
   const rows = await all<Record<string, unknown>>(db, `SELECT * FROM transactions WHERE business_id = ? AND shift_day = ? AND source = 'software_report'`, businessId, day);
-  if (rows.some((r) => r.matched_bank_row)) return { error: 'Some sales of this shift are already matched to the bank or card settlement, so it cannot be reopened.' };
+  const carded = await one(db, `SELECT 1 FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE t.business_id = ? AND t.shift_day = ? AND t.source = 'software_report'`, businessId, day);
+  if (carded || rows.some((r) => r.matched_bank_row)) return { error: 'Some sales of this shift are already matched to the bank or card settlement, so it cannot be reopened.' };
   const t = now();
   await db.batch([
     ...rows.map((r) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)

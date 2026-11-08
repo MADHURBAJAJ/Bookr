@@ -1553,6 +1553,10 @@ describe('a UPI sale that was paid another way', () => {
     // Card: waits for the card settlement.
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale.id], mode: 'card', note: 'card' })).status).toBe(200);
     expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${sale.id}`)[0]).toEqual({ payment_mode: 'card', match_status: 'awaiting_card_settlement' });
+    // A card sale with no card payment ("Was UPI?" on Reconcile) goes back the same way; not to its own mode.
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale.id], mode: 'card', note: 'x' })).status).toBe(400);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale.id], mode: 'upi', note: 'No card payment in the card report' })).status).toBe(200);
+    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${sale.id}`)[0]).toEqual({ payment_mode: 'upi', match_status: 'awaiting_bank_match' });
   });
 });
 
@@ -2113,7 +2117,7 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect(p).toMatchObject({ toCheck: 0, status: expect.anything() });
     expect(p.rows).toBeGreaterThan(10);
     expect(p.toDecide).toBeGreaterThan(0);
-    expect(p.bank).toEqual({ billsLeft: 0, creditsLeft: 4 }); // nothing counted before confirming; four credits inside the shift
+    expect(p.bank).toEqual({ billsLeft: 0, creditsLeft: 4, cardsLeft: 0 }); // nothing counted before confirming; four credits inside the shift
     expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31/progress`)).json.bank).toBeNull();
   });
 

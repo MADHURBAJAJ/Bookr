@@ -10,6 +10,7 @@ import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } fro
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
+import { cashOver, shiftCards } from '../cards';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
@@ -17,6 +18,8 @@ import { billDistance, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
+import { unsettleStatements } from '../cards';
+import { syncCardFolder } from '../cardDrive';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -134,7 +137,11 @@ bankRoutes.post('/businesses/:businessId/bank/sync-all', requireRole('bank.link'
     try { results.push({ accountId: a.id, name: a.name, ...(await syncAccount(c.env, db, bid, a.id)) }); }
     catch (e) { results.push({ accountId: a.id, name: a.name, ok: false, error: (e as Error).message || 'Could not sync.' }); }
   }
-  return c.json({ results });
+  // The card company's reports in the Drive folder, if one is set: read with the bank, so one Sync brings in both.
+  let cards: ({ ok: true } & NonNullable<Awaited<ReturnType<typeof syncCardFolder>>>) | { ok: false; error: string } | null = null;
+  try { const r = await syncCardFolder(c.env, bid); cards = r ? { ok: true, ...r } : null; }
+  catch (e) { cards = { ok: false, error: (e as Error).message || 'Could not read the card reports.' }; }
+  return c.json({ results, cards });
 });
 
 // ---- Lines, with what Bookr suggests for each
@@ -215,7 +222,7 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
   return c.json({ day, sales, credits, repaid, moreHours: more, confirmedShifts: shifts.map((s) => s.day) });
 });
 
-// ---- A UPI sale that was in fact paid by cash or card (the register's mode was a slip)
+// ---- A UPI or card sale that was in fact paid another way (the register's mode was a slip)
 
 bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
@@ -223,7 +230,7 @@ bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'),
   const data = await body(c);
   const ids = Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string' && isUuid(x)).slice(0, 30) : [];
   if (!ids.length) fail(400, 'Choose the bill.');
-  const mode = data.mode === 'cash' || data.mode === 'card' ? data.mode : fail(400, 'Choose cash or card.');
+  const mode = data.mode === 'cash' || data.mode === 'card' || data.mode === 'upi' ? data.mode : fail(400, 'Choose cash, card or UPI.');
   const note = text(data, 'note', 'Reason', { max: 300 })!;
   const r = await repayStatements(db, bid, ids, mode, note, c.get('user').id, now());
   const done = await db.batch(r.statements);
@@ -257,7 +264,9 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
     leftIds = r.open.credits.map((x) => x.id).filter((id) => !carded.has(id));
   }
   const slips = await shiftSlips(db, bid, day, leftIds.filter((id) => !hinted.has(id)));
-  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips });
+  // The card picture (approved 8 Nov 2026), for a confirmed shift: its card sales are made on confirm.
+  const cards = status === 'confirmed' ? await shiftCards(db, bid, day, await cashOver(db, bid, day)) : null;
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards });
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
@@ -885,6 +894,8 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('
   const tx = row.transaction_id ? await one(db, 'SELECT * FROM transactions WHERE id = ?', row.transaction_id) : null;
   const t = now();
   await db.batch([
+    // A card settlement booked against this credit comes apart with it.
+    ...unsettleStatements(db, row.id),
     stmt(db, "UPDATE bank_rows SET status = 'unmatched', transaction_id = NULL, note = NULL, done_by = NULL, done_at = NULL WHERE id = ?", row.id),
     ...(row.transaction_id ? [stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", row.transaction_id)] : []),
     stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.reopen', row.id, { status: row.status, note: row.note, transaction: tx }, { status: 'unmatched' }, t)),

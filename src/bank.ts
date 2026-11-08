@@ -5,6 +5,7 @@
 import { all, newId, now, one, stmt, type DB } from './db';
 import type { BankLine } from './bankstatement';
 import { addDays, shiftWindow } from './time';
+import { runCardAuto } from './cards';
 
 export interface BankRow {
   id: string; account_id: string; tran_id: string; value_date: string; posted_at: number; day: string; description: string;
@@ -24,7 +25,9 @@ export async function importLines(db: DB, businessId: string, accountId: string,
     l.kind, l.upiRef, l.vpa, l.remark, t));
   for (let i = 0; i < statements.length; i += 80) await db.batch(statements.slice(i, i + 80));
   await pairRows(db, accountId);
-  return { added: fresh.length, skipped: lines.length - fresh.length };
+  // A card settlement credit among them is settled by Bookr where safe (its date and exactly its net, a rule set).
+  const auto = fresh.some((l) => l.kind === 'card_settlement') ? await runCardAuto(db, businessId) : null;
+  return { added: fresh.length, skipped: lines.length - fresh.length, cardSettled: auto?.settled ?? 0 };
 }
 
 /** A UPI card fee belongs to the credit with its ref; a reversal to the debit with its ref. */

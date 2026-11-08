@@ -1,10 +1,10 @@
-// Read-only access to Google Sheets as a service account. The key lives only in the Worker secret
+// Read-only access to Google Sheets and Drive as a service account. The key lives only in the Worker secret
 // GOOGLE_SERVICE_ACCOUNT (the JSON key file Google gives); it never reaches the browser, the logs or the repo.
-// The person shares each sheet with the service account's email address as a Viewer.
+// The person shares each sheet (and the card reports' Drive folder) with the service account's email address as a Viewer.
 
 import type { Env } from './types';
 
-const SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+const SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly';
 let cached: { token: string; until: number; email: string } | null = null;
 
 export class GoogleError extends Error {}
@@ -84,4 +84,44 @@ export async function readSheet(env: Env, sheetId: string, tab: string | null): 
     rows.push(...(v.values ?? []));
   }
   return { tabs, rows };
+}
+
+// ---- Drive: the folder the card company's reports are saved into
+
+/** The folder ID from a Google Drive folder link, or the ID itself. */
+export function folderIdFrom(v: string): string | null {
+  const m = /\/folders\/([A-Za-z0-9_-]{10,})/.exec(v) ?? /[?&]id=([A-Za-z0-9_-]{10,})/.exec(v) ?? /^([A-Za-z0-9_-]{10,})$/.exec(v.trim());
+  return m ? m[1] : null;
+}
+
+async function drive(env: Env, url: string) {
+  const res = await fetch(url, { headers: { authorization: `Bearer ${await accessToken(env)}` } });
+  if (res.ok) return res;
+  const why = await res.text().catch(() => '');
+  if (res.status === 403 && /drive api has not been used|accessNotConfigured|SERVICE_DISABLED/i.test(why)) {
+    throw new GoogleError('The Google Drive API is not turned on. In the Google Cloud project, enable "Google Drive API" (as was done for Sheets).');
+  }
+  if (res.status === 403 || res.status === 404) throw new GoogleError(`Bookr cannot open the Drive folder. Share it with ${serviceAccountEmail(env)} as a Viewer, and check the link.`);
+  throw new GoogleError('Google Drive did not answer. Try again in a minute.');
+}
+
+/** Files in a folder (not in its subfolders), newest first. */
+export async function listFolder(env: Env, folderId: string): Promise<{ id: string; name: string; modifiedTime: string; size?: string }[]> {
+  const files: { id: string; name: string; modifiedTime: string; size?: string }[] = [];
+  let page = '';
+  for (let i = 0; i < 10; i += 1) {
+    const q = encodeURIComponent(`'${folderId.replace(/'/g, '')}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`);
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=200&fields=nextPageToken,files(id,name,modifiedTime,size)&supportsAllDrives=true&includeItemsFromAllDrives=true${page ? `&pageToken=${page}` : ''}`;
+    const j = (await (await drive(env, url)).json()) as { files: typeof files; nextPageToken?: string };
+    files.push(...j.files);
+    if (!j.nextPageToken) break;
+    page = j.nextPageToken;
+  }
+  return files;
+}
+
+/** A file's bytes. */
+export async function downloadFile(env: Env, fileId: string): Promise<Uint8Array> {
+  const res = await drive(env, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`);
+  return new Uint8Array(await res.arrayBuffer());
 }

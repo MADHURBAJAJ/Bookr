@@ -2,17 +2,24 @@
 // by cash or card (the register's mode was a slip). The register payment's mode and the sale move to cash or card;
 // a cash sale then counts in the shift's cash check. Recorded in the audit log with whole before rows, so it can be
 // put back. Bills paid together change together (one payment).
+// Also (approved 8 Nov 2026) a confirmed card sale no card payment was found for once the card report is in ("Was
+// cash?"): it moves to cash or UPI the same way.
 
 import { all, one, stmt, type DB } from './db';
 import { fail } from './http';
 import { cashAccountId } from './sales';
 
-export async function repayStatements(db: DB, businessId: string, txIds: string[], mode: 'cash' | 'card', note: string, userId: string, t: number) {
+export async function repayStatements(db: DB, businessId: string, txIds: string[], mode: 'cash' | 'card' | 'upi', note: string, userId: string, t: number) {
   const tx = await all<Record<string, unknown> & { id: string; amount_paise: number; payment_mode: string; match_status: string | null; matched_bank_row: string | null;
     comparison_id: string | null; shift_day: string; bill_no: string | null }>(db,
     `SELECT * FROM transactions WHERE business_id = ? AND type = 'income' AND source = 'software_report' AND id IN (${txIds.map(() => '?').join(',')})`, businessId, ...txIds);
   if (tx.length !== txIds.length) fail(404, 'A sale was not found.');
-  if (tx.some((x) => x.payment_mode !== 'upi' || x.matched_bank_row || x.match_status !== 'awaiting_bank_match')) fail(409, 'Only a UPI sale not yet found in the bank can be changed here.');
+  const from = tx[0].payment_mode;
+  const open = (x: (typeof tx)[number]) => (x.payment_mode === 'upi' && !x.matched_bank_row && x.match_status === 'awaiting_bank_match')
+    || (x.payment_mode === 'card' && x.match_status === 'awaiting_card_settlement');
+  if (tx.some((x) => x.payment_mode !== from || !open(x))) fail(409, 'Only a UPI sale not yet found in the bank, or a card sale with no card payment, can be changed here.');
+  if (from === mode) fail(400, `This sale is already ${mode === 'upi' ? 'UPI' : mode}.`);
+  if (from === 'card' && await one(db, `SELECT 1 AS x FROM card_matches WHERE transaction_id IN (${txIds.map(() => '?').join(',')})`, ...txIds)) fail(409, 'This card sale is matched to a card payment.');
   // The register line(s) and the one payment they were paid with.
   const regs = await all<{ txId: string; regId: string; head: string; cmpId: string; rgMode: string | null }>(db, `
     SELECT t.id AS txId, r.id AS regId, coalesce(r.paid_with_row_id, r.id) AS head, c.id AS cmpId, c.rg_mode AS rgMode
@@ -25,8 +32,8 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
   if (members.length !== regs.length) fail(400, 'Choose every bill paid together with this one.');
   const pays = await all<Record<string, unknown> & { id: string; mode: string; amount_paise: number }>(db, 'SELECT * FROM register_payments WHERE register_row_id = ?', heads[0]);
   const total = tx.reduce((s, x) => s + x.amount_paise, 0);
-  const pay = pays.length === 1 ? pays[0] : pays.find((p) => p.mode === 'upi' && p.amount_paise === total);
-  if (!pay || pay.mode !== 'upi') fail(400, 'The register shows more than one payment for this bill. Change it on its register page.');
+  const pay = pays.length === 1 ? pays[0] : pays.find((p) => p.mode === from && p.amount_paise === total);
+  if (!pay || pay.mode !== from) fail(400, 'The register shows more than one payment for this bill. Change it on its register page.');
   const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, tx[0].shift_day);
   if (shift?.status !== 'confirmed') fail(400, 'This shift is not confirmed yet: change the payment on its register page.');
   const cash = mode === 'cash' ? await cashAccountId(db, businessId) : null;
@@ -35,13 +42,13 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
 
   const statements: D1PreparedStatement[] = [
     stmt(db, 'UPDATE register_payments SET mode = ?, column_label = NULL WHERE id = ?', mode, pay.id),
-    ...tx.map((x) => stmt(db, "UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ? AND match_status = 'awaiting_bank_match'",
-      mode, cash, mode === 'card' ? 'awaiting_card_settlement' : null, x.id)),
+    ...tx.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ? AND match_status = ?',
+      mode, cash, mode === 'card' ? 'awaiting_card_settlement' : mode === 'upi' ? 'awaiting_bank_match' : null, x.id, x.match_status)),
     ...cmps.map((c) => stmt(db, 'UPDATE bill_comparisons SET rg_mode = ? WHERE id = ?', mode, c.id)),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
       VALUES (?, ?, 'sale.repaid', 'register_payments', ?, ?, ?, ?)`, businessId, userId, pay.id,
       JSON.stringify({ payment: pay, sales: tx, comparisons: cmps }),
-      JSON.stringify({ mode, note, shiftDay: tx[0].shift_day, bills: tx.map((x) => x.bill_no), amountPaise: total, transactionIds: txIds }), t),
+      JSON.stringify({ from, mode, note, shiftDay: tx[0].shift_day, bills: tx.map((x) => x.bill_no), amountPaise: total, transactionIds: txIds }), t),
   ];
   return { statements, bills: tx.map((x) => x.bill_no), amountPaise: total };
 }
