@@ -346,6 +346,10 @@ describe('card settlements end to end', () => {
       const got = v.mails[0];
       expect(got).toMatchObject({ from: 'Google Drive', status: 'read' });
       expect((await o.post(`/businesses/${h.bid}/inbound-mails/${got.id}/read`)).json.note).toMatch(/0 new payments, 2 already in Bookr/);
+      // Bank sync and Bring in show the card reports beside the bank accounts.
+      expect((await o.get(`/businesses/${h.bid}/bank`)).json.cards).toMatchObject({ folder: '1AbCdEfGhIjKlMnOp', gmail: false, payments: 2, lastSettled: '2026-11-05' });
+      expect((await o.get(`/businesses/${h.bid}/shifts/2026-11-03/inputs`)).json.bank.cards).toMatchObject({ payments: 2, covered: true });
+      expect((await o.get(`/businesses/${h.bid}/shifts/2026-11-04/inputs`)).json.bank.cards).toMatchObject({ covered: false });
       // Not set up: the script is not called. Set up (Worker secrets): Sync asks it to save new mails first, with the code.
       expect(scriptCalls).toEqual([]);
       expect(sync.cards.script).toBeNull();

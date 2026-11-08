@@ -19,7 +19,7 @@ import { istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { unsettleStatements } from '../cards';
-import { syncCardFolder } from '../cardDrive';
+import { cardReportsStatus, syncCardFolder } from '../cardDrive';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -57,7 +57,7 @@ bankRoutes.get('/businesses/:businessId/bank', requireRole('bank.link'), async (
       (SELECT max(day) FROM bank_rows r WHERE r.account_id = a.id) AS lastDay
     FROM accounts a LEFT JOIN bank_sources s ON s.account_id = a.id
     WHERE a.business_id = ? AND a.kind = 'bank' ORDER BY a.name`, bid);
-  return c.json({ accounts, googleEmail: serviceAccountEmail(c.env) });
+  return c.json({ accounts, googleEmail: serviceAccountEmail(c.env), cards: await cardReportsStatus(c.env, c.get('businessId')) });
 });
 
 bankRoutes.put('/businesses/:businessId/bank/:accountId/source', requireRole('bank.link'), async (c) => {

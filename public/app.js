@@ -3066,6 +3066,15 @@ async function bankView(biz, query = '') {
   const OPEN_KEY = 'bookr.bankOpen';
   let openShifts;
   try { openShifts = new Set(JSON.parse(sessionStorage.getItem(OPEN_KEY) || '[]')); } catch { openShifts = new Set(); }
+  // The card machine's reports, as a line beside the bank accounts (8 Nov 2026): Sync asks Gmail to save new report
+  // mails into the Drive folder, then reads it.
+  const cardRow = (k) => (!k ? '' : html`<tr>
+    <td><strong>Card reports</strong><div class="note">ICICI card machine</div></td>
+    <td>Card payments, fee and GST</td>
+    <td>${k.folder ? html`<a href="https://drive.google.com/drive/folders/${k.folder}" target="_blank" rel="noopener">Drive folder</a>${k.gmail ? ' · from Gmail' : ''}` : html`<span class="note">No folder yet</span>`}</td>
+    <td class="amount">${k.payments}${k.lastSettled ? html`<div class="tiny">settled to ${dayLabel(k.lastSettled)}</div>` : ''}</td>
+    <td style="text-align:right;white-space:nowrap">${k.folder ? html`<button class="btn" type="button" id="cardsyncrow">Sync</button>` : ''}
+      <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/cards">${k.folder ? 'Open' : 'Set up'}</a></td></tr>`);
   const accountRow = (a) => html`<tr>
     <td><strong>${a.name}</strong>${a.accountNumber ? html`<div class="note mono">${a.accountNumber}</div>` : ''}</td>
     <td>${[a.receivesUpiLabel ? `UPI: ${a.receivesUpiLabel}` : '', a.receivesCard ? 'Card settlements' : ''].filter(Boolean).join(' · ') || html`<span class="note">Nothing set</span>`}</td>
@@ -3186,11 +3195,11 @@ async function bankView(biz, query = '') {
     <div id="bmsg"></div>
     <section class="card" style="gap:10px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Bank accounts</h2>
-        <span style="display:flex;gap:10px;align-items:center">${b.accounts.some((a) => a.sheetId) ? html`<button class="btn" type="button" id="banksyncall">Sync all bank accounts</button>` : ''}<a href="#/b/${biz.id}/accounts" class="note">Add a bank account on Accounts</a></span></div>
+        <span style="display:flex;gap:10px;align-items:center">${b.accounts.some((a) => a.sheetId) || b.cards?.folder ? html`<button class="btn" type="button" id="banksyncall">Sync bank and card</button>` : ''}<a href="#/b/${biz.id}/accounts" class="note">Add a bank account on Accounts</a></span></div>
       ${b.googleEmail ? html`<div class="note">To sync a Google Sheet, share it with <strong class="mono">${b.googleEmail}</strong> as a Viewer.</div>`
         : html`<div class="note">Google Sheets access is not set up yet. Until it is, copy rows from the sheet (Ctrl+A, Ctrl+C) and use <strong>Paste rows</strong>. Lines already in Bookr are skipped.</div>`}
       ${b.accounts.length ? html`<div class="scroll"><table style="min-width:760px"><thead><tr><th>Account</th><th>Receives</th><th>Statement from</th><th style="text-align:right">Lines</th><th></th></tr></thead>
-        <tbody>${b.accounts.map(accountRow)}</tbody></table></div>` : html`<div class="note">No bank accounts yet.</div>`}
+        <tbody>${b.accounts.map(accountRow)}${cardRow(b.cards)}</tbody></table></div>` : html`<div class="note">No bank accounts yet.</div>`}
       <form class="inset" id="pasteform" hidden><div style="font-weight:600" id="pastetitle">Paste rows</div>
         <textarea name="text" rows="6" style="width:100%;font-family:var(--mono, monospace);font-size:13px" placeholder="Copy the rows from the Google Sheet and paste them here. Title and header lines are fine."></textarea>
         <div class="form-row"><button class="btn" type="submit">Add lines</button><button class="btn plain" type="button" id="pastecancel">Cancel</button></div><div class="form-msg"></div></form>
@@ -3254,7 +3263,12 @@ async function bankView(biz, query = '') {
   document.getElementById('banksyncall')?.addEventListener('click', async (e) => {
     e.target.disabled = true; e.target.textContent = 'Syncing…';
     try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await bankView(biz, query); document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html; }
-    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync all bank accounts'; showError(msg, err); }
+    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync bank and card'; showError(msg, err); }
+  });
+  document.getElementById('cardsyncrow')?.addEventListener('click', async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Syncing…';
+    try { const k = await apiFull('POST', `/businesses/${biz.id}/cards/sync`, {}); await bankView(biz, query); document.getElementById('bmsg').innerHTML = cardSyncHtml({ ok: true, ...k }).__html; }
+    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync'; showError(msg, err); }
   });
   app.querySelectorAll('details.shiftgroup').forEach((d) => d.addEventListener('toggle', () => {
     if (d.open) openShifts.add(d.dataset.shift); else openShifts.delete(d.dataset.shift);
@@ -4370,8 +4384,10 @@ async function bringInView(biz, dayArg) {
       ${head('🏦', bankOk, false, 'Bank statements', bankOk ? 'In up to the end of the shift (8 am)' : 'Sync once the statements are in the Google Sheets')}
       <div style="display:flex;flex-direction:column;gap:2px">${v.bank.accounts.map((a) => html`<div class="fileline">
         <span class="${a.lastAt && a.lastAt >= v.bank.shiftEnd - 30 * 60000 ? 'okdot' : 'greydot'}"></span><span class="nm">${a.name}${a.label ? html` <span class="tiny">· ${a.label}</span>` : ''}</span>
-        <span class="tiny">${a.lastAt ? `up to ${when(a.lastAt)}` : 'nothing yet'}${a.sheet ? '' : ' · pasted'}</span></div>`)}</div>
-      <div class="form-row" style="align-items:center"><button class="btn" type="button" id="syncall">Sync all bank accounts</button>
+        <span class="tiny">${a.lastAt ? `up to ${when(a.lastAt)}` : 'nothing yet'}${a.sheet ? '' : ' · pasted'}</span></div>`)}
+        ${v.bank.cards ? html`<div class="fileline"><span class="${v.bank.cards.covered ? 'okdot' : 'greydot'}"></span><span class="nm"><a href="#/b/${biz.id}/cards">Card reports</a> <span class="tiny">· ${v.bank.cards.folder ? 'Drive folder' : 'no folder yet'}</span></span>
+          <span class="tiny">${v.bank.cards.lastAt ? `up to ${when(v.bank.cards.lastAt)}` : 'nothing yet'}</span></div>` : ''}</div>
+      <div class="form-row" style="align-items:center"><button class="btn" type="button" id="syncall">Sync bank and card</button>
         <span class="tiny">Pasted accounts: <a href="#/b/${biz.id}/bank">Bank sync</a></span></div>
       <div id="syncbox"></div>
     </section>` : ''}
@@ -4446,7 +4462,7 @@ async function bringInView(biz, dayArg) {
     const b = e.currentTarget;
     b.disabled = true; b.innerHTML = '<span class="spinner"></span>Syncing…';
     try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await reload(); document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html; }
-    catch (err) { b.disabled = false; b.textContent = 'Sync all bank accounts'; showError(document.getElementById('syncbox'), err); }
+    catch (err) { b.disabled = false; b.textContent = 'Sync bank and card'; showError(document.getElementById('syncbox'), err); }
   });
 
   // 3. Pages: each tile uploads its own kind; a line per file with a spinner while uploading and reading.
@@ -4739,8 +4755,8 @@ async function cardsView(biz, query = '') {
         <div class="field" style="flex:2 1 300px"><label for="cdfold">Google Drive folder of the card reports</label>
           <input id="cdfold" name="folder" value="${r.driveFolder ? `https://drive.google.com/drive/folders/${r.driveFolder}` : ''}" placeholder="Paste the folder's link"></div>
         <button class="btn plain" type="submit">Save</button>
-        ${r.driveFolder ? html`<button class="btn" type="button" id="cdsync">Check the folder now</button>` : ''}</form>
-      <div class="tiny">${r.driveFolder ? 'New files are read whenever you Sync on Bring in or Bank sync.' : 'A script in Gmail saves each report there; Bookr reads new files whenever you Sync.'}${r.googleEmail ? html` Share the folder with <span class="mono">${r.googleEmail}</span> as Viewer.` : ' Google access is not set up yet (see Bank sync).'}</div>
+        ${r.driveFolder ? html`<button class="btn" type="button" id="cdsync">Sync card reports</button>` : ''}</form>
+      <div class="tiny">${r.driveFolder ? 'Sync asks Gmail to save new report mails into the folder, then reads them. "Sync bank and card" on Bring in and Bank sync does the same.' : 'A script in Gmail saves each report there; Bookr reads new files whenever you Sync.'}${r.googleEmail ? html` Share the folder with <span class="mono">${r.googleEmail}</span> as Viewer.` : ' Google access is not set up yet (see Bank sync).'}</div>
       <form id="cdrange" class="form-row" style="align-items:flex-end">
         <div class="field"><label for="cdfrom">Settled from</label><input id="cdfrom" type="date" name="from" value="${r.from}" required></div>
         <div class="field"><label for="cdto">To</label><input id="cdto" type="date" name="to" value="${r.to}" required></div>

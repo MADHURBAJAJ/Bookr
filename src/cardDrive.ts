@@ -60,3 +60,15 @@ export async function syncCardFolder(env: Env, businessId: string) {
   }
   return { files: take.length, more: fresh.length - take.length, added, problems, script };
 }
+
+/** The card reports line on Bank sync and Bring in: the folder, and how far the payments read so far go. */
+export async function cardReportsStatus(env: Env, businessId: string) {
+  const db = env.DB;
+  const [b, last] = await Promise.all([
+    one<{ card_drive_folder: string | null }>(db, 'SELECT card_drive_folder FROM businesses WHERE id = ?', businessId),
+    one<{ payments: number; lastAt: number | null; lastSettled: string | null; reports: number }>(db, `SELECT count(*) AS payments, max(paid_at) AS lastAt, max(settled_on) AS lastSettled,
+      count(DISTINCT settled_on || merchant_id) AS reports FROM card_settlements WHERE business_id = ?`, businessId),
+  ]);
+  return { folder: b?.card_drive_folder ?? null, gmail: !!(env.CARD_SCRIPT_URL && env.CARD_SCRIPT_TOKEN), payments: last?.payments ?? 0,
+    reports: last?.reports ?? 0, lastAt: last?.lastAt ?? null, lastSettled: last?.lastSettled ?? null };
+}

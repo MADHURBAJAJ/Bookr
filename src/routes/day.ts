@@ -5,7 +5,8 @@ import { all, one } from '../db';
 import { fail } from '../http';
 import { can } from '../permissions';
 import { coverage } from '../sales';
-import { shiftWindow } from '../time';
+import { addDays, shiftWindow } from '../time';
+import { cardReportsStatus } from '../cardDrive';
 
 export const dayRoutes = new Hono<AppEnv>();
 
@@ -50,7 +51,10 @@ dayRoutes.get('/businesses/:businessId/shifts/:day/inputs', requireRole('rows.up
       FROM accounts a LEFT JOIN bank_sources s ON s.account_id = a.id WHERE a.business_id = ? AND a.kind = 'bank' ORDER BY a.name`, bid);
     // Accounts take turns, so the shift is covered when the latest line of any UPI account reaches its end (about 8 am).
     const latest = Math.max(0, ...accounts.filter((a) => a.label).map((a) => a.lastAt ?? 0));
-    bank = { accounts, covered: latest >= w.to - 30 * 60000, shiftEnd: w.to };
+    // The card reports, beside the bank accounts: in for the shift once a later swipe, or a settlement two days on, is read.
+    const k = await cardReportsStatus(c.env, bid);
+    const cards = { ...k, covered: (k.lastAt ?? 0) >= w.to || (k.lastSettled ?? '') >= addDays(day, 2) };
+    bank = { accounts, covered: latest >= w.to - 30 * 60000, shiftEnd: w.to, cards };
   }
   return c.json({
     day, shiftStatus: shift?.status ?? null,
