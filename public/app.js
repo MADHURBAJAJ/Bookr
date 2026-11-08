@@ -663,7 +663,7 @@ function missedReport(biz, m) {
         <tr><td><strong>All</strong></td><td><strong>${cell(m.notInRegister)}</strong></td><td><strong>${cell(m.notInSoftware)}</strong></td><td><strong>${cell(m.inNeither)}</strong></td></tr></tbody>
     </table></div>` : ''}
     ${part('Missed in the register', 'In the software report, but nobody wrote it in the register.', m.notInRegister, billTable(m.notInRegister, true))}
-    ${part('Missed in the software', 'Written in the register, but not in the software report.', m.notInSoftware, billTable(m.notInSoftware, false))}
+    ${part('Missed in the software', html`Written in the register, but not in the software report.${m.oldPos?.count ? html` Old POS bills are left out: they are never in the software report (${m.oldPos.count} · ₹ ${money(m.oldPos.paise)}).` : ''}`, m.notInSoftware, billTable(m.notInSoftware, false))}
     ${part('Missed in both', 'Money that came into the bank by UPI with no bill in the register or the software: booked under a head, or still not matched after its shift was confirmed.', m.inNeither,
       m.inNeither.length ? html`<div class="scroll"><table style="min-width:700px">
         <thead><tr><th>Shift</th><th>Received</th><th style="text-align:right">Amount ₹</th><th>Account</th><th>From / remark</th><th>Now</th></tr></thead>
@@ -3405,6 +3405,29 @@ async function applySlip(biz, a) {
     payments: s.after.pays.map((p) => ({ mode: p.mode, columnLabel: p.label, amount: rupeesForInput(p.amountPaise) })) });
   return () => put(payload);
 }
+/**
+ * Before confirming: the bill's UPI payments become the ticked credits (column kept when it fits the credit's account,
+ * else the account's), other payments stay, and amount − paid is the discount (negative: a tip). Returns the undo.
+ */
+async function writeBankOnRow(biz, b, credits) {
+  const base = `/businesses/${biz.id}`;
+  const u = await api('GET', `${base}/uploads/${b.uploadId}`);
+  const r = u.rows.find((x) => x.id === b.rowId);
+  if (!r) throw new Error(`Bill ${b.billNo}'s row was not found. Reload the page.`);
+  if (r.paidWithRowId) throw new Error(`Bill ${b.billNo} is paid together with another row: correct the payment there.`);
+  const norm = (x) => (x ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const upi = r.payments.filter((p) => p.mode === 'upi');
+  const others = r.payments.filter((p) => p.mode !== 'upi');
+  const labelFor = (c) => { const had = upi.find((p) => !c.label || norm(p.columnLabel) === norm(c.label) || norm(p.columnLabel) === 'upi'); return had ? had.columnLabel : c.label ?? upi[0]?.columnLabel ?? 'UPI'; };
+  const paid = others.reduce((t, p) => t + p.amountPaise, 0) + credits.reduce((t, c) => t + c.amountPaise, 0);
+  const payload = { paidWithRowId: null, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise - r.tipPaise), remarks: r.remarks, status: r.status,
+    payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+  const put = (x) => apiFull('PUT', `${base}/register-rows/${r.id}`, x);
+  await put({ ...payload, discount: rupeesForInput(r.amountPaise - paid),
+    payments: [...others.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })),
+      ...credits.map((c) => ({ mode: 'upi', columnLabel: labelFor(c), amount: rupeesForInput(c.amountPaise) }))] });
+  return () => put(payload);
+}
 function suggestionCard(c, day) {
   return html`<div class="rv-card" data-card="${c.key}">
     <div class="lane-h"><span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><strong>${c.title}</strong>${(c.billNos ?? []).filter(Boolean).map((b) => drawerBtn(b, day))}</span>
@@ -3494,11 +3517,11 @@ async function reconcileView(biz, dayArg) {
     <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick entries to compare their totals; matching by hand starts after confirming.</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
       <div><strong>Credits with no bill yet</strong> <span class="chip">${r.open.credits.length}</span>
-        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? [k.actions[0].slip.creditId, ...k.actions[0].slip.others.map((o) => o.creditId)].includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}</div>
+        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? [k.actions[0].slip.creditId, ...k.actions[0].slip.others.map((o) => o.creditId)].includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}</div>
       <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
-        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
+        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
     </div>
-    <div id="trialsum" class="note">Tick entries to compare them.</div></section>` : '';
+    <div id="trialsum" class="note">Tick entries to compare them.</div><div id="trialfix"></div></section>` : '';
   const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
       <div class="scroll"><table style="min-width:620px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th><th></th></tr></thead><tbody>
         ${r.done.map((x) => html`<tr><td class="mono">${x.bills.join(' + ')}</td><td class="amount">${money(x.creditPaise ?? x.billsPaise)}</td><td>${when(x.postedAt)}<div class="tiny">${x.accountName}</div></td>
@@ -3545,7 +3568,39 @@ async function reconcileView(biz, dayArg) {
     const sum = (side) => [...trialBox.querySelectorAll(`[data-tside="${side}"]`)].filter((c) => c.checked).reduce((t, c) => t + Number(c.dataset.amt), 0);
     const bank = sum('cr'); const bills = sum('bl'); const diff = bank - bills;
     document.getElementById('trialsum').innerHTML = html`Bank <strong>₹ ${money(bank)}</strong> · Bills <strong>₹ ${money(bills)}</strong> · Difference <strong style="color:${diff ? 'var(--danger)' : 'var(--teal)'}">₹ ${money(Math.abs(diff))}</strong>`.__html;
+    drawTrialFix();
   }));
+  // Ticked credit(s) and one bill, before confirming: write what the bank got on the bill's register row (its UPI
+  // payments become the credits, the difference a tip or a discount), so they pair (approved 8 Nov 2026).
+  const pickedTrial = () => {
+    const ids = (side) => [...trialBox.querySelectorAll(`[data-tside="${side}"]`)].filter((c) => c.checked).map((c) => c.dataset.id);
+    return { credits: ids('cr').map((id) => r.open.credits.find((c) => c.id === id)), bills: ids('bl').map((id) => r.open.bills.find((b) => b.id === id)) };
+  };
+  const drawTrialFix = () => {
+    const box = document.getElementById('trialfix');
+    if (!box) return;
+    const { credits, bills } = pickedTrial();
+    if (!credits.length || !bills.length) { box.innerHTML = ''; return; }
+    const b = bills[0];
+    const why = bills.length > 1 ? 'Tick one bill: several bills paid by one credit are bills paid together, written on the row with the payment.'
+      : b.grouped ? 'This bill is paid together with others: correct the payment on the row that holds it (Open row).'
+      : !b.rowId ? `Bill ${b.billNo} is only in the software report, so there is no register row to write on. Confirm the shift, then match them on this page: Match by hand takes the difference as a discount or tip.` : null;
+    if (why) { box.innerHTML = html`<div class="note">${why}</div>`.__html; return; }
+    const bank = credits.reduce((t, c) => t + c.amountPaise, 0);
+    const diff = bank - b.amountPaise;
+    const label = `Write ${credits.map((c) => `₹ ${money(c.amountPaise)}`).join(' + ')} by UPI on bill ${b.billNo}${diff > 0 ? `, ₹ ${money(diff)} as tip` : diff < 0 ? `, ₹ ${money(-diff)} as discount` : ''}`;
+    box.innerHTML = html`<div class="form-row" style="gap:8px;align-items:center;margin-top:6px"><button class="btn" type="button" id="trialfixgo" style="min-height:36px">${label}</button>
+      <span class="note">Changes the register row as Open row would. Check the photo first.</span></div><div class="form-msg"></div>`.__html;
+    document.getElementById('trialfixgo').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const undo = await writeBankOnRow(biz, b, credits);
+        await reload();
+        doneToast(`Bill ${b.billNo}: the bank's payment is written on the register.`, undo, reload);
+      } catch (err) { btn.disabled = false; showError(box.querySelector('.form-msg'), err); }
+    });
+  };
   if (!r.confirmed) return;
   const act = async (fn, toast) => {
     try {

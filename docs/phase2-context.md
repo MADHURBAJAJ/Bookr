@@ -421,6 +421,14 @@ On the Review table a refused tick comes off again, with the reason.
 - Totals by payment mode: Software and Register are the full reports; Difference (`openPaise`, `unknownOpenPaise`)
   counts only the bills still to decide (the blocker's list), so it reads 0 once every difference is decided.
 
+## Write the bank's payment on a row, from All open entries (approved 8 Nov 2026)
+
+Trial Reconcile, All open entries: tick credit(s) and one bill and a button writes them on the bill's register row
+(`writeBankOnRow`, app.js): its UPI payments become the credits (column kept when it fits the credit's account, else
+the account's label, now on `open.credits[].label`), other payments stay, and amount − paid is the discount (negative:
+a tip). The same PUT as Open row, with Undo. Not for bills paid together, several bills, or a bill only in the software
+report (no row: match it by hand after confirming).
+
 ## Missed entries report (approved 7 Nov 2026)
 
 `src/missed.ts`, `GET reports/missed?from&to` (reports.view: Owner, Accountant, Viewer), on Reports above Large

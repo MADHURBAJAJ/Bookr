@@ -1,9 +1,11 @@
 // Missed entries report (approved 7 Nov 2026): for a range of shifts, what one record left out. A bill in the software
 // report that nobody wrote in the register; a bill in the register that the software does not have; and money in the
 // bank with no bill in either (booked under a head, or still unmatched after its shift was confirmed). Read-only.
+// Old POS bills are never in the software report, so they are not "missed in the software" (approved 8 Nov 2026).
 
 import { all, type DB } from './db';
 import { shiftDayOf, shiftWindow } from './time';
+import { isOldPosBill } from './sales';
 
 export interface MissedBill {
   comparisonId: string; day: string; billNo: string; amountPaise: number | null; mode: string | null; paidAt: number | null;
@@ -22,9 +24,9 @@ const statusOf = (decision: string | null, added: boolean, otherDay: string | nu
 export async function missedEntries(db: DB, businessId: string, from: string, to: string) {
   const [bills, credits, confirmed] = await Promise.all([
     all<{ id: string; day: string; billNo: string; difference: string; swPaise: number | null; swMode: string | null; rgPaise: number | null; rgMode: string | null;
-      paidAt: number | null; decision: string | null; note: string | null; added: number; otherDay: string | null }>(db, `
+      paidAt: number | null; decision: string | null; note: string | null; added: number; otherDay: string | null; closeNote: string | null }>(db, `
       SELECT c.id, c.shift_day AS day, c.bill_no AS billNo, c.difference, c.sw_amount_paise AS swPaise, c.sw_mode AS swMode, c.rg_amount_paise AS rgPaise, c.rg_mode AS rgMode,
-        sb.paid_at AS paidAt, c.decision, c.note, coalesce(r.ocr_original LIKE '%"source":"software_report"%', 0) AS added, l.shift_day AS otherDay
+        sb.paid_at AS paidAt, c.decision, c.note, c.close_note AS closeNote, coalesce(r.ocr_original LIKE '%"source":"software_report"%', 0) AS added, l.shift_day AS otherDay
       FROM bill_comparisons c LEFT JOIN register_rows r ON r.id = c.register_row_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
         LEFT JOIN bill_comparisons l ON l.id = c.linked_to_id
       WHERE c.business_id = ? AND c.shift_day BETWEEN ? AND ?
@@ -38,13 +40,17 @@ export async function missedEntries(db: DB, businessId: string, from: string, to
     all<{ day: string }>(db, "SELECT shift_day AS day FROM shifts WHERE business_id = ? AND status = 'confirmed' AND shift_day BETWEEN ? AND ?", businessId, from, to),
   ]);
   const done = new Set(confirmed.map((x) => x.day));
+  // An old POS bill: its number says so, or a person marked it so (Compare sales, "Old POS bill").
+  const oldPos = (b: { billNo: string; closeNote: string | null }) => isOldPosBill(b.billNo) || /old pos/i.test(b.closeNote ?? '');
   const bill = (b: (typeof bills)[number], side: 'sw' | 'rg'): MissedBill => ({
     comparisonId: b.id, day: b.day, billNo: b.billNo, amountPaise: side === 'sw' ? b.swPaise : b.rgPaise, mode: side === 'sw' ? b.swMode : b.rgMode,
     paidAt: b.paidAt, status: statusOf(b.decision, !!b.added, b.otherDay), otherDay: b.otherDay, note: b.note,
   });
   return {
     notInRegister: bills.filter((b) => b.difference === 'missing_in_register' || b.added).map((b) => bill(b, 'sw')),
-    notInSoftware: bills.filter((b) => b.difference === 'missing_in_software').map((b) => bill(b, 'rg')),
+    notInSoftware: bills.filter((b) => b.difference === 'missing_in_software' && !oldPos(b)).map((b) => bill(b, 'rg')),
+    oldPos: { count: bills.filter((b) => b.difference === 'missing_in_software' && oldPos(b)).length,
+      paise: bills.filter((b) => b.difference === 'missing_in_software' && oldPos(b)).reduce((t, b) => t + (b.rgPaise ?? 0), 0) },
     // Booked credits always count; an unmatched one only once its shift is confirmed (before, it may still be paired).
     inNeither: credits.map((c) => ({ ...c, day: shiftDayOf(c.postedAt) }))
       .filter((c) => c.day >= from && c.day <= to && (c.status === 'booked' || done.has(c.day))),

@@ -16,6 +16,9 @@ const DAY_START = (y: number, m: number, d: number) => istToMs(y, m, d, 0, 0, 0)
 const DAY_END = (y: number, m: number, d: number) => istToMs(y, m, d, 23, 59, 59);
 
 /** A hotel with every role, F&B and Room income heads mapped to their bill types. */
+/** Today in India: for checks inside the watch, which the 31 Oct sample shift is no longer. */
+const todayIst = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+
 async function hotel() {
   const h = await businessWithAllRoles('Hotel');
   const o = h.clients.owner;
@@ -1173,6 +1176,7 @@ describe('bills on one side only, followed across days', () => {
     // Closing: refused inside the watch, allowed after it, with a reason, by Owner or Accountant.
     const c = byBill(await view(h), '26103125');
     expect((await decide(h, c.id, { decision: 'carry_forward' })).status).toBe(200);
+    await sql`UPDATE bill_comparisons SET shift_day = ${todayIst()} WHERE id = ${c.id}`; // inside the watch, whatever today is
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/comparisons/${c.id}/close`, { note: 'Never billed' })).status).toBe(400);
     await sql`UPDATE bill_comparisons SET shift_day = '2026-10-01' WHERE id = ${c.id}`;
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/comparisons/${c.id}/close`, { note: 'Never billed' })).status).toBe(403);
@@ -1308,6 +1312,7 @@ describe('register numbers of neither format can never match, so they do not wai
 
     // Decided the old way: not waiting, listed apart, and closable without the watch running out.
     expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '193').id}`, { decision: 'use_register', note: 'to check' })).status).toBe(200);
+    await sql`UPDATE bill_comparisons SET shift_day = ${todayIst()} WHERE id = ${byBill(v, '193').id}`; // inside the watch, whatever today is
     w = (await h.clients.accountant.get(`/businesses/${h.bid}/waiting-bills`)).json;
     expect(w.bills.map((b: any) => b.billNo)).not.toContain('193');
     const odd = w.oddNumbers.find((b: any) => b.billNo === '193');
@@ -1877,21 +1882,26 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect(v.json.slips.find((x: any) => x.rowId === b)).toMatchObject({ kind: 'add_payment', creditPaise: 800 });
     const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
     expect(trial.slips.find((x: any) => x.rowId === b)).toMatchObject({ kind: 'add_payment', creditPaise: 800 });
+    // Open credits carry their account's column, for writing a ticked credit on a bill's row.
+    expect(trial.open.credits.find((x: any) => x.amountPaise === 800)).toMatchObject({ label: 'UPI XOXO' });
   });
 
   it('the Missed entries report lists bills missed in the register, in the software, and money in neither', async () => {
     const { h, pageId } = await slipShift(); // 2610317 and 26103120 written; the rest of 31 Oct from the register
-    // A bill only in the register.
-    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`,
-      { billNo: '145999', billType: 'fnb', amount: '75', discount: '0', payments: [{ mode: 'cash', columnLabel: null, amount: '75' }], status: 'checked' })).status).toBe(201);
+    // A bill only in the register, and an old POS bill (never in the software report, so left out of the list).
+    const regOnly = (billNo: string) => h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/register-rows`,
+      { billNo, billType: 'fnb', amount: '75', discount: '0', payments: [{ mode: 'cash', columnLabel: null, amount: '75' }], status: 'checked' });
+    expect((await regOnly('26103199')).status).toBe(201);
+    expect((await regOnly('145999')).status).toBe(201);
     // The ₹ 12.34 credit after the shift belongs to 1 Nov; book one inside the shift instead: the ₹ 8 (in no bill once it is booked).
     const credit = (await sql`SELECT id FROM bank_rows WHERE business_id = ${h.bid} AND amount_paise = 800`)[0];
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb, note: 'Tip' })).status).toBe(200);
     const get = (client: any) => client.get(`/businesses/${h.bid}/reports/missed?from=2026-10-31&to=2026-10-31`);
     expect((await get(h.clients.entry_staff)).status).toBe(403);
     const r = (await get(h.clients.viewer)).json;
-    expect(r.notInSoftware.map((x: any) => x.billNo)).toContain('145999');
-    expect(r.notInSoftware.find((x: any) => x.billNo === '145999')).toMatchObject({ day: '2026-10-31', amountPaise: 7500, status: 'open' });
+    expect(r.notInSoftware.find((x: any) => x.billNo === '26103199')).toMatchObject({ day: '2026-10-31', amountPaise: 7500, status: 'open' });
+    expect(r.notInSoftware.map((x: any) => x.billNo)).not.toContain('145999');
+    expect(r.oldPos.count).toBeGreaterThanOrEqual(1);
     const v = await view(h);
     const swOnly = v.json.comparisons.filter((x: any) => x.difference === 'missing_in_register').map((x: any) => x.billNo).sort();
     expect(r.notInRegister.map((x: any) => x.billNo).sort()).toEqual(swOnly);
