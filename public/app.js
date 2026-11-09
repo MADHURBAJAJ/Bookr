@@ -744,8 +744,9 @@ async function reportsView(biz, query) {
 }
 
 /**
- * Money out: every payment from a bank account or from Cash in one list, read-only. Each line links to where it is
- * handled (Bank sync for the shift, the expense-list page on Review, Compare sales for a cash shortage).
+ * Money out: every payment from a bank account or from Cash in one list. Each line links to where it is handled
+ * (Bank sync for the shift, the expense-list page on Review, Compare sales for a cash shortage). A bank payment not
+ * booked yet can be booked to an expense head here (Book), and a booked one put back (Undo), as on Bank sync.
  */
 const MONEY_OUT_STATUS = {
   not_booked: ['wait', 'Not booked yet'], booked: ['ok', 'Booked'], matched: ['ok', 'Matched'], left_out: ['', 'Left out'],
@@ -762,17 +763,21 @@ async function moneyOutView(biz, query) {
     if (l.source === 'cash_photo' && l.uploadId) return `#/b/${biz.id}/review/${l.uploadId}`;
     return `#/b/${biz.id}/compare/${l.day}`;
   };
-  const whereLabel = (l) => (l.source === 'bank' ? (l.status === 'not_booked' ? 'Book on Bank sync' : 'Bank sync') : l.source === 'cash_photo' ? 'Expense page' : 'Cash for the shift');
+  const whereLabel = (l) => (l.source === 'bank' ? 'Bank sync' : l.source === 'cash_photo' ? 'Expense page' : 'Cash for the shift');
   const opt = (v, label, cur) => html`<option value="${v}" ${v === (cur ?? '') ? 'selected' : ''}>${label}</option>`;
   const subtotal = (title, groups, key) => html`<div style="flex:1 1 280px;min-width:0">
     <h3 style="margin:0 0 6px;font-size:15px">${title}</h3>
     <table><tbody>${groups.map((g) => html`<tr>
       <td><a href="${link({ [key]: g.id })}">${g.name}</a> <span class="tiny">${g.count}</span></td><td class="amount">${money(g.paise)}</td></tr>`)}</tbody></table></div>`;
   const filtered = f.account || f.head || f.party || f.waiting;
+  const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
+  const act = (l) => (l.source !== 'bank' ? '' : l.status === 'not_booked' ? html`<button class="btn plain" type="button" style="${SMALL}" data-mobook="${l.id}">Book</button>`
+    : l.status === 'booked' ? html`<button class="btn plain" type="button" style="${SMALL}" data-moundo="${l.id}">Undo</button>` : '');
   render(shell(biz, 'money-out', 'Money out', '', html`
     <section class="card" style="gap:10px">
       <h2>All payments</h2>
-      <div class="note">Every payment from a bank account or from Cash, by shift (8 am to 8 am). A bank line booked to a head is one payment, shown once. Booking stays on Bank sync and Review.</div>
+      <div class="note">Every payment from a bank account or from Cash, by shift (8 am to 8 am). A bank line booked to a head is one payment, shown once. <strong>Book</strong> a bank payment to a head here; cash expenses are booked on Review.</div>
+      <datalist id="moparties">${r.options.parties.map((p) => html`<option value="${p.name}">`)}</datalist>
       <form id="moform" class="form-row" style="align-items:flex-end">
         <div class="field"><label for="mofrom">From shift</label><input id="mofrom" type="date" name="from" value="${r.from}" required></div>
         <div class="field"><label for="moto">To shift</label><input id="moto" type="date" name="to" value="${r.to}" required></div>
@@ -796,7 +801,7 @@ async function moneyOutView(biz, query) {
           <div class="mo-top"><span>${dayLabel(l.day)}${l.at ? html` <span class="tiny">${when(l.at).replace(/^.*?,\s*/, '')}</span>` : ''}</span><strong class="amount">₹ ${money(l.amountPaise)}</strong></div>
           <div>${l.narration || html`<span class="note">No item written</span>`}</div>
           <div class="tiny">${[l.accountName, l.head ?? 'No head yet', l.party].filter(Boolean).join(' · ')}</div>
-          <div class="mo-top"><span><span class="chip ${cls}">${label}</span>${l.note ? html` <span class="tiny">${l.note}</span>` : ''}</span><span class="tiny"><a href="${where(l)}">${whereLabel(l)}</a></span></div></li>`;
+          <div class="mo-top"><span><span class="chip ${cls}">${label}</span>${l.note ? html` <span class="tiny">${l.note}</span>` : ''}</span><span class="tiny" style="display:flex;gap:8px;align-items:center">${act(l)}<a href="${where(l)}">${whereLabel(l)}</a></span></div></li>`;
       })}</ul>
       <div class="scroll mo-table"><table style="min-width:900px">
         <thead><tr><th>Shift · time</th><th>Paid from</th><th>Party</th><th>Head</th><th>Narration</th><th style="text-align:right">₹</th><th>Status</th></tr></thead>
@@ -810,7 +815,7 @@ async function moneyOutView(biz, query) {
           <td style="white-space:normal;min-width:220px">${l.narration || html`<span class="note">No item written</span>`}${l.detail && l.detail !== l.narration ? html`<div class="tiny mono" style="word-break:break-all">${l.detail}</div>` : ''}${l.source === 'cash_shortage' ? html`<div class="tiny">Cash shortage booked by an Owner</div>` : ''}</td>
           <td class="amount" style="${l.status === 'left_out' ? 'text-decoration:line-through' : ''}">${money(l.amountPaise)}</td>
           <td style="white-space:nowrap"><span class="chip ${cls}">${label}</span>${l.note ? html`<div class="tiny" style="white-space:normal">${l.note}</div>` : ''}
-            <div class="tiny"><a href="${where(l)}">${whereLabel(l)}</a></div></td></tr>`;
+            <div class="tiny"><a href="${where(l)}">${whereLabel(l)}</a></div>${act(l) ? html`<div style="margin-top:4px">${act(l)}</div>` : ''}</td></tr>`;
         })}</tbody>
       </table></div>` : html`<div class="ok-msg">No money out in these shifts${filtered ? ' with these filters' : ''}.</div>`}
     </section>`));
@@ -822,6 +827,51 @@ async function moneyOutView(biz, query) {
   };
   form.addEventListener('submit', (e) => { e.preventDefault(); show(); });
   form.querySelectorAll('select, input[type=checkbox]').forEach((el) => el.addEventListener('change', show));
+  const reload = () => moneyOutView(biz, query);
+  const base = `/businesses/${biz.id}/bank-rows`;
+  // Book: a form under the line (the row of the table, or the card on a phone). Amount and date come from the bank.
+  app.querySelectorAll('[data-mobook]').forEach((b) => b.addEventListener('click', () => {
+    const l = r.lines.find((x) => x.id === b.dataset.mobook);
+    const holder = b.closest('tr') ?? b.closest('li');
+    const open = holder.nextElementSibling?.matches?.('.mobookbox') ? holder.nextElementSibling : holder.querySelector('.mobookbox');
+    if (open) { open.remove(); return; }
+    const sg = l.suggest ?? {};
+    const box = document.createElement(holder.tagName === 'TR' ? 'tr' : 'div');
+    box.className = 'mobookbox';
+    const inner = html`<form class="inset" style="display:flex;flex-direction:column;gap:8px">
+      <div style="font-weight:600">Book ₹ ${money(l.amountPaise)} paid on ${dayLabel(l.day)} from ${l.accountName} as an expense</div>
+      <div class="form-row" style="align-items:flex-end">
+        <div class="field"><label>Head</label><select name="headId" required><option value="">Choose</option>${r.options.heads.map((h) => html`<option value="${h.id}" ${h.id === sg.headId ? 'selected' : ''}>${h.name}</option>`)}</select></div>
+        <div class="field"><label>Party (optional)</label><input name="party" value="${sg.party ?? ''}" list="moparties" autocomplete="off"></div>
+        <div class="field"><label>Note (optional)</label><input name="item" value="${sg.item ?? ''}" placeholder="What was paid for"></div>
+        <button class="btn" type="submit">Book</button><button class="btn plain" type="button" data-mocancel>Cancel</button>
+      </div>
+      ${sg.headId ? html`<div class="tiny">Head filled in from how this party was booked before, or a rule. Change it if it is wrong.</div>` : ''}
+      <div class="form-msg"></div></form>`.__html;
+    box.innerHTML = holder.tagName === 'TR' ? `<td colspan="7">${inner}</td>` : inner;
+    if (holder.tagName === 'TR') holder.after(box); else holder.appendChild(box);
+    const fm = box.querySelector('form');
+    box.querySelector('[data-mocancel]').addEventListener('click', () => box.remove());
+    fm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = fm.querySelector('button[type=submit]');
+      btn.disabled = true;
+      try {
+        const res = await apiFull('POST', `${base}/book-many`, { items: [{ rowId: l.id, headId: fm.headId.value, party: fm.party.value.trim() || null, item: fm.item.value.trim() || null }] });
+        if (!res.booked) throw new Error(`Not booked: ${res.skipped.join(' ')}`);
+        await reload();
+        const head = r.options.heads.find((h) => h.id === fm.headId.value)?.name ?? 'its head';
+        doneToast(`Booked ₹ ${money(l.amountPaise)} to ${head}.`, () => apiFull('POST', `${base}/${l.id}/reopen`, {}), reload);
+      } catch (err) { btn.disabled = false; showError(fm.querySelector('.form-msg'), err); }
+    });
+  }));
+  // Undo: the expense booked from the line is removed (kept in the audit log); the line is not booked again.
+  app.querySelectorAll('[data-moundo]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Undo this? The expense is removed (it stays in the audit log).')) return;
+    b.disabled = true;
+    try { await apiFull('POST', `${base}/${b.dataset.moundo}/reopen`, {}); await reload(); }
+    catch (err) { b.disabled = false; alert(err.message); }
+  }));
 }
 
 function laterView(biz, key) {

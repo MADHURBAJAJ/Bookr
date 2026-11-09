@@ -110,4 +110,44 @@ describe('money out', () => {
     expect((await other.clients.owner.get(`/businesses/${h.bid}/money-out`)).status).toBe(404); // not a member: the business is not shown
     expect((await other.clients.owner.get(`/businesses/${other.bid}/money-out?from=2026-10-31&to=2026-10-31`)).json.lines).toEqual([]);
   });
+  it('books a bank payment to a head from its line, with what Bank sync would suggest, and Undo frees the line', async () => {
+    const h = await hotel();
+    const o = h.clients.owner;
+    const line = async (n: string) => (await h.list()).json.lines.find((l: any) => l.detail?.includes(n));
+    // A party known by the UPI ID gives its head; nothing known gives no head.
+    await sql`UPDATE parties SET aliases = '["xxmilk@ybl"]', default_head_id = ${h.veg} WHERE id = ${h.party}`;
+    expect((await line('Milk')).suggest).toEqual({ item: 'Milk', party: 'Sabzi Wala', headId: h.veg });
+    expect((await line('UPICCMDR')).suggest).toMatchObject({ party: null, headId: null });
+    expect((await line('Veg')).suggest).toBeUndefined(); // already booked
+    // A rule fits the card fee: its head is suggested (expense heads only).
+    expect((await o.post(`/businesses/${h.bid}/rules`, { name: 'Card fee', contains: 'UPICCMDR', direction: 'DR', headId: h.util })).status).toBeLessThan(300);
+    expect((await line('UPICCMDR')).suggest.headId).toBe(h.util);
+
+    // Booked from the line in one step: an approved expense on the bank account, of the line's amount and shift, tied to it.
+    const milk = await line('Milk');
+    const r = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: milk.id, headId: h.util, party: 'Dairy Fresh', item: 'Milk for tea' }] })).json;
+    expect(r).toEqual({ booked: 1, skipped: [] });
+    const [tx] = await sql`SELECT t.* FROM transactions t JOIN bank_rows r ON r.transaction_id = t.id WHERE r.id = ${milk.id}`;
+    expect(tx).toMatchObject({ type: 'expense', status: 'approved', amount_paise: 5000, account_id: h.acc, head_id: h.util, matched_bank_row: milk.id, narration: 'Milk for tea' });
+    expect(await line('Milk')).toMatchObject({ status: 'booked', head: 'Utilities', party: 'Dairy Fresh', narration: 'Milk for tea' });
+    expect((await h.list()).json.lines.filter((l: any) => l.amountPaise === 5000)).toHaveLength(1);
+    // Booked twice: refused.
+    expect((await o.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: milk.id, headId: h.util }] })).json.booked).toBe(0);
+
+    // Undo: the expense goes, the line is not booked again.
+    expect((await o.post(`/businesses/${h.bid}/bank-rows/${milk.id}/reopen`, {})).status).toBe(200);
+    expect(await sql`SELECT 1 FROM transactions WHERE id = ${tx.id}`).toHaveLength(0);
+    expect(await line('Milk')).toMatchObject({ status: 'not_booked', head: null });
+  });
+
+  it('only Owner and Accountant can book or undo a bank payment', async () => {
+    const h = await hotel();
+    const milk = (await h.list()).json.lines.find((l: any) => l.detail?.includes('Milk'));
+    for (const role of ['entry_staff', 'viewer'] as const) {
+      expect((await (h.clients as any)[role].post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: milk.id, headId: h.veg }] })).status).toBe(403);
+    }
+    const veg = (await h.list()).json.lines.find((l: any) => l.status === 'booked' && l.source === 'bank');
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/bank-rows/${veg.id}/reopen`, {})).status).toBe(403);
+    expect((await h.list()).json.lines.find((l: any) => l.id === veg.id).status).toBe('booked');
+  });
 });

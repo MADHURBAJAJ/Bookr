@@ -4,6 +4,8 @@ import { requireRole } from '../auth';
 import { all } from '../db';
 import { fail, isUuid } from '../http';
 import { addDays, istDay } from '../time';
+import { loadRules, ruleFor } from '../bank';
+import { byName, inText, loadHistory, loadParties, pickHead } from '../parties';
 
 export const moneyOutRoutes = new Hono<AppEnv>();
 
@@ -16,6 +18,8 @@ export const moneyOutRoutes = new Hono<AppEnv>();
  * bills: less came in, nothing was paid). No code writes 'transfer' rows yet, so there are none to list.
  * Days are shifts (8 am to 8 am, India time): a bank line counts on the shift of its posted time, as on Bank sync.
  * Bank data, so Owner and Accountant only ('bank.link', the same as Bank sync).
+ * A bank line not booked yet carries what Bank sync would suggest for it (item, party, head), so it can be booked
+ * from here in one step with the same booking and Undo as Bank sync.
  */
 type Line = {
   id: string; source: 'bank' | 'cash_photo' | 'cash_shortage'; day: string; at: number | null;
@@ -23,7 +27,12 @@ type Line = {
   partyId: string | null; party: string | null; headId: string | null; head: string | null;
   narration: string; detail: string | null; amountPaise: number;
   status: 'not_booked' | 'booked' | 'matched' | 'left_out' | 'draft' | 'approved'; note: string | null; uploadId: string | null;
+  suggest?: { item: string; party: string | null; headId: string | null } | null;
 };
+type BankLine = Line & { vpa: string | null; remark: string | null; kind: string };
+
+// A UPI note that only names the app, not what was bought.
+const plainNote = (v: string | null) => (v && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay|Paid securely v|Navi UPI|Paid in seconds)$/i.test(v.trim()) ? v.trim() : '');
 
 // The shift of a bank line's posted time: India time less 8 hours (19 800 000 − 28 800 000 ms).
 const SHIFT_OF = "date((r.posted_at - 9000000) / 1000, 'unixepoch')";
@@ -45,8 +54,8 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
   const waiting = q.waiting === '1';
 
   const [bank, cash, accounts, heads, parties] = await Promise.all([
-    all<Line>(db, `
-      SELECT r.id, 'bank' AS source, ${SHIFT_OF} AS day, r.posted_at AS at, a.id AS accountId, a.name AS accountName, a.kind AS accountKind,
+    all<BankLine>(db, `
+      SELECT r.id, 'bank' AS source, r.vpa, r.remark, r.kind, ${SHIFT_OF} AS day, r.posted_at AS at, a.id AS accountId, a.name AS accountName, a.kind AS accountKind,
         p.id AS partyId, p.name AS party, h.id AS headId, h.name AS head,
         coalesce(nullif(t.narration, ''), nullif(r.remark, ''), r.description) AS narration, r.description AS detail, r.amount_paise AS amountPaise,
         CASE r.status WHEN 'unmatched' THEN 'not_booked' WHEN 'ignored' THEN 'left_out' ELSE r.status END AS status, r.note, NULL AS uploadId
@@ -67,7 +76,20 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
     all<{ id: string; name: string }>(db, 'SELECT id, name FROM parties WHERE business_id = ? ORDER BY lower(name)', bid),
   ]);
 
-  const lines = [...bank, ...cash]
+  // As on Bank sync: the party known by this UPI ID (or named in the note), and its head for this item; else a rule's head.
+  const open = bank.filter((l) => l.status === 'not_booked');
+  const [rules, known, history] = open.length ? await Promise.all([loadRules(db, bid), loadParties(db, bid), loadHistory(db, bid)]) : [[], [], []];
+  const expenseHeads = new Set(heads.map((h) => h.id));
+  const bankLines: Line[] = bank.map(({ vpa, remark, kind, ...l }) => {
+    if (l.status !== 'not_booked') return l;
+    const item = plainNote(remark);
+    const p = (vpa ? byName(known, vpa) : null) ?? (item ? inText(known, item) : null);
+    const rule = kind === 'upi_in' ? null : ruleFor(rules, { direction: 'DR', account_id: l.accountId, description: l.detail ?? '', vpa, amount_paise: l.amountPaise });
+    const headId = (p ? pickHead(p, history, item).headId : null) ?? rule?.head_id ?? null;
+    return { ...l, suggest: { item, party: p?.name ?? null, headId: headId && expenseHeads.has(headId) ? headId : null } };
+  });
+
+  const lines = [...bankLines, ...cash]
     .filter((l) => (!account || l.accountId === account)
       && (!head || (head === 'none' ? !l.headId : l.headId === head))
       && (!party || (party === 'none' ? !l.partyId : l.partyId === party))
