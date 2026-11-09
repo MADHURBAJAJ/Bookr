@@ -13,7 +13,7 @@ import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
 import { cashOver, shiftCards } from '../cards';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
-import { bookedTx, joinedBill, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
+import { bookedTx, joinedBill, planTaken, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
 import { billDistance, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
@@ -268,6 +268,7 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
   if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
   const taken = (await shiftChoices(db, bid, day)).some((k) => k.comparisonIds.some((x) => cids.includes(x)));
   if (taken) fail(409, 'A bill is already matched on save.');
+  for (const id of cids) if (await planTaken(db, bid, '', id)) fail(409, 'A bill is already chosen to be one sale with a booked credit.');
   const upi = await plannedUpiPaise(db, bid, day, cids);
   if (upi !== row.amount_paise) fail(409, upi ? 'The credit is not what these bills take by UPI.' : 'These bills have no UPI payment: decide or correct them first.');
   const id = newId();
@@ -395,6 +396,8 @@ bankRoutes.post('/businesses/:businessId/comparisons/:id/same-sale', requireRole
   if (!cmp) fail(404, 'Not found.');
   if ((await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day))?.status === 'confirmed') fail(409, 'This shift is already confirmed.');
   if (!(await bookedTx(db, bid, rowId))) fail(409, 'This credit is no longer booked as a sale.');
+  if (await planTaken(db, bid, rowId, cmp.id)) fail(409, 'This credit, or this bill, is already chosen to be one sale with another.');
+  if (await one(db, 'SELECT 1 AS x FROM shift_choices WHERE business_id = ? AND comparison_ids LIKE ?', bid, `%"${cmp.id}"%`)) fail(409, 'This bill is already matched on save.');
   await db.batch([stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.same_sale_planned', rowId, null, { comparisonId: cmp.id, shiftDay: cmp.shift_day }, now()))]);
   return c.json({ ok: true });
 });

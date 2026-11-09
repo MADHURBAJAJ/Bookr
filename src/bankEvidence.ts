@@ -30,6 +30,8 @@ export interface Evidence {
   fits: 'both' | 'software' | 'register';
   /** The decision the credit points to, when it settles a difference; null when there is nothing to decide. */
   suggest: 'use_software' | 'use_register' | null;
+  /** A credit of each side's amount came: the bank cannot say which side is right. */
+  bothSides?: boolean;
   /** A bill paid in several UPI goes: one credit per payment. creditId and postedAt are the first; amountPaise is their total. */
   parts?: { creditId: string; amountPaise: number; postedAt: number }[];
 }
@@ -94,8 +96,9 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
   for (const p of left) {
     const sameBill = new Set(left.filter((q) => q.bill.id === p.bill.id).map((q) => q.credit.id));
     const sameCredit = new Set(left.filter((q) => q.credit.id === p.credit.id).map((q) => q.bill.id));
-    // A credit some timed bill could also take is not certain either.
-    const wanted = bills.some((b) => b.paidAt != null && !out.has(b.id) && upiAmounts(b).some((a) => a.amount === p.credit.amount));
+    // A credit some timed bill could also take is not certain either: one within its reach (2 h before to 1 h after).
+    const wanted = bills.some((b) => b.paidAt != null && !out.has(b.id) && upiAmounts(b).some((a) => a.amount === p.credit.amount)
+      && p.credit.postedAt >= b.paidAt - FAR_BACK_MIN * 60000 && p.credit.postedAt <= b.paidAt + NEAR_MIN * 60000);
     if (sameBill.size !== 1 || sameCredit.size !== 1 || wanted) continue;
     out.set(p.bill.id, make(p.bill, p.credit, null));
     used.add(p.credit.id);
@@ -132,10 +135,23 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     if (picks.length !== b.parts.length) continue;
     const total = picks.reduce((t, x) => t + x.c.amount, 0);
     const ordered = [...picks].sort((x, y) => x.c.postedAt - y.c.postedAt);
+    // The credits equal the register's UPI part of a bill the software calls all UPI: they back the register's split.
+    const split = b.swMode === 'upi' && b.rgMode === 'mixed' && b.swAmount !== total && (b.difference === 'mode' || b.difference === 'amount_and_mode') ? 'use_register' as const : null;
     out.set(b.id, { ...make(b, ordered[0].c, b.paidAt != null ? Math.max(...picks.map((x) => x.minutes ?? 0)) : null), amountPaise: total,
-      fits: b.swAmount === total ? 'both' : 'register', suggest: suggestion(b, total),
+      fits: b.swAmount === total ? 'both' : 'register', suggest: suggestion(b, total) ?? split,
       parts: ordered.map((x) => ({ creditId: x.c.id, amountPaise: x.c.amount, postedAt: x.c.postedAt })) });
     for (const x of picks) used.add(x.c.id);
+  }
+  // A credit backs one side only when the other side's amount has no free credit near too (audit, 9 Nov 2026): with a
+  // credit for each, the bank cannot choose.
+  for (const b of bills) {
+    const e = out.get(b.id);
+    if (!e?.suggest || e.parts) continue;
+    const other = e.suggest === 'use_register' ? b.swAmount : b.rgAmount;
+    if (other == null || other === e.amountPaise) continue;
+    const rival = credits.some((c) => !used.has(c.id) && c.amount === other && (b.paidAt == null ? c.postedAt >= window.from && c.postedAt < window.to + 3600e3
+      : c.postedAt >= b.paidAt - FAR_BACK_MIN * 60000 && c.postedAt <= b.paidAt + NEAR_MIN * 60000));
+    if (rival) out.set(b.id, { ...e, suggest: null, bothSides: true });
   }
   return { evidence: out, used };
 }
@@ -179,6 +195,12 @@ export function pairGroups(groups: { id: string; upiPaise: number; labels: strin
  * belong to another shift or not be a sale.
  */
 export function creditsWithoutBill(credits: EvidenceCredit[], used: Set<string>, bills: EvidenceBill[], window: { from: number; to: number }, groupPaid: number[] = []) {
-  const amounts = new Set([...bills.flatMap((b) => [b.swAmount, b.rgAmount]).filter((x): x is number => x != null), ...groupPaid]);
-  return credits.filter((c) => !used.has(c.id) && c.postedAt >= window.from && c.postedAt < window.to && !amounts.has(c.amount));
+  // A left-out bill is no bill; each UPI go of a bill paid in several is one (audit, 9 Nov 2026).
+  const live = bills.filter((b) => b.decision !== 'leave_out' && b.decision !== 'carry_forward');
+  const amounts = new Set([...live.flatMap((b) => [b.swAmount, b.rgAmount, ...(b.parts ?? [])]).filter((x): x is number => x != null), ...groupPaid]);
+  return credits.filter((c) => !used.has(c.id) && c.postedAt >= window.from && c.postedAt < window.to && !amounts.has(c.amount) && !nearGroup(c.amount, groupPaid));
 }
+
+/** A group's one payment can come in a few rupees off what was written (a discount or rounding): up to this much. */
+export const GROUP_SLACK_PAISE = 1000;
+export const nearGroup = (amount: number, groupPaid: number[]) => groupPaid.some((g) => g !== amount && Math.abs(g - amount) <= GROUP_SLACK_PAISE);

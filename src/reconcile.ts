@@ -4,7 +4,7 @@
 // credits with no bill). Every action is an existing, recorded and reversible one; nothing happens by itself.
 
 import { all, type DB } from './db';
-import { bankIn } from './bankEvidence';
+import { bankIn, nearGroup } from './bankEvidence';
 import { suggestionsFor } from './bank';
 import { cashCheck } from './cash';
 import { explainShift, tableSets, type Card } from './explain';
@@ -78,9 +78,19 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
   const sameUses = new Set(same.flatMap((x) => x.uses));
   const leftCredits = sug.credits.filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !sameUses.has(`cr:${c.id}`)).map((c) => c.id);
 
-  // Missing: credits inside the shift that no bill of any shift could be.
+  // Missing: credits inside the shift that no bill of any shift could be. Not a credit a few rupees off a group still
+  // waiting for its payment, nor one equal to either side of a bill of this shift (audit, 9 Nov 2026).
+  const [groupsWaiting, sides] = await Promise.all([
+    all<{ total: number }>(db, `SELECT sum(t.amount_paise) AS total FROM transactions t JOIN bill_comparisons c ON c.id = t.comparison_id JOIN register_rows rr ON rr.id = c.register_row_id
+      WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
+      GROUP BY coalesce(rr.paid_with_row_id, rr.id) HAVING count(*) > 1`, businessId, day),
+    all<{ a: number | null; b: number | null }>(db, `SELECT sw_amount_paise AS a, rg_amount_paise AS b FROM bill_comparisons
+      WHERE business_id = ? AND shift_day = ? AND (decision IS NULL OR decision NOT IN ('leave_out', 'carry_forward'))`, businessId, day),
+  ]);
+  const sideAmounts = new Set(sides.flatMap((x) => [x.a, x.b]).filter((x): x is number => x != null));
   const noBill = sug.credits
-    .filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !(sug.candidates.get(c.id) ?? []).length)
+    .filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !(sug.candidates.get(c.id) ?? []).length
+      && !sideAmounts.has(c.amount_paise) && !nearGroup(c.amount_paise, groupsWaiting.map((g) => g.total)))
     .map((c) => credit(c.id));
 
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
@@ -206,6 +216,22 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       witnesses: { software: b.c.software ? `${rs(b.c.software.amountPaise as number)} · ${b.c.software.mode}` : null, register: b.c.register ? `${rs(b.c.register.amountPaise as number)} · ${b.c.register.mode}` : null,
         bank: `${rs(b.c.bank!.amountPaise)} at ${hm(b.c.bank!.postedAt)}`, odd: useSoftware ? 'register' : 'software' },
       actions: [{ label: `Use ${useSoftware ? 'software' : 'register'}`, primary: true, method: 'PUT', path: `${base}/comparisons/${b.c.id}`, body: { decision: b.c.bank!.suggest, note: 'Bank credit agrees (trial reconcile)' } }] });
+  }
+
+  // A group's one payment a few rupees off what was written (audit, 9 Nov 2026): the credit is offered for the group,
+  // and the paying row is corrected (the difference a discount or tip) before saving.
+  for (const g of view.paidGroups.filter((x) => !x.bank && x.upiPaise)) {
+    const fits = free().filter((c) => c.postedAt >= w.from && c.postedAt < w.to + 3600e3 && c.amount !== g.upiPaise && nearGroup(c.amount, [g.upiPaise]));
+    if (fits.length !== 1) continue;
+    const m = fits[0];
+    const head = view.comparisons.find((c) => c.register?.rowId === g.id)?.register;
+    used.add(m.id);
+    const diff = m.amount - g.upiPaise;
+    cards.push({ key: `trial-group:${g.id}:${m.id}`, kind: 'payment_written_wrong', billNos: g.billNos, title: `${rs(m.amount)} at ${hm(m.postedAt)} looks like the payment for bills ${g.billNos.join(' + ')}`,
+      evidence: [`The register has one UPI payment of ${rs(g.upiPaise)} for them; the bank got ${rs(m.amount)}, ${rs(Math.abs(diff))} ${diff < 0 ? 'less (a discount?)' : 'more (a tip?)'}.`,
+        'Correct the payment on the row that holds it, with the difference as a discount or tip; it is then matched when you save.'],
+      score: 72, uses: [`cr:${m.id}`], witnesses: { software: null, register: `${g.billNos.length} bills · ${rs(g.upiPaise)} by UPI`, bank: `${rs(m.amount)} at ${hm(m.postedAt)}`, odd: 'register' },
+      actions: head?.uploadId ? [{ label: 'Open the row', href: `#/b/${businessId}/review/${head.uploadId}/${g.id}` }] : [] });
   }
 
   // One credit for a table. Nothing needs editing, so the card only tells: the match is made after confirming.

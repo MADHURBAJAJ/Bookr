@@ -82,7 +82,8 @@ export async function explainShift(db: DB, businessId: string, day: string) {
       SELECT c.id, c.bill_no AS billNo, c.sw_amount_paise AS swAmount, c.sw_mode AS swMode, b.paid_at AS paidAt,
         EXISTS (SELECT 1 FROM transactions t WHERE t.comparison_id = c.id AND t.matched_bank_row IS NOT NULL) AS matched
       FROM bill_comparisons c LEFT JOIN software_bills b ON b.id = c.software_bill_id
-      WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.register_row_id IS NULL`, businessId, day),
+      WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.register_row_id IS NULL
+        AND (c.decision IS NULL OR c.decision NOT IN ('leave_out', 'carry_forward'))`, businessId, day),
     cashCheck(db, businessId, day),
     suggestionsFor(db, businessId, day, addDays(day, 1)),
   ]);
@@ -237,16 +238,22 @@ export async function explainShift(db: DB, businessId: string, day: string) {
   }
 
   // 5. UPI bills with no credit of their amount anywhere near: probably paid another way (needs the bank to be in).
+  // A credit of the amount that went to another bill is named (audit, 9 Nov 2026): two bills, one payment.
+  const takenNear = covered ? await all<{ amount: number; postedAt: number; bills: string | null }>(db, `
+    SELECT r.amount_paise AS amount, r.posted_at AS postedAt, (SELECT group_concat(t.bill_no, ' + ') FROM bank_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.bank_row_id = r.id) AS bills
+    FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'matched' AND r.posted_at >= ? AND r.posted_at < ?`, businessId, w.from - 3600e3, w.to + 3 * 3600e3) : [];
   if (covered) {
     for (const x of sales.filter((y) => y.parts === 1 && !y.grouped && !used.has(`tx:${y.id}`))) {
       const any = credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt, 180));
       if (any) continue;
       const cashFits = cash.differencePaise != null && cash.differencePaise === x.net;
+      const twin = takenNear.find((c) => c.amount === x.net && (x.paidAt == null || mins(c.postedAt, x.paidAt) <= 180));
       kept.push({
         key: `mode:${x.id}`, kind: 'no_upi_credit', billNos: [x.billNo ?? ''],
-        title: `Bill ${x.billNo} (${rs(x.net)}): no UPI payment of this amount in the bank`,
+        title: twin ? `Bill ${x.billNo} (${rs(x.net)}): the one UPI payment of this amount went to bill ${twin.bills}` : `Bill ${x.billNo} (${rs(x.net)}): no UPI payment of this amount in the bank`,
         evidence: [
-          `No credit of ${rs(x.net)}${x.gross && x.gross !== x.net ? ` or ${rs(x.gross)}` : ''} in any account around ${x.paidAt ? hm(x.paidAt) : 'this shift'}.`,
+          twin ? `A credit of ${rs(x.net)} came at ${hm(twin.postedAt)} and is matched to bill ${twin.bills}. Check which bill it paid; the other was paid another way, or its money is still to come.`
+            : `No credit of ${rs(x.net)}${x.gross && x.gross !== x.net ? ` or ${rs(x.gross)}` : ''} in any account around ${x.paidAt ? hm(x.paidAt) : 'this shift'}.`,
           cashFits ? `The shift's cash is ${rs(x.net)} more than expected: exactly this bill. It was probably paid in cash.` : 'If it was paid by cash or card, change it; otherwise it may have been missed by the bank or the register.',
         ],
         score: cashFits ? 70 : 30, uses: [`tx:${x.id}`],

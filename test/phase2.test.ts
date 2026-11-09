@@ -1919,15 +1919,15 @@ describe('the bank as a third witness on Compare sales (approved 5 Nov 2026)', (
     expect(slip(a).after.pays.map((p: any) => p.amountPaise).sort((x: number, y: number) => x - y)).toEqual([141000, 300000]); // saved together: any order
     expect(slip(b)).toMatchObject({ kind: 'add_payment', creditPaise: 800, before: { discountPaise: 800 }, after: { discountPaise: 0 } });
     expect(slip(b).after.pays.map((p: any) => p.amountPaise).sort((x: number, y: number) => x - y)).toEqual([800, 255200]);
-    expect(v.json.bank.noBill.map((x: any) => x.amountPaise).sort((p: number, q: number) => p - q)).toEqual([800, 141000, 300000]); // the page hides the ones a slip explains
+    expect(v.json.bank.noBill.map((x: any) => x.amountPaise).sort((p: number, q: number) => p - q)).toEqual([800, 141000]); // the page hides the ones a slip explains; the ₹ 3,000 is a written part of 2610317 (audit S6)
     expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/shifts/2026-10-31`)).json.slips).toEqual([]);
     const trial = (await h.clients.owner.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
     expect(trial.slips.map((x: any) => x.key).sort()).toEqual(v.json.slips.map((x: any) => x.key).sort());
     // One count on both pages: credits not matched yet, and of them those with no bill of that amount.
     expect(v.json.bank.open.map((x: any) => x.id).sort()).toEqual(trial.open.credits.map((x: any) => x.id).sort());
     expect(trial.strip.creditsLeft).toBe(v.json.bank.open.length);
-    expect(trial.strip.creditsNoBill).toBe(3);
-    expect(trial.open.credits.filter((x: any) => x.noBill).map((x: any) => x.amountPaise).sort((p: number, q: number) => p - q)).toEqual([800, 141000, 300000]);
+    expect(trial.strip.creditsNoBill).toBe(2);
+    expect(trial.open.credits.filter((x: any) => x.noBill).map((x: any) => x.amountPaise).sort((p: number, q: number) => p - q)).toEqual([800, 141000]);
     // What the button does before confirming: the row as corrected.
     const rows = (await h.clients.owner.get(`/businesses/${h.bid}/uploads/${pageId}`)).json.rows;
     for (const s of v.json.slips) {

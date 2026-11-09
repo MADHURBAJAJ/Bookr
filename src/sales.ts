@@ -3,7 +3,7 @@
 // waits for a person's decision.
 
 import { machineLabel } from './cards';
-import { bankIn, creditsWithoutBill, FAR_BACK_MIN, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
+import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
@@ -584,7 +584,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       const base = { id: x.id, amount: x.amount, postedAt: x.postedAt };
       if (noBillIds.has(x.id)) return { ...base, why: 'no_bill' as const, bills: [], billsOfAmount: 0 };
       const bills = upiBills.filter((c) => (c.sw_mode === 'upi' && c.sw_amount_paise === x.amount) || (c.rg_mode === 'upi' && c.rg_amount_paise === x.amount));
-      const tables = groups.filter((g) => upiTotal(g) === x.amount);
+      const tables = groups.filter((g) => upiTotal(g) === x.amount || nearGroup(x.amount, [upiTotal(g)]));
       const waiting = [
         ...bills.filter((c) => !evidence.has(c.id)).map((c) => ({ billNo: c.bill_no, paidAt: c.paid_at, minutes: c.paid_at != null ? Math.round((c.paid_at - x.postedAt) / 60000) : null })),
         ...tables.filter((g) => !groupCredits.has(g.headId)).map((g) => ({ billNo: g.billNos.join(' + '), paidAt: null, minutes: null })),
@@ -842,8 +842,9 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       }
       continue;
     }
-    if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
-    statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, [{ id: upi[0].id, amount: upi[0].r.amount }], userId, t + 1 + matched));
+    // One credit for the bill's UPI: one payment, or several written that the one credit covers (audit, 9 Nov 2026).
+    if (!upi.length || upi.reduce((a, x) => a + x.r.amount, 0) !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
+    statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, upi.map((x) => ({ id: x.id, amount: x.r.amount })), userId, t + 1 + matched));
     matched += 1;
   }
   // Bills paid together whose one credit came in (shown on the group's line): the credit pays the group's UPI sales,

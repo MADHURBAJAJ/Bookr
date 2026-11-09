@@ -283,7 +283,7 @@ describe('bank evidence on Compare sales', () => {
 
   it('money with no bill: the total of bills paid together by UPI is a bill amount too', () => {
     const bills = [bill('a', { rgAmount: 200, rgMode: 'upi', grouped: true }), bill('b', { rgAmount: 100, rgMode: 'upi', grouped: true })];
-    const credits = [{ id: 'x', amount: 300, postedAt: 10 }, { id: 'y', amount: 400, postedAt: 20 }];
+    const credits = [{ id: 'x', amount: 300, postedAt: 10 }, { id: 'y', amount: 40000, postedAt: 20 }];
     expect(creditsWithoutBill(credits, new Set(), bills, w, [300]).map((c) => c.id)).toEqual(['y']);
   });
 });

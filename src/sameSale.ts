@@ -86,7 +86,19 @@ export async function plansFor(db: DB, businessId: string, day: string) {
     WHERE a.business_id = ? AND a.action = 'bank.same_sale_planned' AND json_extract(a.after, '$.shiftDay') = ?
       AND NOT EXISTS (SELECT 1 FROM audit_log u WHERE u.business_id = a.business_id AND u.action = 'bank.same_sale_unplanned' AND u.row_id = a.row_id AND u.id > a.id)
       AND EXISTS (SELECT 1 FROM bank_rows r WHERE r.id = a.row_id AND r.status = 'booked') ORDER BY a.id`, businessId, day);
-  return rows.map((r) => ({ rowId: r.rowId, comparisonId: (JSON.parse(r.after) as { comparisonId: string }).comparisonId }));
+  // One credit joins one bill, and a bill one credit: the first choice stands (audit, 9 Nov 2026).
+  const seenRow = new Set<string>();
+  const seenCmp = new Set<string>();
+  return rows.map((r) => ({ rowId: r.rowId, comparisonId: (JSON.parse(r.after) as { comparisonId: string }).comparisonId }))
+    .filter((p) => { if (seenRow.has(p.rowId) || seenCmp.has(p.comparisonId)) return false; seenRow.add(p.rowId); seenCmp.add(p.comparisonId); return true; });
+}
+
+/** Is this credit, or this bill, already chosen to be one sale with another (any shift, not undone)? */
+export async function planTaken(db: DB, businessId: string, rowId: string, comparisonId: string) {
+  return !!(await one(db, `SELECT 1 AS x FROM audit_log a
+    WHERE a.business_id = ? AND a.action = 'bank.same_sale_planned' AND (a.row_id = ? OR json_extract(a.after, '$.comparisonId') = ?)
+      AND NOT EXISTS (SELECT 1 FROM audit_log u WHERE u.business_id = a.business_id AND u.action = 'bank.same_sale_unplanned' AND u.row_id = a.row_id AND u.id > a.id)
+      AND EXISTS (SELECT 1 FROM bank_rows r WHERE r.id = a.row_id AND r.status = 'booked')`, businessId, rowId, comparisonId));
 }
 
 // ---- Joining and taking it apart
