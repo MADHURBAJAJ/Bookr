@@ -2,6 +2,7 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
+import { machineLabel } from './cards';
 import { bankIn, creditsWithoutBill, FAR_BACK_MIN, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
@@ -628,6 +629,33 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left, noUpi, open };
   }
 
+  // The card machine as a witness too (approved 9 Nov 2026): a mode difference where one side says card, and the card
+  // report has a payment of that side's amount within an hour of the bill (card, or UPI on the machine). Each payment
+  // once, closest first. A person still decides.
+  const machine = new Map<string, { suggest: 'use_software' | 'use_register'; amountPaise: number; paidAt: number; upi: boolean; label: string; minutes: number }>();
+  if (shift?.status !== 'confirmed') {
+    const diffs = comparisons.filter((c) => (c.difference === 'mode' || c.difference === 'amount_and_mode') && c.paid_at != null && c.rg_mode !== 'mixed'
+      && (c.sw_mode === 'card') !== (c.rg_mode === 'card') && c.decision !== 'leave_out' && c.decision !== 'carry_forward');
+    if (diffs.length) {
+      const pays = await all<{ id: string; amount_paise: number; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null }>(db, `
+        SELECT s.id, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4 FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
+          AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, cov.window.from - 3600e3, cov.window.to + 3600e3);
+      const usedPay = new Set<string>();
+      const options = diffs.flatMap((c) => {
+        const side = c.sw_mode === 'card' ? 'software' : 'register';
+        const amount = (side === 'software' ? c.sw_amount_paise : c.rg_amount_paise) ?? 0;
+        return pays.filter((p) => p.amount_paise === amount && Math.abs(p.paid_at - c.paid_at!) <= 60 * 60000)
+          .map((p) => ({ c, p, side, gap: Math.abs(p.paid_at - c.paid_at!) }));
+      }).sort((a, b) => a.gap - b.gap);
+      for (const o of options) {
+        if (usedPay.has(o.p.id) || machine.has(o.c.id)) continue;
+        usedPay.add(o.p.id);
+        machine.set(o.c.id, { suggest: o.side === 'software' ? 'use_software' : 'use_register', amountPaise: o.p.amount_paise, paidAt: o.p.paid_at, upi: o.p.scheme === 'UPI',
+          label: machineLabel(o.p), minutes: Math.round(o.gap / 60000) });
+      }
+    }
+  }
+
   if (!bank) warnings = warnings.filter((w) => w.counted);
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
   const swByMode = (m: string) => sum(sw.filter((b) => b.mode === m).map((b) => ({ amount: b.amount_paise })));
@@ -667,6 +695,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       numberFlags: flagsOf.get(c.id) ?? [],
       bank: bank?.evidence.get(c.id) ?? null,
       bankNone: bank?.noUpi.get(c.id) ?? null,
+      machine: machine.get(c.id) ?? null,
     })),
     bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left,
       open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, why: c.why, bills: c.bills, billsOfAmount: c.billsOfAmount })) } : null,

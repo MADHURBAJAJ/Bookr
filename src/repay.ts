@@ -3,7 +3,8 @@
 // a cash sale then counts in the shift's cash check. Recorded in the audit log with whole before rows, so it can be
 // put back. Bills paid together change together (one payment).
 // Also (approved 8 Nov 2026) a confirmed card sale no card payment was found for once the card report is in ("Was
-// cash?"): it moves to cash or UPI the same way.
+// cash?"): it moves to cash or UPI the same way. And (approved 9 Nov 2026) a confirmed cash sale that was paid on the
+// card machine moves to card, matched to that machine payment in the same step (see routes/cards.ts).
 
 import { all, one, stmt, type DB } from './db';
 import { fail } from './http';
@@ -16,8 +17,9 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
   if (tx.length !== txIds.length) fail(404, 'A sale was not found.');
   const from = tx[0].payment_mode;
   const open = (x: (typeof tx)[number]) => (x.payment_mode === 'upi' && !x.matched_bank_row && x.match_status === 'awaiting_bank_match')
-    || (x.payment_mode === 'card' && x.match_status === 'awaiting_card_settlement');
-  if (tx.some((x) => x.payment_mode !== from || !open(x))) fail(409, 'Only a UPI sale not yet found in the bank, or a card sale with no card payment, can be changed here.');
+    || (x.payment_mode === 'card' && x.match_status === 'awaiting_card_settlement')
+    || (x.payment_mode === 'cash' && x.match_status == null);
+  if (tx.some((x) => x.payment_mode !== from || !open(x))) fail(409, 'Only a UPI sale not yet found in the bank, a card sale with no card payment, or a cash sale can be changed here.');
   if (from === mode) fail(400, `This sale is already ${mode === 'upi' ? 'UPI' : mode}.`);
   if (from === 'card' && await one(db, `SELECT 1 AS x FROM card_matches WHERE transaction_id IN (${txIds.map(() => '?').join(',')})`, ...txIds)) fail(409, 'This card sale is matched to a card payment.');
   // The register line(s) and the one payment they were paid with.
@@ -42,7 +44,7 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
 
   const statements: D1PreparedStatement[] = [
     stmt(db, 'UPDATE register_payments SET mode = ?, column_label = NULL WHERE id = ?', mode, pay.id),
-    ...tx.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ? AND match_status = ?',
+    ...tx.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ? AND match_status IS ?',
       mode, cash, mode === 'card' ? 'awaiting_card_settlement' : mode === 'upi' ? 'awaiting_bank_match' : null, x.id, x.match_status)),
     ...cmps.map((c) => stmt(db, 'UPDATE bill_comparisons SET rg_mode = ? WHERE id = ?', mode, c.id)),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)

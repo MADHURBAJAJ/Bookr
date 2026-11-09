@@ -2651,13 +2651,17 @@ async function compareView(biz, day) {
   // What the bank says about a mode or amount difference, in one line, while it is undecided or decided the other way.
   const bankSays = (c) => {
     const n = noneOf(c);
-    const suggest = c.bank?.suggest ?? n?.suggest;
+    const m = !c.bank?.suggest && !n ? c.machine : null;
+    const suggest = c.bank?.suggest ?? n?.suggest ?? m?.suggest;
     if (!suggest || c.decision === suggest) return '';
     const text = c.bank?.suggest ? `The bank got ₹ ${rs(c.bank.amountPaise)} by UPI at ${hhmm(c.bank.postedAt)}: ${sideName(suggest)} is right.`
+      : m ? `The card machine got ₹ ${rs(m.amountPaise)} (${m.label}) at ${hhmm(m.paidAt)}: ${sideName(suggest)} is right.`
       : `No UPI credit of ₹ ${rs(n.upiPaise)} near this bill${n.takenBy ? ` (the one at ${hhmm(n.takenBy.postedAt)} went to bill ${n.takenBy.billNo})` : ''}: it was most likely paid by ${MODE_LABELS[n.mode]?.toLowerCase() ?? n.mode}, as ${sideName(suggest)} says.`;
     return html`<div class="tiny" style="white-space:normal;max-width:260px;color:${c.decision ? 'var(--warn-ink, #8a5a00)' : 'var(--teal-ink)'}">${c.decision ? '⚠ Decided the other way. ' : ''}${text}</div>`;
   };
   const bankChip = (c) => {
+    // The card machine's payment, for a card-or-not difference (approved 9 Nov 2026).
+    if (c.machine && !c.bank) return html`<span class="chip ok" title="The card report has a payment of ₹ ${money(c.machine.amountPaise)} (${c.machine.label}) at ${when(c.machine.paidAt)}, ${c.machine.minutes} min from the bill. It is matched to the card sale after confirming.">Machine ₹ ${rs(c.machine.amountPaise)} · ${hhmm(c.machine.paidAt)}${c.machine.upi ? ' · UPI' : ''}</span>`;
     if (!v.bank || (!isUpi(c) && !c.bank)) return '';
     if (c.bank?.parts) {
       return html`<span class="chip ok" title="One unmatched UPI credit for each UPI payment written for this bill: ${c.bank.parts.map((p) => `₹ ${money(p.amountPaise)} at ${when(p.postedAt)}`).join(', ')}. Confirming matches each to its payment.">Bank ${c.bank.parts.map((p) => `₹ ${rs(p.amountPaise)}`).join(' + ')} · ${hhmm(c.bank.parts[0].postedAt)}–${hhmm(c.bank.parts[c.bank.parts.length - 1].postedAt)}</span>`;
@@ -3675,7 +3679,10 @@ async function reconcileView(biz, dayArg) {
     ...slips.flatMap((x) => [{ billNo: x.billNo, credits: slipCredits(x) }, ...(x.partner ? [{ billNo: x.partner.billNo, credits: slipCredits(x) }] : [])])];
   const explained = (c) => (c.billNos ?? []).some((b) => hinted.some((h) => h.billNo === b)) || (c.uses ?? []).some((u) => hinted.some((h) => h.credits.some((id) => u === `cr:${id}`)));
   const fixes = r.fixes.filter((c) => !gone.has(c.key) && !(c.kind === 'paid_in_parts' && explained(c)));
-  const noCredit = r.noCredit.filter((c) => !gone.has(c.key) && !explained(c));
+  // A UPI bill paid on the card machine is told on the Card machine side, once (approved 9 Nov 2026).
+  const onMachine = new Set((r.cards?.explains.bills ?? []).map((b) => b.billNo));
+  const noCredit = r.noCredit.filter((c) => !gone.has(c.key) && !explained(c) && !(c.billNos ?? []).some((b) => onMachine.has(b)));
+  const cardSide = (r.cards?.explains.credits.length ?? 0) + (r.cards?.explains.bills.length ?? 0);
   const noBillLeft = r.noBill.filter((x) => !hinted.some((h) => h.credits.includes(x.creditId)));
   const view = reconcileViewPref();
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;
@@ -3706,6 +3713,7 @@ async function reconcileView(biz, dayArg) {
   const suggestions = html`<section class="card lane" style="gap:10px">
     <div class="rv-cards">${clearCard}${cols.map((c) => suggestionCard(c, day))}${fixes.map((c) => suggestionCard(c, day))}${likelyCard}${noCredit.map((c) => suggestionCard(c, day))}${noBillCards}</div>
     ${nothing ? html`<div class="note">${done ? 'No suggestions: nothing is left to explain.' : 'No suggestions for what is left. Open the entries to compare them yourself.'}</div>` : ''}
+    ${cardSide ? html`<div class="note">${cardSide} UPI entr${cardSide === 1 ? 'y is' : 'ies are'} explained by the card machine: see Card machine below.</div>` : ''}
   </section>`;
   // A register slip or wrong column the bank shows, with its button, under the entries it explains (7 Nov 2026).
   const fixLine = (k) => (k ? html`<div data-card="${k.key}" style="padding:0 10px 8px 40px"><div class="tiny" style="color:#92400E">${k.title}</div>
@@ -3853,14 +3861,18 @@ async function reconcileView(biz, dayArg) {
 function cardSection(biz, k, heads) {
   const st = k.strip;
   const at = (ms) => (ms ? when(ms) : 'register only');
-  const card = (p) => `${p.cardType ?? 'Card'}${p.cardLast4 ? ` ··${p.cardLast4}` : ''}`;
+  const card = (p) => p.label ?? `${p.cardType ?? 'Card'}${p.cardLast4 ? ` ··${p.cardLast4}` : ''}`;
   const income = heads.filter((h) => h.type === 'income');
   const left = k.left;
   const need = (n) => {
     const p = n.payment;
-    const head = html`<div class="lane-h"><strong>₹ ${money(p.amountPaise)} on the card at ${when(p.paidAt)}</strong><span class="tchip warn">${
-      n.why === 'several' ? 'More than one bill fits' : n.why === 'one' ? 'Check before matching' : n.why === 'tip' ? 'More than its bill' : n.why === 'not_purchase' ? 'Refund or void' : 'No bill of this amount'}</span></div>
+    const head = html`<div class="lane-h"><strong>₹ ${money(p.amountPaise)} on the card machine at ${when(p.paidAt)}</strong><span class="tchip warn">${
+      n.why === 'several' ? 'More than one bill fits' : n.why === 'one' ? 'Check before matching' : n.why === 'tip' ? 'More than its bill' : n.why === 'not_purchase' ? 'Refund or void'
+        : n.why === 'written' ? `Bill written as ${n.written.mode === 'upi' ? 'UPI' : 'cash'}` : 'No card bill of this amount'}</span></div>
       <div class="tiny">${card(p)} · machine ${p.terminalId}</div>`;
+    if (n.why === 'written') return html`<div class="rv-card">${head}
+      <div class="note">Bill <span class="mono">${n.written.billNo}</span>, ₹ ${money(n.written.amountPaise)} at ${when(n.written.paidAt)}${n.written.shiftDay !== k.day ? ` (${dayLabel(n.written.shiftDay)} shift)` : ''}, is written as <strong>${n.written.mode === 'upi' ? 'UPI' : 'cash'}</strong>, ${n.written.minutes} min from this payment.${n.written.mode === 'upi' ? ' No UPI credit has paid it: it was most likely paid on the machine.' : ''}</div>
+      <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-cardwascard="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">Change to card and match</button></div><div class="form-msg"></div></div>`;
     if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
     if (n.why === 'tip') return html`<div class="rv-card">${head}
       <div class="note">Bill <span class="mono">${n.tip.billNo}</span> is ₹ ${money(n.tip.amountPaise)}, ${at(n.tip.paidAt)}: the guest paid ₹ ${money(n.tip.tipPaise)} more on the card.</div>
@@ -3874,9 +3886,22 @@ function cardSection(biz, k, heads) {
         <button class="btn plain" type="button" style="min-height:36px" data-cardbook="${p.id}">Book</button>
         <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/compare/${k.day}">Find the bill</a></div><div class="form-msg"></div></div>`;
   };
-  const noSwipe = (x) => html`<div class="rv-card" ${x.cashFits ? 'style="border-color:var(--teal)"' : ''}>
+  const noSwipe = (x) => x.upi ? html`<div class="rv-card" style="border-color:var(--teal)">
+    <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: paid by UPI, not on the machine</strong><span class="tchip ok">Bank shows it</span></div>
+    <div class="tiny">${at(x.paidAt)}</div>
+    <div class="note">No machine payment for this bill, and ₹ ${money(x.upi.amountPaise)} came in by UPI at ${when(x.upi.postedAt)}${x.upi.accountName ? ` on ${x.upi.accountName}` : ''}${x.upi.minutes != null ? `, ${x.upi.minutes} min from the bill` : ''}. No other bill has taken that credit.</div>
+    <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-cardwasupi="${x.transactionId}" data-row="${x.upi.creditId}" data-group="${x.groupHead ?? ''}" data-bill="${x.billNo}">Change to UPI and match</button>
+      <button class="btn plain" type="button" style="min-height:36px" data-cardwas="cash" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was cash</button></div><div class="form-msg"></div></div>`
+    : x.parts && !x.parts.credit ? html`<div class="rv-card" style="border-color:var(--teal)">
+    <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: paid in two goes on the machine</strong><span class="tchip ok">Card report shows it</span></div>
+    <div class="tiny">${at(x.paidAt)}</div>
+    <div class="note">${x.parts.payments.map((p) => `₹ ${money(p.amountPaise)} (${card(p)}) at ${when(p.paidAt)}`).join(' + ')} = ₹ ${money(x.amountPaise)}.</div>
+    <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-cardparts="${x.parts.paymentIds.join(',')}" data-tx="${x.transactionId}" data-bill="${x.billNo}">Match both</button></div><div class="form-msg"></div></div>`
+    : html`<div class="rv-card" ${x.cashFits ? 'style="border-color:var(--teal)"' : ''}>
     <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
     <div class="tiny">${at(x.paidAt)}</div>
+    ${x.parts?.credit ? html`<div class="note">It may have been paid in two ways: ₹ ${money(x.parts.payments[0].amountPaise)} (${card(x.parts.payments[0])}) on the machine at ${when(x.parts.payments[0].paidAt)} and ₹ ${money(x.parts.credit.amountPaise)} by UPI at ${when(x.parts.credit.postedAt)}${x.parts.credit.accountName ? ` on ${x.parts.credit.accountName}` : ''}. Splitting a bill over the machine and the bank is not in Bookr yet: note it, and use Was cash / Was UPI only if it fits.</div>` : ''}
+    ${!x.bankCovered ? html`<div class="tiny">The bank is not in for the whole shift yet: once it is, Bookr also looks for a UPI credit of this amount.</div>` : ''}
     <div class="note">The card report is in for this shift and has no payment for this bill.${x.cashFits ? html` <strong>The shift's cash is over by exactly ₹ ${money(x.amountPaise)}</strong>: it was most likely paid in cash.` : ' Was it paid another way?'}</div>
     <div class="form-row" style="gap:6px"><button class="btn ${x.cashFits ? '' : 'plain'}" type="button" style="min-height:36px" data-cardwas="cash" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was cash</button>
       <button class="btn plain" type="button" style="min-height:36px" data-cardwas="upi" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was UPI</button></div><div class="form-msg"></div></div>`;
@@ -3887,13 +3912,14 @@ function cardSection(biz, k, heads) {
       : !x.ruleSet ? html`<span class="chip wait">No card rule</span><div class="tiny"><a href="#/b/${biz.id}/heads">Set the Card settlement rule</a></div>`
       : html`<span class="chip">Waiting for the bank</span><div class="tiny"><a href="#/b/${biz.id}/cards">Card settlements</a></div>`}</td></tr>`;
   return html`<section class="card" style="gap:10px" id="cardsec">
-    <div class="lane-h"><h2 style="margin:0">Card</h2>${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>`
+    <div class="lane-h"><h2 style="margin:0">Card machine</h2>${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>`
       : left ? html`<span class="chip wait">${left} left</span>` : html`<span class="chip ok">Card reconciled</span>`}</div>
     <div class="rec-strip">
       <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
-      <div><div class="tiny">Matched to card payments</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.matchedPaise)}</div><div class="tiny">${st.matched} bill${st.matched === 1 ? '' : 's'}${st.byBookr ? ` · ${st.byBookr} by Bookr` : ''}</div></div>
+      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}</div></div>
+      <div><div class="tiny">Matched to machine payments</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.matchedPaise)}</div><div class="tiny">${st.matched} bill${st.matched === 1 ? '' : 's'}${st.byBookr ? ` · ${st.byBookr} by Bookr` : ''}</div></div>
       <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : 'after the report'}</div></div>
-      <div><div class="tiny">Swipes with no bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
+      <div><div class="tiny">Machine payments with no card bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
     </div>
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
     ${k.done.length ? html`<details class="cmp-fold"><summary>Done (${k.done.length})</summary><div class="scroll"><table style="min-width:560px"><thead><tr><th>Card payment</th><th style="text-align:right">Amount</th><th>Bill</th><th></th></tr></thead><tbody>
@@ -3936,6 +3962,29 @@ function wireCardSection(biz, k, act) {
     let auditId = null;
     act(async () => { auditId = (await apiFull('POST', `/businesses/${biz.id}/sales/repay`, { transactionIds: ids, mode, note: 'No card payment in the card report (Reconcile)' })).auditId; },
       { text: `Changed to ${mode === 'upi' ? 'UPI' : 'cash'}.`, undo: () => apiFull('POST', `/businesses/${biz.id}/sales/repay/${auditId}/undo`, {}) });
+  }));
+  // Paid another way than written (approved 9 Nov 2026): the mode change and the match in one step; Undo puts back both.
+  const repayUndo = (id) => apiFull('POST', `/businesses/${biz.id}/sales/repay/${id}/undo`, {});
+  box.querySelectorAll('[data-cardwasupi]').forEach((b) => b.addEventListener('click', () => {
+    const ids = b.dataset.group ? k.noSwipe.filter((x) => x.groupHead === b.dataset.group).map((x) => x.transactionId) : [b.dataset.cardwasupi];
+    const rowId = b.dataset.row;
+    b.disabled = true;
+    let auditId = null;
+    act(async () => { auditId = (await apiFull('POST', `${B}/was-upi`, { transactionIds: ids, bankRowId: rowId })).auditId; },
+      { text: `Bill ${b.dataset.bill} changed to UPI and matched to its credit.`, undo: async () => { await apiFull('DELETE', `/businesses/${biz.id}/bank-rows/${rowId}/match`, {}); await repayUndo(auditId); } });
+  }));
+  box.querySelectorAll('[data-cardwascard]').forEach((b) => b.addEventListener('click', () => {
+    const pid = b.dataset.cardwascard;
+    b.disabled = true;
+    let auditId = null;
+    act(async () => { auditId = (await apiFull('POST', `${B}/${pid}/was-card`, { transactionIds: [b.dataset.tx] })).auditId; },
+      { text: `Bill ${b.dataset.bill} changed to card and matched to the machine payment.`, undo: async () => { await unmatch(pid); await repayUndo(auditId); } });
+  }));
+  box.querySelectorAll('[data-cardparts]').forEach((b) => b.addEventListener('click', () => {
+    const pids = b.dataset.cardparts.split(',');
+    b.disabled = true;
+    act(() => apiFull('POST', `${B}/match`, { sets: [{ paymentIds: pids, transactionIds: [b.dataset.tx] }] }),
+      { text: `Bill ${b.dataset.bill} matched to its two machine payments.`, undo: () => unmatch(pids[0]) });
   }));
   box.querySelectorAll('[data-cardunmatch]').forEach((b) => b.addEventListener('click', () => {
     if (!confirm('Undo this match? The bill waits for its card payment again; a tip or booking added with it is removed.')) return;

@@ -78,6 +78,15 @@ The Owner's Apps Script (saves `ICICI_POS…xlsx` attachments of card mails with
 5. Gmail → Settings → Forwarding → Add `cards@<domain>`. Gmail's confirmation mail shows on Card settlements with a "Confirm forwarding" link: open it.
 6. Gmail filter: `from:<card company sender>` → Forward to `cards@<domain>`.
 
+### Card machine and the bank, both ways (approved 9 Nov 2026)
+Reconcile's card section is called **Card machine**. Each machine payment shows as "UPI on machine" or the card brand and last 4; the strip splits what the machine got into card and UPI on machine. Staff write a UPI payment taken on the machine as "card" in the register, so the machine and the bank are checked against each other the same way as UPI, only once both the card report and the bank are in for the shift:
+- A card bill with no machine payment: a UPI credit of its amount near its time, in either account (within 60 minutes, or up to 2 hours before when it is the only one), is offered as **Change to UPI and match**. Two machine payments that add up to it are offered as **Match both**. Otherwise Was cash / Was UPI, as before (cash over by exactly its amount is said).
+- A machine payment with no card bill: a bill of its amount written as UPI (no credit yet) or cash, near its time, from the day before to the day after, is offered as **Change to card and match**. Otherwise a tip, else Book to a head.
+- An entry the card side explains is told and counted once: the credit or the UPI bill is left out of the UPI side, with a note pointing to Card machine.
+- A person confirms every mode change; each is recorded as "paid another way" and can be undone (unmatch, then undo).
+- Compare sales shows a machine payment of the card side's amount within 60 minutes as a witness for a card-vs-other mode difference (Owner and Accountant only).
+- Not built: a bill paid partly on the machine and partly by UPI credit. It is shown as a note only, because splitting one sale between the card report and the bank needs its own design.
+
 ## Not yet (part 2 and later)
 
 - Refunds and voids on the card report: shown, never matched.
