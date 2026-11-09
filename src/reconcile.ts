@@ -315,6 +315,10 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits), creditsNoBill: openCredits.filter((c) => c.noBill).length },
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit, noBill: [], unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
     choices, save: { blockers: view.blockers, canSave: view.canConfirm },
+    // Old POS bills still to decide (approved 9 Nov 2026): ticked for "Use register" in one click; a row not reviewed yet waits.
+    oldPos: { ...view.oldPos, bills: view.comparisons.filter((c) => c.oldPos && !c.decision).map((c) => ({
+      comparisonId: c.id, billNo: c.billNo, kind: c.oldPos!.kind, fullNo: c.oldPos!.fullNo, amountPaise: c.register?.amountPaise ?? null,
+      reviewed: !!c.register?.reviewed, uploadId: c.register?.uploadId ?? null, rowId: c.register?.rowId ?? null })) },
   };
 }
 

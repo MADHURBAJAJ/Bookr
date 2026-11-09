@@ -1379,10 +1379,10 @@ function rowIssues(r) {
   else if (!bm?.exact && isOddBill(r.billNo) && r.numberSettled) info.push(r.numberSettled); // a person settled it on Compare
   else if (!bm && isOddBill(r.billNo)) {
     flags.bill_no = 'red';
-    red.push(html`Number is neither new POS (date and running number) nor old POS (6 digits)`);
+    red.push(html`Number is neither new POS (date and running number) nor old POS (14xxxx–15xxxx)`);
   } else if (bm && !bm.exact) {
     flags.bill_no = 'red';
-    red.push(html`${isOddBill(r.billNo) ? 'Number is neither new POS (date and running number) nor old POS (6 digits)' : 'Not in software report'}${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip ${x.taken ? 'taken' : ''}" data-pick="${x.billNo}" title="${why[x.why] ?? ''}${x.taken ? ' · already on another register line: one of the two may be wrong, or the bill was written twice' : ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}${x.taken ? ' · on register' : ''}</button>`)}</span>` : ''}`);
+    red.push(html`${isOddBill(r.billNo) ? 'Number is neither new POS (date and running number) nor old POS (14xxxx–15xxxx)' : 'Not in software report'}${bm.options.length ? html`<span class="chips">${bm.options.slice(0, 4).map((x) => html`<button type="button" class="pickchip ${x.taken ? 'taken' : ''}" data-pick="${x.billNo}" title="${why[x.why] ?? ''}${x.taken ? ' · already on another register line: one of the two may be wrong, or the bill was written twice' : ''}">${x.billNo} · ${rs(x.amountPaise)}${x.amountMatches ? ' ✓' : ''}${x.taken ? ' · on register' : ''}</button>`)}</span>` : ''}`);
   }
   // Bills paid together: the group is told once, on the row where the payment is written. Its other rows say nothing about it.
   const member = !!r.paidWithRowId;
@@ -1516,18 +1516,22 @@ function regSumHtml(u) {
     ${off.length ? html`<br><span class="error">${off.length} bill${off.length > 1 ? 's have' : ' has'} payments that differ from the bill amount after discount or tip (marked red): ${off.map((r) => r.lineNo).join(', ')}. Compare sales cannot confirm the shift until each row's payments equal its amount less discount.</span>` : ''}`;
 }
 
-/** Bills of the old POS: 6-digit numbers, never in the software report. Shown as such, not as missing. */
+/** Bills of the old POS: 140000 to 159999 (or their last 3 digits), never in the software report. Shown as such, not as missing. */
 const startsWithDate = (b) => {
   const m = /^(\d{2})(\d{2})(\d{2})/.exec(b);
   if (!m || +m[1] < 24) return false;
   const d = new Date(Date.UTC(2000 + +m[1], +m[2] - 1, +m[3]));
   return d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
 };
-const isOldPos = (b) => /^\d{6}$/.test(b ?? '') && !startsWithDate(b); // mirrors src/sales.ts
+const isOldPos = (b) => /^1[45]\d{4}$/.test(b ?? ''); // 140000 to 159999; mirrors src/sales.ts
 const isNewPos = (b) => /^\d{7,9}$/.test(b ?? '') && startsWithDate(b);
 /** A number of neither format, new POS (YYMMDD and a running number) nor old POS. It can never meet a software bill. */
 const isOddBill = (b) => !!b && !isNewPos(b) && !isOldPos(b);
 const SHORT_OLD_POS_NOTE = 'Old POS bill, short number';
+/** Whether 3-digit numbers can still be old POS bills: the old POS fades out once no full number is written for a week. */
+const oldPosState = (o) => (!o?.lastSeen ? '' : o.inUse
+  ? ` Old POS last seen ${dayLabel(o.lastSeen)}: a 3-digit number no new POS bill fits is taken as an old POS bill.`
+  : ` Old POS not seen since ${dayLabel(o.lastSeen)} (over ${o.fadeDays} days): 3-digit numbers are no longer taken as old POS bills.`);
 const OLD_POS_NOTE = 'Old POS bill';
 /** Why a register number may be a typo. Bookr changes nothing: a person checks it against the photo. */
 function numberFlagText(f) {
@@ -2521,6 +2525,7 @@ function baseChoices(c) {
   const carry = !c.register || !c.software ? [['carry_forward', 'Carry forward']] : [];
   if (!c.register) return [['use_software', 'Add to register · F&B', 'fnb'], ['use_software', 'Add to register · Room', 'room'], ['leave_out', 'Leave out'], ...carry];
   if (needsReview(c)) return [['__review', 'Review the row first'], ['leave_out', 'Leave out']];
+  if (!c.software && c.oldPos?.kind === 'short') return [['__oldpos', 'Use register (old POS)'], ['leave_out', 'Leave out']];
   if (!c.software && isOddBill(c.billNo)) return [['__oldpos', SHORT_OLD_POS_NOTE], ['leave_out', 'Leave out']];
   if (!c.software && isOldPos(c.billNo)) return [['__oldpos', 'Use register'], ['leave_out', 'Leave out']];
   if (!c.software) return [['use_register', 'Use register'], ['leave_out', 'Leave out'], ...carry];
@@ -2672,6 +2677,63 @@ const backButton = () => {
 
 // ---------- Compare sales
 
+/** No UPI credit for the side that says UPI, unless a wrong column or a slip explains it. */
+const bankNoneOf = (v, c) => (!c.bank && c.bankNone && !(v.columnHints ?? []).some((h) => h.rowId === c.register?.rowId)
+  && !(v.slips ?? []).some((x) => slipRows(x).includes(c.register?.rowId)) ? c.bankNone : null);
+
+/** The decision menu of one bill: the same choices on Compare sales and on Reconcile (approved 9 Nov 2026). */
+function decideMenuHtml(c, v) {
+  return html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
+    const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
+    if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
+      return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:40px">
+        <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
+        ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
+    }
+    const none = bankNoneOf(v, c);
+    const sugg = !c.decision && (c.bank?.suggest ?? none?.suggest) === k && !type && !link;
+    const why = !sugg ? '' : c.bank?.suggest ? `The bank backs this: ₹ ${money(c.bank.amountPaise)} came in at ${hhmm(c.bank.postedAt)}` : `The bank backs this: no UPI credit of ₹ ${money(none.upiPaise)} came in near this bill`;
+    return html`<button class="btn ${on ? 'ghost' : 'plain'} dchip ${sugg ? 'sugg' : ''}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}" ${sugg ? `title="${why}"` : ''}>${on ? '✓ ' : ''}${l}${sugg ? html` <span class="bank-tag">bank</span>` : ''}</button>`;
+  })}</div>`;
+}
+
+/** Wires every decision menu under root. act(fn) runs a change and reloads; back is where "Check the row" returns to. */
+function wireDecideMenu(biz, day, v, root, act, back) {
+  root.querySelectorAll('[data-cmp][data-d]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const c = v.comparisons.find((x) => x.id === b.dataset.cmp);
+    if (!c) return;
+    if (b.dataset.d === '__review') {
+      setBackTo({ hash: back, bill: c.billNo, label: `${dayLabel(day)} shift` });
+      location.hash = c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?day=${day}`;
+      return;
+    }
+    if (b.dataset.d === '__oldpos') {
+      act(async () => {
+        const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids: [c.id], note: c.oldPos?.kind === 'full' || isOldPos(c.billNo) ? OLD_POS_NOTE : SHORT_OLD_POS_NOTE });
+        if (r.skipped?.length) throw new Error(`Bill ${c.billNo} was not changed: ${r.skipped[0].reason}.`);
+      });
+      return;
+    }
+    let note = null;
+    if (b.dataset.d === 'leave_out' && b.dataset.link && c.otherDay?.decision === 'leave_out') {
+      note = (prompt(`Bill ${c.billNo} was left out on ${dayLabel(c.otherDay.day)}${c.otherDay.note ? ` (${c.otherDay.note})` : ''} and now appears here. Why leave it out again?`) ?? '').trim();
+      if (!note) return;
+    } else if (b.dataset.d === 'leave_out' && !b.dataset.link) {
+      note = (prompt(`Leave bill ${c.billNo} out of the shift. Why? (e.g. cancelled in POS)`) ?? '').trim();
+      if (!note) return;
+    }
+    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: b.dataset.d, billType: b.dataset.type || null, note, linkedToId: b.dataset.link || null }));
+  }));
+  root.querySelectorAll('[data-leaveout]').forEach((sel) => sel.addEventListener('change', () => {
+    let note = sel.value;
+    if (!note) return;
+    if (note === '__other') note = (prompt('Why is this cash bill left out?') ?? '').trim();
+    if (!note) { sel.value = ''; return; }
+    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${sel.dataset.leaveout}`, { decision: 'leave_out', note }));
+  }));
+}
+
 async function compareView(biz, day) {
   const { shifts } = await api('GET', `/businesses/${biz.id}/shifts`);
   if (!day) day = shifts.find((s) => s.day === lastDay(biz.id))?.day ?? shifts.find((s) => s.status !== 'confirmed')?.day ?? shifts[0]?.day;
@@ -2791,7 +2853,8 @@ async function compareView(biz, day) {
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
       <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}
       ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
-      ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
+      ${!c.software && c.oldPos?.kind === 'short' ? html`<div class="tiny">Old POS bill, last 3 digits${c.oldPos.fullNo ? html`: probably <span class="mono">${c.oldPos.fullNo}</span>` : ''}. No new POS bill with running number ${c.billNo} is waiting in the software report.</div>`
+        : !c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
       ${!c.software && !c.decision && isOldPos(c.billNo) ? html`<div class="tiny">Old POS bill. ${c.register?.reviewed ? 'Row reviewed: you can use the register.' : 'Review its row, then use the register.'}</div>` : ''}</td>
     <td>${side(c.software)}</td><td>${side(c.register)}</td>
     <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
@@ -2800,18 +2863,7 @@ async function compareView(biz, day) {
       ${c.auto ? html`<span class="tiny" style="color:var(--teal-ink)">Decided by Bookr${c.note ? `: ${c.note}` : ''}</span>` : ''}
       ${confirmed ? '' : html`${bankChip(c)}${bankSays(c)}`}${c.reissuedAs && !c.decision ? html`<div class="tiny" style="white-space:normal;max-width:260px;color:var(--teal-ink)">Looks issued again as bill ${c.reissuedAs} (same amount, minutes later, in the register). If so, leave this one out.</div>` : ''}
     </div></td>
-    <td>${c.difference === 'match' ? html`<span class="note">No decision needed</span>` : canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
-        const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
-        if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
-          return html`<select class="cell ${on ? 'auto' : ''}" data-leaveout="${c.id}" aria-label="Leave out because" style="min-height:40px">
-            <option value="">${on ? `Left out: ${c.note ?? ''}` : 'Leave out because…'}</option>
-            ${(v.reasons ?? []).map((r) => html`<option value="${r}">${r}</option>`)}<option value="__other">Another reason…</option></select>`;
-        }
-        const none = noneOf(c);
-        const sugg = !c.decision && (c.bank?.suggest ?? none?.suggest) === k && !type && !link;
-        const why = !sugg ? '' : c.bank?.suggest ? `The bank backs this: ₹ ${money(c.bank.amountPaise)} came in at ${hhmm(c.bank.postedAt)}` : `The bank backs this: no UPI credit of ₹ ${money(none.upiPaise)} came in near this bill`;
-        return html`<button class="btn ${on ? 'ghost' : 'plain'} dchip ${sugg ? 'sugg' : ''}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}" ${sugg ? `title="${why}"` : ''}>${on ? '✓ ' : ''}${l}${sugg ? html` <span class="bank-tag">bank</span>` : ''}</button>`;
-      })}</div>`
+    <td>${c.difference === 'match' ? html`<span class="note">No decision needed</span>` : canDecide && !confirmed ? decideMenuHtml(c, v)
       : html`<span class="note">${c.decision ? `${DECISION_LABELS[c.decision]}${c.billType ? ` · ${TYPE_LABELS[c.billType]}` : ''}${c.note ? `: ${c.note}` : ''}` : 'Not decided'}</span>`}</td>
   </tr>`;
   // Bills paid together: one line with the totals, each bill underneath when opened.
@@ -2900,10 +2952,10 @@ async function compareView(biz, day) {
           ${open.length || matched.length ? html`<span class="seg" role="group" aria-label="Show">${kinds.map(([k, l, list]) => list.length || k === 'all' ? html`<button type="button" data-kind="${k}" class="${k === 'all' ? 'on' : ''}">${l} (${list.length})</button>` : '')}</span>` : ''}</div>
         ${v.matchedAfterAdjustment?.length ? html`<div class="note">${v.matchedAfterAdjustment.length} bill${v.matchedAfterAdjustment.length > 1 ? 's match' : ' matches'} after a discount or tip, so no decision is needed: ${v.matchedAfterAdjustment.map((m) => m.billNo).join(', ')}.</div>` : ''}
         ${canDecide && !confirmed && open.filter(bulkOk).length > 1 ? html`<form id="bulkreg" class="inset" style="gap:8px">
-          <div class="note"><strong>${open.filter(bulkOk).length} bills are only in the register.</strong> Tick bills that will never be in a software report and count them from the register at once.</div>
+          <div class="note"><strong>${open.filter(bulkOk).length} bills are only in the register.</strong> Tick bills that will never be in a software report and count them from the register at once.${oldPosState(v.oldPos)}</div>
           <div class="form-row" style="align-items:flex-end">
             <button class="btn plain" type="button" id="bulkall">Select all ${open.filter(bulkOk).length}</button>
-            ${open.some((c) => bulkOk(c) && isOldPos(c.billNo)) ? html`<button class="btn plain" type="button" id="bulkold">Select ${open.filter((c) => bulkOk(c) && isOldPos(c.billNo)).length} reviewed old POS</button>` : ''}
+            ${open.some((c) => bulkOk(c) && c.oldPos) ? html`<button class="btn plain" type="button" id="bulkold">Select ${open.filter((c) => bulkOk(c) && c.oldPos).length} reviewed old POS</button>` : ''}
             <div class="field"><label for="bulknote">Reason</label><input id="bulknote" name="note" value="Old POS bill" required></div>
             <button class="btn" type="submit" id="bulkgo" disabled>Use register for 0 selected</button>
           </div>
@@ -2955,28 +3007,7 @@ async function compareView(biz, day) {
   const msg = document.getElementById('cmsg');
   wireShiftBar(biz, shiftOptions);
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
-  app.querySelectorAll('[data-cmp]').forEach((b) => b.addEventListener('click', () => {
-    const c = v.comparisons.find((x) => x.id === b.dataset.cmp);
-    if (b.dataset.d === '__review') {
-      const tr = b.closest('tr');
-      setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: tr.dataset.bill, label: `${dayLabel(day)} shift` });
-      location.hash = tr.dataset.open;
-      return;
-    }
-    if (b.dataset.d === '__oldpos') {
-      act(async () => {
-        const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids: [c.id], note: isOldPos(c.billNo) ? OLD_POS_NOTE : SHORT_OLD_POS_NOTE });
-        if (r.skipped?.length) throw new Error(`Bill ${c.billNo} was not changed: ${r.skipped[0].reason}.`);
-      });
-      return;
-    }
-    let note = null;
-    if (!note && b.dataset.d === 'leave_out' && b.dataset.link && c?.otherDay?.decision === 'leave_out') {
-      note = (prompt(`Bill ${c.billNo} was left out on ${dayLabel(c.otherDay.day)}${c.otherDay.note ? ` (${c.otherDay.note})` : ''} and now appears here. Why leave it out again?`) ?? '').trim();
-      if (!note) return;
-    }
-    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, { decision: b.dataset.d, billType: b.dataset.type || null, note, linkedToId: b.dataset.link || null }));
-  }));
+  wireDecideMenu(biz, day, v, app, act, `#/b/${biz.id}/compare/${day}`);
   app.querySelectorAll('[data-groupreg]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const bills = v.comparisons.filter((c) => c.groupId === b.dataset.groupreg && bulkOk(c) && !c.decision);
@@ -3060,13 +3091,6 @@ async function compareView(biz, day) {
     if (row) reveal(row);
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
-  app.querySelectorAll('[data-leaveout]').forEach((sel) => sel.addEventListener('change', () => {
-    let note = sel.value;
-    if (!note) return;
-    if (note === '__other') note = (prompt('Why is this cash bill left out?') ?? '').trim();
-    if (!note) { sel.value = ''; return; }
-    act(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${sel.dataset.leaveout}`, { decision: 'leave_out', note }));
-  }));
   wireCashPanel(biz, day, () => compareView(biz, day), msg);
   const bulk = document.getElementById('bulkreg');
   if (bulk) {
@@ -3081,7 +3105,7 @@ async function compareView(biz, day) {
     };
     boxes().forEach((x) => x.addEventListener('change', count));
     document.getElementById('bulkold')?.addEventListener('click', () => {
-      const old = new Set(v.comparisons.filter((c) => isOldPos(c.billNo)).map((c) => c.id));
+      const old = new Set(v.comparisons.filter((c) => c.oldPos).map((c) => c.id));
       boxes().forEach((x) => { x.checked = old.has(x.dataset.bulk); });
       count();
     });
@@ -3747,6 +3771,24 @@ function saveBar(biz, r) {
     <div class="form-msg" id="savemsg"></div></section>`;
 }
 
+/** Old POS bills still to decide (approved 9 Nov 2026): ticked, counted from the register in one click. */
+function oldPosHtml(biz, r) {
+  const list = r.oldPos?.bills ?? [];
+  if (!list.length || r.confirmed) return '';
+  const can = biz.actions.includes('sales.decide');
+  const ready = list.filter((b) => b.reviewed);
+  return html`<section class="card" id="oldpos" style="gap:8px">
+    <div class="lane-h"><strong>Old POS bills: ${list.length}</strong><span class="tchip ok">Use register</span></div>
+    <div class="note">Never in the software report, so they are counted from the register.${oldPosState(r.oldPos)}</div>
+    <div class="scroll"><table style="min-width:420px"><tbody>${list.map((b) => html`<tr>
+      <td style="width:36px">${b.reviewed && can ? html`<input type="checkbox" data-oldpos="${b.comparisonId}" data-kind="${b.kind}" checked aria-label="Use register for bill ${b.billNo}" style="width:18px;height:18px;min-height:0">` : ''}</td>
+      <td class="mono">${b.billNo}${b.kind === 'short' ? html` <span class="tiny">last 3 digits${b.fullNo ? html`, probably ${b.fullNo}` : ''}</span>` : ''}</td>
+      <td class="amount">${b.amountPaise != null ? money(b.amountPaise) : ''}</td>
+      <td>${b.reviewed ? '' : html`<a class="tiny" href="#/b/${biz.id}/review/${b.uploadId}/${b.rowId}">Review the row first</a>`}</td></tr>`)}</tbody></table></div>
+    ${can && ready.length ? html`<div class="form-row" style="gap:6px"><button class="btn" type="button" id="oldposgo" style="min-height:36px">Use register for ${ready.length} old POS bill${ready.length === 1 ? '' : 's'}</button></div>` : ''}
+    <div class="form-msg" id="oldposmsg"></div></section>`;
+}
+
 /** Matches chosen before saving: made on Save, or undone here. */
 function choicesHtml(r) {
   if (!r.choices?.length) return '';
@@ -3763,7 +3805,7 @@ const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 
 /** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
-function entriesHtml(biz, day, t, mode) {
+function entriesHtml(biz, day, t, mode, cv) {
   const side = (x) => (x ? html`₹ ${money(x.amountPaise ?? 0)} ${x.mode ? ENTRY_MODE[x.mode] ?? x.mode : 'no mode'}` : html`<span style="color:var(--danger)">missing</span>`);
   const line = (e) => html`<div class="ent-line">
     <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
@@ -3773,10 +3815,8 @@ function entriesHtml(biz, day, t, mode) {
     <div class="tiny">Register ${side(e.register)} · Software ${side(e.software)}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${day}">Open row</button>` : ''}</div>
     ${e.evidence ? html`<div class="tiny" style="color:var(--teal)">✓ ${e.evidence}</div>` : e.state === 'waiting' ? html`<div class="tiny" style="color:#92400E">${mode === 'upi' ? 'No bank credit yet' : 'No machine payment yet'}</div>` : ''}
     ${e.edits.map((x) => html`<div class="tiny" style="color:${/to decide$/.test(x.text) ? 'var(--danger)' : '#5B21B6'}">✎ ${x.text}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}</div>`)}
-    ${e.state === 'decide' && biz.actions.includes('sales.decide') ? html`<div class="form-row" style="gap:6px;margin-top:4px">
-      ${e.register ? html`<button class="btn plain dchip" type="button" data-decide="use_register" data-cmp="${e.comparisonId}">Use register</button>` : ''}
-      ${e.software ? html`<button class="btn plain dchip" type="button" data-decide="use_software" data-cmp="${e.comparisonId}">Use software</button>` : ''}
-      <button class="btn plain dchip" type="button" data-decide="leave_out" data-cmp="${e.comparisonId}">Leave out…</button></div>` : ''}
+    ${e.state === 'decide' && biz.actions.includes('sales.decide') && cv?.comparisons.find((c) => c.id === e.comparisonId)
+      ? html`<div style="margin-top:4px">${decideMenuHtml(cv.comparisons.find((c) => c.id === e.comparisonId), cv)}</div>` : ''}
   </div>`;
   // Bills paid together: one block with the group's one payment and what backs it, then each bill (approved 9 Nov 2026).
   const block = (es) => {
@@ -3822,9 +3862,11 @@ async function reconcileView(biz, dayArg) {
     render(shell(biz, 'reconcile', 'Reconcile', '', html`<section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
-  const [r, v, { heads }, ent, cash] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
+  const [r, v, { heads }, ent, cash, cv] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
     api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`),
-    api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`)]);
+    api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
+    // The Compare sales view of the shift: every bill and its decision menu (approved 9 Nov 2026).
+    api('GET', `/businesses/${biz.id}/shifts/${day}`)]);
   const tab = reconcileTabPref();
   const reload = () => reconcileView(biz, `${day}?more=${v.moreHours}`);
   drawerReload = reload;
@@ -3908,11 +3950,11 @@ async function reconcileView(biz, dayArg) {
       ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}</div>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
       ${cashPanelHtml(biz, cash)}
-      ${entriesHtml(biz, day, ent.cash, 'cash')}
+      ${entriesHtml(biz, day, ent.cash, 'cash', cv)}
     </div>
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
       ${r.cards ? cardSection(biz, r.cards, heads) : html`<section class="card"><div class="note">The card machine's payments are matched here once the shift is saved (confirmed).</div></section>`}
-      ${entriesHtml(biz, day, ent.card, 'card')}
+      ${entriesHtml(biz, day, ent.card, 'card', cv)}
     </div>
     <div data-rpanel="upi" ${tab === 'upi' ? '' : 'hidden'}>
     <section class="card cmp-bar">
@@ -3933,12 +3975,13 @@ async function reconcileView(biz, dayArg) {
     <div id="recmsg"></div>
     ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>`
       : saveBar(biz, r)}
+    ${oldPosHtml(biz, r)}
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
     <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
     ${doneFold}
     ${choicesHtml(r)}
-    ${entriesHtml(biz, day, ent.upi, 'upi')}
+    ${entriesHtml(biz, day, ent.upi, 'upi', cv)}
     </div>`));
   wireShell();
   app.querySelectorAll('[data-rtab]').forEach((b) => b.addEventListener('click', () => {
@@ -3958,19 +4001,34 @@ async function reconcileView(biz, dayArg) {
       doneToast(`Saved: ${res.rows} sale${res.rows === 1 ? '' : 's'} booked, ${res.matched} matched to the bank${res.cardMatched ? `, ${res.cardMatched} to the card machine` : ''}.${res.skipped?.length ? ` Not matched (the credit no longer fits): ${res.skipped.join(', ')}.` : ''}`);
     } catch (err) { e.currentTarget.disabled = false; showError(saveMsg, err); }
   });
+  const oldGo = document.getElementById('oldposgo');
+  const oldBoxes = () => [...app.querySelectorAll('[data-oldpos]')].filter((x) => x.checked);
+  app.querySelectorAll('[data-oldpos]').forEach((x) => x.addEventListener('change', () => {
+    const n = oldBoxes().length;
+    oldGo.disabled = !n;
+    oldGo.textContent = `Use register for ${n} old POS bill${n === 1 ? '' : 's'}`;
+  }));
+  oldGo?.addEventListener('click', async () => {
+    const ticked = oldBoxes();
+    oldGo.disabled = true;
+    try {
+      const skipped = [];
+      for (const [note, kind] of [[OLD_POS_NOTE, 'full'], [SHORT_OLD_POS_NOTE, 'short']]) {
+        const ids = ticked.filter((x) => x.dataset.kind === kind).map((x) => x.dataset.oldpos);
+        if (ids.length) skipped.push(...((await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids, note })).skipped ?? []));
+      }
+      await reload();
+      doneToast(`${ticked.length - skipped.length} old POS bill${ticked.length - skipped.length === 1 ? '' : 's'} counted from the register.${skipped.length ? ` Not changed: ${skipped.map((x) => `${x.billNo} (${x.reason})`).join(', ')}.` : ''}`);
+    } catch (err) { oldGo.disabled = false; showError(document.getElementById('oldposmsg'), err); }
+  });
   app.querySelectorAll('[data-unchoose]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
     try { await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${b.dataset.unchoose}`, {}); await reload(); }
     catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); }
   }));
-  app.querySelectorAll('[data-decide]').forEach((b) => b.addEventListener('click', async () => {
-    const decision = b.dataset.decide;
-    let note;
-    if (decision === 'leave_out') { note = (prompt('Leave this bill out of the shift. Why? (e.g. cancelled in POS)') ?? '').trim(); if (!note) return; }
-    b.disabled = true;
-    try { await apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, note ? { decision, note } : { decision }); await reload(); }
-    catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
-  }));
+  wireDecideMenu(biz, day, cv, app, async (fn) => {
+    try { await fn(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  }, `#/b/${biz.id}/reconcile/${day}`);
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz, days);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {

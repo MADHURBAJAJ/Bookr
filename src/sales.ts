@@ -421,8 +421,35 @@ export interface NoUpi {
   takenBy: { billNo: string; postedAt: number } | null;
 }
 export const isNewPosBill = (billNo: string | null | undefined) => /^\d{7,9}$/.test(billNo ?? '') && startsWithDate(billNo!);
-/** Bills of the old POS: 6-digit numbers, never in the software report, so never matched. A date with no running number is a new one cut short. */
-export const isOldPosBill = (billNo: string | null | undefined) => /^\d{6}$/.test(billNo ?? '') && !startsWithDate(billNo!);
+/** Bills of the old POS: 140000 to 159999 (user, 9 Nov 2026), never in the software report, so never matched. */
+export const isOldPosBill = (billNo: string | null | undefined) => /^1[45]\d{4}$/.test(billNo ?? '');
+/** The old POS is taken as finished once no full old POS number has been written for this many days. */
+export const OLD_POS_FADE_DAYS = 7;
+/** The note an old POS bill written by its last 3 digits is counted with. */
+export const SHORT_OLD_POS_NOTE = 'Old POS bill, short number';
+/**
+ * A register-only bill of 3 digits is an old POS bill written by its last 3 digits (approved 9 Nov 2026) when it cannot
+ * be a new POS bill written by its running number: none of the shift's date, the day before or after, put in front,
+ * gives a software bill still without its register row; the software report covers the whole shift; and the old POS
+ * was still in use (a full old POS number written within OLD_POS_FADE_DAYS). Otherwise a person decides.
+ */
+export const isShortOldPos = (billNo: string | null | undefined, flags: NumberFlag[], coverageComplete: boolean, oldPosInUse: boolean) =>
+  /^\d{3}$/.test(billNo ?? '') && coverageComplete && oldPosInUse && !flags.some((f) => f.kind === 'pending' || f.kind === 'in_range' || f.kind === 'pending_typo');
+/** The full old POS number a short one probably is: the one number between the full old POS numbers written around it on its page. */
+export function fullOldPos(row: { bill_no: string; line_no: number; upload_id: string }, pageRows: { bill_no: string; line_no: number; upload_id: string }[]) {
+  const page = pageRows.filter((r) => r.upload_id === row.upload_id && isOldPosBill(r.bill_no));
+  const before = page.filter((r) => r.line_no < row.line_no).sort((a, b) => b.line_no - a.line_no)[0];
+  const after = page.filter((r) => r.line_no > row.line_no).sort((a, b) => a.line_no - b.line_no)[0];
+  if (!before && !after) return null;
+  const lo = before ? +before.bill_no : +after!.bill_no - 50;
+  const hi = after ? +after.bill_no : +before!.bill_no + 50;
+  const fits: number[] = [];
+  for (let n = Math.min(lo, hi); n <= Math.max(lo, hi); n++) if (String(n).endsWith(row.bill_no)) fits.push(n);
+  return fits.length === 1 && isOldPosBill(String(fits[0])) ? String(fits[0]) : null;
+}
+/** The last shift day a full old POS number was written in the register, up to this shift. */
+export const oldPosLastSeen = async (db: DB, businessId: string, day: string) => (await one<{ d: string | null }>(db,
+  `SELECT max(shift_day) AS d FROM register_rows WHERE business_id = ? AND shift_day <= ? AND bill_no GLOB '1[45][0-9][0-9][0-9][0-9]'`, businessId, day))?.d ?? null;
 /**
  * A register number of neither format (approved 6 Nov 2026), such as a short "230". It can never meet a software
  * bill, so it does not wait: a person corrects it, marks it as an old POS bill, or leaves it out.
@@ -526,11 +553,22 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const others = await otherDays(db, businessId, day, comparisons);
   // What is odd about a register number, until a person has decided the bill.
   const toCheck = comparisons.filter((c) => c.difference === 'missing_in_software' && c.register_row_id && !c.decided_by && !c.closed_at);
-  const numbers = toCheck.length && shift?.status !== 'confirmed' ? await numberContext(db, businessId, day) : null;
+  const [numbers, lastOldPos] = await Promise.all([toCheck.length && shift?.status !== 'confirmed' ? numberContext(db, businessId, day) : null, oldPosLastSeen(db, businessId, day)]);
+  const oldPosInUse = !!lastOldPos && lastOldPos >= addDays(day, -OLD_POS_FADE_DAYS);
   const flagsOf = new Map(numbers ? toCheck.map((c) => {
     const r = rg.find((x) => x.id === c.register_row_id);
     return [c.id, r ? numberFlags({ ...r, gross_paise: r.amount_paise + r.discount_paise }, numbers) : []] as const;
   }) : []);
+  // Old POS bills (approved 9 Nov 2026): a full number, or a short one that cannot be a new POS bill.
+  const oldPosOf = new Map<string, { kind: 'full' | 'short'; fullNo: string | null }>();
+  for (const c of comparisons) {
+    if (c.difference !== 'missing_in_software' || !c.register_row_id) continue;
+    const r = rg.find((x) => x.id === c.register_row_id);
+    if (isOldPosBill(c.bill_no)) oldPosOf.set(c.id, { kind: 'full', fullNo: null });
+    else if (r && (flagsOf.has(c.id) ? isShortOldPos(c.bill_no, flagsOf.get(c.id)!, !cov.gaps.length, oldPosInUse) : /^\d{3}$/.test(c.bill_no) && c.close_note === SHORT_OLD_POS_NOTE)) {
+      oldPosOf.set(c.id, { kind: 'short', fullNo: fullOldPos(r, rg) });
+    }
+  }
   const twice = comparisons.filter((c) => isCounted(c.decision) && others.has(c.id) && isCounted(others.get(c.id)!.decision)
     && (c.linked_to_id === others.get(c.id)!.id || others.get(c.id)!.linksHere || others.get(c.id)!.billNo === c.bill_no));
   if (twice.length) blockers.push(`Bill ${twice.map((c) => `${c.bill_no} (also counted on ${others.get(c.id)!.day})`).join(', ')} would be counted twice. Choose "Already counted" for it here.`);
@@ -695,6 +733,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     reopenedAt: shift?.reopened_at ?? null,
     reopenReason: shift?.reopen_reason ?? null,
     warnings,
+    /** The old POS: the last day a full number was written, and whether short numbers can still be its bills. */
+    oldPos: { lastSeen: lastOldPos, inUse: oldPosInUse, fadeDays: OLD_POS_FADE_DAYS },
     window: cov.window,
     gaps: cov.gaps,
     reports: cov.reports.map((r) => ({ id: r.id, coversFrom: r.covers_from, coversTo: r.covers_to, firstPaidAt: r.first_paid_at, lastPaidAt: r.last_paid_at, billCount: r.bill_count })),
@@ -715,6 +755,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       bankNone: bank?.noUpi.get(c.id) ?? null,
       machine: machine.get(c.id) ?? null,
       reissuedAs: reissued.get(c.id) ?? null,
+      oldPos: oldPosOf.get(c.id) ?? null,
     })),
     bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left,
       open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, why: c.why, bills: c.bills, billsOfAmount: c.billsOfAmount })) } : null,
