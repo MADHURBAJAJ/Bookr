@@ -40,10 +40,10 @@ export async function hotel() {
   const self = {
     ...h, fnb, accounts, rows,
     /** The software report: one file covering 31 Oct 00:00 to 1 Nov 23:59. */
-    async software(bills: [no: string, when: string, mode: SampleBill['mode'], amount: string][]) {
+    async software(bills: [no: string, when: string, mode: SampleBill['mode'], amount: string][], coversTo = istToMs(2026, 11, 1, 23, 59, 59)) {
       const list: SampleBill[] = bills.map(([bill, when, mode, amount]) => ({ pos: 'POS-1', bill, when: at(when).csv, name: 'U/N', mode, amount }));
       const res = await o.post(`/businesses/${h.bid}/sales-reports`, { day: '2026-10-31', csv: buildSalesCsv(list),
-        coversFrom: istToMs(2026, 10, 31, 0, 0, 0), coversTo: istToMs(2026, 11, 1, 23, 59, 59) });
+        coversFrom: istToMs(2026, 10, 31, 0, 0, 0), coversTo });
       expect(res.status, JSON.stringify(res.json)).toBe(201);
     },
     async register(list: Reg[]) {
@@ -80,6 +80,20 @@ export async function hotel() {
       const ids: string[] = [];
       for (let i = tran - list.length + 1; i <= tran; i++) ids.push((await sql`SELECT id FROM bank_rows WHERE tran_id = ${`S${String(50000000 + i)}`}`)[0]?.id);
       return ids;
+    },
+    /** Any bank lines: [when, amount (rupees, may have paise), CR|DR, description]. Pasting the same text again is a
+     *  second import of the same lines. Returns the row ids, and the pasted text. */
+    async lines(list: [when: string, amount: number | string, dir: 'CR' | 'DR', desc: string][], account = 'HUF A', again?: string) {
+      const first = tran + 1;
+      const text = again ?? [HEAD, ...list.map(([when, amount, dir, desc]) => {
+        tran += 1;
+        return [tran, `S${String(50000000 + tran)}`, at(when).bank.slice(0, 10), at(when).bank, '-', desc, dir, String(amount), '1000'].join('\t');
+      })].join('\n');
+      const res = await o.post(`/businesses/${h.bid}/bank/${accounts[account]}/paste`, { text });
+      expect(res.status, JSON.stringify(res.json)).toBe(200);
+      const ids: string[] = [];
+      if (!again) for (let i = first; i <= tran; i++) ids.push((await sql`SELECT id FROM bank_rows WHERE tran_id = ${`S${String(50000000 + i)}`}`)[0]?.id);
+      return { ids, text, res: res.json };
     },
     async swipe(when: string, amount: number, scheme = 'VISA') {
       const id = crypto.randomUUID();

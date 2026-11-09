@@ -25,6 +25,7 @@ export async function importLines(db: DB, businessId: string, accountId: string,
     l.kind, l.upiRef, l.vpa, l.remark, t));
   for (let i = 0; i < statements.length; i += 80) await db.batch(statements.slice(i, i + 80));
   await pairRows(db, accountId);
+  if (fresh.some((l) => l.direction === 'DR')) await leaveOutReturned(db, businessId);
   // A card settlement credit among them is settled by Bookr where safe (its date and exactly its net, a rule set).
   const auto = fresh.some((l) => l.kind === 'card_settlement') ? await runCardAuto(db, businessId) : null;
   return { added: fresh.length, skipped: lines.length - fresh.length, cardSettled: auto?.settled ?? 0 };
@@ -37,9 +38,53 @@ export async function pairRows(db: DB, accountId: string) {
         AND c.upi_ref = bank_rows.upi_ref AND c.kind = 'upi_in' LIMIT 1)
       WHERE account_id = ? AND kind = 'upi_fee' AND pair_row_id IS NULL`, accountId),
     stmt(db, `UPDATE bank_rows SET pair_row_id = (SELECT d.id FROM bank_rows d WHERE d.account_id = bank_rows.account_id
-        AND d.upi_ref = bank_rows.upi_ref AND d.kind = 'upi_out' AND d.amount_paise = bank_rows.amount_paise LIMIT 1)
+        AND d.upi_ref = bank_rows.upi_ref AND d.kind = CASE WHEN bank_rows.direction = 'DR' THEN 'upi_in' ELSE 'upi_out' END
+        AND d.amount_paise = bank_rows.amount_paise LIMIT 1)
       WHERE account_id = ? AND kind = 'reversal' AND pair_row_id IS NULL`, accountId),
   ]);
+}
+
+/** A refund goes back within this long of the payment it returns. */
+const REFUND_DAYS = 3;
+
+/**
+ * Money that came in and went straight back is not a sale and not an expense (audit, 9 Nov 2026). Both lines are left
+ * out together, with a note, while the credit is still unmatched; Reopen on either line undoes it.
+ * - A UPI credit the bank reversed (a DR line "UPI/RVSL<ref>" of the credit's ref and amount): certain.
+ * - A refund: a UPI payment to the same UPI ID, of the same amount, within REFUND_DAYS after the credit (the latest
+ *   such credit). A credit already matched to a bill is left alone: that sale was refunded, which a person books.
+ */
+export async function leaveOutReturned(db: DB, businessId: string) {
+  const [reversed, refunds] = await Promise.all([
+    all<{ rev: string; cr: string; ref: string | null }>(db, `SELECT r.id AS rev, c.id AS cr, r.upi_ref AS ref FROM bank_rows r JOIN bank_rows c ON c.id = r.pair_row_id
+      WHERE r.business_id = ? AND r.kind = 'reversal' AND r.direction = 'DR' AND r.status = 'unmatched' AND c.kind = 'upi_in' AND c.status = 'unmatched'
+        AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = c.id)`, businessId),
+    all<{ out: string; cr: string; vpa: string; amount: number }>(db, `SELECT d.id AS out, (SELECT c.id FROM bank_rows c WHERE c.business_id = d.business_id
+        AND c.kind = 'upi_in' AND c.status = 'unmatched' AND c.vpa = d.vpa AND c.amount_paise = d.amount_paise AND c.posted_at < d.posted_at
+        AND c.posted_at >= d.posted_at - ? AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = c.id)
+        AND NOT EXISTS (SELECT 1 FROM bank_rows o WHERE o.pair_row_id = c.id) ORDER BY c.posted_at DESC LIMIT 1) AS cr, d.vpa, d.amount_paise AS amount
+      FROM bank_rows d WHERE d.business_id = ? AND d.kind = 'upi_out' AND d.direction = 'DR' AND d.status = 'unmatched' AND d.vpa IS NOT NULL AND d.pair_row_id IS NULL`,
+      REFUND_DAYS * 86400e3, businessId),
+  ]);
+  const t = now();
+  const audit = (rowId: string, after: unknown) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, NULL, 'bank.left_out_returned', 'bank_rows', ?, ?, ?, ?)`, businessId, rowId, JSON.stringify({ status: 'unmatched' }), JSON.stringify(after), t);
+  const leave = (ids: string[], note: string) => stmt(db, `UPDATE bank_rows SET status = 'ignored', note = ?, done_by = NULL, done_at = ?
+    WHERE id IN (${ids.map(() => '?').join(',')}) AND status = 'unmatched'`, note, t, ...ids);
+  const statements: D1PreparedStatement[] = [];
+  const taken = new Set<string>();
+  for (const x of reversed) {
+    taken.add(x.cr);
+    statements.push(leave([x.rev, x.cr], 'Payment reversed by the bank: left out by Bookr'), audit(x.cr, { status: 'ignored', reversedBy: x.rev }));
+  }
+  for (const x of refunds) {
+    if (!x.cr || taken.has(x.cr)) continue;
+    taken.add(x.cr);
+    statements.push(stmt(db, 'UPDATE bank_rows SET pair_row_id = ? WHERE id = ?', x.cr, x.out),
+      leave([x.out, x.cr], `Refunded to ${x.vpa}: left out by Bookr`), audit(x.cr, { status: 'ignored', refundedBy: x.out }));
+  }
+  for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
+  return { reversed: reversed.length, refunded: taken.size - reversed.length };
 }
 
 // ---- Rules
@@ -96,7 +141,14 @@ const WIDE_MIN = 180;
 
 export interface Candidate { transactionIds: string[]; billNos: string[]; amountPaise: number; minutes: number | null; strong: boolean; shiftDay: string; part: string | null;
   /** The credit equals the bill amount, not what the register says was received: matching corrects the register. */
-  adjust?: { receivedPaise: number; billPaise: number } }
+  adjust?: { receivedPaise: number; billPaise: number };
+  /** Far from the bill (an advance days before, or a credit the bank posted the next morning): never ticked. */
+  far?: boolean }
+
+/** A bill still waiting after saving looks this far for its one credit (audit, 9 Nov 2026): an advance paid days
+ *  before (a room booked ahead), or a credit the bank posted the next morning. */
+export const FAR_BEFORE_DAYS = 3;
+const FAR_AFTER_HOURS = 12;
 
 /**
  * For each unmatched UPI credit, sales of the same amount paid near that time (a bill paid together counts as one).
@@ -144,6 +196,20 @@ export function upiCandidates(credits: (BankRow & { label: string | null })[], s
     list.sort((a, b) => (a.minutes ?? 9999) - (b.minutes ?? 9999));
     out.set(c.id, list);
   }
+  // Far (audit, 9 Nov 2026): a timed bill with no credit of its amount within WIDE_MIN takes the one credit of its amount
+  // from FAR_BEFORE_DAYS before to FAR_AFTER_HOURS after its time, when no other bill of that amount still waiting could
+  // take that credit this way either. Offered, never ticked.
+  const span = (u: (typeof units)[number], c: BankRow) => u.paidAt != null && c.posted_at >= u.paidAt - FAR_BEFORE_DAYS * 86400e3 && c.posted_at <= u.paidAt + FAR_AFTER_HOURS * 3600e3;
+  const close = (u: (typeof units)[number]) => [...out.values()].some((list) => list.some((k) => k.transactionIds.join() === u.ids.join() && k.amountPaise === u.amount));
+  for (const u of units) {
+    if (u.paidAt == null || u.adjust || close(u)) continue;
+    const fits = credits.filter((c) => c.amount_paise === u.amount && labelFits(u.labels, c.label) && span(u, c));
+    if (fits.length !== 1) continue;
+    const c = fits[0];
+    if (units.some((o) => o !== u && o.amount === u.amount && !o.adjust && span(o, c))) continue;
+    const minutes = Math.round(Math.abs(c.posted_at - u.paidAt) / 60000);
+    out.get(c.id)!.push({ transactionIds: u.ids, billNos: u.bills, amountPaise: u.amount, minutes, strong: false, shiftDay: u.shiftDay, part: u.part, far: true });
+  }
   // Clear (ticked for the person): credits and sales paired by closest time first, each used once, up to an hour
   // apart. Two credits of the same amount near two bills of that amount pair up by time instead of blocking each other.
   const pairs: { creditId: string; k: Candidate }[] = [];
@@ -169,8 +235,8 @@ export const unmatchedCredits = (db: DB, businessId: string, from: string, to: s
   ORDER BY r.posted_at`, businessId, from, to);
 
 /** Credits and sales around a set of days: sales of the day before and after can be paid across midnight or 8 am. */
-export async function suggestionsFor(db: DB, businessId: string, from: string, to: string) {
-  const [credits, sales] = await Promise.all([unmatchedCredits(db, businessId, from, to), waitingUpi(db, businessId, addDays(from, -1), addDays(to, 1))]);
+export async function suggestionsFor(db: DB, businessId: string, from: string, to: string, far = false) {
+  const [credits, sales] = await Promise.all([unmatchedCredits(db, businessId, far ? addDays(from, -FAR_BEFORE_DAYS) : from, to), waitingUpi(db, businessId, addDays(from, -1), addDays(to, 1))]);
   return { credits, sales, ...upiCandidates(credits, sales) };
 }
 

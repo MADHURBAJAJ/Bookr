@@ -466,10 +466,13 @@ export async function cashAccountId(db: DB, businessId: string): Promise<string 
   return a?.id ?? null;
 }
 
+/** A bill issued again under a new number is within this many minutes of the old one. */
+const REISSUE_MIN = 30;
+
 /** Comparisons as the bank evidence sees them; bills paid together are left to UPI matching (one credit, many bills). */
 function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>, paysByRow: Map<string, RgPay[]>): EvidenceBill[] {
   return comps.map((c) => ({
-    id: c.id, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
+    id: c.id, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
     swAmount: c.software_bill_id ? c.sw_amount_paise : null, swMode: c.sw_mode, rgAmount: c.register_row_id ? c.rg_amount_paise : null, rgMode: c.rg_mode,
     labels: c.register_row_id ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'upi').map((p) => p.column_label).filter(Boolean).join(',') || null : null,
     parts: c.register_row_id && !grouped.has(c.register_row_id) && (paysByRow.get(c.register_row_id) ?? []).length > 1
@@ -656,6 +659,15 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     }
   }
 
+  // A bill voided and issued again (audit, 9 Nov 2026): a software-only UPI bill without a credit, and a later bill of
+  // the same amount within REISSUE_MIN that the register has (or the bank backs). Told, not decided.
+  const reissued = new Map<string, string>();
+  for (const c of comparisons) {
+    if (c.difference !== 'missing_in_register' || c.sw_mode !== 'upi' || c.paid_at == null || bank?.evidence.has(c.id)) continue;
+    const later = comparisons.filter((o) => o.id !== c.id && o.software_bill_id && o.sw_amount_paise === c.sw_amount_paise && o.paid_at != null
+      && o.paid_at > c.paid_at! && o.paid_at - c.paid_at! <= REISSUE_MIN * 60000 && (o.register_row_id || bank?.evidence.has(o.id)));
+    if (later.length === 1) reissued.set(c.id, later[0].bill_no);
+  }
   if (!bank) warnings = warnings.filter((w) => w.counted);
   const sum = (rows: { amount: number }[]) => rows.reduce((s, r) => s + r.amount, 0);
   const swByMode = (m: string) => sum(sw.filter((b) => b.mode === m).map((b) => ({ amount: b.amount_paise })));
@@ -696,6 +708,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       bank: bank?.evidence.get(c.id) ?? null,
       bankNone: bank?.noUpi.get(c.id) ?? null,
       machine: machine.get(c.id) ?? null,
+      reissuedAs: reissued.get(c.id) ?? null,
     })),
     bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left,
       open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, why: c.why, bills: c.bills, billsOfAmount: c.billsOfAmount })) } : null,
@@ -832,6 +845,15 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     if (!c.bank || chosen.has(c.id)) continue;
     const upi = rows.map((r, i) => ({ r, id: ids[i] })).filter((x) => x.r.c.id === c.id && x.r.mode === 'upi');
     // Paid in several goes: each UPI payment is matched to its own credit, only when every one has its credit.
+    // One payment the guest paid in several credits: each credit is matched to that one payment for its own amount.
+    if (c.bank.split && c.bank.parts) {
+      if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
+      for (const p of c.bank.parts) {
+        statements.push(...confirmMatchStatements(db, businessId, p.creditId, [{ id: upi[0].id, amount: p.amountPaise }], userId, t + 1 + matched));
+        matched += 1;
+      }
+      continue;
+    }
     if (c.bank.parts) {
       const free = [...upi];
       const pairs = c.bank.parts.map((p) => { const i = free.findIndex((x) => x.r.amount === p.amountPaise); return i < 0 ? null : { p, x: free.splice(i, 1)[0] }; });

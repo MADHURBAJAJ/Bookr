@@ -2748,11 +2748,11 @@ async function compareView(biz, day) {
     if (c.machine && !c.bank) return html`<span class="chip ok" title="The card report has a payment of ₹ ${money(c.machine.amountPaise)} (${c.machine.label}) at ${when(c.machine.paidAt)}, ${c.machine.minutes} min from the bill. It is matched to the card sale after confirming.">Machine ₹ ${rs(c.machine.amountPaise)} · ${hhmm(c.machine.paidAt)}${c.machine.upi ? ' · UPI' : ''}</span>`;
     if (!v.bank || (!isUpi(c) && !c.bank)) return '';
     if (c.bank?.parts) {
-      return html`<span class="chip ok" title="One unmatched UPI credit for each UPI payment written for this bill: ${c.bank.parts.map((p) => `₹ ${money(p.amountPaise)} at ${when(p.postedAt)}`).join(', ')}. Confirming matches each to its payment.">Bank ${c.bank.parts.map((p) => `₹ ${rs(p.amountPaise)}`).join(' + ')} · ${hhmm(c.bank.parts[0].postedAt)}–${hhmm(c.bank.parts[c.bank.parts.length - 1].postedAt)}</span>`;
+      return html`<span class="chip ok" title="${c.bank.split ? `One payment of ₹ ${money(c.bank.amountPaise)}, paid in ${c.bank.parts.length} goes (e.g. a UPI app limit)` : 'One unmatched UPI credit for each UPI payment written for this bill'}: ${c.bank.parts.map((p) => `₹ ${money(p.amountPaise)} at ${when(p.postedAt)}`).join(', ')}. Confirming matches ${c.bank.split ? 'them to the payment' : 'each to its payment'}.">Bank ${c.bank.parts.map((p) => `₹ ${rs(p.amountPaise)}`).join(' + ')} · ${hhmm(c.bank.parts[0].postedAt)}–${hhmm(c.bank.parts[c.bank.parts.length - 1].postedAt)}</span>`;
     }
     if (c.bank) {
       const fits = c.bank.fits === 'both' ? 'both sides' : c.bank.fits === 'software' ? 'the software' : 'the register';
-      return html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(c.bank.amountPaise)} came in at ${when(c.bank.postedAt)}. It equals ${fits}.${c.bank.minutes > 60 ? ' It came in well before the bill was closed, and it is the only credit of this amount in the two hours before.' : ''} Confirming matches it to this bill.">Bank ₹ ${rs(c.bank.amountPaise)} · ${hhmm(c.bank.postedAt)}${c.bank.minutes != null ? ` · ${c.bank.minutes} min` : ''}</span>`;
+      return html`<span class="chip ok" title="An unmatched UPI credit of ₹ ${money(c.bank.amountPaise)} came in at ${when(c.bank.postedAt)}. It equals ${fits}.${c.bank.byNote ? ' Its UPI note names this bill.' : ''}${c.bank.minutes > 60 ? ' It came in well before the bill was closed, and it is the only credit of this amount in the two hours before.' : ''} Confirming matches it to this bill.">Bank ₹ ${rs(c.bank.amountPaise)} · ${hhmm(c.bank.postedAt)}${c.bank.minutes != null ? ` · ${c.bank.minutes} min` : ''}${c.bank.byNote ? ' · note names the bill' : ''}</span>`;
     }
     const h = colHintOf([c.register?.rowId]);
     if (h) return colChip(h);
@@ -2794,7 +2794,7 @@ async function compareView(biz, day) {
       ${c.difference === 'match' ? (c.software?.amountPaise !== c.register?.amountPaise ? html`<span class="chip wait" title="The group matches on its total. This bill's own figures differ.">This bill differs by ₹ ${rs(Math.abs((c.software?.amountPaise ?? 0) - (c.register?.amountPaise ?? 0)))}</span>` : html`<span class="chip ok">Same</span>`)
         : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}
       ${c.auto ? html`<span class="tiny" style="color:var(--teal-ink)">Decided by Bookr${c.note ? `: ${c.note}` : ''}</span>` : ''}
-      ${confirmed ? '' : html`${bankChip(c)}${bankSays(c)}`}
+      ${confirmed ? '' : html`${bankChip(c)}${bankSays(c)}`}${c.reissuedAs && !c.decision ? html`<div class="tiny" style="white-space:normal;max-width:260px;color:var(--teal-ink)">Looks issued again as bill ${c.reissuedAs} (same amount, minutes later, in the register). If so, leave this one out.</div>` : ''}
     </div></td>
     <td>${c.difference === 'match' ? html`<span class="note">No decision needed</span>` : canDecide && !confirmed ? html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
         const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
@@ -3571,7 +3571,7 @@ async function bankView(biz, query = '') {
 
 // ---------- Reconcile: one screen per confirmed shift (approved 5 Nov 2026)
 
-const CARD_TAGS = { wrong_column: 'Wrong UPI column', register_slip: 'Register slip', number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
+const CARD_TAGS = { change_in_cash: 'Change in cash', wrong_column: 'Wrong UPI column', register_slip: 'Register slip', number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
   clear_matches: 'Same amount, close in time', same_sale: 'Booked directly', bank_backs: 'Bank agrees', no_upi_credit: 'No credit in the bank', no_bill: 'No bill' };
 const witnessHtml = (label, value, odd) => html`<div class="wit ${odd ? 'odd' : ''}"><div class="wit-l">${label}</div><div class="wit-v">${value ?? 'Not found'}</div></div>`;
 /** A suggestion: what Bookr saw, its reason as a tag, and one click to act. A person always makes the click. */
@@ -3847,9 +3847,10 @@ async function reconcileView(biz, dayArg) {
   const view = reconcileViewPref();
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;
   const billsCell = (x) => html`<span class="mono">${x.billNos.join(' + ')}</span>${x.part ? html`<div class="tiny">${x.part}</div>` : ''}`;
+  const farGap = (ms) => (ms >= 86400e3 ? `${Math.round(ms / 86400e3 * 10) / 10} days` : `${Math.round(ms / 3600e3)} h`);
   const pairTable = (rows, attr, ticked) => html`<div class="scroll"><table style="min-width:560px"><thead><tr>${attr ? html`<th style="width:36px"></th>` : ''}<th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th></tr></thead><tbody>
     ${rows.map((x) => html`<tr>${attr ? html`<td><input type="checkbox" ${attr}="${x.creditId}" ${ticked ? 'checked' : ''} aria-label="Match bill ${x.billNos.join(' + ')}" style="width:18px;height:18px;min-height:0"></td>` : ''}
-      <td>${billsCell(x)}${x.others ? html`<div class="tiny" style="color:#92400E">${x.others} other possible match${x.others > 1 ? 'es' : ''}: check before ticking</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${creditCell(x)}</td></tr>`)}
+      <td>${billsCell(x)}${x.others ? html`<div class="tiny" style="color:#92400E">${x.others} other possible match${x.others > 1 ? 'es' : ''}: check before ticking</div>` : ''}${x.far ? html`<div class="tiny" style="color:#92400E">${x.postedAt < x.paidAt ? `Paid ${farGap(x.paidAt - x.postedAt)} before the bill: an advance?` : `Came ${farGap(x.postedAt - x.paidAt)} after the bill: posted late by the bank?`} The only credit of this amount in that time.</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${creditCell(x)}</td></tr>`)}
   </tbody></table></div>`;
   const waiting = v.sales.filter((x) => !x.bankRowId);
   const clearCard = r.clear.length ? html`<div class="rv-card" id="laneclear">
@@ -4445,6 +4446,15 @@ function wireExplain(ex, reload, biz, root = document) {
   root.querySelectorAll('[data-cardact]').forEach((b) => b.addEventListener('click', async () => {
     const c = ex.cards.find((x) => x.key === b.dataset.cardact);
     const a = c.actions[Number(b.dataset.i)];
+    // Tick these in Match by hand (below on Reconcile), where the person chooses how to book a difference.
+    if (a.op === 'pick') {
+      const box = document.getElementById('pair');
+      if (!box) return showError(root.querySelector(`[data-card="${CSS.escape(c.key)}"] .form-msg`), new Error('Open this shift on Reconcile to match by hand.'));
+      box.querySelectorAll('[data-pcr]').forEach((x) => { x.checked = a.credits.includes(x.dataset.pcr); x.dispatchEvent(new Event('change')); });
+      box.querySelectorAll('[data-pbl]').forEach((x) => { x.checked = x.dataset.pbl.split(',').some((id) => a.sales.includes(id)); x.dispatchEvent(new Event('change')); });
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
     b.disabled = true;
     try {
       let undo = null;

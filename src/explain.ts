@@ -11,7 +11,9 @@ import { addDays, shiftWindow } from './time';
 
 /** A call, or on a trial reconcile a change to a register row (op) or a link to open (href). */
 export interface Action { label: string; method?: 'POST' | 'PUT' | 'DELETE'; path?: string; body?: Record<string, unknown>; primary?: boolean; needsNote?: string;
-  op?: 'fixNumber' | 'setMode'; rowId?: string; uploadId?: string; billNo?: string; mode?: string; href?: string }
+  op?: 'fixNumber' | 'setMode' | 'pick'; rowId?: string; uploadId?: string; billNo?: string; mode?: string; href?: string;
+  /** op 'pick': the credits and sales to tick in Match by hand. */
+  credits?: string[]; sales?: string[] }
 /** What each of the three says, and which one is wrong (shown struck out). */
 export interface Witnesses { software: string | null; register: string | null; bank: string; odd: 'software' | 'register' | 'bank' | null }
 export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[]; witnesses?: Witnesses }
@@ -24,6 +26,9 @@ const mins = (a: number, b: number) => Math.round(Math.abs(a - b) / 60000);
 interface Sale { id: string; net: number; billNo: string | null; comparisonId: string | null; paidAt: number | null; difference: string | null; regId: string | null;
   swAmount: number | null; gross: number | null; grouped: number; parts: number }
 const TABLE_MAX = 10;
+/** Change given back in cash: from ₹ 10 (less is a tip or a slip) to ₹ 100. */
+const CHANGE_MIN_PAISE = 1000;
+const CHANGE_MAX_PAISE = 10000;
 
 /**
  * Sets of 2 to 10 bills adding up exactly to an amount, bills within 45 minutes of each other. Stops at two sets
@@ -85,7 +90,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
       WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.register_row_id IS NULL
         AND (c.decision IS NULL OR c.decision NOT IN ('leave_out', 'carry_forward'))`, businessId, day),
     cashCheck(db, businessId, day),
-    suggestionsFor(db, businessId, day, addDays(day, 1)),
+    suggestionsFor(db, businessId, day, addDays(day, 1), true),
   ]);
 
   const cards: Card[] = [];
@@ -209,6 +214,30 @@ export async function explainShift(db: DB, businessId: string, day: string) {
     });
   }
 
+  // Change given in cash (audit, 9 Nov 2026): a credit a little more than one bill still waiting, near its time, that no
+  // bill of its own amount could be: the guest sent more by UPI and got the rest back in cash. Each once, both ways.
+  const over = (x: Sale, m: Credit) => m.amount - x.net >= CHANGE_MIN_PAISE && m.amount - x.net <= CHANGE_MAX_PAISE && x.paidAt != null && mins(m.postedAt, x.paidAt) <= 60;
+  const waitingOne = sales.filter((x) => x.parts === 1 && !x.grouped && !credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt)));
+  for (const m of credits.filter((c) => !single(c))) {
+    const fits = waitingOne.filter((x) => over(x, m));
+    if (fits.length !== 1) continue;
+    const x = fits[0];
+    if (credits.filter((c) => !single(c) && over(x, c)).length !== 1) continue;
+    const change = m.amount - x.net;
+    cards.push({
+      key: `change:${x.id}:${m.id}`, kind: 'change_in_cash', billNos: [x.billNo ?? ''],
+      title: `${rs(m.amount)} at ${hm(m.postedAt)} is probably bill ${x.billNo} (${rs(x.net)}), with ${rs(change)} change given in cash`,
+      evidence: [
+        `Bill ${x.billNo} is ${rs(x.net)} by UPI and has no credit of its amount; ${rs(m.amount)} came ${mins(m.postedAt, x.paidAt!)} min from it, and no bill is ${rs(m.amount)}.`,
+        `If the guest sent ${rs(m.amount)} and got ${rs(change)} back in cash, the cash count will be ${rs(change)} short for it.`,
+        'Tick them in Match by hand and book the difference under the head you use for it, with the reason.',
+      ],
+      score: 60, uses: [`tx:${x.id}`, `cr:${m.id}`],
+      witnesses: { software: x.swAmount != null ? `Bill ${rs(x.swAmount)}` : null, register: `UPI ${rs(x.net)}`, bank: `${rs(m.amount)} at ${hm(m.postedAt)}`, odd: 'bank' },
+      actions: [{ label: 'Tick them in Match by hand', primary: true, op: 'pick', credits: [m.id], sales: [x.id] }],
+    });
+  }
+
   // 4. Clear matches waiting for a click.
   const clearIds = [...sug.clear].filter(([id, k]) => !k.adjust && credits.some((c) => c.id === id)).map(([id]) => id);
   if (clearIds.length) {
@@ -245,7 +274,9 @@ export async function explainShift(db: DB, businessId: string, day: string) {
   if (covered) {
     for (const x of sales.filter((y) => y.parts === 1 && !y.grouped && !used.has(`tx:${y.id}`))) {
       const any = credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt, 180));
-      if (any) continue;
+      // An advance days before, or a credit the bank posted the next morning, is offered as a likely match instead.
+      const far = [...sug.candidates.values()].some((list) => list.some((k) => k.far && k.transactionIds.includes(x.id)));
+      if (any || far) continue;
       const cashFits = cash.differencePaise != null && cash.differencePaise === x.net;
       const twin = takenNear.find((c) => c.amount === x.net && (x.paidAt == null || mins(c.postedAt, x.paidAt) <= 180));
       kept.push({

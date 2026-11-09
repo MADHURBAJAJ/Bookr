@@ -16,14 +16,14 @@ const NEAR_MIN = 60;
 export const FAR_BACK_MIN = 120;
 
 export interface EvidenceBill {
-  id: string; paidAt: number | null; difference: string; decision: string | null; grouped: boolean;
+  id: string; billNo?: string | null; paidAt: number | null; difference: string; decision: string | null; grouped: boolean;
   swAmount: number | null; swMode: string | null; rgAmount: number | null; rgMode: string | null;
   /** The register's UPI column(s): the credit must have come into an account with that label, as on UPI matching. */
   labels?: string | null;
   /** UPI payments written for a bill paid in several goes (or partly another way): each needs its own credit. */
   parts?: number[];
 }
-export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null }
+export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null; remark?: string | null }
 export interface Evidence {
   creditId: string; amountPaise: number; postedAt: number; minutes: number | null;
   /** Which side's amount the credit equals. */
@@ -34,7 +34,19 @@ export interface Evidence {
   bothSides?: boolean;
   /** A bill paid in several UPI goes: one credit per payment. creditId and postedAt are the first; amountPaise is their total. */
   parts?: { creditId: string; amountPaise: number; postedAt: number }[];
+  /** The guest paid one payment in several credits (e.g. a UPI app limit): parts are those credits, all for one payment. */
+  split?: boolean;
+  /** The credit's UPI note names this bill. */
+  byNote?: boolean;
 }
+
+/** A guest splitting one payment: credits this close together, two or three of them. */
+const SPLIT_SPAN_MIN = 30;
+/** A UPI note naming a bill is believed this far from the bill's time (a guest paying ahead, or late). */
+const NOTE_MIN = 12 * 60;
+/** Does a UPI note name this bill number (as a whole number, not inside a longer one)? */
+export const noteNames = (remark: string | null | undefined, billNo: string | null | undefined) =>
+  !!remark && !!billNo && billNo.length >= 3 && new RegExp(`(^|\\D)${billNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\D|$)`).test(remark);
 
 /** Amounts a bill could have been paid by UPI: a side counts when it says UPI, or when the other side does (mode slips). */
 function upiAmounts(b: EvidenceBill): { amount: number; side: 'software' | 'register' }[] {
@@ -87,6 +99,17 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     const rg = b.rgAmount === c.amount;
     return { creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, minutes, fits: sw && rg ? 'both' : sw ? 'software' : 'register', suggest: suggestion(b, c.amount) };
   };
+  // A credit whose UPI note names a bill of its amount pays that bill, before any pairing by time (audit, 9 Nov 2026).
+  for (const c of credits) {
+    if (!c.remark) continue;
+    const named = bills.filter((b) => !b.grouped && b.decision !== 'leave_out' && b.decision !== 'carry_forward' && noteNames(c.remark, b.billNo)
+      && upiAmounts(b).some((a) => a.amount === c.amount) && labelFits(b.labels ?? null, c.label ?? null)
+      && (b.paidAt != null ? Math.abs(c.postedAt - b.paidAt) <= NOTE_MIN * 60000 : c.postedAt >= window.from && c.postedAt < window.to + 3600e3));
+    if (named.length !== 1 || out.has(named[0].id)) continue;
+    const b = named[0];
+    out.set(b.id, { ...make(b, c, b.paidAt != null ? Math.round(Math.abs(c.postedAt - b.paidAt) / 60000) : null), byNote: true });
+    used.add(c.id);
+  }
   for (const p of timed) {
     if (out.has(p.bill.id) || used.has(p.credit.id)) continue;
     out.set(p.bill.id, make(p.bill, p.credit, p.minutes));
@@ -142,6 +165,39 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
       parts: ordered.map((x) => ({ creditId: x.c.id, amountPaise: x.c.amount, postedAt: x.c.postedAt })) });
     for (const x of picks) used.add(x.c.id);
   }
+  // One payment, several credits (audit, 9 Nov 2026): a guest whose UPI app stops at a limit pays a bill in two or three
+  // goes, while the register writes one. A timed bill still without a credit, written as one UPI payment, takes two or
+  // three free credits within SPLIT_SPAN_MIN of each other, in its reach, that add up exactly to its UPI amount, when
+  // that is the only such set, none of them is an amount some bill still looking could take, and no other bill could
+  // take any of them this way.
+  const looking2 = bills.filter((b) => b.paidAt != null && !out.has(b.id) && !b.grouped && !(b.parts && b.parts.length > 1)
+    && b.decision !== 'leave_out' && b.decision !== 'carry_forward');
+  const wantedAmount = new Set(looking2.flatMap((b) => upiAmounts(b).map((a) => a.amount)));
+  const sets = new Map<string, EvidenceCredit[][]>();
+  for (const b of looking2) {
+    const pool = credits.filter((c) => !used.has(c.id) && !wantedAmount.has(c.amount) && reach(b, c) && labelFits(b.labels ?? null, c.label ?? null)).slice(0, 20);
+    const found: EvidenceCredit[][] = [];
+    const targets = new Set(upiAmounts(b).map((a) => a.amount));
+    for (let i = 0; i < pool.length; i++) for (let j = i + 1; j < pool.length; j++) {
+      const two = [pool[i], pool[j]];
+      if (targets.has(pool[i].amount + pool[j].amount)) found.push(two);
+      for (let k = j + 1; k < pool.length; k++) if (targets.has(pool[i].amount + pool[j].amount + pool[k].amount)) found.push([...two, pool[k]]);
+    }
+    const tight = found.filter((set) => { const ts = set.map((c) => c.postedAt); return Math.max(...ts) - Math.min(...ts) <= SPLIT_SPAN_MIN * 60000; });
+    if (tight.length) sets.set(b.id, tight);
+  }
+  for (const b of looking2) {
+    const mine = sets.get(b.id);
+    if (!mine || mine.length !== 1) continue;
+    const set = [...mine[0]].sort((x, y) => x.postedAt - y.postedAt);
+    const ids = new Set(set.map((c) => c.id));
+    if ([...sets].some(([id, other]) => id !== b.id && other.some((o) => o.some((c) => ids.has(c.id))))) continue;
+    const total = set.reduce((t, c) => t + c.amount, 0);
+    out.set(b.id, { ...make(b, set[0], Math.max(...set.map((c) => Math.round(Math.abs(c.postedAt - b.paidAt!) / 60000)))), amountPaise: total,
+      fits: b.swAmount === total && b.rgAmount === total ? 'both' : b.swAmount === total ? 'software' : 'register', suggest: suggestion(b, total), split: true,
+      parts: set.map((c) => ({ creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt })) });
+    set.forEach((c) => used.add(c.id));
+  }
   // A credit backs one side only when the other side's amount has no free credit near too (audit, 9 Nov 2026): with a
   // credit for each, the bank cannot choose.
   for (const b of bills) {
@@ -167,7 +223,7 @@ export async function bankIn(db: DB, businessId: string, day: string) {
 /** Unmatched UPI credits that could pay this shift's bills: from an hour before it starts to three hours after it ends. */
 export const shiftCredits = (db: DB, businessId: string, day: string) => {
   const w = shiftWindow(day);
-  return all<EvidenceCredit>(db, `SELECT r.id, r.amount_paise AS amount, r.posted_at AS postedAt, s.receives_upi_label AS label FROM bank_rows r
+  return all<EvidenceCredit>(db, `SELECT r.id, r.amount_paise AS amount, r.posted_at AS postedAt, s.receives_upi_label AS label, r.remark FROM bank_rows r
     LEFT JOIN bank_sources s ON s.account_id = r.account_id
     WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
       AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`,

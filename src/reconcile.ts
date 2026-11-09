@@ -17,7 +17,7 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
   const w = shiftWindow(day);
   const [ex, sug, sales, booked, typeHeads] = await Promise.all([
     explainShift(db, businessId, day),
-    suggestionsFor(db, businessId, day, addDays(day, 1)),
+    suggestionsFor(db, businessId, day, addDays(day, 1), true),
     all<{ id: string; billNo: string | null; amountPaise: number; bankRowId: string | null; paidAt: number | null; creditAt: number | null;
       creditPaise: number | null; tranId: string | null; accountName: string | null }>(db, `
       SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.matched_bank_row AS bankRowId, sb.paid_at AS paidAt,
@@ -53,7 +53,7 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
   clear.forEach((p) => { used.add(`cr:${p.creditId}`); p.transactionIds.forEach((x) => used.add(`tx:${x}`)); });
 
   // Likely: closest first, each bill once, unticked.
-  const options: { creditId: string; k: { transactionIds: string[]; billNos: string[]; minutes: number | null; part: string | null } }[] = [];
+  const options: { creditId: string; k: { transactionIds: string[]; billNos: string[]; minutes: number | null; part: string | null; far?: boolean } }[] = [];
   for (const c of sug.credits) {
     if (used.has(`cr:${c.id}`)) continue;
     for (const k of sug.candidates.get(c.id) ?? []) {
@@ -62,11 +62,12 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     }
   }
   options.sort((a, b) => (a.k.minutes ?? 999) - (b.k.minutes ?? 999));
-  const likely: (ReturnType<typeof credit> & { transactionIds: string[]; billNos: string[]; minutes: number | null; part: string | null; others: number })[] = [];
+  const likely: (ReturnType<typeof credit> & { transactionIds: string[]; billNos: string[]; minutes: number | null; part: string | null; others: number; far: boolean; paidAt: number | null })[] = [];
   for (const o of options) {
     if (used.has(`cr:${o.creditId}`) || o.k.transactionIds.some((x) => used.has(`tx:${x}`))) continue;
     const others = options.filter((p) => p !== o && (p.creditId === o.creditId || p.k.transactionIds.some((x) => o.k.transactionIds.includes(x)))).length;
-    likely.push({ ...credit(o.creditId), transactionIds: o.k.transactionIds, billNos: o.k.billNos, minutes: o.k.minutes, part: o.k.part, others });
+    const paidAt = sales.find((x) => x.id === o.k.transactionIds[0])?.paidAt ?? null;
+    likely.push({ ...credit(o.creditId), transactionIds: o.k.transactionIds, billNos: o.k.billNos, minutes: o.k.minutes, part: o.k.part, others, far: !!o.k.far, paidAt });
     used.add(`cr:${o.creditId}`);
     o.k.transactionIds.forEach((x) => used.add(`tx:${x}`));
   }
