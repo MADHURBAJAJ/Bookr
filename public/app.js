@@ -3774,9 +3774,29 @@ function entriesHtml(biz, day, t, mode) {
       ${e.software ? html`<button class="btn plain dchip" type="button" data-decide="use_software" data-cmp="${e.comparisonId}">Use software</button>` : ''}
       <button class="btn plain dchip" type="button" data-decide="leave_out" data-cmp="${e.comparisonId}">Leave out…</button></div>` : ''}
   </div>`;
+  // Bills paid together: one block with the group's one payment and what backs it, then each bill (approved 9 Nov 2026).
+  const block = (es) => {
+    const g = es[0].group;
+    const diff = g.billsPaise - g.paymentPaise;
+    return html`<div class="ent-block" style="border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:4px 8px">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 4px"><span class="chip">Paid together</span><span class="mono">${g.billNos.join(' + ')}</span>
+        <strong class="amount" style="margin-left:auto">₹ ${money(g.paymentPaise)}</strong></div>
+      <div class="tiny" style="padding:0 4px">One ${ENTRY_MODE[es[0].mode]} payment of ₹ ${money(g.paymentPaise)} for ${g.billNos.length} bills of ₹ ${money(g.billsPaise)}${diff > 0 ? ` (₹ ${money(diff)} discount)` : diff < 0 ? ` (₹ ${money(-diff)} tip)` : ''}</div>
+      ${es[0].evidence ? html`<div class="tiny" style="color:var(--teal);padding:0 4px">✓ ${es[0].evidence}</div>` : es[0].state === 'waiting' ? html`<div class="tiny" style="color:#92400E;padding:0 4px">${mode === 'upi' ? 'No bank credit of ₹ ' + money(g.paymentPaise) + ' yet' : 'No machine payment yet'}</div>` : ''}
+      ${es.map((e) => line({ ...e, evidence: null, state: e.state === 'decide' ? 'decide' : 'done' }))}</div>`;
+  };
   const group = (state, title) => {
     const list = t.entries.filter((e) => e.state === state);
-    return list.length ? html`<div class="ent-group"><div class="lane-h"><strong>${title}</strong> <span class="chip">${list.length}</span></div>${list.map(line)}</div>` : '';
+    if (!list.length) return '';
+    const seen = new Set();
+    const items = list.flatMap((e) => {
+      if (!e.group) return [line(e)];
+      if (seen.has(e.group.id)) return [];
+      seen.add(e.group.id);
+      return [block(list.filter((x) => x.group?.id === e.group.id))];
+    });
+    const n = list.filter((e) => !e.group).length + seen.size;
+    return html`<div class="ent-group"><div class="lane-h"><strong>${title}</strong> <span class="chip">${n}</span></div>${items}</div>`;
   };
   return html`<details class="card cmp-fold" ${t.left ? 'open' : ''}><summary><h2>${ENTRY_MODE[mode]} bills (${t.entries.length}) · ₹ ${money(t.totalPaise)}</h2></summary>
     ${t.entries.length ? html`${group('decide', 'To decide')}${group('waiting', mode === 'cash' ? 'Waiting' : mode === 'upi' ? 'Waiting for the bank' : 'Waiting for the card machine')}${group('done', 'Done')}`

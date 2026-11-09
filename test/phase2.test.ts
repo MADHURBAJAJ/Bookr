@@ -637,6 +637,29 @@ describe('bills paid together', () => {
     return { h, pageId, head, b2, b3 };
   };
 
+  it('Reconcile\'s UPI tab shows the group once: its one payment, its credit, and each bill (approved 9 Nov 2026)', async () => {
+    const { h, pageId } = await setup();
+    await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
+    const o = h.clients.owner;
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/entries`;
+    let e = (await o.get(url)).json;
+    const g = e.upi.entries.filter((x: any) => x.group);
+    expect(g.map((x: any) => x.billNo).sort()).toEqual(['2610311', '26103122', '2610314']);
+    expect(g[0].group).toMatchObject({ paymentPaise: 237000, billsPaise: 237000 });
+    expect(new Set(g.map((x: any) => x.state))).toEqual(new Set(['waiting']));
+    const before = e.upi.left;
+    // The group's one credit comes in: the whole block is backed.
+    const acc = (await o.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await o.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' });
+    await o.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t'),
+      [1, 'S95000001', '31/10/2026', '31/10/2026 12:20:00 PM', '-', 'UPI/900000000061/UPI/xx61@okaxis/B/ICIa', 'CR', 2370, 1].join('\t')].join('\n') });
+    e = (await o.get(url)).json;
+    const g2 = e.upi.entries.filter((x: any) => x.group);
+    expect(g2.every((x: any) => x.state === 'done' && /^Bank ₹2,370 at/.test(x.evidence))).toBe(true);
+    expect(e.upi.left).toBe(before - 1);   // counted once
+  });
+
   it('each bill matches its own software bill through the group payment mode; the group must balance', async () => {
     const { h, pageId } = await setup();
     let v = await view(h);

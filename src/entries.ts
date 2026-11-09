@@ -17,6 +17,8 @@ export interface Entry {
   evidence: string | null;
   edits: { text: string; by: string | null; at: number | null }[];
   rowId: string | null; uploadId: string | null; transactionId: string | null; part: string | null;
+  /** Bills paid together: one payment for the group, its evidence on the group; amountPaise is the bill's own amount. */
+  group: { id: string; billNos: string[]; paymentPaise: number; billsPaise: number } | null;
 }
 
 const rs = (p: number | null | undefined) => (p == null ? '—' : `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: p % 100 ? 2 : 0, maximumFractionDigits: 2 })}`);
@@ -96,9 +98,10 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
   };
 
   const entries: Entry[] = [];
+  const grouped = new Set(view.paidGroups.flatMap((g) => view.comparisons.filter((c) => c.groupId === g.id).map((c) => c.id)));
   for (const c of view.comparisons) {
-    if (c.decision === 'leave_out' || c.decision === 'carry_forward') continue;
-    const base = { comparisonId: c.id, billNo: c.billNo, paidAt: c.paidAt as number | null, rowId: (c.register?.rowId as string) ?? null, uploadId: (c.register?.uploadId as string) ?? null,
+    if (c.decision === 'leave_out' || c.decision === 'carry_forward' || grouped.has(c.id)) continue;
+    const base = { group: null, comparisonId: c.id, billNo: c.billNo, paidAt: c.paidAt as number | null, rowId: (c.register?.rowId as string) ?? null, uploadId: (c.register?.uploadId as string) ?? null,
       register: c.register ? { amountPaise: c.register.amountPaise as number | null, mode: c.register.mode as string | null } : null,
       software: c.software ? { amountPaise: c.software.amountPaise as number | null, mode: c.software.mode as string | null } : null };
     const edits = editsOf(c);
@@ -125,7 +128,8 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     if (side === 'register' && c.register?.rowId) {
       const r = rowOf.get(c.register.rowId as string);
       const ps = paysOf(r?.paid_with_row_id ? '' : (c.register.rowId as string)).filter((p) => p.amount_paise > 0);
-      parts = ps.length ? ps.map((p) => ({ mode: p.mode as Mode, amount: p.amount_paise })) : [];
+      const order = ['cash', 'upi', 'card'];
+      parts = ps.map((p) => ({ mode: p.mode as Mode, amount: p.amount_paise })).sort((a, b) => order.indexOf(a.mode) - order.indexOf(b.mode) || b.amount - a.amount);
       if (!parts.length && ['cash', 'upi', 'card'].includes(c.register.mode as string)) parts = [{ mode: c.register.mode as Mode, amount: c.register.amountPaise as number }];
     } else if (c.software && ['cash', 'upi', 'card'].includes(c.software.mode as string)) parts = [{ mode: c.software.mode as Mode, amount: c.software.amountPaise as number }];
     if (!parts.length) parts = [{ mode: 'cash', amount: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number }];
@@ -136,10 +140,53 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
         transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null });
     });
   }
+  // Bills paid together (approved 9 Nov 2026): one block per group and mode. The group's one payment and what backs it
+  // are told once; each bill shows its own amount.
+  for (const g of view.paidGroups) {
+    const cs = view.comparisons.filter((c) => c.groupId === g.id && c.decision !== 'leave_out' && c.decision !== 'carry_forward');
+    if (!cs.length) continue;
+    const byMode = new Map<Mode, number>();
+    for (const p of paysOf(g.id).filter((x) => x.amount_paise > 0)) byMode.set(p.mode as Mode, (byMode.get(p.mode as Mode) ?? 0) + p.amount_paise);
+    if (!byMode.size) byMode.set('cash', 0);
+    const undecided = cs.some((c) => c.difference !== 'match' && !c.decision);
+    const mine = txs.filter((t) => cs.some((c) => c.id === t.comparison_id));
+    const billsPaise = cs.reduce((t, c) => t + ((c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number), 0);
+    for (const [mode, paymentPaise] of byMode) {
+      let evidence: string | null = null;
+      let waiting = false;
+      if (mode === 'cash') evidence = 'In the cash count';
+      else if (confirmed) {
+        const m = mine.filter((t) => t.payment_mode === mode);
+        const credit = m.find((t) => t.matched_bank_row);
+        const card = matches.filter((x) => m.some((t) => t.id === x.transaction_id));
+        evidence = mode === 'upi' ? (credit ? `Bank ${rs(paymentPaise)} at ${credit.posted_at ? hm(credit.posted_at) : '—'}${credit.account ? ` · ${credit.account}` : ''}` : null)
+          : card.length ? [...new Map(card.map((x) => [`${x.paid_at}`, x])).values()].map((x) => `${machineLabel(x)} ${rs(x.amount_paise)} at ${hm(x.paid_at)}`).join(' + ') : null;
+        waiting = m.some((t) => (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed) || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement'));
+      } else {
+        evidence = mode === 'upi' && g.bank ? `Bank ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : null;
+        waiting = !evidence;
+      }
+      for (const c of cs) {
+        const rps = mine.filter((t) => t.comparison_id === c.id).map((t) => repaidOf.get(t.id)).filter(Boolean) as { from: string; mode: string; note: string | null; at: number }[];
+        entries.push({ key: `${g.id}:${mode}:${c.id}`, comparisonId: c.id, billNo: c.billNo, paidAt: c.paidAt as number | null, mode,
+          amountPaise: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number,
+          register: c.register ? { amountPaise: c.register.amountPaise as number | null, mode: c.register.mode as string | null } : null,
+          software: c.software ? { amountPaise: c.software.amountPaise as number | null, mode: c.software.mode as string | null } : null,
+          state: !confirmed && undecided ? 'decide' : waiting ? 'waiting' : 'done', evidence,
+          edits: [...editsOf(c), ...rps.map((rp) => ({ text: `${modeName(rp.from)} → ${modeName(rp.mode)}${rp.note ? ` (${rp.note})` : ''}`, by: null, at: rp.at }))],
+          rowId: (c.register?.rowId as string) ?? null, uploadId: (c.register?.uploadId as string) ?? null, transactionId: null, part: null,
+          group: { id: g.id, billNos: g.billNos, paymentPaise, billsPaise } });
+      }
+    }
+  }
   entries.sort((a, b) => (a.paidAt ?? Number.MAX_SAFE_INTEGER) - (b.paidAt ?? Number.MAX_SAFE_INTEGER) || a.billNo.localeCompare(b.billNo));
   const tab = (m: Mode) => {
     const list = entries.filter((e) => e.mode === m);
-    return { entries: list, left: list.filter((e) => e.state !== 'done').length, totalPaise: list.reduce((t, e) => t + e.amountPaise, 0) };
+    // A group counts once, by its payment.
+    const groups = [...new Map(list.filter((e) => e.group).map((e) => [e.group!.id, e])).values()];
+    const single = list.filter((e) => !e.group);
+    return { entries: list, left: single.filter((e) => e.state !== 'done').length + groups.filter((e) => e.state !== 'done').length,
+      totalPaise: single.reduce((t, e) => t + e.amountPaise, 0) + groups.reduce((t, e) => t + e.group!.paymentPaise, 0) };
   };
   return { day, confirmed, cash: tab('cash'), upi: tab('upi'), card: tab('card') };
 }
