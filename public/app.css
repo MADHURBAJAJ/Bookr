@@ -376,3 +376,14 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
   .mo-list { display: block; }
   .mo-table { display: none; }
 }
+
+/* Dashboard (9 Nov 2026): jobs waiting as cards; two columns on desktop, one on a phone. */
+.dash-fresh { margin-bottom: 16px; gap: 6px; }
+.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.dash-big { grid-row: span 2; }
+.dash-num { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dash-go { align-self: flex-start; display: inline-flex; align-items: center; }
+.dash-link { color: inherit; text-decoration: none; }
+.dash-link:hover { background: var(--ground); }
+.dash-done { flex-direction: row; gap: 8px; padding: 10px 16px; margin-top: 8px; color: var(--muted); font-size: 14px; }
+@media (max-width: 760px) { .dash-grid { grid-template-columns: 1fr; } .dash-big { grid-row: auto; } }
