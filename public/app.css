@@ -338,6 +338,10 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 .um-line input { width: 18px; height: 18px; min-height: 0; }
 .rec-tabs { align-self: flex-start; }
 .rec-tabs a { padding: 7px 16px; font-size: 14px; }
+.mode-tabs { align-self: flex-start; }
+.mode-tabs button { padding: 8px 18px; font-size: 15px; display: inline-flex; gap: 6px; align-items: center; }
+.ent-group { margin-top: 10px; }
+.ent-line { padding: 8px 4px; border-top: 1px solid var(--line-soft); display: grid; gap: 2px; }
 
 /* Shift bar: one day for Register, Compare sales and Reconcile, a tab for each with what is left (7 Nov 2026). */
 .shiftbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 12px; margin-bottom: 14px; background: #fff; border: 1px solid var(--line); border-radius: 10px; }

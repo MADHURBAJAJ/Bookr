@@ -3646,6 +3646,32 @@ const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist"
 const RECONCILE_VIEW_KEY = 'bookr.reconcile.view';
 const reconcileViewPref = () => { try { return localStorage.getItem(RECONCILE_VIEW_KEY) === 'open' ? 'open' : 'cards'; } catch { return 'cards'; } };
 
+const RECONCILE_TAB_KEY = 'bookr.reconcile.tab';
+const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
+const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
+
+/** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
+function entriesHtml(biz, day, t, mode) {
+  const side = (x) => (x ? html`₹ ${money(x.amountPaise ?? 0)} ${x.mode ? ENTRY_MODE[x.mode] ?? x.mode : 'no mode'}` : html`<span style="color:var(--danger)">missing</span>`);
+  const line = (e) => html`<div class="ent-line">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+      <span class="mono"><strong>${e.billNo}</strong></span>${e.part ? html`<span class="chip">${e.part}</span>` : ''}
+      <span class="tiny">${e.paidAt ? when(e.paidAt) : 'no time (register only)'}</span>
+      <strong class="amount" style="margin-left:auto">₹ ${money(e.amountPaise)}</strong></div>
+    <div class="tiny">Register ${side(e.register)} · Software ${side(e.software)}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${day}">Open row</button>` : ''}</div>
+    ${e.evidence ? html`<div class="tiny" style="color:var(--teal)">✓ ${e.evidence}</div>` : e.state === 'waiting' ? html`<div class="tiny" style="color:#92400E">${mode === 'upi' ? 'No bank credit yet' : 'No machine payment yet'}</div>` : ''}
+    ${e.edits.map((x) => html`<div class="tiny" style="color:${/to decide$/.test(x.text) ? 'var(--danger)' : '#5B21B6'}">✎ ${x.text}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}</div>`)}
+  </div>`;
+  const group = (state, title) => {
+    const list = t.entries.filter((e) => e.state === state);
+    return list.length ? html`<div class="ent-group"><div class="lane-h"><strong>${title}</strong> <span class="chip">${list.length}</span></div>${list.map(line)}</div>` : '';
+  };
+  return html`<details class="card cmp-fold" ${t.left ? 'open' : ''}><summary><h2>${ENTRY_MODE[mode]} bills (${t.entries.length}) · ₹ ${money(t.totalPaise)}</h2></summary>
+    ${t.entries.length ? html`${group('decide', 'To decide')}${group('waiting', mode === 'cash' ? 'Waiting' : mode === 'upi' ? 'Waiting for the bank' : 'Waiting for the card machine')}${group('done', 'Done')}`
+      : html`<div class="note">No ${ENTRY_MODE[mode]} bills in this shift.</div>`}
+    <div class="note">✎ marks a change: the register as read and as corrected, the side used when the register and the software differ, or a mode changed later.</div></details>`;
+}
+
 async function reconcileView(biz, dayArg) {
   const [dayPart, qs = ''] = String(dayArg ?? '').split('?');
   if (dayPart === 'all') return unmatchedView(biz);
@@ -3660,8 +3686,10 @@ async function reconcileView(biz, dayArg) {
     render(shell(biz, 'reconcile', 'Reconcile', '', html`<section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
-  const [r, v, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
-    api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`)]);
+  const [r, v, { heads }, ent, cash] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
+    api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`),
+    api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`)]);
+  const tab = reconcileTabPref();
   const reload = () => reconcileView(biz, `${day}?more=${v.moreHours}`);
   drawerReload = reload;
   const s = r.strip;
@@ -3734,9 +3762,22 @@ async function reconcileView(biz, dayArg) {
         ${r.booked.map((x) => html`<tr><td>${x.headName ?? 'Booked'}${x.note ? html`<div class="tiny">${x.note}</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${when(x.postedAt)}</td>
           <td><button class="btn plain dchip" type="button" data-putback="${x.id}">Put back</button></td></tr>`)}
       </tbody></table></div></details>` : '';
+  const cardLeft = r.cards ? r.cards.left : 0;
+  const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
     ${shiftBar(biz, day, 'reconcile')}
     ${recTabs(biz, day, 'shift')}
+    <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:4px 0 10px">
+      ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}</div>
+    <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
+      ${cashPanelHtml(biz, cash)}
+      ${entriesHtml(biz, day, ent.cash, 'cash')}
+    </div>
+    <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
+      ${r.cards ? cardSection(biz, r.cards, heads) : html`<section class="card"><div class="note">The card machine's payments are matched here once the shift is saved (confirmed).</div></section>`}
+      ${entriesHtml(biz, day, ent.card, 'card')}
+    </div>
+    <div data-rpanel="upi" ${tab === 'upi' ? '' : 'hidden'}>
     <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
@@ -3759,8 +3800,15 @@ async function reconcileView(biz, dayArg) {
     <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
     ${doneFold}
-    ${r.cards ? cardSection(biz, r.cards, heads) : ''}`));
+    ${entriesHtml(biz, day, ent.upi, 'upi')}
+    </div>`));
   wireShell();
+  app.querySelectorAll('[data-rtab]').forEach((b) => b.addEventListener('click', () => {
+    try { localStorage.setItem(RECONCILE_TAB_KEY, b.dataset.rtab); } catch { /* storage unavailable */ }
+    app.querySelectorAll('[data-rtab]').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-selected', String(x === b)); });
+    app.querySelectorAll('[data-rpanel]').forEach((x) => { x.hidden = x.dataset.rpanel !== b.dataset.rtab; });
+  }));
+  wireCashPanel(biz, day, reload, document.getElementById('recmsg'));
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz, days);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {

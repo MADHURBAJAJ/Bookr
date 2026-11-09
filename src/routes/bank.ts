@@ -20,6 +20,7 @@ import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { unsettleStatements } from '../cards';
 import { cardReportsStatus, syncCardFolder } from '../cardDrive';
+import { shiftEntries } from '../entries';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -243,6 +244,13 @@ bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole
   if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
   await c.env.DB.batch(await undoRepayStatements(c.env.DB, c.get('businessId'), id, c.get('user').id, now()));
   return c.json({ ok: true });
+});
+
+/** Reconcile's Cash, UPI and Card tabs: every bill of the shift under its mode, with its evidence and its changes. */
+bankRoutes.get('/businesses/:businessId/shifts/:day/entries', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  return c.json(await shiftEntries(c.env.DB, c.get('businessId'), day));
 });
 
 bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('bank.link'), async (c) => {

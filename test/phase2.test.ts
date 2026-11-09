@@ -2490,3 +2490,41 @@ describe('the card machine as a witness (approved 9 Nov 2026)', () => {
     expect((await sql`SELECT match_status FROM transactions WHERE id = ${card}`)[0].match_status).toBeNull();
   });
 });
+
+describe('Reconcile tabs: Cash, UPI and Card (approved 9 Nov 2026)', () => {
+  it('lists every bill under its mode with its evidence and its changes, before and after saving', async () => {
+    const h = await hotel();
+    const o = h.clients.owner;
+    await fullShift(h);
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/entries`;
+    expect((await h.clients.entry_staff.get(url)).status).toBe(403);
+    const find = (e: any, mode: string, bill: string) => e[mode].entries.filter((x: any) => x.billNo === bill);
+    let e = (await o.get(url)).json;
+    expect(e.confirmed).toBe(false);
+    // A mode difference waits for a person, under the register's mode until decided.
+    expect(find(e, 'cash', '26103115')[0]).toMatchObject({ state: 'decide', register: { mode: 'cash' }, software: { mode: 'upi' },
+      edits: [{ text: 'Mode differs (register Cash · software UPI): to decide' }] });
+    // Part cash, part UPI: one line in each tab.
+    expect(find(e, 'cash', '26103120')[0]).toMatchObject({ amountPaise: 100000, part: 'part 1 of 2' });
+    expect(find(e, 'upi', '26103120')[0]).toMatchObject({ amountPaise: 156000, part: 'part 2 of 2' });
+    expect(find(e, 'card', '2610313')[0]).toMatchObject({ amountPaise: 94200, state: 'waiting', evidence: null });
+    expect(e.cash.left).toBeGreaterThan(0);
+
+    await decideAll(h);
+    e = (await o.get(url)).json;
+    expect(find(e, 'cash', '26103115')[0]).toMatchObject({ state: 'done', edits: [{ text: 'Mode differs (register Cash · software UPI) → used the register', by: 'accountant' }] });
+    expect(e.upi.entries.some((x: any) => x.billNo === '2610319')).toBe(false);   // left out
+    expect((await o.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+
+    // Saved: the booked sales, and a mode changed later shows as before → after.
+    const sale = (await sql`SELECT id FROM transactions WHERE bill_no = '2610318' AND type = 'income'`)[0].id;
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/sales/repay`, { transactionIds: [sale], mode: 'cash', note: 'register slip' })).status).toBe(200);
+    e = (await o.get(url)).json;
+    expect(e.confirmed).toBe(true);
+    expect(find(e, 'upi', '2610318')).toEqual([]);
+    expect(find(e, 'cash', '2610318')[0]).toMatchObject({ transactionId: sale, state: 'done', evidence: 'In the cash count' });
+    expect(find(e, 'cash', '2610318')[0].edits.map((x: any) => x.text)).toContain('UPI → Cash (register slip)');
+    expect(find(e, 'card', '2610313')[0]).toMatchObject({ state: 'waiting' });
+    expect(e.card.left).toBe(1);
+  });
+});
