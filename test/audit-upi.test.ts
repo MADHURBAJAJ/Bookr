@@ -162,7 +162,70 @@ describe('UPI audit, part 2', () => {
     expect.soft([await statusOf(id[0]), await statusOf(id[1]), await statusOf(id[2])], 'far credits are only offered').toEqual(['unmatched', 'unmatched', 'unmatched']);
   });
 
-  // U8 waits for the owner's answer: does UPI come into the bank payment by payment, or through a merchant app paying
-  // out once a day (one NEFT credit, less a fee)? Today such a payout is read as an "other" credit and offered for nothing.
-  it.skip('U8: a merchant app paying out the day in one credit, less its fee', () => {});
+  // U8 (approved 9 Nov 2026): UPI paid on the card machine (its QR, or a RuPay credit card through UPI) comes in the
+  // machine's settlement with the cards. The bill stays UPI; it is matched to the machine payment.
+  it('U8: UPI on the card machine, a UPI card payment, a machine payment closer than a credit, one arriving after saving', async () => {
+    const h = await hotel();
+    await h.account('HUF A', 'UPI XOXO');
+    await h.software([
+      ['2610431', '31 14:10', 'UPI', '314'],     // U8a QR on the machine
+      ['2610432', '31 15:00', 'UPI', '230'],     // U8b RuPay credit card through UPI on the machine
+      ['2610433', '31 15:02', 'CARD', '230'],    //     a card bill of the same amount, a card swipe
+      ['2610434', '31 16:00', 'UPI', '520'],     // U8c machine 3 min away, a credit 40 min away
+      ['2610435', '31 17:00', 'UPI', '410'],     // U8d its machine payment comes in after saving
+      ['2610499', '1 07:59', 'CASH', '1'],
+    ]);
+    await h.register([
+      { no: '2610431', amount: '314', pays: [['upi', '314']] },
+      { no: '2610432', amount: '230', pays: [['upi', '230']] },
+      { no: '2610433', amount: '230', pays: [['card', '230']] },
+      { no: '2610434', amount: '520', pays: [['upi', '520']] },
+      { no: '2610435', amount: '410', pays: [['upi', '410']] },
+      { no: '2610499', amount: '1', pays: [['cash', '1']] },
+    ]);
+    const qr = await h.swipe('31 14:12', 314, 'UPI', { payMode: 'UPI' });
+    const upiCard = await h.swipe('31 15:01', 230, 'RUPAY CC', { payMode: 'UPI Card', feePaise: 409, gstPaise: 74 });
+    const visa = await h.swipe('31 15:03', 230, 'VISA', { payMode: 'CARDS' });
+    const near = await h.swipe('31 16:03', 520, 'UPI', { payMode: 'UPI' });
+    const { ids: [credit40] } = await h.lines([['31 16:40', 520, 'CR', upi('830000000001')], ['1 09:00', 2, 'CR', upi('830000000002')]]);
+
+    const v = await h.view();
+    log('U8 Compare', { a: bill(v, '2610431').bank, b: bill(v, '2610432').bank, c: bill(v, '2610434').bank });
+    expect.soft(bill(v, '2610431').bank?.creditId, 'U8a: the QR payment backs the UPI XOXO bill').toBe(qr);
+    expect.soft(bill(v, '2610431').bank?.machine?.settledOn, 'U8a: told when it settles').toBe('2026-11-02');
+    expect.soft(bill(v, '2610432').bank?.creditId, 'U8b: the UPI card payment backs the UPI bill').toBe(upiCard);
+    expect.soft(bill(v, '2610432').bank?.machine?.label, 'U8b: told as UPI on the machine').toMatch(/UPI on machine/);
+    expect.soft(bill(v, '2610434').bank?.creditId, 'U8c: the machine payment 3 min away, not the credit 40 min away').toBe(near);
+    expect.soft(bill(v, '2610431').bankNone ?? null, 'U8a: not "no UPI in the bank"').toBeNull();
+
+    await h.decideRest();
+    await h.confirm();
+    const tx = async (no: string) => (await sql`SELECT t.id, t.payment_mode, t.match_status, (SELECT m.settlement_id FROM card_matches m WHERE m.transaction_id = t.id) AS pay
+      FROM transactions t WHERE t.bill_no = ${no} AND t.type = 'income'`)[0];
+    expect.soft(await tx('2610431'), 'U8a saved: UPI, received through the machine').toMatchObject({ payment_mode: 'upi', match_status: null, pay: qr });
+    expect.soft(await tx('2610432'), 'U8b saved: UPI, matched to the UPI card payment').toMatchObject({ payment_mode: 'upi', match_status: null, pay: upiCard });
+    expect.soft((await tx('2610433')).pay ?? visa, 'U8b: the card bill never takes the UPI card payment').not.toBe(upiCard);
+    expect.soft(await tx('2610434'), 'U8c saved').toMatchObject({ payment_mode: 'upi', pay: near });
+    expect.soft(await statusOf(credit40), 'U8c: the credit 40 min away stays open').toBe('unmatched');
+    const ent = await h.entries();
+    const e431 = ent.upi.entries.find((x: any) => x.billNo === '2610431');
+    log('U8a UPI tab', e431 && { state: e431.state, evidence: e431.evidence });
+    expect.soft(e431?.state, 'U8a: done on the UPI tab').toBe('done');
+    expect.soft(e431?.evidence, 'U8a: evidence names the machine and its settlement').toMatch(/UPI on machine .*settles 2026-11-02/);
+
+    // U8d: the machine payment arrives after saving: the Card tab offers it as UPI on the machine; undo puts it back.
+    const late = await h.swipe('31 17:05', 410, 'UPI', { payMode: 'UPI' });
+    const rec = await h.reconcile();
+    const need = rec.cards?.needs?.find((n: any) => n.payment.id === late);
+    log('U8d Card tab', need && { why: need.why, upi: need.payment.upi, written: need.written?.billNo });
+    expect.soft(need?.payment?.upi, 'U8d: told as UPI on the machine').toBe(true);
+    expect.soft(need?.written?.billNo, 'U8d: offered for the UPI bill 2610435').toBe('2610435');
+    const no = (await h.clients.owner.post(`/businesses/${h.bid}/cards/${late}/was-card`, { transactionIds: [need?.written?.transactionId] })).status;
+    expect.soft(no, 'U8d: a UPI payment on the machine is not turned into a card bill').toBe(409);
+    const res = await h.clients.owner.post(`/businesses/${h.bid}/cards/${late}/upi-on-machine`, { transactionIds: [need?.written?.transactionId] });
+    expect.soft(res.status, JSON.stringify(res.json)).toBe(200);
+    expect.soft(await tx('2610435'), 'U8d: matched, still UPI').toMatchObject({ payment_mode: 'upi', match_status: null, pay: late });
+    expect.soft((await h.clients.owner.post(`/businesses/${h.bid}/cards/${late}/unmatch`, {})).status, 'U8d: unmatch').toBe(200);
+    expect.soft(await tx('2610435'), 'U8d undone: waits for its UPI money again').toMatchObject({ payment_mode: 'upi', match_status: 'awaiting_bank_match', pay: null });
+  });
 });

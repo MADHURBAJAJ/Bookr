@@ -2468,17 +2468,17 @@ describe('the card machine as a witness (approved 9 Nov 2026)', () => {
     expect((await o.post(`/businesses/${h.bid}/sales/repay/${w.auditId}/undo`, {})).status).toBe(200);
     expect((await sql`SELECT payment_mode, match_status, matched_bank_row FROM transactions WHERE id = ${card}`)[0]).toEqual({ payment_mode: 'card', match_status: 'awaiting_card_settlement', matched_bank_row: null });
 
-    // Change to card and match: bill 2610318 becomes card, matched to the machine payment; unmatch and undo put it back.
-    expect((await o.post(`${base}/${p650}/was-card`, { transactionIds: [card] })).status).toBe(400);   // a card bill already
-    const c2 = (await o.post(`${base}/${p650}/was-card`, { transactionIds: [upi] })).json;
-    expect(c2).toMatchObject({ ok: true, bills: ['2610318'] });
-    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${upi}`)[0]).toEqual({ payment_mode: 'card', match_status: null });
+    // UPI on the machine (approved 9 Nov 2026): bill 2610318 stays UPI and is matched to the machine payment; it is not
+    // changed to card. Unmatch puts it back to waiting for its UPI money.
+    expect((await o.post(`${base}/${p650}/was-card`, { transactionIds: [upi] })).status).toBe(409);   // UPI on the machine: not a card bill
+    expect((await o.post(`${base}/${p650}/upi-on-machine`, { transactionIds: [card] })).status).toBe(409); // a card bill
+    const c2 = (await o.post(`${base}/${p650}/upi-on-machine`, { transactionIds: [upi] })).json;
+    expect(c2).toMatchObject({ ok: true, auditId: null });
+    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${upi}`)[0]).toEqual({ payment_mode: 'upi', match_status: null });
     expect((await sql`SELECT transaction_id FROM card_matches WHERE settlement_id = ${p650}`).map((r) => r.transaction_id)).toEqual([upi]);
     const after = (await o.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.cards;
     expect(after.needs.find((x: any) => x.payment.id === p650)).toBeUndefined();
-    expect(after.done.find((d: any) => d.payment.id === p650)).toMatchObject({ bills: ['2610318'], byBookr: false });
     expect((await o.post(`${base}/${p650}/unmatch`)).status).toBe(200);
-    expect((await o.post(`/businesses/${h.bid}/sales/repay/${c2.auditId}/undo`, {})).status).toBe(200);
     expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${upi}`)[0]).toEqual({ payment_mode: 'upi', match_status: 'awaiting_bank_match' });
   });
 

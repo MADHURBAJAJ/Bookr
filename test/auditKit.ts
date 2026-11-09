@@ -95,11 +95,15 @@ export async function hotel() {
       if (!again) for (let i = first; i <= tran; i++) ids.push((await sql`SELECT id FROM bank_rows WHERE tran_id = ${`S${String(50000000 + i)}`}`)[0]?.id);
       return { ids, text, res: res.json };
     },
-    async swipe(when: string, amount: number, scheme = 'VISA') {
+    /** A payment on the card machine. payMode is the report's "Mode of Payment" (UPI, UPI Card, CARDS). */
+    async swipe(when: string, amount: number, scheme = 'VISA', o: { payMode?: string; feePaise?: number; gstPaise?: number } = {}) {
       const id = crypto.randomUUID();
+      const fee = o.feePaise ?? 0;
+      const gst = o.gstPaise ?? 0;
+      const card = scheme === 'UPI' || /upi/i.test(o.payMode ?? '') ? null : '4242';
       await sql`INSERT INTO card_settlements (id, business_id, file_name, settled_on, merchant_id, terminal_id, txn_id, paid_at, txn_type, amount_paise, fee_paise, gst_paise,
-        net_paise, scheme, card_last4, created_at) VALUES (${id}, ${h.bid}, 'x_ICICI_POS_CD.xlsx', '2026-11-02', 'M1', 'TT000001', ${'TT_' + id}, ${at(when).ms}, 'PURCHASE',
-        ${amount * 100}, 0, 0, ${amount * 100}, ${scheme}, ${scheme === 'UPI' ? null : '4242'}, ${Date.now()})`;
+        net_paise, scheme, card_last4, pay_mode, created_at) VALUES (${id}, ${h.bid}, 'x_ICICI_POS_CD.xlsx', '2026-11-02', 'M1', 'TT000001', ${'TT_' + id}, ${at(when).ms}, 'PURCHASE',
+        ${amount * 100}, ${fee}, ${gst}, ${amount * 100 - fee - gst}, ${scheme}, ${card}, ${o.payMode ?? null}, ${Date.now()})`;
       return id;
     },
     view: (day = '2026-10-31') => o.get(`/businesses/${h.bid}/shifts/${day}`),

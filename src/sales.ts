@@ -2,8 +2,8 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
-import { machineLabel } from './cards';
-import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill } from './bankEvidence';
+import { isMachineUpi, machineLabel, machineUpiPayments, machineUpiStatements } from './cards';
+import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill, type EvidenceCredit } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
@@ -569,13 +569,18 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   // The bank as a third witness, while the shift is still open.
   const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
-  let groupCredits = new Map<string, { id: string; amount: number; postedAt: number }>();
+  let groupCredits = new Map<string, EvidenceCredit>();
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: OpenCredit[] } | null = null;
   if (shift?.status !== 'confirmed') {
-    const [cov2, credits] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day)]);
+    const [cov2, credits, onMachine] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day),
+      machineUpiPayments(db, businessId, cov.window.from - 3600e3, cov.window.to + 3 * 3600e3)]);
+    // UPI paid on the card machine is evidence too (approved 9 Nov 2026): it comes in the machine's settlement, not as its
+    // own credit, and into no UPI column's account. The closer of a credit and a machine payment pays a bill.
+    const machineCredits: EvidenceCredit[] = onMachine.map((p) => ({ id: p.id, amount: p.amount_paise, postedAt: p.paid_at, label: null, machine: { settledOn: p.settled_on, label: machineLabel(p) } }));
+    const witnesses = [...credits, ...machineCredits];
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
-    const { evidence, used } = pairEvidence(ebills, credits, cov.window);
-    groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), credits, used, cov.window);
+    const { evidence, used } = pairEvidence(ebills, witnesses, cov.window);
+    groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), witnesses, used, cov.window);
     // Every credit in the shift no bill or group took: what a register slip may explain (see slips.ts).
     const taken = new Set([...used, ...[...groupCredits.values()].map((c) => c.id)]);
     // Not matched yet (approved 8 Nov 2026): the one count Compare and Reconcile both show, before anything explains them.
@@ -620,7 +625,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
         if (!side) continue;
         const amount = (side === 'software' ? c.sw_amount_paise : c.rg_amount_paise) ?? 0;
         // As far as a credit could pair: FAR_BACK_MIN before the bill's time to an hour after.
-        const near = credits.filter((x) => x.amount === amount && (c.paid_at != null ? x.postedAt >= c.paid_at - FAR_BACK_MIN * 60000 && x.postedAt <= c.paid_at + CASH_BY_UPI_MIN * 60000
+        const near = witnesses.filter((x) => x.amount === amount && (c.paid_at != null ? x.postedAt >= c.paid_at - FAR_BACK_MIN * 60000 && x.postedAt <= c.paid_at + CASH_BY_UPI_MIN * 60000
           : x.postedAt >= cov.window.from && x.postedAt < cov.window.to));
         if (near.some((x) => !taken.has(x.id))) continue;
         const other = near.find((x) => billOf.has(x.id));
@@ -640,9 +645,10 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     const diffs = comparisons.filter((c) => (c.difference === 'mode' || c.difference === 'amount_and_mode') && c.paid_at != null && c.rg_mode !== 'mixed'
       && (c.sw_mode === 'card') !== (c.rg_mode === 'card') && c.decision !== 'leave_out' && c.decision !== 'carry_forward');
     if (diffs.length) {
-      const pays = await all<{ id: string; amount_paise: number; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null }>(db, `
-        SELECT s.id, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4 FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
-          AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, cov.window.from - 3600e3, cov.window.to + 3600e3);
+      // UPI on the machine backs the UPI side, through the bank evidence above; here, card payments only.
+      const pays = (await all<{ id: string; amount_paise: number; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null }>(db, `
+        SELECT s.id, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4, s.pay_mode FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
+          AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, cov.window.from - 3600e3, cov.window.to + 3600e3)).filter((p) => !isMachineUpi(p));
       const usedPay = new Set<string>();
       const options = diffs.flatMap((c) => {
         const side = c.sw_mode === 'card' ? 'software' : 'register';
@@ -722,7 +728,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       const members = comparisons.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
       const matched = members.length === g.rowIds.length && members.every((c) => c.difference === 'match');
       return { id: g.headId, billNos: g.billNos, softwarePaise: members.reduce((t, c) => t + (c.sw_amount_paise ?? 0), 0), grossPaise: g.grossPaise, paidPaise: g.paidPaise,
-        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { creditId: groupCredits.get(g.headId)!.id, amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt } : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
+        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { creditId: groupCredits.get(g.headId)!.id, amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt, machine: groupCredits.get(g.headId)!.machine ?? null } : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
     }),
     totals,
     unknownModePaise: unknownPaise,
@@ -839,6 +845,10 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     if (skipped.length) statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
       VALUES (?, ?, 'shift.choices_skipped', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id, JSON.stringify({ shiftDay: day, bills: skipped }), t));
   }
+  // A credit, or a UPI payment on the card machine (matched to the machine's report, approved 9 Nov 2026).
+  const link = (creditId: string, machine: unknown, txs: { id: string; amount: number }[], at: number) => (machine
+    ? machineUpiStatements(db, businessId, creditId, txs.map((x) => x.id), userId, at, 'matched on confirming the shift')
+    : confirmMatchStatements(db, businessId, creditId, txs, userId, at));
   // The credits shown as evidence are matched to the bills they paid (approved 5 Nov 2026), by the person confirming.
   // Only a bill counted as one UPI payment of the credit's amount. Each match gets its own time, so Unmatch undoes one.
   for (const c of view.comparisons) {
@@ -849,7 +859,7 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     if (c.bank.split && c.bank.parts) {
       if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
       for (const p of c.bank.parts) {
-        statements.push(...confirmMatchStatements(db, businessId, p.creditId, [{ id: upi[0].id, amount: p.amountPaise }], userId, t + 1 + matched));
+        statements.push(...link(p.creditId, p.machine, [{ id: upi[0].id, amount: p.amountPaise }], t + 1 + matched));
         matched += 1;
       }
       continue;
@@ -858,15 +868,15 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       const free = [...upi];
       const pairs = c.bank.parts.map((p) => { const i = free.findIndex((x) => x.r.amount === p.amountPaise); return i < 0 ? null : { p, x: free.splice(i, 1)[0] }; });
       if (free.length || pairs.some((x) => !x)) continue;
-      for (const { p, x } of pairs as { p: { creditId: string; amountPaise: number }; x: (typeof upi)[number] }[]) {
-        statements.push(...confirmMatchStatements(db, businessId, p.creditId, [{ id: x.id, amount: x.r.amount }], userId, t + 1 + matched));
+      for (const { p, x } of pairs as { p: { creditId: string; amountPaise: number; machine?: unknown }; x: (typeof upi)[number] }[]) {
+        statements.push(...link(p.creditId, p.machine, [{ id: x.id, amount: x.r.amount }], t + 1 + matched));
         matched += 1;
       }
       continue;
     }
     // One credit for the bill's UPI: one payment, or several written that the one credit covers (audit, 9 Nov 2026).
     if (!upi.length || upi.reduce((a, x) => a + x.r.amount, 0) !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
-    statements.push(...confirmMatchStatements(db, businessId, c.bank.creditId, upi.map((x) => ({ id: x.id, amount: x.r.amount })), userId, t + 1 + matched));
+    statements.push(...link(c.bank.creditId, c.bank.machine, upi.map((x) => ({ id: x.id, amount: x.r.amount })), t + 1 + matched));
     matched += 1;
   }
   // Bills paid together whose one credit came in (shown on the group's line): the credit pays the group's UPI sales,
@@ -878,7 +888,7 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && x.r.c.register_row_id && paidWith.get(x.r.c.register_row_id) === g.id);
     if (upi.some((x) => chosen.has(x.r.c.id))) continue;
     if (!upi.length || upi.reduce((a, x) => a + x.amount, 0) !== g.bank.amountPaise) continue;
-    statements.push(...confirmMatchStatements(db, businessId, g.bank.creditId, upi.map(({ id, amount }) => ({ id, amount })), userId, t + 1 + matched));
+    statements.push(...link(g.bank.creditId, g.bank.machine, upi.map(({ id, amount }) => ({ id, amount })), t + 1 + matched));
     matched += 1;
   }
   // Bills a person marked as one sale with a credit booked directly: the booking goes, and the sale keeps its day.

@@ -6,6 +6,7 @@
 import { all, one, type DB } from './db';
 import { billDistance, sameBillNo } from './sales';
 import { suggestionsFor } from './bank';
+import { machineUpiPayments } from './cards';
 import { cashCheck } from './cash';
 import { addDays, shiftWindow } from './time';
 
@@ -268,12 +269,15 @@ export async function explainShift(db: DB, businessId: string, day: string) {
 
   // 5. UPI bills with no credit of their amount anywhere near: probably paid another way (needs the bank to be in).
   // A credit of the amount that went to another bill is named (audit, 9 Nov 2026): two bills, one payment.
+  const onMachine = covered ? await machineUpiPayments(db, businessId, w.from - 3 * 3600e3, w.to + 3 * 3600e3) : [];
   const takenNear = covered ? await all<{ amount: number; postedAt: number; bills: string | null }>(db, `
     SELECT r.amount_paise AS amount, r.posted_at AS postedAt, (SELECT group_concat(t.bill_no, ' + ') FROM bank_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.bank_row_id = r.id) AS bills
     FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'matched' AND r.posted_at >= ? AND r.posted_at < ?`, businessId, w.from - 3600e3, w.to + 3 * 3600e3) : [];
   if (covered) {
     for (const x of sales.filter((y) => y.parts === 1 && !y.grouped && !used.has(`tx:${y.id}`))) {
-      const any = credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt, 180));
+      const any = credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt, 180))
+        // Paid by UPI on the card machine: offered on the Card tab, matched as UPI on the machine.
+        || onMachine.some((p) => (p.amount_paise === x.net || p.amount_paise === x.gross) && (x.paidAt == null || mins(p.paid_at, x.paidAt) <= 180));
       // An advance days before, or a credit the bank posted the next morning, is offered as a likely match instead.
       const far = [...sug.candidates.values()].some((list) => list.some((k) => k.far && k.transactionIds.includes(x.id)));
       if (any || far) continue;

@@ -2738,7 +2738,7 @@ async function compareView(biz, day) {
     const m = !c.bank?.suggest && !n ? c.machine : null;
     const suggest = c.bank?.suggest ?? n?.suggest ?? m?.suggest;
     if (!suggest || c.decision === suggest) return '';
-    const text = c.bank?.suggest ? `The bank got ₹ ${rs(c.bank.amountPaise)} by UPI at ${hhmm(c.bank.postedAt)}: ${sideName(suggest)} is right.`
+    const text = c.bank?.suggest ? `${c.bank.machine ? 'The card machine' : 'The bank'} got ₹ ${rs(c.bank.amountPaise)} by UPI at ${hhmm(c.bank.postedAt)}: ${sideName(suggest)} is right.`
       : m ? `The card machine got ₹ ${rs(m.amountPaise)} (${m.label}) at ${hhmm(m.paidAt)}: ${sideName(suggest)} is right.`
       : `No UPI credit of ₹ ${rs(n.upiPaise)} near this bill${n.takenBy ? ` (the one at ${hhmm(n.takenBy.postedAt)} went to bill ${n.takenBy.billNo})` : ''}: it was most likely paid by ${MODE_LABELS[n.mode]?.toLowerCase() ?? n.mode}, as ${sideName(suggest)} says.`;
     return html`<div class="tiny" style="white-space:normal;max-width:260px;color:${c.decision ? 'var(--warn-ink, #8a5a00)' : 'var(--teal-ink)'}">${c.decision ? '⚠ Decided the other way. ' : ''}${text}</div>`;
@@ -2749,6 +2749,10 @@ async function compareView(biz, day) {
     if (!v.bank || (!isUpi(c) && !c.bank)) return '';
     if (c.bank?.parts) {
       return html`<span class="chip ok" title="${c.bank.split ? `One payment of ₹ ${money(c.bank.amountPaise)}, paid in ${c.bank.parts.length} goes (e.g. a UPI app limit)` : 'One unmatched UPI credit for each UPI payment written for this bill'}: ${c.bank.parts.map((p) => `₹ ${money(p.amountPaise)} at ${when(p.postedAt)}`).join(', ')}. Confirming matches ${c.bank.split ? 'them to the payment' : 'each to its payment'}.">Bank ${c.bank.parts.map((p) => `₹ ${rs(p.amountPaise)}`).join(' + ')} · ${hhmm(c.bank.parts[0].postedAt)}–${hhmm(c.bank.parts[c.bank.parts.length - 1].postedAt)}</span>`;
+    }
+    // UPI paid on the card machine (approved 9 Nov 2026): it comes in the machine's settlement, not as its own credit.
+    if (c.bank?.machine && !c.bank.parts) {
+      return html`<span class="chip ok" title="The card report has a UPI payment of ₹ ${money(c.bank.amountPaise)} on the card machine (${c.bank.machine.label}) at ${when(c.bank.postedAt)}${c.bank.minutes != null ? `, ${c.bank.minutes} min from the bill` : ''}. It reaches the bank in the machine's settlement of ${dayLabel(c.bank.machine.settledOn)}. Saving matches it to this bill, which stays UPI.">UPI on machine ₹ ${rs(c.bank.amountPaise)} · ${hhmm(c.bank.postedAt)} · settles ${dayLabel(c.bank.machine.settledOn)}</span>`;
     }
     if (c.bank) {
       const fits = c.bank.fits === 'both' ? 'both sides' : c.bank.fits === 'software' ? 'the software' : 'the register';
@@ -4089,8 +4093,9 @@ function cardSection(biz, k, heads) {
         : n.why === 'written' ? `Bill written as ${n.written.mode === 'upi' ? 'UPI' : 'cash'}` : 'No card bill of this amount'}</span></div>
       <div class="tiny">${card(p)} · machine ${p.terminalId}</div>`;
     if (n.why === 'written') return html`<div class="rv-card">${head}
-      <div class="note">Bill <span class="mono">${n.written.billNo}</span>, ₹ ${money(n.written.amountPaise)} at ${when(n.written.paidAt)}${n.written.shiftDay !== k.day ? ` (${dayLabel(n.written.shiftDay)} shift)` : ''}, is written as <strong>${n.written.mode === 'upi' ? 'UPI' : 'cash'}</strong>, ${n.written.minutes} min from this payment.${n.written.mode === 'upi' ? ' No UPI credit has paid it: it was most likely paid on the machine.' : ''}</div>
-      <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-cardwascard="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">Change to card and match</button></div><div class="form-msg"></div></div>`;
+      <div class="note">Bill <span class="mono">${n.written.billNo}</span>, ₹ ${money(n.written.amountPaise)} at ${when(n.written.paidAt)}${n.written.shiftDay !== k.day ? ` (${dayLabel(n.written.shiftDay)} shift)` : ''}, is written as <strong>${n.written.mode === 'upi' ? 'UPI' : 'cash'}</strong>, ${n.written.minutes} min from this payment.${n.written.mode === 'upi' ? ' No UPI credit has paid it: it was most likely paid on the machine.' : ''}${p.upi ? ' Paid by UPI on the machine: the bill stays UPI and is received in the machine\'s settlement.' : ''}</div>
+      <div class="form-row" style="gap:6px">${p.upi ? html`<button class="btn" type="button" style="min-height:36px" data-cardupi="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">${n.written.mode === 'upi' ? 'Match as UPI on the machine' : 'Change to UPI and match'}</button>`
+        : html`<button class="btn" type="button" style="min-height:36px" data-cardwascard="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">Change to card and match</button>`}</div><div class="form-msg"></div></div>`;
     if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
     if (n.why === 'tip') return html`<div class="rv-card">${head}
       <div class="note">Bill <span class="mono">${n.tip.billNo}</span> is ₹ ${money(n.tip.amountPaise)}, ${at(n.tip.paidAt)}: the guest paid ₹ ${money(n.tip.tipPaise)} more on the card.</div>
@@ -4197,6 +4202,13 @@ function wireCardSection(biz, k, act) {
     let auditId = null;
     act(async () => { auditId = (await apiFull('POST', `${B}/${pid}/was-card`, { transactionIds: [b.dataset.tx] })).auditId; },
       { text: `Bill ${b.dataset.bill} changed to card and matched to the machine payment.`, undo: async () => { await unmatch(pid); await repayUndo(auditId); } });
+  }));
+  box.querySelectorAll('[data-cardupi]').forEach((b) => b.addEventListener('click', () => {
+    const pid = b.dataset.cardupi;
+    b.disabled = true;
+    let auditId = null;
+    act(async () => { auditId = (await apiFull('POST', `${B}/${pid}/upi-on-machine`, { transactionIds: [b.dataset.tx] })).auditId; },
+      { text: `Bill ${b.dataset.bill} matched as UPI on the card machine.`, undo: async () => { await unmatch(pid); if (auditId) await repayUndo(auditId); } });
   }));
   box.querySelectorAll('[data-cardparts]').forEach((b) => b.addEventListener('click', () => {
     const pids = b.dataset.cardparts.split(',');

@@ -53,8 +53,8 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
         EXISTS (SELECT 1 FROM closed_bills k WHERE k.transaction_id = t.id) AS closed
       FROM transactions t LEFT JOIN bank_rows b ON b.id = t.matched_bank_row LEFT JOIN accounts a ON a.id = b.account_id
       WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.source = 'software_report'`, businessId, day) : Promise.resolve([]),
-    confirmed ? all<{ transaction_id: string; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null; amount_paise: number }>(db, `
-      SELECT m.transaction_id, s.paid_at, s.scheme, s.card_type, s.card_last4, s.amount_paise FROM card_matches m JOIN card_settlements s ON s.id = m.settlement_id
+    confirmed ? all<{ transaction_id: string; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null; amount_paise: number; pay_mode: string | null; settled_on: string }>(db, `
+      SELECT m.transaction_id, s.paid_at, s.scheme, s.card_type, s.card_last4, s.amount_paise, s.pay_mode, s.settled_on FROM card_matches m JOIN card_settlements s ON s.id = m.settlement_id
       JOIN transactions t ON t.id = m.transaction_id WHERE m.business_id = ? AND t.shift_day = ?`, businessId, day) : Promise.resolve([]),
     repaidFor(db, businessId, day),
     all<{ row_id: string; name: string | null; created_at: number }>(db, `SELECT a.row_id, u.name, a.created_at FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
@@ -111,10 +111,11 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
         const card = matches.filter((m) => m.transaction_id === t.id);
         const rp = repaidOf.get(t.id);
         const e = [...edits, ...(rp ? [{ text: `${modeName(rp.from)} → ${modeName(rp.mode)}${rp.note ? ` (${rp.note})` : ''}`, by: null, at: rp.at }] : [])];
-        const evidence = t.payment_mode === 'upi' ? (t.matched_bank_row ? `Bank ${rs(t.amount_paise)} at ${t.posted_at ? hm(t.posted_at) : '—'}${t.account ? ` · ${t.account}` : ''}` : t.closed ? 'Closed: no credit came' : null)
+        const evidence = t.payment_mode === 'upi' ? (t.matched_bank_row ? `Bank ${rs(t.amount_paise)} at ${t.posted_at ? hm(t.posted_at) : '—'}${t.account ? ` · ${t.account}` : ''}`
+            : card.length ? card.map((m) => `${machineLabel(m)} ${rs(m.amount_paise)} at ${hm(m.paid_at)} · settles ${m.settled_on}`).join(' + ') : t.closed ? 'Closed: no credit came' : null)
           : t.payment_mode === 'card' ? (card.length ? card.map((m) => `${machineLabel(m)} ${rs(m.amount_paise)} at ${hm(m.paid_at)}`).join(' + ') : null)
           : 'In the cash count';
-        const waiting = (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed) || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement');
+        const waiting = (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed && !card.length) || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement');
         entries.push({ ...base, key: t.id, mode: t.payment_mode, amountPaise: t.amount_paise, state: waiting ? 'waiting' : 'done', evidence, edits: e, transactionId: t.id,
           part: mine.length > 1 ? `part ${i + 1} of ${mine.length}` : null });
       });
@@ -134,7 +135,7 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     } else if (c.software && ['cash', 'upi', 'card'].includes(c.software.mode as string)) parts = [{ mode: c.software.mode as Mode, amount: c.software.amountPaise as number }];
     if (!parts.length) parts = [{ mode: 'cash', amount: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number }];
     parts.forEach((p, i) => {
-      const evidence = p.mode === 'upi' ? (c.bank ? `Bank ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}` : null)
+      const evidence = p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}` : null)
         : p.mode === 'card' ? (c.machine ? `${c.machine.label} ${rs(c.machine.amountPaise)} at ${hm(c.machine.paidAt)}` : null) : 'In the cash count';
       entries.push({ ...base, key: `${c.id}:${i}`, mode: p.mode, amountPaise: p.amount, state: open ? 'decide' : p.mode === 'cash' || evidence ? 'done' : 'waiting', evidence, edits,
         transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null });
@@ -159,11 +160,12 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
         const m = mine.filter((t) => t.payment_mode === mode);
         const credit = m.find((t) => t.matched_bank_row);
         const card = matches.filter((x) => m.some((t) => t.id === x.transaction_id));
-        evidence = mode === 'upi' ? (credit ? `Bank ${rs(paymentPaise)} at ${credit.posted_at ? hm(credit.posted_at) : '—'}${credit.account ? ` · ${credit.account}` : ''}` : null)
+        evidence = mode === 'upi' && credit ? `Bank ${rs(paymentPaise)} at ${credit.posted_at ? hm(credit.posted_at) : '—'}${credit.account ? ` · ${credit.account}` : ''}`
+          : mode === 'upi' && !card.length ? null
           : card.length ? [...new Map(card.map((x) => [`${x.paid_at}`, x])).values()].map((x) => `${machineLabel(x)} ${rs(x.amount_paise)} at ${hm(x.paid_at)}`).join(' + ') : null;
-        waiting = m.some((t) => (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed) || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement'));
+        waiting = m.some((t) => (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed && t.match_status === 'awaiting_bank_match') || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement'));
       } else {
-        evidence = mode === 'upi' && g.bank ? `Bank ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : null;
+        evidence = mode === 'upi' && g.bank ? `${g.bank.machine ? `${g.bank.machine.label}:` : 'Bank'} ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : null;
         waiting = !evidence;
       }
       for (const c of cs) {

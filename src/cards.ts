@@ -16,10 +16,10 @@ export async function importCardLines(db: DB, businessId: string, fileName: stri
   const fresh = lines.filter((l) => !have.has(l.txnId));
   const t = now();
   const statements = fresh.map((l) => stmt(db, `INSERT INTO card_settlements (id, business_id, mail_id, file_name, settled_on, merchant_id, terminal_id,
-    batch_no, rrn, txn_id, paid_at, txn_type, amount_paise, fee_paise, gst_paise, net_paise, scheme, card_type, card_last4, auth_code, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (business_id, txn_id) DO NOTHING`,
+    batch_no, rrn, txn_id, paid_at, txn_type, amount_paise, fee_paise, gst_paise, net_paise, scheme, card_type, card_last4, auth_code, pay_mode, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (business_id, txn_id) DO NOTHING`,
     newId(), businessId, mailId, fileName, l.settledOn, l.merchantId, l.terminalId, l.batchNo, l.rrn, l.txnId, l.paidAt, l.txnType,
-    l.amountPaise, l.feePaise, l.gstPaise, l.netPaise, l.scheme, l.cardType, l.cardLast4, l.authCode, t));
+    l.amountPaise, l.feePaise, l.gstPaise, l.netPaise, l.scheme, l.cardType, l.cardLast4, l.authCode, l.payMode ?? (l.scheme?.toUpperCase() === 'UPI' ? 'UPI' : null), t));
   for (let i = 0; i < statements.length; i += 80) await db.batch(statements.slice(i, i + 80));
   const auto = fresh.length ? await runCardAuto(db, businessId) : { matched: 0, settled: 0 };
   return { added: fresh.length, skipped: lines.length - fresh.length, autoMatched: auto.matched, autoSettled: auto.settled };
@@ -28,8 +28,12 @@ export async function importCardLines(db: DB, businessId: string, fileName: stri
 export interface CardPayment {
   id: string; settled_on: string; merchant_id: string; terminal_id: string; txn_id: string; rrn: string | null; paid_at: number; txn_type: string;
   amount_paise: number; fee_paise: number; gst_paise: number; net_paise: number; scheme: string | null; card_type: string | null;
-  card_last4: string | null; file_name: string; bank_row_id: string | null; fee_tx_id: string | null; gst_tx_id: string | null;
+  card_last4: string | null; file_name: string; bank_row_id: string | null; fee_tx_id: string | null; gst_tx_id: string | null; pay_mode: string | null;
 }
+
+/** Paid by UPI on the card machine (its QR, or a RuPay credit card through UPI): a UPI sale, settled with the machine's cards. */
+export const isMachineUpi = (p: { pay_mode?: string | null; scheme?: string | null }) =>
+  p.pay_mode ? /^upi/i.test(p.pay_mode.trim()) : (p.scheme ?? '').toUpperCase() === 'UPI';
 
 export interface CardSale {
   id: string; amount_paise: number; bill_no: string | null; shift_day: string; paid_at: number | null; group_head: string | null;
@@ -57,7 +61,7 @@ export interface CardCandidate { transactionIds: string[]; billNos: string[]; am
  * as one). A sale with no time (register only) fits a payment made in its shift. Clear: paired by closest time first,
  * each payment and sale used once, up to an hour apart.
  */
-export function cardCandidates(payments: Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'>[], sales: CardSale[]) {
+export function cardCandidates(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[]) {
   const units: { ids: string[]; bills: string[]; amount: number; paidAt: number | null; shiftDay: string }[] =
     sales.map((s) => ({ ids: [s.id], bills: [s.bill_no ?? ''], amount: s.amount_paise, paidAt: s.paid_at, shiftDay: s.shift_day }));
   const byGroup = new Map<string, CardSale[]>();
@@ -70,7 +74,8 @@ export function cardCandidates(payments: Pick<CardPayment, 'id' | 'paid_at' | 'a
   }
   const candidates = new Map<string, CardCandidate[]>();
   for (const p of payments) {
-    if (p.txn_type !== 'PURCHASE') { candidates.set(p.id, []); continue; }
+    // UPI on the machine pays UPI bills, not card bills (approved 9 Nov 2026).
+    if (p.txn_type !== 'PURCHASE' || isMachineUpi(p)) { candidates.set(p.id, []); continue; }
     const list: CardCandidate[] = [];
     for (const u of units) {
       if (u.amount !== p.amount_paise) continue;
@@ -115,6 +120,29 @@ export function cardMatchStatements(db: DB, businessId: string, paymentIds: stri
   ];
 }
 
+/**
+ * A UPI sale paid on the card machine (approved 9 Nov 2026): matched to its machine payment, it stays UPI and is received
+ * through the machine's settlement, so it no longer waits for a UPI credit. Only while the payment is not matched yet.
+ */
+export function machineUpiStatements(db: DB, businessId: string, paymentId: string, transactionIds: string[], userId: string | null, t: number, how: string) {
+  const free = 'NOT EXISTS (SELECT 1 FROM card_matches o WHERE o.settlement_id = ? AND o.matched_at <> ?)';
+  return [
+    ...transactionIds.flatMap((tid) => [
+      stmt(db, `INSERT INTO card_matches (id, business_id, settlement_id, transaction_id, matched_by, matched_at) SELECT ?, ?, ?, ?, ?, ? WHERE ${free}`,
+        newId(), businessId, paymentId, tid, userId, t, paymentId, t),
+      stmt(db, `UPDATE transactions SET match_status = NULL WHERE id = ? AND payment_mode = 'upi' AND match_status = 'awaiting_bank_match'
+        AND EXISTS (SELECT 1 FROM card_matches m WHERE m.transaction_id = ? AND m.settlement_id = ?)`, tid, tid, paymentId),
+    ]),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'card.match', 'card_settlements', ?, NULL, ?, ?)`, businessId, userId, paymentId, JSON.stringify({ paymentIds: [paymentId], transactionIds, upiOnMachine: true, how }), t),
+  ];
+}
+
+/** Unmatched UPI payments on the card machine paid in this span, as the bank evidence pairs them. */
+export const machineUpiPayments = async (db: DB, businessId: string, from: number, to: number) =>
+  (await all<CardPayment>(db, `SELECT * FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE' AND s.paid_at >= ? AND s.paid_at < ?
+    AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) ORDER BY s.paid_at`, businessId, from, to)).filter(isMachineUpi);
+
 /** The settlement day's credit from the card machine: the ICICIPOS_SET line ends with the settlement date (ddmmyy). */
 export function settlementDateOf(description: string): string | null {
   const m = /ICICIPOS_SET\S*_(\d{2})(\d{2})(\d{2})\s*$/i.exec(description);
@@ -145,7 +173,7 @@ export const AUTO_MIN = 20;
 const TIP_SHARE = 0.25;
 
 /** Pairs Bookr may match on its own: the payment's only candidate, within AUTO_MIN, and no other payment wants any of its sales. */
-export function autoPairs(payments: Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'>[], sales: CardSale[]) {
+export function autoPairs(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[]) {
   const { candidates } = cardCandidates(payments, sales);
   const wants = new Map<string, Set<string>>();
   for (const [pid, list] of candidates) for (const k of list) for (const tid of k.transactionIds) wants.set(tid, new Set([...(wants.get(tid) ?? []), pid]));
@@ -291,8 +319,9 @@ const writtenOtherwise = (db: DB, businessId: string, day: string) => all<{ id: 
   businessId, addDays(day, -1), addDays(day, 1));
 
 /** "UPI on machine" or the card's brand and last 4. */
-export const machineLabel = (p: Pick<CardPayment, 'scheme' | 'card_type' | 'card_last4'>) =>
-  (p.scheme === 'UPI' ? 'UPI on machine' : `${p.scheme ?? p.card_type ?? 'Card'}${p.card_last4 ? ` ··${p.card_last4}` : ''}`);
+export const machineLabel = (p: Pick<CardPayment, 'scheme' | 'card_type' | 'card_last4'> & { pay_mode?: string | null }) =>
+  (isMachineUpi(p) ? (/card/i.test(p.pay_mode ?? '') ? `UPI on machine (${p.scheme ?? 'RuPay'} card)` : 'UPI on machine')
+    : `${p.scheme ?? p.card_type ?? 'Card'}${p.card_last4 ? ` ··${p.card_last4}` : ''}`);
 
 export async function shiftCards(db: DB, businessId: string, day: string, cashOverPaise: number | null, skipCredits: Set<string> = new Set()) {
   const w = shiftWindow(day);
@@ -322,7 +351,7 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   const tipFor = (p: CardPayment) => near.filter((s) => s.paid_at != null && p.amount_paise > s.amount_paise && p.amount_paise - s.amount_paise <= s.amount_paise * TIP_SHARE
     && Math.abs(p.paid_at - s.paid_at) <= AUTO_MIN * 60000).sort((a, b) => Math.abs(p.paid_at - a.paid_at!) - Math.abs(p.paid_at - b.paid_at!))[0] ?? null;
   const pay = (p: CardPayment) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, cardType: p.card_type, cardLast4: p.card_last4, terminalId: p.terminal_id,
-    scheme: p.scheme, upi: p.scheme === 'UPI', label: machineLabel(p) });
+    scheme: p.scheme, upi: isMachineUpi(p), label: machineLabel(p) });
   // Checked against the bank only once it is in for the shift (approved 9 Nov 2026): other UPI credits, either account.
   const [bank, credits, other] = await Promise.all([bankIn(db, businessId, day), shiftCredits(db, businessId, day), writtenOtherwise(db, businessId, day)]);
   const usedCredits = new Set(skipCredits);
@@ -332,7 +361,7 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
     WHERE r.id IN (${credits.map(() => '?').join(',')})`, ...credits.map((c) => c.id)) : []).map((r) => [r.id, r.name]));
   const needs = openPays.map((p) => {
     const list = (candidates.get(p.id) ?? []).slice(0, 5);
-    const tip = !list.length && p.txn_type === 'PURCHASE' ? tipFor(p) : null;
+    const tip = !list.length && p.txn_type === 'PURCHASE' && !isMachineUpi(p) ? tipFor(p) : null;
     // No card bill: a bill of its amount written as UPI or cash near its time, closest first, each bill once.
     const w2 = !list.length && !tip && p.txn_type === 'PURCHASE' ? other.filter((b) => !usedBills.has(b.id) && b.amount_paise === p.amount_paise
       && Math.abs(b.paid_at - p.paid_at) <= NEAR_MIN * 60000).sort((a, b) => Math.abs(a.paid_at - p.paid_at) - Math.abs(b.paid_at - p.paid_at))[0] : undefined;
@@ -411,8 +440,8 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   return {
     day, covered, bankCovered: bank.covered, explains,
     strip: { billsPaise: sum(bills), bills: bills.length, matchedPaise: sum(matchedBills), matched: matchedBills.length, byBookr: done.filter((d) => d.byBookr).length,
-      machineCardPaise: purchases.filter((p) => p.scheme !== 'UPI').reduce((a, p) => a + p.amount_paise, 0),
-      machineUpiPaise: purchases.filter((p) => p.scheme === 'UPI').reduce((a, p) => a + p.amount_paise, 0),
+      machineCardPaise: purchases.filter((p) => !isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
+      machineUpiPaise: purchases.filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
       noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').map((n) => n.payment)),
       noBill: needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').length },
     needs: needsLeft, noSwipe, done, settlements,

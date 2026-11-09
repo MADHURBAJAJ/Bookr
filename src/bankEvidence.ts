@@ -23,7 +23,9 @@ export interface EvidenceBill {
   /** UPI payments written for a bill paid in several goes (or partly another way): each needs its own credit. */
   parts?: number[];
 }
-export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null; remark?: string | null }
+export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null; remark?: string | null;
+  /** A UPI payment on the card machine (approved 9 Nov 2026): it reaches the bank in the machine's settlement of that day. */
+  machine?: { settledOn: string; label: string } }
 export interface Evidence {
   creditId: string; amountPaise: number; postedAt: number; minutes: number | null;
   /** Which side's amount the credit equals. */
@@ -33,7 +35,9 @@ export interface Evidence {
   /** A credit of each side's amount came: the bank cannot say which side is right. */
   bothSides?: boolean;
   /** A bill paid in several UPI goes: one credit per payment. creditId and postedAt are the first; amountPaise is their total. */
-  parts?: { creditId: string; amountPaise: number; postedAt: number }[];
+  parts?: { creditId: string; amountPaise: number; postedAt: number; machine?: { settledOn: string; label: string } }[];
+  /** Paid by UPI on the card machine: the payment's settlement day and label. */
+  machine?: { settledOn: string; label: string };
   /** The guest paid one payment in several credits (e.g. a UPI app limit): parts are those credits, all for one payment. */
   split?: boolean;
   /** The credit's UPI note names this bill. */
@@ -97,7 +101,8 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
   const make = (b: EvidenceBill, c: EvidenceCredit, minutes: number | null): Evidence => {
     const sw = b.swAmount === c.amount;
     const rg = b.rgAmount === c.amount;
-    return { creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, minutes, fits: sw && rg ? 'both' : sw ? 'software' : 'register', suggest: suggestion(b, c.amount) };
+    return { creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, minutes, fits: sw && rg ? 'both' : sw ? 'software' : 'register', suggest: suggestion(b, c.amount),
+      ...(c.machine ? { machine: c.machine } : {}) };
   };
   // A credit whose UPI note names a bill of its amount pays that bill, before any pairing by time (audit, 9 Nov 2026).
   for (const c of credits) {
@@ -162,7 +167,7 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     const split = b.swMode === 'upi' && b.rgMode === 'mixed' && b.swAmount !== total && (b.difference === 'mode' || b.difference === 'amount_and_mode') ? 'use_register' as const : null;
     out.set(b.id, { ...make(b, ordered[0].c, b.paidAt != null ? Math.max(...picks.map((x) => x.minutes ?? 0)) : null), amountPaise: total,
       fits: b.swAmount === total ? 'both' : 'register', suggest: suggestion(b, total) ?? split,
-      parts: ordered.map((x) => ({ creditId: x.c.id, amountPaise: x.c.amount, postedAt: x.c.postedAt })) });
+      parts: ordered.map((x) => ({ creditId: x.c.id, amountPaise: x.c.amount, postedAt: x.c.postedAt, ...(x.c.machine ? { machine: x.c.machine } : {}) })) });
     for (const x of picks) used.add(x.c.id);
   }
   // One payment, several credits (audit, 9 Nov 2026): a guest whose UPI app stops at a limit pays a bill in two or three
@@ -195,7 +200,7 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     const total = set.reduce((t, c) => t + c.amount, 0);
     out.set(b.id, { ...make(b, set[0], Math.max(...set.map((c) => Math.round(Math.abs(c.postedAt - b.paidAt!) / 60000)))), amountPaise: total,
       fits: b.swAmount === total && b.rgAmount === total ? 'both' : b.swAmount === total ? 'software' : 'register', suggest: suggestion(b, total), split: true,
-      parts: set.map((c) => ({ creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt })) });
+      parts: set.map((c) => ({ creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, ...(c.machine ? { machine: c.machine } : {}) })) });
     set.forEach((c) => used.add(c.id));
   }
   // A credit backs one side only when the other side's amount has no free credit near too (audit, 9 Nov 2026): with a

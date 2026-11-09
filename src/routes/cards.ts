@@ -5,7 +5,7 @@ import { requireRole } from '../auth';
 import { all, newId, now, one, stmt } from '../db';
 import { body, fail, isUuid, text } from '../http';
 import { readCardReport } from '../cardsettlement';
-import { cardAddedRow, cardCandidates, cardMatchStatements, cardRules, daysTogether, importCardLines, openSettlementCredits, ruleFor, runCardAuto, settleStatements,
+import { cardAddedRow, cardCandidates, cardMatchStatements, isMachineUpi, machineUpiStatements, cardRules, daysTogether, importCardLines, openSettlementCredits, ruleFor, runCardAuto, settleStatements,
   settlementCredits, unsettledDays, unsettleStatements, waitingCard, type CardPayment } from '../cards';
 import { readMail, readReportFile } from '../mail';
 import { repayStatements } from '../repay';
@@ -160,8 +160,9 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/unmatch', requireRole(
     stmt(db, 'DELETE FROM card_matches WHERE business_id = ? AND matched_at = ?', bid, first.matched_at),
     // A tip on the card, or a swipe booked to a head, was added with the match: it goes with it (kept in the audit log).
     ...added.map((x) => stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", x.id)),
-    ...[...new Set(set.map((m) => m.transaction_id))].map((tid) => stmt(db, `UPDATE transactions SET match_status = 'awaiting_card_settlement'
-      WHERE id = ? AND match_status IS NULL AND payment_mode = 'card' AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.transaction_id = transactions.id)`, tid)),
+    ...[...new Set(set.map((m) => m.transaction_id))].map((tid) => stmt(db, `UPDATE transactions SET match_status = CASE payment_mode WHEN 'card' THEN 'awaiting_card_settlement' ELSE 'awaiting_bank_match' END
+      WHERE id = ? AND match_status IS NULL AND (payment_mode = 'card' OR (payment_mode = 'upi' AND matched_bank_row IS NULL))
+        AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.transaction_id = transactions.id)`, tid)),
     stmt(db, AUDIT, bid, c.get('user').id, 'card.unmatch', 'card_settlements', pid, JSON.stringify({ matches: set, added }), null, t),
   ]);
   return c.json({ ok: true });
@@ -382,6 +383,35 @@ cardRoutes.post('/businesses/:businessId/cards/was-upi', requireRole('bank.link'
   return c.json({ ok: true, bills: r.bills, auditId: done[r.statements.length - 1]?.meta.last_row_id ?? null });
 });
 
+/**
+ * UPI paid on the card machine (approved 9 Nov 2026): the bill stays UPI (a cash bill becomes UPI, recorded as paid
+ * another way) and is matched to the machine payment; it is received through the machine's settlement.
+ */
+cardRoutes.post('/businesses/:businessId/cards/:paymentId/upi-on-machine', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const pid = c.req.param('paymentId');
+  if (!isUuid(pid)) fail(404, 'Not found.');
+  const tids = ids((await body(c)).transactionIds, 30);
+  if (!tids.length) fail(400, 'Choose the bill.');
+  const p = await one<CardPayment & { matched: number }>(db, `SELECT *, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = card_settlements.id) AS matched
+    FROM card_settlements WHERE id = ? AND business_id = ?`, pid, bid);
+  if (!p) fail(404, 'Card payment not found.');
+  if (p.matched || p.txn_type !== 'PURCHASE' || !isMachineUpi(p)) fail(409, 'Choose a UPI payment on the machine that is not matched yet.');
+  const sales = await all<{ id: string; amount_paise: number; payment_mode: string; match_status: string | null; matched_bank_row: string | null }>(db,
+    `SELECT id, amount_paise, payment_mode, match_status, matched_bank_row FROM transactions WHERE business_id = ? AND type = 'income' AND id IN (${tids.map(() => '?').join(',')})`, bid, ...tids);
+  if (sales.length !== tids.length) fail(404, 'A sale was not found.');
+  if (sales.some((x) => !(x.payment_mode === 'upi' && x.match_status === 'awaiting_bank_match' && !x.matched_bank_row) && !(x.payment_mode === 'cash' && x.match_status == null)))
+    fail(409, 'Only a UPI bill still waiting for its money, or a cash bill, is matched here.');
+  if (sales.reduce((t, x) => t + x.amount_paise, 0) !== p.amount_paise) fail(409, 'The payment is not the bill\'s amount.');
+  const t = now();
+  const user = c.get('user').id;
+  const cash = sales.filter((x) => x.payment_mode === 'cash').map((x) => x.id);
+  const r = cash.length ? await repayStatements(db, bid, cash, 'upi', 'Paid by UPI on the card machine: the card report shows it (Reconcile)', user, t) : null;
+  const done = await db.batch([...(r?.statements ?? []), ...machineUpiStatements(db, bid, pid, tids, user, t + 1, 'UPI on the machine, matched by a person')]);
+  return c.json({ ok: true, auditId: r ? done[r.statements.length - 1]?.meta.last_row_id ?? null : null });
+});
+
 /** A machine payment whose bill was written as UPI or cash: the bill is changed to card and matched to the payment. */
 cardRoutes.post('/businesses/:businessId/cards/:paymentId/was-card', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
@@ -394,9 +424,10 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/was-card', requireRole
     FROM card_settlements WHERE id = ? AND business_id = ?`, pid, bid);
   if (!p) fail(404, 'Card payment not found.');
   if (p.matched || p.txn_type !== 'PURCHASE') fail(409, 'This payment is already matched, or is not a purchase.');
+  if (isMachineUpi(p)) fail(409, 'This was paid by UPI on the machine: the bill stays UPI. Match it as UPI on the machine.');
   const t = now();
   const user = c.get('user').id;
-  const r = await repayStatements(db, bid, tids, 'card', `Paid on the card machine (${p.scheme === 'UPI' ? 'UPI on machine' : 'card'}): the card report shows it (Reconcile)`, user, t);
+  const r = await repayStatements(db, bid, tids, 'card', `Paid on the card machine (card): the card report shows it (Reconcile)`, user, t);
   if (r.amountPaise !== p.amount_paise) fail(409, 'The card payment is not the bill\'s amount.');
   const done = await db.batch([...r.statements, ...cardMatchStatements(db, bid, [pid], tids, user, t + 1)]);
   return c.json({ ok: true, bills: r.bills, auditId: done[r.statements.length - 1]?.meta.last_row_id ?? null });

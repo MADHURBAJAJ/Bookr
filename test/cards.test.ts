@@ -3,7 +3,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { businessWithAllRoles, env, resetDb, sql } from './helpers';
 import { parseCardReport, readCardReport } from '../src/cardsettlement';
-import { autoPairs, cardCandidates, settlementDateOf, shiftCards, type CardSale } from '../src/cards';
+import { autoPairs, cardCandidates, isMachineUpi, settlementDateOf, shiftCards, type CardSale } from '../src/cards';
 import { receiveMail } from '../src/mail';
 import { folderIdFrom } from '../src/google';
 import { istToMs } from '../src/time';
@@ -73,6 +73,21 @@ describe('reading the card report', () => {
     expect(r.lines[0].paidAt).toBe(istToMs(2026, 11, 4, 2, 38, 24));
     expect(r.lines[1]).toMatchObject({ amountPaise: 272700, feePaise: 4854, gstPaise: 874, netPaise: 266972 });
   });
+  it('reads the mode of payment: UPI on the machine, a RuPay credit card through UPI, and cards', async () => {
+    const row = (mode: string, scheme: string, type: string, amount: string, fee: string, gst: string, net: string, id: string, card: string) =>
+      ['08-NOV-2026', '900000000000001', 'TT000001', '07-NOV-26', '000002', `7000000${id}`, mode, scheme, type, '', 'INR', amount, fee, gst, net,
+        '07-11-2026 14:12:00', `YBL0000000${id}`, 'PURCHASE', card, '', '', ''];
+    const r = await readCardReport(xlsx([HEAD,
+      row('UPI', 'UPI', '', '100.0', '0.0', '0.0', '100.0', '1', ''),
+      row('UPI Card', 'RUPAY CC', 'CREDIT', '200.0', '-3.56', '-0.64', '195.8', '2', ''),
+      row('CARDS', 'MASTER', 'DEBIT', '300.0', '-1.2', '0.0', '298.8', '3', '************3333'),
+      ['Grand Total', '', '', '', '', '', '', '', '', '', '', '600.0', '-4.76', '-0.64', '594.6']]));
+    expect(r.problems).toEqual([]);
+    expect(r.lines.map((l) => [l.payMode, l.scheme, l.cardLast4])).toEqual([['UPI', 'UPI', null], ['UPI Card', 'RUPAY CC', null], ['CARDS', 'MASTER', '3333']]);
+    expect(r.lines.map((l) => isMachineUpi({ pay_mode: l.payMode, scheme: l.scheme }))).toEqual([true, true, false]);
+    expect(isMachineUpi({ pay_mode: null, scheme: 'UPI' })).toBe(true); // rows from before the column
+  });
+
   it('says what is wrong', async () => {
     const bad = REPORT.map((r) => [...r]);
     bad[5][11] = '3376.0';

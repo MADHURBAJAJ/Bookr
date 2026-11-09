@@ -78,6 +78,8 @@ export interface CardLine {
   settledOn: string; merchantId: string; terminalId: string; batchNo: string | null; rrn: string | null; txnId: string;
   paidAt: number; txnType: string; amountPaise: number; feePaise: number; gstPaise: number; netPaise: number;
   scheme: string | null; cardType: string | null; cardLast4: string | null; authCode: string | null;
+  /** "Mode of Payment": UPI, UPI Card or CARDS. */
+  payMode: string | null;
 }
 
 const MONTHS: Record<string, number> = { JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6, JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12 };
@@ -114,7 +116,7 @@ const HEADINGS = {
   settledOn: /^date of settlement/i, merchantId: /^merchant id$/i, terminalId: /^terminal id$/i, batchNo: /^batch/i, rrn: /^rrn$/i,
   scheme: /^scheme/i, cardType: /^card type$/i, amount: /^transaction amount$/i, charges: /^transaction charges$/i, gst: /^gst$/i,
   net: /^net settlement/i, paidAt: /^transaction date$/i, txnId: /^transaction id$/i, txnType: /^transaction type$/i, card: /^card number$/i,
-  authCode: /^auth/i,
+  authCode: /^auth/i, payMode: /^mode of pay/i,
 } as const;
 type Field = keyof typeof HEADINGS;
 
@@ -158,6 +160,7 @@ export function parseCardReport(rows: string[][]): { lines: CardLine[]; problems
       settledOn, merchantId: cell(r, 'merchantId'), terminalId: cell(r, 'terminalId'), batchNo: cell(r, 'batchNo') || null, rrn: cell(r, 'rrn') || null,
       txnId, paidAt, txnType: (cell(r, 'txnType') || 'PURCHASE').toUpperCase(), amountPaise: amount, feePaise: fee, gstPaise, netPaise: net,
       scheme: cell(r, 'scheme') || null, cardType: cell(r, 'cardType') || null, cardLast4: last4, authCode: cell(r, 'authCode') || null,
+      payMode: cell(r, 'payMode') || null,
     });
   });
   const g = grand as { amount: number | null; net: number | null } | null;
