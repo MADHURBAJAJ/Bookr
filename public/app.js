@@ -307,30 +307,114 @@ function fyDefault() {
   return `${year}-04-01`;
 }
 
+// The dashboard (approved 9 Nov 2026): jobs waiting, most urgent first. Each card opens where the job is done;
+// a card with nothing waiting folds to one grey line. Bank and card parts come only for Owner and Accountant.
 async function dashboardView(biz) {
-  const [{ accounts, heads }, waiting] = await Promise.all([api('GET', `/businesses/${biz.id}/dashboard`),
-    biz.actions.includes('sales.view') ? api('GET', `/businesses/${biz.id}/waiting-bills`).catch(() => null) : null]);
-  const late = waiting?.bills.filter((b) => b.unresolved).length ?? 0;
+  const [h, { accounts, heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/home`), api('GET', `/businesses/${biz.id}/dashboard`)]);
+  const can = (a) => biz.actions.includes(a);
+  const n = (x, one, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
+  const rs = (p) => `₹ ${money(p)}`;
+  const STALE = 36 * 3600000;
+  const stale = (ms) => ms == null || Date.now() - ms > STALE;
+  const done = (title) => html`<section class="card dash-done"><span class="ok-msg">✓</span> ${title}</section>`;
+  const card = (title, body, opts = {}) => html`<section class="card dash-card ${opts.big ? 'dash-big' : ''}" style="gap:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>${title}</h2>${opts.chip ?? ''}</div>${body}</section>`;
+  const goBtn = (href, label) => html`<a class="btn plain dash-go" href="${href}">${label} ›</a>`;
+  const cards = [];
+
+  // 1. Book expenses: bank payments not booked yet, up to the last bank data synced.
+  if (h.bookExpenses) {
+    const b = h.bookExpenses;
+    cards.push(b.count ? card('Book expenses', html`
+      <div class="dash-num">${n(b.count, 'payment')} · ${rs(b.paise)}</div>
+      <div class="note">Not booked yet, oldest ${dayLabel(b.oldestDay)}. Counted up to the bank data synced.</div>
+      ${b.accounts.map((a) => html`<div class="list-row"><span>${a.name}${a.lastAt ? html` <span class="note">· data up to ${when(a.lastAt)}</span>` : ''}</span><span class="amount">${a.count} · ${rs(a.paise)}</span></div>`)}
+      ${goBtn(`#/b/${biz.id}/money-out?${new URLSearchParams({ from: b.oldestDay, to: h.today, waiting: '1' })}`, 'Book on Money out')}`, { big: true }) : done('Book expenses: every bank payment is booked'));
+  }
+
+  // 2. Shifts to finish.
+  if (h.shifts.count) {
+    const next = (s) => {
+      if (s.toCheck && can('rows.edit')) return 'review';
+      if (s.toDecide || !s.bank || !can('bank.link')) return 'compare';
+      return 'reconcile';
+    };
+    const parts = (s) => [s.toCheck && n(s.toCheck, 'row') + ' to check', s.toDecide && n(s.toDecide, 'bill') + ' to decide',
+      s.bank?.billsLeft && `${s.bank.billsLeft} UPI bill${s.bank.billsLeft === 1 ? '' : 's'}`, s.bank?.creditsLeft && n(s.bank.creditsLeft, 'UPI credit'),
+      s.bank?.cardsLeft && `${s.bank.cardsLeft} card`, !s.toCheck && !s.toDecide && s.status !== 'confirmed' && 'to confirm'].filter(Boolean).join(' · ');
+    cards.push(card('Shifts to finish', html`
+      ${h.shifts.list.map((s) => html`<a class="list-row dash-link" href="${screenHref(biz, next(s), s.day)}"><span>${dayLabel(s.day)}</span><span class="note">${parts(s)} ›</span></a>`)}
+      ${h.shifts.count > h.shifts.list.length ? html`<div class="note">and ${h.shifts.count - h.shifts.list.length} more.</div>` : ''}`,
+      { chip: html`<span class="chip wait">${h.shifts.count}</span>` }));
+  } else cards.push(done('Shifts: all confirmed'));
+
+  // 3. UPI credits not matched.
+  if (h.upi) {
+    const { credits: c, bills: b } = h.upi;
+    cards.push(c.count || b.count ? card('UPI not matched', html`
+      ${c.count ? html`<div class="dash-num">${n(c.count, 'credit')} · ${rs(c.paise)}</div><div class="note">Money received with no bill yet, oldest ${dayLabel(c.oldestDay)}.</div>` : ''}
+      ${b.count ? html`<div class="note">${n(b.count, 'UPI bill')} (${rs(b.paise)}) still without a credit, oldest ${dayLabel(b.oldestDay)}.</div>` : ''}
+      ${goBtn(`#/b/${biz.id}/reconcile/all`, 'Open entries')}`, { chip: c.late ? html`<span class="chip bad">${c.late} over ${h.watchDays} days</span>` : '' }) : done('UPI: every credit matched'));
+  }
+
+  // 4. Card settlements.
+  if (h.cards) {
+    cards.push(h.cards.days ? card('Card settlements', html`
+      <div class="dash-num">${n(h.cards.days, 'day')} · ${rs(h.cards.netPaise)} net</div>
+      <div class="note">Card report days not settled against a bank credit yet, oldest ${dayLabel(h.cards.oldestDay)}.</div>
+      ${goBtn(`#/b/${biz.id}/cards`, 'Card settlements')}`) : done('Card settlements: all settled'));
+  }
+
+  // 5. Cash check.
+  if (h.cash) {
+    cards.push(h.cash.length ? card('Cash check', html`
+      ${h.cash.map((k) => html`<a class="list-row dash-link" href="#/b/${biz.id}/compare/${k.day}"><span>${dayLabel(k.day)}</span>
+        <span class="note">${!k.counted ? 'cash in hand not entered' : k.differencePaise < 0 ? `${rs(-k.differencePaise)} short` : `${rs(k.differencePaise)} over`} ›</span></a>`)}`) : done('Cash: every confirmed shift of the week checks out'));
+  }
+
+  // 6. Expense photos to approve.
+  if (h.photos) {
+    cards.push(h.photos.count ? card('Expense photos to approve', html`
+      <div class="dash-num">${n(h.photos.count, 'row')} · ${rs(h.photos.paise)}</div>
+      ${h.photos.pages.map((p) => html`<a class="list-row dash-link" href="#/b/${biz.id}/review/${p.uploadId}"><span>${dayLabel(p.day)}</span><span class="note">${n(p.count, 'row')} · ${rs(p.paise)} ›</span></a>`)}`) : done('Expense photos: all approved'));
+  }
+
+  // 7. Bills waiting for their other side.
+  if (h.waitingBills.count) {
+    cards.push(card('Bills waiting for their other side', html`
+      <div class="note">${h.waitingBills.count} bill${h.waitingBills.count === 1 ? ' was' : 's were'} found only in the software report or only in the register.</div>
+      ${goBtn(`#/b/${biz.id}/compare/${h.waitingBills.firstDay}`, 'Compare sales')}`, { chip: h.waitingBills.late ? html`<span class="chip bad">${h.waitingBills.late} over ${h.watchDays} days</span>` : '' }));
+  }
+
+  // Data freshness: what each figure above is counted up to.
+  const f = h.fresh;
+  const bit = (label, text, old) => html`<span class="chip ${old ? 'wait' : ''}">${label}: ${text}</span>`;
+  const strip = html`<section class="card dash-fresh">
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      ${(f.bank ?? []).filter((a) => a.linked || a.lastAt).map((a) => bit(a.name, a.lastAt ? `up to ${when(a.lastAt)}` : 'no lines yet', stale(a.lastAt)))}
+      ${f.cards?.folder ? bit('Card', f.cards.lastAt ? `up to ${when(f.cards.lastAt)}` : 'no report yet', stale(f.cards.lastAt)) : ''}
+      ${bit('Register', f.registerDay ? dayLabel(f.registerDay) : 'none yet', !f.registerDay || f.registerDay < addDaysIso(h.today, -1))}
+      ${bit('Sales report', f.reportDay ? dayLabel(f.reportDay) : 'none yet', !f.reportDay || f.reportDay < addDaysIso(h.today, -1))}
+      ${f.bank ? html`<button class="btn plain" id="dashsync" type="button" style="margin-left:auto">Sync bank and card</button>` : ''}
+    </div><div id="dashmsg"></div></section>`;
+
   const total = accounts.reduce((s, a) => s + a.openingBalancePaise, 0);
-  render(shell(biz, 'dashboard', 'Dashboard', 'Totals, the weekly chart and items needing attention arrive in Phase 4.', html`
-    ${waiting?.bills.length ? html`<section class="card" style="margin-bottom:16px;gap:6px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-      <h2>Bills waiting for their other side</h2>${late ? html`<span class="chip bad">${late} over ${waiting.watchDays} days</span>` : ''}</div>
-      <div class="note">${waiting.bills.length} bill${waiting.bills.length === 1 ? ' was' : 's were'} found only in the software report or only in the register. <a href="#/b/${biz.id}/compare/${waiting.bills[0].day}">See them on Compare sales</a>.</div></section>` : ''}
-    <div class="row">
-      <section class="card grow1">
-        <h2>Opening balances</h2>
-        ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalancePaise)}</span></div>`)}
-        <div class="list-row" style="font-weight:600"><span>Combined</span><span class="amount">₹ ${money(total)}</span></div>
-      </section>
-      <section class="card grow1">
-        <h2>Set up</h2>
-        <div class="list-row"><span>Accounts</span><span>${accounts.length}</span></div>
-        <div class="list-row"><span>Income heads</span><span>${heads.income}</span></div>
-        <div class="list-row"><span>Expense heads</span><span>${heads.expense}</span></div>
-        <div class="note"><a href="#/b/${biz.id}/accounts">Accounts</a> · <a href="#/b/${biz.id}/heads">Heads and rules</a></div>
-      </section>
-    </div>`));
+  render(shell(biz, 'dashboard', 'Dashboard', 'What is waiting, most urgent first.', html`
+    ${strip}
+    <div class="dash-grid">${cards.filter((c) => !c.__html.includes('dash-done'))}</div>
+    ${cards.filter((c) => c.__html.includes('dash-done'))}
+    <details class="card cmp-fold" style="margin-top:16px"><summary><h2>Opening balances and set-up</h2></summary>
+      ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalancePaise)}</span></div>`)}
+      <div class="list-row" style="font-weight:600"><span>Combined</span><span class="amount">₹ ${money(total)}</span></div>
+      <div class="note">${accounts.length} accounts · ${heads.income} income heads · ${heads.expense} expense heads ·
+        <a href="#/b/${biz.id}/accounts">Accounts</a> · <a href="#/b/${biz.id}/heads">Heads and rules</a></div>
+    </details>`));
   wireShell();
+  document.getElementById('dashsync')?.addEventListener('click', async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Syncing…';
+    try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await dashboardView(biz); document.getElementById('dashmsg').innerHTML = syncResultHtml(r).__html; }
+    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync bank and card'; showError(document.getElementById('dashmsg'), err); }
+  });
 }
 
 async function accountsView(biz, editId) {
