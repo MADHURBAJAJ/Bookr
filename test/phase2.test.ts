@@ -2391,3 +2391,102 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     expect((await h.clients.entry_staff.get(url)).status).toBe(403);
   });
 });
+
+describe('the card machine as a witness (approved 9 Nov 2026)', () => {
+  it('a card bill the machine never got, paid by UPI: changed to UPI and matched; a machine payment of a UPI bill: changed to card; both undo', async () => {
+    const h = await hotel();
+    const o = h.clients.owner;
+    await fullShift(h);
+    await decideAll(h);
+    expect((await o.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const sale = async (bill: string) => (await sql`SELECT id FROM transactions WHERE bill_no = ${bill} AND type = 'income'`)[0].id as string;
+    const card = await sale('2610313');   // ₹942, card, 11:30:45: the machine has no payment for it
+    const upi = await sale('2610318');    // ₹650, UPI, 15:20: paid on the machine
+    // The card report, covering past the shift: a UPI-on-machine payment of ₹650 two minutes after bill 2610318, and a swipe the next morning.
+    const swipe = async (id: string, at: number, amount: number, scheme: string) => {
+      await sql`INSERT INTO card_settlements (id, business_id, file_name, settled_on, merchant_id, terminal_id, txn_id, paid_at, txn_type, amount_paise, fee_paise, gst_paise,
+        net_paise, scheme, card_last4, created_at) VALUES (${id}, ${h.bid}, 'x_ICICI_POS_CD.xlsx', '2026-11-02', '900000000000001', 'TT000001', ${'TT_' + id}, ${at}, 'PURCHASE',
+        ${amount}, 0, 0, ${amount}, ${scheme}, ${scheme === 'UPI' ? null : '4242'}, ${Date.now()})`;
+      return id;
+    };
+    const p650 = await swipe(crypto.randomUUID(), istToMs(2026, 10, 31, 15, 22, 0), 65000, 'UPI');
+    await swipe(crypto.randomUUID(), istToMs(2026, 11, 1, 9, 0, 0), 10000, 'VISA');
+    // The bank, in past the shift: a UPI credit of ₹942 ten minutes after bill 2610313.
+    const acc = (await o.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await o.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' });
+    await o.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t'),
+      [1, 'S80000001', '31/10/2026', '31/10/2026 11:40:00 AM', '-', 'UPI/900000000041/UPI/xx41@okaxis/B/ICIa', 'CR', 942, 1].join('\t'),
+      [2, 'S80000002', '01/11/2026', '01/11/2026 9:30:00 AM', '-', 'UPI/900000000042/UPI/xx42@okaxis/B/ICIa', 'CR', 3, 1].join('\t')].join('\n') });
+    const [cr] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S80000001'`;
+
+    const rec = (await o.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json;
+    expect(rec.cards.covered).toBe(true);
+    expect(rec.cards.bankCovered).toBe(true);
+    expect(rec.cards.strip).toMatchObject({ machineUpiPaise: 65000, machineCardPaise: 0 });
+    const ns = rec.cards.noSwipe.find((x: any) => x.billNo === '2610313');
+    expect(ns.upi).toMatchObject({ creditId: cr.id, amountPaise: 94200, accountName: 'HUF', minutes: 9 });
+    const nd = rec.cards.needs.find((x: any) => x.payment.id === p650);
+    expect(nd).toMatchObject({ why: 'written', payment: { upi: true, label: 'UPI on machine' }, written: { transactionId: upi, billNo: '2610318', mode: 'upi', minutes: 2 } });
+    // Told once: the UPI side leaves out the ₹942 credit and bill 2610318.
+    expect(rec.cards.explains).toEqual({ credits: [{ id: cr.id, postedAt: expect.any(Number) }], bills: [{ id: upi, billNo: '2610318', shiftDay: '2026-10-31' }] });
+    expect(rec.noBill.map((x: any) => x.creditId)).not.toContain(cr.id);
+
+    // Change to UPI and match: a person does it (Owner or Accountant), and it undoes in two steps.
+    const base = `/businesses/${h.bid}/cards`;
+    expect((await h.clients.entry_staff.post(`${base}/was-upi`, { transactionIds: [card], bankRowId: cr.id })).status).toBe(403);
+    expect((await o.post(`${base}/was-upi`, { transactionIds: [upi], bankRowId: cr.id })).status).toBe(409);   // not a card bill
+    const w = (await h.clients.accountant.post(`${base}/was-upi`, { transactionIds: [card], bankRowId: cr.id })).json;
+    expect(w).toMatchObject({ ok: true, bills: ['2610313'] });
+    expect((await sql`SELECT payment_mode, match_status, matched_bank_row FROM transactions WHERE id = ${card}`)[0]).toEqual({ payment_mode: 'upi', match_status: null, matched_bank_row: cr.id });
+    expect((await sql`SELECT p.mode FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.bill_no = '2610313'`)[0].mode).toBe('upi');
+    expect((await o.post(`${base}/was-upi`, { transactionIds: [card], bankRowId: cr.id })).status).toBe(409);
+    expect((await o.del(`/businesses/${h.bid}/bank-rows/${cr.id}/match`)).status).toBe(200);
+    expect((await o.post(`/businesses/${h.bid}/sales/repay/${w.auditId}/undo`, {})).status).toBe(200);
+    expect((await sql`SELECT payment_mode, match_status, matched_bank_row FROM transactions WHERE id = ${card}`)[0]).toEqual({ payment_mode: 'card', match_status: 'awaiting_card_settlement', matched_bank_row: null });
+
+    // Change to card and match: bill 2610318 becomes card, matched to the machine payment; unmatch and undo put it back.
+    expect((await o.post(`${base}/${p650}/was-card`, { transactionIds: [card] })).status).toBe(400);   // a card bill already
+    const c2 = (await o.post(`${base}/${p650}/was-card`, { transactionIds: [upi] })).json;
+    expect(c2).toMatchObject({ ok: true, bills: ['2610318'] });
+    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${upi}`)[0]).toEqual({ payment_mode: 'card', match_status: null });
+    expect((await sql`SELECT transaction_id FROM card_matches WHERE settlement_id = ${p650}`).map((r) => r.transaction_id)).toEqual([upi]);
+    const after = (await o.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.cards;
+    expect(after.needs.find((x: any) => x.payment.id === p650)).toBeUndefined();
+    expect(after.done.find((d: any) => d.payment.id === p650)).toMatchObject({ bills: ['2610318'], byBookr: false });
+    expect((await o.post(`${base}/${p650}/unmatch`)).status).toBe(200);
+    expect((await o.post(`/businesses/${h.bid}/sales/repay/${c2.auditId}/undo`, {})).status).toBe(200);
+    expect((await sql`SELECT payment_mode, match_status FROM transactions WHERE id = ${upi}`)[0]).toEqual({ payment_mode: 'upi', match_status: 'awaiting_bank_match' });
+  });
+
+  it('a card bill paid in two machine payments is offered as one pair', async () => {
+    const h = await hotel();
+    const o = h.clients.owner;
+    await fullShift(h);
+    await decideAll(h);
+    expect((await o.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
+    const ins = async (at: number, amount: number) => {
+      const id = crypto.randomUUID();
+      await sql`INSERT INTO card_settlements (id, business_id, file_name, settled_on, merchant_id, terminal_id, txn_id, paid_at, txn_type, amount_paise, fee_paise, gst_paise,
+        net_paise, scheme, created_at) VALUES (${id}, ${h.bid}, 'x', '2026-11-02', 'M', 'TT000001', ${'TT_' + id}, ${at}, 'PURCHASE', ${amount}, 0, 0, ${amount}, 'VISA', ${Date.now()})`;
+      return id;
+    };
+    const a = await ins(istToMs(2026, 10, 31, 11, 31, 0), 50000);
+    const b = await ins(istToMs(2026, 10, 31, 11, 32, 0), 44200);
+    await ins(istToMs(2026, 11, 1, 9, 0, 0), 100);
+    const acc = (await o.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await o.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' });
+    await o.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t'),
+      [1, 'S80000002', '01/11/2026', '01/11/2026 9:30:00 AM', '-', 'UPI/900000000042/UPI/xx42@okaxis/B/ICIa', 'CR', 3, 1].join('\t')].join('\n') });
+    const k = (await o.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`)).json.cards;
+    const ns = k.noSwipe.find((x: any) => x.billNo === '2610313');
+    expect(ns.parts).toMatchObject({ credit: null });
+    expect([...ns.parts.paymentIds].sort()).toEqual([a, b].sort());
+    // The two payments are told on the bill, not again on their own.
+    expect(k.needs.map((n: any) => n.payment.id)).not.toContain(a);
+    const card = (await sql`SELECT id FROM transactions WHERE bill_no = '2610313' AND type = 'income'`)[0].id;
+    expect((await o.post(`/businesses/${h.bid}/cards/match`, { sets: [{ paymentIds: [a, b], transactionIds: [card] }] })).json).toMatchObject({ matched: 1, problems: [] });
+    expect((await sql`SELECT match_status FROM transactions WHERE id = ${card}`)[0].match_status).toBeNull();
+  });
+});

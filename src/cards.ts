@@ -7,6 +7,7 @@
 import { all, newId, now, one, stmt, type DB } from './db';
 import type { CardLine } from './cardsettlement';
 import { cashCheck } from './cash';
+import { bankIn, FAR_BACK_MIN, shiftCredits } from './bankEvidence';
 import { addDays, shiftDayOf, shiftWindow } from './time';
 
 /** Adds the payments not already stored (the card company's Transaction ID is unique). */
@@ -272,7 +273,28 @@ export const cardAddedRow = (kind: 'tip' | 'booked', paymentId: string) => JSON.
  * The card picture for one confirmed shift, for its Reconcile: its card bills and the payments swiped in it, what Bookr
  * or a person matched, what needs a person, card bills with no swipe once the report is in, and the settlements.
  */
-export async function shiftCards(db: DB, businessId: string, day: string, cashOverPaise: number | null) {
+/** How near (minutes) a UPI credit or another bill must be to explain a card bill or a machine payment, as for UPI. */
+const NEAR_MIN = 60;
+
+/**
+ * Bills of another mode that a machine payment could be (approved 9 Nov 2026): confirmed sales of the software report
+ * written as UPI (no credit yet) or cash, of the payment's amount, within NEAR_MIN of it, on their own (not paid with
+ * other bills).
+ */
+const writtenOtherwise = (db: DB, businessId: string, day: string) => all<{ id: string; amount_paise: number; bill_no: string | null; shift_day: string; paid_at: number; payment_mode: string }>(db, `
+  SELECT t.id, t.amount_paise, t.bill_no, t.shift_day, sb.paid_at, t.payment_mode FROM transactions t
+  JOIN bill_comparisons c ON c.id = t.comparison_id JOIN software_bills sb ON sb.id = c.software_bill_id
+  LEFT JOIN register_rows rr ON rr.id = c.register_row_id
+  WHERE t.business_id = ? AND t.type = 'income' AND t.source = 'software_report' AND t.shift_day BETWEEN ? AND ?
+    AND ((t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL) OR (t.payment_mode = 'cash' AND t.match_status IS NULL))
+    AND (rr.id IS NULL OR (rr.paid_with_row_id IS NULL AND NOT EXISTS (SELECT 1 FROM register_rows o WHERE o.paid_with_row_id = rr.id)))`,
+  businessId, addDays(day, -1), addDays(day, 1));
+
+/** "UPI on machine" or the card's brand and last 4. */
+export const machineLabel = (p: Pick<CardPayment, 'scheme' | 'card_type' | 'card_last4'>) =>
+  (p.scheme === 'UPI' ? 'UPI on machine' : `${p.scheme ?? p.card_type ?? 'Card'}${p.card_last4 ? ` ··${p.card_last4}` : ''}`);
+
+export async function shiftCards(db: DB, businessId: string, day: string, cashOverPaise: number | null, skipCredits: Set<string> = new Set()) {
   const w = shiftWindow(day);
   const [sales, payments, last, rules] = await Promise.all([
     all<{ id: string; amount_paise: number; bill_no: string | null; paid_at: number | null; match_status: string | null; group_head: string | null; source: string }>(db, `
@@ -299,16 +321,64 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   const { candidates } = cardCandidates(openPays, near);
   const tipFor = (p: CardPayment) => near.filter((s) => s.paid_at != null && p.amount_paise > s.amount_paise && p.amount_paise - s.amount_paise <= s.amount_paise * TIP_SHARE
     && Math.abs(p.paid_at - s.paid_at) <= AUTO_MIN * 60000).sort((a, b) => Math.abs(p.paid_at - a.paid_at!) - Math.abs(p.paid_at - b.paid_at!))[0] ?? null;
-  const pay = (p: CardPayment) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, cardType: p.card_type, cardLast4: p.card_last4, terminalId: p.terminal_id });
+  const pay = (p: CardPayment) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, cardType: p.card_type, cardLast4: p.card_last4, terminalId: p.terminal_id,
+    scheme: p.scheme, upi: p.scheme === 'UPI', label: machineLabel(p) });
+  // Checked against the bank only once it is in for the shift (approved 9 Nov 2026): other UPI credits, either account.
+  const [bank, credits, other] = await Promise.all([bankIn(db, businessId, day), shiftCredits(db, businessId, day), writtenOtherwise(db, businessId, day)]);
+  const usedCredits = new Set(skipCredits);
+  const usedBills = new Set<string>();
+  const usedPays = new Set<string>();
+  const accountOf = new Map((credits.length ? await all<{ id: string; name: string }>(db, `SELECT r.id, a.name FROM bank_rows r JOIN accounts a ON a.id = r.account_id
+    WHERE r.id IN (${credits.map(() => '?').join(',')})`, ...credits.map((c) => c.id)) : []).map((r) => [r.id, r.name]));
   const needs = openPays.map((p) => {
     const list = (candidates.get(p.id) ?? []).slice(0, 5);
     const tip = !list.length && p.txn_type === 'PURCHASE' ? tipFor(p) : null;
-    return { payment: pay(p), why: p.txn_type !== 'PURCHASE' ? 'not_purchase' : list.length ? (list.length > 1 ? 'several' : 'one') : tip ? 'tip' : 'no_bill',
-      candidates: list, tip: tip ? { transactionId: tip.id, billNo: tip.bill_no, amountPaise: tip.amount_paise, paidAt: tip.paid_at, tipPaise: p.amount_paise - tip.amount_paise } : null };
+    // No card bill: a bill of its amount written as UPI or cash near its time, closest first, each bill once.
+    const w2 = !list.length && !tip && p.txn_type === 'PURCHASE' ? other.filter((b) => !usedBills.has(b.id) && b.amount_paise === p.amount_paise
+      && Math.abs(b.paid_at - p.paid_at) <= NEAR_MIN * 60000).sort((a, b) => Math.abs(a.paid_at - p.paid_at) - Math.abs(b.paid_at - p.paid_at))[0] : undefined;
+    if (w2) usedBills.add(w2.id);
+    return { payment: pay(p), why: p.txn_type !== 'PURCHASE' ? 'not_purchase' : list.length ? (list.length > 1 ? 'several' : 'one') : tip ? 'tip' : w2 ? 'written' : 'no_bill',
+      candidates: list, tip: tip ? { transactionId: tip.id, billNo: tip.bill_no, amountPaise: tip.amount_paise, paidAt: tip.paid_at, tipPaise: p.amount_paise - tip.amount_paise } : null,
+      written: w2 ? { transactionId: w2.id, billNo: w2.bill_no, mode: w2.payment_mode, shiftDay: w2.shift_day, paidAt: w2.paid_at, amountPaise: w2.amount_paise,
+        minutes: Math.round(Math.abs(w2.paid_at - p.paid_at) / 60000) } : null };
   });
+  needs.filter((n) => n.why === 'written' || n.why === 'tip').forEach((n) => usedPays.add(n.payment.id));
+  const partsPays = new Set<string>();
   const offered = new Set(needs.flatMap((n) => [...n.candidates.flatMap((k) => k.transactionIds), ...(n.tip ? [n.tip.transactionId] : [])]));
-  const noSwipe = covered ? waiting.filter((x) => !offered.has(x.id)).map((x) => ({ transactionId: x.id, billNo: x.bill_no, amountPaise: x.amount_paise, paidAt: x.paid_at,
-    groupHead: x.group_head, cashFits: cashOverPaise != null && cashOverPaise === x.amount_paise })) : [];
+  // A card bill with no machine payment, once the card report is in. With the bank in too, Bookr looks for what paid it
+  // (approved 9 Nov 2026): a UPI credit of its amount near its time in either account (within NEAR_MIN, or up to
+  // FAR_BACK_MIN before when it is the only one); else two machine payments, or a machine payment and a UPI credit,
+  // that add up to it. Cash over by exactly its amount is said as before.
+  const freePays = openPays.filter((p) => p.txn_type === 'PURCHASE' && !(candidates.get(p.id) ?? []).length);
+  const noSwipe = covered ? waiting.filter((x) => !offered.has(x.id)).map((x) => {
+    let upi: { creditId: string; amountPaise: number; postedAt: number; accountName: string | null; minutes: number | null } | null = null;
+    let parts: { paymentIds: string[]; payments: ReturnType<typeof pay>[]; credit: { creditId: string; amountPaise: number; postedAt: number; accountName: string | null } | null } | null = null;
+    if (bank.covered) {
+      const free = credits.filter((c) => !usedCredits.has(c.id));
+      const near = (at: number) => (x.paid_at == null ? at >= w.from && at < w.to : Math.abs(at - x.paid_at) <= NEAR_MIN * 60000);
+      let fit = free.filter((c) => c.amount === x.amount_paise && near(c.postedAt)).sort((a, b) => Math.abs(a.postedAt - (x.paid_at ?? a.postedAt)) - Math.abs(b.postedAt - (x.paid_at ?? b.postedAt)));
+      if (x.paid_at == null && fit.length > 1) fit = [];
+      if (!fit.length && x.paid_at != null) {
+        const back = free.filter((c) => c.amount === x.amount_paise && c.postedAt <= x.paid_at! && x.paid_at! - c.postedAt <= FAR_BACK_MIN * 60000);
+        if (back.length === 1) fit = back;
+      }
+      if (fit[0]) {
+        usedCredits.add(fit[0].id);
+        upi = { creditId: fit[0].id, amountPaise: fit[0].amount, postedAt: fit[0].postedAt, accountName: accountOf.get(fit[0].id) ?? null,
+          minutes: x.paid_at != null ? Math.round(Math.abs(fit[0].postedAt - x.paid_at) / 60000) : null };
+      } else if (x.paid_at != null) {
+        const ps = freePays.filter((p) => !usedPays.has(p.id) && p.amount_paise < x.amount_paise && Math.abs(p.paid_at - x.paid_at!) <= NEAR_MIN * 60000);
+        outer: for (const a of ps) {
+          for (const b of ps) if (b.id > a.id && a.amount_paise + b.amount_paise === x.amount_paise) { parts = { paymentIds: [a.id, b.id], payments: [pay(a), pay(b)], credit: null }; break outer; }
+          const c = free.find((c) => a.amount_paise + c.amount === x.amount_paise && Math.abs(c.postedAt - x.paid_at!) <= NEAR_MIN * 60000);
+          if (c) { parts = { paymentIds: [a.id], payments: [pay(a)], credit: { creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: accountOf.get(c.id) ?? null } }; break; }
+        }
+        if (parts) { parts.paymentIds.forEach((id) => { usedPays.add(id); partsPays.add(id); }); if (parts.credit) usedCredits.add(parts.credit.creditId); }
+      }
+    }
+    return { transactionId: x.id, billNo: x.bill_no, amountPaise: x.amount_paise, paidAt: x.paid_at, groupHead: x.group_head,
+      cashFits: cashOverPaise != null && cashOverPaise === x.amount_paise, upi, parts, bankCovered: bank.covered };
+  }) : [];
   const done = payments.filter((p) => p.matched).map((p) => {
     const tx = matches.filter((m) => m.settlement_id === p.id).map((m) => sales.find((x) => x.id === m.transaction_id)).filter(Boolean) as typeof sales;
     return { payment: pay(p), byBookr: !p.matched_by, bills: [...new Set(tx.filter((x) => x.source === 'software_report').map((x) => x.bill_no ?? ''))],
@@ -329,12 +399,24 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   }));
   const sum = (xs: { amount_paise?: number; amountPaise?: number }[]) => xs.reduce((a, x) => a + (x.amount_paise ?? x.amountPaise ?? 0), 0);
   const matchedBills = bills.filter((x) => !x.match_status);
+  // What the card side explains on the UPI side, so it is told (and counted) once: credits that paid a card bill, and
+  // UPI bills that were paid on the machine.
+  const explains = {
+    credits: noSwipe.flatMap((x) => [...(x.upi ? [{ id: x.upi.creditId, postedAt: x.upi.postedAt }] : []), ...(x.parts?.credit ? [{ id: x.parts.credit.creditId, postedAt: x.parts.credit.postedAt }] : [])]),
+    bills: needs.flatMap((n) => (n.written?.mode === 'upi' ? [{ id: n.written.transactionId, billNo: n.written.billNo, shiftDay: n.written.shiftDay }] : [])),
+  };
+  const purchases = payments.filter((p) => p.txn_type === 'PURCHASE');
+  // A payment that is part of a bill paid in parts is told on that bill, not on its own.
+  const needsLeft = needs.filter((n) => !partsPays.has(n.payment.id));
   return {
-    day, covered,
+    day, covered, bankCovered: bank.covered, explains,
     strip: { billsPaise: sum(bills), bills: bills.length, matchedPaise: sum(matchedBills), matched: matchedBills.length, byBookr: done.filter((d) => d.byBookr).length,
-      noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(needs.filter((n) => n.why === 'no_bill').map((n) => n.payment)), noBill: needs.filter((n) => n.why === 'no_bill').length },
-    needs, noSwipe, done, settlements,
-    left: needs.length + noSwipe.length,
+      machineCardPaise: purchases.filter((p) => p.scheme !== 'UPI').reduce((a, p) => a + p.amount_paise, 0),
+      machineUpiPaise: purchases.filter((p) => p.scheme === 'UPI').reduce((a, p) => a + p.amount_paise, 0),
+      noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').map((n) => n.payment)),
+      noBill: needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').length },
+    needs: needsLeft, noSwipe, done, settlements,
+    left: needsLeft.length + noSwipe.length,
   };
 }
 

@@ -8,6 +8,8 @@ import { readCardReport } from '../cardsettlement';
 import { cardAddedRow, cardCandidates, cardMatchStatements, cardRules, daysTogether, importCardLines, openSettlementCredits, ruleFor, runCardAuto, settleStatements,
   settlementCredits, unsettledDays, unsettleStatements, waitingCard, type CardPayment } from '../cards';
 import { readMail, readReportFile } from '../mail';
+import { repayStatements } from '../repay';
+import { matchStatements } from '../bank';
 import { syncCardFolder } from '../cardDrive';
 import { folderIdFrom, GoogleError, serviceAccountEmail } from '../google';
 import { addDays, istDay, shiftDayOf } from '../time';
@@ -353,4 +355,49 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/book', requireRole('ba
     ...cardMatchStatements(db, bid, [pid], [tx], c.get('user').id, t, { booked: true, headId }),
   ]);
   return c.json({ ok: true });
+});
+
+// ---- Card machine and the bank (approved 9 Nov 2026): a bill paid another way than written. A person confirms each;
+// the mode change is recorded as "paid another way" (sale.repaid) and the match as usual, so both can be undone.
+
+/** A card bill the machine never got, paid by a UPI credit of its amount: changed to UPI and matched to that credit. */
+cardRoutes.post('/businesses/:businessId/cards/was-upi', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const tids = ids(data.transactionIds, 30);
+  if (!tids.length) fail(400, 'Choose the bill.');
+  const rowId = typeof data.bankRowId === 'string' && isUuid(data.bankRowId) ? data.bankRowId : fail(400, 'Choose the bank credit.');
+  const row = await one<{ id: string; kind: string; direction: string; status: string; amount_paise: number }>(db,
+    'SELECT id, kind, direction, status, amount_paise FROM bank_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  if (!row) fail(404, 'Bank line not found.');
+  if (row.kind !== 'upi_in' || row.direction !== 'CR' || row.status !== 'unmatched') fail(409, 'Choose an open UPI credit.');
+  const sales = await all<{ payment_mode: string }>(db, `SELECT payment_mode FROM transactions WHERE business_id = ? AND id IN (${tids.map(() => '?').join(',')})`, bid, ...tids);
+  if (sales.some((x) => x.payment_mode !== 'card')) fail(409, 'Only a card bill is changed here.');
+  const t = now();
+  const user = c.get('user').id;
+  const r = await repayStatements(db, bid, tids, 'upi', 'Paid by UPI, not on the card machine: the bank credit shows it (Reconcile)', user, t);
+  if (r.amountPaise !== row.amount_paise) fail(409, 'The bank credit is not the bill\'s amount.');
+  const done = await db.batch([...r.statements, ...matchStatements(db, bid, row.id, tids, user, t + 1)]);
+  return c.json({ ok: true, bills: r.bills, auditId: done[r.statements.length - 1]?.meta.last_row_id ?? null });
+});
+
+/** A machine payment whose bill was written as UPI or cash: the bill is changed to card and matched to the payment. */
+cardRoutes.post('/businesses/:businessId/cards/:paymentId/was-card', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const pid = c.req.param('paymentId');
+  if (!isUuid(pid)) fail(404, 'Not found.');
+  const tids = ids((await body(c)).transactionIds, 30);
+  if (!tids.length) fail(400, 'Choose the bill.');
+  const p = await one<CardPayment & { matched: number }>(db, `SELECT *, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = card_settlements.id) AS matched
+    FROM card_settlements WHERE id = ? AND business_id = ?`, pid, bid);
+  if (!p) fail(404, 'Card payment not found.');
+  if (p.matched || p.txn_type !== 'PURCHASE') fail(409, 'This payment is already matched, or is not a purchase.');
+  const t = now();
+  const user = c.get('user').id;
+  const r = await repayStatements(db, bid, tids, 'card', `Paid on the card machine (${p.scheme === 'UPI' ? 'UPI on machine' : 'card'}): the card report shows it (Reconcile)`, user, t);
+  if (r.amountPaise !== p.amount_paise) fail(409, 'The card payment is not the bill\'s amount.');
+  const done = await db.batch([...r.statements, ...cardMatchStatements(db, bid, [pid], tids, user, t + 1)]);
+  return c.json({ ok: true, bills: r.bills, auditId: done[r.statements.length - 1]?.meta.last_row_id ?? null });
 });

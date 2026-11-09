@@ -268,8 +268,11 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/progress', requireRole('sal
       AND posted_at >= ? AND posted_at < ?`, bid, w.from, w.to) : null,
   ]);
   // Card items count too once the shift is confirmed: swipes with no bill, and card bills with no swipe once the report is in.
-  const cardsLeft = bills != null && status?.status === 'confirmed' ? (await shiftCards(db, bid, day, null)).left : 0;
-  return c.json({ rows, toCheck, toDecide, status: status?.status ?? null, bank: bills == null ? null : { billsLeft: bills, creditsLeft: credits, cardsLeft } });
+  const k = bills != null && status?.status === 'confirmed' ? await shiftCards(db, bid, day, null) : null;
+  // What the card side explains counts once, there.
+  const twice = k ? { credits: k.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).length, bills: k.explains.bills.filter((x) => x.shiftDay === day).length } : { credits: 0, bills: 0 };
+  return c.json({ rows, toCheck, toDecide, status: status?.status ?? null,
+    bank: bills == null ? null : { billsLeft: bills - twice.bills, creditsLeft: (credits ?? 0) - twice.credits, cardsLeft: k?.left ?? 0 } });
 });
 
 salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view'), async (c) => {
@@ -286,7 +289,7 @@ salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view')
   // The UPI credit behind a "cash" warning is bank data: only for people who can match the bank.
   const warnings = can(c.get('role'), 'bank.link') ? view.warnings : view.warnings.filter((w) => w.counted).map(({ byUpi: _b, ...w }) => w);
   // "No UPI credit" reads the bank too: same people.
-  const comparisons = can(c.get('role'), 'bank.link') ? view.comparisons : view.comparisons.map(({ bankNone: _n, ...x }) => x);
+  const comparisons = can(c.get('role'), 'bank.link') ? view.comparisons : view.comparisons.map(({ bankNone: _n, machine: _m, ...x }) => x);
   return c.json({ ...view, comparisons, bank, warnings, columnHints: hints, slips });
 });
 

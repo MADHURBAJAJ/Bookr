@@ -265,7 +265,21 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   }
   const slips = await shiftSlips(db, bid, day, leftIds.filter((id) => !hinted.has(id)));
   // The card picture (approved 8 Nov 2026), for a confirmed shift: its card sales are made on confirm.
-  const cards = status === 'confirmed' ? await shiftCards(db, bid, day, await cashOver(db, bid, day)) : null;
+  // Credits the UPI side already offers to a bill are not offered to a card bill as well.
+  const offered = 'clear' in r ? new Set([...r.clear, ...r.likely].map((x) => x.creditId)) : new Set<string>();
+  const cards = status === 'confirmed' ? await shiftCards(db, bid, day, await cashOver(db, bid, day), offered) : null;
+  // What the card side explains is told there, and counted once (approved 9 Nov 2026).
+  if (cards && 'left' in r) {
+    const w = shiftWindow(day);
+    const cr = new Set(cards.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).map((x) => x.id));
+    const bl = new Set(cards.explains.bills.filter((x) => x.shiftDay === day).map((x) => x.id));
+    const crPaise = (await Promise.all([...cr].map((id) => one<{ a: number }>(db, 'SELECT amount_paise AS a FROM bank_rows WHERE id = ?', id)))).reduce((t, x) => t + (x?.a ?? 0), 0);
+    const blPaise = (await Promise.all([...bl].map((id) => one<{ a: number }>(db, 'SELECT amount_paise AS a FROM transactions WHERE id = ?', id)))).reduce((t, x) => t + (x?.a ?? 0), 0);
+    r.strip.creditsLeft -= cr.size; r.strip.creditsLeftPaise -= crPaise;
+    r.strip.billsLeft -= bl.size; r.strip.billsLeftPaise -= blPaise;
+    r.noBill = r.noBill.filter((x) => !cr.has(x.creditId));
+    r.strip.creditsNoBill = r.noBill.length;
+  }
   return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards });
 });
 
