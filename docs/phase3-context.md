@@ -87,6 +87,11 @@ Reconcile's card section is called **Card machine**. Each machine payment shows 
 - Compare sales shows a machine payment of the card side's amount within 60 minutes as a witness for a card-vs-other mode difference (Owner and Accountant only).
 - Not built: a bill paid partly on the machine and partly by UPI credit. It is shown as a note only, because splitting one sale between the card report and the bank needs its own design.
 
+### Reconcile tabs and Save reconcile (approved 9 Nov 2026)
+Reconcile has **Cash**, **UPI** and **Card** tabs. Each lists every bill of the shift paid that way: what the register and the software say, what backs it (a bank credit, a machine payment, the cash count), and each change as before → after (the register as read and as corrected, the side used when they differ, a mode changed later). Each tab counts what is left.
+
+A shift is finished on Reconcile with **Save reconcile** (Owner or Accountant), in place of Confirm shift on Compare sales. Before saving, everything is a draft: differences are decided from the tabs (Use register, Use software, Leave out), and a UPI credit and its bill(s) can be ticked to **Match on save**. Such a choice is kept in `shift_choices`; the credit is held, so no other bill or shift is offered it, and Undo removes the choice. Save books the income as confirming did, makes each chosen match whose credit is still open and adds up (a choice that no longer fits is said and logged), then Bookr's clear matches and the card machine's safe matches. Bills still waiting for the bank or the card machine can be saved and matched afterwards, as before. Compare sales stays as the list of all bills.
+
 ## Not yet (part 2 and later)
 
 - Refunds and voids on the card report: shown, never matched.

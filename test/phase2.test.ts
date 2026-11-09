@@ -2528,3 +2528,50 @@ describe('Reconcile tabs: Cash, UPI and Card (approved 9 Nov 2026)', () => {
     expect(e.card.left).toBe(1);
   });
 });
+
+describe('Save reconcile: matches are drafts until the shift is saved (approved 9 Nov 2026)', () => {
+  it('a match chosen before saving holds its credit, can be undone, and is made on Save', async () => {
+    const h = await hotel();
+    const o = h.clients.owner;
+    await fullShift(h);
+    await decideAll(h);
+    const acc = (await o.post(`/businesses/${h.bid}/accounts`, { name: 'HUF', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await o.put(`/businesses/${h.bid}/bank/${acc}/source`, { receivesUpiLabel: 'UPI Bank 2' });
+    // Bill 2610318 (₹650 by UPI at 3:20 pm): its credit came at 6:45 pm, too late to pair on its own.
+    await o.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [
+      ['No.', 'Transaction ID', 'Value Date', 'Txn Posted Date', 'ChequeNo.', 'Description', 'Cr/Dr', 'Transaction Amount(INR)', 'Available Balance(INR)'].join('\t'),
+      [1, 'S90000001', '31/10/2026', '31/10/2026 6:45:00 PM', '-', 'UPI/900000000051/UPI/xx51@okaxis/B/ICIa', 'CR', 650, 1].join('\t'),
+      [2, 'S90000002', '31/10/2026', '31/10/2026 6:50:00 PM', '-', 'UPI/900000000052/UPI/xx52@okaxis/B/ICIa', 'CR', 651, 1].join('\t')].join('\n') });
+    const [cr] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S90000001'`;
+    const [odd] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S90000002'`;
+    const cmp = (await sql`SELECT id FROM bill_comparisons WHERE bill_no = '2610318'`)[0].id;
+    const url = `/businesses/${h.bid}/shifts/2026-10-31/choices`;
+    const rec = () => o.get(`/businesses/${h.bid}/shifts/2026-10-31/reconcile`).then((r) => r.json);
+    let r = await rec();
+    expect(r.open.bills.map((b: any) => b.billNo)).toContain('2610318');
+    expect(r.save).toMatchObject({ canSave: true, blockers: [] });
+
+    expect((await h.clients.entry_staff.post(url, { bankRowId: cr.id, comparisonIds: [cmp] })).status).toBe(403);
+    expect((await o.post(url, { bankRowId: odd.id, comparisonIds: [cmp] })).status).toBe(409);   // ₹651 is not the bill's ₹650
+    const k = (await h.clients.accountant.post(url, { bankRowId: cr.id, comparisonIds: [cmp] })).json;
+    expect(k.ok).toBe(true);
+    expect((await o.post(url, { bankRowId: cr.id, comparisonIds: [cmp] })).status).toBe(409);   // held once
+    r = await rec();
+    expect(r.choices).toMatchObject([{ bankRowId: cr.id, billNos: ['2610318'], amountPaise: 65000, open: true, by: 'accountant' }]);
+    expect(r.open.bills.map((b: any) => b.billNo)).not.toContain('2610318');
+    expect(r.open.credits.map((c: any) => c.id)).not.toContain(cr.id);
+    // Nothing is matched before saving; Undo removes the draft.
+    expect((await sql`SELECT status FROM bank_rows WHERE id = ${cr.id}`)[0].status).toBe('unmatched');
+    expect((await o.del(`${url}/${k.id}`)).status).toBe(200);
+    expect((await rec()).choices).toEqual([]);
+    const k2 = (await o.post(url, { bankRowId: cr.id, comparisonIds: [cmp] })).json;
+
+    // Save: the sales are booked and the chosen credit is matched; the draft goes.
+    const saved = (await o.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).json;
+    expect(saved.skipped).toEqual([]);
+    expect((await sql`SELECT matched_bank_row, match_status FROM transactions WHERE bill_no = '2610318' AND type = 'income'`)[0]).toEqual({ matched_bank_row: cr.id, match_status: null });
+    expect((await sql`SELECT count(*) AS n FROM shift_choices`)[0].n).toBe(0);
+    expect((await o.del(`${url}/${k2.id}`)).status).toBe(404);
+    expect((await o.post(url, { bankRowId: odd.id, comparisonIds: [cmp] })).status).toBe(409);   // saved: match directly
+  });
+});

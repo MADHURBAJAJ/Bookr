@@ -9,7 +9,7 @@ import { suggestionsFor } from './bank';
 import { cashCheck } from './cash';
 import { explainShift, tableSets, type Card } from './explain';
 import { bookedSalesAround, dayName, pairBooked, plansFor, sameSaleCard, sameSaleCards, type WaitingBill } from './sameSale';
-import { billDistance, creditsForShift, sameBillNo, shiftView, WATCH_DAYS } from './sales';
+import { billDistance, creditsForShift, sameBillNo, shiftChoices, shiftView, WATCH_DAYS } from './sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from './time';
 
 /** Likely: a credit and a bill of the same amount up to three hours apart that the clear pairing did not take. */
@@ -128,7 +128,7 @@ const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Ko
 export async function trialReconcile(db: DB, businessId: string, day: string) {
   const w = shiftWindow(day);
   const base = `/businesses/${businessId}`;
-  const [view, credits, cov, cash, details, rows, pays, typeHeads] = await Promise.all([
+  const [view, credits, cov, cash, details, rows, pays, typeHeads, choices] = await Promise.all([
     shiftView(db, businessId, day),
     creditsForShift(db, businessId, day),
     bankIn(db, businessId, day),
@@ -141,7 +141,10 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
     all<{ billType: string; headId: string; headName: string }>(db, `SELECT b.bill_type AS billType, b.head_id AS headId, h.name AS headName
       FROM bill_type_heads b JOIN heads h ON h.id = b.head_id WHERE b.business_id = ?`, businessId),
+    shiftChoices(db, businessId, day),
   ]);
+  // Bills a person matched on save (approved 9 Nov 2026) are matched, as far as this picture goes.
+  const chosen = new Set(choices.flatMap((k) => k.comparisonIds));
   const detail = new Map(details.map((d) => [d.id, d]));
   const heads = new Set(rows.map((r) => r.paidWith).filter(Boolean));
   const inGroup = (id: string | null | undefined) => !!id && (heads.has(id) || !!rows.find((r) => r.id === id)?.paidWith);
@@ -156,7 +159,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     return [{ c, amount: side.amountPaise as number, grouped: inGroup(c.register?.rowId) }];
   });
   // A bill paid in several goes has one line per credit.
-  const clear = bills.filter((b) => b.c.bank).flatMap((b) => (b.c.bank!.parts ?? [{ creditId: b.c.bank!.creditId, amountPaise: b.c.bank!.amountPaise, postedAt: b.c.bank!.postedAt }]).map((p, i, all) => {
+  const clear = bills.filter((b) => b.c.bank && !chosen.has(b.c.id)).flatMap((b) => (b.c.bank!.parts ?? [{ creditId: b.c.bank!.creditId, amountPaise: b.c.bank!.amountPaise, postedAt: b.c.bank!.postedAt }]).map((p, i, all) => {
     const d = detail.get(p.creditId);
     return { creditId: p.creditId, tranId: d?.tranId ?? null, accountName: d?.accountName ?? null, postedAt: p.postedAt, amountPaise: p.amountPaise,
       vpa: d?.vpa ?? null, remark: d?.remark ?? null, transactionIds: [] as string[], billNos: [b.c.billNo], minutes: b.c.bank!.minutes,
@@ -174,7 +177,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   }
   const settled = new Set(used);
   const headOf = (id: string | null | undefined) => rows.find((r) => r.id === id)?.paidWith ?? id ?? null;
-  const left = bills.filter((b) => !b.c.bank && !(b.grouped && groupsFit.has(headOf(b.c.register?.rowId) as string)));
+  const left = bills.filter((b) => !chosen.has(b.c.id) && !b.c.bank && !(b.grouped && groupsFit.has(headOf(b.c.register?.rowId) as string)));
   const billOf = new Set<string>();
   const cards: Card[] = [];
 
@@ -284,6 +287,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     strip: { upiSalesPaise: bills.reduce((t, b) => t + b.amount, 0), bills: bills.length, matchedPaise: bills.reduce((t, b) => t + b.amount, 0) - sum(openBills),
       billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits), creditsNoBill: openCredits.filter((c) => c.noBill).length },
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit, noBill: [], unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
+    choices, save: { blockers: view.blockers, canSave: view.canConfirm },
   };
 }
 

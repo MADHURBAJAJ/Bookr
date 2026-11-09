@@ -777,7 +777,7 @@ function confirmMatchStatements(db: DB, businessId: string, rowId: string, txs: 
 }
 
 /** Confirms a shift in one batch: approved income rows, the shift marked confirmed, audit rows. */
-export async function confirmShift(db: DB, businessId: string, day: string, userId: string): Promise<{ rows: number; totalPaise: number; matched: number } | { blockers: string[] }> {
+export async function confirmShift(db: DB, businessId: string, day: string, userId: string): Promise<{ rows: number; totalPaise: number; matched: number; skipped: string[] } | { blockers: string[] }> {
   await refreshComparisons(db, businessId, day, userId);
   const view = await shiftView(db, businessId, day);
   if (view.status === 'confirmed') return { blockers: ['This shift is already confirmed.'] };
@@ -807,11 +807,29 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       VALUES (?, ?, 'shift.confirm', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id,
       JSON.stringify({ shiftDay: day, incomeRows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0) }), t),
   ];
+  let matched = 0;
+  // Matches a person chose on Reconcile before saving (approved 9 Nov 2026): each credit pays its bills' UPI sales when
+  // the credit is still open and they add up to it. Each choice goes once saved; one that no longer fits is said.
+  const choices = await shiftChoices(db, businessId, day);
+  const chosen = new Set<string>();
+  const skipped: string[] = [];
+  for (const k of choices) {
+    const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && k.comparisonIds.includes(x.r.c.id));
+    if (k.open && upi.length && upi.reduce((a, x) => a + x.amount, 0) === k.amountPaise) {
+      statements.push(...confirmMatchStatements(db, businessId, k.bankRowId, upi.map(({ id, amount }) => ({ id, amount })), userId, t + 1 + matched));
+      matched += 1;
+      k.comparisonIds.forEach((id) => chosen.add(id));
+    } else skipped.push(k.billNos.join(' + '));
+  }
+  if (choices.length) {
+    statements.push(stmt(db, 'DELETE FROM shift_choices WHERE business_id = ? AND shift_day = ?', businessId, day));
+    if (skipped.length) statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'shift.choices_skipped', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id, JSON.stringify({ shiftDay: day, bills: skipped }), t));
+  }
   // The credits shown as evidence are matched to the bills they paid (approved 5 Nov 2026), by the person confirming.
   // Only a bill counted as one UPI payment of the credit's amount. Each match gets its own time, so Unmatch undoes one.
-  let matched = 0;
   for (const c of view.comparisons) {
-    if (!c.bank) continue;
+    if (!c.bank || chosen.has(c.id)) continue;
     const upi = rows.map((r, i) => ({ r, id: ids[i] })).filter((x) => x.r.c.id === c.id && x.r.mode === 'upi');
     // Paid in several goes: each UPI payment is matched to its own credit, only when every one has its credit.
     if (c.bank.parts) {
@@ -835,6 +853,7 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   for (const g of view.paidGroups) {
     if (!g.bank) continue;
     const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && x.r.c.register_row_id && paidWith.get(x.r.c.register_row_id) === g.id);
+    if (upi.some((x) => chosen.has(x.r.c.id))) continue;
     if (!upi.length || upi.reduce((a, x) => a + x.amount, 0) !== g.bank.amountPaise) continue;
     statements.push(...confirmMatchStatements(db, businessId, g.bank.creditId, upi.map(({ id, amount }) => ({ id, amount })), userId, t + 1 + matched));
     matched += 1;
@@ -842,7 +861,7 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   // Bills a person marked as one sale with a credit booked directly: the booking goes, and the sale keeps its day.
   const handled = new Set(view.comparisons.filter((c) => c.bank).map((c) => c.id));
   for (const plan of await plansFor(db, businessId, day)) {
-    if (handled.has(plan.comparisonId)) continue;
+    if (handled.has(plan.comparisonId) || chosen.has(plan.comparisonId)) continue;
     const at = rows.findIndex((r) => r.c.id === plan.comparisonId && r.mode === 'upi');
     if (at < 0 || rows.filter((r) => r.c.id === plan.comparisonId).length !== 1) continue;
     const [booked, row] = await Promise.all([bookedTx(db, businessId, plan.rowId),
@@ -855,7 +874,28 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   }
   if (matched) statements.push(...settleOnCredit(db, businessId));
   await db.batch(statements);
-  return { rows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0), matched };
+  return { rows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0), matched, skipped };
+}
+
+/** Matches chosen on Reconcile before saving, with their credit (still open or not) and their bills' numbers. */
+export async function shiftChoices(db: DB, businessId: string, day: string) {
+  const list = await all<{ id: string; bank_row_id: string; comparison_ids: string; created_at: number; by: string | null; amount_paise: number; posted_at: number;
+    status: string; account: string | null }>(db, `
+    SELECT k.id, k.bank_row_id, k.comparison_ids, k.created_at, u.name AS by, r.amount_paise, r.posted_at, r.status, a.name AS account
+    FROM shift_choices k JOIN bank_rows r ON r.id = k.bank_row_id LEFT JOIN accounts a ON a.id = r.account_id LEFT JOIN users u ON u.id = k.created_by
+    WHERE k.business_id = ? AND k.shift_day = ? ORDER BY k.created_at`, businessId, day);
+  const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
+  const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
+  return list.map((k) => {
+    const comparisonIds = JSON.parse(k.comparison_ids) as string[];
+    return { id: k.id, bankRowId: k.bank_row_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, postedAt: k.posted_at,
+      accountName: k.account, open: k.status === 'unmatched', by: k.by, at: k.created_at };
+  });
+}
+
+/** What a set of bills would book as UPI on saving, by their decisions now: for checking a chosen match adds up. */
+export async function plannedUpiPaise(db: DB, businessId: string, day: string, comparisonIds: string[]) {
+  return (await plannedRows(db, businessId, day)).filter((r) => r.mode === 'upi' && comparisonIds.includes(r.c.id)).reduce((a, r) => a + r.amount, 0);
 }
 
 /** Owner only (checked by the route). Removes the rows confirmation made, keeping them in the audit log. */

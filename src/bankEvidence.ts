@@ -153,7 +153,8 @@ export const shiftCredits = (db: DB, businessId: string, day: string) => {
   const w = shiftWindow(day);
   return all<EvidenceCredit>(db, `SELECT r.id, r.amount_paise AS amount, r.posted_at AS postedAt, s.receives_upi_label AS label FROM bank_rows r
     LEFT JOIN bank_sources s ON s.account_id = r.account_id
-    WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ? ORDER BY r.posted_at`,
+    WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
+      AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`,
     businessId, w.from - 3600e3, w.to + 3 * 3600e3);
 };
 

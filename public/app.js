@@ -185,7 +185,7 @@ async function wireShiftBar(biz, days = null) {
   set('compare', p.status === 'confirmed' ? 'confirmed ✓' : p.toDecide ? `${p.toDecide} to decide` : 'ready to confirm', p.status === 'confirmed' ? 'ok' : p.toDecide ? 'wait' : '');
   if (p.bank) {
     const left = p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0);
-    set('reconcile', p.status !== 'confirmed' ? 'after confirming' : left ? `${left} left` : '✓', p.status !== 'confirmed' ? '' : left ? 'wait' : 'ok');
+    set('reconcile', p.status !== 'confirmed' ? 'not saved' : left ? `${left} left` : '✓', p.status !== 'confirmed' ? '' : left ? 'wait' : 'ok');
   }
 }
 
@@ -2850,7 +2850,7 @@ async function compareView(biz, day) {
         <div class="cmp-day">
           ${status}
         </div>
-        ${canDecide && !confirmed ? html`<button class="btn" id="confirm" ${v.canConfirm ? '' : 'aria-disabled="true"'} title="${v.canConfirm ? 'Turn this shift\'s sales into approved income' : 'Show what is left'}">${v.canConfirm ? 'Confirm shift' : `Confirm shift · ${open.length ? `${open.length} to decide` : `${v.blockers.length} left`}`}</button>` : ''}
+        ${canDecide && !confirmed ? html`<a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${day}" title="The shift is saved on Reconcile">Save on Reconcile ›</a>` : ''}
       </div>
       <div class="cmp-inputs">
         <span class="tchip ${v.gaps.length ? 'warn' : 'ok'}">Software · ${v.softwareBills} bills${v.gaps.length ? ` · ${missingHours} h missing` : ' · 8 am to 8 am'}</span>
@@ -3730,6 +3730,30 @@ const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist"
 const RECONCILE_VIEW_KEY = 'bookr.reconcile.view';
 const reconcileViewPref = () => { try { return localStorage.getItem(RECONCILE_VIEW_KEY) === 'open' ? 'open' : 'cards'; } catch { return 'cards'; } };
 
+/** Save reconcile (approved 9 Nov 2026): what still stops saving, and the button. Saving books the shift's income and makes every match. */
+function saveBar(biz, r) {
+  const s = r.save ?? { blockers: [], canSave: false };
+  const can = biz.actions.includes('sales.decide');
+  return html`<section class="card" style="gap:8px;border-color:var(--teal)">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div><strong>Not saved yet.</strong> <span class="note">Matches and decisions here are drafts. Save books the shift's income and makes every match; bills still waiting for the bank or the card machine can be matched after.</span></div>
+      ${can ? html`<button class="btn" type="button" id="savereconcile" ${s.canSave ? '' : 'disabled'}>Save reconcile</button>` : html`<span class="note">Owner or Accountant saves.</span>`}
+    </div>
+    ${s.blockers.length ? html`<div class="cmp-warn"><strong>Before saving:</strong><ul style="margin:4px 0 0 18px">${s.blockers.map((b) => html`<li>${b}</li>`)}</ul></div>` : ''}
+    <div class="form-msg" id="savemsg"></div></section>`;
+}
+
+/** Matches chosen before saving: made on Save, or undone here. */
+function choicesHtml(r) {
+  if (!r.choices?.length) return '';
+  return html`<section class="card" style="gap:6px"><div class="lane-h"><strong>Matched on save</strong> <span class="chip">${r.choices.length}</span></div>
+    ${r.choices.map((k) => html`<div class="ent-line"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${k.billNos.join(' + ')}</strong></span>
+      <span class="tiny">Bank ₹ ${money(k.amountPaise)} at ${when(k.postedAt)}${k.accountName ? ` · ${k.accountName}` : ''}${k.by ? ` · chosen by ${k.by}` : ''}</span>
+      ${k.open ? '' : html`<span class="chip bad">credit taken elsewhere</span>`}
+      <button class="btn plain dchip" type="button" data-unchoose="${k.id}" style="margin-left:auto">Undo</button></div></div>`)}
+    <div class="note">These are made when you save the shift.</div></section>`;
+}
+
 const RECONCILE_TAB_KEY = 'bookr.reconcile.tab';
 const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
@@ -3745,6 +3769,10 @@ function entriesHtml(biz, day, t, mode) {
     <div class="tiny">Register ${side(e.register)} · Software ${side(e.software)}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${day}">Open row</button>` : ''}</div>
     ${e.evidence ? html`<div class="tiny" style="color:var(--teal)">✓ ${e.evidence}</div>` : e.state === 'waiting' ? html`<div class="tiny" style="color:#92400E">${mode === 'upi' ? 'No bank credit yet' : 'No machine payment yet'}</div>` : ''}
     ${e.edits.map((x) => html`<div class="tiny" style="color:${/to decide$/.test(x.text) ? 'var(--danger)' : '#5B21B6'}">✎ ${x.text}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}</div>`)}
+    ${e.state === 'decide' && biz.actions.includes('sales.decide') ? html`<div class="form-row" style="gap:6px;margin-top:4px">
+      ${e.register ? html`<button class="btn plain dchip" type="button" data-decide="use_register" data-cmp="${e.comparisonId}">Use register</button>` : ''}
+      ${e.software ? html`<button class="btn plain dchip" type="button" data-decide="use_software" data-cmp="${e.comparisonId}">Use software</button>` : ''}
+      <button class="btn plain dchip" type="button" data-decide="leave_out" data-cmp="${e.comparisonId}">Leave out…</button></div>` : ''}
   </div>`;
   const group = (state, title) => {
     const list = t.entries.filter((e) => e.state === state);
@@ -3806,7 +3834,7 @@ async function reconcileView(biz, dayArg) {
   const waiting = v.sales.filter((x) => !x.bankRowId);
   const clearCard = r.clear.length ? html`<div class="rv-card" id="laneclear">
     <div class="lane-h"><strong>${r.clear.length} bill${r.clear.length === 1 ? '' : 's'} match the bank exactly</strong><span class="tchip ok">${CARD_TAGS.clear_matches}</span></div>
-    <div class="note">Same amount, closest in time, within an hour; each bill and credit used once.${r.confirmed ? '' : ' They are matched when you confirm the shift.'}</div>
+    <div class="note">Same amount, closest in time, within an hour; each bill and credit used once.${r.confirmed ? '' : ' They are matched when you save.'}</div>
     ${r.confirmed ? html`<div class="form-row" style="gap:6px"><button class="btn" type="button" id="matchclear" style="min-height:36px">Match all ${r.clear.length}</button></div>` : ''}
     <details class="cmp-fold"><summary>See the list</summary>${pairTable(r.clear, r.confirmed ? 'data-clear' : '', true)}</details>
     <div class="form-msg" id="clearmsg"></div></div>` : '';
@@ -3831,7 +3859,7 @@ async function reconcileView(biz, dayArg) {
   const fixLine = (k) => (k ? html`<div data-card="${k.key}" style="padding:0 10px 8px 40px"><div class="tiny" style="color:#92400E">${k.title}</div>
     <button class="btn plain dchip" type="button" data-cardact="${k.key}" data-i="0" style="margin-top:4px">${k.actions[0].label}</button><div class="form-msg"></div></div>` : '');
   const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
-    <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick entries to compare their totals; matching by hand starts after confirming.</div>
+    <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick a credit and its bill(s) to match them on save, or to compare their totals.</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
       <div><strong>Credits not matched yet</strong> <span class="chip">${r.open.credits.length}</span>${covered && r.open.credits.length ? html`<div class="tiny">${r.open.credits.filter((c) => c.why === 'no_bill').length} with no bill of that amount, ${r.open.credits.filter((c) => c.why === 'extra').length} extra money of a common amount, ${r.open.credits.filter((c) => c.why === 'unpaired').length} that could belong to a bill still without a credit. Each is marked.</div>` : ''}
         ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}</div>
@@ -3866,7 +3894,7 @@ async function reconcileView(biz, dayArg) {
       <div class="cmp-top">
         <div class="cmp-day">
           ${done ? html`<span class="chip ok">UPI reconciled</span>` : html`<span class="chip wait">Left to explain: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched</span>`}
-          ${r.confirmed ? '' : html`<span class="chip">Not confirmed</span>`}
+          ${r.confirmed ? html`<span class="chip ok">Saved</span>` : html`<span class="chip">Not saved</span>`}
         </div>
         <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${day}&to=${day}">Bank sync</a>
       </div>
@@ -3878,12 +3906,13 @@ async function reconcileView(biz, dayArg) {
       </div>
     </section>
     <div id="recmsg"></div>
-    ${r.confirmed ? html`<div class="note">Confirmed shift: each fix here is a recorded correction, and can be undone.</div>`
-      : html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px"><strong>Trial reconcile.</strong> Nothing is saved until you <a href="#/b/${biz.id}/compare/${day}">confirm the shift on Compare sales</a>. Corrections here change the register row, and only Owner and Accountant decide differences. It is optional, and never stops a confirm.</div>`}
+    ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>`
+      : saveBar(biz, r)}
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
     <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
     ${doneFold}
+    ${choicesHtml(r)}
     ${entriesHtml(biz, day, ent.upi, 'upi')}
     </div>`));
   wireShell();
@@ -3893,6 +3922,30 @@ async function reconcileView(biz, dayArg) {
     app.querySelectorAll('[data-rpanel]').forEach((x) => { x.hidden = x.dataset.rpanel !== b.dataset.rtab; });
   }));
   wireCashPanel(biz, day, reload, document.getElementById('recmsg'));
+  const saveMsg = document.getElementById('savemsg');
+  document.getElementById('savereconcile')?.addEventListener('click', async (e) => {
+    const n = (r.choices?.length ?? 0) + (r.clear?.length ?? 0);
+    if (!confirm(`Save the ${dayLabel(day)} shift? Its sales are booked as income${n ? `, and ${n} match${n === 1 ? ' is' : 'es are'} made` : ''}. Only an Owner can reopen it.`)) return;
+    e.currentTarget.disabled = true;
+    try {
+      const res = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {});
+      await reload();
+      doneToast(`Saved: ${res.rows} sale${res.rows === 1 ? '' : 's'} booked, ${res.matched} matched to the bank${res.cardMatched ? `, ${res.cardMatched} to the card machine` : ''}.${res.skipped?.length ? ` Not matched (the credit no longer fits): ${res.skipped.join(', ')}.` : ''}`);
+    } catch (err) { e.currentTarget.disabled = false; showError(saveMsg, err); }
+  });
+  app.querySelectorAll('[data-unchoose]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${b.dataset.unchoose}`, {}); await reload(); }
+    catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); }
+  }));
+  app.querySelectorAll('[data-decide]').forEach((b) => b.addEventListener('click', async () => {
+    const decision = b.dataset.decide;
+    let note;
+    if (decision === 'leave_out') { note = (prompt('Leave this bill out of the shift. Why? (e.g. cancelled in POS)') ?? '').trim(); if (!note) return; }
+    b.disabled = true;
+    try { await apiFull('PUT', `/businesses/${biz.id}/comparisons/${b.dataset.cmp}`, note ? { decision, note } : { decision }); await reload(); }
+    catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  }));
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz, days);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {
@@ -3919,6 +3972,18 @@ async function reconcileView(biz, dayArg) {
     if (!box) return;
     const { credits, bills } = pickedTrial();
     if (!credits.length || !bills.length) { box.innerHTML = ''; return; }
+    // One credit and bills of exactly its amount: matched when the shift is saved (approved 9 Nov 2026).
+    const billsTotal = bills.reduce((t, x) => t + x.amountPaise, 0);
+    if (credits.length === 1 && billsTotal === credits[0].amountPaise) {
+      box.innerHTML = html`<div class="form-row" style="gap:8px;align-items:center;margin-top:6px"><button class="btn" type="button" id="choosego" style="min-height:36px">Match on save: ₹ ${money(billsTotal)} ↔ ${bills.map((x) => x.billNo).join(' + ')}</button>
+        <span class="note">Made when you save the shift; Undo until then.</span></div><div class="form-msg"></div>`.__html;
+      document.getElementById('choosego').addEventListener('click', async (e) => {
+        e.currentTarget.disabled = true;
+        try { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/choices`, { bankRowId: credits[0].id, comparisonIds: bills.map((x) => x.id) }); await reload(); }
+        catch (err) { e.currentTarget.disabled = false; showError(box.querySelector('.form-msg'), err); }
+      });
+      return;
+    }
     const b = bills[0];
     const why = bills.length > 1 ? 'Tick one bill: several bills paid by one credit are bills paid together, written on the row with the payment.'
       : b.grouped ? 'This bill is paid together with others: correct the payment on the row that holds it (Open row).'

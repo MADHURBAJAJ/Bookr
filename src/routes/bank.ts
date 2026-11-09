@@ -14,7 +14,7 @@ import { cashOver, shiftCards } from '../cards';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
-import { billDistance, WATCH_DAYS } from '../sales';
+import { billDistance, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
@@ -243,6 +243,58 @@ bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole
   const id = Number(c.req.param('auditId'));
   if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
   await c.env.DB.batch(await undoRepayStatements(c.env.DB, c.get('businessId'), id, c.get('user').id, now()));
+  return c.json({ ok: true });
+});
+
+// ---- Save reconcile (approved 9 Nov 2026): before a shift is saved, a match is a draft kept per shift, made on Save.
+
+bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const rowId = typeof data.bankRowId === 'string' && isUuid(data.bankRowId) ? data.bankRowId : fail(400, 'Choose the bank credit.');
+  const cids = Array.isArray(data.comparisonIds) ? [...new Set(data.comparisonIds.filter((x): x is string => typeof x === 'string' && isUuid(x)))].slice(0, 30) : [];
+  if (!cids.length) fail(400, 'Choose the bill.');
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  if (!shift) fail(404, 'Unknown shift.');
+  if (shift.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
+  const row = await one<{ kind: string; direction: string; status: string; amount_paise: number }>(db,
+    'SELECT kind, direction, status, amount_paise FROM bank_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  if (!row) fail(404, 'Bank line not found.');
+  if (row.kind !== 'upi_in' || row.direction !== 'CR' || row.status !== 'unmatched') fail(409, 'Choose an open UPI credit.');
+  const found = await all<{ id: string }>(db, `SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
+  if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
+  const taken = (await shiftChoices(db, bid, day)).some((k) => k.comparisonIds.some((x) => cids.includes(x)));
+  if (taken) fail(409, 'A bill is already matched on save.');
+  const upi = await plannedUpiPaise(db, bid, day, cids);
+  if (upi !== row.amount_paise) fail(409, upi ? 'The credit is not what these bills take by UPI.' : 'These bills have no UPI payment: decide or correct them first.');
+  const id = newId();
+  try {
+    await db.batch([
+      stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, bank_row_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'bank_match', ?, ?, ?, ?)`,
+        id, bid, day, rowId, JSON.stringify(cids), c.get('user').id, now()),
+      stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', rowId, null, JSON.stringify({ shiftDay: day, comparisonIds: cids }), now()),
+    ]);
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e))) fail(409, 'This credit is already matched on save.');
+    throw e;
+  }
+  return c.json({ ok: true, id });
+});
+
+bankRoutes.delete('/businesses/:businessId/shifts/:day/choices/:id', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const k = await one<{ bank_row_id: string; comparison_ids: string; shift_day: string }>(db, 'SELECT bank_row_id, comparison_ids, shift_day FROM shift_choices WHERE id = ? AND business_id = ?', id, bid);
+  if (!k || k.shift_day !== c.req.param('day')) fail(404, 'Not found, or already saved.');
+  await db.batch([
+    stmt(db, 'DELETE FROM shift_choices WHERE id = ?', id),
+    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice_undone', k.bank_row_id, JSON.stringify({ shiftDay: k.shift_day, comparisonIds: JSON.parse(k.comparison_ids) }), null, now()),
+  ]);
   return c.json({ ok: true });
 });
 
