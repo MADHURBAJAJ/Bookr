@@ -4072,10 +4072,10 @@ async function writeBankOnRow(biz, b, credits, { fix = false, mode = 'upi', amou
   const others = r.payments.filter((p) => p.mode !== mode);
   const labelFor = (c) => { if (mode !== 'upi') return upi[0]?.columnLabel ?? 'Card'; const had = upi.find((p) => !c.label || norm(p.columnLabel) === norm(c.label) || norm(p.columnLabel) === 'upi'); return had ? had.columnLabel : c.label ?? upi[0]?.columnLabel ?? 'UPI'; };
   const paid = others.reduce((t, p) => t + p.amountPaise, 0) + credits.reduce((t, c) => t + c.amountPaise, 0);
-  const payload = { paidWithRowId: null, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise - r.tipPaise), remarks: r.remarks, status: r.status,
+  const payload = { paidWithRowId: null, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
     payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
   const put = (x) => apiFull('PUT', `${base}/register-rows/${r.id}`, x);
-  const kept = r.discountPaise - r.tipPaise;
+  const kept = r.discountPaise;
   // amountPaise: the software's bill stands (Stage 6): the row takes its amount, and amount − paid is the discount.
   await put({ ...payload, ...(amountPaise != null ? { amount: rupeesForInput(amountPaise), discount: rupeesForInput(amountPaise - paid) } : fix ? { amount: rupeesForInput(paid + kept), discount: rupeesForInput(kept) } : { discount: rupeesForInput(r.amountPaise - paid) }),
     payments: [...others.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })),
@@ -4742,7 +4742,7 @@ async function paidByUpiClick(biz, day, o, b, reload) {
     if (!row) throw new Error(`Bill ${o.billNo}'s row was not found. Reload the page.`);
     const same = row.payments.filter((x) => x.mode === o.mode && x.amountPaise === o.amountPaise);
     if (row.paidWithRowId || row.payments.length !== 1 || same.length !== 1) throw new Error(`Bill ${o.billNo}'s row has changed or has more than one payment: correct it on its row.`);
-    const payload = { paidWithRowId: row.paidWithRowId, billNo: row.billNo, billType: row.billType, amount: rupeesForInput(row.amountPaise), discount: rupeesForInput(row.discountPaise - row.tipPaise),
+    const payload = { paidWithRowId: row.paidWithRowId, billNo: row.billNo, billType: row.billType, amount: rupeesForInput(row.amountPaise), discount: rupeesForInput(row.discountPaise),
       remarks: row.remarks, status: row.status, payments: row.payments.map((x) => ({ mode: x.mode, columnLabel: x.columnLabel, amount: rupeesForInput(x.amountPaise) })) };
     const put = (x) => apiFull('PUT', `${base}/register-rows/${row.id}`, x);
     await put({ ...payload, payments: [{ mode: 'upi', columnLabel: o.label ?? 'UPI', amount: rupeesForInput(o.amountPaise) }] });
@@ -4861,7 +4861,7 @@ function wireTrialCards(biz, day, k, reload) {
       if (!r) throw new Error(`Bill ${wr.billNo}'s row was not found. Reload the page.`);
       const same = r.payments.filter((x) => x.mode === wr.mode && x.amountPaise === wr.amountPaise);
       if (r.paidWithRowId || r.payments.length !== 1 || same.length !== 1) throw new Error(`Bill ${wr.billNo}'s row has changed or has more than one payment: correct it on its row.`);
-      const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise - r.tipPaise), remarks: r.remarks, status: r.status,
+      const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
         payments: r.payments.map((x) => ({ mode: x.mode, columnLabel: x.columnLabel, amount: rupeesForInput(x.amountPaise) })) };
       const put = (x) => apiFull('PUT', `${base}/register-rows/${r.id}`, x);
       await put({ ...payload, payments: [{ mode: 'card', columnLabel: 'Card', amount: rupeesForInput(wr.amountPaise) }] });
