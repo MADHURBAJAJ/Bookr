@@ -3780,7 +3780,58 @@ async function applySlip(biz, a) {
  * Before confirming: the bill's UPI payments become the ticked credits (column kept when it fits the credit's account,
  * else the account's), other payments stay, and amount − paid is the discount (negative: a tip). Returns the undo.
  */
-async function writeBankOnRow(biz, b, credits) {
+// Multi-pair tray (approved 10 Nov 2026): Bookr pairs only what a person ticked. Same amount first (closest time),
+// then bills paid together whose total is the credit, then a gap of up to ₹10 on one bill (a tip, a discount or a
+// misread amount, for the person to choose). Several bills not paid together are shown, never matched.
+const TRAY_GAP = 1000;
+const canGap = (b, d) => d !== 0 && Math.abs(d) <= TRAY_GAP && !!b.rowId && !b.grouped;
+function subsetOf(bs, target) {
+  if (bs.length > 12) return null;
+  const pick = (from, k, left, got) => {
+    if (!k) return left === 0 ? got : null;
+    for (let i = from; i < bs.length; i++) { const r = pick(i + 1, k - 1, left - bs[i].amountPaise, [...got, bs[i]]); if (r) return r; }
+    return null;
+  };
+  for (let k = 2; k <= 4; k++) { const r = pick(0, k, target, []); if (r) return r; }
+  return null;
+}
+function pairTicked(credits, bills, forced = {}) {
+  const byId = new Map(bills.map((b) => [b.id, b]));
+  const free = new Set(bills.map((b) => b.id));
+  const freeBills = () => [...free].map((id) => byId.get(id));
+  const dist = (c, b) => (b.paidAt == null ? 1e15 : Math.abs(c.postedAt - b.paidAt));
+  const pairs = [];
+  const take = (c, bs, kind) => { bs.forEach((b) => free.delete(b.id)); pairs.push({ credit: c, bills: bs, kind, diff: c.amountPaise - bs.reduce((t, b) => t + b.amountPaise, 0) }); };
+  const pass = (list, fn) => list.filter((c) => { const got = fn(c); if (got) take(c, got.bills, got.kind); return !got; });
+  let left = pass([...credits].sort((a, b) => a.postedAt - b.postedAt), (c) => {
+    const b = forced[c.id] && free.has(forced[c.id]) ? byId.get(forced[c.id]) : null;
+    if (!b) return null;
+    const d = c.amountPaise - b.amountPaise;
+    return { bills: [b], kind: d === 0 ? 'exact' : canGap(b, d) ? 'gap' : 'off' };
+  });
+  left = pass(left, (c) => { const b = freeBills().filter((x) => x.amountPaise === c.amountPaise).sort((x, y) => dist(c, x) - dist(c, y))[0]; return b && { bills: [b], kind: 'exact' }; });
+  left = pass(left, (c) => {
+    const groups = new Map();
+    for (const b of freeBills()) if (b.group) groups.set(b.group, [...(groups.get(b.group) ?? []), b]);
+    const bs = [...groups.values()].find((g) => g.length > 1 && g.reduce((t, b) => t + b.amountPaise, 0) === c.amountPaise);
+    return bs && { bills: bs, kind: 'group' };
+  });
+  left = pass(left, (c) => {
+    const b = freeBills().filter((x) => canGap(x, c.amountPaise - x.amountPaise))
+      .sort((x, y) => Math.abs(c.amountPaise - x.amountPaise) - Math.abs(c.amountPaise - y.amountPaise) || dist(c, x) - dist(c, y))[0];
+    return b && { bills: [b], kind: 'gap' };
+  });
+  left = pass(left, (c) => { const bs = subsetOf(freeBills().filter((b) => !b.grouped), c.amountPaise); return bs && { bills: bs, kind: 'loose' }; });
+  return { pairs, credits: left, bills: freeBills() };
+}
+/** Exact pairs nothing else competes for: the amount is on one open credit and one open bill only. */
+function lonePairs(open) {
+  const n = (xs, a) => xs.filter((x) => x.amountPaise === a).length;
+  return open.credits.filter((c) => n(open.credits, c.amountPaise) === 1 && n(open.bills, c.amountPaise) === 1)
+    .map((c) => ({ credit: c, bill: open.bills.find((b) => b.amountPaise === c.amountPaise) }));
+}
+// fix: the bill's amount was misread, so the amount moves to what the bank got and the discount stays (tray, 10 Nov 2026).
+async function writeBankOnRow(biz, b, credits, { fix = false } = {}) {
   const base = `/businesses/${biz.id}`;
   const u = await api('GET', `${base}/uploads/${b.uploadId}`);
   const r = u.rows.find((x) => x.id === b.rowId);
@@ -3794,7 +3845,8 @@ async function writeBankOnRow(biz, b, credits) {
   const payload = { paidWithRowId: null, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise - r.tipPaise), remarks: r.remarks, status: r.status,
     payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
   const put = (x) => apiFull('PUT', `${base}/register-rows/${r.id}`, x);
-  await put({ ...payload, discount: rupeesForInput(r.amountPaise - paid),
+  const kept = r.discountPaise - r.tipPaise;
+  await put({ ...payload, ...(fix ? { amount: rupeesForInput(paid + kept), discount: rupeesForInput(kept) } : { discount: rupeesForInput(r.amountPaise - paid) }),
     payments: [...others.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })),
       ...credits.map((c) => ({ mode: 'upi', columnLabel: labelFor(c), amount: rupeesForInput(c.amountPaise) }))] });
   return () => put(payload);
@@ -4077,15 +4129,16 @@ async function reconcileView(biz, dayArg) {
   // A register slip or wrong column the bank shows, with its button, under the entries it explains (7 Nov 2026).
   const fixLine = (k) => (k ? html`<div data-card="${k.key}" style="padding:0 10px 8px 40px"><div class="tiny" style="color:#92400E">${k.title}</div>
     <button class="btn plain dchip" type="button" data-cardact="${k.key}" data-i="0" style="margin-top:4px">${k.actions[0].label}</button><div class="form-msg"></div></div>` : '');
+  const lone = r.open ? lonePairs(r.open) : [];
   const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
-    <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick a credit and its bill(s) to match them on save, or to compare their totals.</div>
+    <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick credits and their bills, as many as you like: Bookr pairs what you tick (same amount first, then closest time) and you match all the pairs on save in one go.${lone.length > 1 ? html` <button type="button" class="linkbtn" id="tickexact">Tick all exact pairs (${lone.length})</button>` : ''}</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
       <div><strong>Credits not matched yet</strong> <span class="chip">${r.open.credits.length}</span>${covered && r.open.credits.length ? html`<div class="tiny">${r.open.credits.filter((c) => c.why === 'no_bill').length} with no bill of that amount, ${r.open.credits.filter((c) => c.why === 'extra').length} extra money of a common amount, ${r.open.credits.filter((c) => c.why === 'unpaired').length} that could belong to a bill still without a credit. Each is marked.</div>` : ''}
         ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}</div>
       <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
         ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
     </div>
-    <div id="trialsum" class="note">Tick entries to compare them.</div><div id="trialfix"></div></section>` : '';
+    <div id="trialsum" class="note">Tick entries to compare them.</div><div id="trialfix"></div><div class="form-msg" id="traymsg"></div></section>` : '';
   const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
       <div class="scroll"><table style="min-width:620px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th><th></th></tr></thead><tbody>
         ${r.done.map((x) => html`<tr><td class="mono">${x.bills.join(' + ')}</td><td class="amount">${money(x.creditPaise ?? x.billsPaise)}</td><td>${when(x.postedAt)}<div class="tiny">${x.accountName}</div></td>
@@ -4280,38 +4333,135 @@ async function reconcileView(biz, dayArg) {
   // Fixes and open entries work on both sides of confirming; the matching below needs a confirmed shift.
   wireExplain({ cards: [...cols, ...fixes, ...noCredit] }, reload, biz);
   const trialBox = document.getElementById('trialopen');
-  trialBox?.querySelectorAll('[data-tside]').forEach((x) => x.addEventListener('change', () => {
+  const tickBox = (id) => trialBox.querySelector(`[data-tside][data-id="${id}"]`);
+  const refreshTrial = () => {
     const sum = (side) => [...trialBox.querySelectorAll(`[data-tside="${side}"]`)].filter((c) => c.checked).reduce((t, c) => t + Number(c.dataset.amt), 0);
     const bank = sum('cr'); const bills = sum('bl'); const diff = bank - bills;
     document.getElementById('trialsum').innerHTML = html`Bank <strong>₹ ${money(bank)}</strong> · Bills <strong>₹ ${money(bills)}</strong> · Difference <strong style="color:${diff ? 'var(--danger)' : 'var(--teal)'}">₹ ${money(Math.abs(diff))}</strong>`.__html;
     drawTrialFix();
-  }));
-  // Ticked credit(s) and one bill, before confirming: write what the bank got on the bill's register row (its UPI
-  // payments become the credits, the difference a tip or a discount), so they pair (approved 8 Nov 2026).
+  };
+  trialBox?.querySelectorAll('[data-tside]').forEach((x) => x.addEventListener('change', refreshTrial));
+  document.getElementById('tickexact')?.addEventListener('click', () => {
+    lone.forEach((p) => { tickBox(p.credit.id).checked = true; tickBox(p.bill.id).checked = true; });
+    refreshTrial();
+    document.getElementById('trialsum')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
   const pickedTrial = () => {
     const ids = (side) => [...trialBox.querySelectorAll(`[data-tside="${side}"]`)].filter((c) => c.checked).map((c) => c.dataset.id);
     return { credits: ids('cr').map((id) => r.open.credits.find((c) => c.id === id)), bills: ids('bl').map((id) => r.open.bills.find((b) => b.id === id)) };
   };
+  // The tray's own choices: a bill swapped in for a credit, and tip / fix for a pair with a gap.
+  const trayForced = {};
+  const trayPick = {};
   const drawTrialFix = () => {
     const box = document.getElementById('trialfix');
     if (!box) return;
     const { credits, bills } = pickedTrial();
     if (!credits.length || !bills.length) { box.innerHTML = ''; return; }
-    // One credit and bills of exactly its amount: matched when the shift is saved (approved 9 Nov 2026).
-    const billsTotal = bills.reduce((t, x) => t + x.amountPaise, 0);
-    if (credits.length === 1 && billsTotal === credits[0].amountPaise) {
-      box.innerHTML = html`<div class="form-row" style="gap:8px;align-items:center;margin-top:6px"><button class="btn" type="button" id="choosego" style="min-height:36px">Match on save: ₹ ${money(billsTotal)} ↔ ${bills.map((x) => x.billNo).join(' + ')}</button>
-        <span class="note">Made when you save the shift; Undo until then.</span></div><div class="form-msg"></div>`.__html;
-      document.getElementById('choosego').addEventListener('click', async (e) => {
-        e.currentTarget.disabled = true;
-        try { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/choices`, { bankRowId: credits[0].id, comparisonIds: bills.map((x) => x.id) }); await reload(); }
-        catch (err) { e.currentTarget.disabled = false; showError(box.querySelector('.form-msg'), err); }
-      });
-      return;
-    }
+    const t = pairTicked(credits, bills, trayForced);
+    // Several credits for one bill (a bill paid in several goes): write them on its register row, as before.
+    if (!t.pairs.length && bills.length === 1) return drawWriteOnRow(box, credits, bills);
+    drawTray(box, t, bills);
+  };
+  const billLine = (b) => html`<div><span class="mono">${b.billNo ?? '—'}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}<div class="tiny">₹ ${money(b.amountPaise)} · ${b.paidAt ? when(b.paidAt) : 'register only'}</div></div>`;
+  const drawTray = (box, t, ticked) => {
+    const ready = t.pairs.filter((p) => p.kind === 'exact' || p.kind === 'group' || (p.kind === 'gap' && trayPick[p.credit.id]));
+    const gapWord = (d) => (d > 0 ? `₹ ${money(d)} more: tip?` : `₹ ${money(-d)} less: discount?`);
+    const chip = (p) => (p.kind === 'exact' ? html`<span class="tchip ok">Same amount</span>`
+      : p.kind === 'group' ? html`<span class="tchip ok">Paid together, same total</span>`
+      : p.kind === 'gap' ? html`<span class="tchip warn">${gapWord(p.diff)}</span>`
+      : p.kind === 'loose' ? html`<span class="tchip bad">Not paid together on the register</span>`
+      : html`<span class="tchip bad">₹ ${money(Math.abs(p.diff))} apart: not matched</span>`);
+    const swaps = (p) => ticked.filter((b) => !p.bills.includes(b)).map((b) => html`<option value="swap:${b.id}">Use bill ${b.billNo ?? '—'} (₹ ${money(b.amountPaise)}) instead</option>`);
+    const menu = (p) => {
+      if (p.kind === 'loose') return html`<div class="form-row" style="gap:6px;justify-content:flex-end;margin-top:4px"><button type="button" class="btn plain dchip" data-bill-drawer="${p.bills[0].billNo}|${day}">Write as paid together</button><button type="button" class="btn plain dchip" data-trayout="${p.credit.id}">Take out</button></div>`;
+      const b = p.bills[0];
+      const opts = p.kind === 'gap'
+        ? html`<option value="">Choose…</option><option value="tip" ${trayPick[p.credit.id] === 'tip' ? 'selected' : ''}>Match, ₹ ${money(Math.abs(p.diff))} ${p.diff > 0 ? 'tip' : 'discount'}</option>${!b.paidAt ? html`<option value="fix" ${trayPick[p.credit.id] === 'fix' ? 'selected' : ''}>Match, fix bill to ₹ ${money(p.credit.amountPaise)}</option>` : ''}`
+        : p.kind === 'off' ? html`<option value="">Not matched</option>` : html`<option value="">Match</option>`;
+      return html`<div><select data-traypick="${p.credit.id}" style="width:auto;font-size:12px;margin-top:4px;min-height:0">${opts}${swaps(p)}<option value="out">Take out of pairs</option></select></div>`;
+    };
+    const row = (p) => html`<div class="tray-row"><div>Credit ${when(p.credit.postedAt)}<div class="tiny">₹ ${money(p.credit.amountPaise)}${p.credit.accountName ? ` · ${p.credit.accountName}` : ''}</div></div>
+      <span aria-hidden="true">↔</span><div>${p.bills.map(billLine)}</div><div style="text-align:right">${chip(p)}${menu(p)}</div></div>`;
+    const leftRow = (c) => html`<div class="tray-row"><div>Credit ${when(c.postedAt)}<div class="tiny">₹ ${money(c.amountPaise)}</div></div><span aria-hidden="true">↔</span>
+      <div class="tiny">${nearWhy(c, t.bills)}</div><div style="text-align:right"><span class="tchip bad">Left over</span></div></div>`;
+    // Why a near amount was not paired: a gap is written on the register row, which some bills do not have.
+    const nearWhy = (c, bs) => {
+      const b = bs.find((x) => Math.abs(c.amountPaise - x.amountPaise) <= TRAY_GAP);
+      if (!b) return 'No ticked bill fits';
+      return b.grouped ? `Bill ${b.billNo} is ₹ ${money(Math.abs(c.amountPaise - b.amountPaise))} apart and paid together with others: correct the payment on the row that holds it (Open row).`
+        : `Bill ${b.billNo} is ₹ ${money(Math.abs(c.amountPaise - b.amountPaise))} apart but only in the software report, so there is no register row to write the difference on. Match it after saving the shift.`;
+    };
+    const leftBill = (b) => html`<div class="tray-row"><div class="tiny">No ticked credit fits</div><span aria-hidden="true">↔</span>${billLine(b)}<div style="text-align:right"><span class="tchip bad">Left over</span></div></div>`;
+    const sum = (xs) => xs.reduce((a, x) => a + x.amountPaise, 0);
+    const notes = [];
+    const tips = ready.filter((p) => p.kind === 'gap' && trayPick[p.credit.id] === 'tip');
+    if (tips.some((p) => p.diff > 0)) notes.push(`₹ ${money(tips.filter((p) => p.diff > 0).reduce((a, p) => a + p.diff, 0))} as tip`);
+    if (tips.some((p) => p.diff < 0)) notes.push(`₹ ${money(-tips.filter((p) => p.diff < 0).reduce((a, p) => a + p.diff, 0))} as discount`);
+    const fixes = ready.filter((p) => trayPick[p.credit.id] === 'fix');
+    if (fixes.length) notes.push(`${fixes.length} bill${fixes.length === 1 ? '' : 's'} fixed to the bank's amount`);
+    const undecided = t.pairs.filter((p) => p.kind === 'gap' && !trayPick[p.credit.id]).length;
+    if (undecided) notes.push(`${undecided} gap${undecided === 1 ? '' : 's'} to choose`);
+    const unready = t.pairs.filter((p) => p.kind === 'loose' || p.kind === 'off');
+    const lc = [...t.credits, ...unready.map((p) => p.credit)];
+    const lb = [...t.bills, ...unready.flatMap((p) => p.bills)];
+    if (lc.length) notes.push(`₹ ${money(sum(lc))} credit${lc.length === 1 ? '' : 's'} left over (not matched)`);
+    if (lb.length) notes.push(`${lb.length} bill${lb.length === 1 ? '' : 's'} left over`);
+    box.innerHTML = html`<div class="tray">
+      <div class="lane-h"><strong>Pairs to match on save (${t.pairs.length})</strong><span class="tiny">Bookr pairs what you tick: same amount first, then closest time</span></div>
+      ${t.pairs.map(row)}${t.credits.map(leftRow)}${t.bills.map(leftBill)}
+      <div class="tray-foot"><span class="tiny">Ready ₹ ${money(sum(ready.map((p) => p.credit)))} in ${ready.length} pair${ready.length === 1 ? '' : 's'}${notes.length ? ` · ${notes.join(' · ')}` : ''}</span>
+        <span class="form-row" style="gap:8px"><button class="btn plain" type="button" id="trayclear" style="min-height:36px">Clear ticks</button>
+        <button class="btn" type="button" id="traygo" style="min-height:36px" ${ready.length ? '' : 'disabled'}>Match ${ready.length} pair${ready.length === 1 ? '' : 's'} on save</button></span></div>
+      <div class="note">Made when you save the shift; Undo until then.${ready.some((p) => p.kind === 'gap') ? ' A tip, discount or fixed amount is written on the bill\'s register row first: check its photo (Open row).' : ''}</div></div>`.__html;
+    const untick = (cid) => {
+      const p = t.pairs.find((x) => x.credit.id === cid);
+      tickBox(cid).checked = false;
+      p?.bills.forEach((b) => { tickBox(b.id).checked = false; });
+      delete trayForced[cid]; delete trayPick[cid];
+      refreshTrial();
+    };
+    box.querySelectorAll('[data-traypick]').forEach((sel) => sel.addEventListener('change', () => {
+      const cid = sel.dataset.traypick; const v = sel.value;
+      if (v === 'out') return untick(cid);
+      if (v.startsWith('swap:')) {
+        const bid = v.slice(5);
+        for (const k of Object.keys(trayForced)) if (trayForced[k] === bid) delete trayForced[k];
+        trayForced[cid] = bid; delete trayPick[cid];
+      } else if (v) trayPick[cid] = v; else delete trayPick[cid];
+      drawTrialFix();
+    }));
+    box.querySelectorAll('[data-trayout]').forEach((x) => x.addEventListener('click', () => untick(x.dataset.trayout)));
+    document.getElementById('trayclear').addEventListener('click', () => {
+      trialBox.querySelectorAll('[data-tside]').forEach((c) => { c.checked = false; });
+      Object.keys(trayForced).forEach((k) => delete trayForced[k]); Object.keys(trayPick).forEach((k) => delete trayPick[k]);
+      refreshTrial();
+    });
+    document.getElementById('traygo').addEventListener('click', async (e) => {
+      const btn = e.currentTarget; btn.disabled = true;
+      const out = document.getElementById('traymsg');
+      const rowUndos = [];
+      try {
+        // Rows first (tip, discount or fixed amount), so each bill takes its credit by UPI; then every pair at once.
+        for (const p of ready.filter((x) => x.kind === 'gap')) rowUndos.push(await writeBankOnRow(biz, p.bills[0], [p.credit], { fix: trayPick[p.credit.id] === 'fix' }));
+        const res = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/choices`, { pairs: ready.map((p) => ({ bankRowId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) });
+        const undo = async () => {
+          for (const id of res.ids ?? []) await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${id}`, {}).catch(() => {});
+          for (const u of rowUndos.reverse()) await u();
+        };
+        await reload();
+        doneToast(`${ready.length} pair${ready.length === 1 ? '' : 's'} will be matched when you save the shift.`, undo, reload);
+      } catch (err) {
+        for (const u of rowUndos.reverse()) await u().catch(() => {});
+        btn.disabled = false; showError(out, err);
+      }
+    });
+  };
+  // Ticked credit(s) and one bill, before confirming: write what the bank got on the bill's register row (its UPI
+  // payments become the credits, the difference a tip or a discount), so they pair (approved 8 Nov 2026).
+  const drawWriteOnRow = (box, credits, bills) => {
     const b = bills[0];
-    const why = bills.length > 1 ? 'Tick one bill: several bills paid by one credit are bills paid together, written on the row with the payment.'
-      : b.grouped ? 'This bill is paid together with others: correct the payment on the row that holds it (Open row).'
+    const why = b.grouped ? 'This bill is paid together with others: correct the payment on the row that holds it (Open row).'
       : !b.rowId ? `Bill ${b.billNo} is only in the software report, so there is no register row to write on. Confirm the shift, then match them on this page: Match by hand takes the difference as a discount or tip.` : null;
     if (why) { box.innerHTML = html`<div class="note">${why}</div>`.__html; return; }
     const bank = credits.reduce((t, c) => t + c.amountPaise, 0);

@@ -258,41 +258,58 @@ bankRoutes.post('/businesses/:businessId/sales/repay/:auditId/undo', requireRole
 
 // ---- Save reconcile (approved 9 Nov 2026): before a shift is saved, a match is a draft kept per shift, made on Save.
 
+// One credit to its bill(s), or several such pairs in one go (multi-pair tray, approved 10 Nov 2026): every pair is
+// checked first, then all are saved together, each as its own choice so Undo still works one pair at a time.
 bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank.link'), async (c) => {
   const day = c.req.param('day');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
   const db = c.env.DB;
   const bid = c.get('businessId');
   const data = await body(c);
-  const rowId = typeof data.bankRowId === 'string' && isUuid(data.bankRowId) ? data.bankRowId : fail(400, 'Choose the bank credit.');
-  const cids = Array.isArray(data.comparisonIds) ? [...new Set(data.comparisonIds.filter((x): x is string => typeof x === 'string' && isUuid(x)))].slice(0, 30) : [];
-  if (!cids.length) fail(400, 'Choose the bill.');
+  const raw: unknown[] = Array.isArray(data.pairs) ? data.pairs.slice(0, 60) : [data];
+  if (!raw.length) fail(400, 'Choose the bank credit.');
+  const pairs = raw.map((p) => {
+    const x = (p && typeof p === 'object' ? p : {}) as Record<string, unknown>;
+    const rowId = typeof x.bankRowId === 'string' && isUuid(x.bankRowId) ? x.bankRowId : fail(400, 'Choose the bank credit.');
+    const cids = Array.isArray(x.comparisonIds) ? [...new Set(x.comparisonIds.filter((y): y is string => typeof y === 'string' && isUuid(y)))].slice(0, 30) : [];
+    if (!cids.length) fail(400, 'Choose the bill.');
+    return { rowId, cids };
+  });
+  if (new Set(pairs.map((p) => p.rowId)).size !== pairs.length) fail(409, 'A credit is in two pairs.');
+  const allIds = pairs.flatMap((p) => p.cids);
+  if (new Set(allIds).size !== allIds.length) fail(409, 'A bill is in two pairs.');
   const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
   if (!shift) fail(404, 'Unknown shift.');
   if (shift.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
-  const row = await one<{ kind: string; direction: string; status: string; amount_paise: number }>(db,
-    'SELECT kind, direction, status, amount_paise FROM bank_rows WHERE id = ? AND business_id = ?', rowId, bid);
-  if (!row) fail(404, 'Bank line not found.');
-  if (row.kind !== 'upi_in' || row.direction !== 'CR' || row.status !== 'unmatched') fail(409, 'Choose an open UPI credit.');
-  const found = await all<{ id: string }>(db, `SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
-  if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
-  const taken = (await shiftChoices(db, bid, day)).some((k) => k.comparisonIds.some((x) => cids.includes(x)));
-  if (taken) fail(409, 'A bill is already matched on save.');
-  for (const id of cids) if (await planTaken(db, bid, '', id)) fail(409, 'A bill is already chosen to be one sale with a booked credit.');
-  const upi = await plannedUpiPaise(db, bid, day, cids);
-  if (upi !== row.amount_paise) fail(409, upi ? 'The credit is not what these bills take by UPI.' : 'These bills have no UPI payment: decide or correct them first.');
-  const id = newId();
+  const existing = await shiftChoices(db, bid, day);
+  const ids: string[] = [];
+  const stmts = [];
+  for (const { rowId, cids } of pairs) {
+    const row = await one<{ kind: string; direction: string; status: string; amount_paise: number }>(db,
+      'SELECT kind, direction, status, amount_paise FROM bank_rows WHERE id = ? AND business_id = ?', rowId, bid);
+    if (!row) fail(404, 'Bank line not found.');
+    if (row.kind !== 'upi_in' || row.direction !== 'CR' || row.status !== 'unmatched') fail(409, 'Choose an open UPI credit.');
+    const found = await all<{ id: string; bill_no: string | null }>(db, `SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
+    if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
+    const named = found.map((f) => f.bill_no).filter(Boolean).join(' + ');
+    if (existing.some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save.`);
+    if (existing.some((k) => k.bankRowId === rowId)) fail(409, 'This credit is already matched on save.');
+    for (const id of cids) if (await planTaken(db, bid, '', id)) fail(409, 'A bill is already chosen to be one sale with a booked credit.');
+    const upi = await plannedUpiPaise(db, bid, day, cids);
+    if (upi !== row.amount_paise) fail(409, upi ? `The credit is not what ${named ? `bill ${named} takes` : 'these bills take'} by UPI.` : `${named ? `Bill ${named} has` : 'These bills have'} no UPI payment: decide or correct ${named ? 'it' : 'them'} first.`);
+    const id = newId();
+    ids.push(id);
+    stmts.push(stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, bank_row_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'bank_match', ?, ?, ?, ?)`,
+      id, bid, day, rowId, JSON.stringify(cids), c.get('user').id, now()),
+    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', rowId, null, JSON.stringify({ shiftDay: day, comparisonIds: cids }), now()));
+  }
   try {
-    await db.batch([
-      stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, bank_row_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'bank_match', ?, ?, ?, ?)`,
-        id, bid, day, rowId, JSON.stringify(cids), c.get('user').id, now()),
-      stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', rowId, null, JSON.stringify({ shiftDay: day, comparisonIds: cids }), now()),
-    ]);
+    await db.batch(stmts);
   } catch (e) {
     if (/UNIQUE/i.test(String(e))) fail(409, 'This credit is already matched on save.');
     throw e;
   }
-  return c.json({ ok: true, id });
+  return c.json({ ok: true, id: ids[0], ids });
 });
 
 // A card machine payment matched to its bill(s) before saving (approved 10 Nov 2026), made on Save like a UPI match.

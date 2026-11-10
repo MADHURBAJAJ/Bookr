@@ -160,6 +160,8 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   const heads = new Set(rows.map((r) => r.paidWith).filter(Boolean));
   const inGroup = (id: string | null | undefined) => !!id && (heads.has(id) || !!rows.find((r) => r.id === id)?.paidWith);
   const paysOf = (id: string) => pays.filter((p) => p.rowId === id);
+  // The row that holds a group's payment: the same key for every bill paid together.
+  const groupOf = (id: string | null | undefined) => (id ? rows.find((r) => r.id === id)?.paidWith ?? id : null);
 
   // The UPI bills as they stand: the side that counts when decided, otherwise whichever side says UPI.
   const bills = view.comparisons.flatMap((c) => {
@@ -300,7 +302,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   cards.sort((a, b) => b.score - a.score);
   noCredit.sort((a, b) => b.score - a.score);
 
-  const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
+  const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, group: b.grouped ? groupOf(b.c.register?.rowId) : null, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
   // The same credits Compare counts as not matched yet; noBill marks those no bill of that amount could be.
   const noBillIds = new Set((view.bank?.noBill ?? []).map((n) => n.id));
   const whyOf = new Map((view.bank?.open ?? []).map((o) => [o.id, o]));
