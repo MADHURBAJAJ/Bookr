@@ -89,6 +89,16 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
     else toFlag.push({ bill: b, existing: e });
   }
 
+  // The same bill number twice in this file: the repeat is set against the first line (stored, or added now) for a
+  // person to keep one; an exact repeat is skipped.
+  const addIds = new Map(toAdd.map((b) => [b, newId()]));
+  const twiceFlags: { bill: (typeof parsed.bills)[number]; existingId: string }[] = [];
+  for (const b of parsed.twice) {
+    const first = parsed.bills.find((x) => x.posNo === b.posNo && x.billNo === b.billNo)!;
+    if (first.paidAt === b.paidAt && first.mode === b.mode && first.amountPaise === b.amountPaise && first.discountPaise === b.discountPaise) { skipped++; continue; }
+    const stored = byKey.get(`${b.posNo}\u0000${b.billNo}`);
+    twiceFlags.push({ bill: b, existingId: stored ? stored.id : addIds.get(first)! });
+  }
   const addDays = [...new Set(toAdd.map((b) => shiftDayOf(b.paidAt)))].sort();
   const touched = [...new Set([...addDays, ...(replaced?.days ?? [])])].sort();
   const confirmed = touched.length
@@ -106,7 +116,8 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
     coversTo,
     add: toAdd.length,
     skip: skipped,
-    flag: toFlag.length,
+    flag: toFlag.length + twiceFlags.length,
+    twice: twiceFlags.map((f) => f.bill.billNo),
     shifts: [...new Set(parsed.bills.map((b) => shiftDayOf(b.paidAt)))].sort(),
     confirmedShifts: confirmed,
   };
@@ -127,7 +138,7 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         reportId, bid, uploadId, coversFrom, coversTo, parsed.firstPaidAt, parsed.lastPaidAt, parsed.bills.length,
         parsed.footer!.bills, parsed.footer!.upiPaise, parsed.footer!.cardPaise, parsed.footer!.cashPaise, parsed.footer!.totalPaise,
-        toAdd.length, skipped, toFlag.length, t),
+        toAdd.length, skipped, toFlag.length + twiceFlags.length, t),
       ...(replaced ? [
         stmt(db, 'UPDATE sales_reports SET replaced_by = ? WHERE id = ?', reportId, replaced.id),
         stmt(db, 'DELETE FROM software_bill_conflicts WHERE report_id = ? AND decision IS NULL', replaced.id),
@@ -136,15 +147,18 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
       ...touched.map((d) => shiftStatement(db, bid, d)),
       ...toAdd.map((b) => stmt(db, `INSERT INTO software_bills (id, business_id, report_id, pos_no, bill_no, si_no, paid_at, shift_day, mode,
         amount_paise, discount_paise, is_complimentary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        newId(), bid, reportId, b.posNo, b.billNo, b.siNo, b.paidAt, shiftDayOf(b.paidAt), b.mode, b.amountPaise, b.discountPaise,
+        addIds.get(b)!, bid, reportId, b.posNo, b.billNo, b.siNo, b.paidAt, shiftDayOf(b.paidAt), b.mode, b.amountPaise, b.discountPaise,
         b.amountPaise === 0 ? 1 : 0, t)),
       ...toFlag.map((f) => stmt(db, `INSERT INTO software_bill_conflicts (id, business_id, report_id, existing_bill_id, incoming_paid_at,
         incoming_mode, incoming_amount_paise, incoming_discount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         newId(), bid, reportId, f.existing.id, f.bill.paidAt, f.bill.mode, f.bill.amountPaise, f.bill.discountPaise, t)),
+      ...twiceFlags.map((f) => stmt(db, `INSERT INTO software_bill_conflicts (id, business_id, report_id, existing_bill_id, incoming_paid_at,
+        incoming_mode, incoming_amount_paise, incoming_discount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newId(), bid, reportId, f.existingId, f.bill.paidAt, f.bill.mode, f.bill.amountPaise, f.bill.discountPaise, t)),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
         VALUES (?, ?, 'sales_report.import', 'sales_reports', ?, ?, ?, ?)`, bid, c.get('user').id, reportId,
         replaced ? JSON.stringify({ replaces: replaced.id }) : null,
-        JSON.stringify({ bills: parsed.bills.length, added: toAdd.length, skipped, flagged: toFlag.length, coversFrom, coversTo }), t),
+        JSON.stringify({ bills: parsed.bills.length, added: toAdd.length, skipped, flagged: toFlag.length + twiceFlags.length, twice: twiceFlags.length, coversFrom, coversTo }), t),
     ]);
   } catch (e) {
     await c.env.UPLOADS.delete(key);

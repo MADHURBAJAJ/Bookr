@@ -101,13 +101,15 @@ describe('software sales CSV', () => {
     expect(parseSalesCsv(buildSalesCsv(REPORT_31_OCT, { breakFooter: 'upi' })).problems.join(' ')).toMatch(/UPI bills add up/);
   });
 
-  it('refuses bad dates, bad amounts, repeated bills and a missing footer', () => {
+  it('refuses bad dates, bad amounts and a missing footer, and keeps a repeated bill apart', () => {
     const bad = buildSalesCsv([{ ...REPORT_1_NOV_EARLY[0], when: '2026-11-01 00:35' }, { ...REPORT_1_NOV_EARLY[1], amount: 'abc' }]);
     const p = parseSalesCsv(bad).problems.join(' ');
     expect(p).toMatch(/DATE\/TIME/);
     expect(p).toMatch(/BILL AMOUNT/);
-    const twice = buildSalesCsv([REPORT_1_NOV_EARLY[0], REPORT_1_NOV_EARLY[0]]);
-    expect(parseSalesCsv(twice).problems.join(' ')).toMatch(/appears twice/);
+    // The same number twice (Stage 7, 10 Nov 2026): not refused; the repeat is kept apart for a person to choose.
+    const twice = parseSalesCsv(buildSalesCsv([REPORT_1_NOV_EARLY[0], REPORT_1_NOV_EARLY[0]]));
+    expect(twice.problems).toEqual([]);
+    expect([twice.bills.length, twice.twice.length]).toEqual([1, 1]);
     const noFooter = csv.split('\r\n').filter((l) => !/TOTAL|,,UPI|,,CARD|,,CASH/.test(l)).join('\n');
     expect(parseSalesCsv(noFooter).problems.join(' ')).toMatch(/footer is missing/);
   });

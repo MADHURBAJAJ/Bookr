@@ -545,9 +545,9 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     one<{ id: string; status: string; confirmed_at: number | null; reopened_at: number | null; reopen_reason: string | null }>(db,
       'SELECT id, status, confirmed_at, reopened_at, reopen_reason FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     all<{ id: string; bill_no: string; pos_no: string; existing_paid_at: number; existing_mode: string; existing_amount_paise: number;
-      incoming_paid_at: number; incoming_mode: string; incoming_amount_paise: number; decision: string | null }>(db, `
+      incoming_paid_at: number; incoming_mode: string; incoming_amount_paise: number; decision: string | null; same_file: number }>(db, `
       SELECT k.id, b.bill_no, b.pos_no, b.paid_at AS existing_paid_at, b.mode AS existing_mode, b.amount_paise AS existing_amount_paise,
-             k.incoming_paid_at, k.incoming_mode, k.incoming_amount_paise, k.decision
+             k.incoming_paid_at, k.incoming_mode, k.incoming_amount_paise, k.decision, k.report_id = b.report_id AS same_file
       FROM software_bill_conflicts k JOIN software_bills b ON b.id = k.existing_bill_id
       WHERE k.business_id = ? AND k.decision IS NULL AND b.shift_day = ?`, businessId, day),
     all<{ bill_type: string }>(db, 'SELECT bill_type FROM bill_type_heads WHERE business_id = ?', businessId),
@@ -556,7 +556,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const blockers: string[] = [];
   if (!sw.length) blockers.push('No software report has bills in this shift yet.');
   if (cov.gaps.length) blockers.push('Some hours of this shift are not covered by a software report.');
-  if (conflicts.length) blockers.push(`${conflicts.length} overlapping bill${conflicts.length > 1 ? 's differ' : ' differs'} between two software reports. Decide which values to keep.`);
+  if (conflicts.length) blockers.push(`${conflicts.length} bill${conflicts.length > 1 ? 's' : ''} with two different lines in the software (two reports, or the same number twice in one). Decide which line to keep.`);
   const others = await otherDays(db, businessId, day, comparisons);
   // A bill counted here whose register line turned up on a later day, linked to this one (Stage 3, 10 Nov 2026).
   const lateLines = new Map((await all<{ linked_to_id: string; shift_day: string; rg_amount_paise: number | null; rg_mode: string | null }>(db, `
@@ -801,7 +801,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     bank: bank ? { covered: bank.covered, lastBankAt: bank.lastBankAt, noBill: bank.noBill.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt })), left: bank.left,
       open: bank.open.map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, why: c.why, bills: c.bills, billsOfAmount: c.billsOfAmount })) } : null,
     conflicts: conflicts.map((k) => ({
-      id: k.id, billNo: k.bill_no, posNo: k.pos_no,
+      id: k.id, billNo: k.bill_no, posNo: k.pos_no, sameFile: !!k.same_file,
       existing: { paidAt: k.existing_paid_at, mode: k.existing_mode, amountPaise: k.existing_amount_paise },
       incoming: { paidAt: k.incoming_paid_at, mode: k.incoming_mode, amountPaise: k.incoming_amount_paise },
     })),

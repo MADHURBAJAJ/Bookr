@@ -35,6 +35,9 @@ export interface ParsedReport {
   lastPaidAt: number | null;
   /** Every reason the file cannot be imported. Empty means it can. */
   problems: string[];
+  /** A bill number seen again in the same file (Stage 7, approved 10 Nov 2026): imported once, the repeat kept apart
+   *  for a person to choose which line to keep. Counted in the footer checks. */
+  twice: ParsedBill[];
   /** The same file with the NAME column blanked, for storage. */
   redacted: string;
 }
@@ -105,7 +108,7 @@ export function parseSalesCsv(text: string): ParsedReport {
   const problems: string[] = [];
   const headerIndex = rows.findIndex((r) => r.some((c) => norm(c) === 'BILLNO') && r.some((c) => norm(c) === 'MODEOFPAYMENT'));
   if (headerIndex < 0) {
-    return { bills: [], footer: null, firstPaidAt: null, lastPaidAt: null, problems: ['No header row with BILL NO and MODE OF PAYMENT was found.'], redacted: '' };
+    return { bills: [], footer: null, firstPaidAt: null, lastPaidAt: null, problems: ['No header row with BILL NO and MODE OF PAYMENT was found.'], redacted: '', twice: [] };
   }
   const cols: Partial<Record<Col, number>> = {};
   rows[headerIndex].forEach((c, i) => {
@@ -115,12 +118,13 @@ export function parseSalesCsv(text: string): ParsedReport {
   for (const [label, key] of [['SI.NO', 'si'], ['POS.NO', 'pos'], ['DATE/TIME', 'when'], ['BILL NO', 'bill'], ['MODE OF PAYMENT', 'mode'], ['BILL AMOUNT', 'amount']] as const) {
     if (cols[key] === undefined) problems.push(`Column ${label} is missing.`);
   }
-  if (problems.length) return { bills: [], footer: null, firstPaidAt: null, lastPaidAt: null, problems, redacted: '' };
+  if (problems.length) return { bills: [], footer: null, firstPaidAt: null, lastPaidAt: null, problems, redacted: '', twice: [] };
 
   const cell = (r: string[], k: Col) => (cols[k] === undefined ? '' : (r[cols[k]!] ?? '').trim());
   const bills: ParsedBill[] = [];
   const footer: Partial<Record<keyof Footer, number>> = {};
   const seen = new Set<string>();
+  const twice: ParsedBill[] = [];
 
   for (let i = headerIndex + 1; i < rows.length; i++) {
     const r = rows[i];
@@ -136,10 +140,10 @@ export function parseSalesCsv(text: string): ParsedReport {
       if (discount === null) problems.push(`Line ${line}: DISCOUNT "${cell(r, 'discount')}" is not an amount.`);
       if (!billNo) problems.push(`Line ${line}: BILL NO is empty.`);
       const key = `${posNo}\u0000${billNo}`;
-      if (billNo && seen.has(key)) problems.push(`Line ${line}: bill ${billNo} appears twice in this file.`);
+      const again = !!billNo && seen.has(key);
       seen.add(key);
       if (paidAt !== null && amount !== null && discount !== null && billNo) {
-        bills.push({ siNo: cell(r, 'si'), posNo, billNo, paidAt, mode: parseMode(cell(r, 'mode')), amountPaise: amount, discountPaise: discount });
+        (again ? twice : bills).push({ siNo: cell(r, 'si'), posNo, billNo, paidAt, mode: parseMode(cell(r, 'mode')), amountPaise: amount, discountPaise: discount });
       }
       continue;
     }
@@ -158,9 +162,10 @@ export function parseSalesCsv(text: string): ParsedReport {
     problems.push(`The footer is missing: ${missing.map((k) => ({ TOTALBILLS: 'TOTAL BILLS', TOTALSALE: 'TOTAL SALE' } as Record<string, string>)[k] ?? k).join(', ')}.`);
   } else {
     fullFooter = footer as Footer;
-    const sum = (mode?: Mode) => bills.filter((b) => !mode || b.mode === mode).reduce((s, b) => s + b.amountPaise, 0);
+    const all = [...bills, ...twice];
+    const sum = (mode?: Mode) => all.filter((b) => !mode || b.mode === mode).reduce((s, b) => s + b.amountPaise, 0);
     const rupees = (p: number) => `${p < 0 ? '-' : ''}${Math.trunc(Math.abs(p) / 100)}.${String(Math.abs(p) % 100).padStart(2, '0')}`;
-    if (bills.length !== fullFooter.bills) problems.push(`The file has ${bills.length} bills but the footer says ${fullFooter.bills}.`);
+    if (all.length !== fullFooter.bills) problems.push(`The file has ${all.length} bills but the footer says ${fullFooter.bills}.`);
     for (const [mode, label, want] of [['upi', 'UPI', fullFooter.upiPaise], ['card', 'CARD', fullFooter.cardPaise], ['cash', 'CASH', fullFooter.cashPaise]] as const) {
       if (sum(mode) !== want) problems.push(`${label} bills add up to ${rupees(sum(mode))} but the footer says ${rupees(want)}.`);
     }
@@ -181,5 +186,6 @@ export function parseSalesCsv(text: string): ParsedReport {
     lastPaidAt: times.length ? Math.max(...times) : null,
     problems,
     redacted,
+    twice,
   };
 }

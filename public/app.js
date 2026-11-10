@@ -2998,13 +2998,13 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
           ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review">Open register pages</a>` : ''}`;
   const warningsHtml = html`${(v.warnings ?? []).map((w) => cashWarnHtml(w, v, confirmed || !canDecide))}`;
   const conflictsHtml = html`${v.conflicts.length ? html`<section class="card">
-        <h2>Bills that differ between two software reports</h2>
-        <div class="note">The same bill came in twice with different values. Nothing was overwritten. Choose which to keep.</div>
-        <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported</th><th>New file</th><th></th></tr></thead><tbody>
+        <h2>Bills with two different lines in the software</h2>
+        <div class="note">The same bill number came in twice with different values: in two reports, or twice in one file. Nothing was overwritten, and only one is counted. Choose which to keep.</div>
+        <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported (first line)</th><th>New file (second line)</th><th></th></tr></thead><tbody>
           ${v.conflicts.map((k) => html`<tr><td class="mono">${k.billNo}</td>
             <td><div class="mono">${money(k.existing.amountPaise)}</div><div class="note">${MODE_LABELS[k.existing.mode]} · ${when(k.existing.paidAt)}</div></td>
             <td><div class="mono">${money(k.incoming.amountPaise)}</div><div class="note">${MODE_LABELS[k.incoming.mode]} · ${when(k.incoming.paidAt)}</div></td>
-            <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">Keep imported</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">Use new file</button></div>` : ''}</td></tr>`)}
+            <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">${k.sameFile ? 'Keep first line' : 'Keep imported'}</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">${k.sameFile ? 'Keep second line' : 'Use new file'}</button></div>` : ''}</td></tr>`)}
         </tbody></table></div></section>` : ''}`;
   const reopenHtml = html`${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`;
   // The Shift menu on Reconcile: the report's covered times, and reopening a saved shift (Owner).
@@ -3405,6 +3405,8 @@ async function bankView(biz, query = '') {
     }
     if (r.kind === 'upi_fee') parts.push(html`<div class="note">Fee on a credit card paid through UPI${r.pairRowId ? '' : ' (its credit is not in Bookr yet)'}.</div>`);
     if (r.kind === 'card_settlement') parts.push(html`<div class="note">Money from the card machine. <a href="#/b/${biz.id}/cards">Settle it on the Card settlements tab</a>, which books the fee.</div>`);
+    // A cancelled bill refunded (Stage 7): the money goes back to the UPI ID that paid it.
+    if (r.refundOf) parts.push(html`<div class="note">Sent back to the UPI ID that paid bill <span class="mono">${r.refundOf.billNos}</span> on ${when(r.refundOf.postedAt)}: the bill was most likely cancelled and refunded. Book it as a refund; the sale stays, and the refund is its cost.</div>`);
     if (r.kind === 'reversal') parts.push(r.pairRowId && r.pairStatus === 'matched'
       ? html`<div class="note error">Gives back a payment already matched to a bill: that bill is not paid. <button class="btn plain dchip" type="button" data-revunpaid="${r.id}">Bill unpaid again</button></div>`
       : html`<div class="note">${r.pairRowId ? 'Gives back a failed payment: both cancel out.' : 'A reversal; its payment is not in Bookr yet.'}</div>`);

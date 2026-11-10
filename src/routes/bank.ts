@@ -159,6 +159,9 @@ bankRoutes.post('/businesses/:businessId/bank/sync-all', requireRole('bank.link'
 
 // ---- Lines, with what Bookr suggests for each
 
+/** A refund of a paid bill goes back within this long of its payment (a cancelled booking may take weeks). */
+const REFUND_BILL_DAYS = 30;
+
 bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
@@ -179,6 +182,19 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
   // Not a sale (Stage 5): interest named in the description suggests the interest head, when nothing better is known.
   const interestHead = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = 'interest received'", bid);
   const looksInterest = (r: { direction: string; description: string }) => r.direction === 'CR' && /\bINT(EREST)?\.?\s*(PD|PAID|CR|CREDIT)\b|\bINTEREST\b/i.test(r.description);
+  // A bill cancelled after it was paid (Stage 7, approved 10 Nov 2026): money sent back to the UPI ID that paid a bill,
+  // of the same amount, within REFUND_BILL_DAYS. Told on the line with the bill, booked as a refund (an expense head
+  // named for refunds when there is one); the bill's match stays, so the sale and its refund both show.
+  const outs = rows.filter((r) => r.kind === 'upi_out' && r.direction === 'DR' && r.status === 'unmatched' && r.vpa);
+  const paidBy = outs.length ? await all<{ id: string; vpa: string; amount_paise: number; posted_at: number; bills: string }>(db, `
+    SELECT c.id, c.vpa, c.amount_paise, c.posted_at, group_concat(t.bill_no, ' + ') AS bills
+    FROM bank_rows c JOIN bank_matches m ON m.bank_row_id = c.id JOIN transactions t ON t.id = m.transaction_id
+    WHERE c.business_id = ? AND c.kind = 'upi_in' AND c.status = 'matched' AND c.vpa IN (SELECT value FROM json_each(?))
+    GROUP BY c.id`, bid, JSON.stringify([...new Set(outs.map((r) => r.vpa))])) : [];
+  const refundOf = new Map(outs.map((r) => [r.id, paidBy.filter((c) => c.vpa === r.vpa && c.amount_paise === r.amount_paise && c.posted_at < r.posted_at
+    && c.posted_at >= r.posted_at - REFUND_BILL_DAYS * 86400e3).sort((a, b) => b.posted_at - a.posted_at)[0]]).filter(([, c]) => c) as [string, (typeof paidBy)[number]][]);
+  const refundHead = refundOf.size ? await one<{ id: string }>(db, `SELECT id FROM heads WHERE business_id = ? AND type = 'expense'
+    AND (lower(name) LIKE '%refund%' OR lower(name) LIKE '%sales return%') ORDER BY name LIMIT 1`, bid) : null;
   const plainNote = (v: string | null) => (v && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay|Paid securely v|Navi UPI|Paid in seconds)$/i.test(v.trim()) ? v.trim() : '');
   return c.json({
     from, to,
@@ -196,10 +212,13 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           const item = plainNote(r.remark);
           const party = (r.vpa ? byName(parties, r.vpa) : null) ?? (item ? inText(parties, item) : null);
           const head = party ? pickHead(party, history, item) : null;
+          const rf = refundOf.get(r.id);
+          if (rf && !head?.headId && !rule) return { item: `Refund: bill ${rf.bills} cancelled`, party: party?.name ?? null, headId: refundHead?.id ?? null, headChoices: head?.choices ?? [], learned: false };
           return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? (looksInterest(r) ? interestHead?.id ?? null : null), headChoices: head?.choices ?? [], learned: !!head?.headId };
         })() : null,
         clear: sug.clear.has(r.id),
         cashMove: r.status === 'unmatched' ? cashMoveOf(r) : null,
+        refundOf: refundOf.has(r.id) ? { creditId: refundOf.get(r.id)!.id, postedAt: refundOf.get(r.id)!.posted_at, billNos: refundOf.get(r.id)!.bills } : null,
       };
     }),
   });

@@ -163,8 +163,9 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     if (picks.length !== b.parts.length) continue;
     const total = picks.reduce((t, x) => t + x.c.amount, 0);
     const ordered = [...picks].sort((x, y) => x.c.postedAt - y.c.postedAt);
-    // The credits equal the register's UPI part of a bill the software calls all UPI: they back the register's split.
-    const split = b.swMode === 'upi' && b.rgMode === 'mixed' && b.swAmount !== total && (b.difference === 'mode' || b.difference === 'amount_and_mode') ? 'use_register' as const : null;
+    // The credits equal the register's UPI part of a bill the software calls one mode (UPI, or card or cash for a split
+    // card + UPI, Stage 7): they back the register's split. The card part is checked against the machine (sales.ts).
+    const split = !!b.swMode && b.swMode !== 'mixed' && b.swMode !== 'unknown' && b.rgMode === 'mixed' && b.swAmount !== total && (b.difference === 'mode' || b.difference === 'amount_and_mode') ? 'use_register' as const : null;
     out.set(b.id, { ...make(b, ordered[0].c, b.paidAt != null ? Math.max(...picks.map((x) => x.minutes ?? 0)) : null), amountPaise: total,
       fits: b.swAmount === total ? 'both' : 'register', suggest: suggestion(b, total) ?? split,
       parts: ordered.map((x) => ({ creditId: x.c.id, amountPaise: x.c.amount, postedAt: x.c.postedAt, ...(x.c.machine ? { machine: x.c.machine } : {}) })) });
