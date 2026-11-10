@@ -104,7 +104,7 @@ const NAV = [
   { key: 'dashboard', label: 'Dashboard', needs: 'reports.view' },
   { key: 'bringin', label: 'Bring in', needs: 'rows.upload' },
   // Review, Compare sales and Reconcile are tabs of one shift (the shift bar at the top of each).
-  { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'reconcile'] },
+  { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'compare-old', 'reconcile'] },
   { key: 'bank', label: 'Bank sync', needs: 'bank.link' },
   { key: 'cards', label: 'Card settlements', needs: 'bank.link' },
   { key: 'money-out', label: 'Money out', needs: 'bank.link' },
@@ -124,7 +124,8 @@ const sheetKey = (bizId) => `bookr.sheet.${bizId}`;
 const lastSheet = (bizId) => { try { return JSON.parse(localStorage.getItem(sheetKey(bizId)) ?? 'null'); } catch { return null; } };
 const rememberSheet = (bizId, u) => { try { localStorage.setItem(sheetKey(bizId), JSON.stringify({ id: u.id, day: u.day })); } catch { /* storage unavailable */ } };
 const screenKey = (bizId) => `bookr.screen.${bizId}`;
-const SHIFT_SCREENS = [['review', 'Register', 'rows.edit'], ['compare', 'Compare sales', 'sales.view'], ['reconcile', 'Reconcile', 'sales.view']];
+// Compare sales is Reconcile's All bills tab now (approved 10 Nov 2026): the shift has two steps.
+const SHIFT_SCREENS = [['review', 'Register', 'rows.edit'], ['reconcile', 'Reconcile', 'sales.view']];
 /** Where a shift screen opens for a day. Review: the sheet last opened, if it is of that day; else the day's first page. */
 function screenHref(biz, key, day) {
   if (!day) return `#/b/${biz.id}/${key}`;
@@ -137,7 +138,7 @@ function navHref(biz, key) {
     let last = null;
     try { last = localStorage.getItem(screenKey(biz.id)); } catch { /* storage unavailable */ }
     const allowed = SHIFT_SCREENS.filter(([, , need]) => biz.actions.includes(need)).map(([k]) => k);
-    const k = allowed.includes(last) ? last : allowed.includes('compare') ? 'compare' : allowed[0] ?? 'compare';
+    const k = allowed.includes(last) ? last : allowed.includes('reconcile') ? 'reconcile' : allowed[0] ?? 'reconcile';
     // Review with no day yet: the sheet last opened, else the list.
     if (k === 'review' && !lastDay(biz.id)) { const sh = lastSheet(biz.id); return sh ? `#/b/${biz.id}/review/${sh.id}` : `#/b/${biz.id}/review`; }
     return screenHref(biz, k, lastDay(biz.id));
@@ -182,11 +183,9 @@ async function wireShiftBar(biz, days = null) {
   if (!p) return;
   const set = (k, text, cls) => { const el = bar.querySelector(`[data-sbn="${k}"]`); if (el) { el.textContent = text; el.className = `sb-n ${cls}`; } };
   set('review', !p.rows ? 'no page' : p.toCheck ? `${p.toCheck} to check` : '✓', p.rows && !p.toCheck ? 'ok' : p.toCheck ? 'wait' : '');
-  set('compare', p.status === 'confirmed' ? 'confirmed ✓' : p.toDecide ? `${p.toDecide} to decide` : 'ready to confirm', p.status === 'confirmed' ? 'ok' : p.toDecide ? 'wait' : '');
-  if (p.bank) {
-    const left = p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0);
-    set('reconcile', p.status !== 'confirmed' ? 'not saved' : left ? `${left} left` : '✓', p.status !== 'confirmed' ? '' : left ? 'wait' : 'ok');
-  }
+  const left = p.bank ? p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0) : 0;
+  set('reconcile', p.status !== 'confirmed' ? (p.toDecide ? `${p.toDecide} to decide · not saved` : 'not saved') : left ? `${left} left` : '✓',
+    p.status !== 'confirmed' ? (p.toDecide ? 'wait' : '') : left ? 'wait' : 'ok');
 }
 
 function shell(biz, current, title, subtitle, body, opts = {}) {
@@ -336,7 +335,7 @@ async function dashboardView(biz) {
   if (h.shifts.count) {
     const next = (s) => {
       if (s.toCheck && can('rows.edit')) return 'review';
-      if (s.toDecide || !s.bank || !can('bank.link')) return 'compare';
+      if (s.toDecide || !s.bank || !can('bank.link')) return 'reconcile';
       return 'reconcile';
     };
     const parts = (s) => [s.toCheck && n(s.toCheck, 'row') + ' to check', s.toDecide && n(s.toDecide, 'bill') + ' to decide',
@@ -383,7 +382,7 @@ async function dashboardView(biz) {
   if (h.waitingBills.count) {
     cards.push(card('Bills waiting for their other side', html`
       <div class="note">${h.waitingBills.count} bill${h.waitingBills.count === 1 ? ' was' : 's were'} found only in the software report or only in the register.</div>
-      ${goBtn(`#/b/${biz.id}/compare/${h.waitingBills.firstDay}`, 'Compare sales')}`, { chip: h.waitingBills.late ? html`<span class="chip bad">${h.waitingBills.late} over ${h.watchDays} days</span>` : '' }));
+      ${goBtn(`#/b/${biz.id}/reconcile/${h.waitingBills.firstDay}`, 'Open the shift')}`, { chip: h.waitingBills.late ? html`<span class="chip bad">${h.waitingBills.late} over ${h.watchDays} days</span>` : '' }));
   }
 
   // Data freshness: what each figure above is counted up to.
@@ -1288,7 +1287,7 @@ async function reviewListView(biz, find) {
         <div class="list-row">
           <span><strong>${when(r.coversFrom)} to ${when(r.coversTo)}</strong> · ${u.rows} bill${u.rows === 1 ? '' : 's'}
             <br><span class="note">${r.added} new, ${r.skipped} already imported (skipped), ${r.flagged} with different values${r.openConflicts ? html` · <span class="error">${r.openConflicts} still to decide</span>` : ''}${r.replacedBy ? ' · replaced by a corrected file' : ''}</span></span>
-          <span style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${r.shiftDays.map((d) => html`<a href="#/b/${biz.id}/compare/${d}">Compare ${dayLabel(d)} shift</a>`)}${deleteButton(biz, u)}</span>
+          <span style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">${r.shiftDays.map((d) => html`<a href="#/b/${biz.id}/compare/${d}">Open the ${dayLabel(d)} shift</a>`)}${deleteButton(biz, u)}</span>
         </div>`; }) : html`<div class="note">No software reports yet.</div>`}
     </section>
     <h2 style="margin:4px 0 0">Pages</h2>
@@ -1878,7 +1877,7 @@ function drawWaiting(biz, u) {
   const host = document.getElementById('waiting');
   if (!host) return;
   const sw = u.softwareList ?? [];
-  const compare = html`<a href="#/b/${biz.id}/compare/${u.day}">Compare sales →</a>`;
+  const compare = html`<a href="#/b/${biz.id}/compare/${u.day}">All bills of the shift →</a>`;
   if (!sw.length) {
     host.innerHTML = html`<div class="waiting"><span>No software report for ${dayLabel(u.day)} yet, so bill numbers cannot be matched.</span>${compare}</div>`.__html;
     return;
@@ -3189,7 +3188,7 @@ async function compareView(biz, day) {
   const confirmed = v.status === 'confirmed';
   const credit = awaiting?.sales ?? [];
   const tab = (() => { try { return localStorage.getItem('bookr.compare.tab') || 'shift'; } catch { return 'shift'; } })();
-  const P = compareParts(biz, day, v, shifts, { reload: () => compareView(biz, day), back: `#/b/${biz.id}/compare/${day}` });
+  const P = compareParts(biz, day, v, shifts, { reload: () => compareView(biz, day), back: `#/b/${biz.id}/compare-old/${day}` });
   render(shell(biz, 'compare', 'Compare sales', '', html`
     ${shiftBar(biz, day, 'compare')}
     ${P.bar}
@@ -4928,7 +4927,7 @@ async function bringInView(biz, dayArg) {
 
     <section class="card step-card" id="step-ready" style="${allOk ? 'border-color:#86EFAC;background:#F0FDF4' : ''}">
       ${head('✨', allOk, false, allOk ? 'Everything is in' : 'Then', allOk ? 'Go and match the shift.' : `Still to come: ${[!softwareOk && 'software report', v.bank && !bankOk && 'bank up to 8 am', !pagesOk && (regs.length ? 'pages read and a cash summary' : 'register pages')].filter(Boolean).join(' · ')}`)}
-      <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">Compare sales →</a>
+      <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">All bills of the shift →</a>
         ${v.bank ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${day}">Reconcile</a>` : ''}</div>
     </section>
     ${biz.role === 'owner' ? html`<details class="card" style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">Check reading accuracy</summary>
@@ -5106,7 +5105,7 @@ async function openBillDrawer(biz, billNo, day) {
         <a href="#/b/${biz.id}/review/${r.upload_id}/${r.id}">Open on its register page (with the photo)</a></div>`) : html`<div class="note">Not in the register.</div>`)}
     ${section('Comparison', b.comparisons.length ? b.comparisons.map((c) => html`<div>${dayLabel(c.shift_day)} shift: <span class="chip ${c.difference === 'match' ? 'ok' : 'wait'}">${DIFF_LABELS[c.difference]}</span>
         ${c.decision ? ` · ${DECISION_LABELS[c.decision]}${c.note ? `: ${c.note}` : ''}` : ''}${c.shift_status === 'confirmed' ? ' · confirmed' : ''}
-        <div><a href="#/b/${biz.id}/compare/${c.shift_day}">Open on Compare sales</a></div></div>`) : html`<div class="note">No comparison.</div>`)}
+        <div><a href="#/b/${biz.id}/compare/${c.shift_day}">Open in All bills</a></div></div>`) : html`<div class="note">No comparison.</div>`)}
     ${section('Money', b.sales.length ? b.sales.map((x) => {
       const paid = b.money.filter((m) => m.saleId === x.id);
       return html`<div>Sale ₹ ${money(x.amount_paise)} · ${MODE_LABELS[x.payment_mode] ?? x.payment_mode}${x.head ? ` · ${x.head}` : ''}
@@ -5436,7 +5435,14 @@ async function route() {
         }
         return reviewListView(biz, q.get('find'));
       }
-      if (screen === 'compare') return compareView(biz, parts[3]);
+      // Compare sales moved into Reconcile (approved 10 Nov 2026): its links open the All bills tab. The old page stays
+      // at compare-old for a while, in case it is needed.
+      if (screen === 'compare') {
+        const d = isDay(parts[3]) ? parts[3] : lastDay(biz.id);
+        if (d) recKeep = { day: d, top: 'all' };
+        return location.replace(`#/b/${biz.id}/reconcile${d ? `/${d}` : ''}`);
+      }
+      if (screen === 'compare-old') return compareView(biz, parts[3]);
       if (screen === 'bank') return bankView(biz, query);
       if (screen === 'cards') return cardsView(biz, query);
       if (screen === 'bringin') return bringInView(biz, parts[3]);
