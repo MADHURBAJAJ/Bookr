@@ -393,6 +393,10 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 @media (max-width: 760px) { .dash-grid { grid-template-columns: 1fr; } .dash-big { grid-row: auto; } }
 /* Multi-pair tray (approved 10 Nov 2026). */
 .tray { background: var(--ground); border: 1px solid var(--line-soft); border-radius: 12px; padding: 12px 14px; margin-top: 8px; display: grid; gap: 4px; }
-.tray-row { display: grid; grid-template-columns: minmax(0, 1.2fr) 20px minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line-soft); }
+.tray-row { display: grid; grid-template-columns: minmax(0, 1.1fr) 20px minmax(0, 1fr) minmax(0, 1.4fr); gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line-soft); }
 .tray-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 @media (max-width: 560px) { .tray-row { grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr); } .tray-row > :last-child { grid-column: 1 / -1; text-align: left !important; } }
+/* The tray by tick order (10 Nov 2026): the pair taking the next tick, and the list of what saving will do. */
+.tray-row.tray-adding { background: #ECFDF5; outline: 2px solid var(--teal); outline-offset: -2px; border-radius: 8px; padding-left: 8px; padding-right: 8px; }
+.tray-preview { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.tray-row .dchip { min-height: 0; padding: 3px 9px; font-size: 12px; }

@@ -10,13 +10,13 @@ import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } fro
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
-import { cashOver, isMachineUpi, shiftCards, unsettledDays } from '../cards';
+import { cashOver, isMachineUpi, machineLabel, shiftCards, unsettledDays } from '../cards';
 import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, planTaken, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
 import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
-import { istDay, shiftWindow } from '../time';
+import { addDays, istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { unsettleStatements } from '../cards';
@@ -388,6 +388,45 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/entries', requireRole('bank.
   const day = c.req.param('day');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
   return c.json(await shiftEntries(c.env.DB, c.get('businessId'), day));
+});
+
+/**
+ * The tray's "shifts either side" (approved 10 Nov 2026): credits and card payments of the shift before and after that are
+ * still open there (not paired, chosen or matched), so a bill here can take a credit that landed after 8 am, or a
+ * late-night payment counted on the next shift. Asked for only when a person ticks it on, so Reconcile stays quick.
+ */
+bankRoutes.get('/businesses/:businessId/shifts/:day/nearby', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const credits: unknown[] = [];
+  const payments: unknown[] = [];
+  for (const adj of [addDays(day, -1), addDays(day, 1)]) {
+    const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, adj))?.status;
+    const w = shiftWindow(adj);
+    if (status && status !== 'confirmed') {
+      const [r, k] = await Promise.all([trialReconcile(db, bid, adj), trialCards(db, bid, adj)]);
+      credits.push(...r.open.credits.map((x) => ({ ...x, shiftDay: adj })));
+      payments.push(...k.open.payments.map((x) => ({ ...x, shiftDay: adj })));
+      continue;
+    }
+    // A saved shift (or none): whatever is still open in its hours.
+    const [cr, pays] = await Promise.all([
+      all<{ id: string; amountPaise: number; postedAt: number; accountName: string | null; remark: string | null; label: string | null }>(db, `SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt,
+        a.name AS accountName, r.remark, s.receives_upi_label AS label FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id LEFT JOIN bank_sources s ON s.account_id = r.account_id
+        WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
+          AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`, bid, w.from, w.to),
+      all<{ id: string; paid_at: number; amount_paise: number; txn_type: string; terminal_id: string; pay_mode: string | null; scheme: string | null; card_type: string | null; card_last4: string | null }>(db,
+        `SELECT s.id, s.paid_at, s.amount_paise, s.txn_type, s.terminal_id, s.pay_mode, s.scheme, s.card_type, s.card_last4 FROM card_settlements s
+        WHERE s.business_id = ? AND s.txn_type = 'PURCHASE' AND s.paid_at >= ? AND s.paid_at < ?
+          AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.card_payment_id = s.id) ORDER BY s.paid_at`, bid, w.from, w.to),
+    ]);
+    credits.push(...cr.map((x) => ({ ...x, shiftDay: adj })));
+    payments.push(...pays.filter((p) => !isMachineUpi(p)).map((p) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, terminalId: p.terminal_id, upi: false,
+      label: machineLabel(p), shiftDay: adj })));
+  }
+  return c.json({ credits, payments });
 });
 
 bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('bank.link'), async (c) => {

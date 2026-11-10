@@ -10,7 +10,7 @@ import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
 import { shiftSlips } from '../slips';
-import { runCardAuto, shiftCards } from '../cards';
+import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { CASH_BY_UPI_MIN, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
@@ -442,6 +442,81 @@ salesRoutes.post('/businesses/:businessId/comparisons/:id/paid-by-upi', requireR
   }
   // Now software says cash and the register UPI: counted from the register, which the bank backs.
   await refreshComparisons(db, bid, cmp.shift_day, user);
+  const now2 = await one<{ id: string; difference: string; decision: string | null }>(db, 'SELECT id, difference, decision FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
+  if (now2 && NEEDS_DECISION.includes(now2.difference as never) && !now2.decision) {
+    await db.batch([
+      stmt(db, 'UPDATE bill_comparisons SET decision = \'use_register\', decided_by = ?, decided_at = ?, note = ?, linked_to_id = NULL WHERE id = ?', user, t, note, now2.id),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, NULL, ?, ?)`, bid, user, now2.id, JSON.stringify({ decision: 'use_register', note }), t),
+    ]);
+  }
+  return c.json({ ok: true, rowId, uploadId: page.id });
+});
+
+/**
+ * The tray (approved 10 Nov 2026): a bill only in the software report that a bank credit or card machine payment paid.
+ * It is written into the register on the shift's "Added from software report" page as UPI or card, at the bill's amount,
+ * the difference (up to ₹10) as a tip or discount, so the bill takes the payment; the tray then matches them on save.
+ * Delete the line there (or Undo) to take it back.
+ */
+const TRAY_GAP_PAISE = 1000;
+salesRoutes.post('/businesses/:businessId/comparisons/:id/add-paid', requireRole('sales.decide'), async (c) => {
+  if (!can(c.get('role'), 'bank.link')) fail(403, 'Only people who can match the bank can do this.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const data = await body(c);
+  const mode = data.mode === 'upi' || data.mode === 'card' ? data.mode : fail(400, 'Mode must be UPI or card.');
+  const sourceId = typeof data.sourceId === 'string' && isUuid(data.sourceId) ? data.sourceId : fail(400, mode === 'upi' ? 'Choose the bank credit.' : 'Choose the card payment.');
+  const cmp = await one<{ shift_day: string; bill_no: string; difference: string; sw_mode: string | null; sw_amount_paise: number | null; register_row_id: string | null; bill_type: string | null }>(db,
+    'SELECT shift_day, bill_no, difference, sw_mode, sw_amount_paise, register_row_id, bill_type FROM bill_comparisons WHERE id = ? AND business_id = ?', id, bid);
+  if (!cmp) fail(404, 'Not found.');
+  if (cmp.difference !== 'missing_in_register' || cmp.register_row_id || !cmp.sw_amount_paise) fail(400, `Bill ${cmp.bill_no} is not a bill only in the software report.`);
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day);
+  if (shift?.status === 'confirmed') fail(409, CONFIRMED);
+  let paid: number; let label: string; let at: number; let what: string;
+  if (mode === 'upi') {
+    const cr = await one<{ amount_paise: number; posted_at: number; status: string; kind: string; label: string | null; account: string | null }>(db, `SELECT r.amount_paise, r.posted_at, r.status, r.kind,
+      s.receives_upi_label AS label, a.name AS account FROM bank_rows r LEFT JOIN bank_sources s ON s.account_id = r.account_id LEFT JOIN accounts a ON a.id = r.account_id WHERE r.id = ? AND r.business_id = ?`, sourceId, bid);
+    if (!cr || cr.kind !== 'upi_in' || cr.status !== 'unmatched') fail(400, 'That bank credit is not an unmatched UPI credit.');
+    paid = cr.amount_paise; label = cr.label ?? 'UPI'; at = cr.posted_at; what = `bank credit${cr.account ? ` on ${cr.account}` : ''}`;
+  } else {
+    const p = await one<{ amount_paise: number; paid_at: number; txn_type: string; pay_mode: string | null; scheme: string | null; matched: number }>(db, `SELECT amount_paise, paid_at, txn_type, pay_mode, scheme,
+      EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched FROM card_settlements s WHERE id = ? AND business_id = ?`, sourceId, bid);
+    if (!p || p.txn_type !== 'PURCHASE' || isMachineUpi(p) || p.matched) fail(400, 'That card payment is not an unmatched card sale.');
+    paid = p.amount_paise; label = 'Card'; at = p.paid_at; what = 'card machine payment';
+  }
+  const diff = paid - cmp.sw_amount_paise;
+  if (Math.abs(diff) > TRAY_GAP_PAISE) fail(400, `The payment is more than ₹10 from bill ${cmp.bill_no}.`);
+  const billType = cmp.bill_type ?? (data.billType === 'fnb' || data.billType === 'room' ? data.billType : 'fnb');
+  const t = now();
+  const user = c.get('user').id;
+  const hhmm = new Date(at + 5.5 * 3600e3).toISOString().slice(11, 16);
+  const rupees = (x: number) => `₹ ${(x / 100).toLocaleString('en-IN')}`;
+  const note = `Paid by ${mode === 'upi' ? 'UPI' : 'card'}: ${what} of ${rupees(paid)} at ${hhmm}${diff > 0 ? `, ${rupees(diff)} tip` : diff < 0 ? `, ${rupees(-diff)} discount` : ''}`;
+  const page = await softwarePage(db, bid, cmp.shift_day, user, t);
+  const line = (await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) + 1 AS n FROM register_rows WHERE upload_id = ?', page.id))?.n ?? 1;
+  const rowId = newId();
+  try {
+    await db.batch([
+      ...page.statements,
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks, status, ocr_original, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'checked', ?, ?, ?, ?)`, rowId, bid, page.id, line, cmp.shift_day, cmp.bill_no, billType, cmp.sw_amount_paise,
+        diff < 0 ? -diff : 0, diff > 0 ? diff : 0, `Added from software report: ${note}`,
+        JSON.stringify({ source: 'software_report', typed: 'tray', addedBy: user, comparisonId: id, paidBy: { mode, id: sourceId } }), user, t, t),
+      stmt(db, 'INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        newId(), bid, rowId, mode, label, paid, t),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.added_from_software', 'register_rows', ?, NULL, ?, ?)`, bid, user, rowId,
+        JSON.stringify({ billNo: cmp.bill_no, billType, amountPaise: cmp.sw_amount_paise, mode, paidPaise: paid, sourceId, note, comparisonId: id }), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, cmp.shift_day, user);
+  // The software may say another mode (e.g. cash): the register, which the payment backs, is counted.
   const now2 = await one<{ id: string; difference: string; decision: string | null }>(db, 'SELECT id, difference, decision FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
   if (now2 && NEEDS_DECISION.includes(now2.difference as never) && !now2.decision) {
     await db.batch([
