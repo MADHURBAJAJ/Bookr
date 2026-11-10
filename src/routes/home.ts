@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { requireRole } from '../auth';
 import type { AppEnv, Env } from '../types';
-import { all, type DB } from '../db';
+import { all, one, type DB } from '../db';
 import { can, type Role } from '../permissions';
 import { addDays, istDay, shiftDayOf } from '../time';
-import { NEEDS_DECISION, waitingBills, WATCH_DAYS } from '../sales';
+import { NEEDS_DECISION, NOT_BILLED_NOTE, WATCH_DAYS } from '../sales';
+import { waitingPicture } from '../waiting';
 import { shiftCards, unsettledDays } from '../cards';
 import { cashCheck } from '../cash';
 import { cardReportsStatus } from '../cardDrive';
@@ -44,7 +45,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
       AND payment_mode = 'upi' AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL GROUP BY shift_day`, businessId) : [],
     bank ? all<Count & { paise: number }>(db, `SELECT ${SHIFT_OF} AS day, count(*) AS n, sum(amount_paise) AS paise FROM bank_rows
       WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched' GROUP BY ${SHIFT_OF}`, businessId) : [],
-    waitingBills(db, businessId, today),
+    waitingPicture(db, businessId, today),
     all<{ kind: string; day: string | null }>(db, `SELECT kind, max(business_day) AS day FROM uploads WHERE business_id = ? AND kind IN ('bill_register', 'software_sales_csv') GROUP BY kind`, businessId),
   ]);
 
@@ -62,11 +63,16 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   }));
   const open = list.filter((s) => s.status !== 'confirmed' || (s.bank && s.bank.billsLeft + s.bank.creditsLeft + s.bank.cardsLeft > 0));
 
-  const waitingOut = waiting.filter((b) => !b.oddNumber);
+  // Waiting counts only what needs a look (Stage 2, 10 Nov 2026); what waits for a file is told apart.
+  const greyBy = new Map<string, { waitFor: string; day: string; n: number }>();
+  for (const g of waiting.grey) { const k = `${g.waitFor}|${g.day}`; const x = greyBy.get(k) ?? { waitFor: g.waitFor ?? '', day: g.day, n: 0 }; x.n += 1; greyBy.set(k, x); }
+  // Bills written in the register but never billed in the software, closed this week (Stage 4, 10 Nov 2026).
+  const notBilled = (await one<{ n: number }>(db, `SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND close_note = ? AND difference = 'missing_in_software'
+    AND closed_at >= ?`, businessId, NOT_BILLED_NOTE, Date.now() - 7 * 86400000))?.n ?? 0;
   const result = {
     today, watchDays: WATCH_DAYS,
     shifts: { count: open.length, list: open.slice(0, MAX_SHIFTS) },
-    waitingBills: { count: waitingOut.length, late: waitingOut.filter((b) => b.unresolved).length, firstDay: waitingOut[0]?.day ?? null },
+    waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled },
     fresh: {
       registerDay: uploads.find((u) => u.kind === 'bill_register')?.day ?? null,
       reportDay: uploads.find((u) => u.kind === 'software_sales_csv')?.day ?? null,

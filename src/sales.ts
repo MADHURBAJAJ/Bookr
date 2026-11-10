@@ -258,7 +258,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
     statements.push(...unlinkStatements(db, c.id, t));
     statements.push(stmt(db, `UPDATE bill_comparisons SET software_bill_id = ?, register_row_id = ?, sw_amount_paise = ?, sw_mode = ?,
       rg_amount_paise = ?, rg_mode = ?, difference = ?, decision = ?, decided_by = ?, decided_at = ?, note = ?, bill_type = NULL, linked_to_id = NULL,
-      closed_at = NULL, closed_by = NULL, close_note = NULL WHERE id = ?`,
+      closed_at = NULL, closed_by = NULL, close_note = NULL, watch_until = NULL, watch_note = NULL WHERE id = ?`,
       w.software_bill_id, w.register_row_id, w.sw_amount_paise, w.sw_mode, w.rg_amount_paise, w.rg_mode, w.difference,
       null, null, null, null, c.id));
   }
@@ -406,6 +406,8 @@ function startsWithDate(billNo: string) {
 /** Bills of the new POS: YYMMDD, then a running number with no padding, so 7 to 9 digits. */
 /** How far from a "cash" bill's software time a UPI credit of its amount is taken as its payment. */
 export const CASH_BY_UPI_MIN = 60;
+/** The close reason for a bill written in the register that was never billed in the software (Stage 4, 10 Nov 2026). */
+export const NOT_BILLED_NOTE = 'Not billed in software';
 /** A credit inside the shift no bill or group paired, and why. */
 export interface OpenCredit {
   id: string; amount: number; postedAt: number;
@@ -457,21 +459,24 @@ export const oldPosLastSeen = async (db: DB, businessId: string, day: string) =>
 export const isOddBill = (billNo: string | null | undefined) => !!billNo && !isNewPosBill(billNo) && !isOldPosBill(billNo);
 
 export async function waitingBills(db: DB, businessId: string, today: string) {
-  const rows = await all<Comparison & { shift_day: string; shift_status: string | null }>(db, `
+  const rows = await all<Comparison & { shift_day: string; shift_status: string | null; watch_until: string | null; watch_note: string | null }>(db, `
     SELECT c.*, s.status AS shift_status FROM bill_comparisons c
     LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
     WHERE c.business_id = ? AND c.difference IN ('missing_in_register', 'missing_in_software') AND c.decision IS NOT NULL
-      AND c.closed_at IS NULL AND c.linked_to_id IS NULL
+      AND c.decision <> 'leave_out' AND c.closed_at IS NULL AND c.linked_to_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM bill_comparisons x WHERE x.linked_to_id = c.id)
     ORDER BY c.shift_day, c.bill_no`, businessId);
   // An old POS bill on the register will never meet a software bill: it does not wait.
   return rows.filter((c) => !(c.difference === 'missing_in_software' && isOldPosBill(c.bill_no))).map((c) => {
     const days = Math.round((Date.parse(today) - Date.parse(c.shift_day)) / 86400000);
+    // Watched 7 days from its shift, or until the day a person kept it waiting to (Stage 2, 10 Nov 2026).
+    const watchEnd = c.watch_until ?? addDays(c.shift_day, WATCH_DAYS);
     return {
       id: c.id, day: c.shift_day, billNo: c.bill_no, side: c.difference === 'missing_in_register' ? 'software' : 'register',
       amountPaise: c.difference === 'missing_in_register' ? c.sw_amount_paise : c.rg_amount_paise,
       mode: c.difference === 'missing_in_register' ? c.sw_mode : c.rg_mode,
-      decision: c.decision, note: c.note, confirmed: c.shift_status === 'confirmed', daysWaiting: days, unresolved: days > WATCH_DAYS,
+      decision: c.decision, note: c.note, confirmed: c.shift_status === 'confirmed', daysWaiting: days, unresolved: today > watchEnd,
+      watchEnd, watchNote: c.watch_note, pos: c.pos_no,
       oddNumber: c.difference === 'missing_in_software' && isOddBill(c.bill_no),
     };
   });
@@ -551,6 +556,11 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   if (cov.gaps.length) blockers.push('Some hours of this shift are not covered by a software report.');
   if (conflicts.length) blockers.push(`${conflicts.length} overlapping bill${conflicts.length > 1 ? 's differ' : ' differs'} between two software reports. Decide which values to keep.`);
   const others = await otherDays(db, businessId, day, comparisons);
+  // A bill counted here whose register line turned up on a later day, linked to this one (Stage 3, 10 Nov 2026).
+  const lateLines = new Map((await all<{ linked_to_id: string; shift_day: string; rg_amount_paise: number | null; rg_mode: string | null }>(db, `
+    SELECT linked_to_id, shift_day, rg_amount_paise, rg_mode FROM bill_comparisons WHERE business_id = ? AND difference = 'missing_in_software'
+      AND linked_to_id IN (SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ?)`, businessId, businessId, day))
+    .map((x) => [x.linked_to_id, { day: x.shift_day, amountPaise: x.rg_amount_paise, mode: x.rg_mode }]));
   // What is odd about a register number, until a person has decided the bill.
   const toCheck = comparisons.filter((c) => c.difference === 'missing_in_software' && c.register_row_id && !c.decided_by && !c.closed_at);
   const [numbers, lastOldPos] = await Promise.all([toCheck.length && shift?.status !== 'confirmed' ? numberContext(db, businessId, day) : null, oldPosLastSeen(db, businessId, day)]);
@@ -752,6 +762,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       linkedToId: c.linked_to_id ?? null,
       auto: !!c.decision && !c.decided_by && c.decided_at != null,
       otherDay: others.get(c.id) ?? null,
+      confirmedBy: lateLines.get(c.id) ?? null,
       numberFlags: flagsOf.get(c.id) ?? [],
       bank: bank?.evidence.get(c.id) ?? null,
       bankNone: bank?.noUpi.get(c.id) ?? null,
@@ -1202,7 +1213,9 @@ export function numberFlags(row: { bill_no: string; amount_paise: number; gross_
   for (const p of ctx.pending) {
     if (p.billNo === row.bill_no || ctx.taken.has(p.billNo) || !p.amountPaise) continue;
     if (p.amountPaise !== row.amount_paise && p.amountPaise !== row.gross_paise) continue;
-    const kind = candidates.includes(p.billNo) ? 'pending' : w.length >= 5 && billDistance(w, digits(p.billNo)) === 1 ? 'pending_typo' : null;
+    // Misread (Stage 4, 10 Nov 2026): one digit off, or two on a full new POS number; same amount.
+    const dist = w.length >= 5 ? billDistance(w, digits(p.billNo)) : 99;
+    const kind = candidates.includes(p.billNo) ? 'pending' : dist === 1 || (dist === 2 && w.length >= 7) ? 'pending_typo' : null;
     if (kind) out.push({ ...blank, kind, billNo: p.billNo, day: p.day, sameShift: p.day === ctx.day, amountPaise: p.amountPaise });
   }
   for (const c of candidates) {
@@ -1250,6 +1263,8 @@ export async function numberContext(db: DB, businessId: string, day: string): Pr
     day, ranges, taken: new Set(written.map((r) => r.bill_no)),
     pending: [
       ...bills.filter((b) => b.shift_day === day).map((b) => ({ billNo: b.bill_no, day, amountPaise: b.amount_paise })),
+      // The next shift's software bills too: a bill written in the register before the software bill is printed.
+      ...bills.filter((b) => b.shift_day === addDays(day, 1)).map((b) => ({ billNo: b.bill_no, day: b.shift_day, amountPaise: b.amount_paise })),
       ...waiting.filter((c) => c.sw_amount_paise != null).map((c) => ({ billNo: c.bill_no, day: c.shift_day, amountPaise: c.sw_amount_paise! })),
     ],
   };

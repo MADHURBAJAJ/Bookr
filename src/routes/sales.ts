@@ -12,7 +12,8 @@ import { columnHints } from '../columnHints';
 import { shiftSlips } from '../slips';
 import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
-import { cashCheck, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
+import { waitingPicture } from '../waiting';
+import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
 import { CASH_BY_UPI_MIN, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
@@ -581,7 +582,36 @@ salesRoutes.put('/businesses/:businessId/bill-type-heads/:billType', requireRole
 // ---- Cash for a shift (Compare sales, and the cash summary page on Review)
 
 salesRoutes.get('/businesses/:businessId/shifts/:day/cash', requireRole('sales.view'), async (c) => {
-  return c.json({ ...(await cashCheck(c.env.DB, c.get('businessId'), dayParam(c.req.param('day')))), reasons: LEAVE_OUT_REASONS });
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = dayParam(c.req.param('day'));
+  const k = await cashCheck(db, bid, day);
+  return c.json({ ...k, pair: await cashPairOf(db, bid, day, k), reasons: LEAVE_OUT_REASONS });
+});
+
+// A short day and an over day by the same amount, settled together: the cash was counted a day late. Owner or Accountant.
+salesRoutes.post('/businesses/:businessId/shifts/:day/cash/pair', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = dayParam(c.req.param('day'));
+  const b = await body(c);
+  const otherDay = dayParam(String(b.otherDay ?? ''));
+  const pair = await cashPairOf(db, bid, day);
+  if (!pair || pair.day !== otherDay) fail(409, 'These two days no longer differ by the same amount.');
+  const extra = text(b, 'note', 'Note', { max: 300, optional: true });
+  const note = `Paid late: ₹ ${(pair!.amountPaise / 100).toLocaleString('en-IN')} short on ${pair!.shortDay}, over on ${pair!.overDay}${extra ? ` · ${extra}` : ''}`;
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  for (const d of [day, otherDay]) {
+    const k = await cashCheck(db, bid, d);
+    const shift = await one<{ id: string }>(db, 'SELECT id FROM shifts WHERE business_id = ? AND shift_day = ?', bid, d);
+    statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash.difference_accepted', 'shifts', ?, NULL, ?, ?)`, bid, user, shift!.id,
+      JSON.stringify({ day: d, differencePaise: k.differencePaise, shouldBePaise: k.shouldBePaise, countedPaise: k.countedPaise, note, pairedWith: d === day ? otherDay : day }), t));
+  }
+  await db.batch(statements);
+  return c.json({ ok: true, note });
 });
 
 // A difference that is a writing mistake (the cash is there) is accepted with a note. Owner or Accountant.
@@ -659,6 +689,36 @@ async function softwarePage(db: D1Database, bid: string, day: string, user: stri
   return { id, statements: [stmt(db, `INSERT INTO uploads (id, business_id, kind, business_day, storage_key, content_sha256, status, ocr_engine, uploaded_by, created_at)
     VALUES (?, ?, 'bill_register', ?, ?, ?, 'ready', 'manual', ?, ?)`, id, bid, day, `software-added/${day}`, key, user, t)] };
 }
+
+/** Waiting (Stage 2, approved 10 Nov 2026): what needs a look, and what only waits for a file. Bank and card offers
+ *  only for people who can match the bank. */
+salesRoutes.get('/businesses/:businessId/waiting', requireRole('sales.view'), async (c) => {
+  const w = await waitingPicture(c.env.DB, c.get('businessId'), istDay(Date.now()));
+  if (!can(c.get('role'), 'bank.link')) for (const x of w.look) x.offers = [];
+  return c.json(w);
+});
+
+/** Keeps a one-sided bill waiting 7 more days after its watch ran out, with a note. Owner or Accountant. Audited. */
+salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/keep-waiting', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('comparisonId');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const note = text(await body(c), 'note', 'Note', { max: 300 })!;
+  const today = istDay(Date.now());
+  const w = (await waitingBills(db, bid, today)).find((x) => x.id === id);
+  if (!w) fail(404, 'This bill is not waiting for its other side.');
+  if (!w.unresolved) fail(400, `This bill is watched until ${w.watchEnd}; it can be kept waiting after that.`);
+  const until = addDays(today, WATCH_DAYS);
+  const t = now();
+  const user = c.get('user').id;
+  await db.batch([
+    stmt(db, 'UPDATE bill_comparisons SET watch_until = ?, watch_note = ? WHERE id = ? AND business_id = ?', until, note, id, bid),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'comparison.keep_waiting', 'bill_comparisons', ?, ?, ?, ?)`, bid, user, id, JSON.stringify({ watchEnd: w.watchEnd }), JSON.stringify({ watchUntil: until, note }), t),
+  ]);
+  return c.json({ ok: true, watchUntil: until });
+});
 
 /** Closes a one-sided bill still unmatched after the watch, with a reason. Owner or Accountant. Audited. */
 salesRoutes.post('/businesses/:businessId/comparisons/:comparisonId/close', requireRole('sales.decide'), async (c) => {
