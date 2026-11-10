@@ -416,3 +416,5 @@ details.menu[open] { z-index: 40; }
 #nobill .nb-headpick select { flex: 1; min-width: 0; min-height: 36px; }
 #nobill .nb-headpick .btn { width: auto; flex: none; justify-content: center; }
 @media (max-width: 600px) { #nobill .nb-acts { padding-left: 0; } #nobill .nb-acts > input { max-width: none; flex-basis: 100%; } #nobill .nb-more .menu-pop { right: auto; left: 0; } }
+/* The tray: the chosen answer for a pair more than ₹10 apart (11 Nov 2026). */
+.tray-row .dchip.on { background: var(--teal); border-color: var(--teal); color: #fff; }

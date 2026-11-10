@@ -3886,8 +3886,9 @@ function trayPair(p, card) {
     return Math.abs(out.diff) > TRAY_GAP ? { ...out, kind: 'off' } : { ...out, kind: 'parts' };
   }
   if (out.diff === 0) return out;
-  if (Math.abs(out.diff) > TRAY_GAP) return { ...out, kind: 'off' };
   if (b.grouped) return { ...out, kind: 'bad', why: 'Paid together with others: correct the payment on the row that holds it (Open row).' };
+  // More than ₹10 apart (11 Nov 2026): never matched on its own; a person chooses a tip or discount, or the bill's amount.
+  if (Math.abs(out.diff) > TRAY_GAP) return -out.diff >= bl ? { ...out, kind: 'off' } : { ...out, kind: 'big' };
   return { ...out, kind: 'gap' };
 }
 /** The tray, on the UPI tab (bank credits) and the Card tab (machine payments). root holds the [data-tside="cr"|"bl"]
@@ -3961,12 +3962,13 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
     const word = card ? 'card' : 'UPI';
     const off = t.diff > 0 ? `, ₹ ${money(t.diff)} tip` : t.diff < 0 ? `, ₹ ${money(-t.diff)} discount` : '';
     if (t.kind === 'parts') return `Bill ${b.billNo}: write ${p.credits.map((c) => `₹ ${money(c.amountPaise)}`).join(' + ')} by UPI on its register row${off}`;
-    if (t.kind !== 'exact' && t.kind !== 'gap') return null;
-    if (!b.rowId) return `Bill ${b.billNo}: add it to the register (it is not there) as ${word} ₹ ${money(p.credits[0].amountPaise)}${off}`;
-    if (t.kind === 'gap') return pick.get(p) === 'fix' ? `Bill ${b.billNo}: change its amount to ₹ ${money(p.credits[0].amountPaise)}, paid by ${word}` : `Bill ${b.billNo}: write ${word} ₹ ${money(p.credits[0].amountPaise)} on its register row${off}`;
+    if (t.kind !== 'exact' && t.kind !== 'gap' && t.kind !== 'big') return null;
+    if (!b.rowId) return pick.get(p) === 'fix' ? `Bill ${b.billNo}: add it to the register (it is not there) at ₹ ${money(p.credits[0].amountPaise)}, paid by ${word}, and decide it as Use register`
+      : `Bill ${b.billNo}: add it to the register (it is not there) as ${word} ₹ ${money(p.credits[0].amountPaise)}${off}`;
+    if (t.kind === 'gap' || t.kind === 'big') return pick.get(p) === 'fix' ? `Bill ${b.billNo}: change its amount to ₹ ${money(p.credits[0].amountPaise)}, paid by ${word}` : `Bill ${b.billNo}: write ${word} ₹ ${money(p.credits[0].amountPaise)} on its register row${off}`;
     return null;
   };
-  const isReady = (p, t) => ['exact', 'group', 'parts'].includes(t.kind) || (t.kind === 'gap' && pick.has(p));
+  const isReady = (p, t) => ['exact', 'group', 'parts'].includes(t.kind) || ((t.kind === 'gap' || t.kind === 'big') && pick.has(p));
   const draw = () => {
     const box = q('fix');
     q('msg').textContent = '';
@@ -3979,13 +3981,16 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
       : t.kind === 'group' ? html`<span class="tchip ok">Paid together, same total</span>`
       : t.kind === 'parts' ? html`<span class="tchip ${t.diff ? 'warn' : 'ok'}">Paid in ${p.credits.length} goes${t.diff ? `, ₹ ${money(Math.abs(t.diff))} ${t.diff > 0 ? 'tip' : 'discount'}` : ''}</span>`
       : t.kind === 'gap' ? html`<span class="tchip warn">${t.diff > 0 ? `₹ ${money(t.diff)} more: tip?` : `₹ ${money(-t.diff)} less: discount?`}</span>`
+      : t.kind === 'big' ? html`<span class="tchip bad">₹ ${money(Math.abs(t.diff))} ${t.diff > 0 ? 'more' : 'less'} than the bill: choose</span>`
       : t.kind === 'off' ? html`<span class="tchip bad">₹ ${money(Math.abs(t.diff))} apart: not matched</span>`
       : html`<span class="tchip bad">${t.kind === 'loose' ? t.why : 'Not matched'}</span>`);
     const menu = (p, t, i) => {
       const b = p.bills[0];
       const gap = t.kind === 'gap' ? html`<select data-traypick="${i}" style="width:auto;font-size:12px;min-height:0"><option value="">Choose…</option>
         <option value="tip" ${pick.get(p) === 'tip' ? 'selected' : ''}>Match, ₹ ${money(Math.abs(t.diff))} ${t.diff > 0 ? 'tip' : 'discount'}</option>
-        ${b.rowId && !b.paidAt ? html`<option value="fix" ${pick.get(p) === 'fix' ? 'selected' : ''}>Match, fix bill to ₹ ${money(p.credits[0].amountPaise)}</option>` : ''}</select>` : '';
+        ${b.rowId && !b.paidAt ? html`<option value="fix" ${pick.get(p) === 'fix' ? 'selected' : ''}>Match, fix bill to ₹ ${money(p.credits[0].amountPaise)}</option>` : ''}</select>`
+        : t.kind === 'big' ? html`<button type="button" class="btn plain dchip${pick.get(p) === 'tip' ? ' on' : ''}" data-traybig="${i}" data-v="tip">₹ ${money(Math.abs(t.diff))} ${t.diff > 0 ? 'tip' : 'discount'}</button>
+          <button type="button" class="btn plain dchip${pick.get(p) === 'fix' ? ' on' : ''}" data-traybig="${i}" data-v="fix">Bill was ₹ ${money(p.credits[0].amountPaise)}</button>` : '';
       return html`<div class="form-row" style="gap:6px;justify-content:flex-end;margin-top:4px">${gap}
         ${t.kind === 'loose' ? html`<button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${day}">Write as paid together</button>` : ''}
         ${t.kind === 'waiting' ? '' : html`<button type="button" class="btn plain dchip" data-trayadd="${i}">${addTo === p ? 'Tick to add… (cancel)' : '+ Add to this pair'}</button>`}
@@ -3994,7 +3999,7 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
     const row = (p, t, i) => html`<div class="tray-row${addTo === p ? ' tray-adding' : ''}"><div><span class="tiny">Pair ${i + 1}</span>${p.credits.length ? p.credits.map(crLine) : html`<div class="tiny">Tick its ${noun.toLowerCase()}…</div>`}</div>
       <span aria-hidden="true">↔</span><div>${p.bills.length ? p.bills.map(billLine) : html`<div class="tiny">Tick its bill…</div>`}</div>
       <div style="text-align:right">${chip(p, t)}${t.why && t.kind !== 'loose' ? html`<div class="tiny" style="white-space:normal">${t.why}</div>` : ''}${menu(p, t, i)}</div></div>`;
-    const undecided = pairs.filter((p, i) => ts[i].kind === 'gap' && !pick.has(p)).length;
+    const undecided = pairs.filter((p, i) => (ts[i].kind === 'gap' || ts[i].kind === 'big') && !pick.has(p)).length;
     const waiting = ts.filter((t) => t.kind === 'waiting').length;
     const notReady = pairs.length - ready.length - undecided - waiting;
     const notes = [undecided ? `${undecided} gap${undecided === 1 ? '' : 's'} to choose` : '', waiting ? `${waiting} waiting for a tick` : '', notReady ? `${notReady} not matched` : ''].filter(Boolean);
@@ -4014,6 +4019,11 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
     box.querySelectorAll('[data-traypick]').forEach((sel) => sel.addEventListener('change', () => {
       const p = at(sel, 'traypick');
       if (sel.value) pick.set(p, sel.value); else pick.delete(p);
+      draw();
+    }));
+    box.querySelectorAll('[data-traybig]').forEach((x) => x.addEventListener('click', () => {
+      const p = at(x, 'traybig');
+      if (pick.get(p) === x.dataset.v) pick.delete(p); else pick.set(p, x.dataset.v);
       draw();
     }));
     box.querySelectorAll('[data-trayadd]').forEach((x) => x.addEventListener('click', () => { const p = at(x, 'trayadd'); addTo = addTo === p ? null : p; draw(); }));
@@ -4039,10 +4049,21 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
           const t = tOf(p);
           const b = p.bills[0];
           if (t.kind === 'parts') undos.push(await writeBankOnRow(biz, b, p.credits));
-          else if ((t.kind === 'exact' || t.kind === 'gap') && !b.rowId) {
-            const r = await apiFull('POST', `/businesses/${biz.id}/comparisons/${b.id}/add-paid`, { mode, sourceId: p.credits[0].id });
+          else if ((t.kind === 'exact' || t.kind === 'gap' || t.kind === 'big') && !b.rowId) {
+            const r = await apiFull('POST', `/businesses/${biz.id}/comparisons/${b.id}/add-paid`, { mode, sourceId: p.credits[0].id, allowGap: t.kind === 'big', fix: pick.get(p) === 'fix' });
             undos.push(() => apiFull('DELETE', `/businesses/${biz.id}/register-rows/${r.rowId}`, {}));
-          } else if (t.kind === 'gap') undos.push(await writeBankOnRow(biz, b, [p.credits[0]], { fix: pick.get(p) === 'fix', mode }));
+          } else if (t.kind === 'gap' || t.kind === 'big') undos.push(await writeBankOnRow(biz, b, [p.credits[0]], { fix: pick.get(p) === 'fix', mode }));
+        }
+        // "Bill was ₹ X" on a bill the software has at another amount: the payment proves the register (11 Nov 2026).
+        const fixed = ready.filter((p) => pick.get(p) === 'fix' && p.bills[0].rowId);
+        if (fixed.length) {
+          const cmps = (await api('GET', `/businesses/${biz.id}/shifts/${day}`)).comparisons;
+          for (const p of fixed) {
+            const c = cmps.find((x) => x.id === p.bills[0].id);
+            if (!c || c.difference === 'match' || c.difference === 'complimentary' || c.decision === 'use_register') continue;
+            await apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: 'use_register', note: `${card ? 'Card machine' : 'Bank'} ₹ ${money(p.credits[0].amountPaise)} at ${hhmm(p.credits[0].postedAt)}: the bill was ₹ ${money(p.credits[0].amountPaise)}` });
+            undos.push(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: c.decision ?? null, note: c.note ?? undefined }));
+          }
         }
         const matches = ready.filter((p) => tOf(p).kind !== 'parts').map((p) => ({ credit: p.credits[0], bills: p.bills }));
         const res = matches.length ? await post(matches) : { ids: [] };

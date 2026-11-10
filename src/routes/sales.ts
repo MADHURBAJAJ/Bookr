@@ -472,6 +472,8 @@ salesRoutes.post('/businesses/:businessId/comparisons/:id/paid-by-upi', requireR
  * The tray (approved 10 Nov 2026): a bill only in the software report that a bank credit or card machine payment paid.
  * It is written into the register on the shift's "Added from software report" page as UPI or card, at the bill's amount,
  * the difference (up to ₹10) as a tip or discount, so the bill takes the payment; the tray then matches them on save.
+ * More than ₹10 apart (11 Nov 2026) only when a person chose it (allowGap): a tip or discount, or fix (the bill was the
+ * payment's amount: the row takes it, and the bill is decided Use register below).
  * Delete the line there (or Undo) to take it back.
  */
 const TRAY_GAP_PAISE = 1000;
@@ -502,14 +504,17 @@ salesRoutes.post('/businesses/:businessId/comparisons/:id/add-paid', requireRole
     if (!p || p.txn_type !== 'PURCHASE' || isMachineUpi(p) || p.matched) fail(400, 'That card payment is not an unmatched card sale.');
     paid = p.amount_paise; label = 'Card'; at = p.paid_at; what = 'card machine payment';
   }
-  const diff = paid - cmp.sw_amount_paise;
-  if (Math.abs(diff) > TRAY_GAP_PAISE) fail(400, `The payment is more than ₹10 from bill ${cmp.bill_no}.`);
+  const fix = data.fix === true;
+  const amount = fix ? paid : cmp.sw_amount_paise;
+  const diff = paid - amount;
+  if (Math.abs(diff) > TRAY_GAP_PAISE && data.allowGap !== true) fail(400, `The payment is more than ₹10 from bill ${cmp.bill_no}.`);
+  if (-diff >= amount) fail(400, `The payment is too far below bill ${cmp.bill_no} to be a discount.`);
   const billType = cmp.bill_type ?? (data.billType === 'fnb' || data.billType === 'room' ? data.billType : 'fnb');
   const t = now();
   const user = c.get('user').id;
   const hhmm = new Date(at + 5.5 * 3600e3).toISOString().slice(11, 16);
   const rupees = (x: number) => `₹ ${(x / 100).toLocaleString('en-IN')}`;
-  const note = `Paid by ${mode === 'upi' ? 'UPI' : 'card'}: ${what} of ${rupees(paid)} at ${hhmm}${diff > 0 ? `, ${rupees(diff)} tip` : diff < 0 ? `, ${rupees(-diff)} discount` : ''}`;
+  const note = `Paid by ${mode === 'upi' ? 'UPI' : 'card'}: ${what} of ${rupees(paid)} at ${hhmm}${fix && paid !== cmp.sw_amount_paise ? `, the bill was ${rupees(paid)} (software ${rupees(cmp.sw_amount_paise)})` : diff > 0 ? `, ${rupees(diff)} tip` : diff < 0 ? `, ${rupees(-diff)} discount` : ''}`;
   const page = await softwarePage(db, bid, cmp.shift_day, user, t);
   const line = (await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) + 1 AS n FROM register_rows WHERE upload_id = ?', page.id))?.n ?? 1;
   const rowId = newId();
@@ -517,14 +522,14 @@ salesRoutes.post('/businesses/:businessId/comparisons/:id/add-paid', requireRole
     await db.batch([
       ...page.statements,
       stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks, status, ocr_original, edited_by, edited_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'checked', ?, ?, ?, ?)`, rowId, bid, page.id, line, cmp.shift_day, cmp.bill_no, billType, cmp.sw_amount_paise,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'checked', ?, ?, ?, ?)`, rowId, bid, page.id, line, cmp.shift_day, cmp.bill_no, billType, amount,
         diff < 0 ? -diff : 0, diff > 0 ? diff : 0, `Added from software report: ${note}`,
         JSON.stringify({ source: 'software_report', typed: 'tray', addedBy: user, comparisonId: id, paidBy: { mode, id: sourceId } }), user, t, t),
       stmt(db, 'INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
         newId(), bid, rowId, mode, label, paid, t),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
         VALUES (?, ?, 'register.added_from_software', 'register_rows', ?, NULL, ?, ?)`, bid, user, rowId,
-        JSON.stringify({ billNo: cmp.bill_no, billType, amountPaise: cmp.sw_amount_paise, mode, paidPaise: paid, sourceId, note, comparisonId: id }), t),
+        JSON.stringify({ billNo: cmp.bill_no, billType, amountPaise: amount, mode, paidPaise: paid, sourceId, note, comparisonId: id }), t),
     ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);

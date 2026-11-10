@@ -334,8 +334,17 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   // bill of its amount is still open, else it could be theirs.
   const freeWhy = (amount: number) => (openBills.some((b) => b.amountPaise === amount) ? 'unpaired' as const : bills.some((b) => b.amount === amount) ? 'extra' as const : 'no_bill' as const);
   const whyOf = new Map((view.bank?.open ?? []).map((o) => [o.id, o]));
+  // Why a credit is open, as it stands now (11 Nov 2026): the bills a credit "could be" leave out a bill a person matched
+  // to another credit; with none left it is free (extra, or no bill).
+  const whyNow = (id: string, amount: number) => {
+    const o = whyOf.get(id);
+    if (!o) return { why: freeWhy(amount), bills: [], billsOfAmount: bills.filter((b) => b.amount === amount).length };
+    if (o.why !== 'unpaired') return { why: o.why, bills: o.bills, billsOfAmount: o.billsOfAmount };
+    const still = o.bills.filter((x) => openBills.some((b) => b.billNo != null && (x.billNo ?? '').split(' + ').includes(b.billNo)));
+    return still.length ? { why: o.why, bills: still, billsOfAmount: o.billsOfAmount } : { why: freeWhy(amount), bills: [], billsOfAmount: o.billsOfAmount };
+  };
   const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id),
-    why: whyOf.get(c.id)?.why ?? freeWhy(c.amount), bills: whyOf.get(c.id)?.bills ?? [], billsOfAmount: whyOf.get(c.id)?.billsOfAmount ?? bills.filter((b) => b.amount === c.amount).length }));
+    ...whyNow(c.id, c.amount) }));
   // An amount on one side of a bill whose software and register disagree (not a discount or tip both agree on) may be
   // that bill's real payment: not an extra.
   const disagree = view.comparisons.filter((c) => c.software && c.register && c.software.amountPaise !== c.register.amountPaise
