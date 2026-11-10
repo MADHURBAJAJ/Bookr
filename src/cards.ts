@@ -445,7 +445,9 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
       noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').map((n) => n.payment)),
       noBill: needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').length },
     needs: needsLeft, noSwipe, done, settlements,
-    left: needsLeft.length + noSwipe.length,
+    // Card bills waiting while the card report is not in: left too (approved 10 Nov 2026).
+    waitingReport: covered ? 0 : waiting.filter((x) => !offered.has(x.id)).length,
+    left: needsLeft.length + noSwipe.length + (covered ? 0 : waiting.filter((x) => !offered.has(x.id)).length),
   };
 }
 

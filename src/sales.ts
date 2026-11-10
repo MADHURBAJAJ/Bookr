@@ -2,7 +2,7 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
-import { isMachineUpi, machineLabel, machineUpiPayments, machineUpiStatements } from './cards';
+import { cardMatchStatements, isMachineUpi, machineLabel, machineUpiPayments, machineUpiStatements } from './cards';
 import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill, type EvidenceCredit } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
@@ -745,6 +745,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       id: c.id, posNo: c.pos_no, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, note: c.note, billType: c.bill_type,
       software: c.software_bill_id ? { amountPaise: c.sw_amount_paise, mode: c.sw_mode } : null,
       register: c.register_row_id ? { reviewed: rgById.get(c.register_row_id)?.status === 'checked', amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0,
+        // Paid on the row itself (a ₹0 bill with money paid is a mistake to check, 10 Nov 2026).
+        paidPaise: (written.get(c.register_row_id) ?? []).reduce((t, p) => t + p.amount_paise, 0),
         rowId: c.register_row_id, uploadId: rgById.get(c.register_row_id)?.upload_id ?? null } : null,
       groupId: c.register_row_id ? groups.find((g) => g.rowIds.includes(c.register_row_id!))?.headId ?? null : null,
       linkedToId: c.linked_to_id ?? null,
@@ -784,10 +786,10 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   };
 }
 
-interface NewRow { amount: number; mode: 'cash' | 'upi' | 'card'; billType: string; source: 'software' | 'register' | 'both_matched'; c: Comparison }
+export interface NewRow { amount: number; mode: 'cash' | 'upi' | 'card'; billType: string; source: 'software' | 'register' | 'both_matched'; c: Comparison }
 
 /** The income rows confirmation would create. The app follows each decision; it never picks a side. */
-async function plannedRows(db: DB, businessId: string, day: string): Promise<NewRow[]> {
+export async function plannedRows(db: DB, businessId: string, day: string): Promise<NewRow[]> {
   const { rg, written, paysByRow, groups } = await loadShiftData(db, businessId, day);
   const rgById = new Map(rg.map((r) => [r.id, r]));
   const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
@@ -881,7 +883,17 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       k.comparisonIds.forEach((id) => chosen.add(id));
     } else skipped.push(k.billNos.join(' + '));
   }
-  if (choices.length) {
+  // Card matches chosen before saving (approved 10 Nov 2026): the payment pays its bills' card sales when it is still
+  // not matched and they add up to it.
+  const cardChosen = await cardShiftChoices(db, businessId, day);
+  for (const k of cardChosen) {
+    const card = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'card' && k.comparisonIds.includes(x.r.c.id));
+    if (k.open && card.length && card.reduce((a, x) => a + x.amount, 0) === k.amountPaise) {
+      statements.push(...cardMatchStatements(db, businessId, [k.paymentId], card.map((x) => x.id), userId, t + 1 + matched, { how: 'matched on saving the shift' }));
+      matched += 1;
+    } else skipped.push(k.billNos.join(' + '));
+  }
+  if (choices.length || cardChosen.length) {
     statements.push(stmt(db, 'DELETE FROM shift_choices WHERE business_id = ? AND shift_day = ?', businessId, day));
     if (skipped.length) statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
       VALUES (?, ?, 'shift.choices_skipped', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id, JSON.stringify({ shiftDay: day, bills: skipped }), t));
@@ -957,7 +969,7 @@ export async function shiftChoices(db: DB, businessId: string, day: string) {
     status: string; account: string | null }>(db, `
     SELECT k.id, k.bank_row_id, k.comparison_ids, k.created_at, u.name AS by, r.amount_paise, r.posted_at, r.status, a.name AS account
     FROM shift_choices k JOIN bank_rows r ON r.id = k.bank_row_id LEFT JOIN accounts a ON a.id = r.account_id LEFT JOIN users u ON u.id = k.created_by
-    WHERE k.business_id = ? AND k.shift_day = ? ORDER BY k.created_at`, businessId, day);
+    WHERE k.business_id = ? AND k.shift_day = ? AND k.kind = 'bank_match' ORDER BY k.created_at`, businessId, day);
   const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
   const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
   return list.map((k) => {
@@ -965,6 +977,28 @@ export async function shiftChoices(db: DB, businessId: string, day: string) {
     return { id: k.id, bankRowId: k.bank_row_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, postedAt: k.posted_at,
       accountName: k.account, open: k.status === 'unmatched', by: k.by, at: k.created_at };
   });
+}
+
+/** Card matches chosen on Reconcile before saving, with their machine payment (still not matched or not) and their bills. */
+export async function cardShiftChoices(db: DB, businessId: string, day: string) {
+  const list = await all<{ id: string; card_payment_id: string; comparison_ids: string; created_at: number; by: string | null; amount_paise: number; paid_at: number;
+    scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null; matched: number }>(db, `
+    SELECT k.id, k.card_payment_id, k.comparison_ids, k.created_at, u.name AS by, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4, s.pay_mode,
+      EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
+    FROM shift_choices k JOIN card_settlements s ON s.id = k.card_payment_id LEFT JOIN users u ON u.id = k.created_by
+    WHERE k.business_id = ? AND k.shift_day = ? AND k.kind = 'card_match' ORDER BY k.created_at`, businessId, day);
+  const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
+  const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
+  return list.map((k) => {
+    const comparisonIds = JSON.parse(k.comparison_ids) as string[];
+    return { id: k.id, paymentId: k.card_payment_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, paidAt: k.paid_at,
+      label: machineLabel(k), open: !k.matched, by: k.by, at: k.created_at };
+  });
+}
+
+/** What a set of bills would book as card on saving, by their decisions now: for checking a chosen card match adds up. */
+export async function plannedCardPaise(db: DB, businessId: string, day: string, comparisonIds: string[]) {
+  return (await plannedRows(db, businessId, day)).filter((r) => r.mode === 'card' && comparisonIds.includes(r.c.id)).reduce((a, r) => a + r.amount, 0);
 }
 
 /** What a set of bills would book as UPI on saving, by their decisions now: for checking a chosen match adds up. */

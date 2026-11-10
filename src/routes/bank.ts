@@ -10,11 +10,12 @@ import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } fro
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
-import { cashOver, shiftCards } from '../cards';
+import { cashOver, isMachineUpi, shiftCards } from '../cards';
+import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, planTaken, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
-import { billDistance, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
+import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
 import { istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
@@ -285,16 +286,56 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
   return c.json({ ok: true, id });
 });
 
+// A card machine payment matched to its bill(s) before saving (approved 10 Nov 2026), made on Save like a UPI match.
+bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const pid = typeof data.paymentId === 'string' && isUuid(data.paymentId) ? data.paymentId : fail(400, 'Choose the card payment.');
+  const cids = Array.isArray(data.comparisonIds) ? [...new Set(data.comparisonIds.filter((x): x is string => typeof x === 'string' && isUuid(x)))].slice(0, 30) : [];
+  if (!cids.length) fail(400, 'Choose the bill.');
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  if (!shift) fail(404, 'Unknown shift.');
+  if (shift.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
+  const p = await one<{ txn_type: string; amount_paise: number; pay_mode: string | null; scheme: string | null; matched: number }>(db,
+    `SELECT txn_type, amount_paise, pay_mode, scheme, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
+    FROM card_settlements s WHERE id = ? AND business_id = ?`, pid, bid);
+  if (!p) fail(404, 'Card payment not found.');
+  if (p.txn_type !== 'PURCHASE' || isMachineUpi(p)) fail(409, 'Only a card sale on the machine pays a card bill.');
+  if (p.matched) fail(409, 'This card payment is already matched.');
+  const found = await all<{ id: string }>(db, `SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
+  if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
+  if ((await cardShiftChoices(db, bid, day)).some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, 'A bill is already matched on save.');
+  const card = await plannedCardPaise(db, bid, day, cids);
+  if (card !== p.amount_paise) fail(409, card ? 'The payment is not what these bills take by card.' : 'These bills have no card payment: decide or correct them first.');
+  const id = newId();
+  try {
+    await db.batch([
+      stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, card_payment_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'card_match', ?, ?, ?, ?)`,
+        id, bid, day, pid, JSON.stringify(cids), c.get('user').id, now()),
+      stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', pid, null, JSON.stringify({ shiftDay: day, comparisonIds: cids, card: true }), now()),
+    ]);
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e))) fail(409, 'This card payment is already matched on save.');
+    throw e;
+  }
+  return c.json({ ok: true, id });
+});
+
 bankRoutes.delete('/businesses/:businessId/shifts/:day/choices/:id', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
   const id = c.req.param('id');
   if (!isUuid(id)) fail(404, 'Not found.');
-  const k = await one<{ bank_row_id: string; comparison_ids: string; shift_day: string }>(db, 'SELECT bank_row_id, comparison_ids, shift_day FROM shift_choices WHERE id = ? AND business_id = ?', id, bid);
+  const k = await one<{ bank_row_id: string | null; card_payment_id: string | null; comparison_ids: string; shift_day: string }>(db,
+    'SELECT bank_row_id, card_payment_id, comparison_ids, shift_day FROM shift_choices WHERE id = ? AND business_id = ?', id, bid);
   if (!k || k.shift_day !== c.req.param('day')) fail(404, 'Not found, or already saved.');
   await db.batch([
     stmt(db, 'DELETE FROM shift_choices WHERE id = ?', id),
-    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice_undone', k.bank_row_id, JSON.stringify({ shiftDay: k.shift_day, comparisonIds: JSON.parse(k.comparison_ids) }), null, now()),
+    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice_undone', k.bank_row_id ?? k.card_payment_id,
+      JSON.stringify({ shiftDay: k.shift_day, comparisonIds: JSON.parse(k.comparison_ids), ...(k.card_payment_id ? { card: true } : {}) }), null, now()),
   ]);
   return c.json({ ok: true });
 });
@@ -328,9 +369,10 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   // The card picture (approved 8 Nov 2026), for a confirmed shift: its card sales are made on confirm.
   // Credits the UPI side already offers to a bill are not offered to a card bill as well.
   const offered = 'clear' in r ? new Set([...r.clear, ...r.likely].map((x) => x.creditId)) : new Set<string>();
-  const cards = status === 'confirmed' ? await shiftCards(db, bid, day, await cashOver(db, bid, day), offered) : null;
+  // Before saving, the trial card picture (approved 10 Nov 2026): what Save would match, and what needs a person.
+  const cards = status === 'confirmed' ? await shiftCards(db, bid, day, await cashOver(db, bid, day), offered) : await trialCards(db, bid, day);
   // What the card side explains is told there, and counted once (approved 9 Nov 2026).
-  if (cards && 'left' in r) {
+  if (cards && !('trial' in cards) && 'left' in r) {
     const w = shiftWindow(day);
     const cr = new Set(cards.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).map((x) => x.id));
     const bl = new Set(cards.explains.bills.filter((x) => x.shiftDay === day).map((x) => x.id));
@@ -397,7 +439,7 @@ bankRoutes.post('/businesses/:businessId/comparisons/:id/same-sale', requireRole
   if ((await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day))?.status === 'confirmed') fail(409, 'This shift is already confirmed.');
   if (!(await bookedTx(db, bid, rowId))) fail(409, 'This credit is no longer booked as a sale.');
   if (await planTaken(db, bid, rowId, cmp.id)) fail(409, 'This credit, or this bill, is already chosen to be one sale with another.');
-  if (await one(db, 'SELECT 1 AS x FROM shift_choices WHERE business_id = ? AND comparison_ids LIKE ?', bid, `%"${cmp.id}"%`)) fail(409, 'This bill is already matched on save.');
+  if (await one(db, "SELECT 1 AS x FROM shift_choices WHERE business_id = ? AND kind = 'bank_match' AND comparison_ids LIKE ?", bid, `%"${cmp.id}"%`)) fail(409, 'This bill is already matched on save.');
   await db.batch([stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.same_sale_planned', rowId, null, { comparisonId: cmp.id, shiftDay: cmp.shift_day }, now()))]);
   return c.json({ ok: true });
 });

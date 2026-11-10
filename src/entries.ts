@@ -6,6 +6,7 @@
 import { all, type DB } from './db';
 import { repaidFor } from './repay';
 import { machineLabel } from './cards';
+import { trialCards, type TrialMatch } from './cardTrial';
 import { shiftView } from './sales';
 
 type Mode = 'cash' | 'upi' | 'card';
@@ -18,7 +19,7 @@ export interface Entry {
   edits: { text: string; by: string | null; at: number | null }[];
   rowId: string | null; uploadId: string | null; transactionId: string | null; part: string | null;
   /** Bills paid together: one payment for the group, its evidence on the group; amountPaise is the bill's own amount. */
-  group: { id: string; billNos: string[]; paymentPaise: number; billsPaise: number } | null;
+  group: { id: string; billNos: string[]; paymentPaise: number; billsPaise: number; paidPaise: number; otherModes: { mode: Mode; paise: number }[] } | null;
 }
 
 const rs = (p: number | null | undefined) => (p == null ? '—' : `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: p % 100 ? 2 : 0, maximumFractionDigits: 2 })}`);
@@ -41,7 +42,7 @@ const DECISION: Record<string, string> = { use_register: 'used the register', us
 export async function shiftEntries(db: DB, businessId: string, day: string) {
   const view = await shiftView(db, businessId, day);
   const confirmed = view.status === 'confirmed';
-  const [rows, pays, txs, matches, repaid, deciders] = await Promise.all([
+  const [rows, pays, txs, matches, repaid, deciders, trial] = await Promise.all([
     all<{ id: string; bill_no: string; amount_paise: number; ocr_original: string | null; edited_at: number | null; editor: string | null; paid_with_row_id: string | null }>(db, `
       SELECT r.id, r.bill_no, r.amount_paise, r.ocr_original, r.edited_at, u.name AS editor, r.paid_with_row_id FROM register_rows r LEFT JOIN users u ON u.id = r.edited_by
       WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
@@ -59,7 +60,10 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     repaidFor(db, businessId, day),
     all<{ row_id: string; name: string | null; created_at: number }>(db, `SELECT a.row_id, u.name, a.created_at FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
       WHERE a.business_id = ? AND a.action = 'comparison.decide' AND a.row_table = 'bill_comparisons' ORDER BY a.id`, businessId),
+    // Before saving, the machine payment each card bill would be matched to (approved 10 Nov 2026).
+    confirmed ? Promise.resolve(null) : trialCards(db, businessId, day),
   ]);
+  const onSave = (m: TrialMatch) => `${m.label} ${rs(m.amountPaise)} at ${hm(m.paidAt)} · ${m.how === 'chosen' ? 'chosen, matched on save' : 'Bookr matches on save'}`;
   const rowOf = new Map(rows.map((r) => [r.id, r]));
   const paysOf = (id: string) => pays.filter((p) => p.register_row_id === id);
   const decidedBy = new Map(deciders.map((d) => [d.row_id, d]));
@@ -86,7 +90,9 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
         }
       } catch { /* an old reading in another shape: nothing to compare */ }
     }
-    if (c.difference !== 'match') {
+    // A bill of ₹0 is complimentary: never counted as a sale, and nothing to decide (10 Nov 2026).
+    if (c.difference === 'complimentary') out.push({ text: 'Amount ₹0: complimentary, not counted as a sale', by: null, at: null });
+    else if (c.difference !== 'match') {
       const what = c.difference === 'amount' || c.difference === 'amount_and_mode'
         ? `${DIFF[c.difference]} (register ${rs(c.register?.amountPaise as number)} ${modeName(c.register?.mode as string)} · software ${rs(c.software?.amountPaise as number)} ${modeName(c.software?.mode as string)})`
         : c.difference === 'mode' ? `Mode differs (register ${modeName(c.register?.mode as string)} · software ${modeName(c.software?.mode as string)})` : DIFF[c.difference] ?? c.difference;
@@ -100,7 +106,7 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
   const entries: Entry[] = [];
   const grouped = new Set(view.paidGroups.flatMap((g) => view.comparisons.filter((c) => c.groupId === g.id).map((c) => c.id)));
   for (const c of view.comparisons) {
-    if (c.decision === 'leave_out' || c.decision === 'carry_forward' || grouped.has(c.id)) continue;
+    if (c.decision === 'leave_out' || c.decision === 'carry_forward' || c.difference === 'complimentary' || grouped.has(c.id)) continue;
     const base = { group: null, comparisonId: c.id, billNo: c.billNo, paidAt: c.paidAt as number | null, rowId: (c.register?.rowId as string) ?? null, uploadId: (c.register?.uploadId as string) ?? null,
       register: c.register ? { amountPaise: c.register.amountPaise as number | null, mode: c.register.mode as string | null } : null,
       software: c.software ? { amountPaise: c.software.amountPaise as number | null, mode: c.software.mode as string | null } : null };
@@ -136,7 +142,7 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     if (!parts.length) parts = [{ mode: 'cash', amount: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number }];
     parts.forEach((p, i) => {
       const evidence = p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}` : null)
-        : p.mode === 'card' ? (c.machine ? `${c.machine.label} ${rs(c.machine.amountPaise)} at ${hm(c.machine.paidAt)}` : null) : 'In the cash count';
+        : p.mode === 'card' ? (trial?.matches[c.id] ? onSave(trial.matches[c.id]) : c.machine ? `${c.machine.label} ${rs(c.machine.amountPaise)} at ${hm(c.machine.paidAt)}` : null) : 'In the cash count';
       entries.push({ ...base, key: `${c.id}:${i}`, mode: p.mode, amountPaise: p.amount, state: open ? 'decide' : p.mode === 'cash' || evidence ? 'done' : 'waiting', evidence, edits,
         transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null });
     });
@@ -149,7 +155,8 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     const byMode = new Map<Mode, number>();
     for (const p of paysOf(g.id).filter((x) => x.amount_paise > 0)) byMode.set(p.mode as Mode, (byMode.get(p.mode as Mode) ?? 0) + p.amount_paise);
     if (!byMode.size) byMode.set('cash', 0);
-    const undecided = cs.some((c) => c.difference !== 'match' && !c.decision);
+    const undecided = cs.some((c) => c.difference !== 'match' && c.difference !== 'complimentary' && !c.decision);
+    const paidPaise = [...byMode.values()].reduce((a, b) => a + b, 0);
     const mine = txs.filter((t) => cs.some((c) => c.id === t.comparison_id));
     const billsPaise = cs.reduce((t, c) => t + ((c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number), 0);
     for (const [mode, paymentPaise] of byMode) {
@@ -165,7 +172,8 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
           : card.length ? [...new Map(card.map((x) => [`${x.paid_at}`, x])).values()].map((x) => `${machineLabel(x)} ${rs(x.amount_paise)} at ${hm(x.paid_at)}`).join(' + ') : null;
         waiting = m.some((t) => (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed && t.match_status === 'awaiting_bank_match') || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement'));
       } else {
-        evidence = mode === 'upi' && g.bank ? `${g.bank.machine ? `${g.bank.machine.label}:` : 'Bank'} ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : null;
+        const m = mode === 'card' ? cs.map((c) => trial?.matches[c.id]).find(Boolean) : undefined;
+        evidence = mode === 'upi' && g.bank ? `${g.bank.machine ? `${g.bank.machine.label}:` : 'Bank'} ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : m ? onSave(m) : null;
         waiting = !evidence;
       }
       for (const c of cs) {
@@ -177,7 +185,7 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
           state: !confirmed && undecided ? 'decide' : waiting ? 'waiting' : 'done', evidence,
           edits: [...editsOf(c), ...rps.map((rp) => ({ text: `${modeName(rp.from)} → ${modeName(rp.mode)}${rp.note ? ` (${rp.note})` : ''}`, by: null, at: rp.at }))],
           rowId: (c.register?.rowId as string) ?? null, uploadId: (c.register?.uploadId as string) ?? null, transactionId: null, part: null,
-          group: { id: g.id, billNos: g.billNos, paymentPaise, billsPaise } });
+          group: { id: g.id, billNos: g.billNos, paymentPaise, billsPaise, paidPaise, otherModes: [...byMode].filter(([m]) => m !== mode).map(([m, paise]) => ({ mode: m, paise })) } });
       }
     }
   }
