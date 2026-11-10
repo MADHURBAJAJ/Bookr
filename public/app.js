@@ -2734,19 +2734,9 @@ function wireDecideMenu(biz, day, v, root, act, back) {
   }));
 }
 
-async function compareView(biz, day) {
-  const { shifts } = await api('GET', `/businesses/${biz.id}/shifts`);
-  if (!day) day = shifts.find((s) => s.day === lastDay(biz.id))?.day ?? shifts.find((s) => s.status !== 'confirmed')?.day ?? shifts[0]?.day;
-  rememberDay(biz.id, day);
-  if (!day) {
-    render(shell(biz, 'compare', 'Compare sales', 'Software report against the handwritten register, bill by bill. You decide every difference.', html`
-      <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
-    return wireShell();
-  }
-  drawerReload = () => compareView(biz, day);
-  const [v, cash, waiting, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
-    api('GET', `/businesses/${biz.id}/waiting-bills`), api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
-  v.reasons = cash.reasons;
+/** Compare sales of one shift as parts (approved 10 Nov 2026): the bar, the banners and the bill table with its wiring,
+ *  shown on Compare sales and in Reconcile's All bills tab. */
+function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }) {
   const canDecide = biz.actions.includes('sales.decide');
   const confirmed = v.status === 'confirmed';
   const toDecide = v.comparisons.filter((c) => ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'].includes(c.difference));
@@ -2846,8 +2836,6 @@ async function compareView(biz, day) {
   const total = Math.max(1, matches + toDecide.length);
   const seg = (n, cls, label) => (n ? html`<span class="pg ${cls}" style="flex:${n}" title="${label}: ${n}"></span>` : '');
   const status = confirmed ? html`<span class="chip ok">Confirmed</span>` : v.status === 'comparing' ? html`<span class="chip wait">Comparing</span>` : html`<span class="chip">Open</span>`;
-  const credit = awaiting?.sales ?? [];
-  const tab = (() => { try { return localStorage.getItem('bookr.compare.tab') || 'shift'; } catch { return 'shift'; } })();
   const rowHtml = (c, inGroup = '', closed = false) => html`<tr ${inGroup ? html`data-group="${inGroup}"` : ''} ${closed ? 'hidden' : ''} data-bill="${c.billNo}" data-open="${c.register?.uploadId ? `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}` : `#/b/${biz.id}/review?find=${c.billNo.slice(-4)}`}"
       class="clickrow ${c.decision || c.difference === 'match' ? '' : 'undecided'} ${inGroup ? 'grp-bill' : ''}" data-kind="${c.difference === 'match' ? 'match' : c.difference === 'missing_in_register' ? 'sw' : c.difference === 'missing_in_software' ? 'rg' : 'diff'}" title="${c.register ? 'Open this bill in its register page' : 'Look for this bill on the register pages'}">
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
@@ -2899,14 +2887,12 @@ async function compareView(biz, day) {
       const members = rows.filter((x) => x.groupId === c.groupId);
       return [groupRow(groupOf(c), members), ...members.map((x) => rowHtml(x, c.groupId, true))];
     })}</tbody></table></div>`;
-  render(shell(biz, 'compare', 'Compare sales', '', html`
-    ${shiftBar(biz, day, 'compare')}
-    <section class="card cmp-bar">
+  const bar = html`    <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
           ${status}
         </div>
-        ${canDecide && !confirmed ? html`<a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${day}" title="The shift is saved on Reconcile">Save on Reconcile ›</a>` : ''}
+        ${canDecide && !confirmed && !onReconcile ? html`<a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${day}" title="The shift is saved on Reconcile">Save on Reconcile ›</a>` : ''}
       </div>
       <div class="cmp-inputs">
         <span class="tchip ${v.gaps.length ? 'warn' : 'ok'}">Software · ${v.softwareBills} bills${v.gaps.length ? ` · ${missingHours} h missing` : ' · 8 am to 8 am'}</span>
@@ -2924,20 +2910,11 @@ async function compareView(biz, day) {
         <div class="tiny">${matches} match · ${auto.length} by Bookr · ${byPerson.length} decided · <strong>${open.length} to decide</strong>${onCredit.length ? ` · ${onCredit.length} UPI on one side (₹ ${rs(onCreditPaise)}) counted when the bank credit arrives` : ''}</div>
       </div>
       <div id="coveredit"></div>
-    </section>
-    <div id="cmsg"></div>
-    ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
+    </section>`;
+  const banners = html`    ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
     ${(v.warnings ?? []).map((w) => cashWarnHtml(w, v, confirmed || !canDecide))}
-    ${auto.some((c) => c.numberFlags?.length) ? html`<div class="cmp-warn">⚠ ${blockerHtml(`Bookr counted these before their numbers looked wrong. Check them under Decided by Bookr: ${auto.filter((c) => c.numberFlags?.length).map((c) => c.billNo).join(', ')}.`, v)}</div>` : ''}
-    ${notMatched ? notMatchedHtml(notMatched, `#/b/${biz.id}/reconcile/${day}`) : ''}
-    ${oddNumbersHtml(biz, waiting, canDecide)}
-    <div class="seg cmp-tabs" role="tablist">
-      <button type="button" role="tab" data-tab="shift" class="${tab === 'shift' ? 'on' : ''}">This shift</button>
-      <button type="button" role="tab" data-tab="other" class="${tab === 'other' ? 'on' : ''}">Waiting for other side (${waiting?.bills?.length ?? 0})</button>
-      <button type="button" role="tab" data-tab="credit" class="${tab === 'credit' ? 'on' : ''}">Waiting for bank credit (${credit.length})</button>
-    </div>
-    <div data-pane="shift" ${tab === 'shift' ? '' : 'hidden'}>
-      ${v.conflicts.length ? html`<section class="card">
+    ${auto.some((c) => c.numberFlags?.length) ? html`<div class="cmp-warn">⚠ ${blockerHtml(`Bookr counted these before their numbers looked wrong. Check them under Decided by Bookr: ${auto.filter((c) => c.numberFlags?.length).map((c) => c.billNo).join(', ')}.`, v)}</div>` : ''}`;
+  const shiftPane = html`      ${v.conflicts.length ? html`<section class="card">
         <h2>Bills that differ between two software reports</h2>
         <div class="note">The same bill came in twice with different values. Nothing was overwritten. Choose which to keep.</div>
         <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported</th><th>New file</th><th></th></tr></thead><tbody>
@@ -2968,16 +2945,15 @@ async function compareView(biz, day) {
       ${byPerson.length ? html`<details class="card cmp-fold"><summary><h2>Decided (${byPerson.length})</h2></summary>${table(byPerson)}</details>` : ''}
       <div class="row">
         <section class="card" style="flex:2 1 320px;gap:10px" id="nextstep">
-          <h2>${confirmed ? 'Confirmed' : 'Before confirming'}</h2>
+          <h2>${confirmed ? 'Saved' : 'Before saving'}</h2>
           ${confirmed ? html`
             <div class="ok-msg">Confirmed ${when(v.confirmedAt)}. UPI sales now wait for their bank credit${onCredit.length ? '; bills found on one side only count on the day their credit arrives' : ''}.</div>
             ${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`
           : html`
             ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
-            ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="ok-msg">Everything is decided. Confirm the shift at the top.</div>`}
+            ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="ok-msg">Everything is decided. Save the shift on Reconcile.</div>`}
             ${v.assumedTypes?.length ? html`<div class="note" style="background:#FFFBEB;padding:8px 10px;border-radius:6px">${v.assumedTypes.length} bill${v.assumedTypes.length > 1 ? 's were' : ' was'} taken as <strong>F&amp;B</strong> because the register's type could not be read: ${blockerHtml(v.assumedTypes.join(', '), v)}.</div>` : ''}
             ${v.bank && countedUpi.length ? html`<div class="note"><strong>On confirming:</strong> ${matchNow.length} of ${countedUpi.length} UPI bill${countedUpi.length > 1 ? 's' : ''} ${matchNow.length === 1 ? 'is' : 'are'} matched to ${matchNow.length === 1 ? 'its' : 'their'} bank credit at once${countedUpi.length - matchNow.length ? `; ${countedUpi.length - matchNow.length} wait${countedUpi.length - matchNow.length === 1 ? 's' : ''} for ${countedUpi.length - matchNow.length === 1 ? 'its' : 'their'} credit on Reconcile` : ''}. Unmatch undoes any of them.</div>` : ''}
-            ${v.bank && biz.actions.includes('bank.link') ? html`<div class="note" id="trialwarn"></div>` : ''}
             <div class="note">Only Owner and Accountant can decide differences and confirm. The bank credit does not have to arrive first.</div>`}
         </section>
         <section class="card" style="flex:3 1 420px;gap:10px">
@@ -2990,25 +2966,11 @@ async function compareView(biz, day) {
           <div class="note">Difference counts only bills not decided yet${openTotal ? '' : ': every difference is decided'}. Software and Register are the full reports as they stand.</div>
           <div class="note">Complimentary bills (amount 0) are never counted as sales${comps.length ? `: ${comps.map((c) => c.billNo).join(', ')}` : ''}.</div>
         </section>
-      </div>
-      ${cashPanelHtml(biz, cash)}
-    </div>
-    <div data-pane="other" ${tab === 'other' ? '' : 'hidden'}>${waitingHtml(biz, waiting, canDecide) || html`<section class="card"><div class="note">No bill is waiting for its other side.</div></section>`}</div>
-    <div data-pane="credit" ${tab === 'credit' ? '' : 'hidden'}><section class="card" style="gap:10px">
-      <h2>Waiting for bank credit</h2>
-      <div class="note">Confirmed UPI sales whose credit has not been matched on Reconcile yet. A bill found on one side only is <strong>not counted</strong> until its credit is matched; it is then counted on the day the credit arrived.</div>
-      ${credit.length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Counted</th><th>Waiting</th></tr></thead><tbody>
-        ${credit.map((x) => html`<tr><td class="mono">${x.billNo}${drawerBtn(x.billNo, x.day)}</td><td><a href="#/b/${biz.id}/compare/${x.day}">${dayLabel(x.day)}</a></td><td class="amount">${money(x.amountPaise)}</td>
-          <td>${x.onCredit ? html`<span class="chip wait">When the credit arrives</span>` : html`<span class="note">On ${dayLabel(x.day)}</span>`}</td>
-          <td>${x.daysWaiting > 2 ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td></tr>`)}
-      </tbody></table></div>${biz.actions.includes('bank.link') ? html`<a href="#/b/${biz.id}/reconcile">Open Reconcile</a>` : ''}` : html`<div class="ok-msg">Every confirmed UPI sale has its bank credit.</div>`}
-    </section></div>`));
-  wireShell();
-  const msg = document.getElementById('cmsg');
-  wireShiftBar(biz, shiftOptions);
-  const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
-  wireDecideMenu(biz, day, v, app, act, `#/b/${biz.id}/compare/${day}`);
-  app.querySelectorAll('[data-groupreg]').forEach((b) => b.addEventListener('click', (e) => {
+      </div>`;
+  const wire = (root, msg) => {
+  const act = async (fn) => { try { await fn(); await reload(); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
+  wireDecideMenu(biz, day, v, root, act, back);
+  root.querySelectorAll('[data-groupreg]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const bills = v.comparisons.filter((c) => c.groupId === b.dataset.groupreg && bulkOk(c) && !c.decision);
     if (!confirm(`Count ${bills.length} bill${bills.length > 1 ? 's' : ''} from the register: ${bills.map((c) => c.billNo).join(', ')}? No software bill will be expected for them.`)) return;
@@ -3020,28 +2982,28 @@ async function compareView(biz, day) {
       if (skipped.length) throw new Error(`Not changed: ${skipped.map((x) => `bill ${x.billNo}, ${x.reason}`).join('; ')}.`);
     });
   }));
-  app.querySelectorAll('[data-slip]').forEach((b) => b.addEventListener('click', async (e) => {
+  root.querySelectorAll('[data-slip]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation();
     b.disabled = true;
     const x = v.slips.find((y) => y.key === b.dataset.slip);
     try {
       const undo = await applySlip(biz, { slip: x, confirmed: false, day });
-      await compareView(biz, day);
-      doneToast(`Bill ${x.billNo}${x.partner ? ` and ${x.partner.billNo}` : ''}: register corrected (${slipShort(x)}).`, undo, () => compareView(biz, day));
+      await reload();
+      doneToast(`Bill ${x.billNo}${x.partner ? ` and ${x.partner.billNo}` : ''}: register corrected (${slipShort(x)}).`, undo, reload);
     } catch (err) { b.disabled = false; showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   }));
-  app.querySelectorAll('[data-setcol]').forEach((b) => b.addEventListener('click', async (e) => {
+  root.querySelectorAll('[data-setcol]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation();
     b.disabled = true;
     const h = v.columnHints.find((x) => x.paymentId === b.dataset.setcol);
     try {
       const undo = await setColumn(biz, { hint: h, match: false });
-      await compareView(biz, day);
-      doneToast(`Bill ${h.billNo ?? ''}: column changed to ${h.toLabel}.`, undo, () => compareView(biz, day));
+      await reload();
+      doneToast(`Bill ${h.billNo ?? ''}: column changed to ${h.toLabel}.`, undo, reload);
     } catch (err) { b.disabled = false; showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   }));
   // A difference opens its bill in Review; Review offers a way back to this bill here.
-  app.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
+  root.querySelectorAll('tr.clickrow').forEach((tr) => tr.addEventListener('click', (e) => {
     if (e.target.closest('button, select, input')) return;
     e.preventDefault();
     // The bill opens beside the list (its sides, the photo of its register line, and the row to correct), not on Review.
@@ -3074,27 +3036,26 @@ async function compareView(biz, day) {
     root.querySelector(`tr[data-grouphead="${row.dataset.group}"]`)?.classList.add('open');
     showGroups(root);
   };
-  app.querySelectorAll('tr[data-grouphead]').forEach((head) => {
+  root.querySelectorAll('tr[data-grouphead]').forEach((head) => {
     const flip = () => { head.classList.toggle('open'); showGroups(head.closest('section, details')); };
     head.addEventListener('click', flip);
     head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
   });
   // A matched bill is shown on the Matched tab.
   const reveal = (row) => {
-    if (row.dataset.kind === 'match' && decideList?.contains(row)) document.querySelector('button[data-kind="match"]')?.click();
+    if (row.dataset.kind === 'match' && decideList?.contains(row)) root.querySelector('button[data-kind="match"]')?.click();
     openGroupOf(row);
   };
-  const back = getBackTo();
-  if (back?.bill && back.hash === `#/b/${biz.id}/compare/${day}`) {
+  const backTo = getBackTo();
+  if (backTo?.bill && backTo.hash === back) {
     clearBackTo();
-    const row = app.querySelector(`tr[data-bill="${CSS.escape(back.bill)}"]`);
+    const row = root.querySelector(`tr[data-bill="${CSS.escape(backTo.bill)}"]`);
     if (row) reveal(row);
     if (row) { row.classList.add('row-found'); row.scrollIntoView({ block: 'center' }); }
   }
-  wireCashPanel(biz, day, () => compareView(biz, day), msg);
   const bulk = document.getElementById('bulkreg');
   if (bulk) {
-    const boxes = () => [...app.querySelectorAll('[data-bulk]')];
+    const boxes = () => [...root.querySelectorAll('[data-bulk]')];
     const count = () => {
       const n = boxes().filter((x) => x.checked).length;
       const go = document.getElementById('bulkgo');
@@ -3117,38 +3078,33 @@ async function compareView(biz, day) {
       if (!ids.length || !note || !confirm(`Count ${ids.length} bill${ids.length > 1 ? 's' : ''} from the register, with the reason "${note}"? No software bill will be expected for them.`)) return;
       try {
         const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/register-only`, { ids, note });
-        await compareView(biz, day);
-        document.getElementById('cmsg').innerHTML = html`<div class="${r.skipped.length ? 'error' : 'ok-msg'}">${r.decided} bill${r.decided === 1 ? '' : 's'} counted from the register.${r.skipped.length ? ` Not changed: ${r.skipped.map((x) => `${x.billNo} (${x.reason})`).join('; ')}.` : ''}</div>`.__html;
+        await reload();
+        msg.innerHTML = html`<div class="${r.skipped.length ? 'error' : 'ok-msg'}">${r.decided} bill${r.decided === 1 ? '' : 's'} counted from the register.${r.skipped.length ? ` Not changed: ${r.skipped.map((x) => `${x.billNo} (${x.reason})`).join('; ')}.` : ''}</div>`.__html;
       } catch (err) { showError(bulk.querySelector('.form-msg'), err); }
     });
   }
-  app.querySelectorAll('[data-cashupigo]').forEach((b) => b.addEventListener('click', async () => {
+  root.querySelectorAll('[data-cashupigo]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
     try {
       await apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.cashupigo}/paid-by-upi`, { creditId: b.dataset.credit, billType: b.dataset.type });
-      compareView(biz, day);
+      reload();
     } catch (err) { b.disabled = false; showError(b.closest('[data-cashupi]').querySelector('.form-msg'), err); }
   }));
-  app.querySelectorAll('[data-gobill]').forEach((a) => a.addEventListener('click', (e) => {
+  root.querySelectorAll('[data-gobill]').forEach((a) => a.addEventListener('click', (e) => {
     e.preventDefault();
-    const row = app.querySelector(`tr[data-bill="${CSS.escape(a.dataset.gobill)}"]`);
+    const row = root.querySelector(`tr[data-bill="${CSS.escape(a.dataset.gobill)}"]`);
     if (row) reveal(row);
     if (!row) {
       // Not a difference (e.g. a matched bill with no type): open it in its register page.
       const c = v.comparisons.find((x) => x.billNo === a.dataset.gobill);
-      if (c?.register?.uploadId) { setBackTo({ hash: `#/b/${biz.id}/compare/${day}`, bill: c.billNo, label: `${dayLabel(day)} shift` }); location.hash = `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}`; }
+      if (c?.register?.uploadId) { setBackTo({ hash: back, bill: c.billNo, label: `${dayLabel(day)} shift` }); location.hash = `#/b/${biz.id}/review/${c.register.uploadId}/${c.register.rowId}`; }
       return;
     }
-    app.querySelectorAll('tr.row-found').forEach((x) => x.classList.remove('row-found'));
+    root.querySelectorAll('tr.row-found').forEach((x) => x.classList.remove('row-found'));
     row.classList.add('row-found');
     row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }));
-  app.querySelectorAll('[data-oddclose]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.oddclose}/close`, { note: SHORT_OLD_POS_NOTE }))));
-  app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
-    const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
-    if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
-  }));
-  app.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
+  root.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
   document.getElementById('acceptbank')?.addEventListener('click', (e) => {
     e.target.disabled = true;
     act(async () => {
@@ -3158,35 +3114,13 @@ async function compareView(biz, day) {
       }
     });
   });
-  document.getElementById('confirm')?.addEventListener('click', () => {
-    if (!v.canConfirm) { // not yet: show what is left
-      app.querySelector('[data-tab="shift"]')?.click();
-      document.getElementById('nextstep')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-    act(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/confirm`, {}));
-  });
-  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
-    try { localStorage.setItem('bookr.compare.tab', b.dataset.tab); } catch { /* storage unavailable */ }
-    app.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('on', x === b));
-    app.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== b.dataset.tab; });
-  }));
-  app.querySelectorAll('button[data-kind]').forEach((b) => b.addEventListener('click', () => {
-    app.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
+  root.querySelectorAll('button[data-kind]').forEach((b) => b.addEventListener('click', () => {
+    root.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
     showKind(b.closest('section'), b.dataset.kind);
   }));
-  // A warning from the trial reconcile; it never stops a confirm.
-  const trialWarn = document.getElementById('trialwarn');
-  if (trialWarn) api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).then((t) => {
-    const link = html`<a href="#/b/${biz.id}/reconcile/${day}">Try reconcile</a>`;
-    const twice = t.fixes.filter((c) => c.kind === 'same_sale' && c.actions[0]?.label === 'Same sale').length;
-    trialWarn.innerHTML = (twice ? html`<strong>Before you confirm:</strong> ${twice} bill${twice === 1 ? '' : 's'} may be a credit already booked directly, which would count the sale twice. You can still confirm. ${link}` : !t.coverage.covered ? html`The bank is not in for this whole shift yet. You can confirm, and reconcile later. ${link}`
-      : !t.strip.billsLeft && !t.strip.creditsLeft ? html`<strong>UPI reconciled:</strong> every bill and credit of this shift is explained.`
-      : html`<strong>Before you confirm:</strong> ${t.strip.billsLeft} UPI bill${t.strip.billsLeft === 1 ? '' : 's'} not in the bank yet, ${t.strip.creditsLeft} UPI credit${t.strip.creditsLeft === 1 ? '' : 's'} not matched yet${t.strip.creditsNoBill ? ` (${t.strip.creditsNoBill} with no bill of that amount)` : ''}. You can still confirm. ${link}`).__html;
-  }).catch(() => { /* only a hint */ });
   const reopen = document.getElementById('reopen');
-  reopen && onSubmit(reopen, async (d) => { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/reopen`, { reason: d.reason }); compareView(biz, day); });
-  app.querySelectorAll('[data-cover]').forEach((a) => a.addEventListener('click', (e) => {
+  reopen && onSubmit(reopen, async (d) => { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/reopen`, { reason: d.reason }); reload(); });
+  root.querySelectorAll('[data-cover]').forEach((a) => a.addEventListener('click', (e) => {
     e.preventDefault();
     const box = document.getElementById('coveredit');
     box.innerHTML = html`<form class="inset" id="covf"><div class="form-row">
@@ -3195,8 +3129,72 @@ async function compareView(biz, day) {
       <div class="form-msg"></div><button class="btn plain" type="submit" style="align-self:flex-start">Save covered period</button></form>`.__html;
     onSubmit(document.getElementById('covf'), async (d) => {
       await api('PATCH', `/businesses/${biz.id}/sales-reports/${a.dataset.cover}`, { coversFrom: fromLocalInput(d.from), coversTo: fromLocalInput(d.to) });
-      compareView(biz, day);
+      reload();
     });
+  }));
+  };
+  return { bar, banners, shiftPane, notMatched, shiftOptions, wire };
+}
+
+async function compareView(biz, day) {
+  const { shifts } = await api('GET', `/businesses/${biz.id}/shifts`);
+  if (!day) day = shifts.find((s) => s.day === lastDay(biz.id))?.day ?? shifts.find((s) => s.status !== 'confirmed')?.day ?? shifts[0]?.day;
+  rememberDay(biz.id, day);
+  if (!day) {
+    render(shell(biz, 'compare', 'Compare sales', 'Software report against the handwritten register, bill by bill. You decide every difference.', html`
+      <section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
+    return wireShell();
+  }
+  drawerReload = () => compareView(biz, day);
+  const [v, cash, waiting, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
+    api('GET', `/businesses/${biz.id}/waiting-bills`), api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
+  v.reasons = cash.reasons;
+  const canDecide = biz.actions.includes('sales.decide');
+  const confirmed = v.status === 'confirmed';
+  const credit = awaiting?.sales ?? [];
+  const tab = (() => { try { return localStorage.getItem('bookr.compare.tab') || 'shift'; } catch { return 'shift'; } })();
+  const P = compareParts(biz, day, v, shifts, { reload: () => compareView(biz, day), back: `#/b/${biz.id}/compare/${day}` });
+  render(shell(biz, 'compare', 'Compare sales', '', html`
+    ${shiftBar(biz, day, 'compare')}
+    ${P.bar}
+    <div id="cmsg"></div>
+    ${P.banners}
+    ${P.notMatched ? notMatchedHtml(P.notMatched, `#/b/${biz.id}/reconcile/${day}`) : ''}
+    ${oddNumbersHtml(biz, waiting, canDecide)}
+    <div class="seg cmp-tabs" role="tablist">
+      <button type="button" role="tab" data-tab="shift" class="${tab === 'shift' ? 'on' : ''}">This shift</button>
+      <button type="button" role="tab" data-tab="other" class="${tab === 'other' ? 'on' : ''}">Waiting for other side (${waiting?.bills?.length ?? 0})</button>
+      <button type="button" role="tab" data-tab="credit" class="${tab === 'credit' ? 'on' : ''}">Waiting for bank credit (${credit.length})</button>
+    </div>
+    <div data-pane="shift" ${tab === 'shift' ? '' : 'hidden'}>
+      ${P.shiftPane}
+      ${cashPanelHtml(biz, cash)}
+    </div>
+    <div data-pane="other" ${tab === 'other' ? '' : 'hidden'}>${waitingHtml(biz, waiting, canDecide) || html`<section class="card"><div class="note">No bill is waiting for its other side.</div></section>`}</div>
+    <div data-pane="credit" ${tab === 'credit' ? '' : 'hidden'}><section class="card" style="gap:10px">
+      <h2>Waiting for bank credit</h2>
+      <div class="note">Confirmed UPI sales whose credit has not been matched on Reconcile yet. A bill found on one side only is <strong>not counted</strong> until its credit is matched; it is then counted on the day the credit arrived.</div>
+      ${credit.length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Counted</th><th>Waiting</th></tr></thead><tbody>
+        ${credit.map((x) => html`<tr><td class="mono">${x.billNo}${drawerBtn(x.billNo, x.day)}</td><td><a href="#/b/${biz.id}/compare/${x.day}">${dayLabel(x.day)}</a></td><td class="amount">${money(x.amountPaise)}</td>
+          <td>${x.onCredit ? html`<span class="chip wait">When the credit arrives</span>` : html`<span class="note">On ${dayLabel(x.day)}</span>`}</td>
+          <td>${x.daysWaiting > 2 ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td></tr>`)}
+      </tbody></table></div>${biz.actions.includes('bank.link') ? html`<a href="#/b/${biz.id}/reconcile">Open Reconcile</a>` : ''}` : html`<div class="ok-msg">Every confirmed UPI sale has its bank credit.</div>`}
+    </section></div>`));
+  wireShell();
+  const msg = document.getElementById('cmsg');
+  wireShiftBar(biz, P.shiftOptions);
+  P.wire(app, msg);
+  const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
+  wireCashPanel(biz, day, () => compareView(biz, day), msg);
+  app.querySelectorAll('[data-oddclose]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.oddclose}/close`, { note: SHORT_OLD_POS_NOTE }))));
+  app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
+    const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
+    if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
+  }));
+  app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+    try { localStorage.setItem('bookr.compare.tab', b.dataset.tab); } catch { /* storage unavailable */ }
+    app.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('on', x === b));
+    app.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== b.dataset.tab; });
   }));
 }
 
@@ -3801,7 +3799,7 @@ function choicesHtml(r) {
 }
 
 const RECONCILE_TAB_KEY = 'bookr.reconcile.tab';
-const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
+const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card', 'all'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 
 /** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
@@ -3942,12 +3940,22 @@ async function reconcileView(biz, dayArg) {
           <td><button class="btn plain dchip" type="button" data-putback="${x.id}">Put back</button></td></tr>`)}
       </tbody></table></div></details>` : '';
   const cardLeft = r.cards ? r.cards.left : 0;
+  // All bills: the Compare sales table of this shift, with its filters, bulk buttons and totals (approved 10 Nov 2026).
+  cv.reasons = cash.reasons;
+  const P = compareParts(biz, day, cv, r.shifts, { reload, back: `#/b/${biz.id}/reconcile/${day}`, onReconcile: true });
+  const allLeft = cv.comparisons.filter((c) => !c.decision && ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'].includes(c.difference)).length;
   const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
     ${shiftBar(biz, day, 'reconcile')}
     ${recTabs(biz, day, 'shift')}
     <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:4px 0 10px">
-      ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}</div>
+      ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}${tabBtn('all', 'All bills', allLeft)}</div>
+    <div data-rpanel="all" ${tab === 'all' ? '' : 'hidden'}>
+      ${P.bar}
+      <div id="allmsg"></div>
+      ${P.banners}
+      ${P.shiftPane}
+    </div>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
       ${cashPanelHtml(biz, cash)}
       ${entriesHtml(biz, day, ent.cash, 'cash', cv)}
@@ -4026,9 +4034,10 @@ async function reconcileView(biz, dayArg) {
     try { await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${b.dataset.unchoose}`, {}); await reload(); }
     catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); }
   }));
-  wireDecideMenu(biz, day, cv, app, async (fn) => {
+  app.querySelectorAll('[data-rpanel]:not([data-rpanel="all"])').forEach((root) => wireDecideMenu(biz, day, cv, root, async (fn) => {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
-  }, `#/b/${biz.id}/reconcile/${day}`);
+  }, `#/b/${biz.id}/reconcile/${day}`));
+  P.wire(app.querySelector('[data-rpanel="all"]'), document.getElementById('allmsg'));
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz, days);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {
