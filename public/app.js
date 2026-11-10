@@ -4333,26 +4333,29 @@ async function reconcileView(biz, dayArg) {
     <div class="lane-h"><strong>Money with no bill (${noBillLeft.length})</strong>
       <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="nbtickall" style="width:18px;height:18px;min-height:0"> Tick all</label></div>
     <div class="note">No bill of these amounts on this shift: a sale not written down, or money that is not a sale.${r.confirmed ? '' : ' Booked now, before saving. If a bill for one turns up, Bookr offers to join them as one sale, so it is not counted twice.'}</div>
-    ${noBillLeft.map((x) => html`<div class="nb-row" data-nbrow="${x.creditId}" style="display:flex;flex-direction:column;gap:6px;padding:10px 0;border-top:1px solid var(--line-soft)">
-      <div style="display:flex;gap:8px;align-items:flex-start">
-        <input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}" style="width:18px;height:18px;min-height:0;margin-top:2px">
-        <div><strong>₹ ${money(x.amountPaise)}</strong> · ${hhmm(x.postedAt)} · ${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}${plainRemark(x) ? html` · <em>"${plainRemark(x)}"</em>` : ''}</div></div>
+    ${noBillLeft.map((x) => html`<div class="nb-row" data-nbrow="${x.creditId}">
+      <label class="nb-head"><input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">
+        <span><strong>₹ ${money(x.amountPaise)}</strong> <span class="tiny">${hhmm(x.postedAt)} · ${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}</span>${plainRemark(x) ? html` <em class="tiny">"${plainRemark(x)}"</em>` : ''}
+        ${x.extra ? html`<div class="tiny" style="color:#92400E">Extra: ${x.extra === 1 ? 'the 1 bill' : `all ${x.extra} bills`} of ₹ ${money(x.amountPaise)} already ${x.extra === 1 ? 'has its' : 'have their'} credit. A sale not written down, or paid twice?</div>` : ''}</span></label>
       ${byUpiOffer((r.byUpi ?? []).find((o) => o.creditId === x.creditId), true)}
       <div class="nb-check" data-nbcheck="${x.creditId}"></div>
-      <input type="text" data-nbwhat="${x.creditId}" maxlength="120" placeholder="What was it? (optional)" value="${plainRemark(x)}" style="max-width:360px">
-      <div class="form-row" style="gap:6px;flex-wrap:wrap">
-        ${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-nbsale="${x.creditId}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&amp;B'}</button>`)}
-        ${roomHead ? html`<button class="btn plain" type="button" style="min-height:36px" data-nbadvance="${x.creditId}">Advance…</button>` : ''}
-        <details class="menu"><summary class="btn plain" style="display:inline-flex;align-items:center;min-height:36px">More ▾</summary><div class="menu-pop" style="gap:6px;min-width:260px">
+      <div class="nb-acts">
+        <input type="text" data-nbwhat="${x.creditId}" maxlength="120" placeholder="What was it? (optional)" value="${plainRemark(x)}" aria-label="What was ₹ ${money(x.amountPaise)}?">
+        ${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" data-nbsale="${x.creditId}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
+        ${roomHead ? html`<button class="btn plain" type="button" data-nbadvance="${x.creditId}">Advance…</button>` : ''}
+        <details class="menu nb-more"><summary class="btn plain">More ▾</summary><div class="menu-pop">
           <button class="btn plain" type="button" data-nbhold="${x.creditId}" data-kind="refund">Refund due</button>
           <button class="btn plain" type="button" data-nbhold="${x.creditId}" data-kind="tip">Tip for staff</button>
-          <div class="field"><label for="nbh-${x.creditId}">Book under a head</label><select id="nbh-${x.creditId}" data-nbhead="${x.creditId}"><option value="">Choose…</option>
-            ${[...new Set(heads.map((h) => h.type))].map((t) => html`<optgroup label="${t[0].toUpperCase()}${t.slice(1)}">${heads.filter((h) => h.type === t).map((h) => html`<option value="${h.id}">${h.name}</option>`)}</optgroup>`)}</select></div>
-          <button class="btn plain" type="button" data-nbbook="${x.creditId}">Book under that head</button>
+          <div class="nb-sep"></div>
+          <label class="tiny" for="nbh-${x.creditId}">Book under a head</label>
+          <div class="nb-headpick"><select id="nbh-${x.creditId}" data-nbhead="${x.creditId}"><option value="">Choose a head…</option>
+            ${[...new Set(heads.map((h) => h.type))].map((t) => html`<optgroup label="${t[0].toUpperCase()}${t.slice(1)}">${heads.filter((h) => h.type === t).map((h) => html`<option value="${h.id}">${h.name}</option>`)}</optgroup>`)}</select>
+            <button class="btn" type="button" data-nbbook="${x.creditId}">Book</button></div>
+          <div class="nb-sep"></div>
           <button class="btn plain" type="button" data-nbignore="${x.creditId}">Not business (skip)</button></div></details>
       </div></div>`)}
     ${r.unbilledHeads.length ? html`<div class="form-row" id="nbbulk" hidden style="gap:6px;padding-top:10px;border-top:1px solid var(--line-soft)"><span class="tiny" id="nbcount"></span>
-      ${r.unbilledHeads.map((h) => html`<button class="btn" type="button" style="min-height:36px" data-nbmany="${h.billType}">Book ticked as Unbilled ${h.billType === 'room' ? 'Room' : 'F&amp;B'}</button>`)}</div>` : ''}
+      ${r.unbilledHeads.map((h) => html`<button class="btn" type="button" style="min-height:36px" data-nbmany="${h.billType}">Book ticked as Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}</div>` : ''}
     ${r.unbilledHeads.length ? '' : html`<div class="note">Choose the income heads for F&amp;B and Room bills on <a href="#/b/${biz.id}/heads">Heads and rules</a> to book unbilled sales.</div>`}
   </section>` : '';
   const view = reconcileViewPref();
@@ -4415,10 +4418,8 @@ async function reconcileView(biz, dayArg) {
   // A ₹0 (complimentary) bill with money paid on its row (approved 10 Nov 2026): shown as a check, it does not stop saving.
   // The row paying for a group may come to ₹0 under the group's discount (approved 7 Nov 2026): told only when that
   // discount is large, as on Review.
-  const bigGroupDisc = (g) => g && g.grossPaise > 0 && (g.grossPaise - g.paidPaise) * 100 > LARGE_DISCOUNT_PCT * g.grossPaise;
   const paidZero = r.confirmed ? [] : cv.comparisons.filter((c) => c.difference === 'complimentary' && (c.register?.paidPaise ?? 0) > 0 && !groupZero(c, cv));
   // Large discounts on bills paid together are reported, for information only: nothing to approve (10 Nov 2026).
-  const bigGroups = (cv.paidGroups ?? []).filter(bigGroupDisc);
   const checkRow = (c) => html`<div class="ent-line">
     <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
       <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button>
@@ -4450,12 +4451,6 @@ async function reconcileView(biz, dayArg) {
       ${paidZero.map((c) => html`<div class="ent-line"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
         <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button></div>
         <div class="tiny error">₹ 0${c.register?.discountPaise > 0 ? ` after a ₹ ${rs(c.register.discountPaise)} discount` : ''}, but ₹ ${rs(c.register.paidPaise)} is paid on its row.</div></div>`)}</section>` : ''}
-    ${bigGroups.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Large discounts on bills paid together: ${bigGroups.length}</strong><span class="tchip">For your information</span></div>
-      <div class="note">Over ${LARGE_DISCOUNT_PCT}% of the bills. Nothing to approve. A very large one can mean an amount was misread: open the row to compare it with the photo if it looks wrong.</div>
-      ${bigGroups.map((g) => { const d = g.grossPaise - g.paidPaise; const head = cv.comparisons.find((c) => c.groupId === g.id && c.register?.rowId === g.id) ?? cv.comparisons.find((c) => c.groupId === g.id);
-        return html`<div class="ent-line"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono">${g.billNos.join(', ')}</span>
-          ${head ? html`<button type="button" class="linkbtn tiny" data-bill-drawer="${head.billNo}|${day}">Open row</button>` : ''}</div>
-          <div class="tiny">Discount ₹ ${rs(d)}, ${Math.round((d * 100) / g.grossPaise)}% of ₹ ${rs(g.grossPaise)}; ₹ ${rs(g.paidPaise)} paid.${groupZero(head ?? {}, cv) ? ` Bill ${head.billNo} pays for the group and comes to ₹ 0 under the discount.` : ''}</div></div>`; })}</section>` : ''}
     ${checks.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Numbers to check: ${checks.length}</strong><span class="tchip warn">Check the number</span></div>
       <div class="note">Open the row to compare it with the photo, then decide.</div>${checks.map(checkRow)}</section>` : ''}
     <section class="card" style="gap:8px"><h2>Left on the other tabs</h2>
@@ -4637,6 +4632,9 @@ async function reconcileView(biz, dayArg) {
     if (bar) { bar.hidden = n < 1; document.getElementById('nbcount').textContent = `${n} ticked:`; }
   };
   app.querySelectorAll('[data-nbtick]').forEach((x) => x.addEventListener('change', nbBulk));
+  const nbMenus = [...app.querySelectorAll('details.nb-more')];
+  nbMenus.forEach((d) => d.addEventListener('toggle', () => { if (d.open) nbMenus.forEach((o) => { if (o !== d) o.open = false; }); }));
+  if (!window.nbMenuClose) { window.nbMenuClose = true; document.addEventListener('click', (e) => document.querySelectorAll('details.nb-more[open]').forEach((d) => { if (!d.contains(e.target)) d.open = false; })); }
   document.getElementById('nbtickall')?.addEventListener('change', (e) => { app.querySelectorAll('[data-nbtick]').forEach((x) => { x.checked = e.target.checked; }); nbBulk(); });
   app.querySelectorAll('[data-nbsale]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.nbsale;

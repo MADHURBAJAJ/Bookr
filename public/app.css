@@ -400,3 +400,19 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 .tray-row.tray-adding { background: #ECFDF5; outline: 2px solid var(--teal); outline-offset: -2px; border-radius: 8px; padding-left: 8px; padding-right: 8px; }
 .tray-preview { border-top: 1px solid var(--line-soft); padding-top: 10px; }
 .tray-row .dchip { min-height: 0; padding: 3px 9px; font-size: 12px; }
+
+/* Money with no bill (11 Nov 2026): one compact row per credit; the open More menu sits above the rows below it. */
+details.menu { z-index: auto; }
+details.menu[open] { z-index: 40; }
+#nobill .nb-row { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
+#nobill .nb-head { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; font-weight: 400; }
+#nobill .nb-head input { width: 18px; height: 18px; min-height: 0; margin-top: 3px; flex: none; }
+#nobill .nb-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding-left: 28px; }
+#nobill .nb-acts > input { flex: 1 1 200px; max-width: 280px; min-height: 36px; padding: 6px 10px; }
+#nobill .nb-acts .btn, #nobill .nb-acts summary.btn { min-height: 36px; padding: 6px 12px; display: inline-flex; align-items: center; }
+#nobill .nb-more .menu-pop { min-width: 280px; gap: 6px; }
+#nobill .nb-sep { border-top: 1px solid var(--line-soft); margin: 2px 0; }
+#nobill .nb-headpick { display: flex; gap: 6px; }
+#nobill .nb-headpick select { flex: 1; min-width: 0; min-height: 36px; }
+#nobill .nb-headpick .btn { width: auto; flex: none; justify-content: center; }
+@media (max-width: 600px) { #nobill .nb-acts { padding-left: 0; } #nobill .nb-acts > input { max-width: none; flex-basis: 100%; } #nobill .nb-more .menu-pop { right: auto; left: 0; } }

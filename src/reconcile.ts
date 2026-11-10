@@ -85,14 +85,21 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     all<{ total: number }>(db, `SELECT sum(t.amount_paise) AS total FROM transactions t JOIN bill_comparisons c ON c.id = t.comparison_id JOIN register_rows rr ON rr.id = c.register_row_id
       WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
       GROUP BY coalesce(rr.paid_with_row_id, rr.id) HAVING count(*) > 1`, businessId, day),
-    all<{ a: number | null; b: number | null }>(db, `SELECT sw_amount_paise AS a, rg_amount_paise AS b FROM bill_comparisons
-      WHERE business_id = ? AND shift_day = ? AND (decision IS NULL OR decision NOT IN ('leave_out', 'carry_forward'))`, businessId, day),
+    // paid: the credit that paid the bill (11 Nov 2026). A side equal to it is that payment, not room for another credit
+    // (an extra of a common amount); a side that differs from it may still be the bill's real amount.
+    all<{ a: number | null; b: number | null; paid: number | null }>(db, `SELECT c.sw_amount_paise AS a, c.rg_amount_paise AS b,
+        (SELECT max(r.amount_paise) FROM transactions t JOIN bank_rows r ON r.id = t.matched_bank_row WHERE t.comparison_id = c.id) AS paid
+      FROM bill_comparisons c WHERE c.business_id = ? AND c.shift_day = ? AND (c.decision IS NULL OR c.decision NOT IN ('leave_out', 'carry_forward'))`, businessId, day),
   ]);
-  const sideAmounts = new Set(sides.flatMap((x) => [x.a, x.b]).filter((x): x is number => x != null));
+  const sideAmounts = new Set(sides.flatMap((x) => [x.a, x.b].filter((y) => y !== x.paid)).filter((x): x is number => x != null));
   const noBill = sug.credits
     .filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !(sug.candidates.get(c.id) ?? []).length
       && !sideAmounts.has(c.amount_paise) && !nearGroup(c.amount_paise, groupsWaiting.map((g) => g.total)))
-    .map((c) => credit(c.id));
+    .map((c) => {
+      // Extra (11 Nov 2026): every bill of this amount already has its credit; still money with no bill.
+      const extra = sales.filter((x) => x.bankRowId && x.amountPaise === c.amount_paise).length;
+      return { ...credit(c.id), extra };
+    });
 
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   const left = sales.filter((s) => !s.bankRowId);
@@ -308,6 +315,9 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   const whyOf = new Map((view.bank?.open ?? []).map((o) => [o.id, o]));
   const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id),
     why: whyOf.get(c.id)?.why ?? null, bills: whyOf.get(c.id)?.bills ?? [], billsOfAmount: whyOf.get(c.id)?.billsOfAmount ?? 0 }));
+  // An amount on one side of a bill whose software and register differ may be that bill's real payment: not an extra.
+  const splitSides = new Set(view.comparisons.filter((c) => c.software && c.register && c.software.amountPaise !== c.register.amountPaise)
+    .flatMap((c) => [c.software!.amountPaise, c.register!.amountPaise]));
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   return {
     trial: true as const, day, note: null,
@@ -317,7 +327,8 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits), creditsNoBill: openCredits.filter((c) => c.noBill).length },
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit,
     // Money with no bill can be booked before saving too (11 Nov 2026): booking a bank line does not wait for the shift.
-    noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill').map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark })),
+    noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill' || (c.why === 'extra' && !splitSides.has(c.amountPaise))).map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark,
+      extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0 })),
     unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
     choices, save: { blockers: view.blockers, canSave: view.canConfirm },
     // Old POS bills still to decide (approved 9 Nov 2026): ticked for "Use register" in one click; a row not reviewed yet waits.
