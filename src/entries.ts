@@ -7,7 +7,7 @@ import { all, type DB } from './db';
 import { repaidFor } from './repay';
 import { machineLabel } from './cards';
 import { trialCards, type TrialMatch } from './cardTrial';
-import { shiftView } from './sales';
+import { shiftChoices, shiftView } from './sales';
 
 type Mode = 'cash' | 'upi' | 'card';
 export interface Entry {
@@ -63,6 +63,10 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     // Before saving, the machine payment each card bill would be matched to (approved 10 Nov 2026).
     confirmed ? Promise.resolve(null) : trialCards(db, businessId, day),
   ]);
+  // Before saving, a credit chosen on the tray for a bill: matched on save, so the bill is not waiting for one.
+  const chosen = new Map<string, Awaited<ReturnType<typeof shiftChoices>>[number]>();
+  if (!confirmed) for (const k of await shiftChoices(db, businessId, day)) if (k.open) for (const id of k.comparisonIds) chosen.set(id, k);
+  const chosenText = (k: Awaited<ReturnType<typeof shiftChoices>>[number]) => `Bank ${rs(k.amountPaise)} at ${hm(k.postedAt)}${k.accountName ? ` · ${k.accountName}` : ''} · chosen, matched on save`;
   const onSave = (m: TrialMatch) => `${m.label} ${rs(m.amountPaise)} at ${hm(m.paidAt)} · ${m.how === 'chosen' ? 'chosen, matched on save' : 'Bookr matches on save'}`;
   const rowOf = new Map(rows.map((r) => [r.id, r]));
   const paysOf = (id: string) => pays.filter((p) => p.register_row_id === id);
@@ -145,7 +149,8 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     } else if (c.software && ['cash', 'upi', 'card'].includes(c.software.mode as string)) parts = [{ mode: c.software.mode as Mode, amount: c.software.amountPaise as number }];
     if (!parts.length) parts = [{ mode: 'cash', amount: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number }];
     parts.forEach((p, i) => {
-      const evidence = p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}` : null)
+      const evidence = p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}`
+          : chosen.has(c.id) ? chosenText(chosen.get(c.id)!) : null)
         : p.mode === 'card' ? (trial?.matches[c.id] ? onSave(trial.matches[c.id]) : c.machine ? `${c.machine.label} ${rs(c.machine.amountPaise)} at ${hm(c.machine.paidAt)}` : null) : 'In the cash count';
       entries.push({ ...base, key: `${c.id}:${i}`, mode: p.mode, amountPaise: p.amount, state: open ? 'decide' : p.mode === 'cash' || evidence ? 'done' : 'waiting', evidence, edits,
         transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null });
@@ -177,7 +182,8 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
         waiting = m.some((t) => (t.payment_mode === 'upi' && !t.matched_bank_row && !t.closed && t.match_status === 'awaiting_bank_match') || (t.payment_mode === 'card' && t.match_status === 'awaiting_card_settlement'));
       } else {
         const m = mode === 'card' ? cs.map((c) => trial?.matches[c.id]).find(Boolean) : undefined;
-        evidence = mode === 'upi' && g.bank ? `${g.bank.machine ? `${g.bank.machine.label}:` : 'Bank'} ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : m ? onSave(m) : null;
+        const pick = mode === 'upi' ? cs.map((c) => chosen.get(c.id)).find(Boolean) : undefined;
+        evidence = mode === 'upi' && g.bank ? `${g.bank.machine ? `${g.bank.machine.label}:` : 'Bank'} ${rs(g.bank.amountPaise)} at ${hm(g.bank.postedAt)}` : pick ? chosenText(pick) : m ? onSave(m) : null;
         waiting = !evidence;
       }
       for (const c of cs) {

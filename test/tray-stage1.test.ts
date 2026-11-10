@@ -61,6 +61,11 @@ describe('tray: a bill not in the register, paid by the bank or the card machine
     // A bill here may take it: chosen on this shift, matched on save.
     expect((await acc.post(`/businesses/${h.bid}/shifts/2026-10-31/choices`, { bankRowId: cNext, comparisonIds: [bill('2610313').id] })).status).toBe(200);
     expect((await acc.get(`/businesses/${h.bid}/shifts/2026-10-31/nearby`)).json.credits.map((x: any) => x.id)).not.toContain(cNext);
+    // Chosen on the tray: the UPI entry is backed, not "No bank credit yet" (10 Nov 2026).
+    const upi = (await h.entries()).upi;
+    const e = upi.entries.find((x: any) => x.billNo === '2610313');
+    expect(e).toMatchObject({ state: 'done' });
+    expect(e.evidence).toMatch(/chosen, matched on save/);
 
     await h.confirm();
     const matched = await sql`SELECT bill_no, matched_bank_row FROM transactions WHERE business_id = ${h.bid} AND bill_no IN ('2610311', '2610313') AND type = 'income' ORDER BY bill_no`;
