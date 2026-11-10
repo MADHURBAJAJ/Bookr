@@ -406,6 +406,8 @@ function startsWithDate(billNo: string) {
 /** Bills of the new POS: YYMMDD, then a running number with no padding, so 7 to 9 digits. */
 /** How far from a "cash" bill's software time a UPI credit of its amount is taken as its payment. */
 export const CASH_BY_UPI_MIN = 60;
+/** A credit this close to one side's amount may be that bill with a tip or a discount. */
+export const NEAR_GAP = 1000;
 /** The close reason for a bill written in the register that was never billed in the software (Stage 4, 10 Nov 2026). */
 export const NOT_BILLED_NOTE = 'Not billed in software';
 /** A credit inside the shift no bill or group paired, and why. */
@@ -618,6 +620,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
   let groupCredits = new Map<string, EvidenceCredit>();
+  const near = new Map<string, { creditId: string; amountPaise: number; postedAt: number; label: string | null; minutes: number }>();
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: OpenCredit[] } | null = null;
   if (shift?.status !== 'confirmed') {
     const [cov2, credits, onMachine] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day),
@@ -681,6 +684,20 @@ export async function shiftView(db: DB, businessId: string, day: string) {
           takenBy: other ? { billNo: byId.get(billOf.get(other.id)!)!.bill_no, postedAt: other.postedAt } : null });
       }
     }
+    // Within ₹10 of one side but equal to neither (Stage 6, approved 10 Nov 2026): the guest paid a little more (a tip) or
+    // less (a discount). Offered on the bill, as the tray offers a gap; a person chooses which side and why.
+    for (const c of comparisons) {
+      if (c.difference !== 'amount' || c.sw_mode !== 'upi' || c.rg_mode !== 'upi' || evidence.has(c.id) || c.paid_at == null) continue;
+      if (c.decision === 'leave_out' || c.decision === 'carry_forward' || !c.register_row_id || grouped.has(c.register_row_id)) continue;
+      if ((paysByRow.get(c.register_row_id) ?? []).length !== 1) continue;
+      const sides = [c.rg_amount_paise ?? 0, c.sw_amount_paise ?? 0];
+      const fit = credits.filter((x) => !taken.has(x.id) && Math.abs(x.postedAt - c.paid_at!) <= CASH_BY_UPI_MIN * 60000
+          && !sides.includes(x.amount) && sides.some((a) => Math.abs(x.amount - a) <= NEAR_GAP))
+        .sort((x, y) => Math.abs(x.postedAt - c.paid_at!) - Math.abs(y.postedAt - c.paid_at!))[0];
+      if (!fit) continue;
+      taken.add(fit.id);
+      near.set(c.id, { creditId: fit.id, amountPaise: fit.amount, postedAt: fit.postedAt, label: fit.label ?? null, minutes: Math.round(Math.abs(fit.postedAt - c.paid_at) / 60000) });
+    }
     const left = cov2.covered ? credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to).map((c) => c.id) : [];
     bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left, noUpi, open };
   }
@@ -690,20 +707,30 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   // once, closest first. A person still decides.
   const machine = new Map<string, { suggest: 'use_software' | 'use_register'; amountPaise: number; paidAt: number; upi: boolean; label: string; minutes: number }>();
   if (shift?.status !== 'confirmed') {
-    const diffs = comparisons.filter((c) => (c.difference === 'mode' || c.difference === 'amount_and_mode') && c.paid_at != null && c.rg_mode !== 'mixed'
-      && (c.sw_mode === 'card') !== (c.rg_mode === 'card') && c.decision !== 'leave_out' && c.decision !== 'carry_forward');
-    if (diffs.length) {
+    // Amount-only differences on a card bill too (Stage 6, 10 Nov 2026): the payment backs the side it equals.
+    const diffs = comparisons.filter((c) => c.paid_at != null && c.rg_mode !== 'mixed' && c.decision !== 'leave_out' && c.decision !== 'carry_forward'
+      && (((c.difference === 'mode' || c.difference === 'amount_and_mode') && (c.sw_mode === 'card') !== (c.rg_mode === 'card'))
+        || (c.difference === 'amount' && c.sw_mode === 'card' && c.rg_mode === 'card')));
+    // A register bill paid in two modes (e.g. cash + card) against the software's one mode (Stage 6.2): its card part is
+    // checked against its own machine payment; when the machine has it, the register's split is backed.
+    const cardPart = (c: Comparison) => (c.register_row_id ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'card') : []);
+    const splits = comparisons.filter((c) => c.paid_at != null && c.rg_mode === 'mixed' && c.decision !== 'leave_out' && c.decision !== 'carry_forward'
+      && (c.difference === 'mode' || c.difference === 'amount_and_mode') && !(c.register_row_id && grouped.has(c.register_row_id)) && cardPart(c).length === 1);
+    if (diffs.length || splits.length) {
       // UPI on the machine backs the UPI side, through the bank evidence above; here, card payments only.
       const pays = (await all<{ id: string; amount_paise: number; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null }>(db, `
         SELECT s.id, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4, s.pay_mode FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
           AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, cov.window.from - 3600e3, cov.window.to + 3600e3)).filter((p) => !isMachineUpi(p));
       const usedPay = new Set<string>();
       const options = diffs.flatMap((c) => {
-        const side = c.sw_mode === 'card' ? 'software' : 'register';
-        const amount = (side === 'software' ? c.sw_amount_paise : c.rg_amount_paise) ?? 0;
-        return pays.filter((p) => p.amount_paise === amount && Math.abs(p.paid_at - c.paid_at!) <= 60 * 60000)
-          .map((p) => ({ c, p, side, gap: Math.abs(p.paid_at - c.paid_at!) }));
-      }).sort((a, b) => a.gap - b.gap);
+        const sides = c.difference === 'amount' ? (['software', 'register'] as const) : [c.sw_mode === 'card' ? 'software' as const : 'register' as const];
+        return sides.flatMap((side) => {
+          const amount = (side === 'software' ? c.sw_amount_paise : c.rg_amount_paise) ?? 0;
+          return pays.filter((p) => p.amount_paise === amount && Math.abs(p.paid_at - c.paid_at!) <= 60 * 60000)
+            .map((p) => ({ c, p, side, gap: Math.abs(p.paid_at - c.paid_at!) }));
+        });
+      }).concat(splits.flatMap((c) => pays.filter((p) => p.amount_paise === cardPart(c)[0].amount_paise && Math.abs(p.paid_at - c.paid_at!) <= 60 * 60000)
+        .map((p) => ({ c, p, side: 'register' as const, gap: Math.abs(p.paid_at - c.paid_at!) })))).sort((a, b) => a.gap - b.gap);
       for (const o of options) {
         if (usedPay.has(o.p.id) || machine.has(o.c.id)) continue;
         usedPay.add(o.p.id);
@@ -766,6 +793,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       numberFlags: flagsOf.get(c.id) ?? [],
       bank: bank?.evidence.get(c.id) ?? null,
       bankNone: bank?.noUpi.get(c.id) ?? null,
+      bankNear: near.get(c.id) ?? null,
       machine: machine.get(c.id) ?? null,
       reissuedAs: reissued.get(c.id) ?? null,
       oldPos: oldPosOf.get(c.id) ?? null,

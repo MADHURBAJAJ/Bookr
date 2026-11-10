@@ -16,10 +16,11 @@ import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, planTaken, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
 import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
-import { addDays, istDay, shiftWindow } from '../time';
+import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { unsettleStatements } from '../cards';
+import { cashMoveOf } from '../cash';
 import { ADVANCE_TAG, creditChecks, HELD, heldKindOf, heldList, isHeldDone, OWED_PREFIX, type HeldKind } from '../extra';
 import { cardReportsStatus, syncCardFolder } from '../cardDrive';
 import { shiftEntries } from '../entries';
@@ -198,6 +199,7 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? (looksInterest(r) ? interestHead?.id ?? null : null), headChoices: head?.choices ?? [], learned: !!head?.headId };
         })() : null,
         clear: sug.clear.has(r.id),
+        cashMove: r.status === 'unmatched' ? cashMoveOf(r) : null,
       };
     }),
   });
@@ -554,6 +556,42 @@ bankRoutes.post('/businesses/:businessId/sales/:txId/reopen', requireRole('sales
     stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.reopened', id, { note: closed.note }, { matchStatus: 'awaiting_bank_match' }, t)),
   ]);
   return c.json({ ok: true });
+});
+
+/**
+ * Cash moved between the drawer and the bank (Stage 6, approved 10 Nov 2026): a deposit (credit) or cash taken out for
+ * the drawer (debit). Not income and not an expense: two transfer rows, out of one account and into the other, and the
+ * cash check of the shift the cash left (or reached) the drawer counts it. Undo (reopen) removes both.
+ */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/cash-move', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row!.status !== 'unmatched') fail(409, 'This line is already matched, booked or skipped.');
+  if (row!.kind === 'upi_in' || row!.kind === 'upi_out' || row!.kind === 'card_settlement') fail(400, 'A UPI or card line is not cash.');
+  const data = await body(c);
+  const shiftDay = data.shiftDay == null || data.shiftDay === '' ? shiftDayOf(row!.posted_at) : String(data.shiftDay);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(shiftDay)) fail(400, 'Choose the shift.');
+  const cash = await one<{ id: string }>(db, `SELECT id FROM accounts WHERE business_id = ? AND kind = 'cash' ORDER BY lower(name) = 'cash' DESC, created_at LIMIT 1`, bid);
+  if (!cash) fail(400, 'This business has no cash account.');
+  const deposit = row!.direction === 'CR';
+  const t = now();
+  const user = c.get('user').id;
+  const bankLeg = newId();
+  const cashLeg = newId();
+  const what = deposit ? 'Cash deposited to the bank' : 'Cash taken out for the drawer';
+  const meta = (leg: 'in' | 'out') => JSON.stringify({ transfer: deposit ? 'cash_deposit' : 'cash_withdrawal', leg, bankRowId: row!.id });
+  await db.batch([
+    stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, narration, source, status, shift_day, ocr_original, created_at)
+      VALUES (?, ?, ?, ?, ?, 'transfer', ?, 'bank_sheet', 'approved', ?, ?, ?)`, bankLeg, bid, row!.account_id, row!.day, row!.amount_paise, `${what} (${row!.description})`, shiftDay, meta(deposit ? 'in' : 'out'), t),
+    stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, narration, source, status, shift_day, ocr_original, created_at)
+      VALUES (?, ?, ?, ?, ?, 'transfer', ?, 'bank_sheet', 'approved', ?, ?, ?)`, cashLeg, bid, cash!.id, row!.day, row!.amount_paise, what, shiftDay, meta(deposit ? 'out' : 'in'), t),
+    stmt(db, "UPDATE bank_rows SET status = 'booked', transaction_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'",
+      bankLeg, `${deposit ? 'Cash deposited' : 'Cash for the drawer'}: ${shiftDay} shift`, user, t, row!.id),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.cash_move', row!.id, { status: 'unmatched' }, { deposit, shiftDay, transactions: [bankLeg, cashLeg] }, t)),
+  ]);
+  return c.json({ ok: true, shiftDay });
 });
 
 // ---- Money received with no bill (Stage 5, approved 10 Nov 2026)
@@ -1026,27 +1064,57 @@ bankRoutes.delete('/businesses/:businessId/bank-rows/:rowId/match', requireRole(
   const row = await getRow(db, bid, c.req.param('rowId'));
   if (!row) fail(404, 'Not found.');
   if (row.status !== 'matched') fail(409, 'This line is not matched.');
+  const u = await unmatchStatements(db, bid, row, c.get('user').id, now());
+  await db.batch(u.statements);
+  return c.json({ ok: true, unmatched: u.count, ...(u.bookingRestored ? { bookingRestored: true } : {}) });
+});
+
+/** Undoing a credit's match: the bills it paid wait for a credit again. Shared by Unmatch and a reversed payment. */
+async function unmatchStatements(db: D1Database, bid: string, row: BankRow, user: string, t: number): Promise<{ statements: D1PreparedStatement[]; count: number; bookingRestored?: boolean }> {
   // A credit joined to a later bill goes back to being booked, as it was.
   if (await joinedBill(db, row.id)) {
-    const back = await undoSameSaleStatements(db, bid, row.id, c.get('user').id, now());
-    if (back) { await db.batch(back); return c.json({ ok: true, unmatched: 1, bookingRestored: true }); }
+    const back = await undoSameSaleStatements(db, bid, row.id, user, t);
+    if (back) return { statements: back, count: 1, bookingRestored: true };
   }
   // Credits that share a bill are undone together, so no bill is left half matched.
   const set = await matchedSet(db, row.id);
   const inRows = set.rows.map(() => '?').join(',');
   const differences = await all(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'bank_sheet' AND matched_bank_row IN (${inRows})`, bid, ...set.rows);
-  const t = now();
-  const undo = await undoAll(db, bid, set.rows, c.get('user').id, t);
-  await db.batch([
+  const undo = await undoAll(db, bid, set.rows, user, t);
+  return { count: set.rows.length, statements: [
     ...undo,
     stmt(db, `UPDATE transactions SET matched_bank_row = NULL, match_status = 'awaiting_bank_match' WHERE business_id = ? AND source = 'software_report'
       AND (matched_bank_row IN (${inRows}) OR id IN (SELECT transaction_id FROM bank_matches WHERE bank_row_id IN (${inRows})))`, bid, ...set.rows, ...set.rows),
     stmt(db, `DELETE FROM bank_matches WHERE bank_row_id IN (${inRows})`, ...set.rows),
     stmt(db, `DELETE FROM transactions WHERE business_id = ? AND source = 'bank_sheet' AND matched_bank_row IN (${inRows}) AND id NOT IN (SELECT transaction_id FROM bank_rows WHERE transaction_id IS NOT NULL)`, bid, ...set.rows),
     stmt(db, `UPDATE bank_rows SET status = 'unmatched', done_by = NULL, done_at = NULL WHERE status = 'matched' AND id IN (${inRows})`, ...set.rows),
-    stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.unmatch', row.id, { status: 'matched', set: set.rows, differences }, { status: 'unmatched', billsRestored: undo.length > 0 }, t)),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.unmatch', row.id, { status: 'matched', set: set.rows, differences }, { status: 'unmatched', billsRestored: undo.length > 0 }, t)),
+  ] };
+}
+
+/**
+ * A credit reversed by the bank after it was matched to a bill (Stage 6, approved 10 Nov 2026): the guest's payment
+ * failed. The match is undone, both lines are left out as reversed, and the bill waits for its money again.
+ */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reversed-unpaid', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rev = await getRow(db, bid, c.req.param('rowId'));
+  if (!rev || rev.kind !== 'reversal' || !rev.pair_row_id) fail(404, 'Not a reversal of a payment in Bookr.');
+  if (rev!.status !== 'unmatched') fail(409, 'This reversal is already dealt with.');
+  const cr = await getRow(db, bid, rev!.pair_row_id!);
+  if (!cr || cr.status !== 'matched') fail(409, 'The reversed credit is not matched to a bill.');
+  const t = now();
+  const user = c.get('user').id;
+  const u = await unmatchStatements(db, bid, cr!, user, t);
+  await db.batch([
+    ...u.statements,
+    // A credit that had been booked as a sale and joined to its bill: the booking goes too, since the money went back.
+    stmt(db, "DELETE FROM transactions WHERE id = (SELECT transaction_id FROM bank_rows WHERE id = ?) AND source = 'bank_sheet'", cr!.id),
+    stmt(db, "UPDATE bank_rows SET status = 'ignored', transaction_id = NULL, note = 'Payment reversed by the bank: the bill is unpaid again', done_by = ?, done_at = ? WHERE id IN (?, ?)", user, t + 1, rev!.id, cr!.id),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.reversed_unpaid', cr!.id, { status: 'matched' }, { reversedBy: rev!.id }, t + 1)),
   ]);
-  return c.json({ ok: true, unmatched: set.rows.length });
+  return c.json({ ok: true });
 });
 
 // ---- Booking a line as income or expense under a head, or leaving it out
@@ -1188,6 +1256,8 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('
     // A held credit's refund going out is opened again with it (Stage 5).
     ...(heldKindOf(row.note) ? [stmt(db, "UPDATE bank_rows SET status = 'unmatched', note = NULL, pair_row_id = NULL, done_by = NULL, done_at = NULL WHERE pair_row_id = ? AND direction = 'DR' AND status = 'ignored'", row.id)] : []),
     ...(row.transaction_id ? [stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", row.transaction_id)] : []),
+    // Cash moved between the drawer and the bank (Stage 6): both legs go.
+    stmt(db, "DELETE FROM transactions WHERE business_id = ? AND type = 'transfer' AND json_extract(ocr_original, '$.bankRowId') = ?", bid, row.id),
     stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.reopen', row.id, { status: row.status, note: row.note, transaction: tx }, { status: 'unmatched' }, t)),
   ]);
   return c.json({ ok: true });

@@ -23,6 +23,8 @@ export interface WaitItem {
   daysWaiting: number; watchEnd: string | null; unresolved: boolean; watchNote: string | null; offers: Offer[];
   /** On the one line of an unsaved shift: how many of its bills are on one side only. */
   count?: number;
+  /** A matched credit the bank reversed (Stage 6): the reversal line, to make the bill unpaid again. */
+  reversalId?: string;
 }
 
 const GAP = 1000; // ₹10: an offer may be this far from the bill (a tip or a discount)
@@ -158,6 +160,16 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no machine payment matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
   }
 
+  // A credit matched to a bill, then reversed by the bank (Stage 6, 10 Nov 2026): the bill is paid by money that went back.
+  const reversed = await all<{ revId: string; revAt: number; amount: number; creditAt: number; txId: string; billNo: string | null; day: string; comparisonId: string | null }>(db, `
+    SELECT r.id AS revId, r.posted_at AS revAt, c.amount_paise AS amount, c.posted_at AS creditAt, t.id AS txId, t.bill_no AS billNo, t.shift_day AS day, t.comparison_id AS comparisonId
+    FROM bank_rows r JOIN bank_rows c ON c.id = r.pair_row_id JOIN bank_matches m ON m.bank_row_id = c.id JOIN transactions t ON t.id = m.transaction_id
+    WHERE r.business_id = ? AND r.kind = 'reversal' AND r.status = 'unmatched' AND c.status = 'matched'`, businessId);
+  for (const x of reversed) {
+    out.push({ key: `r:${x.revId}:${x.txId}`, comparisonId: x.comparisonId, billNo: x.billNo ?? '', day: x.day, amountPaise: x.amount, mode: 'upi', side: 'both', confirmed: true,
+      group: 'look', waitFor: null, reason: `Its ${rs(x.amount)} credit was reversed by the bank on ${dayOf(x.revAt, x.day)}: the payment failed`, daysWaiting: days(x.day),
+      watchEnd: null, unresolved: false, watchNote: null, offers: [], reversalId: x.revId });
+  }
   for (const [day, n] of unsaved) {
     out.push({ key: `s:${day}`, comparisonId: null, billNo: '', day, amountPaise: 0, mode: null, side: 'both', confirmed: false, group: 'grey', waitFor: 'unsaved',
       reason: `The ${day} shift is not saved yet`, daysWaiting: days(day), watchEnd: null, unresolved: false, watchNote: null, offers: [], count: n });

@@ -7,6 +7,14 @@ import { addDays } from './time';
 
 export const SHORTAGE_HEAD = { name: 'Cash shortage', tally: 'Cash Shortage' };
 
+/** A bank line that reads as cash moved between the drawer and the bank (Stage 6): a deposit, or cash taken out. */
+export function cashMoveOf(r: { direction: string; kind: string; description: string }): 'deposit' | 'withdrawal' | null {
+  if (r.kind === 'upi_in' || r.kind === 'upi_out' || r.kind === 'card_settlement') return null;
+  if (r.direction === 'CR' && /\b(CASH\s*DEP(OSIT)?|BY\s+CASH|CDM|CASH\s+CR)\b/i.test(r.description)) return 'deposit';
+  if (r.direction === 'DR' && /\b(CASH\s*(WDL|WITHDRAWAL)|ATM\s*(WDL|CASH)|ATW|NWD|SELF)\b/i.test(r.description)) return 'withdrawal';
+  return null;
+}
+
 /** Reasons accepted for leaving out a cash bill the register does not have. */
 export const LEAVE_OUT_REASONS = ['Cancelled in POS', 'Paid another way', "In another shift's register", 'Test bill'] as const;
 
@@ -17,7 +25,7 @@ async function summaryFor(db: DB, businessId: string, day: string) {
 }
 
 export async function cashCheck(db: DB, businessId: string, day: string) {
-  const [shift, today, yesterday, sales, notInRegister, expenses, shortages, accepted] = await Promise.all([
+  const [shift, today, yesterday, sales, notInRegister, expenses, shortages, accepted, moved] = await Promise.all([
     one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     summaryFor(db, businessId, day),
     summaryFor(db, businessId, addDays(day, -1)),
@@ -40,13 +48,19 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
       WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage'`, businessId, day),
     one<{ after: string }>(db, `SELECT after FROM audit_log WHERE business_id = ? AND action = 'cash.difference_accepted'
       AND row_table = 'shifts' AND json_extract(after, '$.day') = ? ORDER BY id DESC LIMIT 1`, businessId, day),
+    // Cash moved to or from the bank on this shift (Stage 6).
+    one<{ deposited: number; drawn: number }>(db, `SELECT
+        coalesce(sum(CASE WHEN json_extract(t.ocr_original, '$.leg') = 'out' THEN t.amount_paise END), 0) AS deposited,
+        coalesce(sum(CASE WHEN json_extract(t.ocr_original, '$.leg') = 'in' THEN t.amount_paise END), 0) AS drawn
+      FROM transactions t JOIN accounts a ON a.id = t.account_id
+      WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'transfer' AND a.kind = 'cash'`, businessId, day),
   ]);
 
   const confirmed = shift?.status === 'confirmed';
   const opening = yesterday?.cash_in_hand_paise ?? today?.opening_paise ?? null;
   const openingFrom = yesterday?.cash_in_hand_paise != null ? 'previous' : today?.opening_paise != null ? 'page' : null;
   const counted = today?.cash_in_hand_paise ?? null;
-  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortages!.total : null;
+  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortages!.total - moved!.deposited + moved!.drawn : null;
   const difference = shouldBe !== null && counted !== null ? counted - shouldBe : null;
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
   const notInRegisterRows = notInRegister.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note }));
@@ -79,6 +93,8 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     expensesPaise: expenses!.approved,
     expensesWaiting: expenses!.waiting,
     shortagePaise: shortages!.total,
+    depositedPaise: moved!.deposited,
+    drawnPaise: moved!.drawn,
     shouldBePaise: shouldBe,
     countedPaise: counted,
     summaryUploadId: today?.upload_id ?? null,
