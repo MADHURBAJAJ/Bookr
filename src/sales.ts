@@ -925,11 +925,21 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   // Card matches chosen before saving (approved 10 Nov 2026): the payment pays its bills' card sales when it is still
   // not matched and they add up to it.
   const cardChosen = await cardShiftChoices(db, businessId, day);
+  // UPI on the machine chosen for a UPI bill (11 Nov 2026) is matched as UPI on the machine; the bank evidence below
+  // then leaves that bill and that payment alone.
+  const machineTaken = new Set<string>();
   for (const k of cardChosen) {
     const card = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'card' && k.comparisonIds.includes(x.r.c.id));
+    const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && k.comparisonIds.includes(x.r.c.id));
     if (k.open && card.length && card.reduce((a, x) => a + x.amount, 0) === k.amountPaise) {
       statements.push(...cardMatchStatements(db, businessId, [k.paymentId], card.map((x) => x.id), userId, t + 1 + matched, { how: 'matched on saving the shift' }));
       matched += 1;
+      machineTaken.add(k.paymentId);
+    } else if (k.open && k.upi && upi.length && upi.reduce((a, x) => a + x.amount, 0) === k.amountPaise) {
+      statements.push(...machineUpiStatements(db, businessId, k.paymentId, upi.map((x) => x.id), userId, t + 1 + matched, 'UPI on the machine, chosen before saving'));
+      matched += 1;
+      machineTaken.add(k.paymentId);
+      k.comparisonIds.forEach((id) => chosen.add(id));
     } else skipped.push(k.billNos.join(' + '));
   }
   if (choices.length || cardChosen.length) {
@@ -939,7 +949,7 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   }
   // A credit, or a UPI payment on the card machine (matched to the machine's report, approved 9 Nov 2026).
   const link = (creditId: string, machine: unknown, txs: { id: string; amount: number }[], at: number) => (machine
-    ? machineUpiStatements(db, businessId, creditId, txs.map((x) => x.id), userId, at, 'matched on confirming the shift')
+    ? (machineTaken.has(creditId) ? [] : machineUpiStatements(db, businessId, creditId, txs.map((x) => x.id), userId, at, 'matched on confirming the shift'))
     : confirmMatchStatements(db, businessId, creditId, txs, userId, at));
   // The credits shown as evidence are matched to the bills they paid (approved 5 Nov 2026), by the person confirming.
   // Only a bill counted as one UPI payment of the credit's amount. Each match gets its own time, so Unmatch undoes one.
@@ -1031,7 +1041,7 @@ export async function cardShiftChoices(db: DB, businessId: string, day: string) 
   return list.map((k) => {
     const comparisonIds = JSON.parse(k.comparison_ids) as string[];
     return { id: k.id, paymentId: k.card_payment_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, paidAt: k.paid_at,
-      label: machineLabel(k), open: !k.matched, by: k.by, at: k.created_at };
+      label: machineLabel(k), open: !k.matched, by: k.by, at: k.created_at, upi: isMachineUpi(k) };
   });
 }
 

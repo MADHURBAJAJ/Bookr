@@ -9,7 +9,7 @@ import { suggestionsFor } from './bank';
 import { cashCheck } from './cash';
 import { explainShift, tableSets, type Card } from './explain';
 import { bookedSalesAround, dayName, pairBooked, plansFor, sameSaleCard, sameSaleCards, type WaitingBill } from './sameSale';
-import { billDistance, creditsForShift, sameBillNo, shiftChoices, shiftView, WATCH_DAYS } from './sales';
+import { billDistance, cardShiftChoices, creditsForShift, sameBillNo, shiftChoices, shiftView, WATCH_DAYS } from './sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from './time';
 
 export interface OtherSide { billNo: string | null; softwarePaise: number; registerPaise: number; chose: 'register' | 'software' }
@@ -164,7 +164,7 @@ const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Ko
 export async function trialReconcile(db: DB, businessId: string, day: string) {
   const w = shiftWindow(day);
   const base = `/businesses/${businessId}`;
-  const [view, credits, cov, cash, details, rows, pays, typeHeads, choices] = await Promise.all([
+  const [view, credits, cov, cash, details, rows, pays, typeHeads, choices, machineChoices] = await Promise.all([
     shiftView(db, businessId, day),
     creditsForShift(db, businessId, day),
     bankIn(db, businessId, day),
@@ -178,9 +178,11 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     all<{ billType: string; headId: string; headName: string }>(db, `SELECT b.bill_type AS billType, b.head_id AS headId, h.name AS headName
       FROM bill_type_heads b JOIN heads h ON h.id = b.head_id WHERE b.business_id = ?`, businessId),
     shiftChoices(db, businessId, day),
+    cardShiftChoices(db, businessId, day),
   ]);
-  // Bills a person matched on save (approved 9 Nov 2026) are matched, as far as this picture goes.
-  const chosen = new Set(choices.flatMap((k) => k.comparisonIds));
+  // Bills a person matched on save (approved 9 Nov 2026) are matched, as far as this picture goes; a UPI bill matched to
+  // UPI on the card machine too (11 Nov 2026).
+  const chosen = new Set([...choices.flatMap((k) => k.comparisonIds), ...machineChoices.filter((k) => k.open && k.upi).flatMap((k) => k.comparisonIds)]);
   const detail = new Map(details.map((d) => [d.id, d]));
   const heads = new Set(rows.map((r) => r.paidWith).filter(Boolean));
   const inGroup = (id: string | null | undefined) => !!id && (heads.has(id) || !!rows.find((r) => r.id === id)?.paidWith);

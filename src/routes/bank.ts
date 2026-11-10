@@ -308,6 +308,7 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
   if (!shift) fail(404, 'Unknown shift.');
   if (shift.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
   const existing = await shiftChoices(db, bid, day);
+  const machineChosen = new Set((await cardShiftChoices(db, bid, day)).flatMap((k) => k.comparisonIds));
   const ids: string[] = [];
   const stmts = [];
   for (const { rowId, cids } of pairs) {
@@ -320,6 +321,7 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
     const named = found.map((f) => f.bill_no).filter(Boolean).join(' + ');
     if (existing.some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save.`);
     if (existing.some((k) => k.bankRowId === rowId)) fail(409, 'This credit is already matched on save.');
+    if (cids.some((x) => machineChosen.has(x))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save to the card machine.`);
     for (const id of cids) if (await planTaken(db, bid, '', id)) fail(409, 'A bill is already chosen to be one sale with a booked credit.');
     const upi = await plannedUpiPaise(db, bid, day, cids);
     if (upi !== row.amount_paise) fail(409, upi ? `The credit is not what ${named ? `bill ${named} takes` : 'these bills take'} by UPI.` : `${named ? `Bill ${named} has` : 'These bills have'} no UPI payment: decide or correct ${named ? 'it' : 'them'} first.`);
@@ -362,6 +364,8 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole(
   if (!shift) fail(404, 'Unknown shift.');
   if (shift.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
   const existing = await cardShiftChoices(db, bid, day);
+  // A bill matched on save to a bank credit is not matched to the machine too.
+  const bankChosen = new Set((await shiftChoices(db, bid, day)).flatMap((k) => k.comparisonIds));
   const ids: string[] = [];
   const stmts = [];
   for (const { pid, cids } of pairs) {
@@ -369,15 +373,18 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole(
       `SELECT txn_type, amount_paise, pay_mode, scheme, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
       FROM card_settlements s WHERE id = ? AND business_id = ?`, pid, bid);
     if (!p) fail(404, 'Card payment not found.');
-    if (p.txn_type !== 'PURCHASE' || isMachineUpi(p)) fail(409, 'Only a card sale on the machine pays a card bill.');
+    if (p.txn_type !== 'PURCHASE') fail(409, 'Only a sale on the machine pays a bill.');
     if (p.matched) fail(409, 'This card payment is already matched.');
     const found = await all<{ id: string; bill_no: string | null }>(db, `SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
     if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
     const named = found.map((f) => f.bill_no).filter(Boolean).join(' + ');
     if (existing.some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save.`);
     if (existing.some((k) => k.paymentId === pid)) fail(409, 'This card payment is already matched on save.');
+    if (cids.some((x) => bankChosen.has(x))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save to a bank credit.`);
     const card = await plannedCardPaise(db, bid, day, cids);
-    if (card !== p.amount_paise) fail(409, card ? `The payment is not what ${named ? `bill ${named} takes` : 'these bills take'} by card.` : `${named ? `Bill ${named} has` : 'These bills have'} no card payment: decide or correct ${named ? 'it' : 'them'} first.`);
+    // UPI on the machine (approved 11 Nov 2026) pays a card bill like a swipe, or a UPI bill, matched to the machine on save.
+    const upi = isMachineUpi(p) && card !== p.amount_paise ? await plannedUpiPaise(db, bid, day, cids) : 0;
+    if (card !== p.amount_paise && upi !== p.amount_paise) fail(409, card || upi ? `The payment is not what ${named ? `bill ${named} takes` : 'these bills take'} by ${isMachineUpi(p) ? 'card or UPI' : 'card'}.` : `${named ? `Bill ${named} has` : 'These bills have'} no ${isMachineUpi(p) ? 'card or UPI' : 'card'} payment: decide or correct ${named ? 'it' : 'them'} first.`);
     const id = newId();
     ids.push(id);
     stmts.push(stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, card_payment_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'card_match', ?, ?, ?, ?)`,

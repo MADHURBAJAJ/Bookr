@@ -74,7 +74,24 @@ export interface CardCandidate { transactionIds: string[]; billNos: string[]; am
  * as one). A sale with no time (register only) fits a payment made in its shift. Clear: paired by closest time first,
  * each payment and sale used once, up to an hour apart.
  */
-export function cardCandidates(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[]) {
+/**
+ * UPI on the card machine for card bills (approved 11 Nov 2026): the money comes in the card settlement like a swipe, so
+ * it may pay a card bill, but only when no UPI bill of its amount is waiting near it (those it pays first, through the
+ * bank evidence on save). upiWaiting lists those UPI bills; without it, UPI on the machine pays no card bill.
+ */
+export type UpiWaiting = { amountPaise: number; paidAt: number | null }[];
+const MACHINE_UPI_NEAR_MS = 60 * 60000;
+export const upiBillNear = (p: { amount_paise: number; paid_at: number }, upiWaiting: UpiWaiting) =>
+  upiWaiting.some((b) => b.amountPaise === p.amount_paise && (b.paidAt == null || Math.abs(b.paidAt - p.paid_at) <= MACHINE_UPI_NEAR_MS));
+
+/** Confirmed UPI bills of shifts from..to still waiting for their money: what UPI on the machine pays first. */
+export const upiWaitingSaved = async (db: DB, businessId: string, from: string, to: string): Promise<UpiWaiting> => (await all<{ amount_paise: number; paid_at: number | null }>(db, `
+  SELECT t.amount_paise, sb.paid_at FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
+  WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
+    AND t.shift_day BETWEEN ? AND ?`, businessId, from, to)).map((x) => ({ amountPaise: x.amount_paise, paidAt: x.paid_at }));
+
+export function cardCandidates(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[],
+  upiWaiting?: UpiWaiting) {
   const units: { ids: string[]; bills: string[]; amount: number; paidAt: number | null; shiftDay: string }[] =
     sales.map((s) => ({ ids: [s.id], bills: [s.bill_no ?? ''], amount: s.amount_paise, paidAt: s.paid_at, shiftDay: s.shift_day }));
   const byGroup = new Map<string, CardSale[]>();
@@ -87,8 +104,8 @@ export function cardCandidates(payments: (Pick<CardPayment, 'id' | 'paid_at' | '
   }
   const candidates = new Map<string, CardCandidate[]>();
   for (const p of payments) {
-    // UPI on the machine pays UPI bills, not card bills (approved 9 Nov 2026).
-    if (p.txn_type !== 'PURCHASE' || isMachineUpi(p)) { candidates.set(p.id, []); continue; }
+    // UPI on the machine pays UPI bills first (approved 9 Nov 2026), and a card bill when none is waiting near it.
+    if (p.txn_type !== 'PURCHASE' || (isMachineUpi(p) && (!upiWaiting || upiBillNear(p, upiWaiting)))) { candidates.set(p.id, []); continue; }
     const list: CardCandidate[] = [];
     for (const u of units) {
       if (u.amount !== p.amount_paise) continue;
@@ -189,8 +206,9 @@ const TIP_SHARE = 0.25;
  * Pairs Bookr may match on its own: the payment's only candidate, no other payment wants any of its sales, and within
  * AUTO_MIN, or, for a bill with no time, the one bill and the one payment of that amount (loneUntimed).
  */
-export function autoPairs(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[]) {
-  const { candidates } = cardCandidates(payments, sales);
+export function autoPairs(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[],
+  upiWaiting?: UpiWaiting) {
+  const { candidates } = cardCandidates(payments, sales, upiWaiting);
   const wants = new Map<string, Set<string>>();
   for (const [pid, list] of candidates) for (const k of list) for (const tid of k.transactionIds) wants.set(tid, new Set([...(wants.get(tid) ?? []), pid]));
   const out: { paymentId: string; k: CardCandidate }[] = [];
@@ -305,7 +323,7 @@ export async function runCardAuto(db: DB, businessId: string) {
   if (open.length) {
     const from = addDays(shiftDayOf(open[0].paid_at), -1);
     const to = addDays(shiftDayOf(open[open.length - 1].paid_at), 1);
-    const pairs = autoPairs(open, await waitingCard(db, businessId, from, to));
+    const pairs = autoPairs(open, await waitingCard(db, businessId, from, to), await upiWaitingSaved(db, businessId, from, to));
     const statements = pairs.flatMap((p, i) => cardMatchStatements(db, businessId, [p.paymentId], p.k.transactionIds, null, t + i, { auto: true, minutes: p.k.minutes }));
     for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
     matched = pairs.length;
@@ -380,8 +398,8 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   // A card company charge is settled with its day, not matched to a bill: not left to do (11 Nov 2026).
   const openPays = payments.filter((p) => !p.matched && !isCardCharge(p));
   // Candidates for this shift's open swipes, among card sales still waiting from the day before to the day after.
-  const near = await waitingCard(db, businessId, addDays(day, -1), addDays(day, 1));
-  const { candidates } = cardCandidates(openPays, near);
+  const [near, upiWaiting] = await Promise.all([waitingCard(db, businessId, addDays(day, -1), addDays(day, 1)), upiWaitingSaved(db, businessId, addDays(day, -1), addDays(day, 1))]);
+  const { candidates } = cardCandidates(openPays, near, upiWaiting);
   const tipFor = (p: CardPayment) => near.filter((s) => s.paid_at != null && p.amount_paise > s.amount_paise && p.amount_paise - s.amount_paise <= s.amount_paise * TIP_SHARE
     && Math.abs(p.paid_at - s.paid_at) <= AUTO_MIN * 60000).sort((a, b) => Math.abs(p.paid_at - a.paid_at!) - Math.abs(p.paid_at - b.paid_at!))[0] ?? null;
   const pay = (p: CardPayment) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, cardType: p.card_type, cardLast4: p.card_last4, terminalId: p.terminal_id,
