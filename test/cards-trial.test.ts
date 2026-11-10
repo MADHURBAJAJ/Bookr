@@ -103,4 +103,46 @@ describe('card machine payments before saving a shift', () => {
     expect(await matchOf(one)).toEqual(['145261']);
     expect([...await matchOf(three), ...await matchOf(fourA), ...await matchOf(fourB)]).toEqual([]);
   });
+
+  it('takes several card pairs at once from the open entries, checked together, undone one by one (card tray)', async () => {
+    const h = await hotel();
+    await h.software([['2610312', '31 09:00', 'CARD', '700'], ['2610313', '31 09:30', 'CARD', '900'], ['2610315', '1 07:59', 'CASH', '1']]);
+    await h.register([
+      { no: '2610312', amount: '700', pays: [['card', '700']] },
+      { no: '2610313', amount: '900', pays: [['card', '900']] },
+      { no: '2610315', amount: '1', pays: [['cash', '1']] },
+    ]);
+    // Swiped 11 hours after the bills: Bookr does not pair them on its own.
+    const a = await h.swipe('31 20:00', 700);
+    const b = await h.swipe('31 20:30', 900);
+    const odd = await h.swipe('31 21:00', 333);
+    await h.swipe('1 09:00', 1);
+    const k = (await h.reconcile()).cards;
+    expect(k.open.payments.map((p: any) => p.id).sort()).toEqual([a, b, odd].sort());
+    const bill = (no: string) => k.open.bills.find((x: any) => x.billNo === no);
+    expect(bill('2610312')).toMatchObject({ amountPaise: 70000, grouped: false });
+    expect(bill('2610312').rowId).toBeTruthy();
+    expect(bill('2610312').uploadId).toBeTruthy();
+    const B = `/businesses/${h.bid}/shifts/2026-10-31/card-choices`;
+    const acc = h.clients.accountant;
+    const count = async () => (await sql`SELECT count(*) AS n FROM shift_choices WHERE business_id = ${h.bid}`)[0].n;
+    expect((await acc.post(B, { pairs: [{ paymentId: a, comparisonIds: [bill('2610312').id] }, { paymentId: a, comparisonIds: [bill('2610313').id] }] })).status).toBe(409);
+    const bad = await acc.post(B, { pairs: [{ paymentId: a, comparisonIds: [bill('2610312').id] }, { paymentId: odd, comparisonIds: [bill('2610313').id] }] });
+    expect(bad.status).toBe(409);
+    expect(bad.json.error).toMatch(/2610313/);
+    expect(await count()).toBe(0);
+    const ok = await acc.post(B, { pairs: [{ paymentId: a, comparisonIds: [bill('2610312').id] }, { paymentId: b, comparisonIds: [bill('2610313').id] }] });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    expect(ok.json.ids).toHaveLength(2);
+    const k2 = (await h.reconcile()).cards;
+    expect(k2.open.bills).toHaveLength(0);
+    expect(k2.open.payments.map((p: any) => p.id)).toEqual([odd]);
+    expect((await acc.del(`/businesses/${h.bid}/shifts/2026-10-31/choices/${ok.json.ids[0]}`)).status).toBe(200);
+    expect(await count()).toBe(1);
+    expect((await acc.post(B, { paymentId: a, comparisonIds: [bill('2610312').id] })).status).toBe(200);
+    await h.confirm();
+    const matchOf = async (pid: string) => (await sql`SELECT t.bill_no FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.settlement_id = ${pid}`).map((r: any) => r.bill_no);
+    expect(await matchOf(a)).toEqual(['2610312']);
+    expect(await matchOf(b)).toEqual(['2610313']);
+  });
 });

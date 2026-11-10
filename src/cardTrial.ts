@@ -39,7 +39,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const [times, heads] = ids.length ? await Promise.all([
     all<{ id: string; paid_at: number | null }>(db, `SELECT c.id, sb.paid_at FROM bill_comparisons c LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       WHERE c.business_id = ? AND c.shift_day = ?`, businessId, day),
-    all<{ id: string; head: string }>(db, 'SELECT id, coalesce(paid_with_row_id, id) AS head FROM register_rows WHERE business_id = ? AND shift_day = ?', businessId, day),
+    all<{ id: string; head: string; upload: string | null }>(db, 'SELECT id, coalesce(paid_with_row_id, id) AS head, upload_id AS upload FROM register_rows WHERE business_id = ? AND shift_day = ?', businessId, day),
   ]) : [[], []];
   const timeOf = new Map(times.map((x) => [x.id, x.paid_at]));
   const headOf = new Map(heads.map((x) => [x.id, x.head]));
@@ -112,6 +112,18 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const noSwipe = covered ? leftSales.filter((s) => !offered.has(s.id) && !wanted.has(s.id))
     .map((s) => ({ comparisonId: s.id, billNo: s.bill_no, amountPaise: s.amount_paise, paidAt: s.paid_at })) : [];
 
+  // The open entries to tick on the Card tab's tray (approved 10 Nov 2026): card payments a person may pair, and the
+  // card bills not matched yet, with the register row a tip, discount or fixed amount is written on.
+  const regOf = new Map(rows.filter((r) => r.c.register_row_id).map((r) => [r.c.id, r.c.register_row_id as string]));
+  const uploadOf = new Map(heads.map((x) => [x.id, x.upload]));
+  const open = {
+    payments: needs.filter((n) => n.payment.txnType === 'PURCHASE' && !n.payment.upi).map((n) => n.payment),
+    bills: leftSales.map((s) => {
+      const rowId = regOf.get(s.id) ?? null;
+      const grouped = !!rowId && groupedRows.has(rowId);
+      return { id: s.id, billNo: s.bill_no, amountPaise: s.amount_paise, paidAt: s.paid_at, grouped, group: grouped ? s.group_head : null, rowId, uploadId: rowId ? uploadOf.get(rowId) ?? null : null };
+    }),
+  };
   const shiftPays = payments.filter((p) => inShift(p) && p.txn_type === 'PURCHASE');
   const sum = (xs: { amount_paise?: number; amountPaise?: number }[]) => xs.reduce((a, x) => a + (x.amount_paise ?? x.amountPaise ?? 0), 0);
   const matchedSales = sales.filter((s) => matchOf.has(s.id));
@@ -125,7 +137,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
       noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(noBill.map((n) => n.payment)), noBill: noBill.length },
     matches: Object.fromEntries([...matchOf].map(([id, m]) => [id, { ...m, billNo: billNo.get(id) ?? '' }])) as Record<string, TrialMatch & { billNo: string }>,
     choices: chosen.map((k) => ({ id: k.id, paymentId: k.paymentId, billNos: k.billNos, amountPaise: k.amountPaise, paidAt: k.paidAt, label: k.label, open: k.open, by: k.by })),
-    needs, noSwipe,
+    needs, noSwipe, open,
     // Card bills with no payment yet while the card report is not in: left too, waiting for the report (approved 10 Nov 2026).
     waitingReport: covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length,
     left: needs.length + noSwipe.length + (covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length),

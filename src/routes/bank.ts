@@ -319,35 +319,52 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole(
   const db = c.env.DB;
   const bid = c.get('businessId');
   const data = await body(c);
-  const pid = typeof data.paymentId === 'string' && isUuid(data.paymentId) ? data.paymentId : fail(400, 'Choose the card payment.');
-  const cids = Array.isArray(data.comparisonIds) ? [...new Set(data.comparisonIds.filter((x): x is string => typeof x === 'string' && isUuid(x)))].slice(0, 30) : [];
-  if (!cids.length) fail(400, 'Choose the bill.');
+  // One payment to its bill(s), or several pairs at once (card tray, approved 10 Nov 2026): all checked, then all saved.
+  const raw: unknown[] = Array.isArray(data.pairs) ? data.pairs.slice(0, 60) : [data];
+  if (!raw.length) fail(400, 'Choose the card payment.');
+  const pairs = raw.map((x0) => {
+    const x = (x0 && typeof x0 === 'object' ? x0 : {}) as Record<string, unknown>;
+    const pid = typeof x.paymentId === 'string' && isUuid(x.paymentId) ? x.paymentId : fail(400, 'Choose the card payment.');
+    const cids = Array.isArray(x.comparisonIds) ? [...new Set(x.comparisonIds.filter((y): y is string => typeof y === 'string' && isUuid(y)))].slice(0, 30) : [];
+    if (!cids.length) fail(400, 'Choose the bill.');
+    return { pid, cids };
+  });
+  if (new Set(pairs.map((p) => p.pid)).size !== pairs.length) fail(409, 'A card payment is in two pairs.');
+  const allIds = pairs.flatMap((p) => p.cids);
+  if (new Set(allIds).size !== allIds.length) fail(409, 'A bill is in two pairs.');
   const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
   if (!shift) fail(404, 'Unknown shift.');
   if (shift.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
-  const p = await one<{ txn_type: string; amount_paise: number; pay_mode: string | null; scheme: string | null; matched: number }>(db,
-    `SELECT txn_type, amount_paise, pay_mode, scheme, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
-    FROM card_settlements s WHERE id = ? AND business_id = ?`, pid, bid);
-  if (!p) fail(404, 'Card payment not found.');
-  if (p.txn_type !== 'PURCHASE' || isMachineUpi(p)) fail(409, 'Only a card sale on the machine pays a card bill.');
-  if (p.matched) fail(409, 'This card payment is already matched.');
-  const found = await all<{ id: string }>(db, `SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
-  if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
-  if ((await cardShiftChoices(db, bid, day)).some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, 'A bill is already matched on save.');
-  const card = await plannedCardPaise(db, bid, day, cids);
-  if (card !== p.amount_paise) fail(409, card ? 'The payment is not what these bills take by card.' : 'These bills have no card payment: decide or correct them first.');
-  const id = newId();
+  const existing = await cardShiftChoices(db, bid, day);
+  const ids: string[] = [];
+  const stmts = [];
+  for (const { pid, cids } of pairs) {
+    const p = await one<{ txn_type: string; amount_paise: number; pay_mode: string | null; scheme: string | null; matched: number }>(db,
+      `SELECT txn_type, amount_paise, pay_mode, scheme, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
+      FROM card_settlements s WHERE id = ? AND business_id = ?`, pid, bid);
+    if (!p) fail(404, 'Card payment not found.');
+    if (p.txn_type !== 'PURCHASE' || isMachineUpi(p)) fail(409, 'Only a card sale on the machine pays a card bill.');
+    if (p.matched) fail(409, 'This card payment is already matched.');
+    const found = await all<{ id: string; bill_no: string | null }>(db, `SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
+    if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
+    const named = found.map((f) => f.bill_no).filter(Boolean).join(' + ');
+    if (existing.some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save.`);
+    if (existing.some((k) => k.paymentId === pid)) fail(409, 'This card payment is already matched on save.');
+    const card = await plannedCardPaise(db, bid, day, cids);
+    if (card !== p.amount_paise) fail(409, card ? `The payment is not what ${named ? `bill ${named} takes` : 'these bills take'} by card.` : `${named ? `Bill ${named} has` : 'These bills have'} no card payment: decide or correct ${named ? 'it' : 'them'} first.`);
+    const id = newId();
+    ids.push(id);
+    stmts.push(stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, card_payment_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'card_match', ?, ?, ?, ?)`,
+      id, bid, day, pid, JSON.stringify(cids), c.get('user').id, now()),
+    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', pid, null, JSON.stringify({ shiftDay: day, comparisonIds: cids, card: true }), now()));
+  }
   try {
-    await db.batch([
-      stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, card_payment_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'card_match', ?, ?, ?, ?)`,
-        id, bid, day, pid, JSON.stringify(cids), c.get('user').id, now()),
-      stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', pid, null, JSON.stringify({ shiftDay: day, comparisonIds: cids, card: true }), now()),
-    ]);
+    await db.batch(stmts);
   } catch (e) {
     if (/UNIQUE/i.test(String(e))) fail(409, 'This card payment is already matched on save.');
     throw e;
   }
-  return c.json({ ok: true, id });
+  return c.json({ ok: true, id: ids[0], ids });
 });
 
 bankRoutes.delete('/businesses/:businessId/shifts/:day/choices/:id', requireRole('bank.link'), async (c) => {
