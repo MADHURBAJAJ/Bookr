@@ -131,7 +131,7 @@ describe('overlapping files', () => {
     const v = await view(h);
     expect(v.json.conflicts).toHaveLength(1);
     expect(v.json.conflicts[0]).toMatchObject({ billNo: '26103122', existing: { amountPaise: 78000 }, incoming: { amountPaise: 87000 } });
-    expect(v.json.blockers.join(' ')).toMatch(/overlapping bill differs/);
+    expect(v.json.blockers.join(' ')).toMatch(/1 bill with two different lines in the software/);
   });
 
   it('a person decides the overlap: Entry staff cannot, Accountant can use the incoming values', async () => {
