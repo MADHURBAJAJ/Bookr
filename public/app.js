@@ -4388,6 +4388,25 @@ async function reconcileView(biz, dayArg) {
   // A register slip or wrong column the bank shows, with its button, under the entries it explains (7 Nov 2026).
   const fixLine = (k) => (k ? html`<div data-card="${k.key}" style="padding:0 10px 8px 40px"><div class="tiny" style="color:#92400E">${k.title}</div>
     <button class="btn plain dchip" type="button" data-cardact="${k.key}" data-i="0" style="margin-top:4px">${k.actions[0].label}</button><div class="form-msg"></div></div>` : '');
+  // Paid on the card machine, from the UPI and Cash tabs too (approved 11 Nov 2026): the Card tab's own check, shown on
+  // the bill where it is listed. One button, the same steps, so a fix on either tab clears both.
+  const cardNeeds = (r.cards?.needs ?? []).filter((n) => n.why === 'written' && n.written);
+  const onCardLine = (b) => {
+    const n = cardNeeds.find((x) => x.written.comparisonId === b.id && x.written.mode === 'upi');
+    if (!n) return '';
+    const wr = n.written, p = n.payment;
+    const can = r.cards?.trial && !p.upi && wr.rowId && wr.uploadId && !wr.upiNear;
+    return html`<div class="cmp-warn" style="margin:0 10px 8px 40px">${wr.upiNear
+      ? html`The card machine got ₹ ${money(p.amountPaise)} at ${hhmm(p.paidAt)}, ${wr.minutes} min from the bill, and a UPI credit of this amount is near too: paid twice? Check the bill on its row.`
+      : html`The card machine got ₹ ${money(p.amountPaise)} at ${hhmm(p.paidAt)}, ${wr.minutes} min from the bill, and no UPI credit of this amount came in. It was most likely paid by card.`}
+      ${can ? html`<div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-tpaidcard="${p.id}" data-cmp="${wr.comparisonId}">Paid on the card machine</button></div>`
+        : !wr.upiNear ? html`<div class="tiny" style="margin-top:4px">Change it on the <button type="button" class="linkbtn tiny" data-goto="pay:card">Card tab</button>.</div>` : ''}<div class="form-msg"></div></div>`;
+  };
+  const cashOnCard = cardNeeds.filter((n) => n.written.mode === 'cash');
+  const cashOnCardHtml = cashOnCard.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Cash bills the card machine may have got: ${cashOnCard.length}</strong><span class="tchip warn">Check</span></div>
+    ${cashOnCard.map((n) => html`<div class="ent-line"><div><span class="mono"><strong>${n.written.billNo ?? ''}</strong></span> <button type="button" class="linkbtn tiny" data-bill-drawer="${n.written.billNo}|${day}">Open row</button></div>
+      <div class="tiny">₹ ${money(n.written.amountPaise)} at ${when(n.written.paidAt)}, written as cash. The card machine got ₹ ${money(n.payment.amountPaise)}${n.payment.upi ? ' (UPI on the machine)' : ''} at ${hhmm(n.payment.paidAt)}, ${n.written.minutes} min from the bill.</div></div>`)}
+    <div class="tiny">If it was paid on the machine, change it on the <button type="button" class="linkbtn tiny" data-goto="pay:card">Card tab</button>.</div></section>` : '';
   const lone = r.open ? lonePairs(r.open) : [];
   const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
     <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick a credit, then its bill (or the bill first): each two ticks make a pair, in the order you tick. "+ Add to this pair" adds more to a pair. You match all the pairs on save in one go.${lone.length > 1 ? html` <button type="button" class="linkbtn" data-tray="exact">Tick all exact pairs (${lone.length})</button>` : ''}</div>
@@ -4396,7 +4415,7 @@ async function reconcileView(biz, dayArg) {
         ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c, r.open.bills) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}
         <label class="tiny" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" data-tray="nearOn" style="width:16px;height:16px;min-height:0"> Show credits from the shifts either side</label><div data-tray="near"></div></div>
       <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
-        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
+        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${onCardLine(b)}${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
     </div>
     <div data-tray="sum" class="note">Tick entries to compare them.</div><div data-tray="fix"></div><div class="form-msg" data-tray="msg"></div></section>` : '';
   const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
@@ -4480,6 +4499,7 @@ async function reconcileView(biz, dayArg) {
     <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:0 0 10px">
       ${tabBtn('cash', 'Cash', cashN)}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', cardN)}</div>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
+      ${cashOnCardHtml}
       ${cashPanelHtml(biz, cash)}
       ${entriesHtml(biz, day, ent.cash, 'cash', cv)}
     </div>
@@ -4590,6 +4610,7 @@ async function reconcileView(biz, dayArg) {
     nearby: async () => (await api('GET', `/businesses/${biz.id}/shifts/${day}/nearby`)).credits,
     post: (pairs) => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/choices`, { pairs: pairs.map((p) => ({ bankRowId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) }) });
   if (!r.confirmed) wireTrialCards(biz, day, r.cards, reload);
+  if (r.cards?.trial) app.querySelectorAll('#trialopen [data-tpaidcard]').forEach((b) => b.addEventListener('click', () => paidOnCardClick(biz, day, r.cards.needs.find((x) => x.payment.id === b.dataset.tpaidcard), b, reload)));
   app.querySelectorAll('[data-paidupi]').forEach((b) => b.addEventListener('click', () => paidByUpiClick(biz, day, (r.byUpi ?? []).find((o) => o.comparisonId === b.dataset.paidupi), b, reload)));
   const act = async (fn, toast) => {
     try {
@@ -4836,6 +4857,45 @@ function trialCardOpen(k) {
     <div data-tray="sum" class="note">Tick entries to compare them.</div><div data-tray="fix"></div><div class="form-msg" data-tray="msg"></div></details>`;
 }
 
+// Paid on the card machine (approved 11 Nov 2026), from the Card tab or under the bill on the UPI tab: the register's
+// payment becomes Card, the bill is decided Use register (card) when the software says otherwise, and the machine
+// payment is matched on save. All undone together.
+async function paidOnCardClick(biz, day, n, b, reload) {
+  const wr = n?.written;
+  if (!wr) return;
+  b.disabled = true;
+  const base = `/businesses/${biz.id}`;
+  const undos = [];
+  try {
+    // 1. The register row: its one payment of the bill's amount becomes Card.
+    const u = await api('GET', `${base}/uploads/${wr.uploadId}`);
+    const r = u.rows.find((x) => x.id === wr.rowId);
+    if (!r) throw new Error(`Bill ${wr.billNo}'s row was not found. Reload the page.`);
+    const same = r.payments.filter((x) => x.mode === wr.mode && x.amountPaise === wr.amountPaise);
+    if (r.paidWithRowId || r.payments.length !== 1 || same.length !== 1) throw new Error(`Bill ${wr.billNo}'s row has changed or has more than one payment: correct it on its row.`);
+    const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
+      payments: r.payments.map((x) => ({ mode: x.mode, columnLabel: x.columnLabel, amount: rupeesForInput(x.amountPaise) })) };
+    const put = (x) => apiFull('PUT', `${base}/register-rows/${r.id}`, x);
+    await put({ ...payload, payments: [{ mode: 'card', columnLabel: 'Card', amount: rupeesForInput(wr.amountPaise) }] });
+    undos.push(() => put(payload));
+    // 2. The software still says otherwise: the machine proves the register (card).
+    const note = `Card machine ₹ ${money(n.payment.amountPaise)} at ${hhmm(n.payment.paidAt)} (changed from Reconcile)`;
+    const c = (await api('GET', `${base}/shifts/${day}`)).comparisons.find((x) => x.id === wr.comparisonId);
+    if (c && c.difference !== 'match' && c.difference !== 'complimentary' && c.decision !== 'use_register') {
+      await apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: 'use_register', note });
+      undos.push(() => apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: c.decision ?? null, note: c.note ?? undefined }));
+    }
+    // 3. The machine payment, matched on save.
+    const { id } = await apiFull('POST', `${base}/shifts/${day}/card-choices`, { paymentId: n.payment.id, comparisonIds: [wr.comparisonId] });
+    undos.push(() => apiFull('DELETE', `${base}/shifts/${day}/choices/${id}`, {}));
+    await reload();
+    doneToast(`Bill ${wr.billNo}: changed to card, matched to the machine payment when you save.`, async () => { for (const f of undos.reverse()) await f(); }, reload);
+  } catch (err) {
+    for (const f of undos.reverse()) await f().catch(() => {});
+    b.disabled = false; showError(b.closest('.rv-card, .cmp-warn')?.querySelector('.form-msg'), err);
+  }
+}
+
 function wireTrialCards(biz, day, k, reload) {
   const box = document.getElementById('tcardsec');
   if (!box || !k?.trial) return;
@@ -4846,42 +4906,7 @@ function wireTrialCards(biz, day, k, reload) {
       nearby: async () => (await api('GET', `/businesses/${biz.id}/shifts/${day}/nearby`)).payments.map((p) => ({ ...p, postedAt: p.paidAt, accountName: p.label })),
       post: (pairs) => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/card-choices`, { pairs: pairs.map((p) => ({ paymentId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) }) });
   }
-  box.querySelectorAll('[data-tpaidcard]').forEach((b) => b.addEventListener('click', async () => {
-    const n = k.needs.find((x) => x.payment.id === b.dataset.tpaidcard);
-    const wr = n?.written;
-    if (!wr) return;
-    b.disabled = true;
-    const base = `/businesses/${biz.id}`;
-    const undos = [];
-    try {
-      // 1. The register row: its one payment of the bill's amount becomes Card.
-      const u = await api('GET', `${base}/uploads/${wr.uploadId}`);
-      const r = u.rows.find((x) => x.id === wr.rowId);
-      if (!r) throw new Error(`Bill ${wr.billNo}'s row was not found. Reload the page.`);
-      const same = r.payments.filter((x) => x.mode === wr.mode && x.amountPaise === wr.amountPaise);
-      if (r.paidWithRowId || r.payments.length !== 1 || same.length !== 1) throw new Error(`Bill ${wr.billNo}'s row has changed or has more than one payment: correct it on its row.`);
-      const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
-        payments: r.payments.map((x) => ({ mode: x.mode, columnLabel: x.columnLabel, amount: rupeesForInput(x.amountPaise) })) };
-      const put = (x) => apiFull('PUT', `${base}/register-rows/${r.id}`, x);
-      await put({ ...payload, payments: [{ mode: 'card', columnLabel: 'Card', amount: rupeesForInput(wr.amountPaise) }] });
-      undos.push(() => put(payload));
-      // 2. The software still says otherwise: the machine proves the register (card).
-      const note = `Card machine ₹ ${money(n.payment.amountPaise)} at ${hhmm(n.payment.paidAt)} (changed from Reconcile)`;
-      const c = (await api('GET', `${base}/shifts/${day}`)).comparisons.find((x) => x.id === wr.comparisonId);
-      if (c && c.difference !== 'match' && c.difference !== 'complimentary' && c.decision !== 'use_register') {
-        await apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: 'use_register', note });
-        undos.push(() => apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: c.decision ?? null, note: c.note ?? undefined }));
-      }
-      // 3. The machine payment, matched on save.
-      const { id } = await apiFull('POST', `${base}/shifts/${day}/card-choices`, { paymentId: n.payment.id, comparisonIds: [wr.comparisonId] });
-      undos.push(() => apiFull('DELETE', `${base}/shifts/${day}/choices/${id}`, {}));
-      await reload();
-      doneToast(`Bill ${wr.billNo}: changed to card, matched to the machine payment when you save.`, async () => { for (const f of undos.reverse()) await f(); }, reload);
-    } catch (err) {
-      for (const f of undos.reverse()) await f().catch(() => {});
-      b.disabled = false; showError(b.closest('.rv-card').querySelector('.form-msg'), err);
-    }
-  }));
+  box.querySelectorAll('[data-tpaidcard]').forEach((b) => b.addEventListener('click', () => paidOnCardClick(biz, day, k.needs.find((x) => x.payment.id === b.dataset.tpaidcard), b, reload)));
   box.querySelectorAll('[data-tcardpick]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
     try {
