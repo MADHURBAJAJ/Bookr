@@ -81,6 +81,7 @@ describe('late lines, misreads, and bills not billed in the software', () => {
 
     // A register-only bill, past its watch: closed as not billed in the software, counted on the dashboard.
     await h.decideRest();
+    await h.confirm();
     const acc = h.clients.accountant;
     const reg = (await acc.get(`/businesses/${h.bid}/waiting`)).json.look.find((x: any) => x.billNo === '2610319');
     expect(reg).toMatchObject({ side: 'register', unresolved: true });

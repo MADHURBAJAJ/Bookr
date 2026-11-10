@@ -23,7 +23,12 @@ describe('waiting: needs a look against grey', () => {
     await h.decideRest('2026-11-01');
 
     const acc = h.clients.accountant;
-    const w = (await acc.get(`/businesses/${h.bid}/waiting`)).json;
+    // Waiting starts at save: before it, the shift is one grey line and none of its bills is counted.
+    let w = (await acc.get(`/businesses/${h.bid}/waiting`)).json;
+    expect(w.look).toEqual([]);
+    expect(w.grey.find((x: any) => x.key === 's:2026-10-31')).toMatchObject({ waitFor: 'unsaved', count: 3 });
+    await h.confirm();
+    w = (await acc.get(`/businesses/${h.bid}/waiting`)).json;
     const look = Object.fromEntries(w.look.map((x: any) => [x.billNo, x]));
     const grey = Object.fromEntries(w.grey.map((x: any) => [x.billNo, x]));
     // UPI, not in the register, bank synced: needs a look, with the ₹110 credit offered.
@@ -31,9 +36,10 @@ describe('waiting: needs a look against grey', () => {
     expect(look['2610311'].offers.map((o: any) => o.id)).toEqual([c110]);
     // In the register only, software report covers the shift: needs a look.
     expect(look['2610319']).toMatchObject({ side: 'register' });
-    // Cash, shift not saved: grey until saved. No register on 1 Nov: grey.
-    expect(grey['2610312']).toMatchObject({ waitFor: 'save' });
-    expect(grey['2611011']).toMatchObject({ waitFor: 'register' });
+    // Cash, saved, no cash count yet: grey. The 1 Nov shift is not saved: one grey line, its bill not listed.
+    expect(grey['2610312']).toMatchObject({ waitFor: 'count' });
+    expect(grey['2611011']).toBeUndefined();
+    expect(w.grey.find((x: any) => x.key === 's:2026-11-01')).toMatchObject({ waitFor: 'unsaved', count: 1 });
     // Left out: not waiting at all.
     expect([...w.look, ...w.grey].map((x: any) => x.billNo)).not.toContain('2610318');
 
@@ -44,7 +50,7 @@ describe('waiting: needs a look against grey', () => {
     // The dashboard counts only the bills that need a look; grey ones are grouped.
     const home = (await acc.get(`/businesses/${h.bid}/home`)).json;
     expect(home.waitingBills.count).toBe(w.look.length);
-    expect(home.waitingBills.grey).toContainEqual({ waitFor: 'register', day: '2026-11-01', n: 1 });
+    expect(home.waitingBills.grey).toContainEqual({ waitFor: 'unsaved', day: '2026-11-01', n: 1 });
 
     // Keep waiting: Owner or Accountant, only after the watch, and it starts a new 7-day watch.
     const id = look['2610311'].comparisonId;

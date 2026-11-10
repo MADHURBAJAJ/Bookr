@@ -65,7 +65,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
 
   // Waiting counts only what needs a look (Stage 2, 10 Nov 2026); what waits for a file is told apart.
   const greyBy = new Map<string, { waitFor: string; day: string; n: number }>();
-  for (const g of waiting.grey) { const k = `${g.waitFor}|${g.day}`; const x = greyBy.get(k) ?? { waitFor: g.waitFor ?? '', day: g.day, n: 0 }; x.n += 1; greyBy.set(k, x); }
+  for (const g of waiting.grey) { const k = `${g.waitFor}|${g.day}`; const x = greyBy.get(k) ?? { waitFor: g.waitFor ?? '', day: g.day, n: 0 }; x.n += g.count ?? 1; greyBy.set(k, x); }
   // Bills written in the register but never billed in the software, closed this week (Stage 4, 10 Nov 2026).
   const notBilled = (await one<{ n: number }>(db, `SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND close_note = ? AND difference = 'missing_in_software'
     AND closed_at >= ?`, businessId, NOT_BILLED_NOTE, Date.now() - 7 * 86400000))?.n ?? 0;

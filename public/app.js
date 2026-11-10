@@ -379,12 +379,14 @@ async function dashboardView(biz) {
   }
 
   // 7. Bills waiting for their other side.
-  if (h.waitingBills.count || h.waitingBills.grey?.length || h.waitingBills.notBilled) {
-    const greyN = (h.waitingBills.grey ?? []).reduce((t, g) => t + g.n, 0);
+  if (h.waitingBills.count || h.waitingBills.grey?.some((g) => g.waitFor !== 'unsaved') || h.waitingBills.notBilled) {
+    // Unsaved shifts have their own card (Shifts to finish); here only bills waiting for a file.
+    const greys = (h.waitingBills.grey ?? []).filter((g) => g.waitFor !== 'unsaved');
+    const greyN = greys.reduce((t, g) => t + g.n, 0);
     cards.push(card('Waiting bills that need a look', html`
       ${h.waitingBills.count ? html`<div class="note">${h.waitingBills.count} bill${h.waitingBills.count === 1 ? '' : 's'} where something should have turned up and has not.</div>
         ${goBtn(`#/b/${biz.id}/reconcile/${h.waitingBills.firstDay}?top=wait`, 'Open Waiting')}` : html`<div class="ok-msg">Nothing needs a look.</div>`}
-      ${greyN ? html`<div class="note" style="color:var(--muted)">${greyN} more waiting only for a file or a save: ${(h.waitingBills.grey ?? []).slice(0, 3).map((g) => `${g.n} ${(WAIT_FOR[g.waitFor] ?? dayLabel)(g.day)}`).join('; ')}${h.waitingBills.grey.length > 3 ? '; …' : ''}.</div>` : ''}
+      ${greyN ? html`<div class="note" style="color:var(--muted)">${greyN} more not counted yet: ${greys.slice(0, 3).map(greyText).join('; ')}${greys.length > 3 ? '; …' : ''}.</div>` : ''}
       ${h.waitingBills.notBilled ? html`<div class="note">${h.waitingBills.notBilled} bill${h.waitingBills.notBilled === 1 ? '' : 's'} not billed in software this week.</div>` : ''}`,
       { chip: h.waitingBills.late ? html`<span class="chip bad">${h.waitingBills.late} over ${h.watchDays} days</span>` : '' }));
   }
@@ -2619,8 +2621,12 @@ function oddNumbersHtml(biz, w, canDecide) {
 
 /** What a grey line waits for, in words. */
 const WAIT_FOR = { register: (d) => `until the ${dayLabel(d)} register is in`, software: (d) => `until the software report covers the ${dayLabel(d)} shift`,
-  bank: (d) => `until bank sync (${dayLabel(d)} shift)`, card: (d) => `until the card report (${dayLabel(d)} shift)`, save: (d) => `until the ${dayLabel(d)} shift is saved and its cash counted`,
+  bank: (d) => `until bank sync (${dayLabel(d)} shift)`, card: (d) => `until the card report (${dayLabel(d)} shift)`, count: (d) => `until the ${dayLabel(d)} cash count is in`,
   carry: (d) => `carried forward from the ${dayLabel(d)} shift` };
+/** One grey line: an unsaved shift is told as the shift (Waiting starts at save, 10 Nov 2026); the rest as "N bills: until …". */
+const greyText = (g) => (g.waitFor === 'unsaved'
+  ? `${dayLabel(g.day)} shift not saved yet${g.n ? ` (${g.n} bill${g.n === 1 ? '' : 's'} on one side only)` : ''}: finish it on Reconcile`
+  : `${g.n} bill${g.n === 1 ? '' : 's'}: ${(WAIT_FOR[g.waitFor] ?? ((d) => dayLabel(d)))(g.day)}`);
 
 /**
  * Waiting = needs a look (Stage 2, approved 10 Nov 2026). The /waiting picture: bills where something should have
@@ -2630,7 +2636,7 @@ function waitingPanelHtml(biz, w, canDecide) {
   if (!w) return html`<section class="card"><div class="note">Waiting could not be loaded.</div></section>`;
   const look = w.look ?? [];
   const greys = new Map();
-  for (const x of w.grey ?? []) { const k = `${x.waitFor}|${x.day}`; greys.set(k, { waitFor: x.waitFor, day: x.day, n: (greys.get(k)?.n ?? 0) + 1 }); }
+  for (const x of w.grey ?? []) { const k = `${x.waitFor}|${x.day}`; greys.set(k, { waitFor: x.waitFor, day: x.day, n: (greys.get(k)?.n ?? 0) + (x.count ?? 1) }); }
   const late = look.filter((x) => x.unresolved).length;
   const offerHtml = (x) => (x.offers ?? []).map((o) => html`<div class="tiny" style="color:var(--teal-ink)">${o.kind === 'credit' ? 'Credit' : 'Machine payment'} ₹ ${money(o.amountPaise)} at ${when(o.at)}${o.label ? ` (${o.label})` : ''}${o.shiftDay !== x.day ? `, ${dayLabel(o.shiftDay)} shift` : ''}${o.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(o.amountPaise - x.amountPaise))} ${o.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}
       <a href="#/b/${biz.id}/reconcile/${x.day}">Match on the ${dayLabel(x.day)} shift ›</a></div>`);
@@ -2653,9 +2659,9 @@ function waitingPanelHtml(biz, w, canDecide) {
             <button class="btn plain dchip" type="button" data-keepwait="${x.comparisonId}" data-bill="${x.billNo}">Keep waiting ${w.watchDays} more days</button></div>` : ''}</td>
         </tr>`)}</tbody></table></div>` : html`<div class="ok-msg">Nothing needs a look.</div>`}
     </section>
-    ${greys.size ? html`<section class="card" style="gap:6px"><h2 style="font-size:16px">Waiting for a file (not counted)</h2>
-      <div class="note">Nothing is wrong with these yet; each waits for a file to come in or a shift to be saved.</div>
-      ${[...greys.values()].map((g) => html`<div class="list-row" style="color:var(--muted)"><span>${g.n} bill${g.n === 1 ? '' : 's'}: ${(WAIT_FOR[g.waitFor] ?? ((d) => dayLabel(d)))(g.day)}</span>
+    ${greys.size ? html`<section class="card" style="gap:6px"><h2 style="font-size:16px">Not counted yet</h2>
+      <div class="note">Nothing is wrong with these yet. A shift's bills start waiting when it is saved; until then, finish them on its own tabs. The rest wait for a file to come in.</div>
+      ${[...greys.values()].map((g) => html`<div class="list-row" style="color:var(--muted)"><span>${greyText(g)}</span>
         <a class="note" href="#/b/${biz.id}/reconcile/${g.day}">Open ›</a></div>`)}</section>` : ''}`;
 }
 

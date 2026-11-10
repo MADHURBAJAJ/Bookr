@@ -15,12 +15,14 @@ import { coverage, waitingBills, WATCH_DAYS } from './sales';
 import { cashCheck } from './cash';
 import { isMachineUpi, machineLabel } from './cards';
 
-export type WaitFor = 'register' | 'software' | 'bank' | 'card' | 'save' | 'carry';
+export type WaitFor = 'register' | 'software' | 'bank' | 'card' | 'count' | 'carry' | 'unsaved';
 export interface Offer { id: string; kind: 'credit' | 'payment'; amountPaise: number; at: number; shiftDay: string; label: string | null }
 export interface WaitItem {
   key: string; comparisonId: string | null; billNo: string; day: string; amountPaise: number; mode: string | null;
   side: 'software' | 'register' | 'both'; confirmed: boolean; group: 'look' | 'grey'; waitFor: WaitFor | null; reason: string;
   daysWaiting: number; watchEnd: string | null; unresolved: boolean; watchNote: string | null; offers: Offer[];
+  /** On the one line of an unsaved shift: how many of its bills are on one side only. */
+  count?: number;
 }
 
 const GAP = 1000; // ₹10: an offer may be this far from the bill (a tip or a discount)
@@ -85,9 +87,13 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   const seen = new Set<string>();
   const sales = new Map([...upiSales, ...cardSales].filter((t) => t.comparisonId).map((t) => [t.comparisonId!, t]));
 
-  // Bills found on one side only.
+  // Bills found on one side only. Waiting starts when a shift is saved (approved 10 Nov 2026): before that, every bill is
+  // still open on its shift's own tabs, and its pairs are only Bookr's guesses. An unsaved shift is one grey line.
+  const unsaved = new Map<string, number>();
+  for (const [day, status] of statusOf) if (status !== 'confirmed') unsaved.set(day, 0);
   for (const b of bills.filter((x) => !x.oddNumber)) {
     seen.add(b.id);
+    if (!b.confirmed) { unsaved.set(b.day, (unsaved.get(b.day) ?? 0) + 1); continue; }
     const confirmed = b.confirmed;
     const base = { key: `c:${b.id}`, comparisonId: b.id, billNo: b.billNo, day: b.day, amountPaise: b.amountPaise ?? 0, mode: b.mode, side: b.side as 'software' | 'register',
       confirmed, daysWaiting: b.daysWaiting, watchEnd: b.watchEnd, unresolved: b.unresolved, watchNote: b.watchNote, offers: [] as Offer[] };
@@ -109,9 +115,8 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     if (!hasRegister.has(b.day)) { grey('register', 'Until the register is in'); continue; }
     const sale = sales.get(b.id);
     if (b.mode === 'cash') {
-      if (!confirmed) { grey('save', 'Cash: checked against the cash count when the shift is saved'); continue; }
       const k = await cash(b.day);
-      if (k.differencePaise === null) { grey('save', 'Until the cash count is in'); continue; }
+      if (k.differencePaise === null) { grey('count', 'Until the cash count is in'); continue; }
       if (k.settled || k.differencePaise >= 0) continue; // the cash backs it: not waiting
       const part = k.explained?.bills.find((x) => x.id === b.id);
       look(part ? `Not in the register; explains ${rs(part.partPaise)} of the ${rs(-k.differencePaise)} short cash count`
@@ -119,14 +124,14 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
       continue;
     }
     if (b.mode === 'upi') {
-      if (confirmed && !sale) continue; // its credit is matched: the bank backs it
+      if (!sale) continue; // its credit is matched: the bank backs it
       if (!bankIn(b.day)) { grey('bank', 'Until bank sync'); continue; }
       const offers = await credits(b.day, base.amountPaise, sale?.paidAt ?? null);
       look(offers.length ? 'Not in the register, and no credit matched yet' : 'Not in the register, and no credit of this amount in the bank', offers);
       continue;
     }
     if (b.mode === 'card') {
-      if (confirmed && !sale) continue; // its machine payment is matched
+      if (!sale) continue; // its machine payment is matched
       if (!cardIn(b.day)) { grey('card', 'Until the card report'); continue; }
       const offers = await payments(b.day, base.amountPaise, sale?.paidAt ?? null);
       look(offers.length ? 'Not in the register, and no machine payment matched yet' : 'Not in the register, and no machine payment of this amount', offers);
@@ -153,6 +158,10 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no machine payment matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
   }
 
+  for (const [day, n] of unsaved) {
+    out.push({ key: `s:${day}`, comparisonId: null, billNo: '', day, amountPaise: 0, mode: null, side: 'both', confirmed: false, group: 'grey', waitFor: 'unsaved',
+      reason: `The ${day} shift is not saved yet`, daysWaiting: days(day), watchEnd: null, unresolved: false, watchNote: null, offers: [], count: n });
+  }
   const sortKey = (x: WaitItem) => `${x.day}\u0000${x.billNo}`;
   out.sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : 1));
   return {
