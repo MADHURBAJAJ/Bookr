@@ -4305,6 +4305,7 @@ async function reconcileView(biz, dayArg) {
   recTopNow = top;
   const reload = () => { recKeep = { day, top: recTopNow }; return reconcileView(biz, `${day}?more=${v.moreHours}`); };
   drawerReload = reload;
+  if (r.cards?.trial) r.cards.byUpi = r.byUpi ?? [];
   const s = r.strip;
   const days = [...new Set([day, ...r.shifts.map((x) => x.day)])].sort();
   const at = days.indexOf(day);
@@ -4336,6 +4337,7 @@ async function reconcileView(biz, dayArg) {
       <div style="display:flex;gap:8px;align-items:flex-start">
         <input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}" style="width:18px;height:18px;min-height:0;margin-top:2px">
         <div><strong>₹ ${money(x.amountPaise)}</strong> · ${hhmm(x.postedAt)} · ${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}${plainRemark(x) ? html` · <em>"${plainRemark(x)}"</em>` : ''}</div></div>
+      ${byUpiOffer((r.byUpi ?? []).find((o) => o.creditId === x.creditId), true)}
       <div class="nb-check" data-nbcheck="${x.creditId}"></div>
       <input type="text" data-nbwhat="${x.creditId}" maxlength="120" placeholder="What was it? (optional)" value="${plainRemark(x)}" style="max-width:360px">
       <div class="form-row" style="gap:6px;flex-wrap:wrap">
@@ -4591,7 +4593,8 @@ async function reconcileView(biz, dayArg) {
   if (trialBox) wireTray({ biz, day, reload, root: trialBox, open: r.open, lone, mode: 'upi',
     nearby: async () => (await api('GET', `/businesses/${biz.id}/shifts/${day}/nearby`)).credits,
     post: (pairs) => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/choices`, { pairs: pairs.map((p) => ({ bankRowId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) }) });
-  if (!r.confirmed) { wireTrialCards(biz, day, r.cards, reload); return; }
+  if (!r.confirmed) wireTrialCards(biz, day, r.cards, reload);
+  app.querySelectorAll('[data-paidupi]').forEach((b) => b.addEventListener('click', () => paidByUpiClick(biz, day, (r.byUpi ?? []).find((o) => o.comparisonId === b.dataset.paidupi), b, reload)));
   const act = async (fn, toast) => {
     try {
       await fn(); await reload();
@@ -4688,6 +4691,8 @@ async function reconcileView(biz, dayArg) {
     el.querySelectorAll('[data-nbowed]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `${nbBase}/${id}/owed-paid`, { txId: b.dataset.nbowed }),
       { text: 'Matched to the owed bill.', undo: () => apiFull('DELETE', `${nbBase}/${id}/match`, {}) })));
   });
+  // The rest matches against a saved shift.
+  if (!r.confirmed) return;
   app.querySelectorAll('[data-book]').forEach((b) => b.addEventListener('click', () => {
     b.disabled = true;
     act(async () => { if (!await bookCredit(biz, b.dataset.book, { headId: b.dataset.head, note: `Unbilled ${b.dataset.label} (Reconcile)` })) throw new Error('Not booked.'); },
@@ -4707,6 +4712,58 @@ async function reconcileView(biz, dayArg) {
 
 // ---- Card before saving (approved 10 Nov 2026): what Save would match, a match a person chooses now (made on Save),
 // and what to fix before or after saving.
+
+// ---- Paid by UPI, before saving (approved 11 Nov 2026): a card or cash bill that one UPI credit of its exact amount
+// paid instead. One button: the register's payment becomes UPI (in the column of the account the money came into), the
+// bill is decided Use register when the software says otherwise, and the credit is matched on save. All undone together.
+
+function byUpiOffer(o, fromCredit) {
+  if (!o) return '';
+  const mode = o.mode === 'card' ? 'card' : 'cash';
+  const away = o.minutes != null ? `, ${o.minutes} min from the bill` : '';
+  const text = fromCredit
+    ? html`<strong>Check first:</strong> could be the payment for ${mode} bill <span class="mono">${o.billNo ?? ''}</span> (₹ ${money(o.amountPaise)}${o.paidAt ? `, ${hhmm(o.paidAt)}` : ''})${o.mode === 'card' ? ': the card machine has no payment for it' : ''}.`
+    : html`A ₹ ${money(o.amountPaise)} UPI credit came into ${o.accountName ?? 'the bank'} at ${hhmm(o.creditAt)}${away}, and no other bill of that amount is waiting for it.`;
+  return html`<div class="cmp-warn" style="margin:0">${text}
+    <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-paidupi="${o.comparisonId}">Paid by UPI</button></div><div class="form-msg"></div></div>`;
+}
+
+async function paidByUpiClick(biz, day, o, b, reload) {
+  if (!o) return;
+  const mode = o.mode === 'card' ? 'card' : 'cash';
+  if (o.mode === 'cash' && !confirm(`Bill ${o.billNo ?? ''} is written as cash. Change it to UPI? The cash count for this shift is then ₹ ${money(o.amountPaise)} less than written.`)) return;
+  b.disabled = true;
+  const base = `/businesses/${biz.id}`;
+  const undos = [];
+  try {
+    // 1. The register row: its one payment of the bill's amount becomes UPI.
+    const u = await api('GET', `${base}/uploads/${o.uploadId}`);
+    const row = u.rows.find((x) => x.id === o.rowId);
+    if (!row) throw new Error(`Bill ${o.billNo}'s row was not found. Reload the page.`);
+    const same = row.payments.filter((x) => x.mode === o.mode && x.amountPaise === o.amountPaise);
+    if (row.paidWithRowId || row.payments.length !== 1 || same.length !== 1) throw new Error(`Bill ${o.billNo}'s row has changed or has more than one payment: correct it on its row.`);
+    const payload = { paidWithRowId: row.paidWithRowId, billNo: row.billNo, billType: row.billType, amount: rupeesForInput(row.amountPaise), discount: rupeesForInput(row.discountPaise - row.tipPaise),
+      remarks: row.remarks, status: row.status, payments: row.payments.map((x) => ({ mode: x.mode, columnLabel: x.columnLabel, amount: rupeesForInput(x.amountPaise) })) };
+    const put = (x) => apiFull('PUT', `${base}/register-rows/${row.id}`, x);
+    await put({ ...payload, payments: [{ mode: 'upi', columnLabel: o.label ?? 'UPI', amount: rupeesForInput(o.amountPaise) }] });
+    undos.push(() => put(payload));
+    // 2. The software still says otherwise: the credit proves the register (UPI).
+    const note = `UPI credit ₹ ${money(o.amountPaise)} at ${hhmm(o.creditAt)} (changed from Reconcile)`;
+    const c = (await api('GET', `${base}/shifts/${day}`)).comparisons.find((x) => x.id === o.comparisonId);
+    if (c && c.difference !== 'match' && c.difference !== 'complimentary' && c.decision !== 'use_register') {
+      await apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: 'use_register', note });
+      undos.push(() => apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: c.decision ?? null, note: c.note ?? undefined }));
+    }
+    // 3. The credit, matched on save.
+    const { id } = await apiFull('POST', `${base}/shifts/${day}/choices`, { bankRowId: o.creditId, comparisonIds: [o.comparisonId] });
+    undos.push(() => apiFull('DELETE', `${base}/shifts/${day}/choices/${id}`, {}));
+    await reload();
+    doneToast(`Bill ${o.billNo}: changed from ${mode} to UPI, matched to the ₹ ${money(o.amountPaise)} credit when you save.`, async () => { for (const f of undos.reverse()) await f(); }, reload);
+  } catch (err) {
+    for (const f of undos.reverse()) await f().catch(() => {});
+    b.disabled = false; showError(b.closest('.cmp-warn')?.querySelector('.form-msg'), err);
+  }
+}
 
 function trialCardSection(biz, k) {
   const st = k.strip;
@@ -4741,7 +4798,8 @@ function trialCardSection(biz, k) {
   const noSwipe = (x) => html`<div class="rv-card">
     <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
     <div class="tiny">${at(x.paidAt)} · ${openRow(x.billNo)}</div>
-    <div class="note">The card report is in for this shift and has no payment for this bill. Check how it was paid on its row; after saving, Was cash and Was UPI are here.</div></div>`;
+    <div class="note">The card report is in for this shift and has no payment for this bill. Check how it was paid on its row; after saving, Was cash and Was UPI are here.</div>
+    ${byUpiOffer((k.byUpi ?? []).find((o) => o.comparisonId === x.comparisonId))}</div>`;
   const chosen = k.choices.filter((c) => c.open);
   return html`<section class="card" style="gap:10px" id="tcardsec">
     <div class="lane-h"><h2 style="margin:0">Card machine</h2><span style="display:flex;gap:6px;flex-wrap:wrap">${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>` : ''}

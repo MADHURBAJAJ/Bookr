@@ -21,6 +21,7 @@ import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { unsettleStatements } from '../cards';
 import { cashMoveOf } from '../cash';
+import { paidByUpi } from '../paidByUpi';
 import { ADVANCE_TAG, creditChecks, HELD, heldKindOf, heldList, isHeldDone, OWED_PREFIX, type HeldKind } from '../extra';
 import { cardReportsStatus, syncCardFolder } from '../cardDrive';
 import { shiftEntries } from '../entries';
@@ -490,7 +491,9 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
     r.noBill = r.noBill.filter((x) => !cr.has(x.creditId));
     r.strip.creditsNoBill = r.noBill.length;
   }
-  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards });
+  // Card or cash bills one UPI credit paid instead (approved 11 Nov 2026), before saving.
+  const byUpi = status === 'confirmed' ? [] : await paidByUpi(db, bid, day);
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards, byUpi });
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
