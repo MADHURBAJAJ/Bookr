@@ -71,4 +71,36 @@ describe('card machine payments before saving a shift', () => {
     expect(after.trial).toBeUndefined();
     expect(after.noSwipe.map((x: any) => x.billNo)).toEqual(['2610312']);
   });
+
+  it('matches a bill with no time on its own only when it and the payment are the only ones of their amount', async () => {
+    const h = await hotel();
+    await h.software([['2610311', '31 12:00', 'CASH', '250'], ['2610312', '1 07:59', 'CASH', '1']]);
+    await h.register([
+      { no: '2610311', amount: '250', pays: [['cash', '250']] },
+      { no: '145261', amount: '156', pays: [['card', '156']] },
+      { no: '145262', amount: '300', pays: [['card', '300']] },
+      { no: '145263', amount: '300', pays: [['card', '300']] },
+      { no: '145264', amount: '450', pays: [['card', '450']] },
+      { no: '2610312', amount: '1', pays: [['cash', '1']] },
+    ]);
+    const v = await h.view();
+    const ids = v.json.comparisons.filter((c: any) => c.billNo.startsWith('1452')).map((c: any) => c.id);
+    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/register-only`, { ids, note: 'Old POS bill' })).json.decided).toBe(4);
+    const one = await h.swipe('1 02:08', 156);
+    const three = await h.swipe('31 21:00', 300);
+    const fourA = await h.swipe('31 22:00', 450);
+    const fourB = await h.swipe('1 03:00', 450);
+    await h.swipe('1 09:00', 1);
+    const k = (await h.reconcile()).cards;
+    const cmp = (no: string) => v.json.comparisons.find((c: any) => c.billNo === no).id;
+    expect(k.matches[cmp('145261')]).toMatchObject({ paymentId: one, how: 'auto' });
+    expect(k.matches[cmp('145262')]).toBeUndefined();
+    expect(k.matches[cmp('145264')]).toBeUndefined();
+    expect(k.needs.find((n: any) => n.payment.id === three).why).toBe('several');
+    expect(k.needs.find((n: any) => n.payment.id === fourA).why).toBe('one');
+    await h.confirm();
+    const matchOf = async (pid: string) => (await sql`SELECT t.bill_no FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.settlement_id = ${pid}`).map((r: any) => r.bill_no);
+    expect(await matchOf(one)).toEqual(['145261']);
+    expect([...await matchOf(three), ...await matchOf(fourA), ...await matchOf(fourB)]).toEqual([]);
+  });
 });

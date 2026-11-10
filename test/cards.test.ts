@@ -126,7 +126,12 @@ describe('card match suggestions', () => {
     expect(autoPairs([p('p1', at, 64800)], [sale('b1', at - 5 * 60e3, 64800)]).map((x) => [x.paymentId, x.k.transactionIds])).toEqual([['p1', ['b1']]]);
     // Too far apart, no bill time, two bills, or two payments that want the same bill: left to a person.
     expect(autoPairs([p('p1', at, 64800)], [sale('b1', at - 25 * 60e3, 64800)])).toEqual([]);
-    expect(autoPairs([p('p1', at, 64800)], [sale('b1', null, 64800)])).toEqual([]);
+    // A bill with no time (approved 10 Nov 2026): matched when it and the payment are the only ones of their amount, its
+    // shift's and the shifts either side; else left to a person.
+    expect(autoPairs([p('p1', at, 64800)], [sale('b1', null, 64800)]).map((x) => [x.paymentId, x.k.transactionIds])).toEqual([['p1', ['b1']]]);
+    expect(autoPairs([p('p1', at, 64800)], [sale('b1', null, 64800), sale('b2', null, 64800, { shift_day: '2026-11-04' })])).toEqual([]);
+    expect(autoPairs([p('p1', at, 64800), p('p2', at + 5 * 3600e3, 64800)], [sale('b1', null, 64800)])).toEqual([]);
+    expect(autoPairs([p('p1', at, 64800)], [sale('b1', null, 64800), sale('b2', at - 5 * 3600e3, 64800)])).toEqual([]);
     expect(autoPairs([p('p1', at, 64800)], [sale('b1', at, 64800), sale('b2', at + 60e3, 64800)])).toEqual([]);
     expect(autoPairs([p('p1', at, 64800), p('p2', at + 40 * 60e3, 64800)], [sale('b1', at + 10 * 60e3, 64800)])).toEqual([]);
     expect(autoPairs([p('p1', at, 64800, 'VOID')], [sale('b1', at, 64800)])).toEqual([]);
@@ -149,6 +154,10 @@ describe('card settlements end to end', () => {
     };
     const s1 = await sale('26110301', '2026-11-03', 64800);
     const s2 = await sale('26110405', '2026-11-04', 272700);
+    // A bill of each amount in a shift next to it too, so neither sale is the only one of its amount: these tests are of
+    // matching by a person (a lone bill with no time is matched by Bookr, see 'card match suggestions').
+    await sale('26110202', '2026-11-02', 64800);
+    await sale('26110502', '2026-11-05', 272700);
     return { ...h, acc, fees, gst, s1, s2, sale };
   };
   const T = (cells: (string | number)[]) => cells.join('\t');

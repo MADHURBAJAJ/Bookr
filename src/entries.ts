@@ -91,7 +91,11 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
       } catch { /* an old reading in another shape: nothing to compare */ }
     }
     // A bill of ₹0 is complimentary: never counted as a sale, and nothing to decide (10 Nov 2026).
-    if (c.difference === 'complimentary') out.push({ text: 'Amount ₹0: complimentary, not counted as a sale', by: null, at: null });
+    // A row that pays for a group can come to ₹0 under the group's discount (approved 7 Nov 2026): not complimentary, it
+    // was paid with its group (10 Nov 2026).
+    const g = c.difference === 'complimentary' && !c.software ? view.paidGroups.find((x) => x.id === c.groupId && x.grossPaise > x.paidPaise) : undefined;
+    if (g) out.push({ text: `Amount ₹0 after the group's discount of ${rs(g.grossPaise - g.paidPaise)}: paid with bills ${g.billNos.filter((n) => n !== c.billNo).join(', ')}`, by: null, at: null });
+    else if (c.difference === 'complimentary') out.push({ text: 'Amount ₹0: complimentary, not counted as a sale', by: null, at: null });
     else if (c.difference !== 'match') {
       const what = c.difference === 'amount' || c.difference === 'amount_and_mode'
         ? `${DIFF[c.difference]} (register ${rs(c.register?.amountPaise as number)} ${modeName(c.register?.mode as string)} · software ${rs(c.software?.amountPaise as number)} ${modeName(c.software?.mode as string)})`

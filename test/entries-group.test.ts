@@ -34,6 +34,7 @@ describe('bills paid together on the payment tabs', () => {
     expect(upi.every((e: any) => e.state !== 'decide')).toBe(true);
     expect(upi[0].group).toMatchObject({ paymentPaise: 800000, paidPaise: 1000000, billsPaise: 1000000, otherModes: [{ mode: 'cash', paise: 200000 }] });
     const z = upi.find((e: any) => e.billNo === '145230');
-    expect(z.edits.map((x: any) => x.text)).toEqual(['Amount ₹0: complimentary, not counted as a sale']);
+    // The paying row comes to ₹0 under the group's discount: told so, not as complimentary (10 Nov 2026).
+    expect(z.edits.map((x: any) => x.text)).toEqual(["Amount ₹0 after the group's discount of ₹385: paid with bills 145231, 145232"]);
   });
 });

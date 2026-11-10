@@ -105,8 +105,8 @@ const NAV = [
   { key: 'bringin', label: 'Bring in', needs: 'rows.upload' },
   // Review, Compare sales and Reconcile are tabs of one shift (the shift bar at the top of each).
   { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'compare-old', 'reconcile'] },
-  { key: 'bank', label: 'Bank sync', needs: 'bank.link' },
-  { key: 'cards', label: 'Card settlements', needs: 'bank.link' },
+  // Bank (approved 10 Nov 2026): statements, money in and out, card settlements, done, as tabs of one page.
+  { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards'] },
   { key: 'money-out', label: 'Money out', needs: 'bank.link' },
   { key: 'accounts', label: 'Accounts' },
   { key: 'heads', label: 'Heads and rules' },
@@ -524,7 +524,7 @@ async function headsView(biz, editId) {
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <h2>Auto-tag rules</h2><span class="note">Checked top to bottom. First match wins.</span>
         </div>
-        <div class="note">Rules suggest a head for bank lines on Bank sync; a person books them. Make one from any bank line with "Make a rule".</div>
+        <div class="note">Rules suggest a head for bank lines on Bank; a person books them. Make one from any bank line with "Make a rule".</div>
         ${rules.length ? rules.map((r, i) => html`<div class="list-row">
           <span><span class="note">${i + 1}.</span> <strong>${r.name}</strong>
             <span class="note">${r.direction === 'CR' ? 'received' : r.direction === 'DR' ? 'paid out' : 'any'}${r.contains ? ` · contains "${r.contains}"` : ''}${r.vpa ? ` · UPI ID ${r.vpa}` : ''}</span></span>
@@ -846,7 +846,7 @@ async function moneyOutView(biz, query) {
     if (l.source === 'cash_photo' && l.uploadId) return `#/b/${biz.id}/review/${l.uploadId}`;
     return `#/b/${biz.id}/compare/${l.day}`;
   };
-  const whereLabel = (l) => (l.source === 'bank' ? 'Bank sync' : l.source === 'cash_photo' ? 'Expense page' : 'Cash for the shift');
+  const whereLabel = (l) => (l.source === 'bank' ? 'Bank' : l.source === 'cash_photo' ? 'Expense page' : 'Cash for the shift');
   const opt = (v, label, cur) => html`<option value="${v}" ${v === (cur ?? '') ? 'selected' : ''}>${label}</option>`;
   const subtotal = (title, groups, key) => html`<div style="flex:1 1 280px;min-width:0">
     <h3 style="margin:0 0 6px;font-size:15px">${title}</h3>
@@ -1017,6 +1017,8 @@ const DIFF_LABELS = {
   match: 'Match', amount: 'Amount differs', mode: 'Payment mode differs', amount_and_mode: 'Amount and mode differ',
   missing_in_register: 'Missing in register', missing_in_software: 'Missing in software', complimentary: 'Complimentary',
 };
+/** A row brought to ₹0 by its group's discount (it pays for the group): not complimentary (10 Nov 2026). */
+const groupZero = (c, v) => c.difference === 'complimentary' && !c.software && (v.paidGroups ?? []).find((g) => g.id === c.groupId && g.grossPaise > g.paidPaise);
 const DECISION_LABELS = { use_software: 'Use software', use_register: 'Use register', leave_out: 'Leave out', carry_forward: 'Carry forward' };
 const STATUS_CHIPS = {
   uploaded: ['Uploaded', 'wait'], reading: ['Reading', 'wait'], ready: ['Ready to review', 'info'], retake: ['Retake needed', 'bad'],
@@ -1396,7 +1398,8 @@ function rowIssues(r) {
   // that pays for a group may carry the group's whole discount; a large one is told below as a percentage.
   const overDiscount = !member && !ms.length && r.amountPaise > 0 && (r.discountPaise ?? 0) > r.amountPaise;
   if (overDiscount) { flags.discount = 'red'; red.push(`Discount ₹ ${rs(r.discountPaise)} is more than the bill ₹ ${rs(r.amountPaise)}: check the photo.`); }
-  if (!member && !overDiscount && largePct(r)) { flags.discount = 'red'; red.push(`Discount ${largePct(r)}%${ms.length ? ' on these bills' : ''}: was a payment missed?`); }
+  // A large discount is reported, not something to approve (10 Nov 2026).
+  if (!member && !overDiscount && largePct(r)) { flags.discount = 'amber'; info.push(`Large discount: ${largePct(r)}%${ms.length ? ' on these bills' : ''}`); }
   const other = [r, ...ms].find((m) => m.elsewhere);
   if (!member && other) info.push(html`<a href="#/b/${currentBizId()}/review/${other.uploadId}/${other.id}">Open page ${other.pageNo}</a>`);
   if (r.numberFlags?.length) {
@@ -2876,6 +2879,7 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
     <td>${side(c.software)}</td><td>${side(c.register)}</td>
     <td><div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start">
       ${c.difference === 'match' ? (c.software?.amountPaise !== c.register?.amountPaise ? html`<span class="chip wait" title="The group matches on its total. This bill's own figures differ.">This bill differs by ₹ ${rs(Math.abs((c.software?.amountPaise ?? 0) - (c.register?.amountPaise ?? 0)))}</span>` : html`<span class="chip ok">Same</span>`)
+        : groupZero(c, v) ? html`<span class="chip" title="This row pays for bills ${groupZero(c, v).billNos.join(', ')}, and the group's discount brings it to ₹0. It is paid with its group, not complimentary.">₹0 after the group's discount</span>`
         : html`<span class="chip ${c.difference.startsWith('missing') ? 'bad' : 'wait'}">${DIFF_LABELS[c.difference]}</span>`}
       ${c.auto ? html`<span class="tiny" style="color:var(--teal-ink)">Decided by Bookr${c.note ? `: ${c.note}` : ''}</span>` : ''}
       ${confirmed ? '' : html`${bankChip(c)}${bankSays(c)}`}${c.reissuedAs && !c.decision ? html`<div class="tiny" style="white-space:normal;max-width:260px;color:var(--teal-ink)">Looks issued again as bill ${c.reissuedAs} (same amount, minutes later, in the register). If so, leave this one out.</div>` : ''}
@@ -3231,25 +3235,51 @@ async function compareView(biz, day) {
 const BANK_KIND = { upi_in: 'UPI in', upi_out: 'UPI out', upi_fee: 'UPI card fee', reversal: 'Reversal', card_settlement: 'Card settlement', card_purchase: 'Card purchase', other: 'Other' };
 const hhmm = (ms) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
 
+// The Bank page's top (approved 10 Nov 2026): how far each source is in, what is left, and the tabs. Money out stays its
+// own page; this page's Money out tab is the bank's payments to book.
+const shiftStartNow = () => Date.parse(`${new Date(Date.now() + IST_MS - 8 * 3600e3).toISOString().slice(0, 10)}T08:00:00+05:30`);
+const accountBehind = (a) => !!a.sheetId && (a.lastAt ?? 0) < shiftStartNow() - 3600e3;
+const cardsBehind = (k) => !!k?.folder && (k.lastSettled ?? '') < addDaysIso(todayIst(), -1);
+const bankBehind = (b) => b.accounts.some(accountBehind) || cardsBehind(b.cards);
+
+function bankTop(biz, b, active) {
+  const lastBank = Math.max(0, ...b.accounts.map((a) => a.lastAt ?? 0));
+  const tile = (label, value, warn) => html`<div class="bank-tile"><div class="tiny">${label}</div><div style="font-weight:600;${warn ? 'color:var(--danger)' : ''}">${value}</div></div>`;
+  const tabs = [['statements', 'Statements', bankBehind(b) ? b.accounts.filter(accountBehind).length + (cardsBehind(b.cards) ? 1 : 0) : 0, `#/b/${biz.id}/bank?tab=statements`],
+    ['in', 'Money in', b.open?.in ?? 0, `#/b/${biz.id}/bank?tab=in`], ['out', 'Money out', b.open?.out ?? 0, `#/b/${biz.id}/bank?tab=out`],
+    ['cards', 'Card settlements', b.cards?.days ?? 0, `#/b/${biz.id}/cards`], ['done', 'Done', null, `#/b/${biz.id}/bank?tab=done`]];
+  return html`<div class="bank-strip">
+      ${tile('Bank in up to', lastBank ? when(lastBank) : 'nothing yet', b.accounts.some(accountBehind))}
+      ${tile('Card report in up to', b.cards?.lastSettled ? `settled ${dayLabel(b.cards.lastSettled)}` : 'nothing yet', cardsBehind(b.cards))}
+      ${tile('Money in left', `${b.open?.in ?? 0} line${b.open?.in === 1 ? '' : 's'}`)}
+      ${tile('Money out left', `${b.open?.out ?? 0} line${b.open?.out === 1 ? '' : 's'}`)}
+      ${tile('Card days to settle', b.cards?.days ? `${b.cards.days} · ₹ ${rs(b.cards.daysNetPaise)}` : 'none')}</div>
+    <div class="seg mode-tabs bank-tabs" role="tablist" aria-label="Bank" style="margin:4px 0 10px">${tabs.map(([k, l, n, href]) => html`<a role="tab" href="${href}" class="${k === active ? 'on' : ''}" aria-selected="${k === active}">${l}${n == null ? '' : n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</a>`)}</div>`;
+}
+
 async function bankView(biz, query = '') {
   const q = new URLSearchParams(query);
   const to = q.get('to') || addDaysIso(todayIst(), -1);
   const from = q.get('from') || addDaysIso(to, -6);
   const account = q.get('account') || '';
-  const tab = ['in', 'out', 'done'].includes(q.get('tab')) ? q.get('tab') : 'in';
+  // Opens on Statements when a source is behind, else on Money in (approved 10 Nov 2026).
+  let tab = ['statements', 'in', 'out', 'done'].includes(q.get('tab')) ? q.get('tab') : null;
   // A shift runs 8 am to 8 am, so the last shift's lines run into the next calendar day.
-  const [b, lines, { heads }, { rules }, { parties }] = await Promise.all([
+  const [b, lines, { heads }, { rules }, { parties }, cardSrc] = await Promise.all([
     api('GET', `/businesses/${biz.id}/bank`),
     api('GET', `/businesses/${biz.id}/bank-rows?from=${from}&to=${addDaysIso(to, 1)}${account ? `&account=${account}` : ''}`),
     api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/rules`),
     api('GET', `/businesses/${biz.id}/parties`),
+    tab === 'statements' || !tab ? api('GET', `/businesses/${biz.id}/cards`).catch(() => null) : Promise.resolve(null),
   ]);
+  if (!tab) tab = bankBehind(b) ? 'statements' : 'in';
   const canRules = biz.actions.includes('rules.edit');
   const headsOf = (dir) => heads.filter((h) => h.type === (dir === 'CR' ? 'income' : 'expense'));
   const shiftOf = (ms) => new Date(ms + IST_MS - 8 * 3600e3).toISOString().slice(0, 10);
   const all = lines.rows.map((r) => ({ ...r, shift: shiftOf(r.postedAt) })).filter((r) => r.shift >= from && r.shift <= to);
-  const inTab = (r) => (tab === 'done' ? r.status !== 'unmatched' : r.status === 'unmatched' && r.direction === (tab === 'in' ? 'CR' : 'DR'));
+  // A card settlement credit is settled on the Card settlements tab, not listed under Money in.
+  const inTab = (r) => (tab === 'done' ? r.status !== 'unmatched' : r.status === 'unmatched' && r.kind !== 'card_settlement' && r.direction === (tab === 'in' ? 'CR' : 'DR'));
   const rows = all.filter(inTab);
   const count = (t) => all.filter((r) => (t === 'done' ? r.status !== 'unmatched' : r.status === 'unmatched' && r.direction === (t === 'in' ? 'CR' : 'DR'))).length;
   const shifts = [...new Set(rows.map((r) => r.shift))].sort().reverse();
@@ -3264,20 +3294,21 @@ async function bankView(biz, query = '') {
     <td><strong>Card reports</strong><div class="note">ICICI card machine</div></td>
     <td>Card payments, fee and GST</td>
     <td>${k.folder ? html`<a href="https://drive.google.com/drive/folders/${k.folder}" target="_blank" rel="noopener">Drive folder</a>${k.gmail ? ' · from Gmail' : ''}` : html`<span class="note">No folder yet</span>`}</td>
-    <td class="amount">${k.payments}${k.lastSettled ? html`<div class="tiny">settled to ${dayLabel(k.lastSettled)}</div>` : ''}</td>
-    <td style="text-align:right;white-space:nowrap">${k.folder ? html`<button class="btn" type="button" id="cardsyncrow">Sync</button>` : ''}
-      <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/cards">${k.folder ? 'Open' : 'Set up'}</a></td></tr>`);
+    <td>${k.lastSettled ? `settled ${dayLabel(k.lastSettled)}` : html`<span class="note">No report yet</span>`}<div>${cardsBehind(k) ? html`<span class="chip wait">Behind: sync it</span>` : k.folder ? html`<span class="chip ok">Up to date</span>` : ''}</div></td>
+    <td class="amount">${k.payments}</td>
+    <td style="text-align:right;white-space:nowrap">${k.folder ? html`<button class="btn" type="button" id="cardsyncrow">Sync</button>` : ''}</td></tr>`);
   const accountRow = (a) => html`<tr>
     <td><strong>${a.name}</strong>${a.accountNumber ? html`<div class="note mono">${a.accountNumber}</div>` : ''}</td>
     <td>${[a.receivesUpiLabel ? `UPI: ${a.receivesUpiLabel}` : '', a.receivesCard ? 'Card settlements' : ''].filter(Boolean).join(' · ') || html`<span class="note">Nothing set</span>`}</td>
     <td>${a.sheetId ? html`<a href="https://docs.google.com/spreadsheets/d/${a.sheetId}" target="_blank" rel="noopener">Google Sheet</a> · ${a.tab ?? 'every tab'}` : html`<span class="note">Pasted</span>`}
       ${a.lastSyncNote ? html`<div class="tiny">${a.lastSyncedAt ? `${when(a.lastSyncedAt)}: ` : ''}${a.lastSyncNote}</div>` : ''}</td>
-    <td class="amount">${a.rows}${a.open ? html` <span class="chip wait">${a.open} open</span>` : ''}${a.lastDay ? html`<div class="tiny">to ${dayLabel(a.lastDay)}</div>` : ''}</td>
+    <td>${a.lastAt ? when(a.lastAt) : html`<span class="note">No lines yet</span>`}<div>${accountBehind(a) ? html`<span class="chip wait">Behind: sync it</span>` : a.sheetId ? html`<span class="chip ok">Up to date</span>` : ''}</div></td>
+    <td class="amount">${a.rows}${a.open ? html` <span class="chip wait">${a.open} open</span>` : ''}</td>
     <td style="text-align:right;white-space:nowrap">
       ${a.sheetId ? html`<button class="btn" type="button" data-sync="${a.id}">Sync</button>` : ''}
       <button class="btn plain" type="button" data-paste="${a.id}" data-name="${a.name}">Paste rows</button>
       <button class="btn plain" type="button" data-setup="${a.id}">Set up</button></td></tr>
-    <tr hidden data-setupform="${a.id}"><td colspan="5"><form class="inset" data-src="${a.id}">
+    <tr hidden data-setupform="${a.id}"><td colspan="6"><form class="inset" data-src="${a.id}">
       <div class="form-row">
         <div class="field" style="flex:2 1 260px"><label>Google Sheet link</label><input name="sheet" value="${a.sheetId ? `https://docs.google.com/spreadsheets/d/${a.sheetId}` : ''}" placeholder="Leave empty to paste rows instead"></div>
         <div class="field"><label>Tab</label><input name="tab" value="${a.tab ?? ''}" placeholder="e.g. 2026-27"></div>
@@ -3304,7 +3335,7 @@ async function bankView(biz, query = '') {
         : html`<span class="note">No confirmed UPI bill of this amount near this time.</span>`);
     }
     if (r.kind === 'upi_fee') parts.push(html`<div class="note">Fee on a credit card paid through UPI${r.pairRowId ? '' : ' (its credit is not in Bookr yet)'}.</div>`);
-    if (r.kind === 'card_settlement') parts.push(html`<div class="note">Money from the card machine. <a href="#/b/${biz.id}/cards">Settle it on Card settlements</a>, which books the fee.</div>`);
+    if (r.kind === 'card_settlement') parts.push(html`<div class="note">Money from the card machine. <a href="#/b/${biz.id}/cards">Settle it on the Card settlements tab</a>, which books the fee.</div>`);
     if (r.kind === 'reversal') parts.push(html`<div class="note">${r.pairRowId ? 'Gives back a failed payment: both cancel out.' : 'A reversal; its payment is not in Bookr yet.'}</div>`);
     if (r.rule) parts.push(html`<div class="form-row" style="gap:6px;align-items:center"><input type="checkbox" data-byrule="${r.id}" checked aria-label="Book by this rule" style="width:18px;height:18px;min-height:0">
       <span>Rule <strong>${r.rule.name}</strong> → ${heads.find((h) => h.id === r.rule.headId)?.name ?? ''}</span></div>`);
@@ -3383,19 +3414,21 @@ async function bankView(biz, query = '') {
         ${lineFields(r)}<div style="display:flex;gap:4px">${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
   };
 
-  render(shell(biz, 'bank', 'Bank sync', 'Statement lines from each bank account, matched to sales or booked under a head. Nothing is booked until a person confirms it.', html`
+  render(shell(biz, 'bank', 'Bank', 'Statements from each bank account and the card machine, money in and out, and card settlements. Nothing is booked until a person confirms it.', html`
+    ${bankTop(biz, b, tab)}
     <div id="bmsg"></div>
-    <section class="card" style="gap:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Bank accounts</h2>
-        <span style="display:flex;gap:10px;align-items:center">${b.accounts.some((a) => a.sheetId) || b.cards?.folder ? html`<button class="btn" type="button" id="banksyncall">Sync bank and card</button>` : ''}<a href="#/b/${biz.id}/accounts" class="note">Add a bank account on Accounts</a></span></div>
+    ${tab === 'statements' ? html`<section class="card" style="gap:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Sources</h2>
+        <span style="display:flex;gap:10px;align-items:center">${b.accounts.some((a) => a.sheetId) || b.cards?.folder ? html`<button class="btn" type="button" id="banksyncall">Sync all</button>` : ''}<a href="#/b/${biz.id}/accounts" class="note">Add or edit accounts on Accounts</a></span></div>
       ${b.googleEmail ? html`<div class="note">To sync a Google Sheet, share it with <strong class="mono">${b.googleEmail}</strong> as a Viewer.</div>`
         : html`<div class="note">Google Sheets access is not set up yet. Until it is, copy rows from the sheet (Ctrl+A, Ctrl+C) and use <strong>Paste rows</strong>. Lines already in Bookr are skipped.</div>`}
-      ${b.accounts.length ? html`<div class="scroll"><table style="min-width:760px"><thead><tr><th>Account</th><th>Receives</th><th>Statement from</th><th style="text-align:right">Lines</th><th></th></tr></thead>
+      ${b.accounts.length ? html`<div class="scroll"><table style="min-width:860px"><thead><tr><th>Source</th><th>Receives</th><th>Statement from</th><th>Last line in</th><th style="text-align:right">Lines</th><th></th></tr></thead>
         <tbody>${b.accounts.map(accountRow)}${cardRow(b.cards)}</tbody></table></div>` : html`<div class="note">No bank accounts yet.</div>`}
       <form class="inset" id="pasteform" hidden><div style="font-weight:600" id="pastetitle">Paste rows</div>
         <textarea name="text" rows="6" style="width:100%;font-family:var(--mono, monospace);font-size:13px" placeholder="Copy the rows from the Google Sheet and paste them here. Title and header lines are fine."></textarea>
         <div class="form-row"><button class="btn" type="submit">Add lines</button><button class="btn plain" type="button" id="pastecancel">Cancel</button></div><div class="form-msg"></div></form>
     </section>
+    ${cardSrc ? html`<section class="card" style="gap:10px"><h2>Card machine reports</h2>${cardSourceHtml(cardSrc)}</section>` : ''}` : html`
     <section class="card" style="gap:10px">
       <form class="form-row" id="bfilter" style="align-items:flex-end">
         <div class="field"><label>Shifts from</label><input type="date" name="from" value="${from}"></div>
@@ -3403,9 +3436,6 @@ async function bankView(biz, query = '') {
         <div class="field"><label>Account</label><select name="account"><option value="">All</option>${b.accounts.map((a) => html`<option value="${a.id}" ${a.id === account ? 'selected' : ''}>${a.name}</option>`)}</select></div>
         <button class="btn plain" type="submit">Show</button>
       </form>
-      <div class="form-row" role="tablist" style="gap:6px;border-bottom:1px solid var(--line-soft);padding-bottom:8px">
-        ${[['in', 'Money in'], ['out', 'Money out'], ['done', 'Done']].map(([k, l]) => html`<a role="tab" aria-selected="${k === tab}" class="btn ${k === tab ? '' : 'plain'}" style="display:inline-flex;align-items:center" href="${link({ tab: k })}">${l} <span class="chip" style="margin-left:6px;${k === tab ? 'background:rgba(255,255,255,.22);color:#fff' : ''}">${count(k)}</span></a>`)}
-      </div>
       ${tab === 'in' ? html`<div class="note">UPI money in is reconciled shift by shift on <a href="#/b/${biz.id}/reconcile/${from}">Reconcile</a>. Use this list for other money received, or to book a credit under any head.</div>` : ''}
       <div class="note">${tab === 'in' ? html`<strong>Match to bill</strong>: the credit is the payment for a bill already counted in sales (nothing new is booked). <strong>Book under a head</strong>: money received that is not a bill, e.g. hostel rent. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
         : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Make a rule</strong> once and the same supplier is suggested every time. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
@@ -3443,19 +3473,21 @@ async function bankView(biz, query = '') {
           </summary>
           <div style="padding:0 12px 12px;display:flex;flex-direction:column;gap:14px">${shiftBody(list, sd)}</div>
         </details>`;
-      }) : html`<div class="note">${tab === 'in' ? 'No money received is waiting' : tab === 'out' ? 'No payments are waiting' : 'Nothing done yet'} for shifts ${dayLabel(from)} to ${dayLabel(to)}${account ? ' in this account' : ''}.</div>`}
-    </section>`));
+      }) : html`<div class="note">${tab === 'in' ? 'No money received is waiting' : tab === 'out' ? 'No payments are waiting' : 'Nothing done yet'} for shifts ${dayLabel(from)} to ${dayLabel(to)}${account ? ' in this account' : ''}.${
+        tab !== 'done' && !account && (b.open?.[tab] ?? 0) > 0 ? ` ${b.open[tab]} ${b.open[tab] === 1 ? 'line is' : 'lines are'} waiting on other dates: change the dates to see ${b.open[tab] === 1 ? 'it' : 'them'}.` : ''}</div>`}
+    </section>`}`));
   wireShell();
   const msg = document.getElementById('bmsg');
   const run = async (fn, okText) => {
     try { const r = await fn(); await bankView(biz, query); if (okText) document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${okText(r)}</div>`.__html; }
     catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   };
-  onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account })));
+  if (document.getElementById('bfilter')) onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account })));
+  if (tab === 'statements') wireCardSource(biz, () => bankView(biz, query), msg);
   document.getElementById('banksyncall')?.addEventListener('click', async (e) => {
     e.target.disabled = true; e.target.textContent = 'Syncing…';
     try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await bankView(biz, query); document.getElementById('bmsg').innerHTML = syncResultHtml(r).__html; }
-    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync bank and card'; showError(msg, err); }
+    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync all'; showError(msg, err); }
   });
   document.getElementById('cardsyncrow')?.addEventListener('click', async (e) => {
     e.target.disabled = true; e.target.textContent = 'Syncing…';
@@ -3476,8 +3508,8 @@ async function bankView(biz, query = '') {
   const pf = document.getElementById('pasteform');
   let pasteFor = null;
   app.querySelectorAll('[data-paste]').forEach((x) => x.addEventListener('click', () => { pasteFor = x.dataset.paste; document.getElementById('pastetitle').textContent = `Paste rows for ${x.dataset.name}`; pf.hidden = false; pf.text.focus(); }));
-  document.getElementById('pastecancel').addEventListener('click', () => { pf.hidden = true; });
-  pf.addEventListener('submit', async (e) => {
+  document.getElementById('pastecancel')?.addEventListener('click', () => { pf.hidden = true; });
+  pf?.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
       const r = await apiFull('POST', `/businesses/${biz.id}/bank/${pasteFor}/paste`, { text: pf.text.value });
@@ -3610,8 +3642,8 @@ async function bankView(biz, query = '') {
     rf.direction.value = r.direction;
     rf.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }));
-  document.getElementById('rulecancel').addEventListener('click', () => { rf.hidden = true; });
-  rf.addEventListener('submit', async (e) => {
+  document.getElementById('rulecancel')?.addEventListener('click', () => { rf.hidden = true; });
+  rf?.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
       await apiFull('POST', `/businesses/${biz.id}/rules`, { name: rf.name.value, contains: rf.contains.value || null, vpa: rf.vpa.value || null, direction: rf.direction.value, headId: rf.headId.value });
@@ -3839,7 +3871,7 @@ function editChip(x) {
   const t = x.text;
   const [label, cls] = /: to decide$/.test(t) ? ['To decide', 'bad'] : /^Bill no\. read/.test(t) ? ['No. corrected', 'wait'] : /^Amount read/.test(t) ? ['Amount corrected', 'wait']
     : /^Paid by read/.test(t) ? ['Mode corrected', 'wait'] : /old pos/i.test(t) ? ['Old POS', ''] : /used the register/i.test(t) ? ['Register used', '']
-    : /used the software/i.test(t) ? ['Software used', ''] : /complimentary/i.test(t) ? ['Complimentary', ''] : /^[A-Za-z ]+ → [A-Za-z ]+/.test(t) ? ['Mode changed', 'wait'] : ['Changed', ''];
+    : /used the software/i.test(t) ? ['Software used', ''] : /group's discount/i.test(t) ? ['Group discount', ''] : /complimentary/i.test(t) ? ['Complimentary', ''] : /^[A-Za-z ]+ → [A-Za-z ]+/.test(t) ? ['Mode changed', 'wait'] : ['Changed', ''];
   return html`<span class="chip ${cls}" style="font-size:11px" title="${t}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}">✎ ${label}</span>`;
 }
 
@@ -4074,10 +4106,10 @@ async function reconcileView(biz, dayArg) {
   // A ₹0 (complimentary) bill with money paid on its row (approved 10 Nov 2026): shown as a check, it does not stop saving.
   // The row paying for a group may come to ₹0 under the group's discount (approved 7 Nov 2026): told only when that
   // discount is large, as on Review.
-  const groupOfC = (c) => (cv.paidGroups ?? []).find((g) => g.id === c.groupId);
   const bigGroupDisc = (g) => g && g.grossPaise > 0 && (g.grossPaise - g.paidPaise) * 100 > LARGE_DISCOUNT_PCT * g.grossPaise;
-  const paidZero = r.confirmed ? [] : cv.comparisons.filter((c) => c.difference === 'complimentary' && (c.register?.paidPaise ?? 0) > 0
-    && (!groupOfC(c) || bigGroupDisc(groupOfC(c))));
+  const paidZero = r.confirmed ? [] : cv.comparisons.filter((c) => c.difference === 'complimentary' && (c.register?.paidPaise ?? 0) > 0 && !groupZero(c, cv));
+  // Large discounts on bills paid together are reported, for information only: nothing to approve (10 Nov 2026).
+  const bigGroups = (cv.paidGroups ?? []).filter(bigGroupDisc);
   const checkRow = (c) => html`<div class="ent-line">
     <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
       <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button>
@@ -4108,9 +4140,13 @@ async function reconcileView(biz, dayArg) {
       <div class="note">A bill of ₹0 counts as complimentary, but money is written as paid on its row. Open the row, compare it with the photo, and correct the amount, the discount or the payments.</div>
       ${paidZero.map((c) => html`<div class="ent-line"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
         <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button></div>
-        <div class="tiny error">${groupOfC(c) ? (() => { const g = groupOfC(c); const d = g.grossPaise - g.paidPaise;
-          return `₹ 0: bills ${g.billNos.join(', ')} are paid together with a discount of ₹ ${rs(d)} (${Math.round((d * 100) / g.grossPaise)}% of ₹ ${rs(g.grossPaise)}), more than this bill. A large discount often means an amount was misread: check each bill of the group against the photo.`; })()
-          : `₹ 0${c.register?.discountPaise > 0 ? ` after a ₹ ${rs(c.register.discountPaise)} discount` : ''}, but ₹ ${rs(c.register.paidPaise)} is paid on its row.`}</div></div>`)}</section>` : ''}
+        <div class="tiny error">₹ 0${c.register?.discountPaise > 0 ? ` after a ₹ ${rs(c.register.discountPaise)} discount` : ''}, but ₹ ${rs(c.register.paidPaise)} is paid on its row.</div></div>`)}</section>` : ''}
+    ${bigGroups.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Large discounts on bills paid together: ${bigGroups.length}</strong><span class="tchip">For your information</span></div>
+      <div class="note">Over ${LARGE_DISCOUNT_PCT}% of the bills. Nothing to approve. A very large one can mean an amount was misread: open the row to compare it with the photo if it looks wrong.</div>
+      ${bigGroups.map((g) => { const d = g.grossPaise - g.paidPaise; const head = cv.comparisons.find((c) => c.groupId === g.id && c.register?.rowId === g.id) ?? cv.comparisons.find((c) => c.groupId === g.id);
+        return html`<div class="ent-line"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono">${g.billNos.join(', ')}</span>
+          ${head ? html`<button type="button" class="linkbtn tiny" data-bill-drawer="${head.billNo}|${day}">Open row</button>` : ''}</div>
+          <div class="tiny">Discount ₹ ${rs(d)}, ${Math.round((d * 100) / g.grossPaise)}% of ₹ ${rs(g.grossPaise)}; ₹ ${rs(g.paidPaise)} paid.${groupZero(head ?? {}, cv) ? ` Bill ${head.billNo} pays for the group and comes to ₹ 0 under the discount.` : ''}</div></div>`; })}</section>` : ''}
     ${checks.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Numbers to check: ${checks.length}</strong><span class="tchip warn">Check the number</span></div>
       <div class="note">Open the row to compare it with the photo, then decide.</div>${checks.map(checkRow)}</section>` : ''}
     <section class="card" style="gap:8px"><h2>Left on the other tabs</h2>
@@ -4153,7 +4189,7 @@ async function reconcileView(biz, dayArg) {
           ${done ? html`<span class="chip ok">UPI reconciled</span>` : html`<span class="chip wait">Left to explain: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched</span>`}
           ${r.confirmed ? html`<span class="chip ok">Saved</span>` : html`<span class="chip">Not saved</span>`}
         </div>
-        <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${day}&to=${day}">Bank sync</a>
+        <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${day}&to=${day}&tab=in">Bank</a>
       </div>
       <div class="rec-strip">
         <div><div class="tiny">UPI ${r.confirmed ? 'counted' : 'on this shift'}</div><div class="amount rec-n">₹ ${money(s.upiSalesPaise)}</div><div class="tiny">${s.bills} bill${s.bills === 1 ? '' : 's'}</div></div>
@@ -4355,7 +4391,7 @@ function trialCardSection(biz, k) {
         : n.why === 'written' ? `Bill written as ${n.written.mode === 'upi' ? 'UPI' : 'cash'}` : 'No card bill of this amount'}</span></div>
       <div class="tiny">${p.label} · machine ${p.terminalId}</div>`;
     if (n.candidates.length) return html`<div class="rv-card">${head}
-      <div class="note">${n.candidates.length > 1 ? 'Pick the bill this payment was for. It is matched when you save the shift.' : 'The bill of this amount is further away in time than Bookr matches on its own. Match it if it is the one: it is matched when you save the shift.'}</div>
+      <div class="note">${n.candidates.length > 1 ? 'Pick the bill this payment was for. It is matched when you save the shift.' : (n.candidates[0].minutes == null ? 'This bill has no time, and another bill or payment of this amount is near, so Bookr does not match it on its own. Match it if it is the one: it is matched when you save the shift.' : 'The bill of this amount is further away in time than Bookr matches on its own. Match it if it is the one: it is matched when you save the shift.')}</div>
       <div class="form-row" style="gap:6px">${n.candidates.map((x) => html`<button class="btn plain" type="button" style="min-height:36px" data-tcardpick="${p.id}" data-cmps="${x.comparisonIds.join(',')}">Bill ${x.billNos.join(' + ')}${x.minutes != null ? ` · ${x.minutes} min` : ' · no bill time'}</button>`)}</div><div class="form-msg"></div></div>`;
     if (n.why === 'tip') return html`<div class="rv-card">${head}
       <div class="note">Bill <span class="mono">${n.tip.billNo}</span> ${openRow(n.tip.billNo)} is ₹ ${money(n.tip.amountPaise)}, ${at(n.tip.paidAt)}: the guest paid ₹ ${money(n.tip.tipPaise)} more on the card. Match it with the tip here after saving.</div></div>`;
@@ -4380,7 +4416,7 @@ function trialCardSection(biz, k) {
       <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`}</div></div>
       <div><div class="tiny">Machine payments with no card bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
     </div>
-    <div class="note">Nothing is matched until you save. Bookr matches a payment on its own only when it is the one card bill of its amount within 20 minutes and no other payment wants it; the Money received column shows each.</div>
+    <div class="note">Nothing is matched until you save. Bookr matches a payment on its own only when it is the one card bill of its amount within 20 minutes and no other payment wants it, or, for a bill with no time, the only card bill and the only payment of its amount in the shift; the Money received column shows each.</div>
     ${chosen.length ? html`<div><strong>Chosen, matched on save</strong>${chosen.map((c) => html`<div class="list-row"><span><span class="mono">${c.billNos.join(' + ')}</span> · ${c.label} ₹ ${money(c.amountPaise)} at ${when(c.paidAt)}${c.by ? html` <span class="tiny">by ${c.by}</span>` : ''}</span>
       <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></div>`)}</div>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
@@ -5049,7 +5085,7 @@ async function bringInView(biz, dayArg) {
         ${v.bank.cards ? html`<div class="fileline"><span class="${v.bank.cards.covered ? 'okdot' : 'greydot'}"></span><span class="nm"><a href="#/b/${biz.id}/cards">Card reports</a> <span class="tiny">· ${v.bank.cards.folder ? 'Drive folder' : 'no folder yet'}</span></span>
           <span class="tiny">${v.bank.cards.lastAt ? `up to ${when(v.bank.cards.lastAt)}` : 'nothing yet'}</span></div>` : ''}</div>
       <div class="form-row" style="align-items:center"><button class="btn" type="button" id="syncall">Sync bank and card</button>
-        <span class="tiny">Pasted accounts: <a href="#/b/${biz.id}/bank">Bank sync</a></span></div>
+        <span class="tiny">Pasted accounts: <a href="#/b/${biz.id}/bank?tab=statements">Bank › Statements</a></span></div>
       <div id="syncbox"></div>
     </section>` : ''}
 
@@ -5196,7 +5232,7 @@ async function csvCard(biz, day, csv, name, card, done, cancel) {
 function syncResultHtml(r) {
   return html`<div class="inset" style="gap:4px">${r.results.length ? r.results.map((x) => html`<div class="list-row" style="padding:4px 0"><span>${x.name}</span>
     ${x.ok ? html`<span class="ok-msg" style="font-size:14px">✓ ${x.added} new line${x.added === 1 ? '' : 's'}${x.lastAt ? ` · up to ${when(x.lastAt)}` : ''}</span>` : html`<span class="error" style="font-size:14px">${x.error}</span>`}</div>`)
-    : html`<div class="note">No account has a Google Sheet set up. Use Set up on Bank sync.</div>`}${cardSyncHtml(r.cards)}</div>`;
+    : html`<div class="note">No account has a Google Sheet set up. Use Set up on Bank › Statements.</div>`}${cardSyncHtml(r.cards)}</div>`;
 }
 /** The card reports read from the Drive folder by the same Sync (nothing when no folder is set). */
 /** What the Gmail script did on this Sync (empty when it is not set up). */
@@ -5329,11 +5365,82 @@ const fileBase64 = (file) => new Promise((resolve, reject) => {
   r.readAsDataURL(file);
 });
 
+// The card machine's reports as a source, on the Bank page's Statements tab: the Drive folder, a report dropped in, and
+// the report mails received.
+const cardMailNote = (m) => {
+  const link = /https:\/\/\S+/.exec(m.note ?? '')?.[0];
+  return link ? html`${m.note.replace(link, '').replace(/\s*Open\s*/, ' ')} <a href="${link}" target="_blank" rel="noopener">Confirm forwarding</a>` : m.note;
+};
+
+function cardSourceHtml(r) {
+  const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
+  return html`<label class="drop small" data-drop="cards"><span class="big">💳</span><strong>Drop the card company's report</strong>
+      <span class="tiny">The ICICI POS Excel file (…_ICICI_POS_CD.xlsx), for a report not in the Drive folder.</span>
+      <input type="file" accept=".xlsx" multiple hidden></label>
+    <form id="cdfolder" class="form-row" style="align-items:flex-end">
+      <div class="field" style="flex:2 1 300px"><label for="cdfold">Google Drive folder of the card reports</label>
+        <input id="cdfold" name="folder" value="${r.driveFolder ? `https://drive.google.com/drive/folders/${r.driveFolder}` : ''}" placeholder="Paste the folder's link"></div>
+      <button class="btn plain" type="submit">Save</button></form>
+    <div class="tiny">${r.driveFolder ? 'Sync asks Gmail to save new report mails into the folder, then reads them.' : 'A script in Gmail saves each report there; Bookr reads new files whenever you Sync.'}${r.googleEmail ? html` Share the folder with <span class="mono">${r.googleEmail}</span> as Viewer.` : ' Google access is not set up yet.'}</div>
+    ${r.mails.length ? html`<details><summary>Reports received (${r.mails.length})</summary>
+      <table><tbody>${r.mails.map((m) => {
+        const [cls, label] = CARD_MAIL_STATUS[m.status] ?? ['', m.status];
+        return html`<tr><td style="white-space:nowrap">${when(m.receivedAt)}<div class="tiny">${m.from}</div></td>
+          <td style="white-space:normal">${m.subject || html`<span class="note">No subject</span>`}<div class="tiny">${cardMailNote(m)}</div></td>
+          <td style="white-space:nowrap;text-align:right"><span class="chip ${cls}">${label}</span>
+            ${m.status !== 'ignored' ? html` <button class="btn plain" type="button" data-cread="${m.id}" style="${SMALL}">Read again</button>` : ''}</td></tr>`;
+      })}</tbody></table></details>` : ''}`;
+}
+
+function wireCardSource(biz, reload, msg) {
+  const act = async (btn, fn) => {
+    btn.disabled = true;
+    try { await fn(); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); btn.disabled = false; }
+  };
+  document.getElementById('cdfolder')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    act(e.target.querySelector('button[type=submit]'), async () => {
+      await api('PUT', `/businesses/${biz.id}/cards/folder`, { folder: new FormData(e.target).get('folder') });
+      await reload();
+      doneToast('Folder saved.', null, reload);
+    });
+  });
+  // The report file: tap or drop. Payments already in Bookr are not added twice.
+  const zone = app.querySelector('[data-drop="cards"]');
+  if (zone) {
+    const input = zone.querySelector('input');
+    const bringIn = async (files) => {
+      msg.innerHTML = html`<div class="note"><span class="spinner"></span> Reading ${files.length} file${files.length === 1 ? '' : 's'}…</div>`.__html;
+      const said = [];
+      let ok = 0;
+      for (const f of files) {
+        try {
+          const res = await api('POST', `/businesses/${biz.id}/cards/file`, { name: f.name, data: await fileBase64(f) });
+          ok += 1;
+          said.push(`${f.name}: ${res.added} new payment${res.added === 1 ? '' : 's'}${res.skipped ? `, ${res.skipped} already in Bookr` : ''}${res.problems.length ? `. ${res.problems.join(' ')}` : ''}`);
+        } catch (err) { said.push(`${f.name}: ${err.message}`); }
+      }
+      if (ok) await reload();
+      const box = document.getElementById('bmsg') ?? msg;
+      box.innerHTML = html`<div class="${ok === files.length ? 'ok-msg' : 'error'}">${said.map((x) => html`<div>${x}</div>`)}</div>`.__html;
+    };
+    input.addEventListener('change', () => { if (input.files.length) bringIn([...input.files]); input.value = ''; });
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+    zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('over'); const f = [...e.dataTransfer.files]; if (f.length) bringIn(f); });
+  }
+  app.querySelectorAll('[data-cread]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
+    const res = await api('POST', `/businesses/${biz.id}/inbound-mails/${b.dataset.cread}/read`);
+    await reload();
+    doneToast(res.note, null, reload);
+  })));
+}
+
 async function cardsView(biz, query = '') {
   const q = new URLSearchParams(query);
   const to = isDay(q.get('to')) ? q.get('to') : todayIst();
   const from = isDay(q.get('from')) ? q.get('from') : addDaysIso(to, -13);
-  const r = await api('GET', `/businesses/${biz.id}/cards?from=${from}&to=${to}`);
+  const [r, b] = await Promise.all([api('GET', `/businesses/${biz.id}/cards?from=${from}&to=${to}`), api('GET', `/businesses/${biz.id}/bank`)]);
   const reload = () => cardsView(biz, query);
   const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
   // Matching is done on the shift's Reconcile (approved 10 Nov 2026): here the bill is told, with a link to it.
@@ -5361,7 +5468,7 @@ async function cardsView(biz, query = '') {
     }
     if (!s.credits.length) {
       return html`<div class="note">The bank's card credit of <strong>₹ ${money(s.netPaise)}</strong> (EZY/ICICIPOS_SET…) is not in Bookr yet.
-        <a href="#/b/${biz.id}/bank?${new URLSearchParams({ from: addDaysIso(s.settledOn, -1), to: addDaysIso(s.settledOn, 3), tab: 'in' })}">Sync or paste the statement on Bank sync</a>.</div>`;
+        <a href="#/b/${biz.id}/bank?${new URLSearchParams({ from: addDaysIso(s.settledOn, -1), to: addDaysIso(s.settledOn, 3), tab: 'statements' })}">Sync or paste the statement on Bank › Statements</a>.</div>`;
     }
     const fee = s.feePaise + s.gstPaise;
     return html`<form class="form-row" data-csettle="${s.settledOn}|${s.merchantId}" style="gap:8px;align-items:flex-end">
@@ -5390,35 +5497,16 @@ async function cardsView(biz, query = '') {
       <div class="inset" style="gap:8px"><strong>Bank</strong>${bankBlock(s)}</div>
     </section>`;
   };
-  const mailNote = (m) => {
-    const link = /https:\/\/\S+/.exec(m.note ?? '')?.[0];
-    return link ? html`${m.note.replace(link, '').replace(/\s*Open\s*/, ' ')} <a href="${link}" target="_blank" rel="noopener">Confirm forwarding</a>` : m.note;
-  };
-  render(shell(biz, 'cards', 'Card settlements', 'The card machine\'s daily report: each payment to its bill, each day\'s money to the bank.', html`
+  render(shell(biz, 'bank', 'Bank', 'Statements from each bank account and the card machine, money in and out, and card settlements. Nothing is booked until a person confirms it.', html`
+    ${bankTop(biz, b, 'cards')}
     <section class="card" style="gap:12px">
       <div id="recmsg"></div>
-      <label class="drop small" data-drop="cards"><span class="big">💳</span><strong>Drop the card company's report</strong>
-        <span class="tiny">The ICICI POS Excel file (…_ICICI_POS_CD.xlsx), for a report not in the Drive folder.</span>
-        <input type="file" accept=".xlsx" multiple hidden></label>
-      <form id="cdfolder" class="form-row" style="align-items:flex-end">
-        <div class="field" style="flex:2 1 300px"><label for="cdfold">Google Drive folder of the card reports</label>
-          <input id="cdfold" name="folder" value="${r.driveFolder ? `https://drive.google.com/drive/folders/${r.driveFolder}` : ''}" placeholder="Paste the folder's link"></div>
-        <button class="btn plain" type="submit">Save</button>
-        ${r.driveFolder ? html`<button class="btn" type="button" id="cdsync">Sync card reports</button>` : ''}</form>
-      <div class="tiny">${r.driveFolder ? 'Sync asks Gmail to save new report mails into the folder, then reads them. "Sync bank and card" on Bring in and Bank sync does the same.' : 'A script in Gmail saves each report there; Bookr reads new files whenever you Sync.'}${r.googleEmail ? html` Share the folder with <span class="mono">${r.googleEmail}</span> as Viewer.` : ' Google access is not set up yet (see Bank sync).'}</div>
+      <div class="note">Each settlement day's payments, and its money to the bank. Card payments are matched to their bills on each shift's Reconcile. Reports come in on <a href="#/b/${biz.id}/bank?tab=statements">Statements</a>.</div>
       <form id="cdrange" class="form-row" style="align-items:flex-end">
         <div class="field"><label for="cdfrom">Settled from</label><input id="cdfrom" type="date" name="from" value="${r.from}" required></div>
         <div class="field"><label for="cdto">To</label><input id="cdto" type="date" name="to" value="${r.to}" required></div>
         <button class="btn plain" type="submit">Show</button></form>
     </section>
-    ${r.mails.length ? html`<section class="card" style="gap:8px"><h2>Reports received</h2>
-      <table><tbody>${r.mails.map((m) => {
-        const [cls, label] = CARD_MAIL_STATUS[m.status] ?? ['', m.status];
-        return html`<tr><td style="white-space:nowrap">${when(m.receivedAt)}<div class="tiny">${m.from}</div></td>
-          <td style="white-space:normal">${m.subject || html`<span class="note">No subject</span>`}<div class="tiny">${mailNote(m)}</div></td>
-          <td style="white-space:nowrap;text-align:right"><span class="chip ${cls}">${label}</span>
-            ${m.status !== 'ignored' ? html` <button class="btn plain" type="button" data-cread="${m.id}" style="${SMALL}">Read again</button>` : ''}</td></tr>`;
-      })}</tbody></table></section>` : ''}
     ${r.settlements.length ? r.settlements.map(dayCard) : html`<section class="card"><div class="note">No card payments settled between ${dayLabel(r.from)} and ${dayLabel(r.to)}.</div></section>`}`));
   wireShell();
   const msg = document.getElementById('recmsg');
@@ -5431,41 +5519,6 @@ async function cardsView(biz, query = '') {
     const d = new FormData(e.target);
     location.hash = `#/b/${biz.id}/cards?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
   });
-  document.getElementById('cdfolder').addEventListener('submit', (e) => {
-    e.preventDefault();
-    act(e.target.querySelector('button[type=submit]'), async () => {
-      await api('PUT', `/businesses/${biz.id}/cards/folder`, { folder: new FormData(e.target).get('folder') });
-      await reload();
-      doneToast('Folder saved.', null, reload);
-    });
-  });
-  document.getElementById('cdsync')?.addEventListener('click', (e) => act(e.currentTarget, async () => {
-    const k = await api('POST', `/businesses/${biz.id}/cards/sync`);
-    await reload();
-    doneToast(`${scriptText(k.script)}${k.files ? `${k.files} new file${k.files === 1 ? '' : 's'}, ${k.added} payment${k.added === 1 ? '' : 's'}` : 'No new files in the folder'}${k.more ? ` (${k.more} more: check again)` : ''}.${k.problems.length ? ` ${k.problems.join(' ')}` : ''}`, null, reload);
-  }));
-  // The report file: tap or drop. Payments already in Bookr are not added twice.
-  const zone = app.querySelector('[data-drop="cards"]');
-  const input = zone.querySelector('input');
-  const bringIn = async (files) => {
-    msg.innerHTML = html`<div class="note"><span class="spinner"></span> Reading ${files.length} file${files.length === 1 ? '' : 's'}…</div>`.__html;
-    const said = [];
-    let ok = 0;
-    for (const f of files) {
-      try {
-        const res = await api('POST', `/businesses/${biz.id}/cards/file`, { name: f.name, data: await fileBase64(f) });
-        ok += 1;
-        said.push(`${f.name}: ${res.added} new payment${res.added === 1 ? '' : 's'}${res.skipped ? `, ${res.skipped} already in Bookr` : ''}${res.problems.length ? `. ${res.problems.join(' ')}` : ''}`);
-      } catch (err) { said.push(`${f.name}: ${err.message}`); }
-    }
-    if (ok) await reload();
-    const box = document.getElementById('recmsg');
-    box.innerHTML = html`<div class="${ok === files.length ? 'ok-msg' : 'error'}">${said.map((s) => html`<div>${s}</div>`)}</div>`.__html;
-  };
-  input.addEventListener('change', () => { if (input.files.length) bringIn([...input.files]); input.value = ''; });
-  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
-  zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('over'); const f = [...e.dataTransfer.files]; if (f.length) bringIn(f); });
   // A shift link opens its Reconcile on the Card tab.
   app.querySelectorAll('[data-cardshift]').forEach((l) => l.addEventListener('click', () => { recKeep = { day: l.dataset.cardshift, top: 'pay', tab: 'card' }; }));
   app.querySelectorAll('[data-csettle]').forEach((f) => f.addEventListener('submit', (e) => {
@@ -5492,11 +5545,6 @@ async function cardsView(biz, query = '') {
     await reload();
     doneToast('Taken apart from the bank credit; the fee and GST rows are removed.', null, reload);
   })));
-  app.querySelectorAll('[data-cread]').forEach((b) => b.addEventListener('click', () => act(b, async () => {
-    const res = await api('POST', `/businesses/${biz.id}/inbound-mails/${b.dataset.cread}/read`);
-    await reload();
-    doneToast(res.note, null, reload);
-  })));
 }
 
 async function route() {
@@ -5520,7 +5568,7 @@ async function route() {
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);
       if (screen === 'users' && biz.role === 'owner') return usersView(biz, parts[3]);
-      const item = NAV.find((n) => n.key === screen);
+      const item = NAV.find((n) => n.key === screen || n.screens?.includes(screen));
       if (item?.needs && !biz.actions.includes(item.needs)) return go(home(biz));
       // The old Upload page is gone: Bring in takes every file now.
       if (screen === 'upload') { history.replaceState(null, '', `#/b/${biz.id}/bringin`); return route(); }

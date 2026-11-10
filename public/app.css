@@ -340,6 +340,10 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 .rec-tabs a { padding: 7px 16px; font-size: 14px; }
 .mode-tabs { align-self: flex-start; }
 .mode-tabs button { padding: 8px 18px; font-size: 15px; display: inline-flex; gap: 6px; align-items: center; }
+.mode-tabs a { padding: 8px 18px; font-size: 15px; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.bank-tabs { max-width: 100%; overflow-x: auto; }
+.bank-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.bank-tile { background: var(--surface-2, #F6F7F9); border-radius: 8px; padding: 8px 12px; }
 .ent-group { margin-top: 10px; }
 .ent-line { padding: 8px 4px; border-top: 1px solid var(--line-soft); display: grid; gap: 2px; }
 

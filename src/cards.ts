@@ -172,18 +172,34 @@ export const AUTO_MIN = 20;
 /** A card tip: the payment is more than the bill by at most this share of the bill (and the bill waits). */
 const TIP_SHARE = 0.25;
 
-/** Pairs Bookr may match on its own: the payment's only candidate, within AUTO_MIN, and no other payment wants any of its sales. */
+/**
+ * Pairs Bookr may match on its own: the payment's only candidate, no other payment wants any of its sales, and within
+ * AUTO_MIN, or, for a bill with no time, the one bill and the one payment of that amount (loneUntimed).
+ */
 export function autoPairs(payments: (Pick<CardPayment, 'id' | 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[]) {
   const { candidates } = cardCandidates(payments, sales);
   const wants = new Map<string, Set<string>>();
   for (const [pid, list] of candidates) for (const k of list) for (const tid of k.transactionIds) wants.set(tid, new Set([...(wants.get(tid) ?? []), pid]));
   const out: { paymentId: string; k: CardCandidate }[] = [];
   for (const [pid, list] of candidates) {
-    if (list.length !== 1 || list[0].minutes == null || list[0].minutes > AUTO_MIN) continue;
-    if (list[0].transactionIds.some((tid) => (wants.get(tid)?.size ?? 0) !== 1)) continue;
-    out.push({ paymentId: pid, k: list[0] });
+    if (list.length !== 1) continue;
+    const k = list[0];
+    if (k.transactionIds.some((tid) => (wants.get(tid)?.size ?? 0) !== 1)) continue;
+    if (k.minutes != null ? k.minutes <= AUTO_MIN : loneUntimed(k, payments, sales)) out.push({ paymentId: pid, k });
   }
   return out;
+}
+
+/**
+ * A bill with no time (register only, such as an old POS bill) and a payment, matched by Bookr when they can only be
+ * each other (approved 10 Nov 2026): the only card bill of its amount in its shift and the shifts either side still
+ * without a payment, and the only card payment of that amount in its shift.
+ */
+function loneUntimed(k: CardCandidate, payments: (Pick<CardPayment, 'paid_at' | 'amount_paise' | 'txn_type'> & { pay_mode?: string | null; scheme?: string | null })[], sales: CardSale[]) {
+  const near = new Set([addDays(k.shiftDay, -1), k.shiftDay, addDays(k.shiftDay, 1)]);
+  if (sales.some((s) => !k.transactionIds.includes(s.id) && s.amount_paise === k.amountPaise && near.has(s.shift_day))) return false;
+  const w = shiftWindow(k.shiftDay);
+  return payments.filter((p) => p.txn_type === 'PURCHASE' && !isMachineUpi(p) && p.amount_paise === k.amountPaise && p.paid_at >= w.from && p.paid_at < w.to).length === 1;
 }
 
 export interface CardRule { terminalId: string; feeHeadId: string; gstHeadId: string }

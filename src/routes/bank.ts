@@ -10,7 +10,7 @@ import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } fro
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
-import { cashOver, isMachineUpi, shiftCards } from '../cards';
+import { cashOver, isMachineUpi, shiftCards, unsettledDays } from '../cards';
 import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
@@ -56,10 +56,19 @@ bankRoutes.get('/businesses/:businessId/bank', requireRole('bank.link'), async (
       s.receives_card AS receivesCard, s.last_synced_at AS lastSyncedAt, s.last_sync_note AS lastSyncNote,
       (SELECT count(*) FROM bank_rows r WHERE r.account_id = a.id) AS rows,
       (SELECT count(*) FROM bank_rows r WHERE r.account_id = a.id AND r.status = 'unmatched') AS open,
-      (SELECT max(day) FROM bank_rows r WHERE r.account_id = a.id) AS lastDay
+      (SELECT max(day) FROM bank_rows r WHERE r.account_id = a.id) AS lastDay,
+      (SELECT max(posted_at) FROM bank_rows r WHERE r.account_id = a.id) AS lastAt
     FROM accounts a LEFT JOIN bank_sources s ON s.account_id = a.id
     WHERE a.business_id = ? AND a.kind = 'bank' ORDER BY a.name`, bid);
-  return c.json({ accounts, googleEmail: serviceAccountEmail(c.env), cards: await cardReportsStatus(c.env, c.get('businessId')) });
+  // For the Bank page's strip and tab counts (approved 10 Nov 2026): lines still open by direction, card days to settle.
+  const [open, days] = await Promise.all([
+    one<{ cr: number; dr: number }>(db, `SELECT sum(direction = 'CR') AS cr, sum(direction = 'DR') AS dr FROM bank_rows
+      WHERE business_id = ? AND status = 'unmatched' AND kind <> 'card_settlement'`, bid),
+    unsettledDays(db, bid),
+  ]);
+  const cards = await cardReportsStatus(c.env, bid);
+  return c.json({ accounts, googleEmail: serviceAccountEmail(c.env), open: { in: open?.cr ?? 0, out: open?.dr ?? 0 },
+    cards: { ...cards, days: days.length, daysNetPaise: days.reduce((t, d) => t + d.netPaise, 0) } });
 });
 
 bankRoutes.put('/businesses/:businessId/bank/:accountId/source', requireRole('bank.link'), async (c) => {
