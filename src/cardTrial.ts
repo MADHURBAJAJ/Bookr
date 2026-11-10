@@ -43,6 +43,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   ]) : [[], []];
   const timeOf = new Map(times.map((x) => [x.id, x.paid_at]));
   const headOf = new Map(heads.map((x) => [x.id, x.head]));
+  const uploadOf = new Map(heads.map((x) => [x.id, x.upload]));
   const own = new Map<string, CardSale>();
   for (const r of rows.filter((x) => x.mode === 'card')) {
     const s = own.get(r.c.id);
@@ -80,7 +81,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   // Bills of this shift written as cash or UPI, on their own, near a payment of their amount: perhaps paid on the machine.
   const groupedRows = new Set(heads.filter((h) => h.head !== h.id).flatMap((h) => [h.id, h.head]));
   const otherWay = rows.filter((r) => r.mode !== 'card' && !rows.some((o) => o !== r && o.c.id === r.c.id) && !(r.c.register_row_id && groupedRows.has(r.c.register_row_id)))
-    .map((r) => ({ id: r.c.id, billNo: r.c.bill_no, mode: r.mode, amountPaise: r.amount, paidAt: timeOf.get(r.c.id) ?? null }))
+    .map((r) => ({ id: r.c.id, billNo: r.c.bill_no, mode: r.mode, amountPaise: r.amount, paidAt: timeOf.get(r.c.id) ?? null,
+      rowId: r.c.register_row_id ?? null, uploadId: r.c.register_row_id ? uploadOf.get(r.c.register_row_id) ?? null : null, swMode: r.c.sw_mode ?? null }))
     .filter((x): x is typeof x & { paidAt: number } => x.paidAt != null);
   const usedOther = new Set<string>();
   const pay = (p: CardPayment) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, terminalId: p.terminal_id, upi: isMachineUpi(p), label: label(p) });
@@ -105,8 +107,16 @@ export async function trialCards(db: DB, businessId: string, day: string) {
       candidates: mine.map((k) => ({ comparisonIds: k.transactionIds, billNos: k.billNos, amountPaise: k.amountPaise, minutes: k.minutes })),
       tip: tip ? { comparisonId: tip.id, billNo: tip.bill_no, amountPaise: tip.amount_paise, paidAt: tip.paid_at, tipPaise: p.amount_paise - tip.amount_paise } : null,
       written: written ? { comparisonId: written.id, billNo: written.billNo, mode: written.mode, amountPaise: written.amountPaise, paidAt: written.paidAt,
-        minutes: Math.round(Math.abs(written.paidAt - p.paid_at) / 60000) } : null }];
+        minutes: Math.round(Math.abs(written.paidAt - p.paid_at) / 60000), rowId: written.rowId, uploadId: written.uploadId, swMode: written.swMode, upiNear: false } : null }];
   });
+  // A UPI credit of the bill's amount near it too (Reconcile fix, 11 Nov 2026): it may have been paid twice, so the
+  // bill is not changed to card in one click.
+  for (const n of needs) {
+    const wr = n.written;
+    if (!wr) continue;
+    wr.upiNear = !!(await one<{ x: number }>(db, `SELECT 1 AS x FROM bank_rows WHERE business_id = ? AND kind = 'upi_in' AND status IN ('unmatched', 'matched')
+      AND amount_paise = ? AND abs(posted_at - ?) <= ? LIMIT 1`, businessId, wr.amountPaise, wr.paidAt, NEAR_MIN * 60000));
+  }
   // Card bills no machine payment can be, once the card report is in for the shift.
   const offered = new Set(needs.flatMap((n) => [...n.candidates.flatMap((k) => k.comparisonIds), ...(n.tip ? [n.tip.comparisonId] : [])]));
   const wanted = new Set([...cardCandidates(payments.filter((p) => !usedPay.has(p.id) && !heldElsewhere.has(p.id)), leftSales).candidates.values()]
@@ -117,7 +127,6 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   // The open entries to tick on the Card tab's tray (approved 10 Nov 2026): card payments a person may pair, and the
   // card bills not matched yet, with the register row a tip, discount or fixed amount is written on.
   const regOf = new Map(rows.filter((r) => r.c.register_row_id).map((r) => [r.c.id, r.c.register_row_id as string]));
-  const uploadOf = new Map(heads.map((x) => [x.id, x.upload]));
   const open = {
     payments: needs.filter((n) => n.payment.txnType === 'PURCHASE' && !n.payment.upi).map((n) => n.payment),
     bills: leftSales.map((s) => {
