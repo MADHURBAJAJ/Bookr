@@ -368,7 +368,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill' || (c.why === 'extra' && !splitSides.has(c.amountPaise))).map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark,
       extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0, otherSide: otherSides.get(c.amountPaise) ?? [] })),
     unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
-    choices, save: { blockers: view.blockers, canSave: view.canConfirm },
+    choices, save: { blockers: view.blockers, canSave: view.canConfirm }, numberSlips: view.numberSlips,
     // Old POS bills still to decide (approved 9 Nov 2026): ticked for "Use register" in one click; a row not reviewed yet waits.
     oldPos: { ...view.oldPos, bills: view.comparisons.filter((c) => c.oldPos && !c.decision).map((c) => ({
       comparisonId: c.id, billNo: c.billNo, kind: c.oldPos!.kind, fullNo: c.oldPos!.fullNo, amountPaise: c.register?.amountPaise ?? null,

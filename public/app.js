@@ -1776,8 +1776,15 @@ function reviewCards(u) {
     const rows = [...list].sort((a, b) => at(a) - at(b));
     const software = (u.softwareList ?? []).find((b) => b.billNo === no) ?? null;
     if (new Set(rows.map((r) => r.amountPaise)).size > 1) {
-      cards.push({ key: `rv:two:${no}`, kind: 'two', title: `Bill ${no} has two amounts`, reason: 'Same number, different amounts', rows, software,
-        note: 'Bookr cannot tell which is right. Open each row and compare it with the photo.' });
+      // A row whose amount is exactly another bill's, one digit away and not in the register (11 Nov 2026): its number is
+      // probably a slip for that bill. Offered only when one bill fits; a person changes it.
+      const fixes = rows.filter((x) => !x.elsewhere).flatMap((x) => {
+        const f = (x.numberFlags ?? []).filter((y) => y.kind === 'pending_typo' || y.kind === 'pending');
+        return f.length === 1 ? [{ row: x, billNo: f[0].billNo, amountPaise: f[0].amountPaise, sw: (u.softwareList ?? []).find((b) => b.billNo === f[0].billNo), bank: x.slipBank }] : [];
+      });
+      cards.push({ key: `rv:two:${no}`, kind: 'two', title: `Bill ${no} has two amounts`, reason: fixes.length ? 'A number written wrong?' : 'Same number, different amounts', rows, software, fixes,
+        note: fixes.length ? fixes.map((f) => `${pageRowLabel(u, f.row)} is probably bill ${f.billNo}: the software has ${f.billNo} for ₹ ${rs(f.amountPaise)}${f.sw?.paidAt ? ` at ${when(f.sw.paidAt)}` : ''}, not in the register. Same amount, one digit apart.${f.bank ? ` The bank got ₹ ${rs(f.bank.amountPaise)} at ${when(f.bank.at)}${f.bank.amountPaise > f.amountPaise ? `, which is ₹ ${rs(f.amountPaise)} plus the ₹ ${rs(f.bank.amountPaise - f.amountPaise)} tip on this row` : ''}.` : ''}`).join(' ')
+          : 'Bookr cannot tell which is right. Open each row and compare it with the photo.' });
       continue;
     }
     // The later line is taken as the repeat, unless the earlier one has less on it (no payment, no group).
@@ -1818,6 +1825,9 @@ function cardActionsHtml(u, c) {
     const keep = c.rows.find((x) => x !== c.odd);
     return html`${membersOf(c.odd).length ? '' : del(c.odd, keep, '', `Delete ${pageRowLabel(u, c.odd).toLowerCase()} (written twice)`)}
       ${membersOf(keep).length ? '' : del(keep, c.odd, 'plain', `Delete ${pageRowLabel(u, keep).toLowerCase()} instead`)}${not}`;
+  }
+  if (c.kind === 'two' && c.fixes?.length) {
+    return html`${c.fixes.map((f) => html`<button class="btn" type="button" data-cardpick="${f.row.id}" data-no="${f.billNo}" title="Writes ${f.billNo} on ${pageRowLabel(u, f.row).toLowerCase()}. Check it against the photo first.">Change ${pageRowLabel(u, f.row).toLowerCase()} to ${f.billNo}</button>`)}${not}`;
   }
   if (c.kind === 'group') {
     return html`${c.fits.map((x) => html`<button class="btn ${c.fits.length > 1 ? 'plain' : ''}" type="button" data-cardout="${x.id}">Take ${pageRowLabel(u, x).toLowerCase()} out of the group</button>`)}${not}`;
@@ -2199,6 +2209,14 @@ function wireInlineRows(biz, u, strip) {
       act(b, () => api('PUT', `/businesses/${biz.id}/register-rows/${x.id}`, { paidWithRowId: null, payments: [], status: 'draft', billNo: x.billNo ?? '', billType: x.billType ?? null,
         amount: rupeesForInput(x.amountPaise), discount: rupeesForInput(x.discountPaise ?? 0), remarks: x.remarks ?? null }), `${pageRowLabel(u, x)} taken out of the group. It now needs its own payment, or deleting if it was written twice.`);
     });
+    host.querySelectorAll('[data-cardpick]').forEach((b) => b.addEventListener('click', () => {
+      const tr = table.querySelector(`tr[data-row="${b.dataset.cardpick}"]`);
+      const bn = tr && val(tr, 'billNo');
+      if (!bn) return;
+      b.disabled = true;
+      bn.value = b.dataset.no;
+      save(tr, bn);
+    }));
     document.getElementById('tickclean')?.addEventListener('click', () => {
       for (const r of cleanRows(u)) {
         const tr = table.querySelector(`tr[data-row="${r.id}"]`);
@@ -2946,6 +2964,7 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
     <td class="mono">${bulkOk(c) && !c.decision ? html`<input type="checkbox" data-bulk="${c.id}" aria-label="Select bill ${c.billNo}" style="width:18px;height:18px;min-height:0;margin-right:6px;vertical-align:middle">` : ''}<a href="#" data-openlink>${c.billNo}</a>${drawerBtn(c.billNo, day)}
       <div class="tiny">${c.paidAt ? when(c.paidAt) : 'Not in report'}</div>${otherDayNote(c)}${confirmedByNote(c)}
       ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
+      ${(v.numberSlips ?? []).filter((x) => x.billNo === c.billNo && !c.register).map((x) => html`<div class="tiny error">Probably the register line written as ${x.writtenAs} (₹ ${rs(x.amountPaise)}): same amount, one digit apart. Correct its number on the row.</div>`)}
       ${!c.software && c.oldPos?.kind === 'short' ? html`<div class="tiny">Old POS bill, last 3 digits${c.oldPos.fullNo ? html`: probably <span class="mono">${c.oldPos.fullNo}</span>` : ''}. No new POS bill with running number ${c.billNo} is waiting in the software report.</div>`
         : !c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
       ${!c.software && !c.decision && isOldPos(c.billNo) ? html`<div class="tiny">Old POS bill. ${c.register?.reviewed ? 'Row reviewed: you can use the register.' : 'Review its row, then use the register.'}</div>` : ''}</td>
@@ -4431,15 +4450,19 @@ async function reconcileView(biz, dayArg) {
     ${cashOnCard.map((n) => html`<div class="ent-line"><div><span class="mono"><strong>${n.written.billNo ?? ''}</strong></span> <button type="button" class="linkbtn tiny" data-bill-drawer="${n.written.billNo}|${day}">Open row</button></div>
       <div class="tiny">₹ ${money(n.written.amountPaise)} at ${when(n.written.paidAt)}, written as cash. The card machine got ₹ ${money(n.payment.amountPaise)}${n.payment.upi ? ' (UPI on the machine)' : ''} at ${hhmm(n.payment.paidAt)}, ${n.written.minutes} min from the bill.</div></div>`)}
     <div class="tiny">If it was paid on the machine, change it on the <button type="button" class="linkbtn tiny" data-goto="pay:card">Card tab</button>.</div></section>` : '';
+  // A register line written with a neighbour's number (11 Nov 2026): told under the bill it probably is, and under its credit.
+  const slipOpen = (x) => html`<a href="#/b/${currentBizId()}/review/${x.uploadId}/${x.rowId}" class="tiny">Open the row</a>`;
+  const slipBillLine = (b) => (r.numberSlips ?? []).filter((x) => x.billNo === b.billNo).map((x) => html`<div class="cmp-warn" style="margin:0 10px 8px 40px">Probably the register line written as <span class="mono">${x.writtenAs}</span>: ₹ ${money(x.amountPaise)}, paid ₹ ${money(x.paidPaise)}. Same amount, one digit apart. Correct its number on the row and this bill gets its credit. ${slipOpen(x)}</div>`);
+  const slipCreditLine = (c) => (r.numberSlips ?? []).filter((x) => x.paidPaise === c.amountPaise && (r.open.bills ?? []).some((b) => b.billNo === x.billNo)).map((x) => html`<div class="tiny" style="padding:0 10px 8px 40px;color:#92400E">Probably bill ${x.billNo}, written in the register as ${x.writtenAs}. ${slipOpen(x)}</div>`);
   const lone = r.open ? lonePairs(r.open) : [];
   const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
     <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick a credit, then its bill (or the bill first): each two ticks make a pair, in the order you tick. "+ Add to this pair" adds more to a pair. You match all the pairs on save in one go.${lone.length > 1 ? html` <button type="button" class="linkbtn" data-tray="exact">Tick all exact pairs (${lone.length})</button>` : ''}</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
       <div><strong>Credits not matched yet</strong> <span class="chip">${r.open.credits.length}</span>${covered && r.open.credits.length ? html`<div class="tiny">${r.open.credits.filter((c) => c.why === 'no_bill').length} with no bill of that amount, ${r.open.credits.filter((c) => c.why === 'extra').length} extra money of a common amount, ${r.open.credits.filter((c) => c.why === 'unpaired').length} that could belong to a bill still without a credit. Each is marked.</div>` : ''}
-        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c, r.open.bills) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}
+        ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c, r.open.bills) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${slipCreditLine(c)}${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}
         <label class="tiny" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" data-tray="nearOn" style="width:16px;height:16px;min-height:0"> Show credits from the shifts either side</label><div data-tray="near"></div></div>
       <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
-        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${onCardLine(b)}${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
+        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${slipBillLine(b)}${onCardLine(b)}${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
     </div>
     <div data-tray="sum" class="note">Tick entries to compare them.</div><div data-tray="fix"></div><div class="form-msg" data-tray="msg"></div></section>` : '';
   const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>

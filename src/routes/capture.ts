@@ -214,13 +214,22 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         'SELECT id, bill_no, amount_paise - discount_paise + tip_paise AS amount_paise, amount_paise AS gross_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
     ]);
     const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
+    // Bill 26110158 written for ₹283 when the software's 26110158 is ₹145 (11 Nov 2026): the number may be a slip for a
+    // bill of this amount that is not in the register, so it is checked like a number the software does not have.
+    const amountOff = (id: string) => {
+      const x = shiftRows.find((y) => y.id === id);
+      const sw = x && swBills.find((b) => b.bill_no === x.bill_no);
+      return !!x && !!sw && sw.amount_paise !== x.amount_paise && sw.amount_paise !== x.gross_paise;
+    };
     // Typos: a number that fits another bill or its date's running numbers. Until a person has decided the bill.
     const toCheck = shift?.status === 'confirmed' ? [] : (rows as unknown as { id: string; numberSettled: string | null; numberDecided: number | null }[])
-      .filter((r) => !r.numberSettled && !r.numberDecided && !matches?.get(r.id)?.exact);
+      .filter((r) => !r.numberSettled && !r.numberDecided && (!matches?.get(r.id)?.exact || amountOff(r.id)));
     const numbers = toCheck.length ? await numberContext(db, bid, u.business_day) : null;
     const flagsOf = new Map(numbers ? toCheck.map((r) => {
       const x = shiftRows.find((y) => y.id === r.id);
-      return [r.id, x ? numberFlags(x, numbers) : []] as const;
+      const f = x ? numberFlags(x, numbers) : [];
+      // A number the software has, for another amount: only a bill of this row's amount, a digit away, is worth saying.
+      return [r.id, matches?.get(r.id)?.exact ? f.filter((y) => y.kind === 'pending' || y.kind === 'pending_typo') : f] as const;
     }) : []);
     // A cell Claude could not read (amount or payment): the software's amount for this bill, and a bank credit of that
     // amount near the bill's time, offered as a hint. Never applied by itself; clearly read cells get no hint.
@@ -244,6 +253,16 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         .sort((a, b) => Math.abs(a.posted_at - sw.paid_at) - Math.abs(b.posted_at - sw.paid_at))[0]?.posted_at ?? null;
       return { amountPaise: sw.amount_paise, mode: sw.mode, bankAt, fields: open.filter((f) => f === 'amount' || f === 'payments') };
     };
+    // The bank credit that backs a number slip: what the row says was paid, near the bill it probably is (11 Nov 2026).
+    const slipBank = (id: string) => {
+      const f = flagsOf.get(id)?.filter((y) => y.kind === 'pending' || y.kind === 'pending_typo') ?? [];
+      const sw = f.length === 1 ? swBills.find((b) => b.bill_no === f[0].billNo) : undefined;
+      const paid = pays.filter((p) => p.registerRowId === id).reduce((t, p) => t + (p as unknown as { amountPaise: number }).amountPaise, 0);
+      if (!sw || !paid) return null;
+      const x = credits.filter((y) => y.amount_paise === paid && Math.abs(y.posted_at - sw.paid_at) <= 30 * 60000)
+        .sort((a, b) => Math.abs(a.posted_at - sw.paid_at) - Math.abs(b.posted_at - sw.paid_at))[0];
+      return x ? { amountPaise: x.amount_paise, at: x.posted_at } : null;
+    };
     // Rows of the same shift on its other register pages: bills paid together can run across sheets.
     const pages = await all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
       WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id);
@@ -266,7 +285,9 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       // The shift's software bills, for the bill box's suggestions as you type.
       softwareList: swBills.map((b) => ({ billNo: b.bill_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, used: shiftRows.some((r) => r.bill_no === b.bill_no) })),
       rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null, numberFlags: flagsOf.get(r.id) ?? [],
-        hint: hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }), columnHint: colHints.find((h) => h.rowId === r.id) ?? null })),
+        // "Use ₹145?" is not offered for a row whose own amount fits another bill a digit away.
+        slipBank: slipBank(r.id),
+        hint: flagsOf.get(r.id)?.some((f) => f.kind === 'pending_typo') ? null : hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }), columnHint: colHints.find((h) => h.rowId === r.id) ?? null })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });
   }

@@ -564,12 +564,15 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       AND linked_to_id IN (SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ?)`, businessId, businessId, day))
     .map((x) => [x.linked_to_id, { day: x.shift_day, amountPaise: x.rg_amount_paise, mode: x.rg_mode }]));
   // What is odd about a register number, until a person has decided the bill.
-  const toCheck = comparisons.filter((c) => c.difference === 'missing_in_software' && c.register_row_id && !c.decided_by && !c.closed_at);
+  // Also a bill the software has for another amount (11 Nov 2026): its register line may be a slip for another bill.
+  const amountOff = (c: (typeof comparisons)[number]) => (c.difference === 'amount' || c.difference === 'amount_and_mode');
+  const toCheck = comparisons.filter((c) => (c.difference === 'missing_in_software' || amountOff(c)) && c.register_row_id && !c.decided_by && !c.closed_at);
   const [numbers, lastOldPos] = await Promise.all([toCheck.length && shift?.status !== 'confirmed' ? numberContext(db, businessId, day) : null, oldPosLastSeen(db, businessId, day)]);
   const oldPosInUse = !!lastOldPos && lastOldPos >= addDays(day, -OLD_POS_FADE_DAYS);
   const flagsOf = new Map(numbers ? toCheck.map((c) => {
     const r = rg.find((x) => x.id === c.register_row_id);
-    return [c.id, r ? numberFlags({ ...r, gross_paise: r.amount_paise + r.discount_paise }, numbers) : []] as const;
+    const f = r ? numberFlags({ ...r, gross_paise: r.amount_paise + r.discount_paise }, numbers) : [];
+    return [c.id, amountOff(c) ? f.filter((y) => y.kind === 'pending' || y.kind === 'pending_typo') : f] as const;
   }) : []);
   // Old POS bills (approved 9 Nov 2026): a full number, or a short one that cannot be a new POS bill.
   const oldPosOf = new Map<string, { kind: 'full' | 'short'; fullNo: string | null }>();
@@ -591,7 +594,22 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const counts = new Map<string, number>();
   for (const r of rg) counts.set(r.bill_no, (counts.get(r.bill_no) ?? 0) + 1);
   const repeated = [...counts].filter(([, n]) => n > 1).map(([b]) => b);
-  if (repeated.length) blockers.push(`Bill ${repeated.join(', ')} appears more than once in the register.`);
+  // A line whose amount is another bill's, one digit away and not in the register, is probably that bill (11 Nov 2026).
+  const numberSlips: { writtenAs: string; billNo: string; amountPaise: number; paidPaise: number; rowId: string; uploadId: string; lineNo: number }[] = [];
+  if (repeated.length) {
+    const ctx = numbers ?? (shift?.status !== 'confirmed' ? await numberContext(db, businessId, day) : null);
+    for (const r of ctx ? rg.filter((x) => repeated.includes(x.bill_no)) : []) {
+      const s = sw.find((b) => b.bill_no === r.bill_no);
+      const gross = r.amount_paise + r.discount_paise;
+      if (!s || s.amount_paise === r.amount_paise || s.amount_paise === gross) continue;
+      const f = numberFlags({ ...r, gross_paise: gross }, ctx!).filter((y) => y.kind === 'pending' || y.kind === 'pending_typo');
+      if (f.length !== 1) continue;
+      numberSlips.push({ writtenAs: r.bill_no, billNo: f[0].billNo!, amountPaise: gross, paidPaise: (paysByRow.get(r.paid_with_row_id ?? r.id) ?? []).reduce((t, p) => t + p.amount_paise, 0),
+        rowId: r.id, uploadId: r.upload_id, lineNo: r.line_no });
+    }
+    const said = numberSlips.map((x) => `the ₹ ${(x.amountPaise / 100).toFixed(2).replace(/\.00$/, '')} line of ${x.writtenAs} is probably bill ${x.billNo} (same amount, not in the register)`);
+    blockers.push(`Bill ${repeated.join(', ')} appears more than once in the register.${said.length ? ` ${said.join('; ').replace(/^t/, 'T')}: correct it on its register page.` : ''}`);
+  }
   const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
   const unbalanced = rg.filter((r) => !grouped.has(r.id) && (paysByRow.get(r.id) ?? []).reduce((s, p) => s + p.amount_paise, 0) !== r.amount_paise && r.amount_paise !== 0);
   for (const g of groups) {
@@ -776,6 +794,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     gaps: cov.gaps,
     reports: cov.reports.map((r) => ({ id: r.id, coversFrom: r.covers_from, coversTo: r.covers_to, firstPaidAt: r.first_paid_at, lastPaidAt: r.last_paid_at, billCount: r.bill_count })),
     softwareBills: sw.length,
+    numberSlips,
     registerRows: rg.length,
     registerPages: new Set(rg.map((r) => r.upload_id)).size,
     comparisons: comparisons.map((c) => ({
