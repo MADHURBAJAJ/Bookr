@@ -12,6 +12,20 @@ import { bookedSalesAround, dayName, pairBooked, plansFor, sameSaleCard, sameSal
 import { billDistance, creditsForShift, sameBillNo, shiftChoices, shiftView, WATCH_DAYS } from './sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from './time';
 
+export interface OtherSide { billNo: string | null; softwarePaise: number; registerPaise: number; chose: 'register' | 'software' }
+/** A bill whose software and register disagree and a person chose a side: the amount chosen against, by amount. */
+function otherSidesOf(list: OtherSide[]) {
+  const out = new Map<number, OtherSide[]>();
+  for (const x of list) {
+    const amount = x.chose === 'register' ? x.softwarePaise : x.registerPaise;
+    out.set(amount, [...(out.get(amount) ?? []), x]);
+  }
+  return out;
+}
+const rejected = (x: { a: number | null; b: number | null; difference: string; decision: string | null }) =>
+  x.a != null && x.b != null && x.a !== x.b && x.difference !== 'match' && x.difference !== 'complimentary' && (x.decision === 'use_register' || x.decision === 'use_software')
+    ? (x.decision === 'use_register' ? x.a : x.b) : null;
+
 /** Likely: a credit and a bill of the same amount up to three hours apart that the clear pairing did not take. */
 export async function reconcileShift(db: DB, businessId: string, day: string) {
   const w = shiftWindow(day);
@@ -87,18 +101,22 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
       GROUP BY coalesce(rr.paid_with_row_id, rr.id) HAVING count(*) > 1`, businessId, day),
     // paid: the credit that paid the bill (11 Nov 2026). A side equal to it is that payment, not room for another credit
     // (an extra of a common amount); a side that differs from it may still be the bill's real amount.
-    all<{ a: number | null; b: number | null; paid: number | null }>(db, `SELECT c.sw_amount_paise AS a, c.rg_amount_paise AS b,
+    all<{ a: number | null; b: number | null; paid: number | null; difference: string; decision: string | null; billNo: string | null }>(db, `SELECT c.sw_amount_paise AS a, c.rg_amount_paise AS b, c.difference, c.decision, c.bill_no AS billNo,
         (SELECT max(r.amount_paise) FROM transactions t JOIN bank_rows r ON r.id = t.matched_bank_row WHERE t.comparison_id = c.id) AS paid
       FROM bill_comparisons c WHERE c.business_id = ? AND c.shift_day = ? AND (c.decision IS NULL OR c.decision NOT IN ('leave_out', 'carry_forward'))`, businessId, day),
   ]);
-  const sideAmounts = new Set(sides.flatMap((x) => [x.a, x.b].filter((y) => y !== x.paid)).filter((x): x is number => x != null));
+  // A side a person decided against (11 Nov 2026) does not hide a credit: the credit is listed with a Check first line.
+  const sideAmounts = new Set(sides.flatMap((x) => (x.paid != null && (x.difference === 'match' || x.difference === 'complimentary') ? []
+    : rejected(x) != null ? [x.decision === 'use_register' ? x.b : x.a].filter((y) => y !== x.paid) : [x.a, x.b].filter((y) => y !== x.paid)))
+    .filter((x): x is number => x != null));
+  const otherSides = otherSidesOf(sides.flatMap((x) => (rejected(x) != null ? [{ billNo: x.billNo, softwarePaise: x.a!, registerPaise: x.b!, chose: x.decision === 'use_register' ? 'register' as const : 'software' as const }] : [])));
   const noBill = sug.credits
     .filter((c) => c.posted_at >= w.from && c.posted_at < w.to && !used.has(`cr:${c.id}`) && !(sug.candidates.get(c.id) ?? []).length
       && !sideAmounts.has(c.amount_paise) && !nearGroup(c.amount_paise, groupsWaiting.map((g) => g.total)))
     .map((c) => {
       // Extra (11 Nov 2026): every bill of this amount already has its credit; still money with no bill.
       const extra = sales.filter((x) => x.bankRowId && x.amountPaise === c.amount_paise).length;
-      return { ...credit(c.id), extra };
+      return { ...credit(c.id), extra, otherSide: otherSides.get(c.amount_paise) ?? [] };
     });
 
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
@@ -312,11 +330,20 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, group: b.grouped ? groupOf(b.c.register?.rowId) : null, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
   // The same credits Compare counts as not matched yet; noBill marks those no bill of that amount could be.
   const noBillIds = new Set((view.bank?.noBill ?? []).map((n) => n.id));
+  // A credit the pairing gave a bill that a person matched to another credit (11 Nov 2026): free again. Extra when no
+  // bill of its amount is still open, else it could be theirs.
+  const freeWhy = (amount: number) => (openBills.some((b) => b.amountPaise === amount) ? 'unpaired' as const : bills.some((b) => b.amount === amount) ? 'extra' as const : 'no_bill' as const);
   const whyOf = new Map((view.bank?.open ?? []).map((o) => [o.id, o]));
   const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id),
-    why: whyOf.get(c.id)?.why ?? null, bills: whyOf.get(c.id)?.bills ?? [], billsOfAmount: whyOf.get(c.id)?.billsOfAmount ?? 0 }));
-  // An amount on one side of a bill whose software and register differ may be that bill's real payment: not an extra.
-  const splitSides = new Set(view.comparisons.filter((c) => c.software && c.register && c.software.amountPaise !== c.register.amountPaise)
+    why: whyOf.get(c.id)?.why ?? freeWhy(c.amount), bills: whyOf.get(c.id)?.bills ?? [], billsOfAmount: whyOf.get(c.id)?.billsOfAmount ?? bills.filter((b) => b.amount === c.amount).length }));
+  // An amount on one side of a bill whose software and register disagree (not a discount or tip both agree on) may be
+  // that bill's real payment: not an extra.
+  const disagree = view.comparisons.filter((c) => c.software && c.register && c.software.amountPaise !== c.register.amountPaise
+    && c.difference !== 'match' && c.difference !== 'complimentary');
+  // Decided by a person: the side chosen against only gets a Check first line on the credit (11 Nov 2026).
+  const otherSides = otherSidesOf(disagree.filter((c) => c.decision === 'use_register' || c.decision === 'use_software')
+    .map((c) => ({ billNo: c.billNo, softwarePaise: c.software!.amountPaise as number, registerPaise: c.register!.amountPaise as number, chose: c.decision === 'use_register' ? 'register' as const : 'software' as const })));
+  const splitSides = new Set(disagree.filter((c) => c.decision !== 'use_register' && c.decision !== 'use_software')
     .flatMap((c) => [c.software!.amountPaise, c.register!.amountPaise]));
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   return {
@@ -328,7 +355,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit,
     // Money with no bill can be booked before saving too (11 Nov 2026): booking a bank line does not wait for the shift.
     noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill' || (c.why === 'extra' && !splitSides.has(c.amountPaise))).map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark,
-      extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0 })),
+      extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0, otherSide: otherSides.get(c.amountPaise) ?? [] })),
     unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
     choices, save: { blockers: view.blockers, canSave: view.canConfirm },
     // Old POS bills still to decide (approved 9 Nov 2026): ticked for "Use register" in one click; a row not reviewed yet waits.

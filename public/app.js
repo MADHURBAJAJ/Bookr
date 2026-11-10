@@ -4337,6 +4337,7 @@ async function reconcileView(biz, dayArg) {
       <label class="nb-head"><input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">
         <span><strong>₹ ${money(x.amountPaise)}</strong> <span class="tiny">${hhmm(x.postedAt)} · ${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}</span>${plainRemark(x) ? html` <em class="tiny">"${plainRemark(x)}"</em>` : ''}
         ${x.extra ? html`<div class="tiny" style="color:#92400E">Extra: ${x.extra === 1 ? 'the 1 bill' : `all ${x.extra} bills`} of ₹ ${money(x.amountPaise)} already ${x.extra === 1 ? 'has its' : 'have their'} credit. A sale not written down, or paid twice?</div>` : ''}</span></label>
+      ${(x.otherSide ?? []).length ? html`<div class="cmp-warn" style="margin:0 0 0 28px"><strong>Check first:</strong> ${x.otherSide.map((o) => html`<div>The software said ₹ ${money(o.softwarePaise)} for bill <span class="mono">${o.billNo ?? ''}</span>, the register ₹ ${money(o.registerPaise)}; you chose the ${o.chose}'s ₹ ${money(o.chose === 'register' ? o.registerPaise : o.softwarePaise)}. If the ${o.chose === 'register' ? 'software' : 'register'} was right, this ₹ ${money(x.amountPaise)} is that bill's payment.</div>`)}</div>` : ''}
       ${byUpiOffer((r.byUpi ?? []).find((o) => o.creditId === x.creditId), true)}
       <div class="nb-check" data-nbcheck="${x.creditId}"></div>
       <div class="nb-acts">

@@ -305,7 +305,9 @@ describe('UPI pairing before saving, and what saving matches', () => {
     // S6b is matched on save now, so it is not offered again.
     expect.soft(rec.fixes.some((x: any) => x.kind === 'one_credit_many_bills' && x.billNos.sort().join() === '26103115,26103116'), 'S13 after save: table card').toBe(true);
     expect.soft(rec.fixes.some((x: any) => x.billNos.includes('26103117')), 'left out after save: the explainer never offers to join a bill that was left out').toBe(false);
-    expect.soft(rec.noBill.map((x: any) => x.amountPaise), 'S12 after save: the ₹4,410 credit equals software bill 26103114, so not "no bill"').not.toContain(441000);
+    // S12 after save: the person chose a side, so the ₹4,410 credit is listed, told it may be bill 26103114's payment (11 Nov 2026).
+    const s12left = rec.noBill.find((x: any) => x.amountPaise === 441000);
+    expect.soft(!s12left || s12left.otherSide.some((o: any) => o.billNo === '26103114'), 'S12 after save: the ₹4,410 credit, if listed, says it may be bill 26103114\'s payment').toBe(true);
     const twin = rec.noCredit.find((x: any) => x.billNos.includes('2610313') || x.billNos.includes('2610314'));
     expect.soft(!twin || /went to bill/.test(twin.title), 'S2 after save: the unpaired 520 bill is told its twin took the one credit, not "no UPI payment"').toBe(true);
     expect.soft(rec.noBill.map((x: any) => x.amountPaise), 'S6 after save: ₹600 is half of a bill, not money with no bill').not.toContain(60000);
