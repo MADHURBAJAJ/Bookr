@@ -2646,7 +2646,8 @@ function waitingPanelHtml(biz, w, canDecide) {
           <td class="amount">${money(x.amountPaise ?? 0)}${x.mode ? html` <span class="note">${MODE_LABELS[x.mode] ?? x.mode}</span>` : ''}</td>
           <td style="white-space:normal"><div>${x.reason}</div>${offerHtml(x)}${x.watchNote ? html`<div class="tiny">Kept waiting: ${x.watchNote}</div>` : ''}</td>
           <td>${x.unresolved ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td>
-          <td>${x.unresolved && canDecide && x.comparisonId && x.side !== 'both' ? html`<div style="display:flex;flex-direction:column;gap:4px">
+          <td>${canDecide && x.side === 'both' && x.mode === 'upi' && x.key.startsWith('t:') ? html`<button class="btn plain dchip" type="button" data-owedtx="${x.key.slice(2)}" data-bill="${x.billNo}">Owed by guest/company</button>` : ''}
+            ${x.unresolved && canDecide && x.comparisonId && x.side !== 'both' ? html`<div style="display:flex;flex-direction:column;gap:4px">
             ${x.side === 'register' ? html`<button class="btn plain dchip" type="button" data-closeas="${x.comparisonId}" data-note="Not billed in software">Not billed in software</button>` : ''}
             <button class="btn plain dchip" type="button" data-closebill="${x.comparisonId}" data-bill="${x.billNo}">Close with a reason</button>
             <button class="btn plain dchip" type="button" data-keepwait="${x.comparisonId}" data-bill="${x.billNo}">Keep waiting ${w.watchDays} more days</button></div>` : ''}</td>
@@ -2678,6 +2679,10 @@ function wireWaiting(biz, root, act) {
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
   }));
   root.querySelectorAll('[data-closeas]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closeas}/close`, { note: b.dataset.note }))));
+  root.querySelectorAll('[data-owedtx]').forEach((b) => b.addEventListener('click', () => {
+    const who = (prompt(`Bill ${b.dataset.bill}: owed by which guest or company? Its payment is matched to it when it comes.`) ?? '').trim();
+    if (who) act(() => apiFull('POST', `/businesses/${biz.id}/sales/${b.dataset.owedtx}/close`, { note: `Owed by ${who}` }));
+  }));
   root.querySelectorAll('[data-keepwait]').forEach((b) => b.addEventListener('click', () => {
     const note = (prompt(`Keep bill ${b.dataset.bill} waiting: what are you waiting for?`) ?? '').trim();
     if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.keepwait}/keep-waiting`, { note }));
@@ -4867,7 +4872,8 @@ async function bookCredit(biz, rowId, payload) {
 /** Tab 2: what is still open on every shift, oldest first. Closing a bill takes Owner or Accountant, and a reason. */
 const unmatchedState = { seg: 'all', q: '' };
 async function unmatchedView(biz) {
-  const u = await api('GET', `/businesses/${biz.id}/unmatched`);
+  const [u, heldRes] = await Promise.all([api('GET', `/businesses/${biz.id}/unmatched`), api('GET', `/businesses/${biz.id}/held`).catch(() => ({ held: [] }))]);
+  const held = heldRes.held ?? [];
   const reload = () => unmatchedView(biz);
   const canClose = biz.actions.includes('sales.decide');
   const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
@@ -4887,6 +4893,17 @@ async function unmatchedView(biz) {
       <strong class="amount">₹ ${money(x.amountPaise)}</strong></summary><div class="um-body note">Loading…</div></details>`;
   const groupHtml = (title, cls, xs) => xs.length ? html`<section class="card" style="gap:6px"><div class="lane-h"><h2>${title}</h2><span class="tchip ${cls}">${xs.length} · ₹ ${money(sum(xs))}</span></div>${xs.map(rowHtml)}</section>` : '';
   const listHtml = () => {
+    if (unmatchedState.seg === 'held') {
+      // Refunds due and tips for staff (Stage 5): not income; done when the money goes back or out.
+      return held.length ? html`<section class="card" style="gap:6px"><div class="note">Money received that is not income. A refund due is done when its payment back is matched; a tip when it is paid out to staff.</div>
+        ${held.map((h) => html`<div class="um-line" style="flex-wrap:wrap;gap:6px"><span style="flex:1;min-width:220px">${h.kind === 'refund' ? 'Refund due' : 'Tip for staff'} · credit at ${when(h.postedAt)}
+          <span class="tiny" style="display:block">${dayLabel(h.day)} shift${h.accountName ? ` · ${h.accountName}` : ''} · ${h.note.replace(/^Held: (refund due|tip for staff) · /, '')}</span>
+          ${h.outs.map((o) => html`<span class="tiny" style="display:block">Paid back on ${when(o.postedAt)}${o.vpa ? ` to ${o.vpa}` : ''}? <button class="linkbtn tiny" type="button" data-heldout="${h.id}" data-out="${o.id}">Match the refund</button></span>`)}</span>
+          <strong class="amount">₹ ${money(h.amountPaise)}</strong>
+          ${h.done ? html`<span class="chip ok">${h.kind === 'refund' ? 'Paid back' : 'Paid out'}</span>` : h.kind === 'tip' ? html`<button class="btn plain dchip" type="button" data-heldtip="${h.id}">Paid out to staff</button>` : html`<span class="chip wait">Not paid back</span>`}
+          <button class="btn plain dchip" type="button" data-heldreopen="${h.id}">Open again</button></div>`)}</section>`
+        : html`<section class="card"><div class="note">Nothing is held as a refund due or a tip.</div></section>`;
+    }
     if (unmatchedState.seg === 'closed') {
       return u.closed.length ? html`<section class="card" style="gap:6px">${u.closed.map((x) => html`<div class="um-line" style="flex-wrap:wrap"><span style="flex:1;min-width:220px">Bill <span class="mono">${x.billNo ?? ''}</span>
         <span class="tiny" style="display:block">${dayLabel(x.day)} shift · closed ${when(x.closedAt)}${x.closedBy ? ` by ${x.closedBy}` : ''}: ${x.note}</span></span><strong class="amount">₹ ${money(x.amountPaise)}</strong>
@@ -4907,7 +4924,7 @@ async function unmatchedView(biz) {
         <div><div class="tiny">Over ${u.watchDays} days</div><div class="amount rec-n" style="color:${old.length ? 'var(--danger)' : 'inherit'}">₹ ${money(sum(old))}</div><div class="tiny">${old.length} entr${old.length === 1 ? 'y' : 'ies'}</div></div>
       </div>
       <div class="form-row" style="align-items:center;gap:10px">
-        <div class="seg" id="umseg">${[['all', 'All'], ['bill', 'Bills'], ['credit', 'Credits'], ['closed', `Closed (${u.closed.length})`]].map(([k, l]) => html`<button type="button" data-seg="${k}" class="${unmatchedState.seg === k ? 'on' : ''}">${l}</button>`)}</div>
+        <div class="seg" id="umseg">${[['all', 'All'], ['bill', 'Bills'], ['credit', 'Credits'], ['closed', `Closed (${u.closed.length})`], ['held', `Held (${held.filter((h) => !h.done).length})`]].map(([k, l]) => html`<button type="button" data-seg="${k}" class="${unmatchedState.seg === k ? 'on' : ''}">${l}</button>`)}</div>
         <input id="umq" class="compact" type="search" placeholder="Search amount or bill number" value="${unmatchedState.q}" style="min-width:220px" aria-label="Search amount or bill number">
       </div>
     </section>
@@ -4919,6 +4936,10 @@ async function unmatchedView(biz) {
     list.querySelectorAll('[data-um]').forEach((d) => d.addEventListener('toggle', () => {
       if (d.open && !d.dataset.loaded) { d.dataset.loaded = '1'; loadUnmatchedRow(biz, entries.find((x) => x.id === d.dataset.um), d, entries, canClose, u, reload); }
     }));
+    const act = async (b, fn) => { b.disabled = true; try { await fn(); await reload(); } catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); } };
+    list.querySelectorAll('[data-heldout]').forEach((b) => b.addEventListener('click', () => act(b, () => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.heldout}/held-done`, { outRowId: b.dataset.out }))));
+    list.querySelectorAll('[data-heldtip]').forEach((b) => b.addEventListener('click', () => act(b, () => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.heldtip}/held-done`, {}))));
+    list.querySelectorAll('[data-heldreopen]').forEach((b) => b.addEventListener('click', () => act(b, () => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.heldreopen}/reopen`, {}))));
     list.querySelectorAll('[data-umreopen]').forEach((b) => b.addEventListener('click', async () => {
       b.disabled = true;
       try { await apiFull('POST', `/businesses/${biz.id}/sales/${b.dataset.umreopen}/reopen`, {}); await reload(); }
@@ -4956,18 +4977,32 @@ async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
     ? (x.bankIn ? 'No credit of this amount has been matched to this bill.' : 'The bank is not in up to the end of this shift, so its credit may simply not be here yet.')
     : 'No bill has been matched to this money. It may be a sale not written down, or money that is not a sale.';
   const closeHint = x.side === 'bill' && !x.canClose ? `Watched for ${u.watchDays} days; it can be closed with a reason after that.` : '';
+  // Before calling it extra (Stage 5): an owed bill, part of a bill, a payment made twice.
+  const chk = x.side === 'credit' ? await api('GET', `${base}/bank-rows/${x.id}/checks`).catch(() => null) : null;
+  const roomHead = (r.unbilledHeads ?? []).find((h) => h.billType === 'room');
+  const checksHtml = chk && (chk.owed.length || chk.parts.length || chk.paidTwice) ? html`<div class="rv-card" style="gap:6px"><strong>Check first</strong>
+    ${chk.owed.map((o) => html`<div class="list-row"><span>Bill <span class="mono">${o.billNo ?? ''}</span> (₹ ${money(o.amountPaise)}, ${dayLabel(o.day)}) was closed as ${o.note.replace(/^Owed by /, 'owed by ')}</span>
+      <button class="btn plain dchip" type="button" data-umowed="${o.txId}">Match to the owed bill</button></div>`)}
+    ${chk.parts.map((o) => html`<div class="tiny">Could be part of bill <span class="mono">${o.billNo ?? ''}</span> (₹ ${money(o.amountPaise)}, ${dayLabel(o.day)} shift): <a href="#/b/${biz.id}/reconcile/${o.day}">add it to that bill's pair on Reconcile ›</a></div>`)}
+    ${chk.paidTwice ? html`<div class="tiny error">The same ₹ ${money(x.amountPaise)} came in ${chk.paidTwice.minutes} minute${chk.paidTwice.minutes === 1 ? '' : 's'} apart${chk.paidTwice.samePayer ? ', from the same payer' : ''}: paid twice? If so, hold one as a refund due.</div>` : ''}
+  </div>` : '';
   body.className = 'um-body';
   body.innerHTML = html`<div class="note">${why}</div>
     <div class="tiny">${x.side === 'bill' ? html`${x.paidAt ? `Paid at ${when(x.paidAt)}` : 'Register only, no bill time'}${x.labels ? ` · written under ${x.labels}` : ''}`
       : html`${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}${x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? ` · ${x.remark}` : ''}`}</div>
+    ${checksHtml}
     ${cards.length ? html`<div class="rv-cards">${cards.map((c) => suggestionCard(c, x.day))}</div>` : ''}
     ${others.length ? html`<div><strong>Closest possible</strong>${others.map((o) => html`<div class="um-line" style="cursor:default"><span style="flex:1">${o.side === 'bill' ? html`Bill <span class="mono">${o.billNo ?? ''}</span>` : `Credit at ${when(o.postedAt)}`}
       <span class="tiny" style="display:block">${dayLabel(o.day)} shift${o.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(o.amountPaise - x.amountPaise))} ${o.amountPaise > x.amountPaise ? 'more' : 'less'}` : ' · same amount'}</span></span><span class="amount">₹ ${money(o.amountPaise)}</span></div>`)}</div>` : html`<div class="tiny">Nothing open comes close to this amount.</div>`}
     <div class="form-row" style="gap:6px">
       ${x.side === 'credit' ? html`${r.confirmed ? r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-umbook="${h.headId}" data-label="${h.billType === 'room' ? 'Room' : 'F&B'}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`) : ''}
         <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/bank?from=${x.day}&to=${addDaysIso(x.day, 1)}">Another head…</a>
+        ${r.confirmed && roomHead ? html`<button class="btn plain" type="button" style="min-height:36px" data-umadvance="1">Advance received</button>` : ''}
+        <button class="btn plain" type="button" style="min-height:36px" data-umhold="refund">Refund due</button>
+        <button class="btn plain" type="button" style="min-height:36px" data-umhold="tip">Tip for staff</button>
         <button class="btn plain" type="button" style="min-height:36px" data-umignore="1">Not a sale, close</button>`
       : html`<button class="btn plain" type="button" style="min-height:36px" data-umrepay="cash">Was cash</button><button class="btn plain" type="button" style="min-height:36px" data-umrepay="card">Was card</button>
+        ${canClose ? html`<button class="btn plain" type="button" style="min-height:36px" data-umowe="1">Owed by guest/company</button>` : ''}
         ${canClose && x.canClose ? html`<button class="btn plain" type="button" style="min-height:36px" data-umclose="1">Close with a reason</button>` : ''}`}
       <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/reconcile/${x.day}">Open the shift</a>
     </div>${closeHint ? html`<div class="tiny">${closeHint}</div>` : ''}<div class="form-msg"></div>`.__html;
@@ -4990,6 +5025,23 @@ async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
     await run(async () => { audit = (await apiFull('POST', `${base}/sales/repay`, { transactionIds: [x.id], mode, note })).auditId; },
       `Bill ${x.billNo ?? ''} is now ${mode}.`, () => apiFull('POST', `${base}/sales/repay/${audit}/undo`, {}));
   }));
+  body.querySelectorAll('[data-umowed]').forEach((b) => b.addEventListener('click', () => run(() => apiFull('POST', `${base}/bank-rows/${x.id}/owed-paid`, { txId: b.dataset.umowed }),
+    'Matched to the owed bill.', () => apiFull('DELETE', `${base}/bank-rows/${x.id}/match`, {}))));
+  body.querySelector('[data-umadvance]')?.addEventListener('click', () => {
+    const who = reason('Advance received: from which guest (name, room or booking)?');
+    if (who) run(async () => { const res = await apiFull('POST', `${base}/bank-rows/book-many`, { items: [{ rowId: x.id, billType: 'room', item: `Advance: ${who}` }] }); if (!res.booked) throw new Error(res.skipped.join(' ')); },
+      'Booked as an advance. Its room bill joins it when it comes.', () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}));
+  });
+  body.querySelectorAll('[data-umhold]').forEach((b) => b.addEventListener('click', () => {
+    const refund = b.dataset.umhold === 'refund';
+    const note = reason(refund ? 'Refund due: to whom, and why (e.g. Rahul K, paid twice)?' : 'Tip for staff: for whom, or a note?');
+    if (note) run(() => apiFull('POST', `${base}/bank-rows/${x.id}/hold`, { kind: b.dataset.umhold, note }),
+      refund ? 'Held as a refund due: not counted as income.' : 'Held as a tip for staff: not counted as income.', () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}));
+  }));
+  body.querySelector('[data-umowe]')?.addEventListener('click', () => {
+    const who = reason('Owed by which guest or company? The sale stays in income; its payment is matched to it when it comes.');
+    if (who) run(() => apiFull('POST', `${base}/sales/${x.id}/close`, { note: `Owed by ${who}` }), `Bill ${x.billNo ?? ''} closed as owed by ${who}.`, () => apiFull('POST', `${base}/sales/${x.id}/reopen`, {}));
+  });
   body.querySelector('[data-umclose]')?.addEventListener('click', () => {
     const note = reason('Why will this credit never come? The sale stays in income; closing only stops the chase.');
     if (note) run(() => apiFull('POST', `${base}/sales/${x.id}/close`, { note }), `Bill ${x.billNo ?? ''} closed.`, () => apiFull('POST', `${base}/sales/${x.id}/reopen`, {}));

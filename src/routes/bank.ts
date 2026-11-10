@@ -20,6 +20,7 @@ import { addDays, istDay, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { unsettleStatements } from '../cards';
+import { ADVANCE_TAG, creditChecks, HELD, heldKindOf, heldList, isHeldDone, OWED_PREFIX, type HeldKind } from '../extra';
 import { cardReportsStatus, syncCardFolder } from '../cardDrive';
 import { shiftEntries } from '../entries';
 
@@ -174,6 +175,9 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
     WHERE r.business_id = ? AND r.day BETWEEN ? AND ? AND (? IS NULL OR r.account_id = ?) AND (? IS NULL OR r.status = ?)
     ORDER BY r.posted_at, r.tran_id LIMIT 3000`, bid, from, to, account, account, status, status);
   const [rules, sug, parties, history] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to), loadParties(db, bid), loadHistory(db, bid)]);
+  // Not a sale (Stage 5): interest named in the description suggests the interest head, when nothing better is known.
+  const interestHead = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = 'interest received'", bid);
+  const looksInterest = (r: { direction: string; description: string }) => r.direction === 'CR' && /\bINT(EREST)?\.?\s*(PD|PAID|CR|CREDIT)\b|\bINTEREST\b/i.test(r.description);
   const plainNote = (v: string | null) => (v && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay|Paid securely v|Navi UPI|Paid in seconds)$/i.test(v.trim()) ? v.trim() : '');
   return c.json({
     from, to,
@@ -191,7 +195,7 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           const item = plainNote(r.remark);
           const party = (r.vpa ? byName(parties, r.vpa) : null) ?? (item ? inText(parties, item) : null);
           const head = party ? pickHead(party, history, item) : null;
-          return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? null, headChoices: head?.choices ?? [], learned: !!head?.headId };
+          return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? (looksInterest(r) ? interestHead?.id ?? null : null), headChoices: head?.choices ?? [], learned: !!head?.headId };
         })() : null,
         clear: sug.clear.has(r.id),
       };
@@ -482,7 +486,8 @@ bankRoutes.post('/businesses/:businessId/sales/:txId/close', requireRole('sales.
   if (!tx) fail(404, 'Not found.');
   if (tx.payment_mode !== 'upi' || tx.matched_bank_row || tx.match_status !== 'awaiting_bank_match') fail(409, 'Only a UPI bill still waiting for its credit can be closed.');
   const days = Math.round((Date.parse(istDay(Date.now())) - Date.parse(tx.shift_day)) / 86400000);
-  if (days <= WATCH_DAYS) fail(400, `This bill is watched for ${WATCH_DAYS} days; it can be closed after that.`);
+  // Owed by a guest or company (Stage 5): known now, so it need not wait out the watch.
+  if (days <= WATCH_DAYS && !note.startsWith(OWED_PREFIX)) fail(400, `This bill is watched for ${WATCH_DAYS} days; it can be closed after that.`);
   const t = now();
   const user = c.get('user').id;
   await db.batch([
@@ -548,6 +553,88 @@ bankRoutes.post('/businesses/:businessId/sales/:txId/reopen', requireRole('sales
     stmt(db, 'DELETE FROM closed_bills WHERE transaction_id = ?', id),
     stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.reopened', id, { note: closed.note }, { matchStatus: 'awaiting_bank_match' }, t)),
   ]);
+  return c.json({ ok: true });
+});
+
+// ---- Money received with no bill (Stage 5, approved 10 Nov 2026)
+
+/** What an unmatched credit could be, before it is called extra: an owed bill, part of a bill, a payment made twice. */
+bankRoutes.get('/businesses/:businessId/bank-rows/:rowId/checks', requireRole('bank.link'), async (c) => {
+  const row = await getRow(c.env.DB, c.get('businessId'), c.req.param('rowId'));
+  if (!row || row.direction !== 'CR') fail(404, 'Not found.');
+  return c.json(await creditChecks(c.env.DB, c.get('businessId'), row!));
+});
+
+/** A credit is the payment of a bill closed as owed: the bill is opened again and matched to it. */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/owed-paid', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row || row.kind !== 'upi_in') fail(404, 'Not found.');
+  if (row!.status !== 'unmatched') fail(409, 'This credit is already matched, booked or held.');
+  const txId = (await body(c)).txId;
+  if (typeof txId !== 'string' || !isUuid(txId)) fail(400, 'Choose the bill.');
+  const owed = (await creditChecks(db, bid, row!)).owed.find((x) => x.txId === txId);
+  if (!owed) fail(409, 'This bill is not closed as owed, or its amount is more than ₹10 from the credit.');
+  const t = now();
+  const user = c.get('user').id;
+  await db.batch([
+    stmt(db, "UPDATE transactions SET match_status = 'awaiting_bank_match' WHERE id = ? AND matched_bank_row IS NULL", txId),
+    stmt(db, 'DELETE FROM closed_bills WHERE transaction_id = ?', txId),
+    stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.reopened', txId as string, { note: owed!.note }, { paidBy: row!.id }, t)),
+    ...matchStatements(db, bid, row!.id, [txId as string], user, t),
+  ]);
+  return c.json({ ok: true });
+});
+
+/** Not income: a refund due or a tip for staff. The credit is held with a note until the money goes back or out. */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/hold', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row || row.direction !== 'CR') fail(404, 'Not found.');
+  if (row!.status !== 'unmatched') fail(409, 'This line is already matched, booked or held.');
+  const data = await body(c);
+  const kind = data.kind === 'refund' || data.kind === 'tip' ? (data.kind as HeldKind) : fail(400, 'Choose refund due or tip for staff.');
+  const who = text(data, 'note', kind === 'refund' ? 'To whom' : 'Note', { max: 200 })!;
+  const note = `${HELD[kind as HeldKind]} · ${who}`;
+  const t = now();
+  const user = c.get('user').id;
+  await db.batch([
+    stmt(db, "UPDATE bank_rows SET status = 'ignored', note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", note, user, t, row!.id),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.hold', row!.id, { status: 'unmatched' }, { status: 'ignored', kind, note }, t)),
+  ]);
+  return c.json({ ok: true, note });
+});
+
+bankRoutes.get('/businesses/:businessId/held', requireRole('bank.link'), async (c) => c.json({ held: await heldList(c.env.DB, c.get('businessId')) }));
+
+/** A held refund paid back (matched to the payment going out), or a held tip paid out to staff. */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/held-done', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  const kind = heldKindOf(row?.note ?? null);
+  if (!row || row.status !== 'ignored' || !kind) fail(404, 'This credit is not held.');
+  if (isHeldDone(row!.note)) fail(409, 'This is already paid.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  if (kind === 'refund') {
+    const outId = (await body(c)).outRowId;
+    if (typeof outId !== 'string' || !isUuid(outId)) fail(400, 'Choose the payment that paid it back.');
+    const out = await getRow(db, bid, outId as string);
+    if (!out || out.direction !== 'DR' || out.status !== 'unmatched') fail(409, 'That payment is not an open payment out.');
+    if (out!.amount_paise !== row!.amount_paise || out!.posted_at <= row!.posted_at) fail(400, 'The refund must be the same amount, after the credit.');
+    statements.push(
+      stmt(db, "UPDATE bank_rows SET status = 'ignored', pair_row_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'",
+        row!.id, `Refund paid back for the ${istDay(row!.posted_at)} credit`, user, t, out!.id),
+      stmt(db, 'UPDATE bank_rows SET note = ? WHERE id = ?', `${row!.note} · paid back ${istDay(out!.posted_at)}`, row!.id));
+  } else {
+    statements.push(stmt(db, 'UPDATE bank_rows SET note = ? WHERE id = ?', `${row!.note} · paid out ${istDay(t)}`, row!.id));
+  }
+  statements.push(stmt(db, AUDIT, ...audit(bid, user, 'bank.held_done', row!.id, { note: row!.note }, { kind }, t)));
+  await db.batch(statements);
   return c.json({ ok: true });
 });
 
@@ -1098,6 +1185,8 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('
     // A card settlement booked against this credit comes apart with it.
     ...unsettleStatements(db, row.id),
     stmt(db, "UPDATE bank_rows SET status = 'unmatched', transaction_id = NULL, note = NULL, done_by = NULL, done_at = NULL WHERE id = ?", row.id),
+    // A held credit's refund going out is opened again with it (Stage 5).
+    ...(heldKindOf(row.note) ? [stmt(db, "UPDATE bank_rows SET status = 'unmatched', note = NULL, pair_row_id = NULL, done_by = NULL, done_at = NULL WHERE pair_row_id = ? AND direction = 'DR' AND status = 'ignored'", row.id)] : []),
     ...(row.transaction_id ? [stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", row.transaction_id)] : []),
     stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.reopen', row.id, { status: row.status, note: row.note, transaction: tx }, { status: 'unmatched' }, t)),
   ]);

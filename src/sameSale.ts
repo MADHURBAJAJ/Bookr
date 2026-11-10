@@ -4,27 +4,32 @@ import { all, one, stmt, type DB } from './db';
 import { matchStatements, settleOnCredit } from './bank';
 import type { Card } from './explain';
 import { addDays, shiftWindow } from './time';
+import { ADVANCE_DAYS, ADVANCE_TAG } from './extra';
 
 const WATCH = 7;
 /** Small amounts repeat all day: with more than one bill of the amount, they are not worth a card. */
 const SMALL_PAISE = 10000;
 
-export interface BookedSale { id: string; amountPaise: number; postedAt: number; txId: string; txDay: string; headId: string | null; headName: string | null; accountName: string | null }
-export interface WaitingBill { billNo: string; amountPaise: number; day: string; txId?: string; comparisonId: string; swPaise: number | null; rgPaise: number | null; headName: string | null }
+export interface BookedSale { id: string; amountPaise: number; postedAt: number; txId: string; txDay: string; headId: string | null; headName: string | null; accountName: string | null; advance?: number }
+export interface WaitingBill { billNo: string; amountPaise: number; day: string; txId?: string; comparisonId: string; swPaise: number | null; rgPaise: number | null; headName: string | null; txCount?: number }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
 export const dayName = (day: string) => new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', day: 'numeric', month: 'short' }).format(new Date(`${day}T00:00:00Z`));
 
-/** Credits booked under a head that a bill type uses (so as a sale, not as interest or rent), from the watch before this shift to the day after. */
+/**
+ * Credits booked under a head that a bill type uses (so as a sale, not as interest or rent), from the watch before this
+ * shift to the day after. An advance (Stage 5, 10 Nov 2026) is looked for over ADVANCE_DAYS: a room is often paid ahead.
+ */
 export function bookedSalesAround(db: DB, businessId: string, day: string) {
   return all<BookedSale>(db, `
-    SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt, t.id AS txId, t.day AS txDay, t.head_id AS headId, h.name AS headName, a.name AS accountName
+    SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt, t.id AS txId, t.day AS txDay, t.head_id AS headId, h.name AS headName, a.name AS accountName,
+      (t.narration LIKE ?) AS advance
     FROM bank_rows r JOIN transactions t ON t.id = r.transaction_id LEFT JOIN heads h ON h.id = t.head_id LEFT JOIN accounts a ON a.id = r.account_id
     WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'booked' AND t.type = 'income' AND t.source = 'bank_sheet'
       AND t.head_id IN (SELECT head_id FROM bill_type_heads WHERE business_id = ?)
-      AND r.posted_at >= ? AND r.posted_at < ? ORDER BY r.posted_at`,
-    businessId, businessId, shiftWindow(addDays(day, -WATCH)).from, shiftWindow(addDays(day, 1)).to);
+      AND (r.posted_at >= ? OR (t.narration LIKE ? AND r.posted_at >= ?)) AND r.posted_at < ? ORDER BY r.posted_at`,
+    `%${ADVANCE_TAG}%`, businessId, businessId, shiftWindow(addDays(day, -WATCH)).from, `%${ADVANCE_TAG}%`, shiftWindow(addDays(day, -ADVANCE_DAYS)).from, shiftWindow(addDays(day, 1)).to);
 }
 
 /** Each credit with one bill of its amount, each used once, the credit nearest the shift first. */
@@ -33,7 +38,8 @@ export function pairBooked(bills: WaitingBill[], booked: BookedSale[], day: stri
   const free = new Set(bills);
   const out: { bill: WaitingBill; credit: BookedSale; others: number }[] = [];
   for (const credit of [...booked].sort((a, b) => Math.abs(end - a.postedAt) - Math.abs(end - b.postedAt))) {
-    const same = bills.filter((b) => b.amountPaise === credit.amountPaise);
+    // An advance may pay one payment line of a bill paid in parts; any other credit pays a bill paid in one go.
+    const same = bills.filter((b) => b.amountPaise === credit.amountPaise && (credit.advance || (b.txCount ?? 1) === 1));
     const bill = same.find((b) => free.has(b));
     if (!bill || (credit.amountPaise < SMALL_PAISE && same.length > 1)) continue;
     free.delete(bill);
@@ -48,7 +54,8 @@ export function sameSaleCard(base: string, p: { bill: WaitingBill; credit: Booke
   const trial = !bill.txId;
   return {
     key: `same-sale:${credit.id}:${bill.comparisonId}`, kind: 'same_sale', billNos: [bill.billNo],
-    title: `${rs(credit.amountPaise)} booked as ${credit.headName ?? 'a sale'} on ${onBook}: is it bill ${bill.billNo}?`,
+    title: credit.advance ? `Advance of ${rs(credit.amountPaise)} received on ${onBook}: does bill ${bill.billNo} use it?`
+      : `${rs(credit.amountPaise)} booked as ${credit.headName ?? 'a sale'} on ${onBook}: is it bill ${bill.billNo}?`,
     evidence: [
       counted ? 'If this is the same sale, it is counted twice now: once from the bank, once from the bill.' : 'If this is the same sale, this bill can never find a credit, because its credit is already booked.',
       `Same sale keeps it on ${onBook}, matched to this credit.${trial ? ' It is done when you confirm the shift.' : ''} Undo puts the booking back.`,
@@ -70,11 +77,11 @@ export async function sameSaleCards(db: DB, businessId: string, day: string, ski
   if (!booked.length) return [];
   const rows = await all<WaitingBill & { onCredit: number; txId: string }>(db, `
     SELECT t.id AS txId, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.shift_day AS day, t.comparison_id AS comparisonId, c.sw_amount_paise AS swPaise, c.rg_amount_paise AS rgPaise,
-      h.name AS headName, coalesce(json_extract(t.ocr_original, '$.countOnCredit'), 0) AS onCredit
+      h.name AS headName, coalesce(json_extract(t.ocr_original, '$.countOnCredit'), 0) AS onCredit,
+      (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income') AS txCount
     FROM transactions t JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN register_rows rr ON rr.id = c.register_row_id LEFT JOIN heads h ON h.id = t.head_id
     WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
-      AND (rr.id IS NULL OR (rr.paid_with_row_id IS NULL AND NOT EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = rr.id)))
-      AND (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income') = 1`, businessId, day);
+      AND (rr.id IS NULL OR (rr.paid_with_row_id IS NULL AND NOT EXISTS (SELECT 1 FROM register_rows m WHERE m.paid_with_row_id = rr.id)))`, businessId, day);
   const counted = new Map(rows.map((r) => [r.txId, !r.onCredit]));
   return pairBooked(rows.filter((r) => !skip.has(r.txId)), booked, day).map((p) => sameSaleCard(`/businesses/${businessId}`, p, counted.get(p.bill.txId!) ?? true));
 }
