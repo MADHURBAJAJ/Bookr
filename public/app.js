@@ -124,7 +124,7 @@ const sheetKey = (bizId) => `bookr.sheet.${bizId}`;
 const lastSheet = (bizId) => { try { return JSON.parse(localStorage.getItem(sheetKey(bizId)) ?? 'null'); } catch { return null; } };
 const rememberSheet = (bizId, u) => { try { localStorage.setItem(sheetKey(bizId), JSON.stringify({ id: u.id, day: u.day })); } catch { /* storage unavailable */ } };
 const screenKey = (bizId) => `bookr.screen.${bizId}`;
-const SHIFT_SCREENS = [['review', 'Register', 'rows.edit'], ['compare', 'Compare sales', 'sales.view'], ['reconcile', 'Reconcile', 'bank.link']];
+const SHIFT_SCREENS = [['review', 'Register', 'rows.edit'], ['compare', 'Compare sales', 'sales.view'], ['reconcile', 'Reconcile', 'sales.view']];
 /** Where a shift screen opens for a day. Review: the sheet last opened, if it is of that day; else the day's first page. */
 function screenHref(biz, key, day) {
   if (!day) return `#/b/${biz.id}/${key}`;
@@ -2913,6 +2913,24 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
       const members = rows.filter((x) => x.groupId === c.groupId);
       return [groupRow(groupOf(c), members), ...members.map((x) => rowHtml(x, c.groupId, true))];
     })}</tbody></table></div>`;
+  const reportsHtml = html`          ${v.reports.map((r) => html`<div class="note">Report ${when(r.coversFrom)} to ${when(r.coversTo)}${confirmed || !biz.actions.includes('sales.import') ? '' : html` · <a href="#" data-cover="${r.id}" data-from="${r.coversFrom}" data-to="${r.coversTo}">Change</a>`}</div>`)}
+          ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/bringin/${day}">Bring in a report</a>` : ''}
+          ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review">Open register pages</a>` : ''}`;
+  const warningsHtml = html`${(v.warnings ?? []).map((w) => cashWarnHtml(w, v, confirmed || !canDecide))}`;
+  const conflictsHtml = html`${v.conflicts.length ? html`<section class="card">
+        <h2>Bills that differ between two software reports</h2>
+        <div class="note">The same bill came in twice with different values. Nothing was overwritten. Choose which to keep.</div>
+        <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported</th><th>New file</th><th></th></tr></thead><tbody>
+          ${v.conflicts.map((k) => html`<tr><td class="mono">${k.billNo}</td>
+            <td><div class="mono">${money(k.existing.amountPaise)}</div><div class="note">${MODE_LABELS[k.existing.mode]} · ${when(k.existing.paidAt)}</div></td>
+            <td><div class="mono">${money(k.incoming.amountPaise)}</div><div class="note">${MODE_LABELS[k.incoming.mode]} · ${when(k.incoming.paidAt)}</div></td>
+            <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">Keep imported</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">Use new file</button></div>` : ''}</td></tr>`)}
+        </tbody></table></div></section>` : ''}`;
+  const reopenHtml = html`${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`;
+  // The Shift menu on Reconcile: the report's covered times, and reopening a saved shift (Owner).
+  const shiftMenu = html`<details class="menu" id="shiftmenu"><summary class="btn plain" style="display:inline-flex;align-items:center">Shift ⋯</summary><div class="menu-pop" style="min-width:320px;gap:8px">
+    ${reportsHtml}<div id="coveredit"></div>
+    ${confirmed ? reopenHtml : v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}</div></details>`;
   const bar = html`    <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
@@ -2925,30 +2943,18 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
         <span class="tchip ${v.registerRows ? 'ok' : 'warn'}">Register · ${v.registerPages} page${v.registerPages === 1 ? '' : 's'}, ${v.registerRows} bills</span>
         ${comps.length ? html`<span class="tchip">${comps.length} complimentary</span>` : ''}
         ${v.bank ? html`<span class="tchip ${v.bank.covered ? 'ok' : 'warn'}" title="${v.bank.lastBankAt ? `Latest UPI line in Bookr: ${when(v.bank.lastBankAt)}` : 'No UPI bank lines in Bookr yet'}">${v.bank.covered ? 'Bank in' : v.bank.lastBankAt ? `Bank up to ${when(v.bank.lastBankAt)}` : 'Bank not in yet'}</span>` : ''}
-        <details class="menu"><summary class="linkbtn">Details</summary><div class="menu-pop" style="min-width:300px">
-          ${v.reports.map((r) => html`<div class="note">Report ${when(r.coversFrom)} to ${when(r.coversTo)}${confirmed || !biz.actions.includes('sales.import') ? '' : html` · <a href="#" data-cover="${r.id}" data-from="${r.coversFrom}" data-to="${r.coversTo}">Change</a>`}</div>`)}
-          ${biz.actions.includes('sales.import') ? html`<a href="#/b/${biz.id}/bringin/${day}">Bring in a report</a>` : ''}
-          ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review">Open register pages</a>` : ''}
-        </div></details>
+        ${onReconcile ? '' : html`<details class="menu"><summary class="linkbtn">Details</summary><div class="menu-pop" style="min-width:300px">${reportsHtml}</div></details>`}
       </div>
       <div class="cmp-progress" aria-label="Bills of this shift">
         <div class="pgbar">${seg(matches, 'm', 'Match')}${seg(auto.length, 'a', 'Decided by Bookr')}${seg(byPerson.length, 'd', 'Decided')}${seg(open.length, 'o', 'To decide')}</div>
         <div class="tiny">${matches} match · ${auto.length} by Bookr · ${byPerson.length} decided · <strong>${open.length} to decide</strong>${onCredit.length ? ` · ${onCredit.length} UPI on one side (₹ ${rs(onCreditPaise)}) counted when the bank credit arrives` : ''}</div>
       </div>
-      <div id="coveredit"></div>
+      ${onReconcile ? '' : html`<div id="coveredit"></div>`}
     </section>`;
   const banners = html`    ${v.gaps.map((g) => html`<div class="demo-band">Missing ${when(g.from)} to ${when(g.to)}. Upload the report for those hours, or correct a report's covered period.</div>`)}
-    ${(v.warnings ?? []).map((w) => cashWarnHtml(w, v, confirmed || !canDecide))}
+    ${onReconcile ? '' : warningsHtml}
     ${auto.some((c) => c.numberFlags?.length) ? html`<div class="cmp-warn">⚠ ${blockerHtml(`Bookr counted these before their numbers looked wrong. Check them under Decided by Bookr: ${auto.filter((c) => c.numberFlags?.length).map((c) => c.billNo).join(', ')}.`, v)}</div>` : ''}`;
-  const shiftPane = html`      ${v.conflicts.length ? html`<section class="card">
-        <h2>Bills that differ between two software reports</h2>
-        <div class="note">The same bill came in twice with different values. Nothing was overwritten. Choose which to keep.</div>
-        <div class="scroll"><table style="min-width:640px"><thead><tr><th>Bill</th><th>Already imported</th><th>New file</th><th></th></tr></thead><tbody>
-          ${v.conflicts.map((k) => html`<tr><td class="mono">${k.billNo}</td>
-            <td><div class="mono">${money(k.existing.amountPaise)}</div><div class="note">${MODE_LABELS[k.existing.mode]} · ${when(k.existing.paidAt)}</div></td>
-            <td><div class="mono">${money(k.incoming.amountPaise)}</div><div class="note">${MODE_LABELS[k.incoming.mode]} · ${when(k.incoming.paidAt)}</div></td>
-            <td>${canDecide ? html`<div class="form-row"><button class="btn plain" data-conflict="${k.id}" data-d="keep_existing">Keep imported</button><button class="btn plain" data-conflict="${k.id}" data-d="use_incoming">Use new file</button></div>` : ''}</td></tr>`)}
-        </tbody></table></div></section>` : ''}
+  const shiftPane = html`      ${onReconcile ? '' : conflictsHtml}
       <section class="card" style="gap:10px">
         <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px"><h2 id="decidehead">To decide (${open.length})</h2>
           ${backed.length ? html`<button class="btn" type="button" id="acceptbank" title="Each choice marked 'bank' is the side the bank credit agrees with">Accept ${backed.length} bank-backed choice${backed.length > 1 ? 's' : ''}</button>` : ''}
@@ -2974,7 +2980,7 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
           <h2>${confirmed ? 'Saved' : 'Before saving'}</h2>
           ${confirmed ? html`
             <div class="ok-msg">Confirmed ${when(v.confirmedAt)}. UPI sales now wait for their bank credit${onCredit.length ? '; bills found on one side only count on the day their credit arrives' : ''}.</div>
-            ${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`
+            ${onReconcile ? html`<div class="note">${biz.role === 'owner' ? 'To reopen it, use the Shift menu at the top.' : 'Only an Owner can reopen a saved shift.'}</div>` : reopenHtml}`
           : html`
             ${v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}
             ${v.blockers.length ? html`<ul class="note" style="margin:0;padding-left:18px">${v.blockers.map((b) => html`<li>${blockerHtml(b, v)}</li>`)}</ul>` : html`<div class="ok-msg">Everything is decided. Save the shift on Reconcile.</div>`}
@@ -3109,13 +3115,6 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
       } catch (err) { showError(bulk.querySelector('.form-msg'), err); }
     });
   }
-  root.querySelectorAll('[data-cashupigo]').forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true;
-    try {
-      await apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.cashupigo}/paid-by-upi`, { creditId: b.dataset.credit, billType: b.dataset.type });
-      reload();
-    } catch (err) { b.disabled = false; showError(b.closest('[data-cashupi]').querySelector('.form-msg'), err); }
-  }));
   root.querySelectorAll('[data-gobill]').forEach((a) => a.addEventListener('click', (e) => {
     e.preventDefault();
     const row = root.querySelector(`tr[data-bill="${CSS.escape(a.dataset.gobill)}"]`);
@@ -3130,7 +3129,6 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
     row.classList.add('row-found');
     row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }));
-  root.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
   document.getElementById('acceptbank')?.addEventListener('click', (e) => {
     e.target.disabled = true;
     act(async () => {
@@ -3144,6 +3142,18 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
     root.querySelectorAll('button[data-kind]').forEach((x) => x.classList.toggle('on', x === b));
     showKind(b.closest('section'), b.dataset.kind);
   }));
+  };
+  // Conflicts, "cash bill paid by UPI", covered times and reopen: on Compare sales in the page, on Reconcile in To do and the Shift menu.
+  const wireShift = (root, msg) => {
+  const act = async (fn) => { try { await fn(); await reload(); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
+  root.querySelectorAll('[data-cashupigo]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.cashupigo}/paid-by-upi`, { creditId: b.dataset.credit, billType: b.dataset.type });
+      reload();
+    } catch (err) { b.disabled = false; showError(b.closest('[data-cashupi]').querySelector('.form-msg'), err); }
+  }));
+  root.querySelectorAll('[data-conflict]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('PUT', `/businesses/${biz.id}/conflicts/${b.dataset.conflict}`, { decision: b.dataset.d }))));
   const reopen = document.getElementById('reopen');
   reopen && onSubmit(reopen, async (d) => { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/reopen`, { reason: d.reason }); reload(); });
   root.querySelectorAll('[data-cover]').forEach((a) => a.addEventListener('click', (e) => {
@@ -3159,7 +3169,7 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
     });
   }));
   };
-  return { bar, banners, shiftPane, notMatched, shiftOptions, wire };
+  return { bar, banners, shiftPane, notMatched, shiftOptions, wire, wireShift, warningsHtml, conflictsHtml, shiftMenu, open };
 }
 
 async function compareView(biz, day) {
@@ -3202,6 +3212,7 @@ async function compareView(biz, day) {
   const msg = document.getElementById('cmsg');
   wireShiftBar(biz, P.shiftOptions);
   P.wire(app, msg);
+  P.wireShift(app, msg);
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
   wireCashPanel(biz, day, () => compareView(biz, day), msg);
   wireWaiting(biz, app, act);
@@ -3768,6 +3779,9 @@ const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist"
   <a role="tab" class="${tab === 'shift' ? 'on' : ''}" href="#/b/${biz.id}/reconcile${day ? `/${day}` : ''}">This shift</a>
   <a role="tab" class="${tab === 'all' ? 'on' : ''}" href="#/b/${biz.id}/reconcile/all">All unmatched</a></div>`;
 const RECONCILE_VIEW_KEY = 'bookr.reconcile.view';
+// The shift page opens on To do (approved 10 Nov 2026); a reload after a change stays on the tab in use.
+let recTopNow = 'todo';
+let recKeep = null;
 const reconcileViewPref = () => { try { return localStorage.getItem(RECONCILE_VIEW_KEY) === 'open' ? 'open' : 'cards'; } catch { return 'cards'; } };
 
 /** Save reconcile (approved 9 Nov 2026): what still stops saving, and the button. Saving books the shift's income and makes every match. */
@@ -3813,7 +3827,7 @@ function choicesHtml(r) {
 }
 
 const RECONCILE_TAB_KEY = 'bookr.reconcile.tab';
-const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card', 'all', 'wait'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
+const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 
 /** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
@@ -3860,9 +3874,40 @@ function entriesHtml(biz, day, t, mode, cv) {
     <div class="note">✎ marks a change: the register as read and as corrected, the side used when the register and the software differ, or a mode changed later.</div></details>`;
 }
 
+/**
+ * The shift page for Entry staff and Viewers (approved 10 Nov 2026): All bills and Waiting, to look at. The server sends
+ * them no bank data, and only Owner and Accountant can decide or save.
+ */
+async function reconcileReadOnly(biz, day) {
+  const [{ shifts }, cv, cash, waitingBills, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts`),
+    api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
+    api('GET', `/businesses/${biz.id}/waiting-bills`).catch(() => null), api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
+  cv.reasons = cash.reasons;
+  const reload = () => reconcileView(biz, day);
+  drawerReload = reload;
+  const P = compareParts(biz, day, cv, shifts, { reload, back: `#/b/${biz.id}/reconcile/${day}`, onReconcile: true });
+  const top = recKeep?.day === day && recKeep.top === 'wait' ? 'wait' : 'all';
+  recKeep = null;
+  render(shell(biz, 'reconcile', 'Reconcile', '', html`
+    ${shiftBar(biz, day, 'reconcile')}
+    <div class="note">You can look at this shift's bills here. Only an Owner or Accountant can decide differences and save the shift.</div>
+    <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
+      <button type="button" role="tab" data-rtopbtn="all" class="${top === 'all' ? 'on' : ''}">All bills</button><button type="button" role="tab" data-rtopbtn="wait" class="${top === 'wait' ? 'on' : ''}">Waiting</button></div>
+    <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>${P.bar}<div id="allmsg"></div>${P.banners}${P.warningsHtml}${P.shiftPane}</div>
+    <div data-rtop="wait" ${top === 'wait' ? '' : 'hidden'}>${waitingTabHtml(biz, waitingBills, awaiting?.sales ?? [], false)}</div>`));
+  wireShell();
+  wireShiftBar(biz, P.shiftOptions);
+  P.wire(app.querySelector('[data-rtop="all"]'), document.getElementById('allmsg'));
+  app.querySelectorAll('[data-rtopbtn]').forEach((b) => b.addEventListener('click', () => {
+    recTopNow = b.dataset.rtopbtn;
+    app.querySelectorAll('[data-rtopbtn]').forEach((x) => x.classList.toggle('on', x === b));
+    app.querySelectorAll('[data-rtop]').forEach((x) => { x.hidden = x.dataset.rtop !== b.dataset.rtopbtn; });
+  }));
+}
+
 async function reconcileView(biz, dayArg) {
   const [dayPart, qs = ''] = String(dayArg ?? '').split('?');
-  if (dayPart === 'all') return unmatchedView(biz);
+  if (dayPart === 'all' && biz.actions.includes('bank.link')) return unmatchedView(biz);
   const more = Number(new URLSearchParams(qs).get('more')) || 1;
   let day = isDay(dayPart) ? dayPart : null;
   if (!day) {
@@ -3874,6 +3919,7 @@ async function reconcileView(biz, dayArg) {
     render(shell(biz, 'reconcile', 'Reconcile', '', html`<section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
+  if (!biz.actions.includes('bank.link')) return reconcileReadOnly(biz, day);
   const [r, v, { heads }, ent, cash, cv, waitingBills, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
     api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
@@ -3881,7 +3927,10 @@ async function reconcileView(biz, dayArg) {
     api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/waiting-bills`).catch(() => null),
     api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
   const tab = reconcileTabPref();
-  const reload = () => reconcileView(biz, `${day}?more=${v.moreHours}`);
+  const top = recKeep?.day === day ? recKeep.top : 'todo';
+  recKeep = null;
+  recTopNow = top;
+  const reload = () => { recKeep = { day, top: recTopNow }; return reconcileView(biz, `${day}?more=${v.moreHours}`); };
   drawerReload = reload;
   const s = r.strip;
   const days = [...new Set([day, ...r.shifts.map((x) => x.day)])].sort();
@@ -3959,22 +4008,64 @@ async function reconcileView(biz, dayArg) {
   cv.reasons = cash.reasons;
   const P = compareParts(biz, day, cv, r.shifts, { reload, back: `#/b/${biz.id}/reconcile/${day}`, onReconcile: true });
   const allLeft = cv.comparisons.filter((c) => !c.decision && ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'].includes(c.difference)).length;
+  // To do (approved 10 Nov 2026): saving, old POS bills, import conflicts, cash bills paid by UPI, numbers to check, and
+  // what is left on the other tabs.
+  const canDecide = biz.actions.includes('sales.decide');
+  const checks = r.confirmed ? [] : cv.comparisons.filter((c) => (!c.decision || c.auto) && c.difference !== 'match' && c.difference !== 'complimentary'
+    && (c.numberFlags?.length || (!c.software && isOddBill(c.billNo) && !c.decision) || (c.reissuedAs && !c.decision)));
+  const checkRow = (c) => html`<div class="ent-line">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
+      <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button>
+      <strong class="amount" style="margin-left:auto">₹ ${money((c.register ?? c.software)?.amountPaise ?? 0)}</strong></div>
+    ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
+    ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
+    ${c.reissuedAs ? html`<div class="tiny" style="color:var(--teal-ink)">Looks issued again as bill ${c.reissuedAs} (same amount, minutes later, in the register). If so, leave this one out.</div>` : ''}
+    ${c.auto ? html`<div class="tiny">Counted by Bookr before the number looked wrong${c.note ? `: ${c.note}` : ''}.</div>` : ''}
+    ${canDecide ? html`<div style="margin-top:4px">${decideMenuHtml(c, cv)}</div>` : ''}</div>`;
+  const waitN = (waitingBills?.bills ?? []).filter((b) => b.unresolved).length + (waitingBills?.oddNumbers?.length ?? 0);
+  const cashN = ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0);
+  const cardN = Math.max(ent.card.left, cardLeft);
+  const leftLines = [
+    allLeft && [`${allLeft} bill${allLeft === 1 ? '' : 's'} where the register and the software differ, to decide`, 'all'],
+    cashN && [`Cash: ${ent.cash.left ? `${ent.cash.left} bill${ent.cash.left === 1 ? '' : 's'} left` : ''}${ent.cash.left && cash.differencePaise && !cash.settled ? ', and ' : ''}${cash.differencePaise && !cash.settled ? 'the cash count differs' : ''}`, 'pay:cash'],
+    ent.upi.left && [`UPI: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched`, 'pay:upi'],
+    cardN && [`Card: ${cardN} left`, 'pay:card'],
+    waitN && [`${waitN} bill${waitN === 1 ? '' : 's'} from other shifts waiting too long or with a number that can never match`, 'wait'],
+  ].filter(Boolean);
+  // Saving is on To do too: an unsaved shift is never ✓ here.
+  const todoN = checks.length + (cv.conflicts?.length ? 1 : 0) + (cv.warnings?.length ?? 0) + (r.oldPos?.bills?.length ?? 0) + (r.confirmed ? 0 : 1);
+  const todoHtml = html`
+    ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>` : saveBar(biz, r)}
+    ${oldPosHtml(biz, r)}
+    ${P.conflictsHtml}
+    ${P.warningsHtml}
+    ${checks.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Numbers to check: ${checks.length}</strong><span class="tchip warn">Check the number</span></div>
+      <div class="note">Open the row to compare it with the photo, then decide.</div>${checks.map(checkRow)}</section>` : ''}
+    <section class="card" style="gap:8px"><h2>Left on the other tabs</h2>
+      ${leftLines.length ? leftLines.map(([t, go]) => html`<div class="list-row"><span>${t}</span><button type="button" class="btn plain dchip" data-goto="${go}">Open ›</button></div>`)
+        : html`<div class="ok-msg">Nothing left on the other tabs.</div>`}</section>`;
+  const topBtn = (key, label, n) => html`<button type="button" role="tab" data-rtopbtn="${key}" class="${top === key ? 'on' : ''}" aria-selected="${top === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
     ${shiftBar(biz, day, 'reconcile')}
-    ${recTabs(biz, day, 'shift')}
-    <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:4px 0 10px">
-      ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}${tabBtn('all', 'All bills', allLeft)}${tabBtn('wait', 'Waiting', (waitingBills?.bills ?? []).filter((b) => b.unresolved).length + (waitingBills?.oddNumbers?.length ?? 0))}</div>
-    <div data-rpanel="wait" ${tab === 'wait' ? '' : 'hidden'}>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">${recTabs(biz, day, 'shift')}${P.shiftMenu}</div>
+    <div id="recmsg"></div>
+    <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
+      ${topBtn('todo', 'To do', todoN)}${topBtn('pay', 'Payments', cashN + ent.upi.left + cardN)}${topBtn('all', 'All bills', allLeft)}${topBtn('wait', 'Waiting', waitN)}</div>
+    <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}</div>
+    <div data-rtop="wait" ${top === 'wait' ? '' : 'hidden'}>
       <div id="waitmsg"></div>
       ${waitingTabHtml(biz, waitingBills, awaiting?.sales ?? [], biz.actions.includes('sales.decide'))}
     </div>
-    <div data-rpanel="all" ${tab === 'all' ? '' : 'hidden'}>
+    <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>
       ${P.bar}
       <div id="allmsg"></div>
       ${P.banners}
       ${P.shiftPane}
     </div>
+    <div data-rtop="pay" ${top === 'pay' ? '' : 'hidden'}>
+    <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:0 0 10px">
+      ${tabBtn('cash', 'Cash', cashN)}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', cardN)}</div>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
       ${cashPanelHtml(biz, cash)}
       ${entriesHtml(biz, day, ent.cash, 'cash', cv)}
@@ -3999,16 +4090,13 @@ async function reconcileView(biz, dayArg) {
         <div><div class="tiny">Credits not matched yet</div><div class="amount rec-n" style="color:${s.creditsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.creditsLeftPaise)}</div><div class="tiny">${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}${s.creditsLeft && covered ? ` · ${s.creditsNoBill ?? 0} with no bill of that amount` : ''}</div></div>
       </div>
     </section>
-    <div id="recmsg"></div>
-    ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>`
-      : saveBar(biz, r)}
-    ${oldPosHtml(biz, r)}
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
     <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
     ${doneFold}
     ${choicesHtml(r)}
     ${entriesHtml(biz, day, ent.upi, 'upi', cv)}
+    </div>
     </div>`));
   wireShell();
   app.querySelectorAll('[data-rtab]').forEach((b) => b.addEventListener('click', () => {
@@ -4053,11 +4141,25 @@ async function reconcileView(biz, dayArg) {
     try { await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${b.dataset.unchoose}`, {}); await reload(); }
     catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); }
   }));
-  app.querySelectorAll('[data-rpanel]:not([data-rpanel="all"])').forEach((root) => wireDecideMenu(biz, day, cv, root, async (fn) => {
+  app.querySelectorAll('[data-rpanel], [data-rtop="todo"]').forEach((root) => wireDecideMenu(biz, day, cv, root, async (fn) => {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   }, `#/b/${biz.id}/reconcile/${day}`));
-  P.wire(app.querySelector('[data-rpanel="all"]'), document.getElementById('allmsg'));
-  wireWaiting(biz, app.querySelector('[data-rpanel="wait"]'), async (fn) => {
+  P.wire(app.querySelector('[data-rtop="all"]'), document.getElementById('allmsg'));
+  P.wireShift(app.querySelector('[data-rtop="todo"]'), document.getElementById('recmsg'));
+  P.wireShift(document.getElementById('shiftmenu'), document.getElementById('recmsg'));
+  const showTop = (key) => {
+    recTopNow = key;
+    app.querySelectorAll('[data-rtopbtn]').forEach((x) => { x.classList.toggle('on', x.dataset.rtopbtn === key); x.setAttribute('aria-selected', String(x.dataset.rtopbtn === key)); });
+    app.querySelectorAll('[data-rtop]').forEach((x) => { x.hidden = x.dataset.rtop !== key; });
+  };
+  app.querySelectorAll('[data-rtopbtn]').forEach((b) => b.addEventListener('click', () => showTop(b.dataset.rtopbtn)));
+  app.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => {
+    const [key, mode] = b.dataset.goto.split(':');
+    showTop(key);
+    if (mode) app.querySelector(`[data-rtab="${mode}"]`)?.click();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }));
+  wireWaiting(biz, app.querySelector('[data-rtop="wait"]'), async (fn) => {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('waitmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   });
   const msg = document.getElementById('recmsg');
