@@ -315,7 +315,10 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     // Every UPI bill is either matched (its own credit, its group's, or a booked credit it joins) or not in the bank yet.
     strip: { upiSalesPaise: bills.reduce((t, b) => t + b.amount, 0), bills: bills.length, matchedPaise: bills.reduce((t, b) => t + b.amount, 0) - sum(openBills),
       billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits), creditsNoBill: openCredits.filter((c) => c.noBill).length },
-    clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit, noBill: [], unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
+    clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit,
+    // Money with no bill can be booked before saving too (11 Nov 2026): booking a bank line does not wait for the shift.
+    noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill').map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark })),
+    unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
     choices, save: { blockers: view.blockers, canSave: view.canConfirm },
     // Old POS bills still to decide (approved 9 Nov 2026): ticked for "Use register" in one click; a row not reviewed yet waits.
     oldPos: { ...view.oldPos, bills: view.comparisons.filter((c) => c.oldPos && !c.decision).map((c) => ({

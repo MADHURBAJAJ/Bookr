@@ -4325,6 +4325,34 @@ async function reconcileView(biz, dayArg) {
   const noCredit = r.noCredit.filter((c) => !gone.has(c.key) && !explained(c) && !(c.billNos ?? []).some((b) => onMachine.has(b)));
   const cardSide = (r.cards?.explains?.credits.length ?? 0) + (r.cards?.explains?.bills.length ?? 0);
   const noBillLeft = r.noBill.filter((x) => !hinted.some((h) => h.credits.includes(x.creditId)));
+  // Money with no bill (approved 11 Nov 2026): on Payments → UPI, one row per credit, bookable before saving too.
+  const plainRemark = (x) => (x.remark && !/^(UPI|NA|NO REMARKS?|UPI Pay|Payment from Ph)$/i.test(x.remark.trim()) ? x.remark.trim() : '');
+  const roomHead = r.unbilledHeads.find((h) => h.billType === 'room');
+  const noBillSection = noBillLeft.length ? html`<section class="card" id="nobill" style="gap:0">
+    <div class="lane-h"><strong>Money with no bill (${noBillLeft.length})</strong>
+      <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="nbtickall" style="width:18px;height:18px;min-height:0"> Tick all</label></div>
+    <div class="note">No bill of these amounts on this shift: a sale not written down, or money that is not a sale.${r.confirmed ? '' : ' Booked now, before saving. If a bill for one turns up, Bookr offers to join them as one sale, so it is not counted twice.'}</div>
+    ${noBillLeft.map((x) => html`<div class="nb-row" data-nbrow="${x.creditId}" style="display:flex;flex-direction:column;gap:6px;padding:10px 0;border-top:1px solid var(--line-soft)">
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}" style="width:18px;height:18px;min-height:0;margin-top:2px">
+        <div><strong>₹ ${money(x.amountPaise)}</strong> · ${hhmm(x.postedAt)} · ${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}${plainRemark(x) ? html` · <em>"${plainRemark(x)}"</em>` : ''}</div></div>
+      <div class="nb-check" data-nbcheck="${x.creditId}"></div>
+      <input type="text" data-nbwhat="${x.creditId}" maxlength="120" placeholder="What was it? (optional)" value="${plainRemark(x)}" style="max-width:360px">
+      <div class="form-row" style="gap:6px;flex-wrap:wrap">
+        ${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-nbsale="${x.creditId}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&amp;B'}</button>`)}
+        ${roomHead ? html`<button class="btn plain" type="button" style="min-height:36px" data-nbadvance="${x.creditId}">Advance…</button>` : ''}
+        <details class="menu"><summary class="btn plain" style="display:inline-flex;align-items:center;min-height:36px">More ▾</summary><div class="menu-pop" style="gap:6px;min-width:260px">
+          <button class="btn plain" type="button" data-nbhold="${x.creditId}" data-kind="refund">Refund due</button>
+          <button class="btn plain" type="button" data-nbhold="${x.creditId}" data-kind="tip">Tip for staff</button>
+          <div class="field"><label for="nbh-${x.creditId}">Book under a head</label><select id="nbh-${x.creditId}" data-nbhead="${x.creditId}"><option value="">Choose…</option>
+            ${[...new Set(heads.map((h) => h.type))].map((t) => html`<optgroup label="${t[0].toUpperCase()}${t.slice(1)}">${heads.filter((h) => h.type === t).map((h) => html`<option value="${h.id}">${h.name}</option>`)}</optgroup>`)}</select></div>
+          <button class="btn plain" type="button" data-nbbook="${x.creditId}">Book under that head</button>
+          <button class="btn plain" type="button" data-nbignore="${x.creditId}">Not business (skip)</button></div></details>
+      </div></div>`)}
+    ${r.unbilledHeads.length ? html`<div class="form-row" id="nbbulk" hidden style="gap:6px;padding-top:10px;border-top:1px solid var(--line-soft)"><span class="tiny" id="nbcount"></span>
+      ${r.unbilledHeads.map((h) => html`<button class="btn" type="button" style="min-height:36px" data-nbmany="${h.billType}">Book ticked as Unbilled ${h.billType === 'room' ? 'Room' : 'F&amp;B'}</button>`)}</div>` : ''}
+    ${r.unbilledHeads.length ? '' : html`<div class="note">Choose the income heads for F&amp;B and Room bills on <a href="#/b/${biz.id}/heads">Heads and rules</a> to book unbilled sales.</div>`}
+  </section>` : '';
   const view = reconcileViewPref();
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;
   const billsCell = (x) => html`<span class="mono">${x.billNos.join(' + ')}</span>${x.part ? html`<div class="tiny">${x.part}</div>` : ''}`;
@@ -4345,15 +4373,9 @@ async function reconcileView(biz, dayArg) {
     <div class="note">The same amount, but further apart in time or with another possible match. Tick the ones you agree with.</div>
     <details class="cmp-fold"><summary>See the list</summary>${pairTable(r.likely, 'data-likely', false)}</details>
     <div class="form-row" style="gap:6px"><button class="btn" type="button" id="matchlikely" disabled style="min-height:36px">Match 0 ticked</button></div><div class="form-msg" id="likelymsg"></div></div>` : '';
-  const noBillCards = noBillLeft.map((x) => html`<div class="rv-card">
-    <div class="lane-h"><strong>₹ ${money(x.amountPaise)} came in at ${when(x.postedAt)} with no bill</strong><span class="tchip warn">${CARD_TAGS.no_bill}</span></div>
-    <div class="tiny">${x.accountName}${x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? ` · ${x.remark}` : ''}</div>
-    <div class="note">No bill of this amount: a sale not written down, or money that is not a sale.</div>
-    <div class="form-row" style="gap:6px">${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-book="${x.creditId}" data-head="${h.headId}" data-label="${h.billType === 'room' ? 'Room' : 'F&B'}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
-      <a class="btn plain" style="display:inline-flex;align-items:center;min-height:36px" href="#/b/${biz.id}/bank?from=${day}&to=${addDaysIso(day, 1)}">Another head…</a></div></div>`);
-  const nothing = !r.clear.length && !cols.length && !fixes.length && !r.likely.length && !noCredit.length && !noBillLeft.length;
+  const nothing = !r.clear.length && !cols.length && !fixes.length && !r.likely.length && !noCredit.length;
   const suggestions = html`<section class="card lane" style="gap:10px">
-    <div class="rv-cards">${clearCard}${cols.map((c) => suggestionCard(c, day))}${fixes.map((c) => suggestionCard(c, day))}${likelyCard}${noCredit.map((c) => suggestionCard(c, day))}${noBillCards}</div>
+    <div class="rv-cards">${clearCard}${cols.map((c) => suggestionCard(c, day))}${fixes.map((c) => suggestionCard(c, day))}${likelyCard}${noCredit.map((c) => suggestionCard(c, day))}</div>
     ${nothing ? html`<div class="note">${done ? 'No suggestions: nothing is left to explain.' : 'No suggestions for what is left. Open the entries to compare them yourself.'}</div>` : ''}
     ${cardSide ? html`<div class="note">${cardSide} UPI entr${cardSide === 1 ? 'y is' : 'ies are'} explained by the card machine: see Card machine below.</div>` : ''}
   </section>`;
@@ -4484,6 +4506,7 @@ async function reconcileView(biz, dayArg) {
       </div>
     </section>
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
+    ${noBillSection}
     <div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : r.confirmed ? pairPanel(v, waiting) : trialLists}
     ${doneFold}
@@ -4598,6 +4621,72 @@ async function reconcileView(biz, dayArg) {
     const pairs = ticked('data-likely').map((x) => r.likely.find((l) => l.creditId === x.dataset.likely));
     act(async () => { for (const p of pairs) await apiFull('POST', `/businesses/${biz.id}/bank-rows/${p.creditId}/match`, { transactionIds: p.transactionIds }); },
       { text: `Matched ${pairs.length} bill${pairs.length === 1 ? '' : 's'} to the bank.`, undo: async () => { for (const p of pairs) await unmatch(p.creditId); } });
+  });
+  // Money with no bill: each row, and the ticked rows together. Every booking can be undone (Open again).
+  const nbBase = `/businesses/${biz.id}/bank-rows`;
+  const nbWhat = (id) => app.querySelector(`[data-nbwhat="${id}"]`)?.value.trim() || null;
+  const nbReopen = (ids) => async () => { for (const id of ids) await apiFull('POST', `${nbBase}/${id}/reopen`, {}); };
+  const nbMany = async (items) => { const res = await apiFull('POST', `${nbBase}/book-many`, { items }); if (!res.booked) throw new Error(res.skipped.join(' ') || 'Not booked.'); return res; };
+  const nbTicks = () => [...app.querySelectorAll('[data-nbtick]')].filter((x) => x.checked).map((x) => x.dataset.nbtick);
+  const nbBulk = () => {
+    const n = nbTicks().length;
+    const bar = document.getElementById('nbbulk');
+    if (bar) { bar.hidden = n < 1; document.getElementById('nbcount').textContent = `${n} ticked:`; }
+  };
+  app.querySelectorAll('[data-nbtick]').forEach((x) => x.addEventListener('change', nbBulk));
+  document.getElementById('nbtickall')?.addEventListener('change', (e) => { app.querySelectorAll('[data-nbtick]').forEach((x) => { x.checked = e.target.checked; }); nbBulk(); });
+  app.querySelectorAll('[data-nbsale]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.nbsale;
+    const label = b.dataset.type === 'room' ? 'Room' : 'F&B';
+    b.disabled = true;
+    act(() => nbMany([{ rowId: id, billType: b.dataset.type, item: nbWhat(id) }]), { text: `Booked as Unbilled ${label}.`, undo: nbReopen([id]) }).finally(() => { b.disabled = false; });
+  }));
+  app.querySelectorAll('[data-nbmany]').forEach((b) => b.addEventListener('click', () => {
+    const ids = nbTicks();
+    if (!ids.length) return;
+    const label = b.dataset.nbmany === 'room' ? 'Room' : 'F&B';
+    b.disabled = true;
+    act(async () => { const res = await nbMany(ids.map((id) => ({ rowId: id, billType: b.dataset.nbmany, item: nbWhat(id) }))); if (res.skipped.length) alert(`Not booked: ${res.skipped.join(' ')}`); },
+      { text: `${ids.length} booked as Unbilled ${label}.`, undo: nbReopen(ids) }).finally(() => { b.disabled = false; });
+  }));
+  app.querySelectorAll('[data-nbadvance]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.nbadvance;
+    const who = prompt('Advance received: from which guest (name, room or booking)?', nbWhat(id) ?? '');
+    if (!who?.trim()) return;
+    act(() => nbMany([{ rowId: id, billType: 'room', item: `Advance: ${who.trim()}` }]), { text: 'Booked as an advance. Its room bill joins it when it comes.', undo: nbReopen([id]) });
+  }));
+  app.querySelectorAll('[data-nbhold]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.nbhold;
+    const refund = b.dataset.kind === 'refund';
+    const note = prompt(refund ? 'Refund due: to whom, and why (e.g. Rahul K, paid twice)?' : 'Tip for staff: for whom, or a note?', nbWhat(id) ?? '');
+    if (!note?.trim()) return;
+    act(() => apiFull('POST', `${nbBase}/${id}/hold`, { kind: b.dataset.kind, note: note.trim() }),
+      { text: refund ? 'Held as a refund due: not counted as income.' : 'Held as a tip for staff: not counted as income.', undo: nbReopen([id]) });
+  }));
+  app.querySelectorAll('[data-nbbook]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.nbbook;
+    const headId = app.querySelector(`[data-nbhead="${id}"]`)?.value;
+    if (!headId) { alert('Choose the head first.'); return; }
+    act(() => nbMany([{ rowId: id, headId, item: nbWhat(id) }]), { text: `Booked under ${heads.find((h) => h.id === headId)?.name ?? 'the head'}.`, undo: nbReopen([id]) });
+  }));
+  app.querySelectorAll('[data-nbignore]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.nbignore;
+    const note = prompt('Why is this money not business?', nbWhat(id) ?? '');
+    if (!note?.trim()) return;
+    act(() => apiFull('POST', `${nbBase}/${id}/ignore`, { note: note.trim() }), { text: 'Skipped: not business.', undo: nbReopen([id]) });
+  }));
+  // Check first (Stage 5): an owed bill, part of a bill still waiting, or a payment made twice, shown on the row.
+  app.querySelectorAll('[data-nbcheck]').forEach(async (el) => {
+    const id = el.dataset.nbcheck;
+    const chk = await api('GET', `${nbBase}/${id}/checks`).catch(() => null);
+    if (!chk || !(chk.owed.length || chk.parts.length || chk.paidTwice)) return;
+    el.innerHTML = html`<div class="cmp-warn" style="margin:0"><strong>Check first:</strong>
+      ${chk.owed.map((o) => html`<div>Bill <span class="mono">${o.billNo ?? ''}</span> (₹ ${money(o.amountPaise)}, ${dayLabel(o.day)}) was closed as ${o.note.replace(/^Owed by /, 'owed by ')}
+        <button class="btn plain dchip" type="button" data-nbowed="${o.txId}">Match to the owed bill</button></div>`)}
+      ${chk.parts.map((o) => html`<div>Could be part of bill <span class="mono">${o.billNo ?? ''}</span> (₹ ${money(o.amountPaise)}, ${dayLabel(o.day)} shift, still waiting): add it to that bill's payments.</div>`)}
+      ${chk.paidTwice ? html`<div>The same ₹ ${money(noBillLeft.find((c) => c.creditId === id)?.amountPaise ?? 0)} came in ${chk.paidTwice.minutes} minute${chk.paidTwice.minutes === 1 ? '' : 's'} apart${chk.paidTwice.samePayer ? ', from the same payer' : ''}: maybe paid twice (a refund due?).</div>` : ''}</div>`.__html;
+    el.querySelectorAll('[data-nbowed]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `${nbBase}/${id}/owed-paid`, { txId: b.dataset.nbowed }),
+      { text: 'Matched to the owed bill.', undo: () => apiFull('DELETE', `${nbBase}/${id}/match`, {}) })));
   });
   app.querySelectorAll('[data-book]').forEach((b) => b.addEventListener('click', () => {
     b.disabled = true;
