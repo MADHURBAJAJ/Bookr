@@ -5760,6 +5760,7 @@ async function cardsView(biz, query = '') {
   const billCell = (p) => {
     if (p.matched) return html`<span class="chip ok">✓ Bill ${p.matched.bills.join(' + ')}</span>${p.matched.payments > 1 ? html` <span class="tiny">with ${p.matched.payments - 1} other payment${p.matched.payments > 2 ? 's' : ''}</span>` : ''}
       <div class="tiny">${(p.matched.shiftDays?.length ? p.matched.shiftDays : [p.shiftDay]).map((d) => shiftLink(d, `${dayLabel(d)} shift`))}</div>`;
+    if (p.charge) return html`<span class="note">Card company charge: booked as a fee when this day is settled</span>`;
     if (p.txnType !== 'PURCHASE') return html`<span class="note">${p.txnType.toLowerCase()}: not a sale</span><div class="tiny">${shiftLink(p.shiftDay, `Check it on the ${dayLabel(p.shiftDay)} shift →`)}</div>`;
     return html`<span class="note">Not matched yet</span> · ${shiftLink(p.shiftDay, `Open the ${dayLabel(p.shiftDay)} shift →`)}`;
   };
@@ -5796,15 +5797,15 @@ async function cardsView(biz, query = '') {
       <div class="form-row" style="justify-content:space-between;align-items:baseline">
         <h2>Settled ${dayLabel(s.settledOn)}</h2>
         <span class="chip ${s.bank && !open.length ? 'ok' : 'wait'}">${matched} of ${s.payments.length} matched to bills${s.bank ? ' · in the bank' : ''}</span></div>
-      <div class="note">${s.payments.length} payment${s.payments.length === 1 ? '' : 's'}: ₹ ${money(s.amountPaise)} less fee ₹ ${money(s.feePaise)}${s.gstPaise ? html` and GST ₹ ${money(s.gstPaise)}` : ''}
+      <div class="note">${s.payments.filter((p) => !p.charge).length} payment${s.payments.filter((p) => !p.charge).length === 1 ? '' : 's'}: ₹ ${money(s.amountPaise)} less fee ₹ ${money(s.feePaise)}${s.chargesPaise ? ` (with ₹ ${money(s.chargesPaise)} card company charges)` : ''}${s.gstPaise ? html` and GST ₹ ${money(s.gstPaise)}` : ''}
         = <strong>₹ ${money(s.netPaise)} to the bank</strong> · terminal ${s.terminals.join(', ')}</div>
       <div class="scroll"><table style="min-width:760px">
         <thead><tr><th>Paid</th><th>Card</th><th style="text-align:right">₹</th><th style="text-align:right">Fee + GST</th><th>Bill</th></tr></thead>
         <tbody>${s.payments.map((p) => html`<tr>
           <td style="white-space:nowrap">${hhmm(p.paidAt)}<div class="tiny">${dayLabel(p.shiftDay)} shift</div></td>
           <td style="white-space:nowrap">${p.scheme ?? ''} ${p.cardLast4 ? `•••• ${p.cardLast4}` : ''}<div class="tiny mono">RRN ${p.rrn ?? '—'}</div></td>
-          <td class="amount">${money(p.amountPaise)}</td>
-          <td class="amount">${money(p.feePaise + p.gstPaise)}</td>
+          <td class="amount">${p.charge ? '—' : money(p.amountPaise)}</td>
+          <td class="amount">${money(p.feePaise + p.gstPaise - (p.charge ? p.amountPaise : 0))}</td>
           <td style="white-space:normal">${billCell(p)}</td></tr>`)}</tbody></table></div>
       <div class="inset" style="gap:8px"><strong>Bank</strong>${bankBlock(s)}</div>
     </section>`;

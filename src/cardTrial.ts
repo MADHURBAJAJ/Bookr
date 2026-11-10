@@ -4,7 +4,7 @@
 
 import { all, one, type DB } from './db';
 import { addDays, shiftWindow } from './time';
-import { autoPairs, cardCandidates, isMachineUpi, machineLabel, waitingCard, type CardPayment, type CardSale } from './cards';
+import { autoPairs, cardCandidates, isCardCharge, isMachineUpi, machineLabel, waitingCard, type CardPayment, type CardSale } from './cards';
 import { cardShiftChoices, plannedRows } from './sales';
 
 /** How near (minutes) a bill of another mode must be to a machine payment to be told as perhaps paid on the machine. */
@@ -89,6 +89,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     const theirs = (candidates.get(p.id) ?? []).filter((k) => !k.transactionIds.every((id) => own.has(id)));
     // Wanted only by a saved bill of the shift before or after: told on that shift.
     if (!mine.length && theirs.length) return [];
+    // A card company charge is settled with its day, not a sale or a refund (11 Nov 2026).
+    if (isCardCharge(p)) return [];
     const purchase = p.txn_type === 'PURCHASE';
     const tip = !mine.length && purchase && !isMachineUpi(p) ? leftSales.filter((s) => s.paid_at != null && p.amount_paise > s.amount_paise
       && p.amount_paise - s.amount_paise <= s.amount_paise * TIP_SHARE && Math.abs(p.paid_at - s.paid_at) <= TIP_MIN * 60000)

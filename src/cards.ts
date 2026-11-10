@@ -32,6 +32,19 @@ export interface CardPayment {
 }
 
 /** Paid by UPI on the card machine (its QR, or a RuPay credit card through UPI): a UPI sale, settled with the machine's cards. */
+/**
+ * A charge on the card report (11 Nov 2026): "MONTHLY SERVICE FEE", "SETTLEMENT CHARGE" and the like, written as a
+ * negative amount with GST on it. Not a sale and not a refund: it is the card company's fee, taken from the settlement.
+ */
+export const isCardCharge = (p: { txn_type: string; amount_paise: number }) =>
+  p.txn_type !== 'PURCHASE' && p.amount_paise <= 0 && /FEE|CHARGE|RENT/i.test(p.txn_type);
+/** The card company's charges in a set of payments, as a positive number (their GST is in gst_paise). */
+export const chargesOf = (list: { txn_type: string; amount_paise: number }[]) => list.filter(isCardCharge).reduce((t, p) => t - p.amount_paise, 0);
+/** Fee (MDR and charges) and GST a settlement books as expenses. */
+export const settlementCosts = (list: CardPayment[]) => ({
+  fee: list.reduce((t, p) => t + p.fee_paise, 0) + chargesOf(list), gst: list.reduce((t, p) => t + p.gst_paise, 0),
+  gross: list.filter((p) => !isCardCharge(p)).reduce((t, p) => t + p.amount_paise, 0) });
+
 export const isMachineUpi = (p: { pay_mode?: string | null; scheme?: string | null }) =>
   p.pay_mode ? /^upi/i.test(p.pay_mode.trim()) : (p.scheme ?? '').toUpperCase() === 'UPI';
 
@@ -219,8 +232,10 @@ export function ruleFor(list: Pick<CardPayment, 'terminal_id'>[], rules: Map<str
  */
 export function settleStatements(db: DB, businessId: string, list: CardPayment[], row: { id: string; account_id: string; day: string }, rule: CardRule | null,
   userId: string | null, t: number) {
-  const sum = (k: 'amount_paise' | 'fee_paise' | 'gst_paise' | 'net_paise') => list.reduce((x, p) => x + p[k], 0);
-  const [gross, fee, gst, net] = [sum('amount_paise'), sum('fee_paise'), sum('gst_paise'), sum('net_paise')];
+  // The card company's charges (service fee, settlement charge) are fees too: booked with the MDR, so the books equal the bank.
+  const { gross, fee, gst } = settlementCosts(list);
+  const charges = chargesOf(list);
+  const net = list.reduce((x, p) => x + p.net_paise, 0);
   const days = [...new Set(list.map((p) => p.settled_on))].sort();
   const rupees = (p: number) => `₹${(p / 100).toFixed(2)}`;
   const label = days.length > 1 ? `${days.join(' + ')}` : days[0];
@@ -229,9 +244,10 @@ export function settleStatements(db: DB, businessId: string, list: CardPayment[]
   const expense = (id: string, amount: number, head: string, narration: string) => stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id,
     narration, source, status, payment_mode, matched_bank_row, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'bank_sheet', 'approved', 'card', ?, ?)`,
     id, businessId, row.account_id, row.day, amount, head, narration, row.id, t);
-  const note = `Card settlement ${label}: ${list.length} payment${list.length === 1 ? '' : 's'}, ${rupees(gross)} less fee ${rupees(fee)}${gst ? ` and GST ${rupees(gst)}` : ''}`;
+  const sales = list.filter((p) => !isCardCharge(p)).length;
+  const note = `Card settlement ${label}: ${sales} payment${sales === 1 ? '' : 's'}, ${rupees(gross)} less fee ${rupees(fee)}${charges ? ` (with ${rupees(charges)} card company charges)` : ''}${gst ? ` and GST ${rupees(gst)}` : ''}`;
   return [
-    ...(feeTx ? [expense(feeTx, fee, rule!.feeHeadId, `Card machine fee (MDR), settlement ${label}`)] : []),
+    ...(feeTx ? [expense(feeTx, fee, rule!.feeHeadId, `Card machine fee (MDR)${charges ? ` and charges ${rupees(charges)}` : ''}, settlement ${label}`)] : []),
     ...(gstTx ? [expense(gstTx, gst, rule!.gstHeadId, `GST on card machine fee, settlement ${label}`)] : []),
     stmt(db, "UPDATE bank_rows SET status = 'booked', transaction_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", feeTx ?? gstTx, note, userId, t, row.id),
     ...list.map((p) => stmt(db, 'UPDATE card_settlements SET bank_row_id = ?, fee_tx_id = ?, gst_tx_id = ? WHERE id = ? AND bank_row_id IS NULL', row.id, feeTx, gstTx, p.id)),
@@ -301,7 +317,8 @@ export async function runCardAuto(db: DB, businessId: string) {
   let settled = 0;
   for (const [i, f] of fits.entries()) {
     if (f.c.length !== 1 || claims.get(f.c[0].id) !== 1) continue;
-    const fee = f.d.payments.reduce((x, p) => x + p.fee_paise + p.gst_paise, 0);
+    const { fee: f1, gst: g1 } = settlementCosts(f.d.payments);
+    const fee = f1 + g1;
     const rule = ruleFor(f.d.payments, rules);
     if (fee > 0 && !rule) continue;
     await db.batch(settleStatements(db, businessId, f.d.payments, f.c[0], rule, null, t + 1000 + i));
@@ -360,7 +377,8 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
     `SELECT settlement_id, transaction_id FROM card_matches WHERE business_id = ? AND transaction_id IN (${sales.map(() => '?').join(',')})`, businessId, ...sales.map((x) => x.id)) : [];
   const bills = sales.filter((x) => x.source === 'software_report');
   const waiting = bills.filter((x) => x.match_status === 'awaiting_card_settlement');
-  const openPays = payments.filter((p) => !p.matched);
+  // A card company charge is settled with its day, not matched to a bill: not left to do (11 Nov 2026).
+  const openPays = payments.filter((p) => !p.matched && !isCardCharge(p));
   // Candidates for this shift's open swipes, among card sales still waiting from the day before to the day after.
   const near = await waitingCard(db, businessId, addDays(day, -1), addDays(day, 1));
   const { candidates } = cardCandidates(openPays, near);
@@ -439,7 +457,8 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
     const row = rowId ? await one<{ id: string; day: string; posted_at: number; description: string; done_by: string | null; account_name: string }>(db,
       'SELECT r.id, r.day, r.posted_at, r.description, r.done_by, a.name AS account_name FROM bank_rows r JOIN accounts a ON a.id = r.account_id WHERE r.id = ?', rowId) : null;
     const rule = ruleFor(list, rules);
-    return { settledOn: on, merchantId: merchant, payments: list.length, amountPaise: sum('amount_paise'), feePaise: sum('fee_paise'), gstPaise: sum('gst_paise'), netPaise: sum('net_paise'),
+    const costs = settlementCosts(list);
+    return { settledOn: on, merchantId: merchant, payments: list.filter((p) => !isCardCharge(p)).length, amountPaise: costs.gross, feePaise: costs.fee, chargesPaise: chargesOf(list), gstPaise: costs.gst, netPaise: sum('net_paise'),
       ruleSet: !!rule, bank: row ? { id: row.id, day: row.day, postedAt: row.posted_at, description: row.description, accountName: row.account_name, byBookr: !row.done_by } : null };
   }));
   const sum = (xs: { amount_paise?: number; amountPaise?: number }[]) => xs.reduce((a, x) => a + (x.amount_paise ?? x.amountPaise ?? 0), 0);

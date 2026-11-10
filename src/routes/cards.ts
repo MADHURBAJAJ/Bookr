@@ -6,7 +6,7 @@ import { all, newId, now, one, stmt } from '../db';
 import { body, fail, isUuid, text } from '../http';
 import { readCardReport } from '../cardsettlement';
 import { cardAddedRow, cardCandidates, cardMatchStatements, isMachineUpi, machineUpiStatements, cardRules, daysTogether, importCardLines, openSettlementCredits, ruleFor, runCardAuto, settleStatements,
-  settlementCredits, unsettledDays, unsettleStatements, waitingCard, type CardPayment } from '../cards';
+  settlementCredits, settlementCosts, chargesOf, isCardCharge, unsettledDays, unsettleStatements, waitingCard, type CardPayment } from '../cards';
 import { readMail, readReportFile } from '../mail';
 import { repayStatements } from '../repay';
 import { matchStatements } from '../bank';
@@ -57,7 +57,7 @@ cardRoutes.get('/businesses/:businessId/cards', requireRole('bank.link'), async 
     const credits = linked ? [] : await settlementCredits(db, bid, s.settled_on, net);
     return {
       settledOn: s.settled_on, merchantId: s.merchant_id, terminals: [...new Set(list.map((p) => p.terminal_id))], files: [...new Set(list.map((p) => p.file_name))],
-      amountPaise: sum(list, 'amount_paise'), feePaise: sum(list, 'fee_paise'), gstPaise: sum(list, 'gst_paise'), netPaise: net,
+      amountPaise: settlementCosts(list).gross, feePaise: settlementCosts(list).fee, chargesPaise: chargesOf(list), gstPaise: settlementCosts(list).gst, netPaise: net,
       partlySettled: !!linked && list.some((p) => !p.bank_row_id),
       bank: row ? { id: row.id, accountName: row.account_name, day: row.day, postedAt: row.posted_at, amountPaise: row.amount_paise, description: row.description, feeHead: row.head_name }
         : null,
@@ -69,7 +69,7 @@ cardRoutes.get('/businesses/:businessId/cards', requireRole('bank.link'), async 
           id: p.id, txnId: p.txn_id, rrn: p.rrn, paidAt: p.paid_at, shiftDay: shiftDayOf(p.paid_at), txnType: p.txn_type, amountPaise: p.amount_paise,
           feePaise: p.fee_paise, gstPaise: p.gst_paise, netPaise: p.net_paise, scheme: p.scheme, cardType: p.card_type, cardLast4: p.card_last4,
           matched: mine.length ? { bills: [...new Set(set.map((m) => m.bill_no ?? ''))], shiftDays: [...new Set(set.map((m) => m.shift_day))], payments: new Set(set.map((m) => m.settlement_id)).size } : null,
-          candidates: (sug.candidates.get(p.id) ?? []).slice(0, 5), clear: sug.clear.has(p.id),
+          candidates: (sug.candidates.get(p.id) ?? []).slice(0, 5), clear: sug.clear.has(p.id), charge: isCardCharge(p),
         };
       }),
     };
@@ -191,11 +191,12 @@ cardRoutes.post('/businesses/:businessId/cards/settle', requireRole('bank.link')
   if (row.status !== 'unmatched' || row.direction !== 'CR' || row.kind !== 'card_settlement') fail(409, 'Choose an open card settlement credit from the bank.');
   const net = list.reduce((t, p) => t + p.net_paise, 0);
   if (row.amount_paise !== net) fail(409, 'The bank credit is not the settlement\'s net amount.');
-  const charges = list.reduce((t, p) => t + p.fee_paise + p.gst_paise, 0);
+  const costs = settlementCosts(list);
+  const charges = costs.fee + costs.gst;
   const rule = ruleFor(list, await cardRules(db, bid));
   if (charges > 0 && !rule) fail(400, 'Set the Card settlement rule on Heads and rules first.');
   await db.batch(settleStatements(db, bid, list, row, rule, c.get('user').id, now()));
-  return c.json({ ok: true, feePaise: list.reduce((t, p) => t + p.fee_paise, 0), gstPaise: list.reduce((t, p) => t + p.gst_paise, 0) });
+  return c.json({ ok: true, feePaise: costs.fee, gstPaise: costs.gst });
 });
 
 /** Takes a settlement apart from its bank credit; the fee and GST expenses are removed (kept in the audit log). */
