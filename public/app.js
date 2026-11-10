@@ -3830,47 +3830,100 @@ const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 
 /** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
+/** A change on a bill, as a short chip; the whole text, who and when are on hover (approved 10 Nov 2026). */
+function editChip(x) {
+  const t = x.text;
+  const [label, cls] = /: to decide$/.test(t) ? ['To decide', 'bad'] : /^Bill no\. read/.test(t) ? ['No. corrected', 'wait'] : /^Amount read/.test(t) ? ['Amount corrected', 'wait']
+    : /^Paid by read/.test(t) ? ['Mode corrected', 'wait'] : /old pos/i.test(t) ? ['Old POS', ''] : /used the register/i.test(t) ? ['Register used', '']
+    : /used the software/i.test(t) ? ['Software used', ''] : /^[A-Za-z ]+ → [A-Za-z ]+/.test(t) ? ['Mode changed', 'wait'] : ['Changed', ''];
+  return html`<span class="chip ${cls}" style="font-size:11px" title="${t}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}">✎ ${label}</span>`;
+}
+
+/**
+ * The bills of one payment mode as a table (approved 10 Nov 2026), like All bills: one line a bill, what backs its money,
+ * changes as chips, bills paid together as one line that opens. It opens on what is left; Done is a filter.
+ */
 function entriesHtml(biz, day, t, mode, cv) {
-  const side = (x) => (x ? html`₹ ${money(x.amountPaise ?? 0)} ${x.mode ? ENTRY_MODE[x.mode] ?? x.mode : 'no mode'}` : html`<span style="color:var(--danger)">missing</span>`);
-  const line = (e) => html`<div class="ent-line">
-    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-      <span class="mono"><strong>${e.billNo}</strong></span>${e.part ? html`<span class="chip">${e.part}</span>` : ''}
-      <span class="tiny">${e.paidAt ? when(e.paidAt) : 'no time (register only)'}</span>
-      <strong class="amount" style="margin-left:auto">₹ ${money(e.amountPaise)}</strong></div>
-    <div class="tiny">Register ${side(e.register)} · Software ${side(e.software)}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${day}">Open row</button>` : ''}</div>
-    ${e.evidence ? html`<div class="tiny" style="color:var(--teal)">✓ ${e.evidence}</div>` : e.state === 'waiting' ? html`<div class="tiny" style="color:#92400E">${mode === 'upi' ? 'No bank credit yet' : 'No machine payment yet'}</div>` : ''}
-    ${e.edits.map((x) => html`<div class="tiny" style="color:${/to decide$/.test(x.text) ? 'var(--danger)' : '#5B21B6'}">✎ ${x.text}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}</div>`)}
-    ${e.state === 'decide' && biz.actions.includes('sales.decide') && cv?.comparisons.find((c) => c.id === e.comparisonId)
-      ? html`<div style="margin-top:4px">${decideMenuHtml(cv.comparisons.find((c) => c.id === e.comparisonId), cv)}</div>` : ''}
-  </div>`;
-  // Bills paid together: one block with the group's one payment and what backs it, then each bill (approved 9 Nov 2026).
-  const block = (es) => {
+  const canDecide = biz.actions.includes('sales.decide');
+  const side = (x) => (x ? html`${x.mode ? ENTRY_MODE[x.mode] ?? MODE_LABELS[x.mode] ?? x.mode : 'no mode'}` : html`<em class="note">missing</em>`);
+  const received = (e) => (e.evidence ? html`<span style="color:var(--teal)">✓ ${e.evidence}</span>`
+    : e.state === 'waiting' ? html`<span style="color:#92400E">⏳ ${mode === 'upi' ? 'No bank credit yet' : mode === 'card' ? 'No machine payment yet' : 'Waiting'}</span>`
+    : e.state === 'decide' ? html`<span class="note">Decide first</span>` : html`<span class="note">—</span>`);
+  const action = (e) => {
+    const c = e.state === 'decide' && canDecide ? cv?.comparisons.find((x) => x.id === e.comparisonId) : null;
+    return c ? decideMenuHtml(c, cv) : '';
+  };
+  const row = (e, inGroup = '') => html`<tr data-pstate="${e.state}" ${inGroup ? html`data-pgroup="${inGroup}" hidden` : ''} class="${e.state === 'decide' ? 'undecided' : ''} ${inGroup ? 'grp-bill' : ''}">
+    <td class="mono"><strong>${e.billNo ?? '—'}</strong>${e.part ? html` <span class="chip" style="font-size:11px">${e.part}</span>` : ''}
+      <div class="tiny">${e.paidAt ? hhmm(e.paidAt) : 'register only'}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${day}">Open row</button>` : ''}</div></td>
+    <td class="amount">${money(e.amountPaise)}</td>
+    <td>${side(e.register)} · ${side(e.software)}${e.edits.length ? html`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px">${e.edits.map(editChip)}</div>` : ''}</td>
+    <td style="white-space:normal">${inGroup ? '' : received(e)}</td></tr>
+    ${action(e) ? html`<tr data-pstate="${e.state}" ${inGroup ? html`data-pgroup="${inGroup}" hidden` : ''} class="undecided"><td colspan="4" style="padding-top:0">${action(e)}</td></tr>` : ''}`;
+  const groupRow = (es) => {
     const g = es[0].group;
     const diff = g.billsPaise - g.paymentPaise;
-    return html`<div class="ent-block" style="border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:4px 8px">
-      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 4px"><span class="chip">Paid together</span><span class="mono">${g.billNos.join(' + ')}</span>
-        <strong class="amount" style="margin-left:auto">₹ ${money(g.paymentPaise)}</strong></div>
-      <div class="tiny" style="padding:0 4px">One ${ENTRY_MODE[es[0].mode]} payment of ₹ ${money(g.paymentPaise)} for ${g.billNos.length} bills of ₹ ${money(g.billsPaise)}${diff > 0 ? ` (₹ ${money(diff)} discount)` : diff < 0 ? ` (₹ ${money(-diff)} tip)` : ''}</div>
-      ${es[0].evidence ? html`<div class="tiny" style="color:var(--teal);padding:0 4px">✓ ${es[0].evidence}</div>` : es[0].state === 'waiting' ? html`<div class="tiny" style="color:#92400E;padding:0 4px">${mode === 'upi' ? 'No bank credit of ₹ ' + money(g.paymentPaise) + ' yet' : 'No machine payment yet'}</div>` : ''}
-      ${es.map((e) => line({ ...e, evidence: null, state: e.state === 'decide' ? 'decide' : 'done' }))}</div>`;
+    const st = es.some((e) => e.state === 'decide') ? 'decide' : es[0].state;
+    return html`<tr class="grp-head" data-pstate="${st}" data-pghead="${g.id}" tabindex="0" aria-expanded="false">
+      <td><span class="chip">Paid together</span><div class="tiny mono" style="white-space:normal">${g.billNos.join(' + ')}</div></td>
+      <td class="amount">${money(g.paymentPaise)}</td>
+      <td class="tiny" style="white-space:normal">One payment for ${g.billNos.length} bills of ₹ ${money(g.billsPaise)}${diff > 0 ? ` (₹ ${money(diff)} discount)` : diff < 0 ? ` (₹ ${money(-diff)} tip)` : ''}</td>
+      <td style="white-space:normal">${received(es[0])}<div class="tiny">Open to see each bill</div></td></tr>`;
   };
-  const group = (state, title) => {
-    const list = t.entries.filter((e) => e.state === state);
-    if (!list.length) return '';
-    const seen = new Set();
-    const items = list.flatMap((e) => {
-      if (!e.group) return [line(e)];
-      if (seen.has(e.group.id)) return [];
-      seen.add(e.group.id);
-      return [block(list.filter((x) => x.group?.id === e.group.id))];
-    });
-    const n = list.filter((e) => !e.group).length + seen.size;
-    return html`<div class="ent-group"><div class="lane-h"><strong>${title}</strong> <span class="chip">${n}</span></div>${items}</div>`;
-  };
+  const seen = new Set();
+  const rows = t.entries.flatMap((e) => {
+    if (!e.group) return [row(e)];
+    if (seen.has(e.group.id)) return [];
+    seen.add(e.group.id);
+    const es = t.entries.filter((x) => x.group?.id === e.group.id);
+    return [groupRow(es), ...es.map((x) => row(x, e.group.id))];
+  });
+  const units = t.entries.filter((e) => !e.group).map((e) => e.state);
+  for (const id of seen) { const es = t.entries.filter((x) => x.group?.id === id); units.push(es.some((e) => e.state === 'decide') ? 'decide' : es[0].state); }
+  const nLeft = units.filter((x) => x !== 'done').length;
+  const nDone = units.length - nLeft;
+  const sum = (f) => t.entries.filter(f).reduce((a, e) => a + (e.amountPaise ?? 0), 0);
+  const filter = nLeft ? 'left' : 'all';
   return html`<details class="card cmp-fold" ${t.left ? 'open' : ''}><summary><h2>${ENTRY_MODE[mode]} bills (${t.entries.length}) · ₹ ${money(t.totalPaise)}</h2></summary>
-    ${t.entries.length ? html`${group('decide', 'To decide')}${group('waiting', mode === 'cash' ? 'Waiting' : mode === 'upi' ? 'Waiting for the bank' : 'Waiting for the card machine')}${group('done', 'Done')}`
+    ${t.entries.length ? html`<div class="paytable" data-pfilter="${filter}" style="display:flex;flex-direction:column;gap:8px">
+      <span class="seg" role="group" aria-label="Show" style="align-self:flex-end">
+        <button type="button" data-pf="left" class="${filter === 'left' ? 'on' : ''}">Left (${nLeft})</button><button type="button" data-pf="done">Done (${nDone})</button><button type="button" data-pf="all" class="${filter === 'all' ? 'on' : ''}">All (${units.length})</button></span>
+      ${nLeft ? '' : html`<div class="ok-msg">Nothing left: every ${ENTRY_MODE[mode]} bill is done.</div>`}
+      <div class="scroll"><table class="cmptable" style="min-width:600px">
+        <colgroup><col style="width:150px"><col style="width:100px"><col style="width:180px"><col></colgroup>
+        <thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Register · Software</th><th>Money received</th></tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr style="font-weight:600"><td>Total</td><td class="amount">${money(t.totalPaise)}</td><td></td>
+          <td class="tiny">Received ₹ ${money(sum((e) => e.state === 'done'))} · waiting ₹ ${money(sum((e) => e.state === 'waiting'))}${sum((e) => e.state === 'decide') ? ` · to decide ₹ ${money(sum((e) => e.state === 'decide'))}` : ''}</td></tr></tfoot>
+      </table></div></div>`
       : html`<div class="note">No ${ENTRY_MODE[mode]} bills in this shift.</div>`}
-    <div class="note">✎ marks a change: the register as read and as corrected, the side used when the register and the software differ, or a mode changed later.</div></details>`;
+    <div class="note">✎ marks a change (hover for who and when): the register as read and as corrected, the side used when the register and the software differ, or a mode changed later.</div></details>`;
+}
+
+/** Filters and paid-together lines of the payment tables. */
+function wirePayTables(root) {
+  root.querySelectorAll('.paytable').forEach((box) => {
+    const show = () => {
+      const f = box.dataset.pfilter;
+      const fits = (tr) => f === 'all' || (f === 'done' ? tr.dataset.pstate === 'done' : tr.dataset.pstate !== 'done');
+      box.querySelectorAll('tbody tr:not([data-pgroup])').forEach((tr) => { tr.hidden = !fits(tr); });
+      box.querySelectorAll('tr[data-pghead]').forEach((head) => {
+        head.setAttribute('aria-expanded', head.classList.contains('open') ? 'true' : 'false');
+        box.querySelectorAll(`tr[data-pgroup="${head.dataset.pghead}"]`).forEach((tr) => { tr.hidden = head.hidden || !head.classList.contains('open'); });
+      });
+    };
+    box.querySelectorAll('[data-pf]').forEach((b) => b.addEventListener('click', () => {
+      box.dataset.pfilter = b.dataset.pf;
+      box.querySelectorAll('[data-pf]').forEach((x) => x.classList.toggle('on', x === b));
+      show();
+    }));
+    box.querySelectorAll('tr[data-pghead]').forEach((head) => {
+      const flip = () => { head.classList.toggle('open'); show(); };
+      head.addEventListener('click', flip);
+      head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } });
+    });
+    show();
+  });
 }
 
 /**
@@ -4143,6 +4196,7 @@ async function reconcileView(biz, dayArg) {
   app.querySelectorAll('[data-rpanel], [data-rtop="todo"]').forEach((root) => wireDecideMenu(biz, day, cv, root, async (fn) => {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   }, `#/b/${biz.id}/reconcile/${day}`));
+  wirePayTables(app);
   P.wire(app.querySelector('[data-rtop="all"]'), document.getElementById('allmsg'));
   P.wireShift(app.querySelector('[data-rtop="todo"]'), document.getElementById('recmsg'));
   P.wireShift(document.getElementById('shiftmenu'), document.getElementById('recmsg'));
