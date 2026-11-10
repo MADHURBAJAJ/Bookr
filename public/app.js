@@ -2576,13 +2576,39 @@ function oddNumbersHtml(biz, w, canDecide) {
     <div class="scroll"><table style="min-width:520px">
       <thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Note</th><th></th></tr></thead>
       <tbody>${list.map((b) => html`<tr>
-        <td class="mono">${b.billNo}</td><td><a href="#/b/${biz.id}/compare/${b.day}">${dayLabel(b.day)}</a>${b.confirmed ? html` <span class="note">confirmed</span>` : ''}</td>
+        <td class="mono">${b.billNo}</td><td><a href="#/b/${biz.id}/reconcile/${b.day}">${dayLabel(b.day)}</a>${b.confirmed ? html` <span class="note">confirmed</span>` : ''}</td>
         <td class="amount">${money(b.amountPaise ?? 0)}${b.mode ? html` <span class="note">${MODE_LABELS[b.mode] ?? b.mode}</span>` : ''}</td>
         <td class="note">${b.note ?? ''}</td>
         <td>${canDecide ? html`<button class="btn plain" type="button" data-oddclose="${b.id}">${SHORT_OLD_POS_NOTE}</button>` : ''}</td>
       </tr>`)}</tbody>
     </table></div>
   </section>`;
+}
+
+/** Confirmed UPI sales still waiting for their bank credit, across shifts. */
+function awaitingCreditHtml(biz, credit) {
+  return html`<section class="card" style="gap:10px">
+      <h2>Waiting for bank credit</h2>
+      <div class="note">Confirmed UPI sales whose credit has not been matched on Reconcile yet. A bill found on one side only is <strong>not counted</strong> until its credit is matched; it is then counted on the day the credit arrived.</div>
+      ${credit.length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Counted</th><th>Waiting</th></tr></thead><tbody>
+        ${credit.map((x) => html`<tr><td class="mono">${x.billNo}${drawerBtn(x.billNo, x.day)}</td><td><a href="#/b/${biz.id}/reconcile/${x.day}">${dayLabel(x.day)}</a></td><td class="amount">${money(x.amountPaise)}</td>
+          <td>${x.onCredit ? html`<span class="chip wait">When the credit arrives</span>` : html`<span class="note">On ${dayLabel(x.day)}</span>`}</td>
+          <td>${x.daysWaiting > 2 ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td></tr>`)}
+      </tbody></table></div>${biz.actions.includes('bank.link') ? html`<a href="#/b/${biz.id}/reconcile">Open Reconcile</a>` : ''}` : html`<div class="ok-msg">Every confirmed UPI sale has its bank credit.</div>`}
+    </section>`;
+}
+
+/** Bills of other shifts still waiting (approved 10 Nov 2026): for their other side, numbers that can never match, and UPI
+ *  sales waiting for their credit. The same lists as on Compare sales, with the same buttons. */
+function waitingTabHtml(biz, waiting, credit, canDecide) {
+  return html`${oddNumbersHtml(biz, waiting, canDecide)}${waitingHtml(biz, waiting, canDecide) || html`<section class="card"><div class="note">No bill is waiting for its other side.</div></section>`}${awaitingCreditHtml(biz, credit)}`;
+}
+function wireWaiting(biz, root, act) {
+  root.querySelectorAll('[data-oddclose]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.oddclose}/close`, { note: SHORT_OLD_POS_NOTE }))));
+  root.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
+    const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
+    if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
+  }));
 }
 
 function waitingHtml(biz, w, canDecide) {
@@ -2596,7 +2622,7 @@ function waitingHtml(biz, w, canDecide) {
     <div class="scroll"><table style="min-width:640px">
       <thead><tr><th>Bill</th><th>Shift</th><th>Found in</th><th style="text-align:right">Amount</th><th>Decided</th><th>Waiting</th><th></th></tr></thead>
       <tbody>${w.bills.map((b) => html`<tr>
-        <td class="mono">${b.billNo}</td><td><a href="#/b/${biz.id}/compare/${b.day}">${dayLabel(b.day)}</a></td>
+        <td class="mono">${b.billNo}</td><td><a href="#/b/${biz.id}/reconcile/${b.day}">${dayLabel(b.day)}</a></td>
         <td>${b.side === 'software' ? 'Software only' : 'Register only'}</td><td class="amount">${money(b.amountPaise ?? 0)}${b.mode ? html` <span class="note">${MODE_LABELS[b.mode] ?? b.mode}</span>` : ''}</td>
         <td class="note">${what(b)}</td>
         <td>${b.unresolved ? html`<span class="chip bad">${b.daysWaiting} days</span>` : html`<span class="note">${b.daysWaiting} day${b.daysWaiting === 1 ? '' : 's'}</span>`}</td>
@@ -3171,26 +3197,14 @@ async function compareView(biz, day) {
       ${cashPanelHtml(biz, cash)}
     </div>
     <div data-pane="other" ${tab === 'other' ? '' : 'hidden'}>${waitingHtml(biz, waiting, canDecide) || html`<section class="card"><div class="note">No bill is waiting for its other side.</div></section>`}</div>
-    <div data-pane="credit" ${tab === 'credit' ? '' : 'hidden'}><section class="card" style="gap:10px">
-      <h2>Waiting for bank credit</h2>
-      <div class="note">Confirmed UPI sales whose credit has not been matched on Reconcile yet. A bill found on one side only is <strong>not counted</strong> until its credit is matched; it is then counted on the day the credit arrived.</div>
-      ${credit.length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Counted</th><th>Waiting</th></tr></thead><tbody>
-        ${credit.map((x) => html`<tr><td class="mono">${x.billNo}${drawerBtn(x.billNo, x.day)}</td><td><a href="#/b/${biz.id}/compare/${x.day}">${dayLabel(x.day)}</a></td><td class="amount">${money(x.amountPaise)}</td>
-          <td>${x.onCredit ? html`<span class="chip wait">When the credit arrives</span>` : html`<span class="note">On ${dayLabel(x.day)}</span>`}</td>
-          <td>${x.daysWaiting > 2 ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td></tr>`)}
-      </tbody></table></div>${biz.actions.includes('bank.link') ? html`<a href="#/b/${biz.id}/reconcile">Open Reconcile</a>` : ''}` : html`<div class="ok-msg">Every confirmed UPI sale has its bank credit.</div>`}
-    </section></div>`));
+    <div data-pane="credit" ${tab === 'credit' ? '' : 'hidden'}>${awaitingCreditHtml(biz, credit)}</div>`));
   wireShell();
   const msg = document.getElementById('cmsg');
   wireShiftBar(biz, P.shiftOptions);
   P.wire(app, msg);
   const act = async (fn) => { try { await fn(); compareView(biz, day); } catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); } };
   wireCashPanel(biz, day, () => compareView(biz, day), msg);
-  app.querySelectorAll('[data-oddclose]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.oddclose}/close`, { note: SHORT_OLD_POS_NOTE }))));
-  app.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
-    const note = (prompt(`Close bill ${b.dataset.bill}: why did its other side never turn up?`) ?? '').trim();
-    if (note) act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.closebill}/close`, { note }));
-  }));
+  wireWaiting(biz, app, act);
   app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
     try { localStorage.setItem('bookr.compare.tab', b.dataset.tab); } catch { /* storage unavailable */ }
     app.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('on', x === b));
@@ -3799,7 +3813,7 @@ function choicesHtml(r) {
 }
 
 const RECONCILE_TAB_KEY = 'bookr.reconcile.tab';
-const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card', 'all'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
+const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card', 'all', 'wait'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 
 /** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
@@ -3860,11 +3874,12 @@ async function reconcileView(biz, dayArg) {
     render(shell(biz, 'reconcile', 'Reconcile', '', html`<section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
   }
-  const [r, v, { heads }, ent, cash, cv] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
+  const [r, v, { heads }, ent, cash, cv, waitingBills, awaiting] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
     api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
     // The Compare sales view of the shift: every bill and its decision menu (approved 9 Nov 2026).
-    api('GET', `/businesses/${biz.id}/shifts/${day}`)]);
+    api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/waiting-bills`).catch(() => null),
+    api('GET', `/businesses/${biz.id}/awaiting-credit`).catch(() => null)]);
   const tab = reconcileTabPref();
   const reload = () => reconcileView(biz, `${day}?more=${v.moreHours}`);
   drawerReload = reload;
@@ -3949,7 +3964,11 @@ async function reconcileView(biz, dayArg) {
     ${shiftBar(biz, day, 'reconcile')}
     ${recTabs(biz, day, 'shift')}
     <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:4px 0 10px">
-      ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}${tabBtn('all', 'All bills', allLeft)}</div>
+      ${tabBtn('cash', 'Cash', ent.cash.left + (cash.differencePaise && !cash.settled ? 1 : 0))}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', Math.max(ent.card.left, cardLeft))}${tabBtn('all', 'All bills', allLeft)}${tabBtn('wait', 'Waiting', (waitingBills?.bills ?? []).filter((b) => b.unresolved).length + (waitingBills?.oddNumbers?.length ?? 0))}</div>
+    <div data-rpanel="wait" ${tab === 'wait' ? '' : 'hidden'}>
+      <div id="waitmsg"></div>
+      ${waitingTabHtml(biz, waitingBills, awaiting?.sales ?? [], biz.actions.includes('sales.decide'))}
+    </div>
     <div data-rpanel="all" ${tab === 'all' ? '' : 'hidden'}>
       ${P.bar}
       <div id="allmsg"></div>
@@ -4038,6 +4057,9 @@ async function reconcileView(biz, dayArg) {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('recmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   }, `#/b/${biz.id}/reconcile/${day}`));
   P.wire(app.querySelector('[data-rpanel="all"]'), document.getElementById('allmsg'));
+  wireWaiting(biz, app.querySelector('[data-rpanel="wait"]'), async (fn) => {
+    try { await fn(); await reload(); } catch (err) { showError(document.getElementById('waitmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  });
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz, days);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {
