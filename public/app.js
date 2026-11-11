@@ -4887,6 +4887,8 @@ function trialCardSection(biz, k) {
       <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></div>`)}</div>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
     ${trialCardOpen(k)}
+    ${(k.onUpiTab ?? []).length ? html`<div class="note"><strong>UPI on the machine for UPI bills: ${k.onUpiTab.length}</strong> · on the <button type="button" class="linkbtn" data-goto="pay:upi">UPI tab</button>, not card bills.
+      ${k.onUpiTab.map((p) => html`<div class="tiny">₹ ${money(p.amountPaise)} at ${when(p.paidAt)}: ${p.billNo ? html`UPI bill <span class="mono">${p.billNo}</span>${p.offered ? ', match it there under the bill' : ''}` : 'a UPI bill of this amount is waiting near it, matched on save when the bank shows it'}.</div>`)}</div>` : ''}
   </section>`;
 }
 // Card payments as the tray's left side: its time is the swipe, its name the card.

@@ -164,9 +164,23 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   // The open entries to tick on the Card tab's tray (approved 10 Nov 2026): card payments a person may pair, and the
   // card bills not matched yet, with the register row a tip, discount or fixed amount is written on.
   const regOf = new Map(rows.filter((r) => r.c.register_row_id).map((r) => [r.c.id, r.c.register_row_id as string]));
+  const trayPays = [...needs.filter((n) => n.payment.txnType === 'PURCHASE' && (!n.payment.upi || n.why !== 'written' || n.written?.mode !== 'upi')).map((n) => n.payment),
+    ...machineFree.filter((p) => !upiBillNear(p, upiWaiting) && !needs.some((n) => n.payment.id === p.id)).map(pay)];
+  // A payment a Check line names ("tick both below") is always there to tick (11 Nov 2026).
+  for (const x of noSwipe) {
+    const p = x.near && !trayPays.some((t) => t.id === x.near!.paymentId) ? left.find((y) => y.id === x.near!.paymentId) : undefined;
+    if (p) trayPays.push(pay(p));
+  }
+  trayPays.sort((a, b) => a.paidAt - b.paidAt);
+  // UPI on the machine left for the UPI tab (11 Nov 2026): said on the Card tab too, so every machine payment is found there.
+  const onUpiTab = left.filter((p) => p.txn_type === 'PURCHASE' && isMachineUpi(p) && !isCardCharge(p) && !trayPays.some((t) => t.id === p.id)
+    && !needs.some((n) => n.payment.id === p.id && n.why === 'written' && n.written?.mode !== 'upi')).map((p) => {
+    const offer = upiOnMachine.find((o) => o.paymentId === p.id);
+    const wr = needs.find((n) => n.payment.id === p.id)?.written;
+    return { ...pay(p), billNo: offer?.billNo ?? wr?.billNo ?? null, offered: !!offer };
+  });
   const open = {
-    payments: [...needs.filter((n) => n.payment.txnType === 'PURCHASE' && (!n.payment.upi || n.why !== 'written')).map((n) => n.payment),
-      ...machineFree.filter((p) => !upiBillNear(p, upiWaiting) && !needs.some((n) => n.payment.id === p.id)).map(pay)],
+    payments: trayPays,
     bills: leftSales.map((s) => {
       const rowId = regOf.get(s.id) ?? null;
       const grouped = !!rowId && groupedRows.has(rowId);
@@ -186,7 +200,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
       noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(noBill.map((n) => n.payment)), noBill: noBill.length },
     matches: Object.fromEntries([...matchOf].map(([id, m]) => [id, { ...m, billNo: billNo.get(id) ?? '' }])) as Record<string, TrialMatch & { billNo: string }>,
     choices: chosen.map((k) => ({ id: k.id, paymentId: k.paymentId, billNos: k.billNos, amountPaise: k.amountPaise, paidAt: k.paidAt, label: k.label, open: k.open, by: k.by })),
-    needs, noSwipe, open, upiOnMachine,
+    needs, noSwipe, open, upiOnMachine, onUpiTab,
     // Card bills with no payment yet while the card report is not in: left too, waiting for the report (approved 10 Nov 2026).
     waitingReport: covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length,
     left: needs.length + noSwipe.length + (covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length),
