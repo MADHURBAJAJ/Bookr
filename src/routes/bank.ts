@@ -519,7 +519,11 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
     const a = audits.find((y) => (JSON.parse(y.after) as { transactionIds: string[] }).transactionIds.includes(x.txId));
     return a ? [{ ...x, auditId: a.id, from: (JSON.parse(a.after) as { from: string }).from }] : [];
   });
-  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards, byUpi, paidLater, paidLaterDone });
+  // The next shift, when not saved yet, may hold the bill of money received here (an advance at check-in, billed at
+  // check-out): told before a credit is booked with no bill (approved 11 Nov 2026).
+  const next = addDays(day, 1);
+  const nextShift = { day: next, saved: shifts.some((x) => x.day === next && x.status === 'confirmed') };
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards, byUpi, paidLater, paidLaterDone, nextShift });
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));

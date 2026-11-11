@@ -429,3 +429,5 @@ details.menu[open] { z-index: 40; }
 .tray-row .dchip.on { background: var(--teal); border-color: var(--teal); color: #fff; }
 
 .upitag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--income-bg); color: var(--income); }
+
+.nb-next { flex-basis: 100%; color: #92400E; }

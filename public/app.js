@@ -4375,6 +4375,7 @@ async function reconcileView(biz, dayArg) {
   // Money with no bill (approved 11 Nov 2026): on Payments → UPI, one row per credit, bookable before saving too.
   const plainRemark = (x) => (x.remark && !/^(UPI|NA|NO REMARKS?|UPI Pay|Payment from Ph)$/i.test(x.remark.trim()) ? x.remark.trim() : '');
   const roomHead = r.unbilledHeads.find((h) => h.billType === 'room');
+  const nextOpen = r.nextShift && !r.nextShift.saved;
   // Said once in the head when every credit came into one account.
   const nbOneAccount = (() => { const a = [...new Set(noBillLeft.map((x) => x.accountName ?? ''))]; return a.length === 1 && a[0] ? a[0] : ''; })();
   const noBillSection = noBillLeft.length ? html`<section class="card" id="nobill" style="gap:0">
@@ -4390,6 +4391,7 @@ async function reconcileView(biz, dayArg) {
       ${byUpiOffer((r.byUpi ?? []).find((o) => o.creditId === x.creditId), true)}
       <div class="nb-check" data-nbcheck="${x.creditId}"></div>
       <div class="nb-acts" hidden>
+        ${nextOpen ? html`<div class="tiny nb-next">The ${dayLabel(r.nextShift.day)} shift is not saved yet. If a guest paid ahead (an advance at check-in), the bill may be made there at check-out: book it as an Advance, or leave it for now. If it is booked and the bill turns up, Reconcile offers to join them (Same sale).</div>` : ''}
         <input type="text" data-nbwhat="${x.creditId}" maxlength="120" placeholder="What was it? (optional)" value="${plainRemark(x)}" aria-label="What was ₹ ${money(x.amountPaise)}?">
         ${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" data-nbsale="${x.creditId}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
         ${roomHead ? html`<button class="btn plain" type="button" data-nbadvance="${x.creditId}">Advance…</button>` : ''}
@@ -4464,6 +4466,9 @@ async function reconcileView(biz, dayArg) {
   const slipOpen = (x) => html`<a href="#/b/${currentBizId()}/review/${x.uploadId}/${x.rowId}" class="tiny">Open the row</a>`;
   const slipBillLine = (b) => (r.numberSlips ?? []).filter((x) => x.billNo === b.billNo).map((x) => html`<div class="cmp-warn" style="margin:0 10px 8px 40px">Probably the register line written as <span class="mono">${x.writtenAs}</span>: ₹ ${money(x.amountPaise)}, paid ₹ ${money(x.paidPaise)}. Same amount, one digit apart. Correct its number on the row and this bill gets its credit. ${slipOpen(x)}</div>`);
   const slipCreditLine = (c) => (r.numberSlips ?? []).filter((x) => x.paidPaise === c.amountPaise && (r.open.bills ?? []).some((b) => b.billNo === x.billNo)).map((x) => html`<div class="tiny" style="padding:0 10px 8px 40px;color:#92400E">Probably bill ${x.billNo}, written in the register as ${x.writtenAs}. ${slipOpen(x)}</div>`);
+  // A credit booked as a sale on another day that may be this bill (an advance billed at check-out): its Same sale
+  // card, shown under the bill as well as in Suggestions (11 Nov 2026).
+  const sameSaleOf = (b) => fixes.find((k) => k.kind === 'same_sale' && k.actions?.length && (k.billNos ?? []).includes(b.billNo));
   const lone = r.open ? lonePairs(r.open) : [];
   const trialLists = r.open ? html`<section class="card" style="gap:10px" id="trialopen">
     <div class="note">To correct a bill, open its row: it opens beside the list with its photo. Where the bank shows a slip, the fix is under the entry. Tick a credit, then its bill (or the bill first): each two ticks make a pair, in the order you tick. "+ Add to this pair" adds more to a pair. You match all the pairs on save in one go.${lone.length > 1 ? html` <button type="button" class="linkbtn" data-tray="exact">Tick all exact pairs (${lone.length})</button>` : ''}</div>
@@ -4472,7 +4477,7 @@ async function reconcileView(biz, dayArg) {
         ${r.open.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.postedAt)}<span class="tiny" style="display:block">${c.accountName ?? ''}${covered ? creditWhyHtml(c, r.open.bills) : ''}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>${slipCreditLine(c)}${fixLine(cols.find((k) => k.actions[0].op === 'slip' ? slipCredits(k.actions[0].slip).includes(c.id) : k.actions[0].hint?.creditId === c.id))}`)}
         <label class="tiny" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" data-tray="nearOn" style="width:16px;height:16px;min-height:0"> Show credits from the shifts either side</label><div data-tray="near"></div></div>
       <div><strong>UPI bills not in the bank yet</strong> <span class="chip">${r.open.bills.length}</span>
-        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${slipBillLine(b)}${onCardLine(b)}${fixLine(cols.find((k) => k.billNos.includes(b.billNo)))}`)}</div>
+        ${r.open.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>${slipBillLine(b)}${onCardLine(b)}${fixLine(cols.find((k) => k.billNos.includes(b.billNo)) ?? sameSaleOf(b))}`)}</div>
     </div>
     <div data-tray="sum" class="note">Tick entries to compare them.</div><div data-tray="fix"></div><div class="form-msg" data-tray="msg"></div></section>` : '';
   const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
