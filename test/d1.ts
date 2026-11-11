@@ -40,5 +40,40 @@ export async function createTestDb() {
     await proxy.dispose();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { db, uploads: proxy.env.UPLOADS, dispose };
+  return { db: steady(db), uploads: proxy.env.UPLOADS, dispose };
+}
+
+// The local D1 runs in a separate workerd process reached over a socket. On a busy machine (the full suite on 4 cores) that
+// connection is now and then reset mid-request ("fetch failed", ECONNRESET), failing a test that is not wrong. A read is
+// asked again (up to 3 tries); a write never is, since it may already have run.
+const READ = /^\s*(SELECT|WITH)\b/i;
+const WRITE = /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i;
+const dropped = (e: unknown) => e instanceof Error && (e.message === 'fetch failed' || /ECONNRESET|socket hang up/.test(String((e as { cause?: unknown }).cause ?? '')));
+
+function steady(db: D1Database): D1Database {
+  const inner = new WeakMap<object, D1PreparedStatement>();
+  const wrap = (st: D1PreparedStatement, query: string): D1PreparedStatement => {
+    const read = READ.test(query) && !WRITE.test(query);
+    const retry = <T>(f: () => Promise<T>) => async (): Promise<T> => {
+      for (let i = 1; ; i++) {
+        try { return await f(); } catch (e) { if (!read || i >= 3 || !dropped(e)) throw e; await new Promise((r) => setTimeout(r, 200 * i)); }
+      }
+    };
+    const out = {
+      bind: (...v: unknown[]) => wrap(st.bind(...v), query),
+      first: (col?: string) => retry(() => (col === undefined ? st.first() : st.first(col)))(),
+      all: () => retry(() => st.all())(),
+      raw: (o?: { columnNames?: boolean }) => retry(() => st.raw(o as never))(),
+      run: () => retry(() => st.run())(),
+    } as unknown as D1PreparedStatement;
+    inner.set(out as object, st);
+    return out;
+  };
+  return {
+    prepare: (q: string) => wrap(db.prepare(q), q),
+    batch: (sts: D1PreparedStatement[]) => db.batch(sts.map((x) => inner.get(x as object) ?? x)),
+    exec: (q: string) => db.exec(q),
+    dump: () => db.dump(),
+    withSession: (...a: unknown[]) => (db as unknown as { withSession: (...a: unknown[]) => unknown }).withSession(...a),
+  } as unknown as D1Database;
 }
