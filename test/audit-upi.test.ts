@@ -224,8 +224,12 @@ describe('UPI audit, part 2', () => {
     expect.soft(no, 'U8d: a UPI payment on the machine is not turned into a card bill').toBe(409);
     const res = await h.clients.owner.post(`/businesses/${h.bid}/cards/${late}/upi-on-machine`, { transactionIds: [need?.written?.transactionId] });
     expect.soft(res.status, JSON.stringify(res.json)).toBe(200);
-    expect.soft(await tx('2610435'), 'U8d: matched, still UPI').toMatchObject({ payment_mode: 'upi', match_status: null, pay: late });
+    // Card machine money is a card sale (11 Nov 2026): the bill becomes card, matched to the payment.
+    expect.soft(await tx('2610435'), 'U8d: changed to card and matched').toMatchObject({ payment_mode: 'card', match_status: null, pay: late });
+    expect.soft(res.json?.auditId, 'U8d: the change is recorded').toBeTruthy();
     expect.soft((await h.clients.owner.post(`/businesses/${h.bid}/cards/${late}/unmatch`, {})).status, 'U8d: unmatch').toBe(200);
+    const back = await h.clients.owner.post(`/businesses/${h.bid}/sales/repay/${res.json?.auditId}/undo`, {});
+    expect.soft(back.status, JSON.stringify(back.json)).toBe(200);
     expect.soft(await tx('2610435'), 'U8d undone: waits for its UPI money again').toMatchObject({ payment_mode: 'upi', match_status: 'awaiting_bank_match', pay: null });
   });
 });

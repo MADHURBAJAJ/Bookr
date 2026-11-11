@@ -6,6 +6,7 @@ import { all, one, type DB } from './db';
 import { addDays, shiftWindow } from './time';
 import { autoPairs, cardCandidates, isCardCharge, isMachineUpi, machineLabel, upiBillNear, upiWaitingSaved, waitingCard, type CardPayment, type CardSale, type UpiWaiting } from './cards';
 import { cardShiftChoices, plannedRows } from './sales';
+import { cardHere, settledHere } from './settledHere';
 
 /** How near (minutes) a bill of another mode must be to a machine payment to be told as perhaps paid on the machine. */
 const NEAR_MIN = 60;
@@ -51,6 +52,11 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     else own.set(r.c.id, { id: r.c.id, amount_paise: r.amount, bill_no: r.c.bill_no, shift_day: day, paid_at: timeOf.get(r.c.id) ?? null,
       group_head: r.c.register_row_id ? headOf.get(r.c.register_row_id) ?? null : null });
   }
+  // Card bills of an earlier saved shift whose register line is here (settled the next day, approved 11 Nov 2026): this
+  // shift's payments pay them like its own bills. Chosen by the sale's id; the bill has no time here.
+  const later = cardHere(await settledHere(db, businessId, day));
+  for (const x of later) own.set(x.txId, { id: x.txId, amount_paise: x.amountPaise, bill_no: x.billNo, shift_day: day, paid_at: null, group_head: null });
+  const laterIds = new Set(later.map((x) => x.txId));
   const sales = [...own.values()];
   // UPI bills of this shift (and saved ones either side) still waiting: UPI on the machine pays them first (11 Nov 2026).
   // Not one a person matched to a credit, nor one a bank credit of its amount near its time can pay.
@@ -62,7 +68,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   ]);
   const upiChosenIds = new Set(upiChosen.flatMap((k) => JSON.parse(k.comparison_ids) as string[]));
   const upiOpen = rows.filter((r) => r.mode === 'upi' && !upiChosenIds.has(r.c.id) && !rows.some((o) => o !== r && o.c.id === r.c.id))
-    .map((r) => ({ id: r.c.id, billNo: r.c.bill_no, amountPaise: r.amount, paidAt: timeOf.get(r.c.id) ?? null, grouped: !!(r.c.register_row_id && headOf.get(r.c.register_row_id) !== r.c.register_row_id) }))
+    .map((r) => ({ id: r.c.id, billNo: r.c.bill_no, amountPaise: r.amount, paidAt: timeOf.get(r.c.id) ?? null, grouped: !!(r.c.register_row_id && headOf.get(r.c.register_row_id) !== r.c.register_row_id),
+      rowId: r.c.register_row_id ?? null, uploadId: r.c.register_row_id ? uploadOf.get(r.c.register_row_id) ?? null : null, swMode: r.c.sw_mode ?? null }))
     .filter((b) => !upiCredits.some((c) => c.amount_paise === b.amountPaise && (b.paidAt == null || Math.abs(c.posted_at - b.paidAt) <= NEAR_MIN * 60000)));
   const paidByCredit = (b: { amountPaise: number; paidAt: number | null }) => upiCredits.some((c) => c.amount_paise === b.amountPaise && (b.paidAt == null || Math.abs(c.posted_at - b.paidAt) <= NEAR_MIN * 60000));
   const upiWaiting: UpiWaiting = [...rows.filter((r) => r.mode === 'upi' && !upiChosenIds.has(r.c.id)).map((r) => ({ amountPaise: r.amount, paidAt: timeOf.get(r.c.id) ?? null }))
@@ -80,7 +87,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const usedPay = new Set(chosen.filter((k) => k.open).map((k) => k.paymentId));
   const free = payments.filter((p) => !usedPay.has(p.id) && !heldElsewhere.has(p.id));
   const freeSales = sales.filter((s) => !matchOf.has(s.id));
-  const pool = [...freeSales, ...rivals];
+  const otherRivals = rivals.filter((x) => !laterIds.has(x.id));
+  const pool = [...freeSales, ...otherRivals];
   for (const pr of autoPairs(free, pool, upiWaiting)) {
     if (!pr.k.transactionIds.every((id) => own.has(id))) continue;
     const p = payments.find((x) => x.id === pr.paymentId)!;
@@ -92,7 +100,18 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   // What needs a person: this shift's machine payments not matched above.
   const left = free.filter((p) => !usedPay.has(p.id) && inShift(p));
   const leftSales = sales.filter((s) => !matchOf.has(s.id));
-  const { candidates } = cardCandidates(left, [...leftSales, ...rivals], upiWaiting);
+  const { candidates } = cardCandidates(left, [...leftSales, ...otherRivals], upiWaiting);
+  // A payment that is exactly one bill of this shift plus one settled here from an earlier shift (approved 11 Nov 2026):
+  // offered when it is the only such pair, the bill of this shift near the payment. A person chooses it.
+  for (const p of left) {
+    if ((candidates.get(p.id) ?? []).length || p.txn_type !== 'PURCHASE') continue;
+    const fits = leftSales.filter((s) => !laterIds.has(s.id) && s.paid_at != null && Math.abs(s.paid_at - p.paid_at) <= TIP_MIN * 60000).flatMap((s) =>
+      leftSales.filter((e) => laterIds.has(e.id) && s.amount_paise + e.amount_paise === p.amount_paise).map((e) => ({ s, e })));
+    if (fits.length !== 1) continue;
+    const { s: a, e: b } = fits[0];
+    candidates.set(p.id, [{ transactionIds: [a.id, b.id], billNos: [a.bill_no ?? '', b.bill_no ?? ''], amountPaise: p.amount_paise,
+      minutes: Math.round(Math.abs(a.paid_at! - p.paid_at) / 60000), strong: false, shiftDay: day }]);
+  }
   // Bills of this shift written as cash or UPI, on their own, near a payment of their amount: perhaps paid on the machine.
   const groupedRows = new Set(heads.filter((h) => h.head !== h.id).flatMap((h) => [h.id, h.head]));
   const otherWay = rows.filter((r) => r.mode !== 'card' && !rows.some((o) => o !== r && o.c.id === r.c.id) && !(r.c.register_row_id && groupedRows.has(r.c.register_row_id)))
@@ -120,7 +139,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     // card bill may take (no UPI bill of its amount waiting near) is told like a swipe.
     if (purchase && isMachineUpi(p) && !written && !mine.length) return [];
     return [{ payment: pay(p), why: !purchase ? 'not_purchase' : mine.length ? (mine.length > 1 ? 'several' : 'one') : tip ? 'tip' : written ? 'written' : 'no_bill',
-      candidates: mine.map((k) => ({ comparisonIds: k.transactionIds, billNos: k.billNos, amountPaise: k.amountPaise, minutes: k.minutes })),
+      candidates: mine.map((k) => ({ comparisonIds: k.transactionIds, billNos: k.billNos, amountPaise: k.amountPaise, minutes: k.minutes,
+        earlier: k.transactionIds.flatMap((id) => later.filter((x) => x.txId === id).map((x) => ({ billNo: x.billNo, fromDay: x.fromDay, amountPaise: x.amountPaise }))) })),
       tip: tip ? { comparisonId: tip.id, billNo: tip.bill_no, amountPaise: tip.amount_paise, paidAt: tip.paid_at, tipPaise: p.amount_paise - tip.amount_paise } : null,
       written: written ? { comparisonId: written.id, billNo: written.billNo, mode: written.mode, amountPaise: written.amountPaise, paidAt: written.paidAt,
         minutes: Math.round(Math.abs(written.paidAt - p.paid_at) / 60000), rowId: written.rowId, uploadId: written.uploadId, swMode: written.swMode, upiNear: false } : null }];
@@ -144,7 +164,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     if (fits.length !== 1) return [];
     if (upiOpen.filter((o) => o.amountPaise === b.amountPaise && near(o.paidAt, fits[0].paid_at)).length !== 1) return [];
     const p = fits[0];
-    return [{ comparisonId: b.id, billNo: b.billNo, amountPaise: b.amountPaise, paidAt: b.paidAt, paymentId: p.id, payAt: p.paid_at, label: label(p), minutes: Math.round(Math.abs(p.paid_at - b.paidAt!) / 60000) }];
+    return [{ comparisonId: b.id, billNo: b.billNo, amountPaise: b.amountPaise, paidAt: b.paidAt, paymentId: p.id, payAt: p.paid_at, label: label(p), minutes: Math.round(Math.abs(p.paid_at - b.paidAt!) / 60000),
+      rowId: b.rowId, uploadId: b.uploadId, swMode: b.swMode }];
   });
 
   // Card bills no machine payment can be, once the card report is in for the shift.
@@ -184,6 +205,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     bills: leftSales.map((s) => {
       const rowId = regOf.get(s.id) ?? null;
       const grouped = !!rowId && groupedRows.has(rowId);
+      const e = later.find((x) => x.txId === s.id);
+      if (e) return { id: s.id, billNo: s.bill_no, amountPaise: s.amount_paise, paidAt: null, grouped: false, group: null, rowId: e.rowId, uploadId: e.uploadId, fromDay: e.fromDay };
       return { id: s.id, billNo: s.bill_no, amountPaise: s.amount_paise, paidAt: s.paid_at, grouped, group: grouped ? s.group_head : null, rowId, uploadId: rowId ? uploadOf.get(rowId) ?? null : null };
     }),
   };
@@ -191,15 +214,30 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const sum = (xs: { amount_paise?: number; amountPaise?: number }[]) => xs.reduce((a, x) => a + (x.amount_paise ?? x.amountPaise ?? 0), 0);
   const matchedSales = sales.filter((s) => matchOf.has(s.id));
   const noBill = needs.filter((n) => n.why === 'no_bill' || n.why === 'written');
+  // A bill on its own register row with one UPI payment: what changing it to card needs.
+  const billRow = (id: string) => {
+    const rs = rows.filter((r) => r.c.id === id);
+    const r = rs[0];
+    if (rs.length !== 1 || r.mode !== 'upi' || !r.c.register_row_id) return null;
+    return { comparisonId: id, billNo: r.c.bill_no, mode: r.mode, amountPaise: r.amount, rowId: r.c.register_row_id, uploadId: uploadOf.get(r.c.register_row_id) ?? null, swMode: r.c.sw_mode ?? null };
+  };
+  // Where the shift's machine money goes (11 Nov 2026): to card bills, to UPI bills (chosen, or left for the UPI tab), or
+  // not matched yet. The three add up to what the machine got.
+  const toCard = new Set([...matchOf].filter(([id]) => own.has(id)).map(([, m]) => m.paymentId));
+  const upiBillChoice = (k: (typeof chosen)[number]) => k.open && k.comparisonIds.every((id) => !own.has(id));
+  const toUpi = new Set([...chosen.filter(upiBillChoice).map((k) => k.paymentId), ...onUpiTab.map((p) => p.id)]);
+  const unmatched = shiftPays.filter((p) => !toCard.has(p.id) && !toUpi.has(p.id) && !isCardCharge(p));
   return {
     day, trial: true as const, covered,
     strip: { billsPaise: sum(sales), bills: sales.length, wouldPaise: sum(matchedSales), would: matchedSales.length,
       chosen: matchedSales.filter((s) => matchOf.get(s.id)!.how === 'chosen').length,
       machineCardPaise: shiftPays.filter((p) => !isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
       machineUpiPaise: shiftPays.filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
-      noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(noBill.map((n) => n.payment)), noBill: noBill.length },
+      noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(unmatched), noBill: unmatched.length,
+      machine: { cardPaise: sum(shiftPays.filter((p) => toCard.has(p.id))), upiPaise: sum(shiftPays.filter((p) => toUpi.has(p.id))), leftPaise: sum(unmatched) } },
     matches: Object.fromEntries([...matchOf].map(([id, m]) => [id, { ...m, billNo: billNo.get(id) ?? '' }])) as Record<string, TrialMatch & { billNo: string }>,
-    choices: chosen.map((k) => ({ id: k.id, paymentId: k.paymentId, billNos: k.billNos, amountPaise: k.amountPaise, paidAt: k.paidAt, label: k.label, open: k.open, by: k.by })),
+    choices: chosen.map((k) => ({ id: k.id, paymentId: k.paymentId, billNos: k.billNos, amountPaise: k.amountPaise, paidAt: k.paidAt, label: k.label, open: k.open, by: k.by, upiBill: upiBillChoice(k),
+      bill: upiBillChoice(k) && k.comparisonIds.length === 1 ? billRow(k.comparisonIds[0]) : null })),
     needs, noSwipe, open, upiOnMachine, onUpiTab,
     // Card bills with no payment yet while the card report is not in: left too, waiting for the report (approved 10 Nov 2026).
     waitingReport: covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length,

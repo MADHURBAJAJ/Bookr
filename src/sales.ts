@@ -948,7 +948,14 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   // then leaves that bill and that payment alone.
   const machineTaken = new Set<string>();
   for (const k of cardChosen) {
-    const card = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'card' && k.comparisonIds.includes(x.r.c.id));
+    // Card bills of an earlier saved shift settled here (approved 11 Nov 2026): their sales already exist.
+    const ownIds = new Set(rows.map((r) => r.c.id));
+    const earlierIds = k.comparisonIds.filter((id) => !ownIds.has(id));
+    const earlier = earlierIds.length ? (await all<{ id: string; amount_paise: number }>(db, `SELECT id, amount_paise FROM transactions t WHERE business_id = ? AND type = 'income'
+      AND payment_mode = 'card' AND match_status = 'awaiting_card_settlement' AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.transaction_id = t.id)
+      AND id IN (${earlierIds.map(() => '?').join(',')})`, businessId, ...earlierIds)).map((x) => ({ id: x.id, amount: x.amount_paise })) : [];
+    const card = [...rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'card' && k.comparisonIds.includes(x.r.c.id)), ...earlier];
+    if (earlierIds.length !== earlier.length) { skipped.push(k.billNos.join(' + ')); continue; }
     const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && k.comparisonIds.includes(x.r.c.id));
     if (k.open && card.length && card.reduce((a, x) => a + x.amount, 0) === k.amountPaise) {
       statements.push(...cardMatchStatements(db, businessId, [k.paymentId], card.map((x) => x.id), userId, t + 1 + matched, { how: 'matched on saving the shift' }));
@@ -1040,6 +1047,9 @@ export async function shiftChoices(db: DB, businessId: string, day: string) {
     WHERE k.business_id = ? AND k.shift_day = ? AND k.kind = 'bank_match' ORDER BY k.created_at`, businessId, day);
   const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
   const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
+  // A card bill of an earlier shift settled here is chosen by its sale's id.
+  const others = [...new Set(list.flatMap((k) => JSON.parse(k.comparison_ids) as string[]))].filter((id) => !billOf.has(id));
+  if (others.length) for (const x of await all<{ id: string; bill_no: string }>(db, `SELECT id, bill_no FROM transactions WHERE business_id = ? AND id IN (${others.map(() => '?').join(',')})`, businessId, ...others)) billOf.set(x.id, x.bill_no);
   return list.map((k) => {
     const comparisonIds = JSON.parse(k.comparison_ids) as string[];
     return { id: k.id, bankRowId: k.bank_row_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, postedAt: k.posted_at,
@@ -1057,6 +1067,9 @@ export async function cardShiftChoices(db: DB, businessId: string, day: string) 
     WHERE k.business_id = ? AND k.shift_day = ? AND k.kind = 'card_match' ORDER BY k.created_at`, businessId, day);
   const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
   const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
+  // A card bill of an earlier shift settled here is chosen by its sale's id.
+  const others = [...new Set(list.flatMap((k) => JSON.parse(k.comparison_ids) as string[]))].filter((id) => !billOf.has(id));
+  if (others.length) for (const x of await all<{ id: string; bill_no: string }>(db, `SELECT id, bill_no FROM transactions WHERE business_id = ? AND id IN (${others.map(() => '?').join(',')})`, businessId, ...others)) billOf.set(x.id, x.bill_no);
   return list.map((k) => {
     const comparisonIds = JSON.parse(k.comparison_ids) as string[];
     return { id: k.id, paymentId: k.card_payment_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, paidAt: k.paid_at,

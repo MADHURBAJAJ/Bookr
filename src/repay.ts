@@ -27,6 +27,29 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
     SELECT t.id AS txId, r.id AS regId, coalesce(r.paid_with_row_id, r.id) AS head, c.id AS cmpId, c.rg_mode AS rgMode
     FROM transactions t JOIN bill_comparisons c ON c.id = t.comparison_id JOIN register_rows r ON r.id = c.register_row_id
     WHERE t.id IN (${txIds.map(() => '?').join(',')})`, ...txIds);
+  // Settled the next day (approved 11 Nov 2026): a bill counted from the software alone whose register line is on a later
+  // shift, left out there, and says it was paid this way. Only that sale changes; the later line already says so.
+  if (!regs.length) {
+    const later = await all<{ linked_to_id: string; rg_mode: string | null }>(db, `SELECT linked_to_id, rg_mode FROM bill_comparisons
+      WHERE business_id = ? AND decision = 'leave_out' AND difference = 'missing_in_software' AND linked_to_id IN (${tx.map(() => '?').join(',')})`,
+      businessId, ...tx.map((x) => x.comparison_id ?? ''));
+    if (!tx.every((x) => later.some((l) => l.linked_to_id === x.comparison_id && l.rg_mode === mode))) fail(400, 'A bill chosen is not in the register. Correct it on Compare sales.');
+    const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, tx[0].shift_day);
+    if (shift?.status !== 'confirmed') fail(400, 'This shift is not confirmed yet: change the payment on its register page.');
+    const cash = mode === 'cash' ? await cashAccountId(db, businessId) : null;
+    const total = tx.reduce((s, x) => s + x.amount_paise, 0);
+    return {
+      statements: [
+        ...tx.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ? AND match_status IS ?',
+          mode, cash, mode === 'card' ? 'awaiting_card_settlement' : mode === 'upi' ? 'awaiting_bank_match' : null, x.id, x.match_status)),
+        stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+          VALUES (?, ?, 'sale.repaid', 'transactions', ?, ?, ?, ?)`, businessId, userId, tx[0].id,
+          JSON.stringify({ payment: null, sales: tx, comparisons: [] }),
+          JSON.stringify({ from, mode, note, shiftDay: tx[0].shift_day, bills: tx.map((x) => x.bill_no), amountPaise: total, transactionIds: txIds, settledLater: true }), t),
+      ],
+      bills: tx.map((x) => x.bill_no), amountPaise: total,
+    };
+  }
   if (regs.length !== tx.length) fail(400, 'A bill chosen is not in the register. Correct it on Compare sales.');
   const heads = [...new Set(regs.map((r) => r.head))];
   if (heads.length !== 1) fail(400, 'Choose one bill (or one group of bills paid together) at a time.');
@@ -68,11 +91,14 @@ export async function undoRepayStatements(db: DB, businessId: string, auditId: n
   const a = await one<{ id: number; before: string; after: string }>(db, "SELECT id, before, after FROM audit_log WHERE id = ? AND business_id = ? AND action = 'sale.repaid'", auditId, businessId);
   if (!a) fail(404, 'Not found.');
   if (await one(db, "SELECT 1 AS ok FROM audit_log WHERE business_id = ? AND action = 'sale.repay_undone' AND row_id = ?", businessId, String(auditId))) fail(409, 'This was already put back.');
-  const b = JSON.parse(a.before) as { payment: Record<string, unknown>; sales: Record<string, unknown>[]; comparisons: Record<string, unknown>[] };
+  const b = JSON.parse(a.before) as { payment: Record<string, unknown> | null; sales: Record<string, unknown>[]; comparisons: Record<string, unknown>[] };
   const now = await all<{ id: string; matched_bank_row: string | null }>(db, `SELECT id, matched_bank_row FROM transactions WHERE id IN (${b.sales.map(() => '?').join(',')})`, ...b.sales.map((x) => x.id as string));
+  if ((JSON.parse(a.after) as { settledLater?: boolean }).settledLater && await one(db, `SELECT 1 AS x FROM card_matches WHERE transaction_id IN (${b.sales.map(() => '?').join(',')})`, ...b.sales.map((x) => x.id as string))) {
+    fail(409, 'This sale is matched to a card payment now: unmatch it first.');
+  }
   if (now.length !== b.sales.length || now.some((x) => x.matched_bank_row)) fail(409, 'These sales have changed since (e.g. matched). Put them back by hand on the register page.');
   return [
-    stmt(db, 'UPDATE register_payments SET mode = ?, column_label = ? WHERE id = ?', b.payment.mode as string, (b.payment.column_label as string) ?? null, b.payment.id as string),
+    ...(b.payment ? [stmt(db, 'UPDATE register_payments SET mode = ?, column_label = ? WHERE id = ?', b.payment.mode as string, (b.payment.column_label as string) ?? null, b.payment.id as string)] : []),
     ...b.sales.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ?',
       x.payment_mode as string, (x.account_id as string) ?? null, (x.match_status as string) ?? null, x.id as string)),
     ...b.comparisons.map((c) => stmt(db, 'UPDATE bill_comparisons SET rg_mode = ? WHERE id = ?', (c.rg_mode as string) ?? null, c.id as string)),

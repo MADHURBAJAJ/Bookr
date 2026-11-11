@@ -1382,7 +1382,13 @@ function rowIssues(r) {
     if (q.size) red.push(html`Couldn't read ${[...q].map((f) => FIELD_WORDS[f] ?? f).join(', ')}`);
   }
   const why = { short: 'last digits', typo: 'one digit off', short_typo: 'last digits, one off', amount: 'same amount' };
-  if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
+  const od = r.otherDayBill;
+  const odMode = (m) => (m === 'upi' ? 'UPI' : m ?? '');
+  const rowMode = r.payments.length === 1 ? r.payments[0].mode : null;
+  if (od && bm && !bm.exact) {
+    // Settled on another day (11 Nov 2026): the bill is in that day's software report, counted there.
+    info.push(`${dayLabel(od.day)} bill: in that day's software report${od.amount != null ? ` as ${odMode(od.mode)} ₹ ${rs(od.amount)}` : ''}, counted there${rowMode && od.mode && rowMode !== od.mode ? `. Paid here by ${odMode(rowMode)}: change it on Reconcile` : ''}.`);
+  } else if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
   else if (!bm?.exact && isOddBill(r.billNo) && r.numberSettled) info.push(r.numberSettled); // a person settled it on Compare
   else if (!bm && isOddBill(r.billNo)) {
     flags.bill_no = 'red';
@@ -4369,18 +4375,21 @@ async function reconcileView(biz, dayArg) {
   // Money with no bill (approved 11 Nov 2026): on Payments → UPI, one row per credit, bookable before saving too.
   const plainRemark = (x) => (x.remark && !/^(UPI|NA|NO REMARKS?|UPI Pay|Payment from Ph)$/i.test(x.remark.trim()) ? x.remark.trim() : '');
   const roomHead = r.unbilledHeads.find((h) => h.billType === 'room');
+  // Said once in the head when every credit came into one account.
+  const nbOneAccount = (() => { const a = [...new Set(noBillLeft.map((x) => x.accountName ?? ''))]; return a.length === 1 && a[0] ? a[0] : ''; })();
   const noBillSection = noBillLeft.length ? html`<section class="card" id="nobill" style="gap:0">
     <div class="lane-h"><strong>Money with no bill (${noBillLeft.length})</strong>
       <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="nbtickall" style="width:18px;height:18px;min-height:0"> Tick all</label></div>
-    <div class="note">No bill of these amounts on this shift: a sale not written down, or money that is not a sale.${r.confirmed ? '' : ' Booked now, before saving. If a bill for one turns up, Bookr offers to join them as one sale, so it is not counted twice.'}</div>
+    <div class="tiny" style="color:var(--muted);padding-bottom:6px">${nbOneAccount ? `Into ${nbOneAccount} · ` : ''}A sale not written down, or money that is not a sale.${r.confirmed ? '' : ' Book it now; if its bill turns up, Bookr joins them so it is counted once.'} Press Book on a row for its choices, or tick several.</div>
     ${noBillLeft.map((x) => html`<div class="nb-row" data-nbrow="${x.creditId}">
-      <label class="nb-head"><input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">
-        <span><strong>₹ ${money(x.amountPaise)}</strong> <span class="tiny">${hhmm(x.postedAt)} · ${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}</span>${plainRemark(x) ? html` <em class="tiny">"${plainRemark(x)}"</em>` : ''}
-        ${x.extra ? html`<div class="tiny" style="color:#92400E">Extra: ${x.extra === 1 ? 'the 1 bill' : `all ${x.extra} bills`} of ₹ ${money(x.amountPaise)} already ${x.extra === 1 ? 'has its' : 'have their'} credit. A sale not written down, or paid twice?</div>` : ''}</span></label>
+      <div class="nb-line"><label class="nb-head"><input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">
+        <strong class="nb-amt">₹ ${money(x.amountPaise)}</strong><span class="tiny nb-meta">${hhmm(x.postedAt)}${nbOneAccount ? '' : ` · ${x.accountName ?? ''}`}${x.vpa ? ` · ${x.vpa}` : ''}${plainRemark(x) ? html` · <em>"${plainRemark(x)}"</em>` : ''}</span></label>
+        ${x.extra ? html`<span class="nb-chip" title="${`${x.extra === 1 ? 'The 1 bill' : `All ${x.extra} bills`} of ₹ ${money(x.amountPaise)} already ${x.extra === 1 ? 'has its' : 'have their'} credit: a sale not written down, or paid twice?`}">Extra · ${x.extra} bill${x.extra === 1 ? '' : 's'} of this amount paid</span>` : html`<span class="nb-chip">No bill of this amount</span>`}
+        <button class="btn plain nb-open" type="button" data-nbopen="${x.creditId}" aria-expanded="false">Book ▾</button></div>
       ${(x.otherSide ?? []).length ? html`<div class="cmp-warn" style="margin:0 0 0 28px"><strong>Check first:</strong> ${x.otherSide.map((o) => html`<div>The software said ₹ ${money(o.softwarePaise)} for bill <span class="mono">${o.billNo ?? ''}</span>, the register ₹ ${money(o.registerPaise)}; you chose the ${o.chose}'s ₹ ${money(o.chose === 'register' ? o.registerPaise : o.softwarePaise)}. If the ${o.chose === 'register' ? 'software' : 'register'} was right, this ₹ ${money(x.amountPaise)} is that bill's payment.</div>`)}</div>` : ''}
       ${byUpiOffer((r.byUpi ?? []).find((o) => o.creditId === x.creditId), true)}
       <div class="nb-check" data-nbcheck="${x.creditId}"></div>
-      <div class="nb-acts">
+      <div class="nb-acts" hidden>
         <input type="text" data-nbwhat="${x.creditId}" maxlength="120" placeholder="What was it? (optional)" value="${plainRemark(x)}" aria-label="What was ₹ ${money(x.amountPaise)}?">
         ${r.unbilledHeads.map((h) => html`<button class="btn plain" type="button" data-nbsale="${x.creditId}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
         ${roomHead ? html`<button class="btn plain" type="button" data-nbadvance="${x.creditId}">Advance…</button>` : ''}
@@ -4433,12 +4442,13 @@ async function reconcileView(biz, dayArg) {
   const cardNeeds = (r.cards?.needs ?? []).filter((n) => n.why === 'written' && n.written);
   const onCardLine = (b) => {
     const m = (r.cards?.upiOnMachine ?? []).find((x) => x.comparisonId === b.id);
-    if (m) return html`<div class="cmp-warn" style="margin:0 10px 8px 40px">Paid by UPI on the card machine: ₹ ${money(m.amountPaise)} at ${hhmm(m.payAt)}, ${m.minutes} min from the bill. The money comes in the card settlement, not this bank account.
-      <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-upimachine="${m.paymentId}" data-cmp="${m.comparisonId}" data-bill="${m.billNo ?? ''}">Match as UPI on the machine</button></div><div class="form-msg"></div></div>`;
+    if (m) return html`<div class="cmp-warn" style="margin:0 10px 8px 40px">Paid by UPI on the card machine: ₹ ${money(m.amountPaise)} at ${hhmm(m.payAt)}, ${m.minutes} min from the bill. The money comes in the card settlement, not this bank account, so it is a card bill.
+      ${m.rowId && m.uploadId ? html`<div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-upimachine="${m.paymentId}" data-cmp="${m.comparisonId}" data-bill="${m.billNo ?? ''}">Paid on the card machine</button></div>
+      <div class="tiny" style="margin-top:4px">Changes the register's payment to Card and matches it on save. One Undo puts it back.</div>` : html`<div class="tiny" style="margin-top:4px">Change its payment to Card on its row.</div>`}<div class="form-msg"></div></div>`;
     const n = cardNeeds.find((x) => x.written.comparisonId === b.id && x.written.mode === 'upi');
     if (!n) return '';
     const wr = n.written, p = n.payment;
-    const can = r.cards?.trial && !p.upi && wr.rowId && wr.uploadId && !wr.upiNear;
+    const can = r.cards?.trial && wr.rowId && wr.uploadId && !wr.upiNear;
     return html`<div class="cmp-warn" style="margin:0 10px 8px 40px">${wr.upiNear
       ? html`The card machine got ₹ ${money(p.amountPaise)} at ${hhmm(p.paidAt)}, ${wr.minutes} min from the bill, and a UPI credit of this amount is near too: paid twice? Check the bill on its row.`
       : html`The card machine got ₹ ${money(p.amountPaise)} at ${hhmm(p.paidAt)}, ${wr.minutes} min from the bill, and no UPI credit of this amount came in. It was most likely paid by card.`}
@@ -4551,10 +4561,13 @@ async function reconcileView(biz, dayArg) {
       ${entriesHtml(biz, day, ent.cash, 'cash', cv)}
     </div>
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
+      ${paidLaterHtml(biz, r, 'card')}
       ${r.cards?.trial ? trialCardSection(biz, r.cards) : r.cards ? cardSection(biz, r.cards, heads) : ''}
       ${entriesHtml(biz, day, ent.card, 'card', cv)}
+      ${machineUpiLine(r.cards)}
     </div>
     <div data-rpanel="upi" ${tab === 'upi' ? '' : 'hidden'}>
+      ${paidLaterHtml(biz, r, 'upi')}
     <section class="card cmp-bar">
       <div class="cmp-top">
         <div class="cmp-day">
@@ -4657,7 +4670,8 @@ async function reconcileView(biz, dayArg) {
     nearby: async () => (await api('GET', `/businesses/${biz.id}/shifts/${day}/nearby`)).credits,
     post: (pairs) => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/choices`, { pairs: pairs.map((p) => ({ bankRowId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) }) });
   if (!r.confirmed) wireTrialCards(biz, day, r.cards, reload);
-  app.querySelectorAll('#trialopen [data-upimachine]').forEach((b) => b.addEventListener('click', () => upiOnMachineClick(biz, day, b, reload)));
+  wirePaidLater(biz, reload);
+  app.querySelectorAll('#trialopen [data-upimachine]').forEach((b) => b.addEventListener('click', () => upiOnMachineClick(biz, day, b, reload, r.cards)));
   if (r.cards?.trial) app.querySelectorAll('#trialopen [data-tpaidcard]').forEach((b) => b.addEventListener('click', () => paidOnCardClick(biz, day, r.cards.needs.find((x) => x.payment.id === b.dataset.tpaidcard), b, reload)));
   app.querySelectorAll('[data-paidupi]').forEach((b) => b.addEventListener('click', () => paidByUpiClick(biz, day, (r.byUpi ?? []).find((o) => o.comparisonId === b.dataset.paidupi), b, reload)));
   const act = async (fn, toast) => {
@@ -4702,6 +4716,18 @@ async function reconcileView(biz, dayArg) {
     if (bar) { bar.hidden = n < 1; document.getElementById('nbcount').textContent = `${n} ticked:`; }
   };
   app.querySelectorAll('[data-nbtick]').forEach((x) => x.addEventListener('change', nbBulk));
+  // One row's choices open at a time (11 Nov 2026): the list stays one line per credit.
+  app.querySelectorAll('[data-nbopen]').forEach((b) => b.addEventListener('click', () => {
+    const row = b.closest('.nb-row');
+    const acts = row.querySelector('.nb-acts');
+    const opening = acts.hidden;
+    app.querySelectorAll('#nobill .nb-acts').forEach((a) => { a.hidden = true; });
+    app.querySelectorAll('[data-nbopen]').forEach((x) => { x.setAttribute('aria-expanded', 'false'); x.classList.remove('on'); });
+    acts.hidden = !opening;
+    b.setAttribute('aria-expanded', String(opening));
+    b.classList.toggle('on', opening);
+    if (opening) acts.querySelector('input')?.focus();
+  }));
   const nbMenus = [...app.querySelectorAll('details.nb-more')];
   nbMenus.forEach((d) => d.addEventListener('toggle', () => { if (d.open) nbMenus.forEach((o) => { if (o !== d) o.open = false; }); }));
   if (!window.nbMenuClose) { window.nbMenuClose = true; document.addEventListener('click', (e) => document.querySelectorAll('details.nb-more[open]').forEach((d) => { if (!d.contains(e.target)) d.open = false; })); }
@@ -4833,6 +4859,50 @@ async function paidByUpiClick(biz, day, o, b, reload) {
   }
 }
 
+// UPI bills paid on the card machine, under the Card bills table (11 Nov 2026): their machine money is accounted here too.
+function machineUpiLine(k) {
+  if (!k?.trial) return '';
+  const xs = [...k.choices.filter((c) => c.open && c.upiBill).map((c) => ({ billNo: c.billNos.join(' + '), amountPaise: c.amountPaise, paidAt: c.paidAt, how: 'chosen, matched on save' })),
+    ...(k.onUpiTab ?? []).map((p) => ({ billNo: p.billNo, amountPaise: p.amountPaise, paidAt: p.paidAt, how: p.offered ? 'match it on the UPI tab' : 'matched on save when the bank shows it' }))];
+  if (!xs.length) return '';
+  return html`<div class="note" style="margin-top:8px"><strong>Also on this machine, for UPI bills:</strong> ${xs.map((x, i) => html`${i ? ' · ' : ''}${x.billNo ? html`<span class="mono">${x.billNo}</span> ` : 'a UPI bill, '}₹ ${money(x.amountPaise)} at ${hhmm(x.paidAt)}, ${x.how}`)} · <button type="button" class="linkbtn" data-goto="pay:upi">see the UPI tab</button></div>`;
+}
+
+// Bills settled the next day (approved 11 Nov 2026): counted on an earlier saved shift in another mode than their register
+// line here. One button changes that day's sale to this mode (its cash then drops), recorded with Undo.
+const MODE_WORD = { cash: 'cash', card: 'card', upi: 'UPI' };
+function paidLaterHtml(biz, r, mode) {
+  const todo = (r.paidLater ?? []).filter((x) => x.rowMode === mode);
+  const done = (r.paidLaterDone ?? []).filter((x) => x.rowMode === mode);
+  if (!todo.length && !done.length) return '';
+  const row = (x) => html`<a href="#/b/${biz.id}/review/${x.uploadId}/${x.rowId}" class="tiny">Open the line</a>`;
+  return html`<section class="card" style="gap:8px">
+    <div class="lane-h"><strong>Settled here, counted on an earlier day</strong>${todo.length ? html`<span class="tchip warn">${todo.length} to check</span>` : ''}</div>
+    ${todo.map((x) => html`<div class="ent-line" data-plrow><div><span class="mono"><strong>${x.billNo}</strong></span> · ₹ ${money(x.amountPaise)} · ${dayLabel(x.fromDay)} bill ${row(x)}
+      <div class="tiny">Counted as <strong>${MODE_WORD[x.txMode] ?? x.txMode}</strong> on ${dayLabel(x.fromDay)} (saved). The register here says it was paid by <strong>${MODE_WORD[x.rowMode]}</strong>.${x.txMode === 'cash' ? ` If ${dayLabel(x.fromDay)}'s cash was short by ₹ ${money(x.amountPaise)}, this is why.` : ''}</div>
+      <div class="form-msg"></div></div>
+      <button class="btn" type="button" style="min-height:36px" data-paidlater="${x.txId}" data-mode="${x.rowMode}" data-bill="${x.billNo}" data-day="${x.fromDay}">Paid by ${MODE_WORD[x.rowMode]} here</button></div>`)}
+    ${done.map((x) => html`<div class="ent-line"><div><span class="mono">${x.billNo}</span> · ₹ ${money(x.amountPaise)} · ${dayLabel(x.fromDay)} bill: changed from ${MODE_WORD[x.from] ?? x.from} to ${MODE_WORD[x.rowMode]}, paid here.${mode === 'card' ? ' Match it to its card payment below.' : ''}<div class="form-msg"></div></div>
+      <button class="btn plain dchip" type="button" data-paidlaterundo="${x.auditId}">Undo</button></div>`)}
+  </section>`;
+}
+function wirePaidLater(biz, reload) {
+  app.querySelectorAll('[data-paidlater]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      const { auditId } = await apiFull('POST', `/businesses/${biz.id}/sales/repay`, { transactionIds: [b.dataset.paidlater], mode: b.dataset.mode,
+        note: `Settled the next day: paid by ${MODE_WORD[b.dataset.mode]} (Reconcile)` });
+      await reload();
+      doneToast(`Bill ${b.dataset.bill}: ${dayLabel(b.dataset.day)} now counts it as ${MODE_WORD[b.dataset.mode]}, paid here.`, () => apiFull('POST', `/businesses/${biz.id}/sales/repay/${auditId}/undo`, {}), reload);
+    } catch (err) { b.disabled = false; showError(b.closest('.ent-line').querySelector('.form-msg'), err); }
+  }));
+  app.querySelectorAll('[data-paidlaterundo]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await apiFull('POST', `/businesses/${biz.id}/sales/repay/${b.dataset.paidlaterundo}/undo`, {}); await reload(); }
+    catch (err) { b.disabled = false; showError(b.closest('.ent-line').querySelector('.form-msg'), err); }
+  }));
+}
+
 function trialCardSection(biz, k) {
   const st = k.strip;
   const at = (ms) => (ms ? when(ms) : 'register only');
@@ -4845,30 +4915,28 @@ function trialCardSection(biz, k) {
       <div class="tiny">${p.label} · machine ${p.terminalId}</div>`;
     if (n.candidates.length) return html`<div class="rv-card">${head}
       <div class="note">${n.candidates.length > 1 ? 'Pick the bill this payment was for. It is matched when you save the shift.' : (n.candidates[0].minutes == null ? 'This bill has no time, and another bill or payment of this amount is near, so Bookr does not match it on its own. Match it if it is the one: it is matched when you save the shift.' : 'The bill of this amount is further away in time than Bookr matches on its own. Match it if it is the one: it is matched when you save the shift.')}</div>
-      <div class="form-row" style="gap:6px">${n.candidates.map((x) => html`<button class="btn plain" type="button" style="min-height:36px" data-tcardpick="${p.id}" data-cmps="${x.comparisonIds.join(',')}">Bill ${x.billNos.join(' + ')}${x.minutes != null ? ` · ${x.minutes} min` : ' · no bill time'}</button>`)}</div><div class="form-msg"></div></div>`;
+      <div class="form-row" style="gap:6px">${n.candidates.map((x) => html`<button class="btn plain" type="button" style="min-height:36px" data-tcardpick="${p.id}" data-cmps="${x.comparisonIds.join(',')}">Bill ${x.billNos.join(' + ')}${x.minutes != null ? ` · ${x.minutes} min` : ' · no bill time'}</button>`)}</div>
+      ${n.candidates.flatMap((x) => x.earlier ?? []).map((e) => html`<div class="tiny">${e.billNo} is a ${dayLabel(e.fromDay)} bill (₹ ${money(e.amountPaise)}) settled here: its line is on this shift's register.</div>`)}<div class="form-msg"></div></div>`;
     if (n.why === 'tip') return html`<div class="rv-card">${head}
       <div class="note">Bill <span class="mono">${n.tip.billNo}</span> ${openRow(n.tip.billNo)} is ₹ ${money(n.tip.amountPaise)}, ${at(n.tip.paidAt)}: the guest paid ₹ ${money(n.tip.tipPaise)} more on the card. Match it with the tip here after saving.</div></div>`;
     // Paid on the card machine (approved 11 Nov 2026): corrected here before saving, in one step with one Undo.
     if (n.why === 'written') {
       const wr = n.written;
-      const can = !p.upi && wr.rowId && wr.uploadId && !wr.upiNear;
+      const can = wr.rowId && wr.uploadId && !wr.upiNear;
       return html`<div class="rv-card">${head}
       <div class="note">Bill <span class="mono">${wr.billNo}</span> ${openRow(wr.billNo)}, ₹ ${money(wr.amountPaise)} at ${when(wr.paidAt)}, is written as <strong>${wr.mode === 'upi' ? 'UPI' : 'cash'}</strong>. The card machine got ₹ ${money(p.amountPaise)} at ${hhmm(p.paidAt)}, ${wr.minutes} min from the bill${wr.mode === 'upi' && !wr.upiNear ? ', and no UPI credit of this amount came in near it' : ''}.</div>
       ${wr.upiNear ? html`<div class="cmp-warn" style="margin:0">Both a UPI credit and a card payment of ₹ ${money(wr.amountPaise)} are near this bill: paid twice? Check the bill on its row.</div>` : ''}
-      ${p.upi && wr.mode === 'upi' && (k.upiOnMachine ?? []).some((m) => m.paymentId === p.id) ? html`<div class="note">Paid by UPI on the machine: the bill stays UPI, and the money comes in the card settlement.</div>
-      <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-upimachine="${p.id}" data-cmp="${wr.comparisonId}" data-bill="${wr.billNo ?? ''}">Match as UPI on the machine</button></div>` : ''}
-      ${can ? html`<div class="note">Changes the register's payment to Card${wr.swMode && wr.swMode !== 'card' ? ', decides the bill as Use register (card)' : ''}, and matches this payment on save. One Undo puts it all back.</div>
+      ${can ? html`<div class="note">${p.upi ? 'Paid by UPI on the machine: the money comes in the card settlement, so it is a card bill. ' : ''}Changes the register's payment to Card${wr.swMode && wr.swMode !== 'card' ? ', decides the bill as Use register (card)' : ''}, and matches this payment on save. One Undo puts it all back.</div>
       <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-tpaidcard="${p.id}" data-cmp="${wr.comparisonId}">Paid on the card machine</button></div>` : ''}
       <div class="form-msg"></div></div>`;
     }
     if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
     return html`<div class="rv-card">${head}
-      <div class="note">No card bill of this amount in this shift: a bill written as cash or UPI, several bills paid on one card (tick them together in Match several at once below), or money that is not a bill (an advance, a room). After saving it can be booked to a head here.</div></div>`;
+      <div class="tiny" style="color:var(--muted)">No card bill of this amount. Several bills on one card? Tick them together in Match several at once below. Otherwise a bill written as cash or UPI, or money that is not a bill (book it after saving).</div></div>`;
   };
   const noSwipe = (x) => html`<div class="rv-card">
     <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
-    <div class="tiny">${at(x.paidAt)} · ${openRow(x.billNo)}</div>
-    <div class="note">The card report is in for this shift and has no payment for this bill. Check how it was paid on its row; after saving, Was cash and Was UPI are here.</div>
+    <div class="tiny">${x.paidAt ? at(x.paidAt) : 'No bill time'} · ${openRow(x.billNo)} · <span style="color:var(--muted)">the card report has no payment for it: check how it was paid on its row.</span></div>
     ${x.near ? html`<div class="cmp-warn" style="margin:0"><strong>Check:</strong> ${x.near.label} ₹ ${money(x.near.amountPaise)} at ${hhmm(x.near.paidAt)}, ${x.near.minutes} min from the bill, ₹ ${money(Math.abs(x.near.amountPaise - x.amountPaise))} ${x.near.amountPaise > x.amountPaise ? 'more' : 'less'}: a misread amount, or a ${x.near.amountPaise > x.amountPaise ? 'tip' : 'discount'}? Tick both in Match several at once below to choose.</div>` : ''}
     ${byUpiOffer((k.byUpi ?? []).find((o) => o.comparisonId === x.comparisonId))}</div>`;
   const chosen = k.choices.filter((c) => c.open);
@@ -4877,18 +4945,17 @@ function trialCardSection(biz, k) {
       ${k.left ? html`<span class="chip wait">${k.left} left</span>` : k.covered ? html`<span class="chip ok">Card ready to save</span>` : ''}<span class="chip">Not saved</span></span></div>
     <div class="rec-strip">
       <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
-      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}</div></div>
+      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">${st.machine ? `card bills ₹ ${rs(st.machine.cardPaise)} · UPI bills ₹ ${rs(st.machine.upiPaise)} · not matched ₹ ${rs(st.machine.leftPaise)}` : `card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}`}</div></div>
       <div><div class="tiny">Would match on save</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.wouldPaise)}</div><div class="tiny">${st.would} bill${st.would === 1 ? '' : 's'}${st.chosen ? ` · ${st.chosen} chosen` : ''}</div></div>
       <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`}</div></div>
-      <div><div class="tiny">Machine payments with no card bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
+      <div><div class="tiny">${st.machine ? 'Machine payments not matched yet' : 'Machine payments with no card bill'}</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
     </div>
-    <div class="note">Nothing is matched until you save. Bookr matches a payment on its own only when it is the one card bill of its amount within 20 minutes and no other payment wants it, or, for a bill with no time, the only card bill and the only payment of its amount in the shift; the Money received column shows each.</div>
-    ${chosen.length ? html`<div><strong>Chosen, matched on save</strong>${chosen.map((c) => html`<div class="list-row"><span><span class="mono">${c.billNos.join(' + ')}</span> · ${c.label} ₹ ${money(c.amountPaise)} at ${when(c.paidAt)}${c.by ? html` <span class="tiny">by ${c.by}</span>` : ''}</span>
-      <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></div>`)}</div>` : ''}
+    <div class="tiny" style="color:var(--muted)" title="Bookr matches a payment on its own only when it is the one card bill of its amount within 20 minutes and no other payment wants it, or, for a bill with no time, the only card bill and the only payment of its amount in the shift.">Nothing is matched until you save. The Money received column below shows what Save will match.</div>
+    ${chosen.length ? html`<details class="cmp-fold"><summary><strong>Chosen by you, matched on save (${chosen.length})</strong></summary>${chosen.map((c) => html`<div class="list-row" style="padding:4px 0"><span class="tiny"><span class="mono">${c.billNos.join(' + ')}</span>${c.upiBill ? html` <span class="upitag">UPI bill</span>` : ''} · ${c.label} ₹ ${money(c.amountPaise)} at ${hhmm(c.paidAt)}${c.by ? ` · ${c.by}` : ''}${c.upiBill ? html` · <button type="button" class="linkbtn tiny" data-goto="pay:upi">on the UPI tab</button>` : ''}</span>
+      <span style="display:flex;gap:6px">${c.upiBill && c.bill?.uploadId ? html`<button class="btn plain dchip" type="button" data-choicetocard="${c.id}" title="Card machine money is a card bill: changes the register's payment to Card, matched on save">Change to card</button>` : ''}
+      <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></span><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
     ${trialCardOpen(k)}
-    ${(k.onUpiTab ?? []).length ? html`<div class="note"><strong>UPI on the machine for UPI bills: ${k.onUpiTab.length}</strong> · on the <button type="button" class="linkbtn" data-goto="pay:upi">UPI tab</button>, not card bills.
-      ${k.onUpiTab.map((p) => html`<div class="tiny">₹ ${money(p.amountPaise)} at ${when(p.paidAt)}: ${p.billNo ? html`UPI bill <span class="mono">${p.billNo}</span>${p.offered ? ', match it there under the bill' : ''}` : 'a UPI bill of this amount is waiting near it, matched on save when the bank shows it'}.</div>`)}</div>` : ''}
   </section>`;
 }
 // Card payments as the tray's left side: its time is the swipe, its name the card.
@@ -4905,7 +4972,7 @@ function trialCardOpen(k) {
         ${o.credits.map((c) => html`<label class="um-line"><input type="checkbox" data-tside="cr" data-amt="${c.amountPaise}" data-id="${c.id}"><span style="flex:1">${when(c.paidAt)}<span class="tiny" style="display:block">${c.label} · machine ${c.terminalId}</span></span><strong class="amount">₹ ${money(c.amountPaise)}</strong></label>`)}
         <label class="tiny" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" data-tray="nearOn" style="width:16px;height:16px;min-height:0"> Show payments from the shifts either side</label><div data-tray="near"></div></div>
       <div><strong>Card bills with no payment yet</strong> <span class="chip">${o.bills.length}</span>
-        ${o.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${k.day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>`)}</div>
+        ${o.bills.map((b) => html`<label class="um-line"><input type="checkbox" data-tside="bl" data-amt="${b.amountPaise}" data-id="${b.id}"><span style="flex:1"><span class="mono">${b.billNo}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}${b.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${k.day}">Open row</button>` : ''}<span class="tiny" style="display:block">${b.fromDay ? `${dayLabel(b.fromDay)} bill, settled here` : b.paidAt ? when(b.paidAt) : 'register only'}</span></span><strong class="amount">₹ ${money(b.amountPaise)}</strong></label>`)}</div>
     </div>
     <div data-tray="sum" class="note">Tick entries to compare them.</div><div data-tray="fix"></div><div class="form-msg" data-tray="msg"></div></details>`;
 }
@@ -4914,13 +4981,13 @@ function trialCardOpen(k) {
 // payment becomes Card, the bill is decided Use register (card) when the software says otherwise, and the machine
 // payment is matched on save. All undone together.
 // A UPI bill paid by UPI on the card machine (11 Nov 2026), matched to the machine's report on save; from the UPI or Card tab.
-async function upiOnMachineClick(biz, day, b, reload) {
-  b.disabled = true;
-  try {
-    const { id } = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/card-choices`, { paymentId: b.dataset.upimachine, comparisonIds: [b.dataset.cmp] });
-    await reload();
-    doneToast(`Bill ${b.dataset.bill}: matched to the UPI payment on the card machine when you save.`, () => apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${id}`, {}), reload);
-  } catch (err) { b.disabled = false; showError(b.closest('.cmp-warn, .rv-card')?.querySelector('.form-msg'), err); }
+// UPI on the card machine (card since 11 Nov 2026): the bill becomes a card bill, the same steps as Paid on the card machine.
+async function upiOnMachineClick(biz, day, b, reload, k) {
+  const m = (k?.upiOnMachine ?? []).find((x) => x.paymentId === b.dataset.upimachine && x.comparisonId === b.dataset.cmp);
+  const n = (k?.needs ?? []).find((x) => x.payment.id === b.dataset.upimachine && x.written?.comparisonId === b.dataset.cmp);
+  const wr = n?.written ?? (m && { comparisonId: m.comparisonId, billNo: m.billNo, mode: 'upi', amountPaise: m.amountPaise, rowId: m.rowId, uploadId: m.uploadId, swMode: m.swMode });
+  if (!wr) { showError(b.closest('.cmp-warn, .rv-card')?.querySelector('.form-msg'), new Error('Reload the page: this payment has changed.')); return; }
+  return paidOnCardClick(biz, day, { payment: n?.payment ?? { id: m.paymentId, amountPaise: m.amountPaise, paidAt: m.payAt, upi: true }, written: wr }, b, reload);
 }
 
 async function paidOnCardClick(biz, day, n, b, reload) {
@@ -4969,7 +5036,16 @@ function wireTrialCards(biz, day, k, reload) {
       nearby: async () => (await api('GET', `/businesses/${biz.id}/shifts/${day}/nearby`)).payments.map((p) => ({ ...p, postedAt: p.paidAt, accountName: p.label })),
       post: (pairs) => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/card-choices`, { pairs: pairs.map((p) => ({ paymentId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) }) });
   }
-  box.querySelectorAll('[data-upimachine]').forEach((b) => b.addEventListener('click', () => upiOnMachineClick(biz, day, b, reload)));
+  box.querySelectorAll('[data-upimachine]').forEach((b) => b.addEventListener('click', () => upiOnMachineClick(biz, day, b, reload, k)));
+  // A UPI bill already chosen for UPI on the machine (before 11 Nov 2026): changed to card, the choice made again.
+  box.querySelectorAll('[data-choicetocard]').forEach((b) => b.addEventListener('click', async () => {
+    const c = k.choices.find((x) => x.id === b.dataset.choicetocard);
+    if (!c?.bill) return;
+    b.disabled = true;
+    try { await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${c.id}`, {}); }
+    catch (err) { b.disabled = false; showError(b.closest('.list-row').querySelector('.form-msg'), err); return; }
+    await paidOnCardClick(biz, day, { payment: { id: c.paymentId, amountPaise: c.amountPaise, paidAt: c.paidAt, upi: true }, written: c.bill }, b, reload);
+  }));
   box.querySelectorAll('[data-tpaidcard]').forEach((b) => b.addEventListener('click', () => paidOnCardClick(biz, day, k.needs.find((x) => x.payment.id === b.dataset.tpaidcard), b, reload)));
   box.querySelectorAll('[data-tcardpick]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
@@ -4998,7 +5074,7 @@ function cardSection(biz, k, heads) {
       <div class="tiny">${card(p)} · machine ${p.terminalId}</div>`;
     if (n.why === 'written') return html`<div class="rv-card">${head}
       <div class="note">Bill <span class="mono">${n.written.billNo}</span>, ₹ ${money(n.written.amountPaise)} at ${when(n.written.paidAt)}${n.written.shiftDay !== k.day ? ` (${dayLabel(n.written.shiftDay)} shift)` : ''}, is written as <strong>${n.written.mode === 'upi' ? 'UPI' : 'cash'}</strong>, ${n.written.minutes} min from this payment.${n.written.mode === 'upi' ? ' No UPI credit has paid it: it was most likely paid on the machine.' : ''}${p.upi ? ' Paid by UPI on the machine: the bill stays UPI and is received in the machine\'s settlement.' : ''}</div>
-      <div class="form-row" style="gap:6px">${p.upi ? html`<button class="btn" type="button" style="min-height:36px" data-cardupi="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">${n.written.mode === 'upi' ? 'Match as UPI on the machine' : 'Change to UPI and match'}</button>`
+      <div class="form-row" style="gap:6px">${p.upi ? html`<button class="btn" type="button" style="min-height:36px" data-cardupi="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">Change to card and match</button>`
         : html`<button class="btn" type="button" style="min-height:36px" data-cardwascard="${p.id}" data-tx="${n.written.transactionId}" data-bill="${n.written.billNo}">Change to card and match</button>`}</div><div class="form-msg"></div></div>`;
     if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
     if (n.why === 'tip') return html`<div class="rv-card">${head}
@@ -5112,7 +5188,7 @@ function wireCardSection(biz, k, act) {
     b.disabled = true;
     let auditId = null;
     act(async () => { auditId = (await apiFull('POST', `${B}/${pid}/upi-on-machine`, { transactionIds: [b.dataset.tx] })).auditId; },
-      { text: `Bill ${b.dataset.bill} matched as UPI on the card machine.`, undo: async () => { await unmatch(pid); if (auditId) await repayUndo(auditId); } });
+      { text: `Bill ${b.dataset.bill} changed to card (UPI on the machine) and matched to the machine payment.`, undo: async () => { await unmatch(pid); if (auditId) await repayUndo(auditId); } });
   }));
   box.querySelectorAll('[data-cardparts]').forEach((b) => b.addEventListener('click', () => {
     const pids = b.dataset.cardparts.split(',');

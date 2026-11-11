@@ -263,6 +263,13 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         .sort((a, b) => Math.abs(a.posted_at - sw.paid_at) - Math.abs(b.posted_at - sw.paid_at))[0];
       return x ? { amountPaise: x.amount_paise, at: x.posted_at } : null;
     };
+    // A line whose bill is in an earlier or later shift's software report (a bill settled the next day, 11 Nov 2026):
+    // said as such, not as a number the software does not have.
+    const elsewhereBill = new Map((await all<{ rowId: string; day: string; mode: string | null; amount: number | null; decision: string | null }>(db, `
+      SELECT here.register_row_id AS rowId, e.shift_day AS day, e.sw_mode AS mode, e.sw_amount_paise AS amount, e.decision
+      FROM bill_comparisons here JOIN bill_comparisons e ON e.id = here.linked_to_id
+      WHERE here.business_id = ? AND here.shift_day = ? AND here.register_row_id IS NOT NULL AND e.shift_day <> here.shift_day`, bid, u.business_day))
+      .map((x) => [x.rowId, x]));
     // Rows of the same shift on its other register pages: bills paid together can run across sheets.
     const pages = await all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
       WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id);
@@ -287,6 +294,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       rows: rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id), billMatch: matches?.get(r.id) ?? null, numberFlags: flagsOf.get(r.id) ?? [],
         // "Use ₹145?" is not offered for a row whose own amount fits another bill a digit away.
         slipBank: slipBank(r.id),
+        otherDayBill: elsewhereBill.get(r.id) ?? null,
         hint: flagsOf.get(r.id)?.some((f) => f.kind === 'pending_typo') ? null : hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }), columnHint: colHints.find((h) => h.rowId === r.id) ?? null })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });

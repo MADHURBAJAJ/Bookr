@@ -5,7 +5,7 @@ import { requireRole } from '../auth';
 import { all, newId, now, one, stmt } from '../db';
 import { body, fail, isUuid, text } from '../http';
 import { readCardReport } from '../cardsettlement';
-import { cardAddedRow, cardCandidates, cardMatchStatements, isMachineUpi, machineUpiStatements, cardRules, daysTogether, importCardLines, openSettlementCredits, ruleFor, runCardAuto, settleStatements,
+import { cardAddedRow, cardCandidates, cardMatchStatements, isMachineUpi, cardRules, daysTogether, importCardLines, openSettlementCredits, ruleFor, runCardAuto, settleStatements,
   settlementCredits, settlementCosts, chargesOf, isCardCharge, unsettledDays, unsettleStatements, waitingCard, type CardPayment } from '../cards';
 import { readMail, readReportFile } from '../mail';
 import { repayStatements } from '../repay';
@@ -385,8 +385,8 @@ cardRoutes.post('/businesses/:businessId/cards/was-upi', requireRole('bank.link'
 });
 
 /**
- * UPI paid on the card machine (approved 9 Nov 2026): the bill stays UPI (a cash bill becomes UPI, recorded as paid
- * another way) and is matched to the machine payment; it is received through the machine's settlement.
+ * UPI paid on the card machine (approved 9 Nov 2026; card since 11 Nov 2026): a UPI or cash bill becomes a card bill,
+ * recorded as paid another way, and is matched to the machine payment; it is received through the machine's settlement.
  */
 cardRoutes.post('/businesses/:businessId/cards/:paymentId/upi-on-machine', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
@@ -407,10 +407,11 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/upi-on-machine', requi
   if (sales.reduce((t, x) => t + x.amount_paise, 0) !== p.amount_paise) fail(409, 'The payment is not the bill\'s amount.');
   const t = now();
   const user = c.get('user').id;
-  const cash = sales.filter((x) => x.payment_mode === 'cash').map((x) => x.id);
-  const r = cash.length ? await repayStatements(db, bid, cash, 'upi', 'Paid by UPI on the card machine: the card report shows it (Reconcile)', user, t) : null;
-  const done = await db.batch([...(r?.statements ?? []), ...machineUpiStatements(db, bid, pid, tids, user, t + 1, 'UPI on the machine, matched by a person')]);
-  return c.json({ ok: true, auditId: r ? done[r.statements.length - 1]?.meta.last_row_id ?? null : null });
+  // Card machine money is a card sale (approved 11 Nov 2026): the bill becomes card, paid by UPI on the machine, and is
+  // matched to the payment. Undo puts back both.
+  const r = await repayStatements(db, bid, tids, 'card', 'Paid by UPI on the card machine: the card report shows it (Reconcile)', user, t);
+  const done = await db.batch([...r.statements, ...cardMatchStatements(db, bid, [pid], tids, user, t + 1, { upiOnMachine: true })]);
+  return c.json({ ok: true, bills: r.bills, auditId: done[r.statements.length - 1]?.meta.last_row_id ?? null });
 });
 
 /** A machine payment whose bill was written as UPI or cash: the bill is changed to card and matched to the payment. */

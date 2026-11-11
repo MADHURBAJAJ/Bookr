@@ -404,7 +404,16 @@ details.cmp-fold[open] > summary h2::before { content: '▾ '; }
 /* Money with no bill (11 Nov 2026): one compact row per credit; the open More menu sits above the rows below it. */
 details.menu { z-index: auto; }
 details.menu[open] { z-index: 40; }
-#nobill .nb-row { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
+#nobill .nb-row { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line-soft); }
+#nobill .nb-line { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#nobill .nb-line .nb-head { flex: 1 1 260px; align-items: center; min-width: 0; }
+#nobill .nb-line .nb-head input { margin-top: 0; }
+#nobill .nb-amt { min-width: 92px; font-variant-numeric: tabular-nums; }
+#nobill .nb-meta { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#nobill .nb-chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #FEF3C7; color: #92400E; white-space: nowrap; }
+#nobill .nb-open { min-height: 32px; padding: 4px 12px; }
+#nobill .nb-open.on { background: var(--teal); color: #fff; border-color: var(--teal); }
+#nobill .nb-acts[hidden] { display: none; }
 #nobill .nb-head { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; font-weight: 400; }
 #nobill .nb-head input { width: 18px; height: 18px; min-height: 0; margin-top: 3px; flex: none; }
 #nobill .nb-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding-left: 28px; }
@@ -418,3 +427,5 @@ details.menu[open] { z-index: 40; }
 @media (max-width: 600px) { #nobill .nb-acts { padding-left: 0; } #nobill .nb-acts > input { max-width: none; flex-basis: 100%; } #nobill .nb-more .menu-pop { right: auto; left: 0; } }
 /* The tray: the chosen answer for a pair more than ₹10 apart (11 Nov 2026). */
 .tray-row .dchip.on { background: var(--teal); border-color: var(--teal); color: #fff; }
+
+.upitag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--income-bg); color: var(--income); }
