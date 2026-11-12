@@ -2,7 +2,8 @@
 //
 // - Bills are rows whose SI.NO is a number. Blank lines and a footer follow.
 // - The footer (TOTAL BILLS, UPI, CARD, CASH, TOTAL SALE) is the control total.
-// - NAME is never returned, and the copy kept in storage has it blanked.
+// - NAME is kept (approved 12 Nov 2026, for the complimentary report); empty or "U/N" means no name. The copy kept in
+//   storage is the file as it came.
 // - Amounts become integer paise; DATE/TIME is India time.
 
 import { parsePaise } from './money';
@@ -18,6 +19,8 @@ export interface ParsedBill {
   mode: Mode;
   amountPaise: number;
   discountPaise: number;
+  /** The NAME column; null when empty or "U/N". */
+  name: string | null;
 }
 
 export interface Footer {
@@ -38,7 +41,7 @@ export interface ParsedReport {
   /** A bill number seen again in the same file (Stage 7, approved 10 Nov 2026): imported once, the repeat kept apart
    *  for a person to choose which line to keep. Counted in the footer checks. */
   twice: ParsedBill[];
-  /** The same file with the NAME column blanked, for storage. */
+  /** The file as stored (with its NAME column, since 12 Nov 2026). */
   redacted: string;
 }
 
@@ -143,7 +146,9 @@ export function parseSalesCsv(text: string): ParsedReport {
       const again = !!billNo && seen.has(key);
       seen.add(key);
       if (paidAt !== null && amount !== null && discount !== null && billNo) {
-        (again ? twice : bills).push({ siNo: cell(r, 'si'), posNo, billNo, paidAt, mode: parseMode(cell(r, 'mode')), amountPaise: amount, discountPaise: discount });
+        const name = cell(r, 'name').replace(/\s+/g, ' ').slice(0, 120);
+        (again ? twice : bills).push({ siNo: cell(r, 'si'), posNo, billNo, paidAt, mode: parseMode(cell(r, 'mode')), amountPaise: amount, discountPaise: discount,
+          name: name && !/^u\s*\/\s*n$/i.test(name) ? name : null });
       }
       continue;
     }
@@ -174,10 +179,7 @@ export function parseSalesCsv(text: string): ParsedReport {
   if (!bills.length && !problems.length) problems.push('The file has no bills.');
 
   const times = bills.map((b) => b.paidAt);
-  const redacted = rows
-    .map((r, i) => (i > headerIndex && cols.name !== undefined && r.length > cols.name ? r.map((c, j) => (j === cols.name ? '' : c)) : r))
-    .map((r) => r.map(quote).join(','))
-    .join('\n');
+  const redacted = rows.map((r) => r.map(quote).join(',')).join('\n');
 
   return {
     bills,

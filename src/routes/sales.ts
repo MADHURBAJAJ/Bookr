@@ -60,8 +60,31 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
   }
 
   const contentSha = await sha256(csv);
+  // Names (approved 12 Nov 2026): bills imported before kept no name. The same file again fills in the names of its
+  // bills still without one, and changes nothing else.
+  const nameFills = async () => {
+    const named = parsed.bills.filter((b) => b.name);
+    if (!named.length) return [];
+    const have = await all<{ id: string; pos_no: string; bill_no: string; paid_at: number; amount_paise: number }>(db, `SELECT id, pos_no, bill_no, paid_at, amount_paise FROM software_bills
+      WHERE business_id = ? AND customer_name IS NULL AND (pos_no || char(0) || bill_no) IN (SELECT value FROM json_each(?))`, bid, JSON.stringify(named.map((b) => `${b.posNo}\u0000${b.billNo}`)));
+    return have.flatMap((h) => {
+      const b = named.find((x) => x.posNo === h.pos_no && x.billNo === h.bill_no && x.paidAt === h.paid_at && x.amountPaise === h.amount_paise);
+      return b ? [{ id: h.id, name: b.name! }] : [];
+    });
+  };
+  const namesOnly = async (fills: { id: string; name: string }[]) => {
+    if (dryRun) return c.json({ namesOnly: true, names: fills.length });
+    await db.batch([
+      ...fills.map((f) => stmt(db, 'UPDATE software_bills SET customer_name = ? WHERE id = ? AND customer_name IS NULL', f.name, f.id)),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'sales_report.names', 'software_bills', ?, NULL, ?, ?)`,
+        bid, c.get('user').id, fills[0].id, JSON.stringify({ names: fills.length }), now()),
+    ]);
+    return c.json({ namesOnly: true, names: fills.length });
+  };
   if (await one(db, 'SELECT 1 AS ok FROM uploads WHERE business_id = ? AND content_sha256 = ?', bid, contentSha)) {
-    fail(409, 'This exact file was already uploaded.');
+    const fills = await nameFills();
+    if (!fills.length) fail(409, 'This exact file was already uploaded.');
+    return namesOnly(fills);
   }
 
   let replaced: { id: string; days: string[] } | null = null;
@@ -98,6 +121,11 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
     if (first.paidAt === b.paidAt && first.mode === b.mode && first.amountPaise === b.amountPaise && first.discountPaise === b.discountPaise) { skipped++; continue; }
     const stored = byKey.get(`${b.posNo}\u0000${b.billNo}`);
     twiceFlags.push({ bill: b, existingId: stored ? stored.id : addIds.get(first)! });
+  }
+  // Nothing new in the file, only names for bills already in Bookr: the names are filled in, nothing else.
+  if (!replaced && !toAdd.length && !toFlag.length && !twiceFlags.length) {
+    const fills = await nameFills();
+    if (fills.length) return namesOnly(fills);
   }
   const addDays = [...new Set(toAdd.map((b) => shiftDayOf(b.paidAt)))].sort();
   const touched = [...new Set([...addDays, ...(replaced?.days ?? [])])].sort();
@@ -146,9 +174,11 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
       ] : []),
       ...touched.map((d) => shiftStatement(db, bid, d)),
       ...toAdd.map((b) => stmt(db, `INSERT INTO software_bills (id, business_id, report_id, pos_no, bill_no, si_no, paid_at, shift_day, mode,
-        amount_paise, discount_paise, is_complimentary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        amount_paise, discount_paise, is_complimentary, customer_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         addIds.get(b)!, bid, reportId, b.posNo, b.billNo, b.siNo, b.paidAt, shiftDayOf(b.paidAt), b.mode, b.amountPaise, b.discountPaise,
-        b.amountPaise === 0 ? 1 : 0, t)),
+        b.amountPaise === 0 ? 1 : 0, b.name, t)),
+      // A bill already stored the same, imported before names were kept, takes its name from this file.
+      ...(await nameFills()).filter((f) => !toAdd.some((b) => addIds.get(b) === f.id)).map((f) => stmt(db, 'UPDATE software_bills SET customer_name = ? WHERE id = ? AND customer_name IS NULL', f.name, f.id)),
       ...toFlag.map((f) => stmt(db, `INSERT INTO software_bill_conflicts (id, business_id, report_id, existing_bill_id, incoming_paid_at,
         incoming_mode, incoming_amount_paise, incoming_discount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         newId(), bid, reportId, f.existing.id, f.bill.paidAt, f.bill.mode, f.bill.amountPaise, f.bill.discountPaise, t)),

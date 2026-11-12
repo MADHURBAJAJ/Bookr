@@ -47,6 +47,10 @@ describe('a bill settled the next day', () => {
     expect(r.cards.open.bills.find((b: any) => b.billNo === '2610317')).toMatchObject({ fromDay: '2026-10-31' });
     const ch = await h.clients.accountant.post(`${base}/shifts/2026-11-01/card-choices`, { paymentId: pay, comparisonIds: need.candidates[0].comparisonIds });
     expect(ch.status, JSON.stringify(ch.json)).toBe(200);
+    // Waiting (12 Nov 2026): the saved 31 Oct bill is chosen on 1 Nov, so it is not "needs a look" but told as chosen there.
+    const w = (await o.get(`${base}/waiting`)).json;
+    expect(w.look.map((x: any) => x.billNo)).not.toContain('2610317');
+    expect(w.grey.find((x: any) => x.billNo === '2610317')).toMatchObject({ waitFor: 'chosen', chosenOn: '2026-11-01', chosenWith: expect.stringMatching(/with bill 2611012$/) });
 
     await h.decideRest('2026-11-01');
     await h.confirm('2026-11-01');

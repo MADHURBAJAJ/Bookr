@@ -86,13 +86,14 @@ describe('software sales CSV', () => {
     expect(r.footer!.totalPaise).toBe(r.bills.reduce((s, x) => s + x.amountPaise, 0));
   });
 
-  it('never returns or keeps a name', () => {
+  it('keeps the name for the complimentary report (12 Nov 2026); U/N is no name', () => {
     const r = parseSalesCsv(csv);
-    expect(JSON.stringify(r.bills)).not.toMatch(/Asha|Vikram|U\/N"/);
-    expect(r.redacted).not.toMatch(/Asha|Vikram|Room 4/);
-    const rows = csvRows(r.redacted);
-    expect(rows[0][4]).toBe('NAME');
-    expect(rows.slice(1, 17).every((row) => row[4] === '')).toBe(true);
+    expect(r.bills.find((x) => x.billNo === '2610314')!.name).toBe('Asha Rao, Room 4');
+    expect(r.bills.find((x) => x.billNo === '26103120')!.name).toBe('Vikram Nair');
+    expect(r.bills.filter((x) => x.name === null).length).toBeGreaterThan(0);
+    expect(JSON.stringify(r.bills)).not.toMatch(/U\/N"/);
+    expect(r.redacted).toContain('Asha Rao, Room 4');
+    expect(csvRows(r.redacted)[0][4]).toBe('NAME');
     expect(r.redacted).toContain('TOTAL SALE');
   });
 

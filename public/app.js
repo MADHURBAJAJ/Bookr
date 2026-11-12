@@ -2653,6 +2653,7 @@ const WAIT_FOR = { register: (d) => `until the ${dayLabel(d)} register is in`, s
 /** One grey line: an unsaved shift is told as the shift (Waiting starts at save, 10 Nov 2026); the rest as "N bills: until …". */
 const greyText = (g) => (g.waitFor === 'unsaved'
   ? `${dayLabel(g.day)} shift not saved yet${g.n ? ` (${g.n} bill${g.n === 1 ? '' : 's'} on one side only)` : ''}: finish it on Reconcile`
+  : g.waitFor === 'chosen' ? `${g.n} saved bill${g.n === 1 ? '' : 's'} of ${dayLabel(g.day)} chosen on a later shift: matched when that shift is saved`
   : `${g.n} bill${g.n === 1 ? '' : 's'}: ${(WAIT_FOR[g.waitFor] ?? ((d) => dayLabel(d)))(g.day)}`);
 
 /**
@@ -2663,7 +2664,9 @@ function waitingPanelHtml(biz, w, canDecide) {
   if (!w) return html`<section class="card"><div class="note">Waiting could not be loaded.</div></section>`;
   const look = w.look ?? [];
   const greys = new Map();
-  for (const x of w.grey ?? []) { const k = `${x.waitFor}|${x.day}`; greys.set(k, { waitFor: x.waitFor, day: x.day, n: (greys.get(k)?.n ?? 0) + (x.count ?? 1) }); }
+  // Saved bills chosen on a later shift not saved yet (12 Nov 2026): each told on its own line.
+  const chosen = (w.grey ?? []).filter((x) => x.waitFor === 'chosen');
+  for (const x of (w.grey ?? []).filter((y) => y.waitFor !== 'chosen')) { const k = `${x.waitFor}|${x.day}`; greys.set(k, { waitFor: x.waitFor, day: x.day, n: (greys.get(k)?.n ?? 0) + (x.count ?? 1) }); }
   const late = look.filter((x) => x.unresolved).length;
   const offerHtml = (x) => (x.offers ?? []).map((o) => html`<div class="tiny" style="color:var(--teal-ink)">${o.kind === 'credit' ? 'Credit' : 'Machine payment'} ₹ ${money(o.amountPaise)} at ${when(o.at)}${o.label ? ` (${o.label})` : ''}${o.shiftDay !== x.day ? `, ${dayLabel(o.shiftDay)} shift` : ''}${o.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(o.amountPaise - x.amountPaise))} ${o.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}
       <a href="#/b/${biz.id}/reconcile/${x.day}">Match on the ${dayLabel(x.day)} shift ›</a></div>`);
@@ -2687,8 +2690,10 @@ function waitingPanelHtml(biz, w, canDecide) {
             <button class="btn plain dchip" type="button" data-keepwait="${x.comparisonId}" data-bill="${x.billNo}">Keep waiting ${w.watchDays} more days</button></div>` : ''}</td>
         </tr>`)}</tbody></table></div>` : html`<div class="ok-msg">Nothing needs a look.</div>`}
     </section>
-    ${greys.size ? html`<section class="card" style="gap:6px"><h2 style="font-size:16px">Not counted yet</h2>
+    ${greys.size || chosen.length ? html`<section class="card" style="gap:6px"><h2 style="font-size:16px">Not counted yet</h2>
       <div class="note">Nothing is wrong with these yet. A shift's bills start waiting when it is saved; until then, finish them on its own tabs. The rest wait for a file to come in.</div>
+      ${chosen.map((x) => html`<div class="list-row" style="color:var(--muted)"><span><span class="mono">${x.billNo}</span> · ${dayLabel(x.day)} bill, ₹ ${money(x.amountPaise)} ${MODE_LABELS[x.mode] ?? x.mode}: chosen on the ${dayLabel(x.chosenOn)} shift (${x.chosenWith}). Matched when you save that shift.</span>
+        <a class="note" href="#/b/${biz.id}/reconcile/${x.chosenOn}">Open ›</a></div>`)}
       ${[...greys.values()].map((g) => html`<div class="list-row" style="color:var(--muted)"><span>${greyText(g)}</span>
         <a class="note" href="#/b/${biz.id}/reconcile/${g.day}">Open ›</a></div>`)}</section>` : ''}`;
 }
@@ -5933,6 +5938,22 @@ async function csvCard(biz, day, csv, name, card, done, cancel) {
   let p;
   try { p = await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv, dryRun: true }); }
   catch (err) { card.innerHTML = html`<div class="fileline"><span class="greydot" style="background:#F59E0B"></span><span class="nm">${name}</span></div><div class="form-msg"></div>`.__html; return showError(card.querySelector('.form-msg'), err); }
+  // Already in Bookr, but imported before names were kept (12 Nov 2026): this file can add its bills' names.
+  if (p.namesOnly) {
+    card.innerHTML = html`<div style="display:flex;flex-direction:column;gap:8px"><div class="fileline" style="font-size:14px"><span>📄</span><span class="nm"><strong>Already imported</strong> <span class="tiny">${name}</span></span></div>
+      <div class="tiny">${p.names} bill${p.names === 1 ? '' : 's'} in it ${p.names === 1 ? 'has' : 'have'} a guest or company name Bookr does not have yet (bills imported before names were kept). Adding them changes nothing else.</div>
+      <div class="form-msg"></div><div class="form-row" style="align-items:center"><button class="btn" type="button" data-names>Add ${p.names} name${p.names === 1 ? '' : 's'}</button><button class="linkbtn" type="button" data-cancel>Cancel</button></div></div>`.__html;
+    card.querySelector('[data-cancel]').addEventListener('click', () => cancel?.());
+    card.querySelector('[data-names]').addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try {
+        const r = await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day, csv });
+        await done();
+        document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Added ${r.names} name${r.names === 1 ? '' : 's'} from ${name}.</div>`.__html;
+      } catch (err) { e.target.disabled = false; showError(card.querySelector('.form-msg'), err); }
+    });
+    return;
+  }
   const f = p.footer;
   const whole = { from: `${toLocalInput(p.firstPaidAt).slice(0, 10)}T00:00:00`, to: `${toLocalInput(p.lastPaidAt).slice(0, 10)}T23:59:59` };
   const span = whole.from.slice(0, 10) === whole.to.slice(0, 10) ? `${dayLabel(whole.from.slice(0, 10))}, whole day` : `${dayLabel(whole.from.slice(0, 10))} to ${dayLabel(whole.to.slice(0, 10))}, whole days`;

@@ -11,11 +11,11 @@
 import type { DB } from './db';
 import { all, one } from './db';
 import { addDays, shiftWindow } from './time';
-import { coverage, waitingBills, WATCH_DAYS } from './sales';
+import { cardShiftChoices, coverage, shiftChoices, waitingBills, WATCH_DAYS } from './sales';
 import { cashCheck } from './cash';
 import { isMachineUpi, machineLabel } from './cards';
 
-export type WaitFor = 'register' | 'software' | 'bank' | 'card' | 'count' | 'carry' | 'unsaved';
+export type WaitFor = 'register' | 'software' | 'bank' | 'card' | 'count' | 'carry' | 'unsaved' | 'chosen';
 export interface Offer { id: string; kind: 'credit' | 'payment'; amountPaise: number; at: number; shiftDay: string; label: string | null }
 export interface WaitItem {
   key: string; comparisonId: string | null; billNo: string; day: string; amountPaise: number; mode: string | null;
@@ -23,6 +23,8 @@ export interface WaitItem {
   daysWaiting: number; watchEnd: string | null; unresolved: boolean; watchNote: string | null; offers: Offer[];
   /** On the one line of an unsaved shift: how many of its bills are on one side only. */
   count?: number;
+  /** Chosen on an unsaved shift's Reconcile (12 Nov 2026): that shift, and the money it is matched to when saved. */
+  chosenOn?: string; chosenWith?: string;
   /** A matched credit the bank reversed (Stage 6): the reversal line, to make the bill unpaid again. */
   reversalId?: string;
 }
@@ -142,9 +144,33 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     look('Not in the register; the software does not say how it was paid');
   }
 
+  // A saved sale already chosen on a later shift that is not saved yet (12 Nov 2026), e.g. a bill settled the next day:
+  // nothing is wrong, it is matched when that shift is saved. Shown, not counted.
+  const at = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
+  const chosenFor = new Map<string, { day: string; with: string }>();
+  const openDays = (await all<{ d: string }>(db, `SELECT DISTINCT k.shift_day AS d FROM shift_choices k LEFT JOIN shifts s ON s.business_id = k.business_id AND s.shift_day = k.shift_day
+    WHERE k.business_id = ? AND coalesce(s.status, '') <> 'confirmed'`, businessId)).map((x) => x.d);
+  for (const d of openDays) {
+    const [ups, cards] = await Promise.all([shiftChoices(db, businessId, d), cardShiftChoices(db, businessId, d)]);
+    const note = (ids: string[], nos: string[], i: number, money: string) => {
+      const others = nos.filter((_, j) => j !== i);
+      return `${money}${others.length ? `, with bill ${others.join(' + ')}` : ''}`;
+    };
+    for (const k of ups) if (k.open) k.comparisonIds.forEach((id, i) => chosenFor.set(id, { day: d, with: note(k.comparisonIds, k.billNos, i, `credit ${rs(k.amountPaise)} at ${at(k.postedAt)}`) }));
+    for (const k of cards) if (k.open) k.comparisonIds.forEach((id, i) => chosenFor.set(id, { day: d, with: note(k.comparisonIds, k.billNos, i, `${k.label} ${rs(k.amountPaise)} at ${at(k.paidAt)}`) }));
+  }
+  const chosenOf = (t: { id: string; comparisonId: string | null }) => chosenFor.get(t.id) ?? (t.comparisonId ? chosenFor.get(t.comparisonId) : undefined);
+
   // Saved sales with both sides, waiting for their money.
   for (const t of upiSales) {
     if (t.comparisonId && seen.has(t.comparisonId)) continue;
+    const ch = chosenOf(t);
+    if (ch) {
+      out.push({ key: `t:${t.id}`, comparisonId: t.comparisonId, billNo: t.billNo, day: t.day, amountPaise: t.amountPaise, mode: 'upi', side: 'both', confirmed: true, group: 'grey',
+        waitFor: 'chosen', reason: `Chosen on the ${ch.day} shift: ${ch.with}. Matched when that shift is saved`, chosenOn: ch.day, chosenWith: ch.with,
+        daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null, offers: [] });
+      continue;
+    }
     const base = { key: `t:${t.id}`, comparisonId: t.comparisonId, billNo: t.billNo, day: t.day, amountPaise: t.amountPaise, mode: 'upi', side: 'both' as const, confirmed: true,
       daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null };
     if (!bankIn(t.day)) { out.push({ ...base, group: 'grey', waitFor: 'bank', reason: 'Until bank sync', offers: [] }); continue; }
@@ -153,6 +179,13 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   }
   for (const t of cardSales) {
     if (t.comparisonId && seen.has(t.comparisonId)) continue;
+    const ch = chosenOf(t);
+    if (ch) {
+      out.push({ key: `t:${t.id}`, comparisonId: t.comparisonId, billNo: t.billNo, day: t.day, amountPaise: t.amountPaise, mode: 'card', side: 'both', confirmed: true, group: 'grey',
+        waitFor: 'chosen', reason: `Chosen on the ${ch.day} shift: ${ch.with}. Matched when that shift is saved`, chosenOn: ch.day, chosenWith: ch.with,
+        daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null, offers: [] });
+      continue;
+    }
     const base = { key: `t:${t.id}`, comparisonId: t.comparisonId, billNo: t.billNo, day: t.day, amountPaise: t.amountPaise, mode: 'card', side: 'both' as const, confirmed: true,
       daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null };
     if (!cardIn(t.day)) { out.push({ ...base, group: 'grey', waitFor: 'card', reason: 'Until the card report', offers: [] }); continue; }

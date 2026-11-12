@@ -218,14 +218,15 @@ describe('software report import', () => {
     expect(comp.is_complimentary).toBe(1);
   });
 
-  it('stores no guest name anywhere: not in D1, not in the stored copy', async () => {
+  // Names are kept since 12 Nov 2026 (for the complimentary report): on the software bill only, and in the stored copy.
+  it('keeps the guest name on its software bill and in the stored copy, nowhere else', async () => {
     const h = await hotel();
     const res = await h.importCsv(h.clients.owner, REPORT_31_OCT);
     const [u] = await sql`SELECT storage_key FROM uploads WHERE kind = 'software_sales_csv'`;
     const stored = await (await uploads.get(u.storage_key))!.text();
-    expect(stored).not.toMatch(/Asha|Vikram|Room 4/);
-    expect(stored).toContain('26103120');
-    for (const table of ['software_bills', 'sales_reports', 'uploads', 'audit_log', 'bill_comparisons']) {
+    expect(stored).toMatch(/Asha Rao, Room 4/);
+    expect((await sql`SELECT customer_name FROM software_bills WHERE bill_no = '26103120'`)[0].customer_name).toBe('Vikram Nair');
+    for (const table of ['sales_reports', 'uploads', 'audit_log', 'bill_comparisons']) {
       const rows = await sql([`SELECT * FROM ${table}`] as unknown as TemplateStringsArray);
       expect(JSON.stringify(rows)).not.toMatch(/Asha|Vikram/);
     }
