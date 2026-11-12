@@ -7,6 +7,7 @@ import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pair
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
+import { cardAdvancePlans, joinCardAdvanceStatements } from './cardAdvance';
 import { all, newId, now, one, stmt, type DB } from './db';
 import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
 
@@ -967,6 +968,16 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       machineTaken.add(k.paymentId);
       k.comparisonIds.forEach((id) => chosen.add(id));
     } else skipped.push(k.billNos.join(' + '));
+  }
+  // A card advance chosen for a bill (approved 12 Nov 2026): the booking goes and the payment pays the bill's card sale,
+  // which keeps the day the money came. Only when the bill's card sale is the advance's amount.
+  for (const plan of await cardAdvancePlans(db, businessId, day)) {
+    if (machineTaken.has(plan.paymentId)) continue;
+    const sale = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'card' && x.r.c.id === plan.comparisonId);
+    const adv = await one<{ amount_paise: number }>(db, 'SELECT amount_paise FROM card_settlements WHERE id = ? AND business_id = ?', plan.paymentId, businessId);
+    const join = sale.length === 1 && adv?.amount_paise === sale[0].amount ? await joinCardAdvanceStatements(db, businessId, plan.paymentId, sale[0].id, day, userId, t + 1 + matched) : null;
+    if (join) { statements.push(...join); matched += 1; machineTaken.add(plan.paymentId); }
+    else skipped.push(`${rows.find((r) => r.c.id === plan.comparisonId)?.c.bill_no ?? '?'} (card advance)`);
   }
   if (choices.length || cardChosen.length) {
     statements.push(stmt(db, 'DELETE FROM shift_choices WHERE business_id = ? AND shift_day = ?', businessId, day));

@@ -7,6 +7,7 @@ import { addDays, shiftWindow } from './time';
 import { autoPairs, cardCandidates, isCardCharge, isMachineUpi, machineLabel, upiBillNear, upiWaitingSaved, waitingCard, type CardPayment, type CardSale, type UpiWaiting } from './cards';
 import { cardShiftChoices, plannedRows } from './sales';
 import { cardHere, settledHere } from './settledHere';
+import { cardAdvancePlans, cardAdvances } from './cardAdvance';
 
 /** How near (minutes) a bill of another mode must be to a machine payment to be told as perhaps paid on the machine. */
 const NEAR_MIN = 60;
@@ -143,7 +144,9 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     if (written) usedOther.add(written.id);
     // UPI on the machine pays UPI bills: Save matches it to the bill's UPI sale when the bank evidence shows it. One a
     // card bill may take (no UPI bill of its amount waiting near) is told like a swipe.
-    if (purchase && isMachineUpi(p) && !written && !mine.length) return [];
+    // UPI on the machine with no UPI bill of its amount waiting near it (12 Nov 2026) is money with no bill, listed with
+    // Book like a swipe; one a UPI bill may be is told on the UPI tab.
+    if (purchase && isMachineUpi(p) && !written && !mine.length && upiBillNear(p, upiWaiting)) return [];
     return [{ payment: pay(p), why: !purchase ? 'not_purchase' : mine.length ? (mine.length > 1 ? 'several' : 'one') : tip ? 'tip' : written ? 'written' : 'no_bill',
       candidates: mine.map((k) => ({ comparisonIds: k.transactionIds, billNos: k.billNos, amountPaise: k.amountPaise, minutes: k.minutes,
         earlier: k.transactionIds.flatMap((id) => later.filter((x) => x.txId === id).map((x) => ({ billNo: x.billNo, fromDay: x.fromDay, amountPaise: x.amountPaise }))) })),
@@ -178,13 +181,22 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const offered = new Set(needs.flatMap((n) => [...n.candidates.flatMap((k) => k.comparisonIds), ...(n.tip ? [n.tip.comparisonId] : [])]));
   const wanted = new Set([...cardCandidates(payments.filter((p) => !usedPay.has(p.id) && !heldElsewhere.has(p.id)), leftSales, upiWaiting).candidates.values()]
     .flatMap((l) => l.flatMap((k) => k.transactionIds)));
-  const noSwipe = covered ? leftSales.filter((s) => !offered.has(s.id) && !wanted.has(s.id))
+  // Card advances (approved 12 Nov 2026): a bill chosen to use one is matched on save; a bill with no swipe is offered the
+  // advances of its amount.
+  const [advances, advPlans] = await Promise.all([cardAdvances(db, businessId, day), cardAdvancePlans(db, businessId, day)]);
+  const advPlanned = advPlans.filter((x) => advances.some((a) => a.paymentId === x.paymentId) && own.has(x.comparisonId) && !matchOf.has(x.comparisonId));
+  const advBill = new Set(advPlanned.map((x) => x.comparisonId));
+  const advFree = advances.filter((a) => !advPlanned.some((x) => x.paymentId === a.paymentId));
+  const advOut = (a: (typeof advances)[number]) => ({ paymentId: a.paymentId, amountPaise: a.amountPaise, paidAt: a.paidAt, txDay: a.txDay, label: label(a),
+    what: a.what.replace(/ — card payment$/, '').replace(/^Sale not billed \(Room\): /, '') });
+  const noSwipe = covered ? leftSales.filter((s) => !offered.has(s.id) && !wanted.has(s.id) && !advBill.has(s.id))
     .map((s) => {
       // The nearest free machine payment of another amount (11 Nov 2026): a misread amount or a tip, for a person to check.
       const nearPay = s.paid_at == null ? null : left.filter((p) => p.txn_type === 'PURCHASE' && p.amount_paise !== s.amount_paise && Math.abs(p.paid_at - s.paid_at!) <= TIP_MIN * 60000
         && Math.abs(p.amount_paise - s.amount_paise) <= s.amount_paise * TIP_SHARE && !(isMachineUpi(p) && upiBillNear(p, upiWaiting)))
         .sort((a, b) => Math.abs(a.paid_at - s.paid_at!) - Math.abs(b.paid_at - s.paid_at!))[0] ?? null;
       return { comparisonId: s.id, billNo: s.bill_no, amountPaise: s.amount_paise, paidAt: s.paid_at,
+        advances: own.has(s.id) ? advFree.filter((a) => a.amountPaise === s.amount_paise).map(advOut) : [],
         near: nearPay ? { paymentId: nearPay.id, amountPaise: nearPay.amount_paise, paidAt: nearPay.paid_at, label: label(nearPay), minutes: Math.round(Math.abs(nearPay.paid_at - s.paid_at!) / 60000) } : null };
     }) : [];
 
@@ -235,7 +247,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const unmatched = shiftPays.filter((p) => !toCard.has(p.id) && !toUpi.has(p.id) && !isCardCharge(p));
   return {
     day, trial: true as const, covered,
-    strip: { billsPaise: sum(sales), bills: sales.length, wouldPaise: sum(matchedSales), would: matchedSales.length,
+    strip: { billsPaise: sum(sales), bills: sales.length, wouldPaise: sum(matchedSales) + sum(sales.filter((x) => advBill.has(x.id))), would: matchedSales.length + advBill.size,
       chosen: matchedSales.filter((s) => matchOf.get(s.id)!.how === 'chosen').length,
       machineCardPaise: [...shiftPays, ...booked].filter((p) => !isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
       machineUpiPaise: [...shiftPays, ...booked].filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
@@ -245,10 +257,11 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     choices: chosen.map((k) => ({ id: k.id, paymentId: k.paymentId, billNos: k.billNos, amountPaise: k.amountPaise, paidAt: k.paidAt, label: k.label, open: k.open, by: k.by, upiBill: upiBillChoice(k),
       bill: upiBillChoice(k) && k.comparisonIds.length === 1 ? billRow(k.comparisonIds[0]) : null })),
     needs, noSwipe, open, upiOnMachine, onUpiTab,
+    advancePlans: advPlanned.map((x) => ({ ...advOut(advances.find((a) => a.paymentId === x.paymentId)!), comparisonId: x.comparisonId, billNo: billNo.get(x.comparisonId) ?? '' })),
     booked: booked.map((p) => ({ paymentId: p.id, amountPaise: p.amount_paise, paidAt: p.paid_at, label: machineLabel(p), headName: p.headName,
       what: (p.narration ?? '').replace(/ — card payment$/, '') })),
     // Card bills with no payment yet while the card report is not in: left too, waiting for the report (approved 10 Nov 2026).
-    waitingReport: covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length,
-    left: needs.length + noSwipe.length + (covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length),
+    waitingReport: covered ? 0 : leftSales.filter((s) => !offered.has(s.id) && !advBill.has(s.id)).length,
+    left: needs.length + noSwipe.length + (covered ? 0 : leftSales.filter((s) => !offered.has(s.id) && !advBill.has(s.id)).length),
   };
 }

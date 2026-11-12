@@ -25,6 +25,8 @@ describe('card machine money with no bill, before saving', () => {
     let k = (await h.reconcile()).cards;
     expect(k.strip.machine).toMatchObject({ leftPaise: 24200, bookedPaise: 0 });
     const got = k.strip.machineCardPaise + k.strip.machineUpiPaise;
+    // UPI on the machine with no UPI bill near it is money with no bill too, listed with Book (12 Nov 2026).
+    expect(k.needs.filter((n: any) => n.why === 'no_bill').map((n: any) => n.payment.id).sort()).toEqual([p32, p210].sort());
 
     const acc = h.clients.accountant;
     expect((await h.clients.entry_staff.post(`${base}/cards/${p32}/book`, { billType: 'fnb' })).status).toBe(403);

@@ -9,6 +9,8 @@ import { cardAddedRow, cardCandidates, cardMatchStatements, isMachineUpi, cardRu
   settlementCredits, settlementCosts, chargesOf, isCardCharge, unsettledDays, unsettleStatements, waitingCard, type CardPayment } from '../cards';
 import { readMail, readReportFile } from '../mail';
 import { repayStatements } from '../repay';
+import { cardAdvancePlans, cardAdvances, undoCardAdvanceStatements } from '../cardAdvance';
+import { plannedCardPaise } from '../sales';
 import { matchStatements } from '../bank';
 import { syncCardFolder } from '../cardDrive';
 import { folderIdFrom, GoogleError, serviceAccountEmail } from '../google';
@@ -152,6 +154,12 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/unmatch', requireRole(
   if (!isUuid(pid)) fail(404, 'Not found.');
   const first = await one<{ matched_at: number }>(db, 'SELECT matched_at FROM card_matches WHERE business_id = ? AND settlement_id = ?', bid, pid);
   if (!first) fail(409, 'This payment is not matched.');
+  // A card advance joined to its bill (12 Nov 2026): unmatching puts the advance booking back.
+  if (await one(db, `SELECT 1 AS x FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.business_id = ? AND m.settlement_id = ?
+    AND json_extract(t.ocr_original, '$.cardAdvance') = ?`, bid, pid, pid)) {
+    const back = await undoCardAdvanceStatements(db, bid, pid, c.get('user').id, now());
+    if (back) { await db.batch(back); return c.json({ ok: true, advanceBack: true }); }
+  }
   const set = await all<{ id: string; settlement_id: string; transaction_id: string }>(db, 'SELECT id, settlement_id, transaction_id FROM card_matches WHERE business_id = ? AND matched_at = ?', bid, first.matched_at);
   const t = now();
   const added = await all<Record<string, unknown> & { id: string }>(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'bank_sheet'
@@ -332,6 +340,46 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/tip', requireRole('ban
   ]);
   return c.json({ ok: true, tipPaise: tip });
 });
+
+/** A card advance chosen for a bill of an unsaved shift (approved 12 Nov 2026): joined when the shift is saved. */
+cardRoutes.post('/businesses/:businessId/shifts/:day/card-advance', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const data = await body(c);
+  const pid = typeof data.paymentId === 'string' && isUuid(data.paymentId) ? data.paymentId : fail(400, 'Choose the advance.');
+  const cmp = typeof data.comparisonId === 'string' && isUuid(data.comparisonId) ? data.comparisonId : fail(400, 'Choose the bill.');
+  if ((await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status === 'confirmed')
+    fail(409, 'This shift is saved. Reopen it, or match the bill on the Card tab.');
+  const adv = (await cardAdvances(db, bid, day)).find((x) => x.paymentId === pid) ?? fail(409, 'This card payment is not booked as an advance.');
+  if (!await one(db, 'SELECT 1 AS x FROM bill_comparisons WHERE id = ? AND business_id = ? AND shift_day = ?', cmp, bid, day)) fail(404, 'Bill not found on this shift.');
+  if (await plannedCardPaise(db, bid, day, [cmp]) !== adv.amountPaise) fail(409, 'The bill\'s card payment is not the advance\'s amount.');
+  const taken = (await cardAdvancePlans(db, bid, day)).some((x) => x.paymentId === pid || x.comparisonId === cmp) || await planElsewhere(db, bid, pid, day);
+  if (taken) fail(409, 'This advance or this bill is already chosen.');
+  await db.prepare(AUDIT).bind(bid, c.get('user').id, 'card.advance_planned', 'card_settlements', pid, null, JSON.stringify({ shiftDay: day, comparisonId: cmp }), now()).run();
+  return c.json({ ok: true });
+});
+
+cardRoutes.delete('/businesses/:businessId/shifts/:day/card-advance', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const data = await body(c);
+  const pid = typeof data.paymentId === 'string' && isUuid(data.paymentId) ? data.paymentId : fail(400, 'Choose the advance.');
+  const plan = (await cardAdvancePlans(db, bid, day)).find((x) => x.paymentId === pid) ?? fail(409, 'This advance is not chosen for a bill here.');
+  await db.prepare(AUDIT).bind(bid, c.get('user').id, 'card.advance_unplanned', 'card_settlements', pid, null, JSON.stringify({ shiftDay: day, comparisonId: plan.comparisonId }), now()).run();
+  return c.json({ ok: true });
+});
+
+/** Is this advance chosen for a bill on another unsaved shift? */
+async function planElsewhere(db: D1Database, bid: string, pid: string, day: string) {
+  const days = (await all<{ d: string }>(db, `SELECT DISTINCT json_extract(after, '$.shiftDay') AS d FROM audit_log WHERE business_id = ? AND action = 'card.advance_planned' AND row_id = ?`, bid, pid))
+    .map((x) => x.d).filter((d) => d !== day);
+  for (const d of days) if ((await cardAdvancePlans(db, bid, d)).some((x) => x.paymentId === pid)) return true;
+  return false;
+}
 
 /** A card payment with no bill (an advance, a room payment taken on the restaurant machine): booked to an income head. */
 cardRoutes.post('/businesses/:businessId/cards/:paymentId/book', requireRole('bank.link'), async (c) => {

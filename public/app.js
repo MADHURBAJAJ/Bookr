@@ -4942,6 +4942,7 @@ function trialCardSection(biz, k, book = null) {
       ${book ? html`<div class="form-row" style="gap:6px;align-items:center">
         <input type="text" data-tcardwhat="${p.id}" maxlength="120" placeholder="What was it? (optional)" style="flex:1 1 180px;max-width:240px;min-height:36px" aria-label="What was ₹ ${money(p.amountPaise)}?">
         ${book.unbilled.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-tcardsale="${p.id}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
+        ${book.unbilled.some((h) => h.billType === 'room') ? html`<button class="btn plain" type="button" style="min-height:36px" data-tcardadv="${p.id}">Advance…</button>` : ''}
         <select data-tcardhead="${p.id}" style="min-height:36px;max-width:200px" aria-label="Book under a head"><option value="">Other income head…</option>${book.income.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>
         <button class="btn plain" type="button" style="min-height:36px" data-tcardbook="${p.id}">Book</button></div>` : ''}<div class="form-msg"></div></div>`;
   };
@@ -4949,6 +4950,8 @@ function trialCardSection(biz, k, book = null) {
     <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
     <div class="tiny">${x.paidAt ? at(x.paidAt) : 'No bill time'} · ${openRow(x.billNo)} · <span style="color:var(--muted)">the card report has no payment for it: check how it was paid on its row.</span></div>
     ${x.near ? html`<div class="cmp-warn" style="margin:0"><strong>Check:</strong> ${x.near.label} ₹ ${money(x.near.amountPaise)} at ${hhmm(x.near.paidAt)}, ${x.near.minutes} min from the bill, ₹ ${money(Math.abs(x.near.amountPaise - x.amountPaise))} ${x.near.amountPaise > x.amountPaise ? 'more' : 'less'}: a misread amount, or a ${x.near.amountPaise > x.amountPaise ? 'tip' : 'discount'}? Tick both in Match several at once below to choose.</div>` : ''}
+    ${(x.advances ?? []).map((a) => html`<div class="cmp-warn" style="margin:0"><strong>Advance?</strong> ₹ ${money(a.amountPaise)} on the card machine at ${when(a.paidAt)}, booked as ${a.what}. If this bill uses it, it is matched on save and the sale stays on ${dayLabel(a.txDay)}.
+      <div style="margin-top:4px"><button class="btn plain dchip" type="button" data-tcarduseadv="${a.paymentId}" data-cmp="${x.comparisonId}" data-bill="${x.billNo}">Uses this advance</button></div><div class="form-msg"></div></div>`)}
     ${byUpiOffer((k.byUpi ?? []).find((o) => o.comparisonId === x.comparisonId))}</div>`;
   const chosen = k.choices.filter((c) => c.open);
   return html`<section class="card" style="gap:10px" id="tcardsec">
@@ -4965,6 +4968,8 @@ function trialCardSection(biz, k, book = null) {
     ${chosen.length ? html`<details class="cmp-fold"><summary><strong>Chosen by you, matched on save (${chosen.length})</strong></summary>${chosen.map((c) => html`<div class="list-row" style="padding:4px 0"><span class="tiny"><span class="mono">${c.billNos.join(' + ')}</span>${c.upiBill ? html` <span class="upitag">UPI bill</span>` : ''} · ${c.label} ₹ ${money(c.amountPaise)} at ${hhmm(c.paidAt)}${c.by ? ` · ${c.by}` : ''}${c.upiBill ? html` · <button type="button" class="linkbtn tiny" data-goto="pay:upi">on the UPI tab</button>` : ''}</span>
       <span style="display:flex;gap:6px">${c.upiBill && c.bill?.uploadId ? html`<button class="btn plain dchip" type="button" data-choicetocard="${c.id}" title="Card machine money is a card bill: changes the register's payment to Card, matched on save">Change to card</button>` : ''}
       <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></span><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
+    ${(k.advancePlans ?? []).length ? html`<details class="cmp-fold" open><summary><strong>Advances used by a bill, matched on save (${k.advancePlans.length})</strong></summary>${k.advancePlans.map((a) => html`<div class="list-row" style="padding:4px 0"><span class="tiny"><span class="mono">${a.billNo}</span> · ${a.label} ₹ ${money(a.amountPaise)} at ${when(a.paidAt)} · ${a.what}</span>
+      <button class="btn plain dchip" type="button" data-tcardunadv="${a.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${(k.booked ?? []).length ? html`<details class="cmp-fold"><summary><strong>Booked with no bill (${k.booked.length}) · ₹ ${money(k.booked.reduce((a, x) => a + x.amountPaise, 0))}</strong></summary>${k.booked.map((x) => html`<div class="list-row" style="padding:4px 0"><span class="tiny">${x.label} ₹ ${money(x.amountPaise)} at ${hhmm(x.paidAt)} · ${x.what || x.headName || 'Booked'}${x.headName && x.what ? ` · ${x.headName}` : ''}</span>
       <button class="btn plain dchip" type="button" data-tcardunbook="${x.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
@@ -5072,6 +5077,27 @@ function wireTrialCards(biz, day, k, reload) {
     const sel = box.querySelector(`[data-tcardhead="${pid}"]`);
     if (!sel?.value) { showError(msgOf(b), new Error('Choose the head first.')); return; }
     bookCard(b, pid, { headId: sel.value, note: what(pid) }, `Card payment booked under ${sel.selectedOptions[0].textContent}.`);
+  }));
+  box.querySelectorAll('[data-tcardadv]').forEach((b) => b.addEventListener('click', () => {
+    const pid = b.dataset.tcardadv;
+    const who = prompt('Advance received on the card machine: from which guest (name, room or booking)?', what(pid) ?? '');
+    if (!who?.trim()) return;
+    bookCard(b, pid, { billType: 'room', item: `Advance: ${who.trim()}` }, 'Booked as an advance. Its room bill can use it when it comes.');
+  }));
+  const advPath = `/businesses/${biz.id}/shifts/${day}/card-advance`;
+  box.querySelectorAll('[data-tcarduseadv]').forEach((b) => b.addEventListener('click', async () => {
+    const pid = b.dataset.tcarduseadv;
+    b.disabled = true;
+    try {
+      await apiFull('POST', advPath, { paymentId: pid, comparisonId: b.dataset.cmp });
+      await reload();
+      doneToast(`Bill ${b.dataset.bill} uses the advance: matched when you save.`, () => apiFull('DELETE', advPath, { paymentId: pid }), reload);
+    } catch (err) { b.disabled = false; showError(b.closest('.cmp-warn').querySelector('.form-msg'), err); }
+  }));
+  box.querySelectorAll('[data-tcardunadv]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await apiFull('DELETE', advPath, { paymentId: b.dataset.tcardunadv }); await reload(); }
+    catch (err) { b.disabled = false; showError(msgOf(b), err); }
   }));
   box.querySelectorAll('[data-tcardunbook]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
