@@ -4567,7 +4567,7 @@ async function reconcileView(biz, dayArg) {
     </div>
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
       ${paidLaterHtml(biz, r, 'card')}
-      ${r.cards?.trial ? trialCardSection(biz, r.cards) : r.cards ? cardSection(biz, r.cards, heads) : ''}
+      ${r.cards?.trial ? trialCardSection(biz, r.cards, biz.actions.includes('bank.link') ? { unbilled: r.unbilledHeads ?? [], income: heads.filter((h) => h.type === 'income') } : null) : r.cards ? cardSection(biz, r.cards, heads) : ''}
       ${entriesHtml(biz, day, ent.card, 'card', cv)}
       ${machineUpiLine(r.cards)}
     </div>
@@ -4908,7 +4908,7 @@ function wirePaidLater(biz, reload) {
   }));
 }
 
-function trialCardSection(biz, k) {
+function trialCardSection(biz, k, book = null) {
   const st = k.strip;
   const at = (ms) => (ms ? when(ms) : 'register only');
   const openRow = (billNo) => html`<button type="button" class="linkbtn tiny" data-bill-drawer="${billNo}|${k.day}">Open row</button>`;
@@ -4936,8 +4936,14 @@ function trialCardSection(biz, k) {
       <div class="form-msg"></div></div>`;
     }
     if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
+    // Book it now (approved 11 Nov 2026), as on the UPI tab: an unbilled sale, or under a head. Undo takes it back.
     return html`<div class="rv-card">${head}
-      <div class="tiny" style="color:var(--muted)">No card bill of this amount. Several bills on one card? Tick them together in Match several at once below. Otherwise a bill written as cash or UPI, or money that is not a bill (book it after saving).</div></div>`;
+      <div class="tiny" style="color:var(--muted)">No card bill of this amount. Several bills on one card? Tick them together in Match several at once below. A bill written as cash or UPI? Correct it on its row. Otherwise book it here.</div>
+      ${book ? html`<div class="form-row" style="gap:6px;align-items:center">
+        <input type="text" data-tcardwhat="${p.id}" maxlength="120" placeholder="What was it? (optional)" style="flex:1 1 180px;max-width:240px;min-height:36px" aria-label="What was ₹ ${money(p.amountPaise)}?">
+        ${book.unbilled.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-tcardsale="${p.id}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
+        <select data-tcardhead="${p.id}" style="min-height:36px;max-width:200px" aria-label="Book under a head"><option value="">Other income head…</option>${book.income.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>
+        <button class="btn plain" type="button" style="min-height:36px" data-tcardbook="${p.id}">Book</button></div>` : ''}<div class="form-msg"></div></div>`;
   };
   const noSwipe = (x) => html`<div class="rv-card">
     <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
@@ -4950,7 +4956,7 @@ function trialCardSection(biz, k) {
       ${k.left ? html`<span class="chip wait">${k.left} left</span>` : k.covered ? html`<span class="chip ok">Card ready to save</span>` : ''}<span class="chip">Not saved</span></span></div>
     <div class="rec-strip">
       <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
-      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">${st.machine ? `card bills ₹ ${rs(st.machine.cardPaise)} · UPI bills ₹ ${rs(st.machine.upiPaise)} · not matched ₹ ${rs(st.machine.leftPaise)}` : `card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}`}</div></div>
+      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">${st.machine ? `card bills ₹ ${rs(st.machine.cardPaise)} · UPI bills ₹ ${rs(st.machine.upiPaise)} · not matched ₹ ${rs(st.machine.leftPaise)}${st.machine.bookedPaise ? ` · booked, no bill ₹ ${rs(st.machine.bookedPaise)}` : ''}` : `card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}`}</div></div>
       <div><div class="tiny">Would match on save</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.wouldPaise)}</div><div class="tiny">${st.would} bill${st.would === 1 ? '' : 's'}${st.chosen ? ` · ${st.chosen} chosen` : ''}</div></div>
       <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`}</div></div>
       <div><div class="tiny">${st.machine ? 'Machine payments not matched yet' : 'Machine payments with no card bill'}</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
@@ -4959,6 +4965,8 @@ function trialCardSection(biz, k) {
     ${chosen.length ? html`<details class="cmp-fold"><summary><strong>Chosen by you, matched on save (${chosen.length})</strong></summary>${chosen.map((c) => html`<div class="list-row" style="padding:4px 0"><span class="tiny"><span class="mono">${c.billNos.join(' + ')}</span>${c.upiBill ? html` <span class="upitag">UPI bill</span>` : ''} · ${c.label} ₹ ${money(c.amountPaise)} at ${hhmm(c.paidAt)}${c.by ? ` · ${c.by}` : ''}${c.upiBill ? html` · <button type="button" class="linkbtn tiny" data-goto="pay:upi">on the UPI tab</button>` : ''}</span>
       <span style="display:flex;gap:6px">${c.upiBill && c.bill?.uploadId ? html`<button class="btn plain dchip" type="button" data-choicetocard="${c.id}" title="Card machine money is a card bill: changes the register's payment to Card, matched on save">Change to card</button>` : ''}
       <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></span><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
+    ${(k.booked ?? []).length ? html`<details class="cmp-fold"><summary><strong>Booked with no bill (${k.booked.length}) · ₹ ${money(k.booked.reduce((a, x) => a + x.amountPaise, 0))}</strong></summary>${k.booked.map((x) => html`<div class="list-row" style="padding:4px 0"><span class="tiny">${x.label} ₹ ${money(x.amountPaise)} at ${hhmm(x.paidAt)} · ${x.what || x.headName || 'Booked'}${x.headName && x.what ? ` · ${x.headName}` : ''}</span>
+      <button class="btn plain dchip" type="button" data-tcardunbook="${x.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
     ${trialCardOpen(k)}
   </section>`;
@@ -5042,6 +5050,34 @@ function wireTrialCards(biz, day, k, reload) {
       post: (pairs) => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/card-choices`, { pairs: pairs.map((p) => ({ paymentId: p.credit.id, comparisonIds: p.bills.map((b) => b.id) })) }) });
   }
   box.querySelectorAll('[data-upimachine]').forEach((b) => b.addEventListener('click', () => upiOnMachineClick(biz, day, b, reload, k)));
+  // Machine money with no bill, booked before saving (11 Nov 2026): matched to its payment at once; Undo unmatches it,
+  // which removes the booking.
+  const B = `/businesses/${biz.id}/cards`;
+  const msgOf = (b) => b.closest('.rv-card, .list-row')?.querySelector('.form-msg');
+  const bookCard = async (b, pid, payload, text) => {
+    b.disabled = true;
+    try {
+      await apiFull('POST', `${B}/${pid}/book`, payload);
+      await reload();
+      doneToast(text, () => apiFull('POST', `${B}/${pid}/unmatch`, {}), reload);
+    } catch (err) { b.disabled = false; showError(msgOf(b), err); }
+  };
+  const what = (pid) => box.querySelector(`[data-tcardwhat="${pid}"]`)?.value.trim() || undefined;
+  box.querySelectorAll('[data-tcardsale]').forEach((b) => b.addEventListener('click', () => {
+    const pid = b.dataset.tcardsale;
+    bookCard(b, pid, { billType: b.dataset.type, item: what(pid) }, `Card payment booked as Unbilled ${b.dataset.type === 'room' ? 'Room' : 'F&B'}.`);
+  }));
+  box.querySelectorAll('[data-tcardbook]').forEach((b) => b.addEventListener('click', () => {
+    const pid = b.dataset.tcardbook;
+    const sel = box.querySelector(`[data-tcardhead="${pid}"]`);
+    if (!sel?.value) { showError(msgOf(b), new Error('Choose the head first.')); return; }
+    bookCard(b, pid, { headId: sel.value, note: what(pid) }, `Card payment booked under ${sel.selectedOptions[0].textContent}.`);
+  }));
+  box.querySelectorAll('[data-tcardunbook]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await apiFull('POST', `${B}/${b.dataset.tcardunbook}/unmatch`, {}); await reload(); }
+    catch (err) { b.disabled = false; showError(msgOf(b), err); }
+  }));
   // A UPI bill already chosen for UPI on the machine (before 11 Nov 2026): changed to card, the choice made again.
   box.querySelectorAll('[data-choicetocard]').forEach((b) => b.addEventListener('click', async () => {
     const c = k.choices.find((x) => x.id === b.dataset.choicetocard);

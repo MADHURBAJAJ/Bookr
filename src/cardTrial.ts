@@ -29,6 +29,12 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     waitingCard(db, businessId, addDays(day, -1), addDays(day, 1)),
     cardShiftChoices(db, businessId, day),
   ]);
+  // Machine payments with no bill booked as a sale (or to a head) before saving (11 Nov 2026): matched already, told
+  // with their Undo, and still part of what the machine got.
+  const booked = await all<CardPayment & { txId: string; narration: string | null; headName: string | null }>(db, `SELECT s.*, t.id AS txId, t.narration, h.name AS headName
+    FROM card_settlements s JOIN card_matches m ON m.settlement_id = s.id JOIN transactions t ON t.id = m.transaction_id LEFT JOIN heads h ON h.id = t.head_id
+    WHERE s.business_id = ? AND s.paid_at >= ? AND s.paid_at < ? AND t.source = 'bank_sheet' AND json_extract(t.ocr_original, '$.card') = 'booked'
+    ORDER BY s.paid_at`, businessId, w.from, w.to);
   const covered = (last?.paid ?? 0) >= w.to || (last?.settled ?? '') >= addDays(day, 2);
   const inShift = (p: CardPayment) => p.paid_at >= w.from && p.paid_at < w.to;
   // Payments chosen on another shift's Reconcile are held there.
@@ -231,14 +237,16 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     day, trial: true as const, covered,
     strip: { billsPaise: sum(sales), bills: sales.length, wouldPaise: sum(matchedSales), would: matchedSales.length,
       chosen: matchedSales.filter((s) => matchOf.get(s.id)!.how === 'chosen').length,
-      machineCardPaise: shiftPays.filter((p) => !isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
-      machineUpiPaise: shiftPays.filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
+      machineCardPaise: [...shiftPays, ...booked].filter((p) => !isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
+      machineUpiPaise: [...shiftPays, ...booked].filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
       noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(unmatched), noBill: unmatched.length,
-      machine: { cardPaise: sum(shiftPays.filter((p) => toCard.has(p.id))), upiPaise: sum(shiftPays.filter((p) => toUpi.has(p.id))), leftPaise: sum(unmatched) } },
+      machine: { cardPaise: sum(shiftPays.filter((p) => toCard.has(p.id))), upiPaise: sum(shiftPays.filter((p) => toUpi.has(p.id))), leftPaise: sum(unmatched), bookedPaise: sum(booked) } },
     matches: Object.fromEntries([...matchOf].map(([id, m]) => [id, { ...m, billNo: billNo.get(id) ?? '' }])) as Record<string, TrialMatch & { billNo: string }>,
     choices: chosen.map((k) => ({ id: k.id, paymentId: k.paymentId, billNos: k.billNos, amountPaise: k.amountPaise, paidAt: k.paidAt, label: k.label, open: k.open, by: k.by, upiBill: upiBillChoice(k),
       bill: upiBillChoice(k) && k.comparisonIds.length === 1 ? billRow(k.comparisonIds[0]) : null })),
     needs, noSwipe, open, upiOnMachine, onUpiTab,
+    booked: booked.map((p) => ({ paymentId: p.id, amountPaise: p.amount_paise, paidAt: p.paid_at, label: machineLabel(p), headName: p.headName,
+      what: (p.narration ?? '').replace(/ — card payment$/, '') })),
     // Card bills with no payment yet while the card report is not in: left too, waiting for the report (approved 10 Nov 2026).
     waitingReport: covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length,
     left: needs.length + noSwipe.length + (covered ? 0 : leftSales.filter((s) => !offered.has(s.id)).length),

@@ -8,6 +8,7 @@ import { repaidFor } from './repay';
 import { machineLabel } from './cards';
 import { trialCards, type TrialMatch } from './cardTrial';
 import { shiftChoices, shiftView } from './sales';
+import { plansFor } from './sameSale';
 
 type Mode = 'cash' | 'upi' | 'card';
 export interface Entry {
@@ -23,6 +24,7 @@ export interface Entry {
 }
 
 const rs = (p: number | null | undefined) => (p == null ? '—' : `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: p % 100 ? 2 : 0, maximumFractionDigits: 2 })}`);
+const dayOf = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' }).format(new Date(ms));
 const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
 const MODE: Record<string, string> = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed', unknown: 'No mode' };
 const modeName = (m: string | null | undefined) => (m ? MODE[m] ?? m : 'No mode');
@@ -65,8 +67,20 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
   ]);
   // Before saving, a credit chosen on the tray for a bill: matched on save, so the bill is not waiting for one.
   const chosen = new Map<string, Awaited<ReturnType<typeof shiftChoices>>[number]>();
+  const sameSale = new Map<string, string>();
   if (!confirmed) for (const k of await shiftChoices(db, businessId, day)) if (k.open) for (const id of k.comparisonIds) chosen.set(id, k);
   const chosenText = (k: Awaited<ReturnType<typeof shiftChoices>>[number]) => `Bank ${rs(k.amountPaise)} at ${hm(k.postedAt)}${k.accountName ? ` · ${k.accountName}` : ''} · chosen, matched on save`;
+  // Before saving, a credit booked as a sale on another day and chosen as this bill (Same sale): joined on save (11 Nov 2026).
+  if (!confirmed) {
+    const plans = await plansFor(db, businessId, day);
+    const credits = plans.length ? await all<{ id: string; amountPaise: number; postedAt: number; accountName: string | null }>(db, `SELECT r.id, r.amount_paise AS amountPaise,
+      r.posted_at AS postedAt, a.name AS accountName FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id
+      WHERE r.business_id = ? AND r.id IN (${plans.map(() => '?').join(',')})`, businessId, ...plans.map((x) => x.rowId)) : [];
+    for (const p of plans) {
+      const cr = credits.find((x) => x.id === p.rowId);
+      if (cr && !chosen.has(p.comparisonId)) sameSale.set(p.comparisonId, `Bank ${rs(cr.amountPaise)} at ${hm(cr.postedAt)}, ${dayOf(cr.postedAt)}${cr.accountName ? ` · ${cr.accountName}` : ''} · booked that day, same sale, joined on save`);
+    }
+  }
   const onSave = (m: TrialMatch) => `${m.label} ${rs(m.amountPaise)} at ${hm(m.paidAt)} · ${m.how === 'chosen' ? 'chosen, matched on save' : 'Bookr matches on save'}`;
   const rowOf = new Map(rows.map((r) => [r.id, r]));
   const paysOf = (id: string) => pays.filter((p) => p.register_row_id === id);
@@ -150,7 +164,7 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     if (!parts.length) parts = [{ mode: 'cash', amount: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number }];
     parts.forEach((p, i) => {
       const evidence = p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}`
-          : chosen.has(c.id) ? chosenText(chosen.get(c.id)!) : null)
+          : chosen.has(c.id) ? chosenText(chosen.get(c.id)!) : sameSale.get(c.id) ?? null)
         : p.mode === 'card' ? (trial?.matches[c.id] ? onSave(trial.matches[c.id]) : c.machine ? `${c.machine.label} ${rs(c.machine.amountPaise)} at ${hm(c.machine.paidAt)}` : null) : 'In the cash count';
       entries.push({ ...base, key: `${c.id}:${i}`, mode: p.mode, amountPaise: p.amount, state: open ? 'decide' : p.mode === 'cash' || evidence ? 'done' : 'waiting', evidence, edits,
         transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null });

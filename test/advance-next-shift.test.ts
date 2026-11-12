@@ -33,6 +33,11 @@ describe('an advance booked the day before its bill', () => {
     // Same sale: chosen before saving, done on save. The sale is counted once, on the credit's day, matched to it.
     const a = card.actions[0];
     expect((await acc.post(a.path, a.body)).status).toBe(200);
+    // The UPI tab tells the bill's money: the credit booked on 31 Oct, joined on save (not "No bank credit yet").
+    const ent = await h.entries('2026-11-01');
+    const e = ent.upi.entries.find((x: any) => x.billNo === '26110129');
+    expect(e).toMatchObject({ state: 'done' });
+    expect(e.evidence).toMatch(/^Bank ₹1,950 at 12:03 pm, 31 Oct · HUF A · booked that day, same sale, joined on save$/);
     await h.decideRest('2026-11-01');
     await h.confirm('2026-11-01');
     const sales = await sql`SELECT bill_no, source, day, matched_bank_row FROM transactions WHERE business_id = ${h.bid} AND type = 'income' AND amount_paise = 195000`;

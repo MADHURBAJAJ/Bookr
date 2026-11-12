@@ -340,8 +340,13 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/book', requireRole('ba
   const pid = c.req.param('paymentId');
   if (!isUuid(pid)) fail(404, 'Not found.');
   const data = await body(c);
-  const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose the head.');
-  const note = text(data, 'note', 'Note', { optional: true, max: 200 });
+  // An unbilled F&B or Room sale goes under the head that bill type uses (before or after saving, 11 Nov 2026).
+  const billType = data.billType === 'fnb' || data.billType === 'room' ? data.billType : null;
+  const typed = text(data, 'item', 'What was it', { optional: true, max: 120 });
+  const typeHead = billType ? (await one<{ head_id: string }>(db, 'SELECT head_id FROM bill_type_heads WHERE business_id = ? AND bill_type = ?', bid, billType))?.head_id
+    ?? fail(400, `Choose the income head for ${billType === 'fnb' ? 'F&B' : 'Room'} bills on Heads and rules first.`) : null;
+  const headId = typeHead ?? (typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose the head.'));
+  const note = billType ? `Sale not billed (${billType === 'fnb' ? 'F&B' : 'Room'})${typed ? `: ${typed}` : ''} — card payment` : text(data, 'note', 'Note', { optional: true, max: 200 });
   if (!await one(db, "SELECT 1 AS x FROM heads WHERE id = ? AND business_id = ? AND type = 'income'", headId, bid)) fail(400, 'A card payment goes under an income head.');
   const p = await one<CardPayment & { matched: number }>(db, `SELECT *, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = card_settlements.id) AS matched
     FROM card_settlements WHERE id = ? AND business_id = ?`, pid, bid);
