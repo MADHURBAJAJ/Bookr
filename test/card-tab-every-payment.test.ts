@@ -26,13 +26,13 @@ describe('card tab lists every machine payment', () => {
     expect(k.open.payments.map((x: any) => x.id)).not.toContain(p104);
     expect(k.onUpiTab).toEqual([expect.objectContaining({ id: p104, billNo: '2610313', offered: true })]);
     // What the machine got adds up: card bills, UPI bills, not matched yet (₹100 and the ₹999 with no bill).
-    expect(k.strip.machine).toEqual({ cardPaise: 0, upiPaise: 10400, leftPaise: 109900 });
+    expect(k.strip.machine).toEqual({ cardPaise: 0, upiPaise: 10400, leftPaise: 109900, bookedPaise: 0 });
     expect(k.strip).toMatchObject({ noBillPaise: 109900, noBill: 2 });
     // Chosen for the UPI bill: tagged as a UPI bill, still counted under UPI bills.
     const upiBill = (await h.view()).json.comparisons.find((x: any) => x.billNo === '2610313');
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/card-choices`, { paymentId: p104, comparisonIds: [upiBill.id] })).status).toBe(200);
     const k2 = (await h.reconcile()).cards;
     expect(k2.choices).toEqual([expect.objectContaining({ paymentId: p104, upiBill: true })]);
-    expect(k2.strip.machine).toEqual({ cardPaise: 0, upiPaise: 10400, leftPaise: 109900 });
+    expect(k2.strip.machine).toEqual({ cardPaise: 0, upiPaise: 10400, leftPaise: 109900, bookedPaise: 0 });
   });
 });
