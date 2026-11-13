@@ -51,7 +51,7 @@ describe('bills paid together', () => {
     const { h, pageId } = await setup();
     let v = await view(h);
     for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
-    expect(v.json.blockers.join(' ')).toMatch(/paid together: the payment does not equal/);
+    expect(v.json.blockers.join(' ')).toMatch(/paid together: bills ₹2,380 after discounts and tips, paid ₹2,370, ₹10 less paid than billed/);
     // 2,370 paid for 2,380 of bills: Fill writes the 10 discount on the row with the payment.
     const fill = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
     expect(fill.json.filled).toBe(1);

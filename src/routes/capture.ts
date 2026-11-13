@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
@@ -514,13 +515,77 @@ captureRoutes.post('/businesses/:businessId/register-rows/:rowId/insert-below', 
   return c.json({ id }, 201);
 });
 
+/**
+ * Two bills the reader found on one line ("145232 145192", amount "188+351"), as they read: two numbers and two amounts.
+ * Null when the line does not read that way, or it was split already (a line added or split below it).
+ */
+export function splitOfReading(ocr: string | null) {
+  if (!ocr) return null;
+  let o: { read?: { bill_no?: string | null; amount?: string | null }; splitInto?: string };
+  try { o = JSON.parse(ocr); } catch { return null; }
+  if (o.splitInto) return null;
+  const bills = (o.read?.bill_no ?? '').trim().split(/[\s,/&+]+/).filter(Boolean);
+  const amounts = (o.read?.amount ?? '').trim().split(/[\s,/&+]+/).filter(Boolean).map((a) => parsePaiseText(a));
+  if (bills.length !== 2 || amounts.length !== 2 || amounts.some((a) => a === null || a <= 0)) return null;
+  return { bills: bills as [string, string], amounts: amounts as [number, number] };
+}
+const parsePaiseText = (v: string) => {
+  const m = /^(\d{1,12})(?:\.(\d{1,2}))?$/.exec(v.replace(/,/g, ''));
+  return m ? Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0')) : null;
+};
+
+// Split a line the reader found two bills on (approved 13 Nov 2026): this row keeps the first bill and its payments,
+// a new line below takes the second, paid with the same row as the first (or with this row when it holds the payment).
+// Both go back to draft for a person to check against the photo.
+captureRoutes.post('/businesses/:businessId/register-rows/:rowId/split', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = c.req.param('rowId');
+  if (!isUuid(rowId)) fail(404, 'Row not found.');
+  const row = await one<{ upload_id: string; line_no: number; shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; paid_with_row_id: string | null; ocr_original: string | null }>(db,
+    'SELECT upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, paid_with_row_id, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  if (!row) fail(404, 'Row not found.');
+  const sp = splitOfReading(row.ocr_original);
+  if (!sp) fail(400, 'This line was not read as two bills with two amounts. Use Add a line below instead.');
+  if (await one(db, "SELECT 1 AS ok FROM register_rows WHERE business_id = ? AND json_extract(ocr_original, '$.addedBelow') = ? LIMIT 1", bid, rowId)) {
+    fail(400, 'A line was already added below this one for its second bill. Correct the two lines instead.');
+  }
+  const paysHere = await one(db, 'SELECT 1 AS ok FROM register_payments WHERE register_row_id = ? LIMIT 1', rowId);
+  const paidWith = row.paid_with_row_id ?? (paysHere ? rowId : null);
+  const o = JSON.parse(row.ocr_original!) as Record<string, unknown> & { resolved?: string[]; line?: number; y?: number };
+  const id = newId();
+  const t = now();
+  const user = c.get('user').id;
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE register_rows SET line_no = line_no + 1 WHERE upload_id = ? AND line_no > ?', row.upload_id, row.line_no),
+      stmt(db, "UPDATE register_rows SET bill_no = ?, amount_paise = ?, status = 'draft', ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?",
+        sp.bills[0], sp.amounts[0], JSON.stringify({ ...o, splitInto: id, resolved: [...new Set([...(o.resolved ?? []), 'bill_no', 'amount'])] }), user, t, rowId),
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, status, ocr_original, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, 'draft', ?, ?, ?, ?)`, id, bid, row.upload_id, row.line_no + 1, row.shift_day, sp.bills[1], row.bill_type, sp.amounts[1], paidWith,
+        JSON.stringify({ engine: 'split', splitFrom: rowId, line: o.line, y: o.y, resolved: ['bill_no', 'amount'] }), user, t, t),
+      ...(paidWith === rowId ? [newHeadStatement(db, rowId, id)] : []),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'register.split', 'register_rows', ?, ?, ?, ?)`,
+        bid, user, rowId, JSON.stringify({ billNo: row.bill_no, amountPaise: row.amount_paise }),
+        JSON.stringify({ newRowId: id, changes: `Split into ${sp.bills[0]} ${rupees(sp.amounts[0])} and ${sp.bills[1]} ${rupees(sp.amounts[1])}` }), t),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'register.split', 'register_rows', ?, NULL, ?, ?)`,
+        bid, user, id, JSON.stringify({ splitFrom: rowId, changes: `Split from the line read as ${sp.bills.join(' ')}` }), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, row.shift_day, user);
+  return c.json({ id, bills: sp.bills, amounts: sp.amounts }, 201);
+});
+
 captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; ocr_original: string | null }>(db,
-    'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; status: string; ocr_original: string | null }>(db,
+    'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, status, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
   const data = await body(c);
   const r = registerInput(data);
@@ -532,10 +597,19 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   // A field a person changes counts as resolved: its "Needs input" mark goes, the others stay until the row is checked.
   // The original reading and its "unclear" list are kept as they were.
   let ocr = old.ocr_original;
+  const oldPays = await all<{ mode: string; amount_paise: number; column_label: string | null }>(db,
+    'SELECT mode, amount_paise, column_label FROM register_payments WHERE register_row_id = ? ORDER BY created_at, id', rowId);
+  const key = (ps: { mode: string; amount: number; label: string | null }[]) => JSON.stringify(ps.map((p) => [p.mode, p.amount, p.label ?? '']).sort());
+  // An amount the reader could not read was drafted as ₹0 (13 Nov 2026): the row cannot be ticked at ₹0 until a person
+  // types the amount, or says the bill really is ₹0.
+  if (ocr && r.status === 'checked' && r.amountPaise === 0 && old.amount_paise === 0 && !confirmed.includes('amount')) {
+    const o = JSON.parse(ocr) as { unclear?: string[]; resolved?: string[] };
+    if ((o.unclear ?? []).includes('amount') && !(o.resolved ?? []).includes('amount')) {
+      throw new HTTPException(400, { message: `The amount of bill ${r.billNo || 'on this line'} could not be read, so it is ₹0 for now. Type the amount from the photo, or confirm the bill really is ₹0.`, cause: { code: 'amount_unread' } });
+    }
+  }
+  const editAudit = rowEditAudit(old, oldPays, r);
   if (ocr) {
-    const oldPays = await all<{ mode: string; amount_paise: number; column_label: string | null }>(db,
-      'SELECT mode, amount_paise, column_label FROM register_payments WHERE register_row_id = ? ORDER BY created_at, id', rowId);
-    const key = (ps: { mode: string; amount: number; label: string | null }[]) => JSON.stringify(ps.map((p) => [p.mode, p.amount, p.label ?? '']).sort());
     const changed = [
       old.bill_no !== r.billNo && 'bill_no',
       old.bill_type !== r.billType && 'bill_type',
@@ -558,6 +632,8 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
       stmt(db, 'DELETE FROM register_payments WHERE register_row_id = ?', rowId),
       ...paymentStatements(db, bid, rowId, r.payments, t),
       ...(r.paidWithRowId && r.paidWithRowId !== old.paid_with_row_id ? [newHeadStatement(db, r.paidWithRowId, rowId)] : []),
+      ...(editAudit ? [stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.edit', 'register_rows', ?, ?, ?, ?)`, bid, c.get('user').id, rowId, JSON.stringify(editAudit.before), JSON.stringify(editAudit.after), t)] : []),
     ]);
   } catch (e) {
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
@@ -566,6 +642,37 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   await refreshComparisons(db, bid, old.shift_day, c.get('user').id);
   return c.json({ ok: true });
 });
+
+const rupees = (p: number) => `₹${p < 0 ? '-' : ''}${Math.trunc(Math.abs(p) / 100).toLocaleString('en-IN')}${Math.abs(p) % 100 ? `.${String(Math.abs(p) % 100).padStart(2, '0')}` : ''}`;
+const MODE_WORD: Record<string, string> = { cash: 'Cash', upi: 'UPI', card: 'Card' };
+const paysText = (ps: { mode: string; amount: number; label: string | null }[]) =>
+  ps.length ? ps.map((p) => `${p.label || MODE_WORD[p.mode] || p.mode} ${rupees(p.amount)}`).join(' + ') : 'none';
+
+/**
+ * Each change to a register row, kept in the audit log with the old and new values and a line in words for the bill's
+ * History (approved 13 Nov 2026). Null when nothing changed.
+ */
+function rowEditAudit(old: { bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; status?: string },
+  oldPays: { mode: string; amount_paise: number; column_label: string | null }[], r: ReturnType<typeof registerInput>) {
+  const before = { billNo: old.bill_no, billType: old.bill_type, amountPaise: old.amount_paise, discountPaise: old.discount_paise, tipPaise: old.tip_paise,
+    paidWithRowId: old.paid_with_row_id, remarks: old.remarks ?? null, status: old.status ?? null,
+    payments: oldPays.map((p) => ({ mode: p.mode, amount: p.amount_paise, label: p.column_label })) };
+  const after = { billNo: r.billNo, billType: r.billType, amountPaise: r.amountPaise, discountPaise: r.discountPaise, tipPaise: r.tipPaise,
+    paidWithRowId: r.paidWithRowId, remarks: r.remarks, status: r.status, payments: r.payments.map((p) => ({ mode: p.mode, amount: p.amountPaise, label: p.columnLabel })) };
+  const TYPE: Record<string, string> = { fnb: 'F&B', room: 'Room' };
+  const disc = (d: number, tip: number) => (d - tip < 0 ? `tip ${rupees(tip - d)}` : rupees(d - tip));
+  const words: string[] = [];
+  if (before.billNo !== after.billNo) words.push(`Bill no. ${before.billNo || '(blank)'} → ${after.billNo || '(blank)'}`);
+  if (before.billType !== after.billType) words.push(`Type ${TYPE[before.billType ?? ''] ?? '–'} → ${TYPE[after.billType ?? ''] ?? '–'}`);
+  if (before.amountPaise !== after.amountPaise) words.push(`Amount ${rupees(before.amountPaise)} → ${rupees(after.amountPaise)}`);
+  if (before.discountPaise - before.tipPaise !== after.discountPaise - after.tipPaise) words.push(`Discount ${disc(before.discountPaise, before.tipPaise)} → ${disc(after.discountPaise, after.tipPaise)}`);
+  const pk = (ps: { mode: string; amount: number; label: string | null }[]) => JSON.stringify(ps.map((p) => [p.mode, p.amount, p.label ?? '']).sort());
+  if (pk(before.payments) !== pk(after.payments)) words.push(`Payments ${paysText(before.payments)} → ${paysText(after.payments)}`);
+  if (before.paidWithRowId !== after.paidWithRowId) words.push(after.paidWithRowId ? 'Linked to be paid with another row' : 'Unlinked: pays on its own');
+  if (before.remarks !== after.remarks) words.push(`Remarks "${before.remarks ?? ''}" → "${after.remarks ?? ''}"`);
+  if (before.status && before.status !== after.status) words.push(after.status === 'checked' ? 'Ticked as checked' : 'Tick removed');
+  return words.length ? { before, after: { ...after, changes: words.join('; ') } } : null;
+}
 
 interface SlipRow { id: string; lineNo: number; amountPaise: number; paidWithRowId: string | null; status: string }
 

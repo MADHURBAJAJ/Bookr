@@ -37,6 +37,10 @@ async function api(method, path, body) {
     go('#/login');
     throw new Error('Please sign in.');
   }
+  if (!res.ok && data?.code === 'amount_unread' && method === 'PUT' && body && !(body.confirm ?? []).includes('amount')) {
+    // An amount the reader could not read (13 Nov 2026): ticking it at ₹0 needs a person to say it really is ₹0.
+    if (window.confirm(`${data.error}\n\nOK = the bill really is ₹0 (complimentary). Cancel = type the amount first.`)) return api(method, path, { ...body, confirm: [...(body.confirm ?? []), 'amount'] });
+  }
   if (!res.ok) throw new Error(data?.error ?? 'Something went wrong.');
   return data;
 }
@@ -1098,6 +1102,9 @@ async function apiFull(method, path, body) {
   body = bodyFor(method, body);
   const res = await fetch(`/api${path}`, { method, headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
   const data = await res.json().catch(() => null);
+  if (!res.ok && data?.code === 'amount_unread' && method === 'PUT' && body && !(body.confirm ?? []).includes('amount')) {
+    if (window.confirm(`${data.error}\n\nOK = the bill really is ₹0 (complimentary). Cancel = type the amount first.`)) return apiFull(method, path, { ...body, confirm: [...(body.confirm ?? []), 'amount'] });
+  }
   if (!res.ok) { const e = new Error(data?.error ?? 'Something went wrong.'); e.problems = data?.problems; throw e; }
   return data;
 }
@@ -1470,9 +1477,20 @@ function rowIssues(r) {
   if (inf.has('discount') && !largePct(r)) flags.discount ??= 'amber'; // a worked-out discount is only tinted, not spelled out
   if (inf.has('payments') && !r.paidWithRowId && o.movedFromRow) { flags.payments ??= 'amber'; amber.push('Payment moved from the next line'); }
   if (r.bankAdjusted) info.push('Adjusted from bank on Reconcile');
+  const sp = splitOffer(r, o);
+  if (sp) red.unshift(html`Two bills on this line: ${sp.bills[0]} ₹ ${rs(sp.amounts[0])} and ${sp.bills[1]} ₹ ${rs(sp.amounts[1])}
+    <span class="chips"><button type="button" class="pickchip" data-split="${r.id}" title="This line keeps ${sp.bills[0]} and its payment; a new line below takes ${sp.bills[1]}, paid together with it. Check both against the photo.">Split into 2 rows</button></span>`);
   return { red, amber, info, flags, needsYou: red.length > 0 && r.status !== 'checked' };
 }
 
+/** A line the reader found two bills on, with two amounts, not split yet (same rule as the server's splitOfReading). */
+function splitOffer(r, o) {
+  if (!o?.read || o.splitInto || regRows.some((y) => { try { return JSON.parse(y.ocrOriginal ?? '{}').addedBelow === r.id; } catch { return false; } })) return null;
+  const parts = (v) => String(v ?? '').trim().split(/[\s,/&+]+/).filter(Boolean);
+  const bills = parts(o.read.bill_no);
+  const amounts = parts(o.read.amount).map((a) => (/^\d{1,12}(\.\d{1,2})?$/.test(a.replace(/,/g, '')) ? parsePaiseText(a) : null));
+  return bills.length === 2 && amounts.length === 2 && amounts.every((a) => a > 0) ? { bills, amounts } : null;
+}
 const flagClass = (f) => (f === 'red' ? 'flag' : f === 'amber' ? 'flag-auto' : '');
 const issueHtml = (x, r) => html`${x.red.map((t) => html`<div class="iss red">${t}</div>`)}${x.amber.map((t) => html`<div class="iss amber">${t}</div>`)}${x.info.map((t) => html`<div class="iss info">${t}</div>`)}`;
 
@@ -2156,6 +2174,16 @@ function wireInlineRows(biz, u, strip) {
       } catch (err) { b.disabled = false; showError(document.getElementById('rmsg'), err); }
     });
     tr.querySelector('[data-edit]')?.addEventListener('click', () => openRowForm(tr.dataset.row));
+    tr.querySelector('[data-split]')?.addEventListener('click', async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      try {
+        await chain;
+        const { id, bills } = await api('POST', `/businesses/${biz.id}/register-rows/${tr.dataset.row}/split`, {});
+        await reviewView(biz, u.id, id);
+        doneToast(`Split into ${bills[0]} and ${bills[1]}. Check both lines against the photo and tick them.`);
+      } catch (err) { b.disabled = false; showError(document.getElementById('rmsg'), err); }
+    });
     tr.querySelector('[data-addbelow]')?.addEventListener('click', async () => {
       try {
         const { id } = await api('POST', `/businesses/${biz.id}/register-rows/${tr.dataset.row}/insert-below`, {});
@@ -6074,7 +6102,7 @@ async function openBillDrawer(biz, billNo, day) {
         <div class="note">${paid.length ? paid.map((m) => `In the bank: ₹ ${money(m.appliedPaise)} of ₹ ${money(m.amountPaise)} at ${when(m.postedAt)} · ${m.accountName}${m.vpa ? ` · ${m.vpa}` : ''}`).join('; ')
           : x.payment_mode === 'cash' ? 'Cash: counted in the shift\'s cash check.' : x.match_status === 'awaiting_card_settlement' ? 'Waiting for the card settlement.' : x.match_status === 'awaiting_bank_match' ? 'Not found in the bank yet.' : ''}</div></div>`;
     }) : html`<div class="note">${c0?.shift_status === 'confirmed' ? 'Not counted as a sale.' : 'Counted once the shift is confirmed.'}</div>`)}
-    ${section('History', b.history.length ? b.history.map((h) => html`<div class="tiny">${when(h.at)} · ${h.user ?? 'Bookr'} · ${HISTORY_LABELS[h.action] ?? h.action}</div>`) : html`<div class="note">Nothing yet.</div>`)}
+    ${section('History', b.history.length ? b.history.map((h) => html`<div class="tiny">${when(h.at)} · ${h.user ?? 'Bookr'} · ${HISTORY_LABELS[h.action] ?? h.action}${historyWords(h)}</div>`) : html`<div class="note">Nothing yet.</div>`)}
     ${c0 && b.sales.some((x) => x.match_status === 'awaiting_bank_match') ? html`<div><a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${c0.shift_day}">Match or fix on Reconcile</a></div>` : ''}`.__html;
   document.getElementById('drawerclose').addEventListener('click', () => d.remove());
   // The register line, editable here with its photo, so a slip is corrected without leaving the page (7 Nov 2026).
@@ -6133,7 +6161,9 @@ const HISTORY_LABELS = {
   'bank.match': 'Matched to a bank credit', 'bank.match_set': 'Matched by hand', 'bank.match_adjust_bills': 'Matched; register corrected to the bank amount', 'bank.fix_bill': 'Bill fixed from the bank',
   'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened',
   'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
+  'register.edit': 'Register line changed', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };
+const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
 // Any element with data-bill-drawer="billNo|day" opens the drawer.
 document.addEventListener('click', (e) => {
   const el = e.target.closest?.('[data-bill-drawer]');

@@ -614,7 +614,14 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
   const unbalanced = rg.filter((r) => !grouped.has(r.id) && (paysByRow.get(r.id) ?? []).reduce((s, p) => s + p.amount_paise, 0) !== r.amount_paise && r.amount_paise !== 0);
   for (const g of groups) {
-    if (g.paidPaise !== g.billsPaise) blockers.push(`Bills ${g.billNos.join(', ')} are paid together: the payment does not equal the bills after discounts and tips.`);
+    if (g.paidPaise === g.billsPaise) continue;
+    // In figures (approved 13 Nov 2026): what the bills come to, what was paid, by how much, and any row at ₹0 (often an
+    // amount not read, or a second bill on the line not split off).
+    const diff = g.paidPaise - g.billsPaise;
+    const zero = rg.filter((r) => g.rowIds.includes(r.id) && r.amount_paise + r.discount_paise === 0).map((r) => r.bill_no || `line ${r.line_no}`);
+    const rs = (p: number) => `₹${Math.trunc(Math.abs(p) / 100).toLocaleString('en-IN')}${Math.abs(p) % 100 ? `.${String(Math.abs(p) % 100).padStart(2, '0')}` : ''}`;
+    blockers.push(`Bills ${g.billNos.join(', ')} are paid together: bills ${rs(g.billsPaise)} after discounts and tips, paid ${rs(g.paidPaise)}, ${rs(diff)} ${diff > 0 ? 'more paid than billed' : 'less paid than billed'}.`
+      + (zero.length ? ` Rows at ₹0: ${zero.join(', ')}. Check their amounts against the photo.` : diff > 0 ? '' : ' If it was a discount, use Fill discounts on the register page.'));
   }
   if (unbalanced.length) blockers.push(`The payments written for bill ${unbalanced.map((r) => r.bill_no).join(', ')} do not add up to the bill amount.`);
   const typed = new Set(typeHeads.map((t) => t.bill_type));

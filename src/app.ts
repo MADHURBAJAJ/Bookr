@@ -52,7 +52,10 @@ app.route('/', homeRoutes);
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 
 app.onError((err, c) => {
-  if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
+  if (err instanceof HTTPException) {
+    const code = (err.cause as { code?: string } | undefined)?.code;
+    return c.json({ error: err.message, ...(code ? { code } : {}) }, err.status);
+  }
   console.error(err);
   return c.json({ error: 'Something went wrong.' }, 500);
 });
