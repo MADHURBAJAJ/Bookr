@@ -84,4 +84,32 @@ describe('register lines', () => {
     const v = await view(h);
     expect(v.json.blockers.join(' ')).toMatch(/bills ₹1,180 after discounts and tips, paid ₹1,600, ₹420 more paid than billed\. Rows at ₹0: 2610311\./);
   });
+
+  it('a group short by a small gap gets its discount filled by itself once no row is at ₹0; a typed discount or Undo stays', async () => {
+    const { h, add, put } = await setup();
+    // 420 + 1180 = 1,600 of bills, 1,550 paid. While 2610314 is at ₹0, nothing is filled (₹1,130 paid over).
+    const head = await add('2610311', '420', [{ mode: 'cash', columnLabel: 'Cash', amount: '1550' }]);
+    const m = await add('2610314', '0', [], { paidWithRowId: head });
+    const disc = async () => (await sql`SELECT discount_paise FROM register_rows WHERE id = ${head}`)[0].discount_paise;
+    expect(await disc()).toBe(0);
+    expect((await put(m, { billNo: '2610314', amount: '1180', paidWithRowId: head, status: 'draft' })).status).toBe(200);
+    expect(await disc()).toBe(5000);
+    const log = await sql`SELECT after FROM audit_log WHERE action = 'register.auto_discount' AND row_id = ${head}`;
+    expect(JSON.parse(log[0].after).changes).toBe('Discount filled: ₹50 (3.1% of ₹1,600 of bills, ₹1,550 paid)');
+    expect((await view(h)).json.blockers.join(' ')).not.toMatch(/2610311, 2610314 are paid together/);
+    // The member back to ₹0: the filled discount comes off, and the blocker names the row.
+    expect((await put(m, { billNo: '2610314', amount: '0', paidWithRowId: head, status: 'draft' })).status).toBe(200);
+    expect(await disc()).toBe(0);
+    expect((await view(h)).json.blockers.join(' ')).toMatch(/Rows at ₹0: 2610314/);
+    // A gap over 20% is left to a person.
+    expect((await put(m, { billNo: '2610314', amount: '5000', paidWithRowId: head, status: 'draft' })).status).toBe(200);
+    expect(await disc()).toBe(0);
+    // Back to 1,180: filled again; a person taking it off (Undo) keeps it off.
+    expect((await put(m, { billNo: '2610314', amount: '1180', paidWithRowId: head, status: 'draft' })).status).toBe(200);
+    expect(await disc()).toBe(5000);
+    expect((await put(head, { billNo: '2610311', amount: '420', discount: '0', payments: [{ mode: 'cash', columnLabel: 'Cash', amount: '1550' }], status: 'draft' })).status).toBe(200);
+    expect(await disc()).toBe(0);
+    expect((await put(m, { billNo: '2610314', amount: '1180', remarks: 'x', paidWithRowId: head, status: 'draft' })).status).toBe(200);
+    expect(await disc()).toBe(0);
+  });
 });

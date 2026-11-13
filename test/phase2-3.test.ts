@@ -51,10 +51,8 @@ describe('bills paid together', () => {
     const { h, pageId } = await setup();
     let v = await view(h);
     for (const b of ['2610311', '2610314', '26103122']) expect(byBill(v, b).difference).toBe('match');
-    expect(v.json.blockers.join(' ')).toMatch(/paid together: bills ₹2,380 after discounts and tips, paid ₹2,370, ₹10 less paid than billed/);
-    // 2,370 paid for 2,380 of bills: Fill writes the 10 discount on the row with the payment.
-    const fill = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${pageId}/fill-discounts`);
-    expect(fill.json.filled).toBe(1);
+    // 2,370 paid for 2,380 of bills: the 10 discount is filled by itself on the row with the payment (13 Nov 2026).
+    expect(v.json.blockers.join(' ')).not.toMatch(/paid together/);
     const disc = await sql`SELECT bill_no, discount_paise, paid_with_row_id FROM register_rows WHERE bill_no IN ('2610311', '2610314', '26103122')`;
     expect(disc.reduce((t, x) => t + x.discount_paise, 0)).toBe(1000);
     expect(disc.filter((x) => x.discount_paise > 0).every((x) => !x.paid_with_row_id)).toBe(true);
@@ -70,6 +68,7 @@ describe('bills paid together', () => {
   it('confirming books one income row per bill, in the group mode', async () => {
     const { h } = await setup();
     await sql`UPDATE register_payments SET amount_paise = 238000 WHERE register_row_id = (SELECT id FROM register_rows WHERE bill_no = '2610311')`;
+    await sql`UPDATE register_rows SET discount_paise = 0 WHERE bill_no = '2610311'`; // the filled 10 goes with the full payment
     await decideAll(h);
     expect((await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
     const rows = await sql`SELECT bill_no, amount_paise, payment_mode, match_status FROM transactions WHERE bill_no IN ('2610311', '2610314', '26103122') ORDER BY bill_no`;

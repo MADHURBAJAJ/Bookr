@@ -1474,7 +1474,13 @@ function rowIssues(r) {
   }
   if (inf.has('bill_no') && o.completedFrom) { flags.bill_no ??= 'amber'; amber.push(`Completed from "${o.completedFrom}" on the page`); }
   if (inf.has('bill_type')) flags.bill_type ??= 'amber'; // assumed F&B: only tinted
-  if (inf.has('discount') && !largePct(r)) flags.discount ??= 'amber'; // a worked-out discount is only tinted, not spelled out
+  // A group's discount filled by itself (13 Nov 2026): said in words, with Undo (a person's 0 then stays).
+  if (o.autoGroupDiscount && r.discountPaise && !member) {
+    flags.discount = 'amber';
+    const gross = r.amountPaise + ms.reduce((t, m) => t + m.amountPaise, 0);
+    amber.push(html`Discount filled: ₹ ${rs(r.discountPaise)} (${gross ? (Math.round(r.discountPaise * 1000 / gross) / 10) : 0}% of ₹ ${rs(gross)} of bills)
+      <span class="chips"><button type="button" class="pickchip" data-undodisc="${r.id}" title="Takes the discount off. It is not filled again for this group.">Undo</button></span>`);
+  } else if (inf.has('discount') && !largePct(r)) flags.discount ??= 'amber'; // a worked-out discount is only tinted, not spelled out
   if (inf.has('payments') && !r.paidWithRowId && o.movedFromRow) { flags.payments ??= 'amber'; amber.push('Payment moved from the next line'); }
   if (r.bankAdjusted) info.push('Adjusted from bank on Reconcile');
   const sp = splitOffer(r, o);
@@ -2174,6 +2180,7 @@ function wireInlineRows(biz, u, strip) {
       } catch (err) { b.disabled = false; showError(document.getElementById('rmsg'), err); }
     });
     tr.querySelector('[data-edit]')?.addEventListener('click', () => openRowForm(tr.dataset.row));
+    tr.querySelector('[data-undodisc]')?.addEventListener('click', () => { const d = val(tr, 'discount'); d.value = '0'; save(tr, d); });
     tr.querySelector('[data-split]')?.addEventListener('click', async (e) => {
       const b = e.currentTarget;
       b.disabled = true;
@@ -6161,7 +6168,7 @@ const HISTORY_LABELS = {
   'bank.match': 'Matched to a bank credit', 'bank.match_set': 'Matched by hand', 'bank.match_adjust_bills': 'Matched; register corrected to the bank amount', 'bank.fix_bill': 'Bill fixed from the bank',
   'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened',
   'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
-  'register.edit': 'Register line changed', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
+  'register.edit': 'Register line changed', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };
 const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
 // Any element with data-bill-drawer="billNo|day" opens the drawer.

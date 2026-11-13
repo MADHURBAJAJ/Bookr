@@ -5,7 +5,7 @@ import { requireRole } from '../auth';
 import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, date, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
-import { cashSummaryChecks, numberContext, numberFlags, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
+import { cashSummaryChecks, LARGE_DISCOUNT_PCT, numberContext, numberFlags, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
 import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { onPayingRow, spreadDifference } from '../discounts';
@@ -480,6 +480,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
+  await autoGroupDiscount(db, bid, [r.paidWithRowId], c.get('user').id);
   await refreshComparisons(db, bid, u.business_day, c.get('user').id);
   return c.json({ id }, 201);
 });
@@ -575,9 +576,52 @@ captureRoutes.post('/businesses/:businessId/register-rows/:rowId/split', require
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
+  await autoGroupDiscount(db, bid, [paidWith], user);
   await refreshComparisons(db, bid, row.shift_day, user);
   return c.json({ id, bills: sp.bills, amounts: sp.amounts }, 201);
 });
+
+
+/**
+ * A group's discount filled by itself after a line changes (approved 13 Nov 2026), when the group looks complete: less
+ * was paid than billed, by no more than the large-discount limit, and no row is at ₹0 or has an amount not read. It
+ * goes on the row with the payment, marked so the screen says it was filled. A discount a person typed or took off
+ * is never touched. A filled one that no longer fits (the bills or payment changed) is worked out again, or taken off
+ * when the group no longer qualifies: more paid than billed, a row at ₹0, or too large a gap stay with a person.
+ */
+async function autoGroupDiscount(db: DB, businessId: string, heads: (string | null | undefined)[], user: string) {
+  for (const headId of [...new Set(heads.filter((x): x is string => !!x))]) {
+    const rows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; status: string; ocr_original: string | null }>(db,
+      'SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id, status, ocr_original FROM register_rows WHERE business_id = ? AND (id = ? OR paid_with_row_id = ?)', businessId, headId, headId);
+    const head = rows.find((r) => r.id === headId);
+    if (!head || head.paid_with_row_id || rows.length < 2) continue;
+    const ocrOf = (r: { ocr_original: string | null }) => { try { return (r.ocr_original ? JSON.parse(r.ocr_original) : {}) as Record<string, unknown> & { inferred?: string[]; resolved?: string[]; unclear?: string[]; autoGroupDiscount?: boolean }; } catch { return {}; } };
+    const o = ocrOf(head);
+    const typed = (r: (typeof rows)[number]) => { const x = ocrOf(r); return (x.resolved ?? []).includes('discount') || ((r.discount_paise || r.tip_paise) > 0 && !stillInferred(r.ocr_original, 'discount')); };
+    if (rows.some(typed)) continue;
+    if (rows.some((r) => r.id !== headId && (r.discount_paise || r.tip_paise))) continue;
+    const paid = (await one<{ n: number }>(db, 'SELECT coalesce(sum(amount_paise), 0) AS n FROM register_payments WHERE register_row_id = ?', headId))!.n;
+    const gross = rows.reduce((t, r) => t + r.amount_paise, 0);
+    const unread = (r: (typeof rows)[number]) => { const x = ocrOf(r); return (x.unclear ?? []).includes('amount') && !(x.resolved ?? []).includes('amount'); };
+    const gap = gross - paid;
+    const fits = paid > 0 && gap > 0 && gap * 100 <= LARGE_DISCOUNT_PCT * gross && rows.every((r) => r.amount_paise > 0 && !unread(r));
+    const want = fits ? gap : 0;
+    if (!fits && !o.autoGroupDiscount) continue;           // nothing filled here before: a person decides
+    if (head.discount_paise === want && head.tip_paise === 0 && !!o.autoGroupDiscount === fits) continue;
+    const inferred = new Set((o.inferred ?? []).filter((f) => f !== 'discount'));
+    if (fits) inferred.add('discount');
+    const next = { ...o, inferred: [...inferred], autoGroupDiscount: fits || undefined };
+    const pct = gross ? (gap * 1000 / gross) : 0;
+    const words = fits ? `Discount filled: ${rupees(gap)} (${(Math.round(pct) / 10).toString()}% of ${rupees(gross)} of bills, ${rupees(paid)} paid)`
+      : `Filled discount ${rupees(head.discount_paise)} taken off: the group now needs a person (${gap < 0 ? `${rupees(-gap)} more paid than billed` : rows.some((r) => !r.amount_paise || unread(r)) ? 'a row at ₹0 or not read' : gap > 0 ? 'the gap is over the large-discount limit' : 'it balances'})`;
+    const t = now();
+    await db.batch([
+      stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = 0, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?', want, JSON.stringify(next), user, t, headId),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'register.auto_discount', 'register_rows', ?, ?, ?, ?)`,
+        businessId, user, headId, JSON.stringify({ discountPaise: head.discount_paise, tipPaise: head.tip_paise }), JSON.stringify({ discountPaise: want, grossPaise: gross, paidPaise: paid, changes: words }), t),
+    ]).catch((e) => { if (!isShiftConfirmed(e)) throw e; });
+  }
+}
 
 captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
@@ -639,6 +683,7 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
+  await autoGroupDiscount(db, bid, [r.paidWithRowId ?? rowId, old.paid_with_row_id], c.get('user').id);
   await refreshComparisons(db, bid, old.shift_day, c.get('user').id);
   return c.json({ ok: true });
 });
@@ -843,6 +888,7 @@ captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
+  await autoGroupDiscount(db, bid, [old.paid_with_row_id], c.get('user').id);
   await refreshComparisons(db, bid, old.shift_day, c.get('user').id);
   return c.json({ ok: true });
 });

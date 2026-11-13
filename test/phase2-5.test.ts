@@ -508,14 +508,14 @@ describe('bills paid together across register pages', () => {
     const head = (await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p1}/register-rows`,
       { billNo: '9001', billType: 'fnb', amount: '600', payments: [{ mode: 'upi', columnLabel: null, amount: '1000' }] })).json.id;
     const res = await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/register-rows`,
-      { billNo: '9002', billType: 'fnb', amount: '500', payments: [], paidWithRowId: head });
+      { billNo: '9002', billType: 'fnb', amount: '900', payments: [], paidWithRowId: head });
     expect(res.status).toBe(201);
     const d2 = (await h.clients.entry_staff.get(`/businesses/${h.bid}/uploads/${p2}`)).json;
     expect(d2.pageNo).toBe(2);
     expect(d2.otherPageRows).toEqual([expect.objectContaining({ id: head, pageNo: 1, uploadId: p1, amountPaise: 60000, billType: 'fnb', status: 'draft', remarks: null, payments: [expect.objectContaining({ amountPaise: 100000 })] })]);
-    // 600 + 500 = 1,100 against 1,000 paid: Fill on page 2 writes the 100 discount on the paying row on page 1.
+    // 600 + 900 = 1,500 against 1,000 paid (over 20%, so not filled by itself): Fill on page 2 writes the 500 discount on the paying row on page 1.
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p2}/fill-discounts`)).json.filled).toBe(1);
     const rows = await sql`SELECT discount_paise FROM register_rows WHERE id IN (${head}, ${res.json.id})`;
-    expect(rows.reduce((t, r) => t + r.discount_paise, 0)).toBe(10000);
+    expect(rows.reduce((t, r) => t + r.discount_paise, 0)).toBe(50000);
   });
 });
