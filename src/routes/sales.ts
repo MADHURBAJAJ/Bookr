@@ -14,7 +14,7 @@ import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { waitingPicture } from '../waiting';
 import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { CASH_BY_UPI_MIN, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { CASH_BY_UPI_MIN, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -799,6 +799,15 @@ salesRoutes.get('/businesses/:businessId/reports/large-discounts', requireRole('
   const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
   const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
   return c.json({ from, to, limitPct: LARGE_DISCOUNT_PCT, lines: await largeDiscounts(c.env.DB, c.get('businessId'), from, to) });
+});
+
+salesRoutes.get('/businesses/:businessId/reports/complimentary', requireRole('reports.view'), async (c) => {
+  const q = c.req.query();
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
+  let from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
+  if (from > to) fail(400, 'From must be on or before To.');
+  if (from < addDays(to, -366)) from = addDays(to, -366);
+  return c.json({ from, to, ...(await complimentaryBills(c.env.DB, c.get('businessId'), from, to)) });
 });
 
 salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.view'), async (c) => {

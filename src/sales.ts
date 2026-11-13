@@ -1373,3 +1373,27 @@ export async function largeDiscounts(db: DB, businessId: string, from: string, t
       remarks: bills.map((r) => r.remarks).filter(Boolean).join(' · ') || null, uploadId: head.upload_id, rowId: head.id };
   }).sort((a, b) => b.day.localeCompare(a.day));
 }
+
+/**
+ * Complimentary bills (approved 13 Nov 2026): bills of ₹0 with no money paid, with the guest's name from the software
+ * report and the register's remarks. A row brought to ₹0 by its group's discount carries the group's payments, and a ₹0
+ * row with money written on it is a row to correct: neither is complimentary, so neither is listed. Value is what the
+ * bill was before it came to ₹0: the register's amount, or the software's discount when only the software has it.
+ */
+export async function complimentaryBills(db: DB, businessId: string, from: string, to: string) {
+  const rows = await all<{ id: string; day: string; billNo: string; posNo: string; regPaise: number | null; regDiscount: number | null; remarks: string | null;
+    uploadId: string | null; rowId: string | null; billType: string | null; swDiscount: number | null; name: string | null; paidAt: number | null; swId: string | null; paid: number }>(db, `
+    SELECT c.id, c.shift_day AS day, c.bill_no AS billNo, c.pos_no AS posNo, r.amount_paise AS regPaise, r.discount_paise AS regDiscount, r.remarks, r.upload_id AS uploadId,
+      r.id AS rowId, coalesce(r.bill_type, c.bill_type) AS billType, s.discount_paise AS swDiscount, s.customer_name AS name, s.paid_at AS paidAt, s.id AS swId,
+      (SELECT count(*) FROM register_payments p WHERE p.register_row_id IN (r.id, r.paid_with_row_id))
+        + (SELECT count(*) FROM register_rows m WHERE m.paid_with_row_id = r.id) AS paid
+    FROM bill_comparisons c LEFT JOIN register_rows r ON r.id = c.register_row_id LEFT JOIN software_bills s ON s.id = c.software_bill_id
+    WHERE c.business_id = ? AND c.shift_day BETWEEN ? AND ? AND c.difference = 'complimentary'
+    ORDER BY c.shift_day, coalesce(s.paid_at, 0), c.bill_no`, businessId, from, to);
+  const lines = rows.filter((r) => !r.paid).map((r) => ({
+    day: r.day, billNo: r.billNo, posNo: r.posNo || null, billType: r.billType, name: r.name, remarks: r.remarks, paidAt: r.paidAt,
+    valuePaise: r.regPaise ? r.regPaise : r.swDiscount || null,
+    in: r.rowId && r.swId ? 'both' : r.rowId ? 'register' : 'software', uploadId: r.uploadId, rowId: r.rowId,
+  }));
+  return { lines, count: lines.length, valuePaise: lines.reduce((t, l) => t + (l.valuePaise ?? 0), 0), noName: lines.filter((l) => !l.name && !l.remarks).length };
+}

@@ -797,11 +797,47 @@ function missedReport(biz, m) {
   </section>`;
 }
 
+/**
+ * Complimentary bills (approved 13 Nov 2026): ₹0 bills with no money paid, with the guest's name from the software report
+ * and the register's remarks, and the value given free over the shifts chosen (a subtotal per month when there are several).
+ */
+function complimentaryReport(biz, cp) {
+  const months = [...new Set(cp.lines.map((l) => l.day.slice(0, 7)))];
+  const monthName = (ym) => new Date(`${ym}-01T00:00:00`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const IN = { both: 'Software and register', software: 'Software only', register: 'Register only' };
+  const row = (l) => html`<tr>
+    <td><a href="#/b/${biz.id}/compare/${l.day}">${dayLabel(l.day)}</a></td>
+    <td class="mono">${l.rowId && biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${l.uploadId}/${l.rowId}">${l.billNo}</a>` : l.billNo}</td>
+    <td>${l.billType === 'room' ? 'Room' : l.billType === 'fnb' ? 'F&B' : ''}</td>
+    <td>${l.name ?? html`<span class="note">No name</span>`}</td>
+    <td class="note">${l.remarks ?? ''}</td>
+    <td class="amount">${l.valuePaise != null ? money(l.valuePaise) : html`<span class="note">Not shown</span>`}</td>
+    <td class="note">${IN[l.in]}</td></tr>`;
+  const sub = (ym) => { const ls = cp.lines.filter((l) => l.day.startsWith(ym)); return html`<tr><td colspan="5"><strong>${monthName(ym)}</strong> · ${ls.length} bill${ls.length > 1 ? 's' : ''}</td>
+    <td class="amount"><strong>${money(ls.reduce((t, l) => t + (l.valuePaise ?? 0), 0))}</strong></td><td></td></tr>`; };
+  return html`<section class="card" id="comps" style="gap:10px">
+    <h2>Complimentary bills</h2>
+    <div class="note">Bills of ₹0 with no money paid, never counted as sales. The name comes from the software report, the remarks from the register. Value is the bill before it came to ₹0, when the register or the software shows it. A row that comes to ₹0 under its group's discount is paid with its group and is not listed.</div>
+    <form class="repdates form-row" style="align-items:flex-end">
+      <div class="field"><label for="cpfrom">From shift</label><input id="cpfrom" type="date" name="from" value="${cp.from}" required></div>
+      <div class="field"><label for="cpto">To shift</label><input id="cpto" type="date" name="to" value="${cp.to}" required></div>
+      <button class="btn plain" type="submit">Show</button>
+    </form>
+    ${cp.lines.length ? html`<div class="note"><strong>${cp.count} complimentary bill${cp.count > 1 ? 's' : ''}</strong> · ₹ ${money(cp.valuePaise)} given free${cp.noName ? ` · ${cp.noName} with no name or remark` : ''}</div>
+    <div class="scroll"><table style="min-width:760px">
+      <thead><tr><th>Shift</th><th>Bill</th><th>Type</th><th>Name</th><th>Remarks</th><th style="text-align:right">Value ₹</th><th>Found in</th></tr></thead>
+      <tbody>${months.length > 1 ? months.map((ym) => html`${cp.lines.filter((l) => l.day.startsWith(ym)).map(row)}${sub(ym)}`) : cp.lines.map(row)}</tbody>
+    </table></div>
+    <div class="note">Names for reports imported before 12 Nov: upload the same software report again and press <strong>Add names</strong>.</div>` : html`<div class="ok-msg">No complimentary bills in these shifts.</div>`}
+  </section>`;
+}
+
 /** Reports: discounts over the limit, for a person to look through. They need no decision on Compare sales. */
 async function reportsView(biz, query) {
   const q = new URLSearchParams(query);
   const range = new URLSearchParams({ from: q.get('from') ?? '', to: q.get('to') ?? '' });
-  const [r, m] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`), api('GET', `/businesses/${biz.id}/reports/missed?${range}`)]);
+  const [r, m, cp] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`), api('GET', `/businesses/${biz.id}/reports/missed?${range}`),
+    api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`)]);
   const total = r.lines.reduce((t, l) => t + l.discountPaise, 0);
   render(shell(biz, 'reports', 'Reports', '', html`
     ${missedReport(biz, m)}
@@ -822,10 +858,11 @@ async function reportsView(biz, query) {
           <td class="amount">${money(l.billsPaise)}</td><td class="amount">${money(l.discountPaise)}</td><td class="amount">${l.pct}</td><td class="amount">${money(l.paidPaise)}</td>
           <td>${l.modes.map((m) => MODE_LABELS[m] ?? m).join(', ') || 'None written'}</td><td class="amount">${money(l.softwarePaise)}</td><td class="note">${l.remarks ?? ''}</td></tr>`)}</tbody>
       </table></div>` : html`<div class="ok-msg">No large discounts in these shifts.</div>`}
-    </section>`));
+    </section>
+    ${complimentaryReport(biz, cp)}`));
   wireShell();
-  // Both reports share one range: either form sets it.
-  document.querySelectorAll('#repdates, #missed .repdates').forEach((f) => f.addEventListener('submit', (e) => {
+  // The reports share one range: any form sets it.
+  document.querySelectorAll('#repdates, #missed .repdates, #comps .repdates').forEach((f) => f.addEventListener('submit', (e) => {
     e.preventDefault();
     const d = new FormData(e.target);
     location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
