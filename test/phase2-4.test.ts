@@ -16,7 +16,7 @@ describe('confirming a shift', () => {
     await fullShift(h);
     const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`);
     expect(res.status).toBe(409);
-    expect(res.json.problems.join(' ')).toMatch(/5 differences are not decided/); // bills on one side only are decided by Bookr, except 26103125: past its date's last running number
+    expect(res.json.problems.join(' ')).toMatch(/4 differences are not decided/); // bills on one side only, and a U/N bill the register has at the same amount, are decided by Bookr, except 26103125: past its date's last running number
   });
 
   it('creates approved income rows that follow each decision', async () => {

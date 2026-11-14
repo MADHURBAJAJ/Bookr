@@ -2910,7 +2910,7 @@ function cashPanelHtml(biz, k, opts = {}) {
  * Each: Complimentary ✓ (asks the guest's name) or Paid by Cash / UPI / Card. Never counted as sales; value on Reports.
  */
 function compPanelHtml(biz, comp, canAct) {
-  const WHY = { prepaid: 'PREPAID in the software', zero: '₹0 bill', marked: 'Made complimentary' };
+  const WHY = { prepaid: 'PREPAID in the software', zero: '₹0 bill', marked: 'Made complimentary', unknown: 'Mode U/N in the software · not in the register' };
   const looks = comp.lines.filter((l) => l.status === 'look');
   const oks = comp.lines.filter((l) => l.status === 'ok');
   const line = (l) => html`<div class="ent-line" style="${l.status === 'look' ? 'border-left:3px solid #F59E0B;padding-left:10px' : ''}">
@@ -2921,13 +2921,17 @@ function compPanelHtml(biz, comp, canAct) {
       <button type="button" class="linkbtn tiny" data-bill-drawer="${l.billNo}|${comp.day}">Details</button></div>
     <div class="tiny">${l.guestName ? html`Guest: <strong>${l.guestName}</strong>${l.markedBy ? ` · by ${l.markedBy}` : ''}` : l.name ? `Software name: ${l.name}` : html`<span class="note">No guest name yet</span>`}${l.remarks ? ` · Register: ${l.remarks}` : ''}</div>
     ${l.look ? html`<div class="tiny error">${l.look}</div>` : ''}
+    ${l.hint ? html`<div class="tiny" style="color:var(--teal-ink)">Maybe: ${l.hint.text}</div>` : ''}
     ${canAct ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">
-      <button type="button" class="btn ${l.status === 'look' ? '' : 'plain'} dchip" data-makecomp="${l.comparisonId}" data-bill="${l.billNo}" data-name="${l.guestName ?? l.name ?? ''}" ${l.guestName ? 'data-had="1"' : ''}>${l.guestName ? 'Change guest name' : 'Complimentary ✓'}</button>
-      ${paidByChips(l)}</div>` : ''}
+      ${l.why === 'unknown' ? html`${paidByChips(l, l.hint?.mode)}
+        <button type="button" class="btn plain dchip" data-makecomp="${l.comparisonId}" data-bill="${l.billNo}" data-name="${l.name ?? ''}">Complimentary</button>
+        <button type="button" class="btn plain dchip" data-leaveunk="${l.comparisonId}" data-bill="${l.billNo}">Leave out…</button>`
+      : html`<button type="button" class="btn ${l.status === 'look' ? '' : 'plain'} dchip" data-makecomp="${l.comparisonId}" data-bill="${l.billNo}" data-name="${l.guestName ?? l.name ?? ''}" ${l.guestName ? 'data-had="1"' : ''}>${l.guestName ? 'Change guest name' : 'Complimentary ✓'}</button>
+      ${paidByChips(l)}`}</div>` : ''}
   </div>`;
   return html`<section class="card" style="gap:10px">
     <div class="lane-h"><strong>Complimentary bills</strong><span class="tchip">${oks.length} · ₹ ${money(comp.valuePaise)} given free</span></div>
-    <div class="note">Not counted as sales. PREPAID bills in the software and ₹0 bills come here by themselves; any other bill can be made complimentary from All bills, Cash or its details. A bill that was paid after all: choose how under "Paid by", and it moves to that tab.</div>
+    <div class="note">Not counted as sales. Bills the software calls U/N that the register does not have wait here too, until you say how they were paid. PREPAID bills in the software and ₹0 bills come here by themselves; any other bill can be made complimentary from All bills, Cash or its details. A bill that was paid after all: choose how under "Paid by", and it moves to that tab.</div>
     ${looks.length ? html`<strong style="font-size:15px">Needs a look (${looks.length})</strong>${looks.map(line)}` : ''}
     ${oks.length ? html`${looks.length ? html`<strong style="font-size:15px">Complimentary (${oks.length})</strong>` : ''}${oks.map(line)}` : html`<div class="note">None in this shift yet.</div>`}
   </section>`;
@@ -6316,13 +6320,20 @@ const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').change
 document.addEventListener('click', async (e) => {
   const mk = e.target.closest?.('[data-makecomp]');
   const pb = e.target.closest?.('[data-paidby]');
-  if (!mk && !pb) return;
+  const lo = e.target.closest?.('[data-leaveunk]');
+  if (!mk && !pb && !lo) return;
   e.preventDefault(); e.stopPropagation();
   const bizId = currentBizId();
   const reload = async () => { await (drawerReload ?? route)(); };
   const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
   try {
-    if (mk) {
+    if (lo) {
+      const why = (prompt(`Leave bill ${lo.dataset.bill} out of the sales? Say why (e.g. cancelled, test bill):`, '') ?? '').trim();
+      if (!why) return;
+      await apiFull('PUT', `/businesses/${bizId}/comparisons/${lo.dataset.leaveunk}`, { decision: 'leave_out', note: why });
+      await reload();
+      doneToast(`Bill ${lo.dataset.bill}: left out (${why}).`, async () => { await apiFull('PUT', `/businesses/${bizId}/comparisons/${lo.dataset.leaveunk}`, { decision: null }); }, reload);
+    } else if (mk) {
       const guest = (prompt(`Make bill ${mk.dataset.bill} complimentary. Guest name:`, mk.dataset.name ?? '') ?? '').trim();
       if (!guest) return;
       await apiFull('POST', `/businesses/${bizId}/comparisons/${mk.dataset.makecomp}/complimentary`, { guestName: guest });
@@ -6336,7 +6347,7 @@ document.addEventListener('click', async (e) => {
     }
   } catch (err) { if (where) showError(where, err); else alert(err.message); }
 }, true);
-const paidByChips = (c) => html`<span class="tiny note">Paid by</span>${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="btn plain dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}`;
+const paidByChips = (c, pick = null) => html`<span class="tiny note">Paid by</span>${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}`;
 // Any element with data-bill-drawer="billNo|day" opens the drawer.
 document.addEventListener('click', (e) => {
   const el = e.target.closest?.('[data-bill-drawer]');

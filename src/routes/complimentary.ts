@@ -6,6 +6,9 @@ import { requireRole } from '../auth';
 import { all, isShiftConfirmed, newId, now, one, stmt, type DB } from '../db';
 import { body, fail, isUuid, text } from '../http';
 import { complimentaryMarks, isPrepaid, NEEDS_DECISION, refreshComparisons } from '../sales';
+import { shiftCredits } from '../bankEvidence';
+import { isMachineUpi, machineLabel } from '../cards';
+import { can } from '../permissions';
 
 export const complimentaryRoutes = new Hono<AppEnv>();
 const CONFIRMED = 'This shift is saved. An Owner must reopen it first.';
@@ -29,9 +32,9 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
   const bid = c.get('businessId');
   const day = c.req.param('day');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(404, 'Shift not found.');
-  const [rows, marks] = await Promise.all([all<{ id: string; bill_no: string; difference: string; decision: string | null; sw_amount_paise: number | null; mode_text: string | null; name: string | null;
+  const [rows, marks] = await Promise.all([all<{ id: string; bill_no: string; difference: string; decision: string | null; sw_amount_paise: number | null; sw_mode: string | null; paid_at: number | null; mode_text: string | null; name: string | null;
     row_id: string | null; upload_id: string | null; rg_amount: number | null; rg_discount: number | null; remarks: string | null; paid_with: string | null; paid: number; modes: string | null }>(db, `
-    SELECT c.id, c.bill_no, c.difference, c.decision, c.sw_amount_paise, s.mode_text, s.customer_name AS name, r.id AS row_id, r.upload_id, r.amount_paise AS rg_amount,
+    SELECT c.id, c.bill_no, c.difference, c.decision, c.sw_amount_paise, c.sw_mode, s.paid_at, s.mode_text, s.customer_name AS name, r.id AS row_id, r.upload_id, r.amount_paise AS rg_amount,
       r.discount_paise - r.tip_paise AS rg_discount, r.remarks, r.paid_with_row_id AS paid_with,
       coalesce((SELECT sum(p.amount_paise) FROM register_payments p WHERE p.register_row_id = r.id), 0) AS paid,
       (SELECT group_concat(DISTINCT p.mode) FROM register_payments p WHERE p.register_row_id = r.id) AS modes
@@ -41,6 +44,16 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
     const prepaid = isPrepaid(r.mode_text);
     const mark = marks.get(r.bill_no);
     const comp = r.difference === 'complimentary';
+    // U/N in the software and not in the register (approved 14 Nov 2026): nobody knows how it was paid, so a person says:
+    // paid by Cash, UPI or Card, complimentary, or left out.
+    if (r.difference === 'missing_in_register' && r.sw_mode === 'unknown' && !r.decision && !prepaid && !mark) {
+      return [{
+        comparisonId: r.id, billNo: r.bill_no, why: 'unknown', status: 'look', paidAt: r.paid_at,
+        look: 'The software report does not say how it was paid, and the register does not have it: say how it was paid, make it complimentary, or leave it out',
+        valuePaise: r.sw_amount_paise, modeText: r.mode_text, name: r.name, remarks: null, guestName: null, markedBy: null, markedAt: null,
+        registerPaidPaise: null, rowId: null, uploadId: null, decision: r.decision, hint: null as null | { mode: string; text: string },
+      }];
+    }
     if (!comp && !prepaid) return [];
     // Paid with another row whose group is over ₹0: paid with its group, not complimentary.
     if (comp && !prepaid && !mark && r.paid_with) return [];
@@ -52,9 +65,32 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
       comparisonId: r.id, billNo: r.bill_no, why, status: look ? 'look' : 'ok', look,
       valuePaise: r.sw_amount_paise || (r.rg_amount ?? 0) || null, modeText: r.mode_text, name: r.name, remarks: r.remarks,
       guestName: mark?.guest_name ?? null, markedBy: mark?.user ?? null, markedAt: mark?.marked_at ?? null,
-      registerPaidPaise: r.row_id ? r.paid : null, rowId: r.row_id, uploadId: r.upload_id, decision: r.decision,
+      registerPaidPaise: r.row_id ? r.paid : null, rowId: r.row_id, uploadId: r.upload_id, decision: r.decision, paidAt: r.paid_at, hint: null as null | { mode: string; text: string },
     }];
   });
+  // A payment of the same amount near the bill's time, each used once, closest first: shown as a hint, never applied by
+  // itself. The bank and the card machine are shown only to people who can match them.
+  const unknown = lines.filter((l): l is typeof l & { paidAt: number; valuePaise: number } => l.why === 'unknown' && !!l.valuePaise && l.paidAt != null);
+  if (unknown.length && can(c.get('role'), 'bank.link')) {
+    const near = 60 * 60000;
+    const [credits, cards] = await Promise.all([shiftCredits(db, bid, day), all<{ id: string; amount_paise: number; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null }>(db, `
+      SELECT s.id, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4, s.pay_mode FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
+        AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`,
+      bid, Math.min(...unknown.map((l) => l.paidAt)) - near, Math.max(...unknown.map((l) => l.paidAt)) + near)]);
+    const time = (ms: number) => new Date(ms + 5.5 * 3600e3).toISOString().slice(11, 16);
+    const options = unknown.flatMap((l) => [
+      ...credits.filter((x) => x.amount === l.valuePaise && Math.abs(x.postedAt - l.paidAt) <= near)
+        .map((x) => ({ l, id: `b${x.id}`, gap: Math.abs(x.postedAt - l.paidAt), mode: 'upi', text: `UPI credit of ${rs(x.amount)} in the bank at ${time(x.postedAt)}${x.label ? ` (${x.label})` : ''}` })),
+      ...cards.filter((p) => p.amount_paise === l.valuePaise && Math.abs(p.paid_at - l.paidAt) <= near)
+        .map((p) => ({ l, id: `c${p.id}`, gap: Math.abs(p.paid_at - l.paidAt), mode: isMachineUpi(p) ? 'upi' : 'card', text: `${machineLabel(p)} payment of ${rs(p.amount_paise)} on the card machine at ${time(p.paid_at)}` })),
+    ]).sort((a, b) => a.gap - b.gap);
+    const used = new Set<string>();
+    for (const o of options) {
+      if (used.has(o.id) || o.l.hint) continue;
+      used.add(o.id);
+      o.l.hint = { mode: o.mode, text: `${o.text}, ${Math.round(o.gap / 60000)} min from the bill` };
+    }
+  }
   return c.json({ day, lines, valuePaise: lines.filter((l) => l.status === 'ok').reduce((t, l) => t + (l.valuePaise ?? 0), 0) });
 });
 

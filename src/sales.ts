@@ -296,6 +296,7 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
 }
 
 export const AUTO_COUNTED_NOTE = 'Counted automatically: waiting for its other side';
+export const UNKNOWN_MODE_NOTE = 'Counted from the register: the software report does not say how it was paid';
 
 /**
  * Bills on one side only are decided without waiting for a person (approved 3 Nov 2026). A person can change
@@ -311,7 +312,11 @@ export const AUTO_COUNTED_NOTE = 'Counted automatically: waiting for its other s
 async function decideOneSided(db: DB, businessId: string, day: string, rgById: Map<string, RgRow>, paysByRow: Map<string, RgPay[]>) {
   const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
   const open = comps.filter((c) => ONE_SIDED.includes(c.difference) && !c.decision);
-  if (!open.length) return;
+  // The software report does not say how the bill was paid (U/N), and the register has the same amount with its payment
+  // (approved 14 Nov 2026): the register's mode is the only one known, so it is counted from the register. A person can change it.
+  const unknownMode = comps.filter((c) => c.difference === 'mode' && c.sw_mode === 'unknown' && !c.decision && c.register_row_id
+    && (() => { const r = rgById.get(c.register_row_id!); return !!r && !!paysByRow.get(r.paid_with_row_id ?? r.id)?.length; })());
+  if (!open.length && !unknownMode.length) return;
   const others = await otherDays(db, businessId, day, comps);
   const numbers = open.some((c) => c.difference === 'missing_in_software' && isNewPosBill(c.bill_no)) ? await numberContext(db, businessId, day) : null;
   const t = now();
@@ -339,6 +344,7 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
       decide(c, 'use_register', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, null);
     }
   }
+  for (const c of unknownMode) decide(c, 'use_register', UNKNOWN_MODE_NOTE, null, null);
   if (statements.length) await db.batch(statements);
 }
 
