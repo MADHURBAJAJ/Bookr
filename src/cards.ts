@@ -283,7 +283,9 @@ export const openSettlementCredits = (db: DB, businessId: string) => all<{ id: s
 
 /** Unsettled payments by settlement day and merchant (a day partly settled is left to a person). */
 export async function unsettledDays(db: DB, businessId: string) {
+  // Days before the books start (the earliest account opening date) are not waiting (14 Nov 2026).
   const list = await all<CardPayment>(db, `SELECT * FROM card_settlements s WHERE business_id = ? AND bank_row_id IS NULL
+    AND s.settled_on >= coalesce((SELECT min(opening_date) FROM accounts WHERE business_id = s.business_id), '0000-00-00')
     AND NOT EXISTS (SELECT 1 FROM card_settlements o WHERE o.business_id = s.business_id AND o.settled_on = s.settled_on AND o.merchant_id = s.merchant_id AND o.bank_row_id IS NOT NULL)
     ORDER BY settled_on`, businessId);
   const days = new Map<string, CardPayment[]>();

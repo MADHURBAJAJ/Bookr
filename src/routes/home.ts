@@ -6,6 +6,7 @@ import { can, type Role } from '../permissions';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { NEEDS_DECISION, NOT_BILLED_NOTE, WATCH_DAYS } from '../sales';
 import { waitingPicture } from '../waiting';
+import { booksStart } from '../bank';
 import { shiftCards, unsettledDays } from '../cards';
 import { cashCheck } from '../cash';
 import { cardReportsStatus } from '../cardDrive';
@@ -33,10 +34,12 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   const bank = can(role, 'bank.link');
   const decide = can(role, 'sales.decide');
   const approve = can(role, 'rows.approve');
-  const since = addDays(today, -SHIFT_DAYS);
+  // Nothing before the books start (the earliest account opening date) is waiting (14 Nov 2026).
+  const start = await booksStart(db, businessId);
+  const since = [addDays(today, -SHIFT_DAYS), start].sort()[1];
   const byDay = (rows: Count[]) => new Map(rows.map((r) => [r.day, r.n]));
 
-  const [shifts, toCheck, toDecide, upiBills, upiCredits, waiting, uploads] = await Promise.all([
+  const [shifts, toCheck, toDecide, upiBills0, upiCredits0, waiting0, uploads] = await Promise.all([
     all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? AND shift_day >= ? ORDER BY shift_day', businessId, since),
     all<Count>(db, `SELECT shift_day AS day, count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day >= ? AND status <> 'checked' GROUP BY shift_day`, businessId, since),
     all<Count>(db, `SELECT shift_day AS day, count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day >= ? AND decision IS NULL
@@ -49,6 +52,9 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     all<{ kind: string; day: string | null }>(db, `SELECT kind, max(business_day) AS day FROM uploads WHERE business_id = ? AND kind IN ('bill_register', 'software_sales_csv') GROUP BY kind`, businessId),
   ]);
 
+  const upiBills = upiBills0.filter((x) => x.day >= start);
+  const upiCredits = upiCredits0.filter((x) => x.day >= start);
+  const waiting = { ...waiting0, look: waiting0.look.filter((b) => b.day >= start), grey: waiting0.grey.filter((g) => g.day >= start) };
   // Shifts to finish: not confirmed yet, or (for the bank's people) confirmed with UPI or card items still open.
   const check = byDay(toCheck);
   const decideN = byDay(toDecide);
@@ -93,7 +99,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     one<{ n: number }>(db, "SELECT count(*) AS n FROM uploads WHERE business_id = ? AND business_day = ? AND kind = 'bill_register'", businessId, lastShift),
     one<{ n: number }>(db, "SELECT count(*) AS n FROM shifts WHERE business_id = ? AND shift_day = ? AND status = 'confirmed'", businessId, lastShift),
   ]);
-  const bringIn = !saved?.n && (!sw?.n || !reg?.n) ? { day: lastShift, software: sw?.n ?? 0, registerPages: reg?.n ?? 0 } : null;
+  const bringIn = lastShift >= start && !saved?.n && (!sw?.n || !reg?.n) ? { day: lastShift, software: sw?.n ?? 0, registerPages: reg?.n ?? 0 } : null;
 
   if (bank) {
     const [accounts, unbooked, unsettled, cardStatus] = await Promise.all([
@@ -137,7 +143,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     const pages = await all<{ uploadId: string; day: string; count: number; paise: number }>(db, `
       SELECT upload_id AS uploadId, min(day) AS day, count(*) AS count, sum(amount_paise) AS paise FROM transactions
       WHERE business_id = ? AND source = 'cash_photo' AND type = 'expense' AND status <> 'approved' AND upload_id IS NOT NULL
-      GROUP BY upload_id ORDER BY min(day)`, businessId);
+      GROUP BY upload_id HAVING min(day) >= ? ORDER BY min(day)`, businessId, start);
     result.photos = { count: pages.reduce((t, p) => t + p.count, 0), paise: pages.reduce((t, p) => t + p.paise, 0), pages };
   }
   result.bringIn = bringIn;

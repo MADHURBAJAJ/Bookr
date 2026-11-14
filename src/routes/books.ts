@@ -4,6 +4,7 @@ import { requireRole } from '../auth';
 import { all, isUniqueViolation, newId, now, stmt } from '../db';
 import { body, date, fail, isUuid, paise, text } from '../http';
 import { auditAccountAfter, auditAccountBefore } from '../audit';
+import { booksStartStatements } from '../bank';
 
 export const bookRoutes = new Hono<AppEnv>();
 
@@ -44,6 +45,7 @@ bookRoutes.post('/businesses/:businessId/accounts', requireRole('accounts.edit')
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, a.name, a.kind, a.accountNumber, a.openingBalancePaise, a.openingDate, t),
       auditAccountAfter(db, { businessId: bid, userId: c.get('user').id, action: 'account.create', accountId: id, at: t, isCreate: true }),
     ]);
+    await db.batch(booksStartStatements(db, id, t));
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, DUPLICATE_ACCOUNT);
     throw e;
@@ -72,6 +74,8 @@ bookRoutes.patch('/businesses/:businessId/accounts/:accountId', requireRole('acc
   }
   // No row in this business: the batch changed nothing (no audit row either).
   if (!results[1].meta.changes) fail(404, 'Account not found.');
+  // The opening date is the day the books start: earlier open lines are left out, later ones open again.
+  await db.batch(booksStartStatements(db, accountId, now()));
   return c.json({ ok: true });
 });
 

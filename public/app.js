@@ -428,7 +428,7 @@ async function accountsView(biz, editId) {
       <td style="text-align:right">${canEdit ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/accounts/${a.id}">Edit</a>` : ''}</td>
     </tr>`);
   const f = editing ? { ...editing, openingBalance: rupeesForInput(editing.openingBalancePaise) } : { name: '', kind: 'bank', accountNumber: '', openingBalance: '0.00', openingDate: biz.fyStart };
-  render(shell(biz, 'accounts', 'Accounts', canEdit ? 'Every account here is the business\'s own: money moved between them is a transfer, not an expense or income.' : 'Only Owner and Accountant can change these.', html`
+  render(shell(biz, 'accounts', 'Accounts', canEdit ? 'Every account here is the business\'s own: money moved between them is a transfer. The opening date is the day its books start: earlier lines are not waiting.' : 'Only Owner and Accountant can change these.', html`
     <div class="row">
       <section class="card grow3">
         <h2>Accounts in ${biz.name}</h2>
@@ -449,7 +449,8 @@ async function accountsView(biz, editId) {
         </div>
         <div class="form-row">
           <div class="field"><label for="ab">Opening balance (₹)</label><input id="ab" name="openingBalance" class="mono" inputmode="decimal" value="${f.openingBalance}" required></div>
-          <div class="field"><label for="ad">Opening date</label><input id="ad" name="openingDate" type="date" value="${f.openingDate}" required></div>
+          <div class="field"><label for="ad">Opening date</label><input id="ad" name="openingDate" type="date" value="${f.openingDate}" required
+            title="The day this account's books start: its bank lines before it are kept but not waiting"></div>
         </div>
         <div class="form-msg"></div>
         <div class="form-row">

@@ -13,6 +13,22 @@ export interface BankRow {
   remark: string | null; pair_row_id: string | null; status: string; transaction_id: string | null; note: string | null;
 }
 
+// Books start (approved 14 Nov 2026): an account's opening date is the day its books start. Its open lines of earlier
+// shifts are left out ("Before books start"): kept and shown on Done, never waiting. Moving the date earlier opens them again.
+export const BEFORE_START = 'Before books start';
+const ROW_SHIFT = "date((posted_at - 9000000) / 1000, 'unixepoch')";
+export function booksStartStatements(db: DB, accountId: string, t: number) {
+  const opening = '(SELECT opening_date FROM accounts WHERE id = bank_rows.account_id)';
+  return [
+    stmt(db, `UPDATE bank_rows SET status = 'ignored', note = ?, done_by = NULL, done_at = ? WHERE account_id = ? AND status = 'unmatched' AND ${ROW_SHIFT} < ${opening}`, BEFORE_START, t, accountId),
+    stmt(db, `UPDATE bank_rows SET status = 'unmatched', note = NULL, done_by = NULL, done_at = NULL WHERE account_id = ? AND status = 'ignored' AND note = ? AND ${ROW_SHIFT} >= ${opening}`, accountId, BEFORE_START),
+  ];
+}
+/** The day the business's books start: its earliest account opening date. */
+export async function booksStart(db: DB, businessId: string) {
+  return (await one<{ d: string | null }>(db, 'SELECT min(opening_date) AS d FROM accounts WHERE business_id = ?', businessId))?.d ?? '0000-00-00';
+}
+
 /** Adds the lines not already stored for this account, then pairs UPI card fees and reversals. */
 export async function importLines(db: DB, businessId: string, accountId: string, lines: BankLine[]) {
   const have = new Set((await all<{ tran_id: string }>(db, 'SELECT tran_id FROM bank_rows WHERE account_id = ?', accountId)).map((r) => r.tran_id));
@@ -24,6 +40,7 @@ export async function importLines(db: DB, businessId: string, accountId: string,
     newId(), businessId, accountId, l.tranId, l.valueDate, l.postedAt, l.day, l.description, l.direction, l.amountPaise, l.balancePaise,
     l.kind, l.upiRef, l.vpa, l.remark, t));
   for (let i = 0; i < statements.length; i += 80) await db.batch(statements.slice(i, i + 80));
+  await db.batch(booksStartStatements(db, accountId, t));
   await pairRows(db, accountId);
   if (fresh.some((l) => l.direction === 'DR')) await leaveOutReturned(db, businessId);
   // A card settlement credit among them is settled by Bookr where safe (its date and exactly its net, a rule set).
