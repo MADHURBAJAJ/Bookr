@@ -21,7 +21,7 @@ a { color: var(--teal); text-decoration: none; }
 .nav .soon { font-size: 11px; color: var(--side-muted); }
 .nav-n { font-size: 12px; min-width: 20px; text-align: center; padding: 1px 7px; border-radius: 10px; background: #F59E0B; color: #1F2937; font-weight: 600; }
 .nav-g { font-size: 12px; color: var(--side-muted); padding: 14px 12px 4px; text-transform: none; cursor: default; }
-.nav-set { margin-top: auto; }
+.nav-set { margin-top: 0; }
 .nav-set > summary { cursor: pointer; list-style: none; }
 .nav-set > summary::after { content: ' ▾'; }
 .nav-set[open] > summary::after { content: ' ▴'; }
