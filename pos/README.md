@@ -16,7 +16,7 @@ POS page (not yet booked as income). Plan and decisions: the "Hotel restaurant P
 Nothing about one hotel is fixed in code. Billing names (a company, HUFs or one name), GST rate, yearly limits, shift start,
 tab age limit, menu and reason lists are settings per business.
 
-## What it does now (server only; the counter screens come next)
+## What it does
 
 - **Sign-in.** Owners and managers: email and password. Counter staff (cashier, captain): a 4–6 digit PIN, only on a counter
   device an Owner set up; 5 wrong PINs lock PIN sign-in on that device for 15 minutes. Every business route checks the role
