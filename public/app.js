@@ -2832,17 +2832,17 @@ function cashPanelHtml(biz, k, opts = {}) {
     const sw = b.swCashPaise ?? 0, rg = b.rgCashPaise ?? 0;
     let text, effects = [];
     if (b.rgCashPaise === null) {
-      text = html`Software says cash ₹ ${money(sw)}, the register has no line for it.`;
+      text = html`software Cash ₹ ${money(sw)}, not in the register`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Left out', 0]] : [];
-      if (b.decision === 'use_software') text = html`Software says cash ₹ ${money(sw)}, the register has no line for it. Counted from the software: the cash may not have reached the drawer.`;
+      if (b.decision === 'use_software') text = html`software Cash ₹ ${money(sw)}, not in the register: counted, may not have reached the drawer`;
     } else if (b.swCashPaise === null) {
-      text = html`Register has cash ₹ ${money(rg)}, the software says ${b.swMode ? `${MODE_LABELS[b.swMode] ?? b.swMode} ₹ ${money(b.swAmountPaise ?? 0)}` : 'nothing'}.`;
+      text = html`register Cash ₹ ${money(rg)}, software ${b.swMode ? `${MODE_LABELS[b.swMode] ?? b.swMode} ₹ ${money(b.swAmountPaise ?? 0)}` : 'nothing'}`;
       effects = b.state === 'undecided' ? [['Use register', rg], ['Use software', 0]] : [];
     } else if (b.rgOther.length && !rg) {
-      text = html`Software says cash ₹ ${money(sw)}, the register says ${other(b)}.`;
+      text = html`software Cash ₹ ${money(sw)}, register ${other(b)}`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Use register', 0]] : [];
     } else {
-      text = html`Cash ₹ ${money(sw)} in the software, ₹ ${money(rg)} in the register${b.rgOther.length ? ` (and ${other(b)})` : ''}.`;
+      text = html`Cash ₹ ${money(sw)} software, ₹ ${money(rg)} register${b.rgOther.length ? ` (+ ${other(b)})` : ''}`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Use register', rg]] : [];
     }
     // Each side as a choice with what it does to the difference (14 Nov 2026): a person can switch the side here.
@@ -2855,14 +2855,25 @@ function cashPanelHtml(biz, k, opts = {}) {
     const wit = b.witness ? (b.witness.found ? html`<div class="tiny" style="color:var(--teal)">✓ ${b.witness.found}: ${MODE_LABELS[b.witness.mode] ?? b.witness.mode} ₹ ${money(b.witness.amountPaise)} was received</div>`
       : html`<div class="tiny" style="color:#92400E">No ${b.witness.mode === 'upi' ? 'UPI credit in the bank or UPI on the card machine' : 'card-machine payment'} of ₹ ${money(b.witness.amountPaise)} near this bill</div>`) : '';
     const same = gap ? (b.rgCashPaise === null && b.decision === 'use_software' && sw === gap) || effects.some(([, v]) => v === gap) || Math.abs(sw - rg) === gap : false;
+    // One line per bill (approved 14 Nov 2026): what differs, then the two sides as choices with the cash after each;
+    // Edit and Make complimentary under ⋯.
+    const more = html`<details class="menu"><summary class="btn plain dchip" aria-label="More for bill ${b.billNo}">⋯</summary><div class="menu-pop" style="min-width:200px;gap:6px">
+      <button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}">Edit</button>
+      ${draft && b.state !== 'complimentary' && biz.actions.includes('sales.decide') ? html`<button type="button" class="btn plain dchip" data-makecomp="${b.comparisonId}" data-bill="${b.billNo}">Make complimentary</button>` : ''}</div></details>`;
     items.push({ same, html: html`<div class="ent-line" style="${same ? 'border:1px solid #F3B4B4;border-radius:8px;padding:8px 10px' : ''}">
-      <div>${same ? html`<span class="chip bad">Same amount</span> ` : html`<span class="chip wait">${b.rgCashPaise === null ? 'Not in register' : b.state === 'undecided' ? 'Not decided' : 'Differs'}</span> `}Bill <span class="mono">${b.billNo}</span>: ${text}</div>
-      ${effects.length && !switches.length ? html`<div class="tiny note">${effects.map(([l, v]) => `${l}: ${v ? `+₹ ${money(v)}` : '₹ 0'}`).join(' · ')}</div>` : ''}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>${same ? html`<span class="chip bad">Same amount</span> ` : ''}<span class="mono">${b.billNo}</span> · ${text}</span>${more}</div>
       ${wit}
-      ${switches.length ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:stretch">${switches.map((x) => html`<button type="button" class="btn ${x.on ? 'ghost' : 'plain'} dchip" ${x.on ? 'disabled style="font-weight:600;background:#E3F1EF"' : ''}
-          data-cashswitch="${b.comparisonId}" data-d="${x.d}" data-was="${b.decision ?? ''}" data-bill="${b.billNo}" data-label="${x.text}">${x.on ? '✓ ' : ''}${x.text}<span class="tiny" style="display:block;font-weight:400">${x.on ? `now: ${word(diff)}` : `then: ${x.then}`}</span></button>`)}</div>` : ''}
-      <div class="form-row" style="gap:6px;margin-top:4px">${edit(b)}${b.state === 'undecided' && !switches.length ? decide : ''}</div></div>` });
+      ${switches.length ? html`<div class="form-row" style="gap:6px;margin-top:4px">${switches.map((x) => html`<button type="button" class="btn ${x.on ? 'ghost' : 'plain'} dchip" ${x.on ? 'disabled style="font-weight:600;background:#E3F1EF"' : ''}
+          data-cashswitch="${b.comparisonId}" data-d="${x.d}" data-was="${b.decision ?? ''}" data-bill="${b.billNo}" data-label="${x.text}" title="${x.text}">${x.on ? '✓ ' : ''}${sideName(x.d)} · ${x.on ? word(diff) : x.then}</button>`)}</div>`
+        : effects.length ? html`<div class="tiny note">${effects.map(([l, v]) => `${l}: ${v ? `+₹ ${money(v)}` : '₹ 0'}`).join(' · ')}</div>` : ''}
+      ${b.state === 'undecided' && !switches.length ? html`<div class="form-row" style="gap:6px;margin-top:4px">${decide}</div>` : ''}</div>` });
   }
+  // Bills paid a rounded amount: already counted as paid, told on one quiet line (14 Nov 2026).
+  const rounded = bills.filter((b) => b.roundedPaise);
+  const off = rounded.filter((b) => b.roundedPaise > 0).reduce((t, b) => t + b.roundedPaise, 0);
+  const extra = -rounded.filter((b) => b.roundedPaise < 0).reduce((t, b) => t + b.roundedPaise, 0);
+  const roundedLine = rounded.length ? html`<details class="tiny note"><summary>${rounded.length} bill${rounded.length === 1 ? '' : 's'} paid rounded${off ? ` · ₹ ${money(off)} off` : ''}${extra ? ` · ₹ ${money(extra)} extra` : ''} · already counted</summary>
+    ${rounded.map((b) => html`<div><span class="mono">${b.billNo}</span> software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)}</div>`)}</details>` : '';
   if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'} ₹ ${money(k.expensesWaitingPaise)}, not taken off yet.</div>
     <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review">Review</a></div></div>` });
   items.sort((a, b) => Number(b.same) - Number(a.same));
@@ -2873,20 +2884,20 @@ function cashPanelHtml(biz, k, opts = {}) {
     <style>#cashpanel .cash-bad{background:#FDECEC;color:#7F1D1D}#cashpanel .cash-warn{background:#FFF6E0;color:#6B4A00}#cashpanel tr.cash-bad td,#cashpanel tr.cash-warn td{color:inherit}
       #cashpanel .cash-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:stretch}
       #cashpanel .cash-strip>div{padding:8px 12px;border-radius:8px}#cashpanel .cash-big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}</style>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Cash for the ${dayLabel(k.day)} shift</h2>${tag(!draft)}</div>
     <div class="cash-strip">
       <div><div class="note">Should be in hand</div><div class="cash-big">${shouldBe == null ? '—' : `₹ ${money(shouldBe)}`}</div>${k.openingPaise == null ? html`<div class="tiny note">No opening cash yet</div>` : ''}</div>
       <div><div class="note">Counted (cash page)</div><div class="cash-big">${k.countedPaise == null ? '—' : `₹ ${money(k.countedPaise)}`}</div>
         ${k.countedPaise == null ? html`<a class="tiny" href="#/b/${biz.id}/bringin">Not in yet: bring it in</a>` : ''}</div>
-      <div class="${tone}"><div style="font-size:13px">${stateWord}</div><div class="cash-big">${diff == null ? '—' : diff === 0 ? '₹ 0' : `₹ ${money(Math.abs(diff))}`}</div></div>
-      <div><div>${tag(!draft)}</div><div class="tiny note" style="margin-top:4px">${draft ? 'Changes as you decide and correct bills. Final after Save.' : 'Booked when the shift was saved.'}</div></div>
+      <div class="${tone}" title="${draft ? 'Draft: changes as you decide and correct bills, final after Save' : 'Final: booked when the shift was saved'}"><div style="font-size:13px">${stateWord}${draft ? ' · draft' : ''}</div><div class="cash-big">${diff == null ? '—' : diff === 0 ? '₹ 0' : `₹ ${money(Math.abs(diff))}`}</div></div>
     </div>
     ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px"><strong>What could explain it</strong>
-      ${items.length ? items.map((x) => x.html) : html`<div class="note">No cash bill differs between the software and the register${k.expensesWaiting ? '' : ', and no expense is waiting'}. Check the count on the cash page.</div>`}
+      ${items.length ? html`${items.slice(0, 2).map((x) => x.html)}${items.length > 2 ? html`<details><summary class="btn plain dchip" style="display:inline-flex">Show ${items.length - 2} more</summary>${items.slice(2).map((x) => x.html)}</details>` : ''}`
+        : html`<div class="note">No bill explains it. Check the count on the cash page.</div>`}
+      ${roundedLine}
       ${k.pair ? html`<div class="ent-line"><span class="chip">Paid late?</span> ₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.
         ${!draft && biz.actions.includes('sales.decide') ? html`<button class="btn plain dchip" type="button" id="cashpair" data-other="${k.pair.day}">Settle both as paid late</button>` : html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${k.pair.day}">Open ${dayLabel(k.pair.day)}</a>`}</div>` : ''}
     </div>` : ''}
-    <div class="scroll"><table style="min-width:560px">
+    <details><summary class="note">How it's worked out</summary><div class="scroll"><table style="min-width:560px">
       ${row('Opening cash', k.openingFrom === 'previous' ? 'previous day\'s cash in hand' : k.openingFrom === 'page' ? 'opening written on this day\'s cash page' : 'no cash summary for the previous day', k.openingPaise, k.openingPaise == null ? '' : tag(true))}
       ${row('+ Cash sales', draft ? 'what Save would book now' : 'booked for this shift', sales, tag(!draft))}
       ${k.notInRegisterBookedPaise ? row('', 'of which not in the register (Use software)', k.notInRegisterBookedPaise) : ''}
@@ -2897,10 +2908,10 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${k.drawnPaise ? row('+ Cash from bank', 'taken out for the drawer', k.drawnPaise) : ''}
       ${row('= Should be in hand', '', shouldBe, '', true)}
       ${row('Counted', 'cash in hand on this day\'s cash summary page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/bringin">Bring it in</a>`)}
-      ${diff !== null ? row('Difference', diff < 0 ? 'short: less cash than there should be' : diff > 0 ? 'more cash than there should be' : '', diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
-    </table></div>
-    ${bills.length ? html`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Cash bills (${bills.length})</strong>
-      ${differ.length ? html`<label class="note" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="cashonly" checked> Only those that differ (${differ.length})</label>` : html`<span class="note">All agree</span>`}</div>
+      ${diff !== null ? row('Difference', diff < 0 ? 'short' : diff > 0 ? 'over' : '', diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
+    </table></div></details>
+    ${bills.length ? html`<details><summary style="display:inline-flex;gap:8px;align-items:center"><strong>Cash bills · ${bills.length} · ₹ ${money(bills.reduce((t, b) => t + (b.countedPaise ?? 0), 0))}</strong><span class="note">${differ.length ? `${differ.length} differ` : 'all agree'}</span></summary>
+      ${differ.length ? html`<label class="note" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="cashonly" checked> Only those that differ</label>` : ''}
     <div class="scroll"><table style="min-width:600px" id="cashbills">
       <thead><tr><th>Bill</th><th style="text-align:right">Software cash</th><th style="text-align:right">Register cash</th><th>Counted as</th><th style="text-align:right">Counted ₹</th><th></th></tr></thead>
       <tbody>${bills.map((b) => html`<tr class="${tint(b)}" data-differs="${b.differs ? '1' : ''}" ${differ.length && !b.differs ? 'hidden' : ''}>
@@ -2908,20 +2919,17 @@ function cashPanelHtml(biz, k, opts = {}) {
         <td class="amount">${b.swCashPaise == null ? (b.swMode ? `${MODE_LABELS[b.swMode] ?? b.swMode} ${money(b.swAmountPaise ?? 0)}` : '—') : money(b.swCashPaise)}</td>
         <td class="amount">${b.rgCashPaise == null ? '—' : b.rgCashPaise ? money(b.rgCashPaise) : other(b) || '0.00'}</td>
         <td>${counted(b)}</td><td class="amount">${b.countedPaise ? money(b.countedPaise) : ''}</td><td>${edit(b)}</td></tr>`)}</tbody>
-    </table></div>` : ''}
-    ${draft && diff ? html`<div class="note">Accept or book a shortage after the shift is saved: until then the figure can still change.</div>` : ''}
+    </table></div></details>` : ''}
     ${!draft && k.explained ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}${k.explained.bills.length ? html`, explained by ${k.explained.bills.length} bill${k.explained.bills.length === 1 ? '' : 's'} waiting (not in the register): ${k.explained.bills.map((b) => `${b.billNo} ₹ ${money(b.partPaise)}${b.partPaise < b.amountPaise ? ` of ₹ ${money(b.amountPaise)}` : ''}`).join(', ')}` : ''}${k.explained.unexplainedPaise ? html`${k.explained.bills.length ? ' / ' : ': '}<strong>unexplained ₹ ${money(k.explained.unexplainedPaise)}</strong>` : ''}.</div>` : ''}
     ${k.accepted ? html`<div class="note">Accepted with a note: ${k.accepted}</div>` : ''}
     ${!draft && diff !== null && diff !== 0 && !k.settled ? html`<form id="cashact" class="inset">
       <div class="field"><label for="cashnote">Note (what happened)</label><input id="cashnote" name="note" required placeholder="e.g. Bill 26103136 cash received, not written in the register"></div>
       <div class="form-msg"></div>
       <div class="form-row">
-        ${biz.actions.includes('sales.decide') ? html`<button class="btn plain" type="submit" data-cashact="accept">Accept with a note</button>` : ''}
-        ${diff < 0 && biz.actions.includes('cash.writeoff') ? html`<button class="btn danger" type="submit" data-cashact="shortage">Book ₹ ${money(-diff)} as cash shortage</button>` : ''}
+        ${biz.actions.includes('sales.decide') ? html`<button class="btn plain" type="submit" data-cashact="accept" title="The cash is there; only the writing is wrong">Accept with a note</button>` : ''}
+        ${diff < 0 && biz.actions.includes('cash.writeoff') ? html`<button class="btn danger" type="submit" data-cashact="shortage" title="Cash is missing: booked as an approved expense from Cash under Cash shortage (Owner only)">Book ₹ ${money(-diff)} as cash shortage</button>` : ''}
       </div>
-      <div class="note">Accept when the cash is there and only the writing is wrong. Book a shortage (Owner only) when cash is missing: it becomes an approved expense from Cash under "Cash shortage".</div>
     </form>` : ''}
-    ${!draft ? html`<div class="tiny note">Saved shift: Edit asks an Owner to reopen the shift first, with a reason.</div>` : ''}
   </section>`;
 }
 
@@ -3011,10 +3019,12 @@ function decideMenuHtml(c, v) {
   // how (a register line is written), or makes it complimentary, or leaves it out with a reason, or carries it forward.
   if (c.difference === 'missing_in_register' && c.software?.mode === 'unknown' && !(c.otherDay && !c.otherDay.closed)) {
     const on = c.decision === 'carry_forward';
-    return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${paidByChips({ comparisonId: c.id, billNo: c.billNo })}
+    // Paid by ▾, Complimentary, and the rarer two under ⋯ (approved 14 Nov 2026).
+    return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${paidByMenu({ comparisonId: c.id, billNo: c.billNo })}
       <button class="btn plain dchip" type="button" data-makecomp="${c.id}" data-bill="${c.billNo}" data-name="${c.software?.name ?? ''}" title="Given free: not counted as a sale. Asks the guest's name.">Complimentary</button>
+      <details class="menu"><summary class="btn ${on ? 'ghost' : 'plain'} dchip" aria-label="More for bill ${c.billNo}">${on ? '✓ Carried forward' : '⋯'}</summary><div class="menu-pop" style="min-width:180px;gap:6px">
       <button class="btn plain dchip" type="button" data-leaveunk="${c.id}" data-bill="${c.billNo}">Leave out…</button>
-      <button class="btn ${on ? 'ghost' : 'plain'} dchip" data-cmp="${c.id}" data-d="carry_forward" data-type="" data-link="">${on ? '✓ ' : ''}Carry forward</button></div>`;
+      <button class="btn ${on ? 'ghost' : 'plain'} dchip" data-cmp="${c.id}" data-d="carry_forward" data-type="" data-link="">${on ? '✓ ' : ''}Carry forward</button></div></details></div>`;
   }
   return html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
     const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
@@ -3248,7 +3258,8 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
         </tbody></table></div></section>` : ''}`;
   const reopenHtml = html`${biz.role === 'owner' ? html`<form id="reopen" class="inset"><div class="field"><label for="rr">Reopen this shift: reason</label><input id="rr" name="reason" required></div><div class="form-msg"></div><button class="btn danger" type="submit" style="align-self:flex-start">Reopen shift</button></form>` : html`<div class="note">Only an Owner can reopen a confirmed shift.</div>`}`;
   // The Shift menu on Reconcile: the report's covered times, and reopening a saved shift (Owner).
-  const shiftMenu = html`<details class="menu" id="shiftmenu"><summary class="btn plain" style="display:inline-flex;align-items:center">Shift ⋯</summary><div class="menu-pop" style="min-width:320px;gap:8px">
+  const shiftMenu = html`<details class="menu" id="shiftmenu"><summary class="btn plain" style="display:inline-flex;align-items:center" aria-label="More for this shift">⋯</summary><div class="menu-pop" style="min-width:320px;gap:8px">
+    ${onReconcile ? html`<a href="#/b/${biz.id}/reconcile/all">All unmatched, every shift ›</a>` : ''}
     ${reportsHtml}<div id="coveredit"></div>
     ${confirmed ? reopenHtml : v.reopenedAt ? html`<div class="note">Reopened ${when(v.reopenedAt)}: ${v.reopenReason}</div>` : ''}</div></details>`;
   const bar = html`    <section class="card cmp-bar">
@@ -4455,8 +4466,12 @@ function entriesHtml(biz, day, t, mode, cv) {
   const seen = new Set();
   // Bills with no mode on either side come first, under their own heading: not cash until a person says so.
   const unknown = t.entries.filter((e) => e.noMode);
+  const SHOW = 3;
   const rows = [...(unknown.length ? [html`<tr data-pstate="decide"><td colspan="4" style="background:#FEF3C7;white-space:normal"><strong>Mode not known (${unknown.length}) · ₹ ${money(t.noModePaise ?? 0)}</strong>
-    <div class="tiny">The software says U/N and the register does not have them. Not counted as cash: say how each was paid, make it complimentary, or leave it out.</div></td></tr>`, ...unknown.map((e) => row(e))] : []),
+    <span class="tiny" title="The software says U/N and the register does not have them. Not counted as cash until you say how each was paid.">· not counted as cash</span></td></tr>`,
+    ...unknown.slice(0, SHOW).map((e) => row(e)),
+    ...(unknown.length > SHOW ? [html`<tr data-unkmore><td colspan="4"><button type="button" class="btn plain dchip" data-showunk>Show ${unknown.length - SHOW} more</button></td></tr>`,
+      ...unknown.slice(SHOW).map((e) => row(e, 'unk'))] : [])] : []),
     ...t.entries.filter((e) => !e.noMode).flatMap((e) => {
     if (!e.group) return [row(e)];
     if (seen.has(e.group.id)) return [];
@@ -4483,7 +4498,7 @@ function entriesHtml(biz, day, t, mode, cv) {
           <td class="tiny">Received ₹ ${money(sum((e) => e.state === 'done'))} · waiting ₹ ${money(sum((e) => e.state === 'waiting'))}${sum((e) => e.state === 'decide') ? ` · to decide ₹ ${money(sum((e) => e.state === 'decide'))}` : ''}${t.noModePaise ? ` · mode not known ₹ ${money(t.noModePaise)}` : ''}</td></tr></tfoot>
       </table></div></div>`
       : html`<div class="note">No ${ENTRY_MODE[mode]} bills in this shift.</div>`}
-    <div class="note">✎ marks a change (hover for who and when): the register as read and as corrected, the side used when the register and the software differ, or a mode changed later.</div></details>`;
+</details>`;
 }
 
 /** Filters and paid-together lines of the payment tables. */
@@ -4566,8 +4581,9 @@ async function reconcileView(biz, dayArg) {
     api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/waiting`).catch(() => null),
     api('GET', `/businesses/${biz.id}/shifts/${day}/complimentary`).catch(() => ({ lines: [], valuePaise: 0 }))]);
   const tab0 = recKeep?.day === day && recKeep.tab ? recKeep.tab : reconcileTabPref();
-  const tab = tab0 === 'comp' && !comp.lines.length ? 'upi' : tab0;
-  const top = recKeep?.day === day ? recKeep.top : 'todo';
+  const tab = tab0 === 'comp' ? 'cash' : tab0;
+  const top0 = recKeep?.day === day ? recKeep.top : 'todo';
+  const top = top0 === 'wait' ? 'todo' : top0;
   recKeep = null;
   recTopNow = top;
   const reload = () => { recKeep = { day, top: recTopNow }; return reconcileView(biz, `${day}?more=${v.moreHours}`); };
@@ -4743,7 +4759,7 @@ async function reconcileView(biz, dayArg) {
     cashN && [`Cash: ${ent.cash.left ? `${ent.cash.left} bill${ent.cash.left === 1 ? '' : 's'} left` : ''}${ent.cash.left && cashDiff ? ', and ' : ''}${cashDiff ? `the cash count is ${cashDiff < 0 ? 'short' : 'over'} by ₹ ${money(Math.abs(cashDiff))}${cash.confirmed ? '' : ' (draft)'}` : ''}`, 'pay:cash'],
     ent.upi.left && [`UPI: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched`, 'pay:upi'],
     cardN && [`Card: ${cardN} left${r.cards?.waitingReport ? `, ${r.cards.waitingReport} waiting for the card report` : ''}`, 'pay:card'],
-    waitN && [`${waitN} waiting bill${waitN === 1 ? '' : 's'} need${waitN === 1 ? 's' : ''} a look`, 'wait'],
+
   ].filter(Boolean);
   // Saving is on To do too: an unsaved shift is never ✓ here.
   const todoN = checks.length + paidZero.length + (cv.conflicts?.length ? 1 : 0) + (cv.warnings?.length ?? 0) + (r.oldPos?.bills?.length ?? 0) + (r.confirmed ? 0 : 1);
@@ -4762,18 +4778,23 @@ async function reconcileView(biz, dayArg) {
     <section class="card" style="gap:8px"><h2>Left on the other tabs</h2>
       ${leftLines.length ? leftLines.map(([t, go]) => html`<div class="list-row"><span>${t}</span><button type="button" class="btn plain dchip" data-goto="${go}">Open ›</button></div>`)
         : html`<div class="ok-msg">Nothing left on the other tabs.</div>`}</section>`;
+  // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
+  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : 'todo';
+  const oneTab = (key, label, n) => html`<button type="button" role="tab" data-rtab1="${key}" class="${curTab === key ? 'on' : ''}" aria-selected="${curTab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : ''}</button>`;
+  const compLook = comp.lines.filter((l) => l.status === 'look').length;
   const topBtn = (key, label, n) => html`<button type="button" role="tab" data-rtopbtn="${key}" class="${top === key ? 'on' : ''}" aria-selected="${top === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
     ${shiftBar(biz, day, 'reconcile')}
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">${recTabs(biz, day, 'shift')}${P.shiftMenu}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+      <span class="note">${r.confirmed ? 'Saved' : 'Not saved'}${todoN - (r.confirmed ? 0 : 1) > 0 ? ` · ${todoN - (r.confirmed ? 0 : 1)} to do` : ''}</span>
+      <div style="display:flex;gap:8px;align-items:center">${!r.confirmed && biz.actions.includes('sales.decide') ? html`<button class="btn" type="button" id="savehead">Save shift</button>` : ''}${P.shiftMenu}</div></div>
     <div id="recmsg"></div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
-      ${topBtn('todo', 'To do', todoN)}${topBtn('pay', 'Payments', cashN + ent.upi.left + cardN)}${topBtn('all', 'All bills', allLeft)}${topBtn('wait', 'Waiting', waitN)}</div>
-    <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}</div>
-    <div data-rtop="wait" ${top === 'wait' ? '' : 'hidden'}>
-      <div id="waitmsg"></div>
-      ${waitingPanelHtml(biz, waitPic, biz.actions.includes('sales.decide'))}
+      ${oneTab('todo', 'To do', todoN + waitN + compLook)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${oneTab('all', 'All bills', allLeft)}</div>
+    <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
+      ${waitN ? html`<div data-rsec="wait"><div id="waitmsg"></div>${waitingPanelHtml(biz, waitPic, biz.actions.includes('sales.decide'))}</div>` : ''}
+      ${comp.lines.length ? html`<div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div>` : ''}
     </div>
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>
       ${P.bar}
@@ -4782,9 +4803,6 @@ async function reconcileView(biz, dayArg) {
       ${P.shiftPane}
     </div>
     <div data-rtop="pay" ${top === 'pay' ? '' : 'hidden'}>
-    <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:0 0 10px">
-      ${tabBtn('cash', 'Cash', cashN)}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', cardN)}${comp.lines.length ? tabBtn('comp', `Complimentary${comp.lines.filter((l) => l.status === 'ok').length ? ` (${comp.lines.filter((l) => l.status === 'ok').length})` : ''}`, comp.lines.filter((l) => l.status === 'look').length) : ''}</div>
-    <div data-rpanel="comp" ${tab === 'comp' ? '' : 'hidden'}>${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
       ${cashOnCardHtml}
       ${cashPanelHtml(biz, cash, { decide: true })}
@@ -4878,13 +4896,28 @@ async function reconcileView(biz, dayArg) {
     app.querySelectorAll('[data-rtop]').forEach((x) => { x.hidden = x.dataset.rtop !== key; });
   };
   app.querySelectorAll('[data-rtopbtn]').forEach((b) => b.addEventListener('click', () => showTop(b.dataset.rtopbtn)));
+  const go = (key) => {
+    const pay = ['cash', 'upi', 'card'].includes(key);
+    showTop(pay ? 'pay' : key);
+    if (pay) {
+      try { localStorage.setItem(RECONCILE_TAB_KEY, key); } catch { /* storage unavailable */ }
+      app.querySelectorAll('[data-rpanel]').forEach((x) => { x.hidden = x.dataset.rpanel !== key; });
+    }
+    app.querySelectorAll('[data-rtab1]').forEach((x) => { x.classList.toggle('on', x.dataset.rtab1 === key); x.setAttribute('aria-selected', String(x.dataset.rtab1 === key)); });
+  };
+  app.querySelectorAll('[data-rtab1]').forEach((b) => b.addEventListener('click', () => go(b.dataset.rtab1)));
+  document.getElementById('savehead')?.addEventListener('click', () => {
+    go('todo');
+    const btn = document.getElementById('savereconcile');
+    if (btn && !btn.disabled) btn.click(); else btn?.closest('section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   app.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => {
     const [key, mode] = b.dataset.goto.split(':');
-    showTop(key);
-    if (mode) app.querySelector(`[data-rtab="${mode}"]`)?.click();
+    if (key === 'wait') { go('todo'); app.querySelector('[data-rsec="wait"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    go(mode ?? (key === 'pay' ? 'cash' : key));
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }));
-  wireWaiting(biz, app.querySelector('[data-rtop="wait"]'), async (fn) => {
+  if (app.querySelector('[data-rsec="wait"]')) wireWaiting(biz, app.querySelector('[data-rsec="wait"]'), async (fn) => {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('waitmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   });
   const msg = document.getElementById('recmsg');
@@ -6236,34 +6269,49 @@ async function openBillDrawer(biz, billNo, day) {
     document.body.appendChild(d);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.getElementById('billdrawer')?.remove(); });
   }
+  drawerReopen = () => openBillDrawer(biz, billNo, day);
   d.innerHTML = '<div class="note">Loading…</div>';
   let b;
   try { b = await api('GET', `/businesses/${biz.id}/bills/${encodeURIComponent(billNo)}${day ? `?day=${day}` : ''}`); }
   catch (err) { showError(d, err); return; }
-  const section = (title, body) => html`<section style="border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:4px"><strong>${title}</strong>${body}</section>`;
+  // Three boxes side by side, one row of actions, photo and history folded (approved 14 Nov 2026).
+  const box = (title, body) => html`<div style="border:1px solid var(--line-soft);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:4px;min-width:0"><span class="tiny note">${title}</span>${body}</div>`;
   const c0 = b.comparisons[0];
+  const open = b.comparisons.find((c) => c.shift_status !== 'confirmed') ?? null;
+  const decide = open && biz.actions?.includes('sales.decide');
+  const sw = b.comparisons.filter((c) => c.sw_amount_paise != null);
+  const paidFor = (x) => b.money.filter((m) => m.saleId === x.id);
+  const bankBody = b.sales.length ? b.sales.map((x) => {
+    const paid = paidFor(x);
+    return html`<div>${paid.length ? paid.map((m) => html`<div><strong>₹ ${money(m.appliedPaise)}</strong> ${hhmm(m.postedAt)}<div class="tiny note">${m.accountName}${m.vpa ? ` · ${m.vpa}` : ''}</div></div>`)
+      : html`<span class="note">${x.payment_mode === 'cash' ? 'Cash: in the cash count' : x.match_status === 'awaiting_card_settlement' ? 'Waiting for the card settlement' : x.match_status === 'awaiting_bank_match' ? 'Not found yet' : MODE_LABELS[x.payment_mode] ?? ''}</span>`}</div>`;
+  }) : html`<span class="note">${c0?.shift_status === 'confirmed' ? 'Not a sale' : 'After Save'}</span>`;
+  const both = open && open.difference !== 'match' && open.sw_amount_paise != null && b.register.length;
+  const choice = (dd, label) => html`<button type="button" class="btn ${open.decision === dd ? 'ghost' : 'plain'} dchip" ${open.decision === dd ? 'disabled style="font-weight:600;background:#E3F1EF"' : ''} data-cashswitch="${open.id}" data-d="${dd}" data-was="${open.decision ?? ''}" data-bill="${b.billNo}" data-label="${label.toLowerCase()}">${open.decision === dd ? '✓ ' : ''}${label}</button>`;
   d.innerHTML = html`
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2 class="mono" style="margin:0">Bill ${b.billNo}</h2>
-      <button class="btn plain" type="button" id="drawerclose" aria-label="Close">Close ✕</button></div>
-    ${section('Software', b.comparisons.some((c) => c.sw_amount_paise != null) ? b.comparisons.filter((c) => c.sw_amount_paise != null).map((c) => html`<div>₹ ${money(c.sw_amount_paise)} · ${MODE_LABELS[c.sw_mode] ?? c.sw_mode}${c.paid_at ? ` · paid ${when(c.paid_at)}` : ''} · ${dayLabel(c.shift_day)} shift</div>`) : html`<div class="note">Not in the software report.</div>`)}
-    ${section('Register', b.register.length ? b.register.map((r) => html`<div>₹ ${money(r.amount_paise)}${r.discount_paise ? ` · discount ₹ ${money(r.discount_paise)}` : ''}${r.tip_paise ? ` · tip ₹ ${money(r.tip_paise)}` : ''} · ${TYPE_LABELS[r.bill_type] ?? 'no type'}
-        ${r.adjusted ? html` <span class="chip" style="background:#E3F1EF">Adjusted from bank</span>` : ''}
-        <div class="note">Paid ${r.payments.map((p) => `${p.label || MODE_LABELS[p.mode]} ₹ ${money(p.amountPaise)}`).join(' + ') || 'none written'}${r.paid_with_row_id ? ' (paid together with another bill)' : ''}${r.remarks ? ` · ${r.remarks}` : ''} · line ${r.line_no}</div>
-        <a href="#/b/${biz.id}/review/${r.upload_id}/${r.id}">Open on its register page (with the photo)</a></div>`) : html`<div class="note">Not in the register.</div>`)}
-    ${section('Comparison', b.comparisons.length ? b.comparisons.map((c) => html`<div>${dayLabel(c.shift_day)} shift: <span class="chip ${c.difference === 'match' ? 'ok' : 'wait'}">${DIFF_LABELS[c.difference]}</span>
-        ${c.decision ? ` · ${DECISION_LABELS[c.decision]}${c.note ? `: ${c.note}` : ''}` : ''}${c.shift_status === 'confirmed' ? ' · confirmed' : ''}
-        <div><a href="#/b/${biz.id}/compare/${c.shift_day}">Open in All bills</a></div>
-        ${c.shift_status !== 'confirmed' && biz.actions?.includes('sales.decide') ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">${c.difference === 'complimentary'
-          ? html`<button type="button" class="btn plain dchip" data-makecomp="${c.id}" data-bill="${c.bill_no}">Guest name</button>${paidByChips({ comparisonId: c.id, billNo: c.bill_no })}`
-          : html`<button type="button" class="btn plain dchip" data-makecomp="${c.id}" data-bill="${c.bill_no}">Make complimentary</button>`}</div>` : ''}</div>`) : html`<div class="note">No comparison.</div>`)}
-    ${section('Money', b.sales.length ? b.sales.map((x) => {
-      const paid = b.money.filter((m) => m.saleId === x.id);
-      return html`<div>Sale ₹ ${money(x.amount_paise)} · ${MODE_LABELS[x.payment_mode] ?? x.payment_mode}${x.head ? ` · ${x.head}` : ''}
-        <div class="note">${paid.length ? paid.map((m) => `In the bank: ₹ ${money(m.appliedPaise)} of ₹ ${money(m.amountPaise)} at ${when(m.postedAt)} · ${m.accountName}${m.vpa ? ` · ${m.vpa}` : ''}`).join('; ')
-          : x.payment_mode === 'cash' ? 'Cash: counted in the shift\'s cash check.' : x.match_status === 'awaiting_card_settlement' ? 'Waiting for the card settlement.' : x.match_status === 'awaiting_bank_match' ? 'Not found in the bank yet.' : ''}</div></div>`;
-    }) : html`<div class="note">${c0?.shift_status === 'confirmed' ? 'Not counted as a sale.' : 'Counted once the shift is confirmed.'}</div>`)}
-    ${section('History', b.history.length ? b.history.map((h) => html`<div class="tiny">${when(h.at)} · ${h.user ?? 'Bookr'} · ${HISTORY_LABELS[h.action] ?? h.action}${historyWords(h)}</div>`) : html`<div class="note">Nothing yet.</div>`)}
-    ${c0 && b.sales.some((x) => x.match_status === 'awaiting_bank_match') ? html`<div><a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${c0.shift_day}">Match or fix on Reconcile</a></div>` : ''}`.__html;
+      <span style="display:flex;gap:6px;align-items:center">${b.comparisons.map((c) => html`<span class="chip ${c.difference === 'match' ? 'ok' : 'wait'}" title="${dayLabel(c.shift_day)} shift${c.decision ? ` · ${DECISION_LABELS[c.decision]}${c.note ? `: ${c.note}` : ''}` : ''}">${c.decision ? DECISION_LABELS[c.decision] : DIFF_LABELS[c.difference]}</span>`)}
+      <button class="btn plain" type="button" id="drawerclose" aria-label="Close">✕</button></span></div>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
+      ${box('Software', sw.length ? sw.map((c) => html`<div><strong>₹ ${money(c.sw_amount_paise)}</strong> ${MODE_LABELS[c.sw_mode] ?? c.sw_mode}<div class="tiny note">${c.paid_at ? hhmm(c.paid_at) : ''}${b.comparisons.length > 1 ? ` · ${dayLabel(c.shift_day)}` : ''}</div></div>`) : html`<span class="note">Not there</span>`)}
+      ${box('Register', b.register.length ? b.register.map((r) => html`<div><strong>₹ ${money(r.amount_paise)}</strong> ${r.payments.map((p) => p.label || MODE_LABELS[p.mode]).join(' + ') || 'not paid'}
+        <div class="tiny note">${r.discount_paise ? `disc ₹ ${money(r.discount_paise)} · ` : ''}${r.tip_paise ? `tip ₹ ${money(r.tip_paise)} · ` : ''}line ${r.line_no}${r.paid_with_row_id ? ' · paid with another bill' : ''}${r.adjusted ? ' · adjusted from bank' : ''}</div></div>`) : html`<span class="note">Not there</span>`)}
+      ${box('Bank', bankBody)}
+    </div>
+    <div class="form-row" style="gap:6px;align-items:center" data-dactions>
+      ${both && decide ? html`${choice('use_software', 'Use software')}${choice('use_register', 'Use register')}` : ''}
+      ${b.register.some((r) => r.upload_id) ? html`<button type="button" class="btn plain dchip" data-dgoedit>Edit line</button>` : ''}
+      <details class="menu"><summary class="btn plain dchip" aria-label="More">⋯</summary><div class="menu-pop" style="min-width:210px;gap:6px">
+        ${decide ? (open.difference === 'complimentary'
+          ? html`<button type="button" class="btn plain dchip" data-makecomp="${open.id}" data-bill="${open.bill_no}">Guest name</button>${paidByChips({ comparisonId: open.id, billNo: open.bill_no })}`
+          : html`<button type="button" class="btn plain dchip" data-makecomp="${open.id}" data-bill="${open.bill_no}">Make complimentary</button>`) : ''}
+        ${c0 ? html`<a class="btn plain dchip" href="#/b/${biz.id}/compare/${c0.shift_day}">Open in All bills</a>` : ''}
+        ${b.register.filter((r) => r.upload_id).slice(0, 1).map((r) => html`<a class="btn plain dchip" href="#/b/${biz.id}/review/${r.upload_id}/${r.id}">Open on its register page</a>`)}
+        ${c0 && b.sales.some((x) => x.match_status === 'awaiting_bank_match') ? html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${c0.shift_day}">Match or fix on Reconcile</a>` : ''}
+      </div></details>
+    </div>
+    <details><summary class="note">History (${b.history.length})</summary>${b.history.length ? b.history.map((h) => html`<div class="tiny">${when(h.at)} · ${h.user ?? 'Bookr'} · ${HISTORY_LABELS[h.action] ?? h.action}${historyWords(h)}</div>`) : html`<div class="note">Nothing yet.</div>`}</details>`.__html;
+  d.querySelector('[data-dgoedit]')?.addEventListener('click', () => { const ed = d.querySelector('[data-deditor]'); ed?.scrollIntoView({ behavior: 'smooth', block: 'start' }); ed?.querySelector('input:not([disabled])')?.focus(); });
   document.getElementById('drawerclose').addEventListener('click', () => d.remove());
   // The register line, editable here with its photo, so a slip is corrected without leaving the page (7 Nov 2026).
   const lines = b.register.filter((r) => r.upload_id);
@@ -6271,6 +6319,8 @@ async function openBillDrawer(biz, billNo, day) {
 }
 /** What the page under the drawer reloads after a change (set by Compare sales and Reconcile). */
 let drawerReload = null;
+/** Opens the drawer again on the same bill after a change made from inside it. */
+let drawerReopen = null;
 async function drawerEditor(biz, d, r0, billNo, day) {
   let u;
   try { u = await api('GET', `/businesses/${biz.id}/uploads/${r0.upload_id}`); } catch { return; } // no rows.edit: the drawer only shows
@@ -6283,9 +6333,10 @@ async function drawerEditor(biz, d, r0, billNo, day) {
     <input class="cell mono" data-df="${f}" value="${value}" ${locked ? 'disabled' : ''} ${extra} style="min-height:34px"></label>`;
   const box = document.createElement('section');
   box.style.cssText = 'border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:8px';
+  box.dataset.deditor = '1';
   box.innerHTML = html`<strong>Register line · page ${u.pageNo ?? 1}, row ${r.lineNo}</strong>
-    ${u.fromSoftware ? '' : html`<div class="strip" style="height:110px"><canvas></canvas><span class="band"></span>
-      <span class="strip-tools"><span class="tiny"></span><button type="button" class="iconbtn" title="Turn the photo" aria-label="Turn the photo">⟳</button></span></div>`}
+    ${u.fromSoftware ? '' : html`<details data-dphoto><summary class="note">Photo</summary><div class="strip" style="height:110px"><canvas></canvas><span class="band"></span>
+      <span class="strip-tools"><span class="tiny"></span><button type="button" class="iconbtn" title="Turn the photo" aria-label="Turn the photo">⟳</button></span></div></details>`}
     ${locked ? html`<div class="note">The shift is saved, so this line is locked. Corrections from the bank are made on Reconcile.</div>
       ${biz.actions.includes('shift.reopen') ? html`<div class="form-row" style="gap:6px"><button class="btn plain" type="button" data-dreopen>Reopen the shift to edit</button></div>` : html`<div class="note">Ask an Owner to reopen this shift to change it.</div>`}` : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px">
@@ -6297,8 +6348,10 @@ async function drawerEditor(biz, d, r0, billNo, day) {
     ${locked ? '' : html`<div class="form-row" style="gap:6px"><button class="btn" type="button" data-dsave>Save the row</button>
       <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${u.id}/${r.id}">Open on Review</a></div>`}
     <div class="form-msg"></div>`.__html;
-  d.children[0].after(box);
-  if (!u.fromSoftware) wireStrip(u, `/api/businesses/${biz.id}/uploads/${u.id}/file`, box).show(r);
+  (d.querySelector('[data-dactions]') ?? d.children[0]).after(box);
+  // The photo draws when it is first opened (a folded canvas has no size).
+  const ph = box.querySelector('[data-dphoto]');
+  if (ph) ph.addEventListener('toggle', () => { if (ph.open && !ph.dataset.drawn) { ph.dataset.drawn = '1'; wireStrip(u, `/api/businesses/${biz.id}/uploads/${u.id}/file`, box).show(r); } });
   // What this change does to the cash, before it is saved (14 Nov 2026): if the bill is counted from the register.
   const cashLine = box.querySelector('[data-dcash]');
   if (cashLine) {
@@ -6362,7 +6415,7 @@ document.addEventListener('click', async (e) => {
   if (!mk && !pb && !lo && !sw) return;
   e.preventDefault(); e.stopPropagation();
   const bizId = currentBizId();
-  const reload = async () => { await (drawerReload ?? route)(); };
+  const reload = async () => { await (drawerReload ?? route)(); if (document.getElementById('billdrawer') && drawerReopen) await drawerReopen(); };
   const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
   try {
     if (sw) {
@@ -6390,7 +6443,17 @@ document.addEventListener('click', async (e) => {
     }
   } catch (err) { if (where) showError(where, err); else alert(err.message); }
 }, true);
+// Paid by ▾: the three modes in a small menu, the hinted one first and marked (approved 14 Nov 2026).
+const paidByMenu = (c, pick = null) => html`<details class="menu"><summary class="btn plain dchip">Paid by ▾</summary><div class="menu-pop" style="min-width:140px;gap:6px">${[...(pick ? [pick] : []), ...['cash', 'upi', 'card'].filter((m) => m !== pick)].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}</div></details>`;
 const paidByChips = (c, pick = null) => html`<span class="tiny note">Paid by</span>${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}`;
+// "Show n more" under Mode not known: shows the rest of the list.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest?.('[data-showunk]');
+  if (!b) return;
+  const table = b.closest('table');
+  table?.querySelectorAll('tr[data-pgroup="unk"]').forEach((tr) => { tr.hidden = false; tr.classList.remove('grp-bill'); });
+  b.closest('tr')?.remove();
+});
 // Any element with data-bill-drawer="billNo|day" opens the drawer.
 document.addEventListener('click', (e) => {
   const el = e.target.closest?.('[data-bill-drawer]');

@@ -26,4 +26,12 @@ describe('cash tab: the other side', () => {
     expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${c}`, { decision: 'use_register' })).status).toBe(200);
     expect((await cash()).bills.find((x: any) => x.billNo === '2610331').countedPaise).toBe(0);
   });
+
+  it('a bill paid a rounded amount is counted as paid, not a difference', async () => {
+    const h = await hotel();
+    await h.software([['2610341', '31 12:00', 'CASH', '633'], ['2610342', '31 13:00', 'CASH', '547']]);
+    await h.register([{ no: '2610341', amount: '633', discount: '3', pays: [['cash', '630']] }, { no: '2610342', amount: '547', discount: '-3', pays: [['cash', '550']] }]);
+    const k = (await h.clients.accountant.get(`/businesses/${h.bid}/shifts/2026-10-31/cash`)).json;
+    expect(k.bills.map((b: any) => [b.billNo, b.differs, b.roundedPaise, b.countedPaise])).toEqual([['2610341', false, 300, 63000], ['2610342', false, -300, 55000]]);
+  });
 });

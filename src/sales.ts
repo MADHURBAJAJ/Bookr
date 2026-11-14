@@ -1469,12 +1469,16 @@ export async function cashBills(db: DB, businessId: string, day: string) {
     if (!swCash && !rgCash && !cnt) return [];
     const state = c.difference === 'match' ? 'match' : c.difference === 'complimentary' ? 'complimentary' : c.decision === 'leave_out' ? 'left_out' : c.decision ? 'decided' : 'undecided';
     const g = r ? headOf.get(r.id) : undefined;
-    const differs = state === 'undecided' || (swCash ?? 0) !== rgCash || (state === 'decided' && !r);
+    // Paid a rounded amount (14 Nov 2026): the bills match, the register writes the rounding as a discount or tip and its
+    // cash is what was paid. Counted as paid; not a difference to explain.
+    const rounded = c.difference === 'match' && !!r && swCash != null && rgCash === r.amount_paise && pays.every((p) => p.mode === 'cash')
+      && r.discount_paise !== 0 && swCash === r.amount_paise + r.discount_paise ? r.discount_paise : 0;
+    const differs = state === 'undecided' || ((swCash ?? 0) !== rgCash && !rounded) || (state === 'decided' && !r);
     return [{
       comparisonId: c.id, billNo: c.bill_no, difference: c.difference, decision: c.decision, state, differs,
       swCashPaise: swCash, swMode: c.sw_mode, swAmountPaise: c.sw_amount_paise,
       rgCashPaise: r ? rgCash : null, rgOther: pays.filter((p) => p.mode !== 'cash').map((p) => ({ mode: p.mode, amountPaise: p.amount_paise })),
-      rgAmountPaise: c.rg_amount_paise, countedPaise: cnt, rowId: r?.id ?? null, uploadId: r?.upload_id ?? null, groupSize: g ? g.rowIds.length : 0,
+      rgAmountPaise: c.rg_amount_paise, countedPaise: cnt, roundedPaise: rounded, rowId: r?.id ?? null, uploadId: r?.upload_id ?? null, groupSize: g ? g.rowIds.length : 0,
     }];
   }).sort((a, b) => Number(b.differs) - Number(a.differs) || a.billNo.localeCompare(b.billNo));
   // The other side of a cash bill that differs (14 Nov 2026): when it says UPI or card, is there a payment of that amount
