@@ -459,7 +459,14 @@ actions.addPay = () => {
   if (amountPaise > left && !['cash', 'upi', 'card'].includes(m)) throw new Error('More than what is left to pay.');
   if (amountPaise > left && m === 'cash' && ui.tendered) throw new Error('Type the bill amount here, and the note handed over as "cash given".');
   const p = { mode: m, amount: rupees(amountPaise), amountPaise, label: { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Room', credit: 'Credit', comp: 'Complimentary', advance: 'Advance' }[m], detail: '' };
-  if (m === 'cash' && ui.tendered) { const t = toPaise(ui.tendered); if (t === null || t < amountPaise) throw new Error('Cash given must be at least the amount.'); p.tendered = rupees(t); p.detail = t > amountPaise ? `Given ${rs(t)} · change ${rs(t - amountPaise)}` : 'Exact'; }
+  if (m === 'cash' && ui.tendered) {
+    const t = toPaise(ui.tendered);
+    if (t === null || t <= 0) throw new Error('Type the cash given in rupees.');
+    if (t < amountPaise) {
+      // Less cash than the bill: what was handed over is what was paid; the rest is still to pay (or a discount).
+      p.amountPaise = t; p.amount = rupees(t); p.detail = 'Cash given';
+    } else { p.tendered = rupees(t); p.detail = t > amountPaise ? `Given ${rs(t)} · change ${rs(t - amountPaise)}` : 'Exact'; }
+  }
   if (m === 'upi') { if (!ui.payAccountId) throw new Error("Choose which account's QR was paid."); p.payAccountId = ui.payAccountId; p.detail = cache.payAccounts.find((a) => a.id === ui.payAccountId).name; }
   if (m === 'card') {
     const code = (ui.cardApproval ?? '').trim().toUpperCase(); const last4 = (ui.cardLast4 ?? '').trim();
