@@ -26,7 +26,7 @@ async function order(c: { env: { DB: D1Database } }, bid: string, id: string, ed
 }
 
 const lines = (db: D1Database, orderId: string) =>
-  all<LineRow>(db, 'SELECT id, item_id, name, price_paise, sac, station, qty, sent_qty FROM order_lines WHERE order_id = ? ORDER BY created_at', orderId);
+  all<LineRow>(db, 'SELECT id, item_id, name, price_paise, sac, station, qty, sent_qty FROM order_lines WHERE order_id = ? ORDER BY created_at, rowid', orderId);
 
 function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
   return {
