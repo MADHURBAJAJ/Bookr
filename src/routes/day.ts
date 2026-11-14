@@ -100,6 +100,8 @@ dayRoutes.get('/businesses/:businessId/bills/:billNo', requireRole('sales.view')
   }
   const ids = [...cmpIds, ...register.map((r) => r.id), ...sales.map((x) => x.id), ...money.map((m) => m.id as string)];
   const history = ids.length ? await all(db, `SELECT a.action, a.created_at AS at, u.name AS user, a.after FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
-    WHERE a.business_id = ? AND a.row_id IN (${ids.map(() => '?').join(',')}) AND a.action NOT IN ('ocr.read') ORDER BY a.id DESC LIMIT 40`, bid, ...ids) : [];
+    WHERE a.business_id = ? AND (a.row_id IN (${ids.map(() => '?').join(',')})
+      ${cmpIds.length ? `OR (a.action = 'transaction.remove_on_reopen' AND json_extract(a.before, '$.comparison_id') IN (${cmpIds.map(() => '?').join(',')}))` : ''})
+      AND a.action NOT IN ('ocr.read') ORDER BY a.id DESC LIMIT 40`, bid, ...ids, ...cmpIds) : [];
   return c.json({ billNo, comparisons, register: register.map((r) => ({ ...r, payments: JSON.parse(r.payments as string) })), sales, money, history });
 });

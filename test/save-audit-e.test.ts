@@ -142,7 +142,7 @@ describe('E19 a saved shift is locked; History', () => {
   // GAP (save audit, 14 Nov 2026): a bill's History does not say that its sale was removed when the shift was reopened.
   // reopenShift logs 'transaction.remove_on_reopen' on the removed sale's id, and the History query only looks at the
   // bill's current sales, so the step is lost from the bill's History.
-  it.fails('the bill\'s History shows its sale removed on reopen', async () => {
+  it('the bill\'s History shows its sale removed on reopen', async () => {
     const h = await hotel();
     await h.software([['2610493', '31 10:00', 'CASH', '800']]);
     await h.register([{ no: '2610493', amount: '800', pays: [['cash', '800']] }]);

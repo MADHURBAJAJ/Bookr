@@ -85,7 +85,7 @@ describe('D14 a complimentary bill with cash written in the register', () => {
   // BUG (minor, save audit 14 Nov 2026): the Cash tab says it agrees. Bill 2610453 is ₹500 cash on both sides and was
   // made complimentary, so nothing is counted, but the register says ₹500 reached the drawer. cashBills
   // (src/sales.ts, `differs`) compares only the software's cash with the register's cash, not with what is counted.
-  it.fails('is shown as differing on the Cash tab (₹500 in the register, nothing counted)', async () => {
+  it('is shown as differing on the Cash tab (₹500 in the register, nothing counted)', async () => {
     const h = await hotel();
     await h.software([['2610453', '31 10:00', 'CASH', '500']]);
     await h.register([{ no: '2610453', amount: '500', pays: [['cash', '500']] }]);

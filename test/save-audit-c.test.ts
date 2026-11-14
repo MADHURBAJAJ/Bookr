@@ -47,7 +47,7 @@ describe('C10 UPI matched on save', () => {
   // BUG (save audit, 14 Nov 2026): a same-sale join undone after saving comes back by itself when the shift is reopened and
   // saved again. Undo restores the booking but leaves the plan ('bank.same_sale_planned') in the audit log, and plansFor
   // still reads it on the next save.
-  it.fails('a same-sale join undone after saving is not made again when the shift is reopened and saved', async () => {
+  it('a same-sale join undone after saving is not made again when the shift is reopened and saved', async () => {
     const { h, booked, clear, far } = await setUp();
     await saveChecked(h);
     const owner = h.clients.owner;
@@ -122,7 +122,7 @@ describe('C12 undo after saving', () => {
   // BUG (save audit, 14 Nov 2026): a card advance join undone after saving (Unmatch: "advanceBack") comes back by itself
   // when the shift is reopened and saved again. Undo writes 'card.advance_joined' back but never 'card.advance_unplanned',
   // so cardAdvancePlans still returns the plan on the next save. Same cause as the same-sale case in C10.
-  it.fails('a card advance join undone after saving is not made again when the shift is reopened and saved', async () => {
+  it('a card advance join undone after saving is not made again when the shift is reopened and saved', async () => {
     const h = await hotel();
     const acc = h.clients.accountant;
     const base = `/businesses/${h.bid}`;

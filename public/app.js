@@ -2831,7 +2831,9 @@ function cashPanelHtml(biz, k, opts = {}) {
   for (const b of differ) {
     const sw = b.swCashPaise ?? 0, rg = b.rgCashPaise ?? 0;
     let text, effects = [];
-    if (b.rgCashPaise === null) {
+    if ((b.state === 'complimentary' || b.state === 'left_out') && rg !== (b.countedPaise ?? 0)) {
+      text = html`${b.state === 'complimentary' ? 'complimentary' : 'left out'}, but the register has Cash ₹ ${money(rg)} received: not counted`;
+    } else if (b.rgCashPaise === null) {
       text = html`software Cash ₹ ${money(sw)}, not in the register`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Left out', 0]] : [];
       if (b.decision === 'use_software') text = html`software Cash ₹ ${money(sw)}, not in the register: counted, may not have reached the drawer`;
@@ -6400,7 +6402,7 @@ async function drawerEditor(biz, d, r0, billNo, day) {
 const HISTORY_LABELS = {
   'comparison.decide': 'Decided', 'comparison.decision_cleared': 'Decision cleared (data changed)', 'register.added_from_software': 'Added to the register from the software report',
   'bank.match': 'Matched to a bank credit', 'bank.match_set': 'Matched by hand', 'bank.match_adjust_bills': 'Matched; register corrected to the bank amount', 'bank.fix_bill': 'Bill fixed from the bank',
-  'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened',
+  'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened', 'transaction.remove_on_reopen': 'Sale taken off (shift reopened)',
   'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
   'register.edit': 'Register line changed', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };

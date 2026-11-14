@@ -58,5 +58,9 @@ export async function undoCardAdvanceStatements(db: DB, businessId: string, paym
     ...b.matches.map((m) => { const k = Object.keys(m); return stmt(db, `INSERT INTO card_matches (${k.join(', ')}) VALUES (${k.map(() => '?').join(', ')})`, ...k.map((x) => m[x])); }),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'card.advance_undone', 'card_settlements', ?, NULL, ?, ?)`,
       businessId, userId, paymentId, JSON.stringify({ transactionId: saleId, bookingRestored: b.booked.id }), t),
+    // The undo stands: the choice is withdrawn, so Reopen and Save does not join them again (audit, 14 Nov 2026).
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      SELECT business_id, ?, 'card.advance_unplanned', 'card_settlements', row_id, NULL, after, ? FROM audit_log
+      WHERE business_id = ? AND action = 'card.advance_planned' AND row_id = ? ORDER BY id DESC LIMIT 1`, userId, t + 1, businessId, paymentId),
   ];
 }

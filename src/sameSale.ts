@@ -144,6 +144,10 @@ export async function undoSameSaleStatements(db: DB, businessId: string, rowId: 
     stmt(db, "UPDATE bank_rows SET status = 'booked', transaction_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ?", b.booked.id, b.note, b.doneBy, b.doneAt, rowId),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'bank.same_sale_undone', 'bank_rows', ?, NULL, ?, ?)`, businessId, userId, rowId,
       JSON.stringify({ transactionId: b.bill.id, bookingRestored: b.booked.id }), t),
+    // The undo stands: the plan that made the join is withdrawn, so Reopen and Save does not join them again (audit, 14 Nov 2026).
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      SELECT business_id, ?, 'bank.same_sale_unplanned', 'bank_rows', row_id, NULL, after, ? FROM audit_log
+      WHERE business_id = ? AND action = 'bank.same_sale_planned' AND row_id = ? ORDER BY id DESC LIMIT 1`, userId, t, businessId, rowId),
     ...settleOnCredit(db, businessId),
   ];
 }

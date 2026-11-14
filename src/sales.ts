@@ -1473,7 +1473,9 @@ export async function cashBills(db: DB, businessId: string, day: string) {
     // cash is what was paid. Counted as paid; not a difference to explain.
     const rounded = c.difference === 'match' && !!r && swCash != null && rgCash === r.amount_paise && pays.every((p) => p.mode === 'cash')
       && r.discount_paise !== 0 && swCash === r.amount_paise + r.discount_paise ? r.discount_paise : 0;
-    const differs = state === 'undecided' || ((swCash ?? 0) !== rgCash && !rounded) || (state === 'decided' && !r);
+    // A complimentary or left-out bill whose register shows cash received: nothing is counted, so the drawer is over by it (audit, 14 Nov 2026).
+    const differs = state === 'undecided' || ((swCash ?? 0) !== rgCash && !rounded) || (state === 'decided' && !r)
+      || ((state === 'complimentary' || state === 'left_out') && rgCash !== cnt);
     return [{
       comparisonId: c.id, billNo: c.bill_no, difference: c.difference, decision: c.decision, state, differs,
       swCashPaise: swCash, swMode: c.sw_mode, swAmountPaise: c.sw_amount_paise,
