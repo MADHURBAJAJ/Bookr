@@ -112,7 +112,7 @@ const NAV = [
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts' },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
-  { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books' },
+  { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds'] },
   { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
@@ -864,6 +864,7 @@ async function reportsView(biz, query) {
     api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`)]);
   const total = r.lines.reduce((t, l) => t + l.discountPaise, 0);
   render(shell(biz, 'reports', 'Reports', '', html`
+    ${reportTabs(biz, 'checks')}
     ${missedReport(biz, m)}
     <section class="card" style="gap:10px">
       <h2>Large discounts</h2>
@@ -890,6 +891,121 @@ async function reportsView(biz, query) {
     e.preventDefault();
     const d = new FormData(e.target);
     location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
+  }));
+}
+
+/** Reports tabs: the checks (missed, discounts, complimentary) and Funds flow (bank data: Owner and Accountant). */
+function reportTabs(biz, active) {
+  if (!biz.actions.includes('bank.link')) return '';
+  const tabs = [['checks', 'Bills to look at', `#/b/${biz.id}/reports`], ['funds', 'Funds flow', `#/b/${biz.id}/funds`]];
+  return html`<div class="seg mode-tabs" role="tablist" aria-label="Reports" style="margin:4px 0 10px">${tabs.map(([k, l, href]) => html`<a role="tab" href="${href}" class="${k === active ? 'on' : ''}" aria-selected="${k === active}">${l}</a>`)}</div>`;
+}
+
+/**
+ * Funds flow (approved 14 Nov 2026): money that actually moved between two shifts, one column per account and a
+ * total. Transfers between own accounts move money between columns only. Each figure opens the lines behind it.
+ * The end of each account is checked against its statement balance (bank) or the cash counted (cash).
+ */
+async function fundsView(biz, query) {
+  const q = new URLSearchParams(query);
+  const today = currentShiftDay();
+  const range = { from: q.get('from') ?? '', to: q.get('to') ?? '' };
+  const r = await api('GET', `/businesses/${biz.id}/reports/funds-flow?${new URLSearchParams(range)}`);
+  const totalOnly = q.get('cols') === 'total';
+  const accs = totalOnly ? [] : r.accounts;
+  const sumOf = (o) => Object.values(o ?? {}).reduce((s, x) => s + x, 0);
+  const fig = (p, key, acc) => (p ? html`<a href="#" class="ff-fig" data-fk="${key}" data-acc="${acc ?? ''}">${rs(p)}</a>` : html`<span class="tiny">–</span>`);
+  const cells = (amounts, key, plain) => html`${accs.map((a) => html`<td class="amount">${plain ? rs(amounts[a.id] ?? 0) : fig(amounts[a.id] ?? 0, key, a.id)}</td>`)}<td class="amount" style="font-weight:600">${plain ? rs(sumOf(amounts)) : fig(sumOf(amounts), key, '')}</td>`;
+  const addUp = (rows) => { const o = {}; for (const x of rows) for (const [k, v] of Object.entries(x.amounts)) o[k] = (o[k] ?? 0) + v; return o; };
+  const line = (x, indent) => html`<tr data-row="${x.key}" class="${x.warn ? 'ff-warn' : ''}"><td style="padding-left:${indent}px">${x.label}</td>${cells(x.amounts, x.key)}</tr>`;
+  const head = (label, amounts) => html`<tr class="ff-h"><td>${label}</td>${cells(amounts, null, true)}</tr>`;
+  const sub = (label, amounts) => html`<tr class="ff-sub"><td style="padding-left:18px">${label}</td>${cells(amounts, null, true)}</tr>`;
+  const ins = r.rows.filter((x) => x.group === 'in');
+  const outs = r.rows.filter((x) => x.group === 'out');
+  const trs = r.rows.filter((x) => x.group === 'tr');
+  const block = (rows, section, label) => {
+    const list = rows.filter((x) => x.section === section);
+    if (!list.length) return '';
+    return label ? html`${sub(label, addUp(list))}${list.map((x) => line(x, 34))}` : list.map((x) => line(x, 18));
+  };
+  const checkCell = (a) => {
+    const k = r.checks[a.id];
+    if (!k) return html`<td class="amount tiny">${a.kind === 'cash' ? 'not counted yet' : 'no statement yet'}</td>`;
+    const on = k.day === r.to ? '' : html` <span class="tiny">(${k.what === 'counted' ? 'counted' : 'statement'} ${dayLabel(k.day)})</span>`;
+    if (k.differencePaise === null) return html`<td class="amount tiny">no balance on the statement</td>`;
+    return k.differencePaise === 0 ? html`<td class="amount" style="color:var(--ok)">✓ matches${on}</td>`
+      : html`<td class="amount" style="color:var(--danger)" title="${k.what === 'counted' ? 'Cash counted' : 'Statement balance'} ₹ ${money(k.paise)}">differs ${rs(k.differencePaise)}${on}</td>`;
+  };
+  const known = (k) => r.checks[k.id]?.paise;
+  const checkedTotal = r.accounts.every((a) => r.checks[a.id]?.differencePaise != null) ? r.accounts.reduce((s, a) => s + r.checks[a.id].differencePaise, 0) : null;
+  const picks = (() => {
+    const monday = (() => { const d = new Date(`${today}T12:00:00Z`); const back = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - back); return d.toISOString().slice(0, 10); })();
+    return [['Today', today, today], ['This week', monday, today], ['This month', `${today.slice(0, 8)}01`, today]];
+  })();
+  const link = (from, to, cols = q.get('cols') ?? '') => `#/b/${biz.id}/funds?${new URLSearchParams({ from, to, ...(cols ? { cols } : {}) })}`;
+  const m = r.memo;
+  render(shell(biz, 'reports', 'Reports', '', html`
+    ${reportTabs(biz, 'funds')}
+    <section class="card" style="gap:10px">
+      <h2>Funds flow</h2>
+      <div class="note">Money that actually moved, shift to shift (8 am to 8 am). Click a figure to see its lines. The books start on ${dayLabel(r.booksStart)}.</div>
+      <div class="form-row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+        ${picks.map(([l, f, t]) => html`<a class="btn ${f === r.from && t === r.to ? '' : 'plain'}" href="${link(f, t)}">${l}</a>`)}
+        <form id="ffdates" class="form-row" style="align-items:flex-end;gap:8px">
+          <div class="field"><label for="fffrom">From shift</label><input id="fffrom" type="date" name="from" value="${r.from}" min="${r.booksStart}" required></div>
+          <div class="field"><label for="ffto">To shift</label><input id="ffto" type="date" name="to" value="${r.to}" required></div>
+          <button class="btn plain" type="submit">Show</button>
+        </form>
+        <span style="flex:1"></span>
+        <div class="seg"><a href="${link(r.from, r.to, '')}" class="${totalOnly ? '' : 'on'}">Per account</a><a href="${link(r.from, r.to, 'total')}" class="${totalOnly ? 'on' : ''}">Total only</a></div>
+      </div>
+      <div class="scroll"><table class="ff" style="min-width:${totalOnly ? 420 : 300 + 120 * (accs.length + 1)}px">
+        <thead><tr><th>₹</th>${accs.map((a) => html`<th class="amount">${a.name}</th>`)}<th class="amount">Total</th></tr></thead>
+        <tbody>
+          ${head(`Funds at start · ${dayLabel(r.from)}`, r.start)}
+          ${head('+ Money in', addUp(ins))}
+          ${block(ins, 'sales', 'Sales received')}${block(ins, 'advance')}${block(ins, 'income')}${block(ins, 'left_out')}${block(ins, 'open')}
+          ${head('− Money out', addUp(outs))}
+          ${block(outs, 'expenses', 'Expenses by head')}${block(outs, 'card_fees')}${block(outs, 'not_approved')}${block(outs, 'left_out')}${block(outs, 'open')}
+          ${trs.length ? html`${head('± Transfers between own accounts', addUp(trs))}${trs.map((x) => line(x, 18))}` : ''}
+          ${head(`= Funds at end · ${dayLabel(r.to)}`, r.end)}
+          ${totalOnly ? '' : html`<tr><td class="tiny">Statement balance / cash counted</td>${accs.map((a) => html`<td class="amount tiny">${known(a) == null ? '–' : rs(known(a))}</td>`)}<td></td></tr>
+          <tr><td class="tiny">Check</td>${accs.map(checkCell)}<td class="amount ${checkedTotal ? '' : 'tiny'}" style="${checkedTotal ? 'color:var(--danger)' : ''}">${checkedTotal == null ? '' : checkedTotal ? `differs ${rs(checkedTotal)}` : '✓'}</td></tr>`}
+        </tbody>
+      </table></div>
+      <div class="ff-memo">
+        <div style="font-weight:600;margin-bottom:4px">Sales made but not received yet <span class="tiny">(not in the flow above)</span></div>
+        <div class="list-row"><span>Sales billed in these shifts (${m.billed.n} bill${m.billed.n === 1 ? '' : 's'})</span><span class="amount">${rs(m.billed.paise)}</span></div>
+        <div class="list-row"><span>UPI bills not in the bank yet (${m.upiWaiting.n})</span><span class="amount">${m.upiWaiting.n ? html`<a href="#/b/${biz.id}/bank?tab=in">${rs(m.upiWaiting.paise)}</a>` : '–'}</span></div>
+        <div class="list-row"><span>Card sales waiting for settlement (${m.cardWaiting.n})</span><span class="amount">${m.cardWaiting.n ? html`<a href="#/b/${biz.id}/cards">${rs(m.cardWaiting.paise)}</a>` : '–'}</span></div>
+        <div class="note">Card settlements above are the card payments in full; the card company's fees and GST are under Money out, so the two together are what reached the bank.</div>
+      </div>
+    </section>`));
+  wireShell();
+  document.getElementById('ffdates').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const d = new FormData(e.target);
+    location.hash = link(d.get('from'), d.get('to')).slice(1);
+  });
+  const names = Object.fromEntries(r.accounts.map((a) => [a.id, a.name]));
+  document.querySelectorAll('.ff-fig').forEach((a) => a.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const tr = a.closest('tr');
+    const open = tr.nextElementSibling?.classList.contains('ff-lines') ? tr.nextElementSibling : null;
+    const same = open && open.dataset.for === `${a.dataset.fk}|${a.dataset.acc}`;
+    open?.remove();
+    if (same) return;
+    try {
+      const d = await api('GET', `/businesses/${biz.id}/reports/funds-flow?${new URLSearchParams({ from: r.from, to: r.to, key: a.dataset.fk })}`);
+      const ls = d.lines.filter((l) => !a.dataset.acc || l.accountId === a.dataset.acc);
+      const shown = ls.slice(0, 200);
+      const row = document.createElement('tr');
+      row.className = 'ff-lines';
+      row.dataset.for = `${a.dataset.fk}|${a.dataset.acc}`;
+      row.innerHTML = html`<td colspan="${accs.length + 2}"><div class="ff-detail">${shown.map((l) => html`<div class="list-row"><span><span class="tiny">${dayLabel(l.day)} · ${names[l.accountId] ?? ''}</span> ${l.text}</span><span class="amount">${rs(l.paise)}</span></div>`)}
+        ${ls.length > shown.length ? html`<div class="tiny">and ${ls.length - shown.length} more</div>` : ''}${ls.length ? '' : html`<div class="tiny">No lines.</div>`}</div></td>`.__html;
+      tr.after(row);
+    } catch (err) { window.alert(err.message); }
   }));
 }
 
@@ -6811,6 +6927,7 @@ async function route() {
       if (screen === 'bringin') return bringInView(biz, parts[3]);
       if (screen === 'reconcile' || screen === 'upi') return reconcileView(biz, parts[3]);
       if (screen === 'reports') return reportsView(biz, query);
+      if (screen === 'funds') return biz.actions.includes('bank.link') ? fundsView(biz, query) : go(`#/b/${biz.id}/reports`);
       if (screen === 'money-out') return moneyOutView(biz, query);
       if (screen === 'parties') return partiesView(biz, query);
       if (item?.phase) return laterView(biz, screen);

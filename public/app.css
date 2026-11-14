@@ -440,3 +440,11 @@ details.menu[open] { z-index: 40; }
 
 .today-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink); }
 .today-row:hover { background: var(--surface-2, #F6F7F9); }
+/* Funds flow */
+.ff td, .ff th { padding: 5px 8px; }
+.ff .ff-h td { font-weight: 600; background: var(--ground); }
+.ff .ff-sub td { font-weight: 500; }
+.ff .ff-warn td:first-child, .ff .ff-warn a { color: var(--wait); }
+.ff a.ff-fig { text-decoration: none; }
+.ff-detail { background: var(--ground); padding: 6px 10px; border-radius: 8px; max-height: 360px; overflow: auto; }
+.ff-memo { border-top: 1px solid var(--line); padding-top: 8px; }
