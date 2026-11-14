@@ -409,3 +409,24 @@ describe('paid less or more than the bill', () => {
     expect((await s.counter.post(`${s.B}/settlements`, { billIds: [three.id], payments: [{ mode: 'room', amount: '50', debtorAccountId: folio }], difference: { kind: 'tip' } })).json.error).toMatch(/cash, UPI or card/);
   });
 });
+
+describe('tables list', () => {
+  it('shows recent tables until a list is saved, then the list in its order; only a manager or owner may change it', async () => {
+    const s = await setupBusiness();
+    await s.counter.post(`${s.B}/orders`, { kind: 'table', place: 'T10' });
+    let r = (await s.counter.get(`${s.B}/orders`)).json;
+    expect(r.tables).toEqual(['T10']);
+    expect(r.tablesFixed).toBe(false);
+
+    expect((await s.counter.call('PUT', `${s.B}/tables`, { tables: ['T1'] })).status).toBe(403);
+    expect((await s.owner.call('PUT', `${s.B}/tables`, { tables: ['T1', 't1'] })).json.error).toMatch(/twice/);
+    expect((await s.owner.call('PUT', `${s.B}/tables`, { tables: ['Lawn 1', ' T2 ', 'T1'] })).status).toBe(200);
+    r = (await s.counter.get(`${s.B}/orders`)).json;
+    expect(r.tables).toEqual(['Lawn 1', 'T2', 'T1']);
+    expect(r.tablesFixed).toBe(true);
+
+    // An empty list goes back to recent tables.
+    await s.owner.call('PUT', `${s.B}/tables`, { tables: [] });
+    expect((await s.counter.get(`${s.B}/orders`)).json.tablesFixed).toBe(false);
+  });
+});

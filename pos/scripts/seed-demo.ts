@@ -49,7 +49,7 @@ for (const table of ['settle_differences', 'recipes', 'credit_notes', 'drawer_ou
 }
 out.push(`DELETE FROM businesses WHERE id = ${lit(B)};`);
 
-insert('businesses', { id: B, name: 'Sample Restaurant (demo)', fy_start_month: 4, shift_start_hour: 8, tab_age_days: 3, created_at: t });
+insert('businesses', { id: B, name: 'Sample Restaurant (demo)', fy_start_month: 4, shift_start_hour: 8, tab_age_days: 3, tables: JSON.stringify(['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'Lawn 1', 'Lawn 2', 'Bar 1', 'Bar 2']), created_at: t });
 const hash = keep ? presentHash() : await hashPassword(password);
 insert('staff', { id: id(), business_id: B, name: 'Owner (demo)', role: 'owner', email: 'pos-owner@example.com', password_hash: hash, pin_hash: null, created_at: t });
 for (const [name, role, pin] of [['Ravi (cashier)', 'cashier', '1111'], ['Suresh (captain)', 'captain', '2222'], ['Anil (manager)', 'manager', '3333']]) {

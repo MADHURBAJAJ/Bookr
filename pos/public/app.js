@@ -193,8 +193,8 @@ actions.logout = async () => { await api('POST', '/auth/logout'); me = null; cac
 // ---------- tables
 
 async function tablesScreen() {
-  const [{ orders, tables }] = await Promise.all([api('GET', B() + '/orders'), load('stays')]);
-  ui.orders = orders; ui.tables = tables ?? [];
+  const [{ orders, tables, tablesFixed }] = await Promise.all([api('GET', B() + '/orders'), load('stays')]);
+  ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed;
   rerender = () => {
     const tile = (o) => {
       const st = o.status === 'billed' ? html`<span class="st billed">Bill ${o.bill?.billNo} · ${rs(o.bill?.totalPaise ?? 0)} to pay</span>`
@@ -211,7 +211,7 @@ async function tablesScreen() {
       ${errorBox()}
       ${can('bills.print') ? html`<form class="row" style="margin-bottom:16px"><input class="in" style="max-width:260px" data-model="findNo" placeholder="Find a bill: number or its end" value="${ui.findNo ?? ''}">
         <button class="btn" type="submit" data-act="findBill" data-submit>Find</button>
-        ${ui.found ? (ui.found.length ? ui.found.map((b) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`) : ''}</form>` : ''}
+        ${ui.found ? (ui.found.length ? ui.found.map((b) => html`<a class="chip link" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`) : ''}</form>` : ''}
       ${ui.picking ? newOrderForm() : ''}
       ${can('orders.edit') && ui.tables.length ? tableGrid() : ''}
       ${ui.orders.length ? html`<div class="tiles">${ui.orders.map(tile)}</div>` : html`<p class="quiet">No open orders. Start one above.</p>`}`));
@@ -221,8 +221,11 @@ async function tablesScreen() {
 /** Tables used before: a busy one opens its order or bill, a free one starts an order with one tap. */
 function tableGrid() {
   const busy = new Map(ui.orders.filter((o) => o.kind === 'table').map((o) => [o.place.toLowerCase(), o]));
-  return html`<div style="margin-bottom:18px"><p class="small quiet" style="font-weight:600;margin-bottom:6px">Tables · tap a free one to start</p>
-    <div class="tgrid">${ui.tables.map((t) => {
+  // An open order at a table that is not in the list (typed by hand) still shows, at the end.
+  const listed = new Set(ui.tables.map((t) => t.toLowerCase()));
+  const cells = [...ui.tables, ...[...busy.values()].filter((o) => !listed.has(o.place.toLowerCase())).map((o) => o.place)];
+  return html`<div style="margin-bottom:18px"><p class="small quiet" style="font-weight:600;margin-bottom:6px">Tables · tap a free one to start${ui.tablesFixed ? '' : ' (tables used lately; set your own list in Settings, Tables)'}</p>
+    <div class="tgrid">${cells.map((t) => {
       const o = busy.get(t.toLowerCase());
       if (!o) return html`<button type="button" class="tcell free" data-act="quickTable" data-place="${t}">${t}</button>`;
       const href = o.status === 'billed' ? `#/settle/${o.bill.id}` : `#/order/${o.id}`;
@@ -784,7 +787,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   ui.from = from; ui.to = to;
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const head = html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><div class="chips">
-      ${[['sales', 'Sales'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
+      ${[['sales', 'Sales'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip link" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
     ${tab === 'sales' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
       <div class="f">&nbsp;<button class="btn" type="submit" data-act="repGo" data-submit>Show</button></div></form>` : ''}</div>`;
   if (tab === 'owed') {
@@ -852,7 +855,7 @@ async function stockScreen(tab = 'hand') {
   await load('menu');
   ui.st = st;
   const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['report', 'Report'], ['items', 'Items and recipes']];
-  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/stock/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
+  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip link" href="#/stock/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
   const items = st.items.filter((i) => i.active);
   const storeSel = (model, label) => html`<label class="f">${label}<select class="in" data-model="${model}"><option value="">Choose</option>${st.stores.map((x) => html`<option value="${x.id}" ${ui[model] === x.id ? 'selected' : ''}>${x.name}</option>`)}</select></label>`;
   const itemSel = (model) => html`<label class="f">Item<select class="in" data-model="${model}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${ui[model] === i.id ? 'selected' : ''}>${i.name} (${i.unit})</option>`)}</select></label>`;
@@ -950,15 +953,26 @@ actions.exDay = () => go(`#/exceptions/${ui.day}`);
 
 // ---------- settings (Owner and manager)
 
+const splitTables = (text) => (text ?? '').split(/[,\n]/).map((t) => t.trim()).filter(Boolean);
+actions.tablesAddRange = () => {
+  const from = int(ui.tFrom ?? '1'); const to = int(ui.tTo ?? '12'); const prefix = (ui.tPrefix ?? 'T').trim();
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from > to || to - from >= 150) throw new Error('Type a from and to number, such as 1 and 12.');
+  const have = splitTables(ui.tableText);
+  const add = Array.from({ length: to - from + 1 }, (_, i) => `${prefix}${from + i}`).filter((t) => !have.some((h) => h.toLowerCase() === t.toLowerCase()));
+  ui.tableText = [...have, ...add].join(', '); ui.error = null; rerender();
+};
+actions.tablesSave = async () => { await api('PUT', B() + '/tables', { tables: splitTables(ui.tableText) }); flash = { kind: 'ok', text: 'Tables saved. The counter shows them now.' }; route(); };
+actions.tablesClear = async () => { await api('PUT', B() + '/tables', { tables: [] }); flash = { kind: 'ok', text: 'List cleared. The counter shows the tables used lately.' }; route(); };
 async function settingsScreen(tab = 'menu') {
-  const tabs = [['menu', 'Menu', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
+  const tabs = [['menu', 'Menu', 'menu.edit'], ['tables', 'Tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
     ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];
   await load('menu', 'reasons', 'entities', 'payAccounts');
   if (tab === 'staff') ui.staff = (await api('GET', B() + '/staff')).staff;
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
-  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/settings/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
+  if (tab === 'tables') { ui.tableList = (await api('GET', B() + '/tables')).tables; ui.tableText = ui.tableList.join(', '); }
+  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip link" href="#/settings/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
   const kinds = { discount: 'Discount', comp: 'Complimentary', void: 'Void', kot_cancel: 'Cancelled KOT line' };
   rerender = () => {
     let body = '';
@@ -970,6 +984,17 @@ async function settingsScreen(tab = 'menu') {
         <label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>
         <label class="f">Station<select class="in" data-model="iStation"><option value="kitchen">Kitchen</option><option value="bar" ${ui.iStation === 'bar' ? 'selected' : ''}>Bar</option></select></label>
         <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="addItem" data-submit>${ui.editItem ? 'Save item' : 'Add item'}</button>${ui.editItem ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></div></form></section>`;
+    if (tab === 'tables') body = html`<section class="panel"><h2>Tables</h2>
+      <p class="quiet small">The tables the counter shows as a grid, in this order. Leave the list empty to show the tables used in the last 60 days instead.</p>${errorBox()}
+      ${ui.tableList.length ? html`<div class="tgrid">${ui.tableList.map((t) => html`<span class="tcell free">${t}</span>`)}</div>` : html`<p class="quiet">No list yet: the counter shows recent tables.</p>`}
+      <form class="grid3"><h2 style="grid-column:1/-1">Make a numbered set</h2>
+        <label class="f">Name starts with<input class="in" data-model="tPrefix" value="${ui.tPrefix ?? 'T'}" maxlength="12"></label>
+        <label class="f">From number<input class="in" inputmode="numeric" data-model="tFrom" value="${ui.tFrom ?? '1'}"></label>
+        <label class="f">To number<input class="in" inputmode="numeric" data-model="tTo" value="${ui.tTo ?? '12'}"></label>
+        <div class="row" style="grid-column:1/-1"><button class="btn" type="button" data-act="tablesAddRange">Add these to the list below</button></div></form>
+      <form class="f"><label class="f">All tables, in order (separate with commas or new lines)<textarea class="in" rows="4" data-model="tableText">${ui.tableText}</textarea></label>
+        <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tablesSave" data-submit>Save tables</button>
+          ${ui.tableList.length ? html`<button class="btn" type="button" data-act="tablesClear">Clear the list (show recent tables)</button>` : ''}</div></form></section>`;
     if (tab === 'reasons') body = html`<section class="panel"><h2>Reasons</h2>${errorBox()}
       ${Object.entries(kinds).map(([k, t]) => html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">${t}</p><div class="chips">${reasonsOf(k).map((r) => html`<span class="chip" style="display:inline-flex;align-items:center;gap:8px">${r.label}<button class="btn" style="min-height:32px;padding:0 8px" type="button" data-act="retire" data-id="${r.id}" aria-label="Remove ${r.label}">×</button></span>`)}</div></div>`)}
       <form class="grid3"><label class="f">For<select class="in" data-model="rKind">${Object.entries(kinds).map(([k, t]) => html`<option value="${k}" ${ui.rKind === k ? 'selected' : ''}>${t}</option>`)}</select></label>

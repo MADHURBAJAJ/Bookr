@@ -6,7 +6,7 @@ import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { billTotals, limitState, rs, type Discount } from '../billing';
-import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel } from '../util';
+import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel, tableList } from '../util';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
@@ -40,19 +40,21 @@ function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
 // Open orders and tabs (with their lines), and bills printed but not yet paid: the counter's main screen.
 orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
+  const fixed = tableList(bizOf(c));
   const [os, ls, bills, used] = await Promise.all([
     all<OrderRow>(c.env.DB, "SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at", bid),
     all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
     all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
       "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
-    // The tables this restaurant has used in the last 60 days: the counter shows them as a grid to tap.
-    all<{ place: string }>(c.env.DB, "SELECT min(place) AS place FROM orders WHERE business_id = ? AND kind = 'table' AND opened_at > ? GROUP BY lower(place) LIMIT 80",
-      bid, Date.now() - 60 * 86_400_000),
+    // The counter's table grid: the restaurant's own list from Settings, or else the tables used in the last 60 days.
+    fixed ? Promise.resolve(fixed.map((place) => ({ place })))
+      : all<{ place: string }>(c.env.DB, "SELECT min(place) AS place FROM orders WHERE business_id = ? AND kind = 'table' AND opened_at > ? GROUP BY lower(place) LIMIT 80",
+        bid, Date.now() - 60 * 86_400_000),
   ]);
   return c.json({ orders: os.map((o) => {
     const b = bills.find((x) => x.order_id === o.id);
     return orderOut(o, ls.filter((l) => l.order_id === o.id), b ? { id: b.id, billNo: b.bill_no, totalPaise: b.total_paise, entityId: b.entity_id } : null);
-  }), tables: used.map((u) => u.place).sort((x, y) => x.localeCompare(y, 'en', { numeric: true })) });
+  }), tables: fixed ?? used.map((u) => u.place).sort((x, y) => x.localeCompare(y, 'en', { numeric: true })), tablesFixed: !!fixed });
 });
 
 orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {

@@ -6,7 +6,7 @@ import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, optionalPaise, paise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { isRole } from '../permissions';
-import { audit, clock, bizOf, loadBusiness } from '../util';
+import { audit, clock, bizOf, loadBusiness, tableList } from '../util';
 import type { AppEnv } from '../types';
 
 export const settingsRoutes = new Hono<AppEnv>();
@@ -37,6 +37,31 @@ settingsRoutes.put(`${B}/settings`, requireAction('staff.manage'), async (c) => 
     audit(c.env.DB, id, c.get('staff').id, 'business.update', 'businesses', id, before, after),
   ]);
   return c.json({ ok: true });
+});
+
+// ---------- tables: the counter's grid, in the order given
+
+settingsRoutes.get(`${B}/tables`, requireAction('menu.edit'), async (c) => {
+  return c.json({ tables: tableList(bizOf(c)) ?? [] });
+});
+
+settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
+  const id = c.get('businessId');
+  const data = await body(c);
+  if (!Array.isArray(data.tables) || data.tables.length > 150) fail(400, 'Tables must be a list of up to 150 names.');
+  const names: string[] = [];
+  for (const raw of data.tables) {
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (!name || name.length > 20) fail(400, 'Each table name must be 1 to 20 characters.');
+    if (names.some((n) => n.toLowerCase() === name.toLowerCase())) fail(400, `${name} is in the list twice.`);
+    names.push(name);
+  }
+  const before = tableList(bizOf(c));
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE businesses SET tables = ? WHERE id = ?', names.length ? JSON.stringify(names) : null, id),
+    audit(c.env.DB, id, c.get('staff').id, 'tables.update', 'businesses', id, { tables: before }, { tables: names.length ? names : null }),
+  ]);
+  return c.json({ tables: names });
 });
 
 // ---------- staff

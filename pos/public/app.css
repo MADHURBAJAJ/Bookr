@@ -135,3 +135,5 @@ a.btn.pri { color: #fff; }
 .tcell.billed { background: var(--warn-tint); border-color: var(--warn-line); }
 .quick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .quick .btn { min-height: 52px; font-size: 16px; }
+a.chip.link { display: inline-flex; align-items: center; text-decoration: none; color: inherit; }
+a.chip.link[aria-pressed="true"] { color: #fff; }

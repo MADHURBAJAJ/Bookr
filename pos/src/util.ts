@@ -2,12 +2,18 @@ import { now, one, stmt, type DB } from '../../src/db';
 import { fail } from '../../src/http';
 import { fyOf, shiftDayAt } from './billing';
 
-export interface Business { id: string; name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number }
+export interface Business { id: string; name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null }
 
 export async function loadBusiness(db: DB, id: string): Promise<Business> {
-  const b = await one<Business>(db, 'SELECT id, name, fy_start_month, shift_start_hour, tab_age_days FROM businesses WHERE id = ?', id);
+  const b = await one<Business>(db, 'SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables FROM businesses WHERE id = ?', id);
   if (!b) fail(404, 'Business not found.');
   return b;
+}
+
+/** The restaurant's own table list from Settings, or null when it has none (the counter then shows recent tables). */
+export function tableList(b: Business): string[] | null {
+  if (!b.tables) return null;
+  try { const v = JSON.parse(b.tables); return Array.isArray(v) && v.length ? v.map(String) : null; } catch { return null; }
 }
 
 /** The signed-in person's business, already loaded with their session. */
