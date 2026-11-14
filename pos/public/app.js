@@ -251,7 +251,7 @@ async function orderScreen(id) {
         <div class="items">${menu.filter((m) => ui.cat === 'All' || m.category === ui.cat).map((m) => html`<button type="button" class="item" data-act="add" data-id="${m.id}">
           <strong>${m.name}</strong><span class="quiet small">${rs(m.pricePaise)}</span>${qty(m.id) ? html`<span class="q">${qty(m.id)}</span>` : ''}</button>`)}</div>
       </section>
-      <section class="ticket panel" aria-label="Order">
+      <section class="ticket panel" aria-label="Order" id="ticket">
         <div class="row" style="justify-content:space-between"><div><h2>${o.place}</h2><p class="quiet small">${o.guestName ?? ''}${o.status === 'tab' ? ' · tab since ' + o.openedShiftDay : ''}</p></div>
           <a class="btn" href="#/">Back</a></div>
         ${errorBox()}
@@ -281,10 +281,13 @@ async function orderScreen(id) {
           ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>` : ''}</div>
         ${ui.tabAsk ? html`<form class="msg warn"><label class="f">Guest name for the tab<input class="in" data-model="tabGuest" value="${o.guestName ?? ''}" autofocus></label>
           <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
-      </section></div>`));
+      </section></div>
+      <div class="orderbar"><span>${o.place} · ${o.lines.reduce((n, l) => n + l.qty, 0)} items · ${rs(o.lines.reduce((t, l) => t + l.qty * l.pricePaise, 0))}${unsent ? ' · not sent' : ''}</span>
+        <button class="btn" type="button" data-act="toTicket" style="min-height:40px">View order</button></div>`));
   };
   rerender();
 }
+actions.toTicket = () => document.getElementById('ticket')?.scrollIntoView({ behavior: 'smooth' });
 actions.cat = (d) => { ui.cat = d.c; rerender(); };
 actions.add = async (d) => { ui.error = null; ui.kotDone = null; ui.order = (await api('POST', `${B()}/orders/${ui.order.id}/items`, { itemId: d.id, delta: 1 })).order; rerender(); };
 actions.less = async (d) => {
@@ -660,7 +663,7 @@ async function shiftScreen() {
       </section>
       ${ui.closed ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
         <label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" data-live value="${ui.float ?? ''}"></label>
-        <div class="grid3">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="c${n}" data-note="${n}" value="${ui.counts[n] ?? ''}"></label>`)}
+        <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="c${n}" data-note="${n}" value="${ui.counts[n] ?? ''}"></label>`)}
           <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="loose" data-live value="${ui.loose ?? ''}"></label></div>
         <div class="sums"><div><span>Should be in the drawer</span><span>${rs(expected)}</span></div><div><span>Counted</span><span>${rs(counted)}</span></div>
           <div class="big" style="color:${diff ? 'var(--bad)' : 'var(--accent)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div></div>
