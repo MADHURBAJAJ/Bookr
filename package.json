@@ -19,7 +19,8 @@
     "pos:migrate:remote": "wrangler d1 migrations apply DB --remote -c pos/wrangler.jsonc",
     "pos:seed-demo:local": "tsx pos/scripts/seed-demo.ts --local",
     "pos:seed-demo:remote": "tsx pos/scripts/seed-demo.ts --remote",
-    "pos:deploy": "wrangler deploy -c pos/wrangler.jsonc"
+    "pos:deploy": "wrangler deploy -c pos/wrangler.jsonc",
+    "pos:reset-demo:remote": "tsx pos/scripts/seed-demo.ts --remote --keep-password"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",

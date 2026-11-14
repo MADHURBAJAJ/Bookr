@@ -29,7 +29,8 @@ npm run pos:deploy
 
 Sign in as `pos-owner@example.com` with the demo password, open **Settings › This device** and press **Make this a
 counter device**. Sign out: the counter now shows the PIN pad (demo PINs 1111 cashier, 2222 captain, 3333 manager).
-Running the seed again resets the demo restaurant.
+Running the seed again resets the demo restaurant; `npm run pos:reset-demo:remote` resets it keeping the Owner's present password
+(no password typed). A reset also removes counter devices, so set the counter up again afterwards.
 
 ## Connecting to Bookr
 

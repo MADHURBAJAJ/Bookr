@@ -3,6 +3,7 @@
 //
 //   DEMO_PASSWORD=... npx tsx pos/scripts/seed-demo.ts --local
 //   DEMO_PASSWORD=... npx tsx pos/scripts/seed-demo.ts --remote
+//   npx tsx pos/scripts/seed-demo.ts --remote --keep-password   (reset, keeping the Owner's present password)
 //
 // The Owner's password comes from the environment and is never written to the repo or printed; only its PBKDF2 hash goes
 // into a temporary SQL file, deleted as soon as wrangler has run it. Counter PINs are demo PINs (1111, 2222, 3333): they
@@ -16,8 +17,19 @@ import { shiftDayAt } from '../src/billing';
 
 const target = process.argv.includes('--remote') ? '--remote' : process.argv.includes('--local') ? '--local' : null;
 const password = process.env.DEMO_PASSWORD ?? '';
+const keep = process.argv.includes('--keep-password');
 if (!target) throw new Error('Pass --local or --remote');
-if (password.length < 12) throw new Error('Set DEMO_PASSWORD (at least 12 characters)');
+if (!keep && password.length < 12) throw new Error('Set DEMO_PASSWORD (at least 12 characters), or pass --keep-password');
+
+/** The Owner's present password hash, read from the database (never printed), so a reset needs no password typed. */
+function presentHash(): string {
+  const res = spawnSync('npx', ['wrangler', 'd1', 'execute', 'DB', target!, '--json', '--command',
+    "SELECT password_hash FROM staff WHERE lower(email) = 'pos-owner@example.com'", '-c', 'pos/wrangler.jsonc'], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+  if (res.status !== 0) throw new Error('Could not read the present demo Owner; set DEMO_PASSWORD instead.');
+  const h = JSON.parse(res.stdout.slice(res.stdout.indexOf('[')))[0]?.results?.[0]?.password_hash;
+  if (typeof h !== 'string' || !h.startsWith('pbkdf2-sha256$')) throw new Error('No demo Owner found to keep; set DEMO_PASSWORD instead.');
+  return h;
+}
 
 export const DEMO_BUSINESS = '0000dea0-0000-4000-8000-000000000001';
 const lit = (v: string | number | null) => (v === null ? 'NULL' : typeof v === 'number' ? String(v) : `'${v.replace(/'/g, "''")}'`);
@@ -38,7 +50,7 @@ for (const table of ['settle_differences', 'recipes', 'credit_notes', 'drawer_ou
 out.push(`DELETE FROM businesses WHERE id = ${lit(B)};`);
 
 insert('businesses', { id: B, name: 'Sample Restaurant (demo)', fy_start_month: 4, shift_start_hour: 8, tab_age_days: 3, created_at: t });
-const hash = await hashPassword(password);
+const hash = keep ? presentHash() : await hashPassword(password);
 insert('staff', { id: id(), business_id: B, name: 'Owner (demo)', role: 'owner', email: 'pos-owner@example.com', password_hash: hash, pin_hash: null, created_at: t });
 for (const [name, role, pin] of [['Ravi (cashier)', 'cashier', '1111'], ['Suresh (captain)', 'captain', '2222'], ['Anil (manager)', 'manager', '3333']]) {
   insert('staff', { id: id(), business_id: B, name, role, email: role === 'manager' ? 'pos-manager@example.com' : null,
@@ -119,4 +131,4 @@ try {
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
-console.log(`Demo restaurant ready on ${target === '--local' ? 'local' : 'remote'} D1. Sign in as pos-owner@example.com with DEMO_PASSWORD; counter PINs 1111 (cashier), 2222 (captain), 3333 (manager).`);
+console.log(`Demo restaurant ready on ${target === '--local' ? 'local' : 'remote'} D1. Sign in as pos-owner@example.com with ${keep ? 'the same password as before' : 'DEMO_PASSWORD'}; counter PINs 1111 (cashier), 2222 (captain), 3333 (manager).`);
