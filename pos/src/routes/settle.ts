@@ -10,6 +10,7 @@ import { requireAction, requireStaff } from '../auth';
 import { allocate, rs } from '../billing';
 import { clock, event, isTrigger, loadBusiness, reasonLabel } from '../util';
 import { billOut } from './orders';
+import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
 export const settleRoutes = new Hono<AppEnv>();
@@ -20,7 +21,7 @@ type Mode = 'cash' | 'upi' | 'card' | 'room' | 'credit' | 'comp' | 'advance';
 interface Pay {
   id: string; mode: Mode; amountPaise: number; tenderedPaise: number | null; payAccountId: string | null; payAccountEntity: string | null;
   cardApproval: string | null; cardLast4: string | null; debtorAccountId: string | null; newCredit: { name: string; phone: string | null } | null;
-  compGuest: string | null; compReason: string | null;
+  compGuest: string | null; compReason: string | null; payAccountName: string | null; bookrAccountId: string | null; debtorName: string | null;
 }
 
 const amountOf = (v: unknown, label: string): number => {
@@ -40,16 +41,18 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
   const mode = p.mode as Mode;
   if (!allowed.includes(mode)) fail(400, `Payment ${n}: ${String(p.mode)} cannot be used here.`);
   const out: Pay = { id: newId(), mode, amountPaise: amountOf(p.amount, `Payment ${n} amount`), tenderedPaise: null, payAccountId: null, payAccountEntity: null,
-    cardApproval: null, cardLast4: null, debtorAccountId: null, newCredit: null, compGuest: null, compReason: null };
+    cardApproval: null, cardLast4: null, debtorAccountId: null, newCredit: null, compGuest: null, compReason: null, payAccountName: null, bookrAccountId: null, debtorName: null };
   if (mode === 'cash' && p.tendered !== undefined && p.tendered !== null && p.tendered !== '') {
     out.tenderedPaise = amountOf(p.tendered, `Payment ${n} cash given`);
     if (out.tenderedPaise < out.amountPaise) fail(400, `Payment ${n}: cash given is less than the amount.`);
   }
   if (mode === 'upi') {
-    const acc = await one<{ id: string; entity_id: string }>(db, 'SELECT id, entity_id FROM pay_accounts WHERE id = ? AND business_id = ? AND active = 1', p.payAccountId, bid);
+    const acc = await one<{ id: string; entity_id: string; name: string; bookr_account_id: string | null }>(db, 'SELECT id, entity_id, name, bookr_account_id FROM pay_accounts WHERE id = ? AND business_id = ? AND active = 1', p.payAccountId, bid);
     if (!acc) fail(400, `Payment ${n}: choose which account's QR was paid.`);
     out.payAccountId = acc.id;
     out.payAccountEntity = acc.entity_id;
+    out.payAccountName = acc.name;
+    out.bookrAccountId = acc.bookr_account_id;
   }
   if (mode === 'card') {
     const code = typeof p.cardApproval === 'string' ? p.cardApproval.trim().toUpperCase() : '';
@@ -60,16 +63,18 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
     out.cardLast4 = last4;
   }
   if (mode === 'room') {
-    const a = await one<{ id: string }>(db, `SELECT d.id FROM debtor_accounts d JOIN stays s ON s.id = d.stay_id
+    const a = await one<{ id: string; name: string }>(db, `SELECT d.id, d.name FROM debtor_accounts d JOIN stays s ON s.id = d.stay_id
       WHERE d.id = ? AND d.business_id = ? AND d.kind = 'room' AND s.checked_out_at IS NULL`, p.debtorAccountId, bid);
     if (!a) fail(400, `Payment ${n}: choose an in-house room.`);
     out.debtorAccountId = a.id;
+    out.debtorName = a.name;
   }
   if (mode === 'credit') {
     if (p.newCredit && typeof p.newCredit === 'object') {
       const nc = p.newCredit as Record<string, unknown>;
       out.newCredit = { name: text(nc, 'name', `Payment ${n}: new credit account name`, { max: 80 })!, phone: text(nc, 'phone', 'Phone', { optional: true, max: 20 }) };
       out.debtorAccountId = newId();
+      out.debtorName = out.newCredit.name;
     } else {
       const a = await one<{ id: string; credit_limit_paise: number | null; name: string }>(db,
         "SELECT id, credit_limit_paise, name FROM debtor_accounts WHERE id = ? AND business_id = ? AND kind = 'credit'", p.debtorAccountId, bid);
@@ -78,6 +83,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
         fail(409, `Payment ${n}: ${a.name} would go over its credit limit of ${rs(a.credit_limit_paise)}.`);
       }
       out.debtorAccountId = a.id;
+      out.debtorName = a.name;
     }
   }
   if (mode === 'advance') {
@@ -86,6 +92,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
     const bal = await balance(db, a.id);
     if (-bal < out.amountPaise) fail(409, `Payment ${n}: ${a.name} has ${rs(Math.max(0, -bal))} of advance left.`);
     out.debtorAccountId = a.id;
+    out.debtorName = a.name;
   }
   if (mode === 'comp') {
     out.compGuest = text(p, 'compGuest', `Payment ${n}: the guest's name for a complimentary bill`, { max: 80 });
@@ -171,6 +178,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     if (isTrigger(e, 'bill_frozen')) fail(409, 'One of these bills changed meanwhile. Open it again.');
     throw e;
   }
+  sendSoon(c, bid);
   const change = pays.reduce((s, p) => s + (p.tenderedPaise ? p.tenderedPaise - p.amountPaise : 0), 0);
   return c.json({ settlementId, changePaise: change, bills: await Promise.all(ordered.map((x) => billOut(db, bid, x.id))) }, 201);
 });
@@ -185,7 +193,8 @@ function settledMessage(billId: string, bills: { id: string; bill_no: string }[]
     payments: pieces.filter((x) => x.billId === billId).map((x) => {
       const p = pays.find((q) => q.id === x.paymentId)!;
       return { paymentId: p.id, mode: p.mode, amountPaise: x.amountPaise, paymentTotalPaise: p.amountPaise, payAccountId: p.payAccountId,
-        cardApproval: p.cardApproval, cardLast4: p.cardLast4, debtorAccountId: p.debtorAccountId, compGuest: p.compGuest, compReason: p.compReason };
+        payAccountName: p.payAccountName, bookrAccountId: p.bookrAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4,
+        debtorAccountId: p.debtorAccountId, debtorName: p.debtorName, compGuest: p.compGuest, compReason: p.compReason };
     }),
   };
 }
@@ -217,13 +226,15 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
         newId(), bid, acc.id, kind, -p.amountPaise, p.id, staff.id, t)),
       stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
         settlementId, kind, account: { id: acc.id, kind: acc.kind, name: acc.name }, shiftDay, at: t, by: staff.name,
-        payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4 })),
+        payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, payAccountName: p.payAccountName,
+          bookrAccountId: p.bookrAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4 })),
       }), t),
     ]);
   } catch (e) {
     if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Ask an Owner.');
     throw e;
   }
+  sendSoon(c, bid);
   return c.json({ settlementId, balancePaise: await balance(db, acc.id) }, 201);
 });
 

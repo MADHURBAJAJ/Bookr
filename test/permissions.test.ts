@@ -21,6 +21,7 @@ describe('role matrix (matches the Users and roles design)', () => {
     ['accounts.view', true, true, true, true],
     ['heads.view', true, true, true, true],
     ['business.view', true, true, true, true],
+    ['pos.link', true, false, false, false],
   ];
   it.each(table)('%s', (action, ...expected) => {
     expect(ROLES.map((r) => can(r, action))).toEqual(expected);

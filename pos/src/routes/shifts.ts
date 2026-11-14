@@ -8,6 +8,7 @@ import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { rs } from '../billing';
 import { clock, loadBusiness } from '../util';
+import { sendOutbox, sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
 export const shiftRoutes = new Hono<AppEnv>();
@@ -96,6 +97,7 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
     if (isUniqueViolation(e)) fail(409, 'This shift is already closed.');
     throw e;
   }
+  sendSoon(c, bid);
   return c.json({ ok: true, countedPaise, expectedPaise: expected, differencePaise: diff, message: diff === 0 ? 'Drawer agrees.' : `Drawer is ${diff < 0 ? 'short' : 'over'} by ${rs(Math.abs(diff))}.` }, 201);
 });
 
@@ -107,9 +109,15 @@ shiftRoutes.get(`${B}/events`, requireAction('reports.view'), async (c) => {
     FROM pos_events e LEFT JOIN staff s ON s.id = e.by_staff WHERE e.business_id = ? AND e.shift_day = ? ORDER BY e.at DESC, e.id DESC`, bid, day) });
 });
 
-shiftRoutes.get(`${B}/outbox`, requireAction('reports.view'), async (c) => {
+shiftRoutes.get(`${B}/outbox`, requireAction('shift.close'), async (c) => {
   const bid = c.get('businessId');
   const pending = await one<{ n: number; oldest: number | null }>(c.env.DB, 'SELECT count(*) AS n, min(created_at) AS oldest FROM outbox WHERE business_id = ? AND sent_at IS NULL', bid);
   const failing = await all(c.env.DB, 'SELECT id, kind, attempts, last_error AS lastError, created_at AS createdAt FROM outbox WHERE business_id = ? AND sent_at IS NULL AND attempts > 0 ORDER BY created_at LIMIT 20', bid);
-  return c.json({ pending: pending?.n ?? 0, oldestAt: pending?.oldest ?? null, failing });
+  const rejected = await all(c.env.DB, "SELECT id, kind, last_error AS lastError, sent_at AS sentAt FROM outbox WHERE business_id = ? AND sent_at IS NOT NULL AND last_error LIKE 'Rejected%' ORDER BY sent_at DESC LIMIT 20", bid);
+  return c.json({ pending: pending?.n ?? 0, oldestAt: pending?.oldest ?? null, failing, rejected });
+});
+
+// "Send now": tries the outbox at once (also tried after each sale and every 5 minutes).
+shiftRoutes.post(`${B}/outbox/send`, requireAction('shift.close'), async (c) => {
+  return c.json(await sendOutbox(c.env, c.get('businessId')));
 });

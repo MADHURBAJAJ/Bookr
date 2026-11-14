@@ -39,6 +39,8 @@ export const PERMISSIONS = {
   'sales.decide': BOOKS,
   'shift.reopen': OWNER,
   'cash.writeoff': OWNER,
+  // The restaurant POS (approved 14 Nov 2026): connecting one is Owner work; its bills are seen with sales.view.
+  'pos.link': OWNER,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

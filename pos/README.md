@@ -1,8 +1,17 @@
 # Restaurant POS
 
 A separate Cloudflare Worker with its own D1 database, kept in the Bookr repository so it shares Bookr's money, India-time and
-crypto code. It sends each settled bill, debtor receipt, void and shift close to Bookr (the sending and Bookr's receiving end
-come next; for now messages wait in the `outbox` table). Plan and decisions: the "Hotel restaurant POS: research and plan" doc.
+crypto code. It sends each settled bill, debtor receipt, void and shift close to Bookr, which files them and shows them on its
+POS page (not yet booked as income). Plan and decisions: the "Hotel restaurant POS: research and plan" doc.
+
+## Connecting to Bookr
+
+1. In Bookr, the Owner opens **POS** and presses **Connect POS**. The key is shown once.
+2. On the POS Worker set `BOOKR_URL` (a var in `pos/wrangler.jsonc`) to Bookr's address, and the key as a secret:
+   `npx wrangler secret put BOOKR_KEYS -c pos/wrangler.jsonc` with `{"<business id>": "<key>"}`. Never in the repo or chat.
+3. The POS sends after every settle, void, receipt and shift close, every 5 minutes (cron), and on **Send now**. A message
+   Bookr already has is not filed twice; one it cannot file is kept on both sides with the reason.
+4. **Make a new key** in Bookr replaces the old one (then update the secret); **Disconnect** stops Bookr accepting messages.
 
 Nothing about one hotel is fixed in code. Billing names (a company, HUFs or one name), GST rate, yearly limits, shift start,
 tab age limit, menu and reason lists are settings per business.

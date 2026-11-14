@@ -20,6 +20,10 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Bookr's address. The key Bookr gives each business goes in the BOOKR_KEYS Worker secret, never here.
+  "vars": { "BOOKR_URL": "" },
+  // Sends Bookr whatever is still waiting, every 5 minutes.
+  "triggers": { "crons": ["*/5 * * * *"] },
   // POS_SETUP_TOKEN is a Worker secret (wrangler secret put POS_SETUP_TOKEN -c pos/wrangler.jsonc), never here.
   "observability": { "enabled": true }
 }

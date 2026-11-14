@@ -7,6 +7,7 @@ import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { billTotals, limitState, rs, type Discount } from '../billing';
 import { clock, event, isTrigger, loadBusiness, reasonLabel } from '../util';
+import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
 export const orderRoutes = new Hono<AppEnv>();
@@ -264,6 +265,7 @@ orderRoutes.post(`${B}/bills/:id/void`, requireAction('bills.void'), async (c) =
     stmt(c.env.DB, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'bill_void', ?, ?)", newId(), bid,
       JSON.stringify({ billId: id, billNo: bill.bill_no, shiftDay: bill.shift_day, totalPaise: bill.total_paise, reason, voidedAt: t }), t),
   ]);
+  sendSoon(c, bid);
   return c.json({ ok: true });
 });
 

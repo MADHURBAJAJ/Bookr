@@ -53,8 +53,8 @@ export class Client {
 
 let n = 0;
 /** A business with an Owner signed in, a counter device, a cashier and captain with PINs, a menu and reasons. */
-export async function setupBusiness(opts: { huf?: boolean } = {}) {
-  const businessId = crypto.randomUUID();
+export async function setupBusiness(opts: { huf?: boolean; businessId?: string; bookrAccountId?: string } = {}) {
+  const businessId = opts.businessId ?? crypto.randomUUID();
   const email = `owner-${++n}@test.local`;
   const owner = new Client();
   let r = await owner.call('POST', '/setup', { businessId, name: 'Sample Hotel', ownerName: 'Owner', email, password: 'owner-password-123' }, { 'X-Setup-Token': SETUP_TOKEN });
@@ -66,7 +66,7 @@ export async function setupBusiness(opts: { huf?: boolean } = {}) {
 
   const company = (await ok(owner.post(`${B}/entities`, { name: 'Sample Hotels Pvt Ltd', kind: 'company', gstRegistered: true, gstin: '29ABCDE1234F1Z5', gstRateBp: 500, seriesPrefix: 'C' }))).id;
   const huf = opts.huf ? (await ok(owner.post(`${B}/entities`, { name: 'Sample HUF 1', kind: 'huf', gstRegistered: false, seriesPrefix: 'H1', yearlyLimit: '2000000', warn1: '1500000', warn2: '1800000', stopAt: '1950000' }))).id : null;
-  const upiCompany = (await ok(owner.post(`${B}/pay-accounts`, { name: 'Company QR', entityId: company }))).id;
+  const upiCompany = (await ok(owner.post(`${B}/pay-accounts`, { name: 'Company QR', entityId: company, bookrAccountId: opts.bookrAccountId }))).id;
   const upiHuf = huf ? (await ok(owner.post(`${B}/pay-accounts`, { name: 'HUF 1 QR', entityId: huf }))).id : null;
 
   const items: Record<string, string> = {};
