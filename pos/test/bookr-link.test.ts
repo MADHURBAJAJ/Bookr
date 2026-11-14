@@ -52,10 +52,21 @@ describe('POS to Bookr', () => {
     expect(view.byMode).toEqual({ card: 18900, upi: 8400 });
     expect(view.voids.map((v: any) => [v.billNo, v.reason])).toEqual([[voided.billNo, 'Wrong billing name']]);
 
+    // A tip on a card payment and a discount at payment reach Bookr with the bill.
+    const c2 = (await billed(s, [['Masala Dosa', 1]])).bill; // 189
+    await s.counter.post(`${s.B}/settlements`, { billIds: [c2.id], payments: [{ mode: 'card', amount: '200', cardApproval: 'TP12TP', cardLast4: '2222' }], difference: { kind: 'tip' } });
+    const d2 = (await billed(s, [['Masala Chai', 2]])).bill; // 84
+    await s.counter.post(`${s.B}/settlements`, { billIds: [d2.id], payments: [{ mode: 'cash', amount: '80' }], difference: { kind: 'discount', reasonId: s.reasons.discount } });
+    expect(await sendOutbox(env, bid, toBookr)).toMatchObject({ sent: 2, rejected: 0 });
+    const v2 = (await bookr.get(`/businesses/${bid}/pos?day=${a.shiftDay}`)).json.bills;
+    expect(v2.find((x: any) => x.billNo === c2.billNo)).toMatchObject({ tipPaise: 1100, settleDiscountPaise: 0 });
+    expect(v2.find((x: any) => x.billNo === c2.billNo).payments[0]).toMatchObject({ amountPaise: 18900, paymentTotalPaise: 20000 });
+    expect(v2.find((x: any) => x.billNo === d2.billNo)).toMatchObject({ settleDiscountPaise: 400, settleDiscountReason: 'Regular guest' });
+
     // Sent again (as after a lost answer): Bookr keeps one copy.
     await posDb.prepare('UPDATE outbox SET sent_at = NULL WHERE business_id = ?').bind(bid).run();
-    expect(await sendOutbox(env, bid, toBookr)).toMatchObject({ sent: 3, rejected: 0 });
-    expect((await bookrSql`SELECT count(*) AS n FROM pos_bills WHERE business_id = ${bid}`)[0].n).toBe(2);
+    expect(await sendOutbox(env, bid, toBookr)).toMatchObject({ sent: 5, rejected: 0 });
+    expect((await bookrSql`SELECT count(*) AS n FROM pos_bills WHERE business_id = ${bid}`)[0].n).toBe(4);
   });
 
   it('keeps messages waiting when Bookr refuses the key or cannot be reached', async () => {

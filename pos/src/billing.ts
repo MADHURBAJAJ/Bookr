@@ -81,6 +81,29 @@ export function allocate(payments: { id: string; amountPaise: number }[], bills:
   return out;
 }
 
+/**
+ * Like allocate, but the payments may come to less or more than the bills: what is still owed at the end is returned per
+ * bill (a discount at payment), and what is left over is returned per payment that carried it (a tip).
+ */
+export function allocateLoose(payments: { id: string; amountPaise: number }[], bills: { id: string; totalPaise: number }[]) {
+  const owing = bills.map((b) => ({ id: b.id, left: b.totalPaise }));
+  const pieces: { paymentId: string; billId: string; amountPaise: number }[] = [];
+  const over: { paymentId: string; amountPaise: number }[] = [];
+  let i = 0;
+  for (const p of payments) {
+    let left = p.amountPaise;
+    while (left > 0) {
+      while (i < owing.length && owing[i].left === 0) i++;
+      if (i >= owing.length) { over.push({ paymentId: p.id, amountPaise: left }); break; }
+      const take = Math.min(left, owing[i].left);
+      pieces.push({ paymentId: p.id, billId: owing[i].id, amountPaise: take });
+      owing[i].left -= take;
+      left -= take;
+    }
+  }
+  return { pieces, over, short: owing.filter((o) => o.left > 0).map((o) => ({ billId: o.id, amountPaise: o.left })) };
+}
+
 /** Where a billing name stands against its yearly limit, after adding `addPaise`. */
 export function limitState(entity: { warn1_paise: number | null; warn2_paise: number | null; stop_paise: number | null }, yearPaise: number, addPaise = 0): 'ok' | 'warn1' | 'warn2' | 'stop' {
   const t = yearPaise + addPaise;

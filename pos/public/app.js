@@ -418,13 +418,17 @@ async function settleScreen(billId) {
           ${m === 'advance' ? html`<div class="f" style="grid-column:1/-1">Whose advance${advanceAccts.length ? html`<div class="chips">${advanceAccts.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === a.id}" data-act="pick" data-k="debtorAccountId" data-id="${a.id}">${a.name} · ${rs(-a.bal)} left</button>`)}</div>` : html`<span>Nobody has an advance.</span>`}</div>` : ''}
         </form>
         ${errorBox()}
+        ${ui.pays.length && left > 0 ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>${rs(left)} still to pay.</strong> Take another payment, or mark it as a discount (the printed bill stays as it is):</p>
+          <div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.diff?.kind === 'discount' && ui.diff.reasonId === r.id}" data-act="diffDisc" data-id="${r.id}">${r.label}</button>`)}</div></div>` : ''}
+        ${left < 0 ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Paid ${rs(-left)} more than the bill.</strong> Mark it as a tip for staff, or remove the payment and enter cash given so change is worked out.</p>
+          <button type="button" class="chip" aria-pressed="${ui.diff?.kind === 'tip'}" data-act="diffTip">Mark ${rs(-left)} as a tip</button></div>` : ''}
         ${ui.mismatch ? html`<div class="msg warn"><p style="margin-bottom:8px">${ui.mismatch}</p><button class="btn" type="button" data-act="settle" data-confirm="1">Settle anyway</button></div>` : ''}
         <div><button class="btn" type="button" data-act="addPay" ${left > 0 ? '' : 'disabled'}>Add this payment</button></div>
         <div><p class="small quiet" style="font-weight:600">Payments</p>
           ${ui.pays.length ? ui.pays.map((p, i) => html`<div class="line"><strong style="width:130px">${p.label}</strong><span class="grow quiet small">${p.detail}</span><span class="num">${rs(p.amountPaise)}</span>
             <button class="btn" type="button" data-act="dropPay" data-i="${i}">Remove</button></div>`) : html`<p class="quiet small">None yet. The bill closes only when payments add up to the total.</p>`}</div>
-        <div class="row" style="justify-content:space-between"><strong style="font-size:17px;color:${left === 0 ? 'var(--accent)' : 'inherit'}">${left === 0 ? 'Paid in full' : left > 0 ? 'Left to pay ' + rs(left) : 'Over by ' + rs(-left)}</strong>
-          <button class="btn pri" type="button" data-act="settle" ${left === 0 && ui.pays.length ? '' : 'disabled'}>Settle</button></div>
+        <div class="row" style="justify-content:space-between"><strong style="font-size:17px;color:${left === 0 || diffOk(left) ? 'var(--accent)' : 'inherit'}">${left === 0 ? 'Paid in full' : diffOk(left) ? (left > 0 ? `Paid, with ${rs(left)} discount` : `Paid, with ${rs(-left)} tip`) : left > 0 ? 'Left to pay ' + rs(left) : 'Over by ' + rs(-left)}</strong>
+          <button class="btn pri" type="button" data-act="settle" ${(left === 0 || diffOk(left)) && ui.pays.length ? '' : 'disabled'}>Settle</button></div>
       </section></div>`));
   };
   rerender();
@@ -439,7 +443,11 @@ actions.shares = (d) => { const n = Number(d.n); ui.shares = ui.shares === n ? n
 actions.together = (d) => { ui.together = ui.together.includes(d.id) ? ui.together.filter((x) => x !== d.id) : [...ui.together, d.id]; ui.amount = undefined; rerender(); };
 actions.mode = (d) => { ui.mode = d.m; ui.error = null; ui.amount = undefined; ui.debtorAccountId = null; rerender(); };
 actions.pick = (d) => { ui[d.k] = d.id; rerender(); };
-actions.dropPay = (d) => { ui.pays.splice(Number(d.i), 1); ui.amount = undefined; ui.mismatch = null; rerender(); };
+/** A difference marked to match: a discount (with a reason) when paid less, a tip when paid more. */
+const diffOk = (left) => (left > 0 && ui.diff?.kind === 'discount' && !!ui.diff.reasonId) || (left < 0 && ui.diff?.kind === 'tip');
+actions.diffDisc = (d) => { ui.diff = { kind: 'discount', reasonId: d.id }; rerender(); };
+actions.diffTip = () => { ui.diff = ui.diff?.kind === 'tip' ? null : { kind: 'tip' }; rerender(); };
+actions.dropPay = (d) => { ui.pays.splice(Number(d.i), 1); ui.amount = undefined; ui.mismatch = null; ui.diff = null; rerender(); };
 actions.addPay = () => {
   ui.error = null;
   const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
@@ -447,7 +455,9 @@ actions.addPay = () => {
   const m = ui.mode;
   let amountPaise = ['room', 'credit', 'comp'].includes(m) ? shareOf(due, left) : toPaise(ui.amount ?? rupees(shareOf(due, left)));
   if (!amountPaise || amountPaise <= 0) throw new Error('Type the amount.');
-  if (amountPaise > left) throw new Error(m === 'cash' ? 'Type the bill amount here, and the note handed over as "cash given".' : 'More than what is left to pay.');
+  // More than is left: on cash, UPI or card it may be a tip (asked on screen); other ways cannot carry one.
+  if (amountPaise > left && !['cash', 'upi', 'card'].includes(m)) throw new Error('More than what is left to pay.');
+  if (amountPaise > left && m === 'cash' && ui.tendered) throw new Error('Type the bill amount here, and the note handed over as "cash given".');
   const p = { mode: m, amount: rupees(amountPaise), amountPaise, label: { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Room', credit: 'Credit', comp: 'Complimentary', advance: 'Advance' }[m], detail: '' };
   if (m === 'cash' && ui.tendered) { const t = toPaise(ui.tendered); if (t === null || t < amountPaise) throw new Error('Cash given must be at least the amount.'); p.tendered = rupees(t); p.detail = t > amountPaise ? `Given ${rs(t)} · change ${rs(t - amountPaise)}` : 'Exact'; }
   if (m === 'upi') { if (!ui.payAccountId) throw new Error("Choose which account's QR was paid."); p.payAccountId = ui.payAccountId; p.detail = cache.payAccounts.find((a) => a.id === ui.payAccountId).name; }
@@ -470,12 +480,16 @@ actions.addPay = () => {
   }
   if (m === 'advance') { if (!ui.debtorAccountId) throw new Error('Choose whose advance to use.'); p.debtorAccountId = ui.debtorAccountId; p.detail = 'Advance'; }
   ui.pays.push(p);
+  ui.diff = null;
   ui.amount = undefined; ui.tendered = undefined; ui.cardApproval = undefined; ui.cardLast4 = undefined;
   rerender();
 };
 actions.settle = async (d) => {
   ui.error = null;
-  const body = { billIds: [ui.bill.id, ...ui.together], payments: ui.pays.map(({ label, detail, amountPaise, ...p }) => p), confirm: d.confirm ? ['entity_mismatch'] : [] };
+  const dueNow = ui.bill.totalPaise + ui.together.reduce((s2, id) => s2 + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
+  const leftNow = dueNow - ui.pays.reduce((s2, p) => s2 + p.amountPaise, 0);
+  const body = { billIds: [ui.bill.id, ...ui.together], payments: ui.pays.map(({ label, detail, amountPaise, ...p }) => p), confirm: d.confirm ? ['entity_mismatch'] : [],
+    difference: leftNow !== 0 && diffOk(leftNow) ? ui.diff : undefined };
   try {
     const r = await api('POST', B() + '/settlements', body);
     if (r.changePaise) flash = { kind: 'ok', text: `Give change: ${rs(r.changePaise)}` };
@@ -566,6 +580,7 @@ function receipt(b) {
     ${b.roundOffPaise ? html`<div class="rl"><span>Round off</span><span>${rs(b.roundOffPaise)}</span></div>` : ''}
     <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(b.totalPaise)}</span></div>
     ${b.payments?.length ? html`<hr>${b.payments.map((p) => html`<div class="rl"><span>${{ cash: 'Cash', upi: 'UPI', card: 'Card', room: 'To room', credit: 'On credit', comp: 'Complimentary', advance: 'Advance' }[p.mode]}${p.cardLast4 ? ' ****' + p.cardLast4 : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}` : ''}
+    ${(b.differences ?? []).map((x) => html`<div class="rl"><span>${x.kind === 'tip' ? `Tip (${x.mode})` : `Discount at payment`}</span><span>${rs(x.kind === 'tip' ? x.amountPaise : x.amountPaise)}</span></div>`)}
     ${b.status === 'void' ? html`<div class="c" style="font-weight:700">VOID</div>` : ''}
   </div>`;
 }
@@ -654,6 +669,8 @@ async function shiftScreen() {
         <div class="sums">${s.billed.map((b) => html`<div><span>${b.entity}: ${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}</span><span>${rs(b.paise)}</span></div>`)}</div>
         <div class="sums">${s.events.map((e) => html`<div><span>${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings', credit_note: 'Credit notes', stock_waste: 'Stock breakage', stock_count: 'Stock count variances' }[e.kind]}</span><span>${e.n} · ${rs(e.paise)}</span></div>`)}</div>
         ${s.tabs.length ? html`<div class="sums"><div><strong>Tabs carried to the next shift (not in these totals)</strong></div>${s.tabs.map((t) => html`<div><span>${t.place} · ${t.guest} · since ${t.since}${t.old ? ' · overdue' : ''}</span><span>${rs(t.paise)}</span></div>`)}</div>` : ''}
+        ${s.tips.length || s.discountsAtPayment.n ? html`<div class="sums">${s.tips.map((t) => html`<div><span>Tips on ${t.mode} (${t.n}) · for staff, not sales</span><span>${rs(t.paise)}</span></div>`)}
+          ${s.discountsAtPayment.n ? html`<div><span>Discounts at payment (${s.discountsAtPayment.n})</span><span>${rs(s.discountsAtPayment.paise)}</span></div>` : ''}</div>` : ''}
         ${s.creditNotes.length ? html`<div class="sums"><div><strong>Credit notes (money given back)</strong></div>${s.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
         ${s.drawerOuts.length ? html`<div class="sums"><div><strong>Paid out of the drawer</strong></div>${s.drawerOuts.map((o) => html`<div><span>${o.kind === 'refund' ? 'Advance refunded' : 'Paid out'}${o.mode === 'upi' ? ' (UPI)' : ''}${o.note && o.note !== 'Advance refunded' ? ' · ' + o.note : ''} · ${o.byName ?? ''}</span><span>${rs(-o.amountPaise)}</span></div>`)}</div>` : ''}
         ${ui.closed ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
@@ -737,6 +754,8 @@ async function reportsScreen(tab = 'sales', range = '') {
       <section class="panel"><h2>By payment</h2><div class="sums">${r.byMode.map((m) => html`<div><span>${modeName[m.mode]} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
         ${r.discounts.length ? html`<h2>Discounts</h2><div class="sums">${r.discounts.map((d) => html`<div><span>${d.reason} (${d.n})</span><span>${rs(d.paise)}</span></div>`)}</div>` : ''}
         ${r.comps.length ? html`<h2>Complimentary</h2><div class="sums">${r.comps.map((c) => html`<div><span>${c.day} · ${c.guest} · ${c.reason} · by ${c.byName ?? ''}</span><span>${rs(c.paise)}</span></div>`)}</div>` : ''}
+        ${r.paymentDiscounts.length ? html`<h2>Discounts at payment</h2><div class="sums">${r.paymentDiscounts.map((d) => html`<div><span>${d.reason} (${d.n})</span><span>${rs(d.paise)}</span></div>`)}</div>` : ''}
+        ${r.tips.length ? html`<h2>Tips (for staff, not sales)</h2><div class="sums">${r.tips.map((t) => html`<div><span>${modeName[t.mode] ?? t.mode} (${t.n})</span><span>${rs(t.paise)}</span></div>`)}</div><p class="small quiet">By payment above includes these tips.</p>` : ''}
         ${r.creditNoteList.length ? html`<h2>Credit notes</h2><div class="sums">${r.creditNoteList.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(n.totalPaise)}</span></div>`)}</div>` : ''}
         ${r.voids.length ? html`<h2>Void bills</h2><div class="sums">${r.voids.map((v) => html`<div><span>${v.billNo} · ${v.reason}</span><span>${rs(v.totalPaise)}</span></div>`)}</div>` : ''}
         ${r.days.length > 1 ? html`<h2>By shift</h2><div class="sums">${r.days.map((d) => html`<div><span>${d.day} (${d.bills} bills)</span><span>${rs(d.totalPaise)}</span></div>`)}</div>` : ''}</section>

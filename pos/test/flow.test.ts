@@ -377,3 +377,35 @@ describe('bar stock', () => {
     await expect(q('UPDATE stock_moves SET qty = 1 WHERE business_id = ?', s.businessId)).rejects.toThrow(/stock_move_frozen/);
   });
 });
+
+describe('paid less or more than the bill', () => {
+  it('marks a shortfall as a discount with a reason, and an extra as a tip on that payment', async () => {
+    const s = await setupBusiness();
+    const { bill } = await billed(s, [['Masala Dosa', 2], ['Butter Naan', 1]]); // 441
+    const pay = (body: Record<string, unknown>) => s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], ...body });
+    // ₹440 by UPI: ₹1 short.
+    expect((await pay({ payments: [{ mode: 'upi', amount: '440', payAccountId: s.upiCompany }] })).json.error).toMatch(/mark it as a discount/);
+    expect((await pay({ payments: [{ mode: 'upi', amount: '440', payAccountId: s.upiCompany }], difference: { kind: 'discount' } })).json.error).toMatch(/reason/);
+    const r = await pay({ payments: [{ mode: 'upi', amount: '440', payAccountId: s.upiCompany }], difference: { kind: 'discount', reasonId: s.reasons.discount } });
+    expect(r.status).toBe(201);
+    expect(r.json).toMatchObject({ discountPaise: 100, tipPaise: 0 });
+    expect(r.json.bills[0].differences).toEqual([{ kind: 'discount', amountPaise: 100, reason: 'Regular guest', mode: null }]);
+    expect(r.json.bills[0].totalPaise).toBe(44100); // the printed bill and its GST do not change
+    const msg = JSON.parse((await q("SELECT body FROM outbox WHERE business_id = ? AND kind = 'bill_settled'", s.businessId))[0].body);
+    expect(msg).toMatchObject({ discountAtPaymentPaise: 100, discountAtPaymentReason: 'Regular guest' });
+
+    // ₹500 on the card for a ₹189 bill: ₹311 tip... and a tip cannot ride on a room payment.
+    const two = (await billed(s, [['Masala Dosa', 1]])).bill;
+    expect((await s.counter.post(`${s.B}/settlements`, { billIds: [two.id], payments: [{ mode: 'card', amount: '200', cardApproval: 'AB12CD', cardLast4: '9999' }] })).json.error).toMatch(/Mark it as a tip/);
+    const t = await s.counter.post(`${s.B}/settlements`, { billIds: [two.id], payments: [{ mode: 'card', amount: '200', cardApproval: 'AB12CD', cardLast4: '9999' }], difference: { kind: 'tip' } });
+    expect(t.json).toMatchObject({ tipPaise: 1100 });
+    expect(t.json.bills[0].payments[0]).toMatchObject({ mode: 'card', amountPaise: 18900 });
+    const sum = (await s.counter.get(`${s.B}/shifts/${bill.shiftDay}`)).json.summary;
+    expect(sum.tips).toEqual([{ mode: 'card', n: 1, paise: 1100 }]);
+    expect(sum.discountsAtPayment).toEqual({ n: 1, paise: 100 });
+    const stay = (await s.counter.post(`${s.B}/stays`, { room: '9', guestName: 'T. Guest' })).json.id;
+    const folio = (await s.counter.get(`${s.B}/stays`)).json.stays.find((x: any) => x.id === stay).accountId;
+    const three = (await billed(s, [['Masala Chai', 1]])).bill;
+    expect((await s.counter.post(`${s.B}/settlements`, { billIds: [three.id], payments: [{ mode: 'room', amount: '50', debtorAccountId: folio }], difference: { kind: 'tip' } })).json.error).toMatch(/cash, UPI or card/);
+  });
+});

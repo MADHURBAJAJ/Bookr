@@ -39,6 +39,8 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
     FROM orders o LEFT JOIN order_lines l ON l.order_id = o.id WHERE o.business_id = ? AND o.status = 'tab' GROUP BY o.id ORDER BY o.opened_at`, bid);
   const outs = await all<{ kind: string; mode: string; amount_paise: number; note: string; at: number; by_name: string | null }>(db, `SELECT o.kind, o.mode, o.amount_paise, o.note, o.at, s.name AS by_name
     FROM drawer_outs o LEFT JOIN staff s ON s.id = o.by_staff WHERE o.business_id = ? AND o.shift_day = ? ORDER BY o.at`, bid, day);
+  const differences = await all<{ kind: string; mode: string | null; n: number; paise: number }>(db, `SELECT d.kind, p.mode, count(*) AS n, sum(d.amount_paise) AS paise
+    FROM settle_differences d LEFT JOIN payments p ON p.id = d.payment_id WHERE d.business_id = ? AND d.shift_day = ? GROUP BY d.kind, p.mode`, bid, day);
   const creditNotes = await all<{ cn_no: string; bill_no: string; total_paise: number; refund_mode: string; reason: string }>(db, `SELECT n.cn_no, b.bill_no, n.total_paise, n.refund_mode, n.reason
     FROM credit_notes n JOIN bills b ON b.id = n.bill_id WHERE n.business_id = ? AND n.shift_day = ? ORDER BY n.seq`, bid, day);
   const cashIn = [...byMode, ...receipts].filter((r) => r.mode === 'cash').reduce((s, r) => s + r.paise, 0);
@@ -48,6 +50,8 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut,
     drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })),
+    tips: differences.filter((d) => d.kind === 'tip').map((d) => ({ mode: d.mode, n: d.n, paise: d.paise })),
+    discountsAtPayment: differences.filter((d) => d.kind === 'discount').reduce((t, d) => ({ n: t.n + d.n, paise: t.paise + d.paise }), { n: 0, paise: 0 }),
     creditNotes: creditNotes.map((n) => ({ cnNo: n.cn_no, billNo: n.bill_no, totalPaise: n.total_paise, refundMode: n.refund_mode, reason: n.reason })) };
 }
 
@@ -90,7 +94,7 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const expected = float + s.cashInPaise - s.cashOutPaise;
   const diff = countedPaise - expected;
   const reason = text(data, 'reason', 'A reason for the difference', { optional: diff === 0, max: 200 });
-  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes };
+  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment };
   const id = newId();
   try {
     await db.batch([

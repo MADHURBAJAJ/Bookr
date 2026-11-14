@@ -7,7 +7,7 @@ import { all, newId, now, one, stmt, type DB } from '../../../src/db';
 import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { allocate, rs } from '../billing';
+import { allocateLoose, rs } from '../billing';
 import { clock, event, isTrigger, loadBusiness, reasonLabel } from '../util';
 import { billOut } from './orders';
 import { sendSoon } from '../sync';
@@ -135,7 +135,15 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   const pays: Pay[] = [];
   for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card', 'room', 'credit', 'comp', 'advance']));
   const paid = pays.reduce((s, p) => s + p.amountPaise, 0);
-  if (paid !== due) fail(400, paid < due ? `Payments come to ${rs(paid)}; ${rs(due - paid)} is still to pay.` : `Payments come to ${rs(paid)}, ${rs(paid - due)} more than the bill. Enter cash given as "cash given" so change is worked out.`);
+  // Paid less: the rest is a discount at payment (with a reason). Paid more: the extra is a tip. Asked for, never assumed.
+  const diff = (data.difference ?? null) as Record<string, unknown> | null;
+  let discountReason: string | null = null;
+  if (paid < due) {
+    if (diff?.kind !== 'discount') fail(400, `Payments come to ${rs(paid)}; ${rs(due - paid)} is still to pay, or mark it as a discount.`);
+    discountReason = await reasonLabel(db, bid, 'discount', diff.reasonId, 'A reason for the discount');
+  } else if (paid > due) {
+    if (diff?.kind !== 'tip') fail(400, `Payments come to ${rs(paid)}, ${rs(paid - due)} more than the bill. Mark it as a tip, or enter cash given so change is worked out.`);
+  }
 
   // A UPI payment into another billing name's account is asked about first (the bill and the money should agree).
   const entities = new Set(ordered.map((b) => b.entity_id));
@@ -148,7 +156,11 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   const { t, shiftDay } = clock(b);
   const staff = c.get('staff');
   const settlementId = newId();
-  const pieces = allocate(pays.map((p) => ({ id: p.id, amountPaise: p.amountPaise })), ordered.map((x) => ({ id: x.id, totalPaise: x.total_paise })));
+  const { pieces, over, short } = allocateLoose(pays.map((p) => ({ id: p.id, amountPaise: p.amountPaise })), ordered.map((x) => ({ id: x.id, totalPaise: x.total_paise })));
+  for (const o of over) {
+    const p = pays.find((q) => q.id === o.paymentId)!;
+    if (!['cash', 'upi', 'card'].includes(p.mode)) fail(400, 'A tip can only come with a cash, UPI or card payment. Put that payment last.');
+  }
   const statements = [
     stmt(db, "INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at) VALUES (?, ?, 'bills', ?, ?, ?)", settlementId, bid, shiftDay, staff.id, t),
     ...pays.filter((p) => p.newCredit).map((p) => newCreditAccount(db, bid, p, staff.id, t)),
@@ -164,6 +176,13 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     ...ordered.map((x) => stmt(db, "UPDATE bills SET status = 'settled', settlement_id = ?, settled_at = ? WHERE id = ? AND status = 'printed'", settlementId, t, x.id)),
     ...ordered.map((x) => stmt(db, "UPDATE orders SET status = 'closed' WHERE id = ?", x.order_id)),
     ...pays.filter((p) => p.mode === 'comp').map((p) => event(db, bid, 'comp', ordered.map((x) => x.bill_no).join(', '), p.amountPaise, p.compReason, `Guest: ${p.compGuest}`, staff.id, shiftDay)),
+    ...short.flatMap((x) => [
+      stmt(db, "INSERT INTO settle_differences (id, business_id, settlement_id, kind, bill_id, amount_paise, reason, shift_day, by_staff, at) VALUES (?, ?, ?, 'discount', ?, ?, ?, ?, ?, ?)",
+        newId(), bid, settlementId, x.billId, x.amountPaise, discountReason, shiftDay, staff.id, t),
+      event(db, bid, 'discount', ordered.find((o) => o.id === x.billId)!.bill_no, x.amountPaise, discountReason, 'At payment (paid less than the bill)', staff.id, shiftDay),
+    ]),
+    ...over.map((x) => stmt(db, "INSERT INTO settle_differences (id, business_id, settlement_id, kind, payment_id, amount_paise, shift_day, by_staff, at) VALUES (?, ?, ?, 'tip', ?, ?, ?, ?, ?)",
+      newId(), bid, settlementId, x.paymentId, x.amountPaise, shiftDay, staff.id, t)),
   ];
   // Stock the bills used (recipes), in the same batch.
   statements.push(...(await saleMoves(db, bid, ordered.map((x) => x.id), staff.id, shiftDay, t)));
@@ -172,7 +191,10 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     const { payments: _none, ...printed } = await billOut(db, bid, x.id);
     delete (printed as Record<string, unknown>).status;
     statements.push(stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'bill_settled', ?, ?)",
-      newId(), bid, JSON.stringify({ ...settledMessage(x.id, ordered, pays, pieces, shiftDay, t, staff.name), bill: printed }), t));
+      newId(), bid, JSON.stringify({ ...settledMessage(x.id, ordered, pays, pieces, shiftDay, t, staff.name), bill: printed,
+        discountAtPaymentPaise: short.find((d) => d.billId === x.id)?.amountPaise ?? 0, discountAtPaymentReason: short.some((d) => d.billId === x.id) ? discountReason : null,
+        // Tips go with the last bill of the settle: [{paymentId, mode, amountPaise}].
+        tips: x.id === ordered[ordered.length - 1].id ? over.map((o) => ({ paymentId: o.paymentId, mode: pays.find((q) => q.id === o.paymentId)!.mode, amountPaise: o.amountPaise })) : [] }), t));
   }
   try {
     await db.batch(statements);
@@ -183,7 +205,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   }
   sendSoon(c, bid);
   const change = pays.reduce((s, p) => s + (p.tenderedPaise ? p.tenderedPaise - p.amountPaise : 0), 0);
-  return c.json({ settlementId, changePaise: change, bills: await Promise.all(ordered.map((x) => billOut(db, bid, x.id))) }, 201);
+  return c.json({ settlementId, changePaise: change, tipPaise: over.reduce((t2, o) => t2 + o.amountPaise, 0), discountPaise: due - paid > 0 ? due - paid : 0, bills: await Promise.all(ordered.map((x) => billOut(db, bid, x.id))) }, 201);
 });
 
 function settledMessage(billId: string, bills: { id: string; bill_no: string }[], pays: Pay[], pieces: { paymentId: string; billId: string; amountPaise: number }[], shiftDay: string, t: number, by: string) {

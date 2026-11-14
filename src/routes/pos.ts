@@ -86,15 +86,19 @@ async function file(db: DB, bid: string, id: string, kind: string, body: Obj): P
       lines.push({ p, mode, amount, account: await bookrAccount(db, bid, str(p, 'bookrAccountId', true)) });
     }
     const total = int(bill, 'totalPaise')!;
-    if (sum !== total) throw new Bad(`Payments (${sum}) do not add up to the bill (${total}).`);
+    const settleDiscount = int(body, 'discountAtPaymentPaise', true) ?? 0;
+    if (settleDiscount < 0 || sum + settleDiscount !== total) throw new Bad(`Payments (${sum}) and discount at payment (${settleDiscount}) do not add up to the bill (${total}).`);
+    const tips = Array.isArray(body.tips) ? body.tips.map((x) => int(obj(x, 'tip'), 'amountPaise')!) : [];
+    if (tips.some((x) => x <= 0)) throw new Bad('A tip is not above zero.');
     const together = Array.isArray(body.paidTogetherWith) ? body.paidTogetherWith.filter((x) => typeof x === 'string') : [];
     return [
       stmt(db, `INSERT INTO pos_bills (id, business_id, message_id, bill_no, entity_name, gst_registered, place, guest_name, printed_at, settled_at, shift_day,
-          gross_paise, discount_paise, discount_reason, cgst_paise, sgst_paise, round_off_paise, total_paise, paid_together)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          gross_paise, discount_paise, discount_reason, cgst_paise, sgst_paise, round_off_paise, total_paise, paid_together, settle_discount_paise, settle_discount_reason, tip_paise)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         billId, bid, id, str(bill, 'billNo'), str(bill, 'entityName'), bill.gstRegistered ? 1 : 0, str(bill, 'place', true), str(bill, 'guestName', true),
         int(bill, 'printedAt'), settledAt, day, int(bill, 'grossPaise'), int(bill, 'discountPaise'), str(bill, 'discountReason', true),
-        int(bill, 'cgstPaise'), int(bill, 'sgstPaise'), int(bill, 'roundOffPaise'), total, JSON.stringify(together)),
+        int(bill, 'cgstPaise'), int(bill, 'sgstPaise'), int(bill, 'roundOffPaise'), total, JSON.stringify(together), settleDiscount,
+        str(body, 'discountAtPaymentReason', true), tips.reduce((a, b) => a + b, 0)),
       ...lines.map(({ p, mode, amount, account }) => stmt(db, `INSERT INTO pos_payment_lines (id, business_id, message_id, bill_id, payment_id, kind, mode, amount_paise,
           payment_total_paise, account_id, pay_account, card_approval, card_last4, debtor_name, comp_guest, comp_reason, paid_at, shift_day)
         VALUES (?, ?, ?, ?, ?, 'bill', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -214,7 +218,8 @@ posRoutes.get('/businesses/:businessId/pos', requireRole('sales.view'), async (c
   const rejected = await all(db, "SELECT id, kind, note, received_at AS receivedAt FROM pos_messages WHERE business_id = ? AND outcome = 'rejected' ORDER BY received_at DESC LIMIT 20", bid);
   const bills = await all<Record<string, unknown> & { id: string }>(db, `SELECT id, bill_no AS billNo, entity_name AS entityName, gst_registered AS gstRegistered, place,
       guest_name AS guestName, settled_at AS settledAt, gross_paise AS grossPaise, discount_paise AS discountPaise, discount_reason AS discountReason,
-      cgst_paise + sgst_paise AS gstPaise, total_paise AS totalPaise, paid_together AS paidTogether
+      cgst_paise + sgst_paise AS gstPaise, total_paise AS totalPaise, paid_together AS paidTogether,
+      settle_discount_paise AS settleDiscountPaise, settle_discount_reason AS settleDiscountReason, tip_paise AS tipPaise
     FROM pos_bills WHERE business_id = ? AND shift_day = ? ORDER BY settled_at, bill_no`, bid, day);
   const lines = await all<{ id: string; bill_id: string | null; payment_id: string; kind: string; mode: string; amount_paise: number; payment_total_paise: number;
     account_id: string | null; account_name: string | null; pay_account: string | null; card_approval: string | null; card_last4: string | null;

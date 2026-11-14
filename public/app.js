@@ -6471,7 +6471,8 @@ async function posView(biz, query = '') {
             <td>${b.entityName}${b.gstRegistered ? '' : html`<div class="tiny">no GST</div>`}</td>
             <td>${b.place ?? ''}${b.guestName ? html`<div class="tiny">${b.guestName}</div>` : ''}</td>
             <td class="amount">₹ ${money(b.totalPaise)}${b.discountPaise ? html`<div class="tiny">discount ₹ ${money(b.discountPaise)} · ${b.discountReason}</div>` : ''}</td>
-            <td>${b.payments.map((p) => html`<div>₹ ${money(p.amountPaise)} · ${payText(p)}${evid(p)}</div>`)}${b.paidTogether.length ? html`<div class="tiny">paid together with ${b.paidTogether.join(', ')}</div>` : ''}</td>
+            <td>${b.payments.map((p) => html`<div>₹ ${money(p.amountPaise)} · ${payText(p)}${evid(p)}</div>`)}${b.paidTogether.length ? html`<div class="tiny">paid together with ${b.paidTogether.join(', ')}</div>` : ''}
+              ${b.settleDiscountPaise ? html`<div class="tiny">discount at payment ₹ ${money(b.settleDiscountPaise)} · ${b.settleDiscountReason}</div>` : ''}${b.tipPaise ? html`<div class="tiny">tip ₹ ${money(b.tipPaise)} (not income)</div>` : ''}</td>
           </tr>`) : html`<tr><td colspan="5" class="note">No POS bills in this shift.</td></tr>`}</tbody>
         </table></div>
         ${r.receipts.length ? html`<h2>Money received on folios and credit accounts</h2>${r.receipts.map((p) => html`<div>₹ ${money(p.amountPaise)} · ${p.kind === 'advance' ? 'Advance' : 'Payment'} from ${p.debtor} · ${payText(p)}${evid(p)}</div>`)}` : ''}

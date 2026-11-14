@@ -278,7 +278,9 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     FROM allocations a JOIN payments p ON p.id = a.payment_id LEFT JOIN pay_accounts pa ON pa.id = p.pay_account_id LEFT JOIN debtor_accounts d ON d.id = p.debtor_account_id
     WHERE a.bill_id = ? ORDER BY p.at, p.rowid`, id);
   const { entity_id, ...rest } = b;
-  return { ...rest, entityId: entity_id, items, payments: pays, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
+  const differences = await all(db, `SELECT d.kind, d.amount_paise AS amountPaise, d.reason, p.mode FROM settle_differences d LEFT JOIN payments p ON p.id = d.payment_id
+    WHERE d.bill_id = ? OR (d.kind = 'tip' AND d.settlement_id = (SELECT settlement_id FROM bills WHERE id = ?)) ORDER BY d.rowid`, id, id);
+  return { ...rest, entityId: entity_id, items, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
 
 // Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.

@@ -35,12 +35,16 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
     FROM payments p LEFT JOIN staff s ON s.id = p.by_staff WHERE p.business_id = ? AND p.shift_day BETWEEN ? AND ? AND p.mode = 'comp' ORDER BY p.at`, bid, from, to);
   const voids = await all(db, `SELECT bill_no AS billNo, total_paise AS totalPaise, void_reason AS reason FROM bills
     WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND status = 'void' ORDER BY bill_no`, bid, from, to);
+  const tips = await all(db, `SELECT p.mode, count(*) AS n, sum(d.amount_paise) AS paise FROM settle_differences d JOIN payments p ON p.id = d.payment_id
+    WHERE d.business_id = ? AND d.shift_day BETWEEN ? AND ? AND d.kind = 'tip' GROUP BY p.mode`, bid, from, to);
+  const paymentDiscounts = await all(db, `SELECT d.reason, count(*) AS n, sum(d.amount_paise) AS paise FROM settle_differences d
+    WHERE d.business_id = ? AND d.shift_day BETWEEN ? AND ? AND d.kind = 'discount' GROUP BY d.reason`, bid, from, to);
   const creditNotes = await all(db, `SELECT e.name, count(*) AS n, sum(n.taxable_paise) AS taxablePaise, sum(n.cgst_paise) AS cgstPaise, sum(n.sgst_paise) AS sgstPaise,
       sum(n.total_paise) AS totalPaise, min(n.cn_no) AS first, max(n.cn_no) AS last
     FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, from, to);
   const creditNoteList = await all(db, `SELECT n.cn_no AS cnNo, b.bill_no AS billNo, n.total_paise AS totalPaise, n.reason, n.refund_mode AS refundMode, n.shift_day AS day
     FROM credit_notes n JOIN bills b ON b.id = n.bill_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? ORDER BY n.at`, bid, from, to);
-  return c.json({ from, to, days, byEntity, byMode, items, discounts, comps, voids, creditNotes, creditNoteList });
+  return c.json({ from, to, days, byEntity, byMode, items, discounts, comps, voids, creditNotes, creditNoteList, tips, paymentDiscounts });
 });
 
 // Who owes what, aged: what is owed is taken to be the newest charges (older ones were paid first).

@@ -44,6 +44,9 @@ CREATE TABLE pos_bills (
   round_off_paise INTEGER NOT NULL,
   total_paise     INTEGER NOT NULL,
   paid_together   TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(paid_together)),
+  settle_discount_paise INTEGER NOT NULL DEFAULT 0,   -- paid less than the bill, given as a discount at payment
+  settle_discount_reason TEXT,
+  tip_paise       INTEGER NOT NULL DEFAULT 0,          -- paid more than the bill(s): a tip for staff, not income
   UNIQUE (business_id, bill_no)
 );
 CREATE INDEX pos_bills_shift_idx ON pos_bills (business_id, shift_day);
