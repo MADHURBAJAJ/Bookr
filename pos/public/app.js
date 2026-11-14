@@ -70,7 +70,7 @@ const counterEntities = () => (cache.entities ?? []).filter((e) => e.active && e
 
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
-    ['#/exceptions', 'Exceptions', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
+    ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Exceptions', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   return html`<header class="top">
     <div class="row"><span class="brand">${me.business.name}</span>
       <nav aria-label="Main">${links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`)}</nav></div>
@@ -88,17 +88,18 @@ async function route() {
     if (!me) {
       try { me = await api('GET', '/me'); } catch { me = null; }
     }
-    if (!me) return signIn();
+    if (!me) return await signIn();
     const [path, a, b] = location.hash.replace(/^#\/?/, '').split('/');
-    if (path === 'order') return orderScreen(a);
-    if (path === 'bill') return billScreen(a);
-    if (path === 'settle') return settleScreen(a, b);
-    if (path === 'done') return doneScreen(a);
-    if (path === 'rooms') return roomsScreen();
-    if (path === 'shift') return shiftScreen();
-    if (path === 'exceptions') return exceptionsScreen(a);
-    if (path === 'settings') return settingsScreen(a);
-    return tablesScreen();
+    if (path === 'order') return await orderScreen(a);
+    if (path === 'bill') return await billScreen(a);
+    if (path === 'settle') return await settleScreen(a, b);
+    if (path === 'done') return await doneScreen(a);
+    if (path === 'rooms') return await roomsScreen();
+    if (path === 'shift') return await shiftScreen();
+    if (path === 'exceptions') return await exceptionsScreen(a);
+    if (path === 'reports') return await reportsScreen(a, b);
+    if (path === 'settings') return await settingsScreen(a);
+    return await tablesScreen();
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return;
     root.innerHTML = asHtml(html`<main><div class="msg bad" role="alert">${e.message}</div><p style="margin-top:12px"><a href="#/">Back to tables</a></p></main>`);
@@ -504,6 +505,7 @@ async function roomsScreen() {
       <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
         ${cache.stays.map((s) => html`<tr><td>${s.room}</td><td>${s.guestName}</td><td>${s.checkIn}</td><td class="num">${rs(s.balancePaise)}</td>
           <td><div class="row"><button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}">Take payment</button>
+          ${s.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-max="${-s.balancePaise}">Refund advance</button>` : ''}
           <button class="btn" type="button" data-act="checkOut" data-id="${s.id}">Check out</button></div></td></tr>`)}
       </tbody></table></div>
       ${can('stays.edit') ? html`<form class="grid2"><label class="f">Room<input class="in" data-model="room"></label><label class="f">Guest name<input class="in" data-model="guest"></label>
@@ -512,9 +514,16 @@ async function roomsScreen() {
     <section class="panel"><h2>Credit accounts</h2>
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th class="num">Owes</th><th class="num">Limit</th><th></th></tr></thead><tbody>
         ${cache.credit.map((a) => html`<tr><td>${a.name}${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num">${rs(a.balancePaise)}</td>
-          <td class="num">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td><td><button class="btn" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button></td></tr>`)}
+          <td class="num">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td><td><div class="row"><button class="btn" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button>
+          ${a.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${a.id}" data-n="${a.name}" data-max="${-a.balancePaise}">Refund advance</button>` : ''}</div></td></tr>`)}
       </tbody></table></div><p class="small quiet">New credit accounts are made at the settle screen. A negative amount owed is an advance.</p>
     </section>
+    ${ui.refund ? html`<form class="panel" style="grid-column:1/-1;max-width:640px"><h2>Refund advance to ${ui.refund.name}</h2>
+      <p class="quiet small">${rs(ui.refund.max)} of advance is held.</p>
+      <div class="chips">${[['cash', 'Cash from the drawer'], ['upi', 'UPI']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.refundMode ?? 'cash') === k}" data-act="pick" data-k="refundMode" data-id="${k}">${t}</button>`)}</div>
+      <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="refundAmount" value="${ui.refundAmount ?? rupees(ui.refund.max)}"></label>
+        <label class="f">Note (optional)<input class="in" data-model="refundNote"></label></div>
+      <div class="row"><button class="btn pri" type="submit" data-act="refundGo" data-submit>Refund</button><button class="btn" type="button" data-act="refundNo">Cancel</button></div></form>` : ''}
     ${ui.recv ? html`<form class="panel" style="grid-column:1/-1;max-width:640px"><h2>Payment from ${ui.recv.name}</h2>
       <div class="chips"><button type="button" class="chip" aria-pressed="${ui.recvKind !== 'advance'}" data-act="pick" data-k="recvKind" data-id="receipt">Against what is owed</button>
         <button type="button" class="chip" aria-pressed="${ui.recvKind === 'advance'}" data-act="pick" data-k="recvKind" data-id="advance">Advance</button></div>
@@ -530,6 +539,12 @@ actions.openStay = async () => { await api('POST', B() + '/stays', { room: ui.ro
 actions.checkOut = async (d) => { await api('POST', `${B()}/stays/${d.id}/check-out`); flash = { kind: 'ok', text: 'Checked out.' }; route(); };
 actions.recv = (d) => { ui.recv = { id: d.id, name: d.n }; ui.recvMode = 'cash'; ui.recvKind = 'receipt'; ui.error = null; rerender(); };
 actions.recvNo = () => { ui.recv = null; rerender(); };
+actions.refundAsk = (d) => { ui.refund = { id: d.id, name: d.n, max: Number(d.max) }; ui.recv = null; ui.refundAmount = undefined; ui.refundMode = 'cash'; ui.error = null; rerender(); };
+actions.refundNo = () => { ui.refund = null; rerender(); };
+actions.refundGo = async () => {
+  const r = await api('POST', `${B()}/debtors/${ui.refund.id}/refund`, { mode: ui.refundMode ?? 'cash', amount: ui.refundAmount ?? rupees(ui.refund.max), note: ui.refundNote });
+  flash = { kind: 'ok', text: `Refunded. ${ui.refund.name} now ${r.balancePaise < 0 ? 'holds ' + rs(-r.balancePaise) + ' of advance' : 'owes ' + rs(r.balancePaise)}.` }; route();
+};
 actions.recvGo = async () => {
   const p = { mode: ui.recvMode ?? 'cash', amount: ui.recvAmount ?? '', payAccountId: ui.payAccountId, cardApproval: ui.cardApproval, cardLast4: ui.cardLast4 };
   const r = await api('POST', `${B()}/debtors/${ui.recv.id}/receipts`, { kind: ui.recvKind ?? 'receipt', payments: [p] });
@@ -547,7 +562,7 @@ async function shiftScreen() {
     const s = ui.s;
     const counted = notes.reduce((t, n) => t + (Number(ui.counts[n]) || 0) * Number(n) * 100, 0) + (toPaise(ui.loose || '0') ?? 0);
     const float = toPaise(ui.float || '0') ?? 0;
-    const expected = float + s.cashInPaise;
+    const expected = float + s.cashInPaise - s.cashOutPaise;
     const diff = counted - expected;
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
     paint(shell('#/shift', html`<div class="settle">
@@ -559,6 +574,10 @@ async function shiftScreen() {
         <div class="sums">${s.billed.map((b) => html`<div><span>${b.entity}: ${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}</span><span>${rs(b.paise)}</span></div>`)}</div>
         <div class="sums">${s.events.map((e) => html`<div><span>${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings' }[e.kind]}</span><span>${e.n} · ${rs(e.paise)}</span></div>`)}</div>
         ${s.tabs.length ? html`<div class="sums"><div><strong>Tabs carried to the next shift (not in these totals)</strong></div>${s.tabs.map((t) => html`<div><span>${t.place} · ${t.guest} · since ${t.since}${t.old ? ' · overdue' : ''}</span><span>${rs(t.paise)}</span></div>`)}</div>` : ''}
+        ${s.drawerOuts.length ? html`<div class="sums"><div><strong>Paid out of the drawer</strong></div>${s.drawerOuts.map((o) => html`<div><span>${o.kind === 'refund' ? 'Advance refunded' : 'Paid out'}${o.mode === 'upi' ? ' (UPI)' : ''}${o.note && o.note !== 'Advance refunded' ? ' · ' + o.note : ''} · ${o.byName ?? ''}</span><span>${rs(-o.amountPaise)}</span></div>`)}</div>` : ''}
+        ${ui.closed ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
+          <label class="f">What for<input class="in" data-model="outNote" value="${ui.outNote ?? ''}" placeholder="e.g. Vegetables"></label>
+          <button class="btn" type="submit" data-act="paidOut" data-submit>Record paid out</button></form>`}
         ${s.openOrders.length ? html`<div class="msg bad">Bill these orders or keep them as a tab first: ${s.openOrders.map((o) => o.place).join(', ')}.</div>` : ''}
         ${s.unpaidBills.length ? html`<div class="msg bad">Printed but not paid: ${s.unpaidBills.map((b) => b.bill_no).join(', ')}.</div>` : ''}
       </section>
@@ -569,17 +588,84 @@ async function shiftScreen() {
         <div class="sums"><div><span>Should be in the drawer</span><span>${rs(expected)}</span></div><div><span>Counted</span><span>${rs(counted)}</span></div>
           <div class="big" style="color:${diff ? 'var(--bad)' : 'var(--accent)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div></div>
         ${diff ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift and send to Bookr</button></form>`}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift</button></form>`}
     </div>`));
   };
   rerender();
 }
 root.addEventListener('input', (ev) => { const n = ev.target.dataset?.note; if (n) { ui.counts[n] = ev.target.value; refocus(ev.target.dataset.model, () => rerender()); } });
+actions.paidOut = async () => {
+  await api('POST', B() + '/drawer-outs', { amount: ui.outAmount ?? '', note: ui.outNote ?? '' });
+  flash = { kind: 'ok', text: `Paid out ${rs(toPaise(ui.outAmount) ?? 0)} recorded.` }; route();
+};
 actions.closeShift = async () => {
   const counted = {}; for (const [k, v] of Object.entries(ui.counts)) counted[k] = Number(v) || 0;
   counted.loose = ui.loose || '0';
   const r = await api('POST', `${B()}/shifts/${ui.s.shiftDay}/close`, { openingFloat: ui.float || '0', counted, reason: ui.reason });
   flash = { kind: r.differencePaise ? 'warn' : 'ok', text: `Shift closed. ${r.message}` }; route();
+};
+
+// ---------- reports (Owner and manager)
+
+async function reportsScreen(tab = 'sales', range = '') {
+  const [qf, qt] = range.split('_');
+  const isD = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '');
+  const from = isD(qf) ? qf : me.business.shiftDay;
+  const to = isD(qt) ? qt : from;
+  ui.from = from; ui.to = to;
+  const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
+  const head = html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><div class="chips">
+      ${[['sales', 'Sales'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
+    ${tab === 'sales' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
+      <div class="f">&nbsp;<button class="btn" type="submit" data-act="repGo" data-submit>Show</button></div></form>` : ''}</div>`;
+  if (tab === 'owed') {
+    const { accounts } = await api('GET', `${B()}/reports/debtors`);
+    ui.statement = null;
+    rerender = () => paint(shell('#/reports', html`${head}<section class="panel"><h2>Who owes what</h2>
+      <p class="quiet small">Rooms in house and credit accounts. A negative amount is an advance held. Ages count from the bills still unpaid.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Account</th><th class="num">Owes</th><th class="num">0–30 days</th><th class="num">31–60</th><th class="num">61–90</th><th class="num">Over 90</th><th class="num">Limit</th><th></th></tr></thead><tbody>
+        ${accounts.map((a) => html`<tr><td>${a.name}<div class="small quiet">${a.kind === 'room' ? 'Room folio' : 'Credit account'}${a.phone ? ' · ' + a.phone : ''}</div></td>
+          <td class="num"><strong>${rs(a.balancePaise)}</strong></td><td class="num">${a.d0_30 ? rs(a.d0_30) : ''}</td><td class="num">${a.d31_60 ? rs(a.d31_60) : ''}</td>
+          <td class="num">${a.d61_90 ? rs(a.d61_90) : ''}</td><td class="num">${a.d90 ? rs(a.d90) : ''}</td><td class="num">${a.creditLimitPaise ? rs(a.creditLimitPaise) : ''}</td>
+          <td><button class="btn" type="button" data-act="statement" data-id="${a.id}">Statement</button></td></tr>`)}
+        <tr><td><strong>Total</strong></td><td class="num"><strong>${rs(accounts.reduce((t, a) => t + a.balancePaise, 0))}</strong></td><td colspan="6"></td></tr></tbody></table></div></section>
+      ${ui.statement ? html`<section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Statement · ${ui.statement.account.name}</h2><button class="btn" type="button" data-act="printStatement">Print</button></div>
+        <div class="scroll"><table class="t"><thead><tr><th>When</th><th>What</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr></thead><tbody>
+          ${(() => { let bal = 0; return ui.statement.entries.map((e) => { bal += e.amountPaise; return html`<tr><td>${dateTime(e.at)}</td>
+            <td>${{ charge: 'Bill', receipt: 'Payment', advance: 'Advance paid', advance_used: 'Advance used on bill', refund: 'Advance refunded' }[e.kind]}${e.billNo ? ' ' + e.billNo : ''}${e.mode ? ' · ' + e.mode : ''}</td>
+            <td class="num">${e.amountPaise > 0 ? rs(e.amountPaise) : ''}</td><td class="num">${e.amountPaise < 0 ? rs(-e.amountPaise) : ''}</td><td class="num">${rs(bal)}</td></tr>`; }); })()}
+        </tbody></table></div></section>` : ''}`));
+    rerender();
+    return;
+  }
+  const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
+  const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
+  rerender = () => paint(shell('#/reports', html`${head}
+    <section class="panel"><h2>Sales ${from === to ? from : `${from} to ${to}`}</h2>
+      <div class="scroll"><table class="t"><thead><tr><th>Name on bill</th><th>Bills</th><th class="num">Items</th><th class="num">Discount</th><th class="num">Taxable</th><th class="num">CGST</th><th class="num">SGST</th><th class="num">Total</th></tr></thead><tbody>
+        ${r.byEntity.map((e) => html`<tr><td>${e.name}<div class="small quiet">${e.gstRegistered ? 'GSTIN ' + e.gstin : 'Not registered for GST'}</div></td><td>${e.bills}<div class="small quiet">${e.firstBill} to ${e.lastBill}</div></td>
+          <td class="num">${rs(e.grossPaise)}</td><td class="num">${rs(e.discountPaise)}</td><td class="num">${rs(e.taxablePaise)}</td><td class="num">${rs(e.cgstPaise)}</td><td class="num">${rs(e.sgstPaise)}</td><td class="num"><strong>${rs(e.totalPaise)}</strong></td></tr>`)}
+        <tr><td><strong>Total</strong></td><td>${sum('bills')}</td><td class="num">${rs(sum('grossPaise'))}</td><td class="num">${rs(sum('discountPaise'))}</td><td class="num">${rs(sum('taxablePaise'))}</td>
+          <td class="num">${rs(sum('cgstPaise'))}</td><td class="num">${rs(sum('sgstPaise'))}</td><td class="num"><strong>${rs(sum('totalPaise'))}</strong></td></tr></tbody></table></div></section>
+    <div class="grid2" style="margin-top:16px;align-items:start">
+      <section class="panel"><h2>By payment</h2><div class="sums">${r.byMode.map((m) => html`<div><span>${modeName[m.mode]} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
+        ${r.discounts.length ? html`<h2>Discounts</h2><div class="sums">${r.discounts.map((d) => html`<div><span>${d.reason} (${d.n})</span><span>${rs(d.paise)}</span></div>`)}</div>` : ''}
+        ${r.comps.length ? html`<h2>Complimentary</h2><div class="sums">${r.comps.map((c) => html`<div><span>${c.day} · ${c.guest} · ${c.reason} · by ${c.byName ?? ''}</span><span>${rs(c.paise)}</span></div>`)}</div>` : ''}
+        ${r.voids.length ? html`<h2>Void bills</h2><div class="sums">${r.voids.map((v) => html`<div><span>${v.billNo} · ${v.reason}</span><span>${rs(v.totalPaise)}</span></div>`)}</div>` : ''}
+        ${r.days.length > 1 ? html`<h2>By shift</h2><div class="sums">${r.days.map((d) => html`<div><span>${d.day} (${d.bills} bills)</span><span>${rs(d.totalPaise)}</span></div>`)}</div>` : ''}</section>
+      <section class="panel"><h2>Items sold</h2><div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Amount</th></tr></thead><tbody>
+        ${r.items.map((i) => html`<tr><td>${i.name}</td><td class="num">${i.qty}</td><td class="num">${rs(i.amountPaise)}</td></tr>`)}</tbody></table></div></section>
+    </div>`));
+  rerender();
+}
+actions.repGo = () => go(`#/reports/sales/${ui.from}_${ui.to}`);
+actions.statement = async (d) => { ui.statement = await api('GET', `${B()}/debtors/${d.id}`); rerender(); };
+actions.printStatement = () => {
+  const st = ui.statement; let bal = 0;
+  printArea.innerHTML = asHtml(html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">STATEMENT</div><div>${st.account.name}</div><hr>
+    ${st.entries.map((e) => { bal += e.amountPaise; return html`<div class="rl"><span>${dateTime(e.at)} ${e.billNo ?? e.kind}</span><span>${rs(e.amountPaise)}</span></div>`; })}
+    <hr><div class="rl" style="font-weight:700"><span>Balance</span><span>${rs(bal)}</span></div></div>`);
+  window.print();
 };
 
 // ---------- exceptions
@@ -613,11 +699,11 @@ async function settingsScreen(tab = 'menu') {
     if (tab === 'menu') body = html`<section class="panel"><h2>Menu</h2>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Category</th><th>Station</th><th class="num">Price (before GST)</th><th></th></tr></thead><tbody>
         ${cache.menu.map((m) => html`<tr><td>${m.name}</td><td>${m.category}</td><td>${m.station}</td><td class="num">${rs(m.pricePaise)}</td>
-          <td><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></td></tr>`)}</tbody></table></div>
-      <form class="grid3"><label class="f">Name<input class="in" data-model="iName"></label><label class="f">Category<input class="in" data-model="iCat"></label>
-        <label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice"></label>
+          <td><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
+      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}"></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
+        <label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>
         <label class="f">Station<select class="in" data-model="iStation"><option value="kitchen">Kitchen</option><option value="bar" ${ui.iStation === 'bar' ? 'selected' : ''}>Bar</option></select></label>
-        <div class="f">&nbsp;<button class="btn pri" type="submit" data-act="addItem" data-submit>Add item</button></div></form></section>`;
+        <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="addItem" data-submit>${ui.editItem ? 'Save item' : 'Add item'}</button>${ui.editItem ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></div></form></section>`;
     if (tab === 'reasons') body = html`<section class="panel"><h2>Reasons</h2>${errorBox()}
       ${Object.entries(kinds).map(([k, t]) => html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">${t}</p><div class="chips">${reasonsOf(k).map((r) => html`<span class="chip" style="display:inline-flex;align-items:center;gap:8px">${r.label}<button class="btn" style="min-height:32px;padding:0 8px" type="button" data-act="retire" data-id="${r.id}" aria-label="Remove ${r.label}">×</button></span>`)}</div></div>`)}
       <form class="grid3"><label class="f">For<select class="in" data-model="rKind">${Object.entries(kinds).map(([k, t]) => html`<option value="${k}" ${ui.rKind === k ? 'selected' : ''}>${t}</option>`)}</select></label>
@@ -628,31 +714,37 @@ async function settingsScreen(tab = 'menu') {
           <td>${e.gst_registered ? `${e.gst_rate_bp / 100}% · ${e.gstin}` : 'Not registered'}</td><td>${e.series_prefix}</td><td class="num">${rs(e.year_paise)}</td>
           <td>${e.yearly_limit_paise ? `${rs(e.yearly_limit_paise)} · stops at ${rs(e.stop_paise)}` : '—'}</td>
           <td><div class="row"><button class="btn" type="button" data-act="entFlag" data-id="${e.id}" data-f="offered">${e.offered ? 'Offered' : 'Not offered'}</button>
-            ${e.is_default ? '' : html`<button class="btn" type="button" data-act="entFlag" data-id="${e.id}" data-f="is_default">Make default</button>`}</div></td></tr>`)}</tbody></table></div>
-      <form class="panel" style="padding:0;border:0"><h2>Add a billing name</h2>
-        <div class="grid3"><label class="f">Name as printed<input class="in" data-model="eName"></label>
+            ${e.is_default ? '' : html`<button class="btn" type="button" data-act="entFlag" data-id="${e.id}" data-f="is_default">Make default</button>`}
+            <button class="btn" type="button" data-act="entEdit" data-id="${e.id}">Edit</button></div></td></tr>`)}</tbody></table></div>
+      <form class="panel" style="padding:0;border:0"><h2>${ui.editEntity ? 'Edit billing name' : 'Add a billing name'}</h2>
+        <div class="grid3"><label class="f">Name as printed<input class="in" data-model="eName" value="${ui.eName ?? ''}"></label>
           <label class="f">Kind<select class="in" data-model="eKind">${['company', 'llp', 'partnership', 'proprietor', 'huf', 'other'].map((k) => html`<option value="${k}" ${ui.eKind === k ? 'selected' : ''}>${k.toUpperCase() === 'HUF' || k === 'llp' ? k.toUpperCase() : k[0].toUpperCase() + k.slice(1)}</option>`)}</select></label>
-          <label class="f">Bill series prefix<input class="in" data-model="ePrefix" maxlength="4"></label>
+          <label class="f">Bill series prefix<input class="in" data-model="ePrefix" maxlength="4" value="${ui.ePrefix ?? ''}"></label>
           <label class="f">Registered under GST?<select class="in" data-model="eGst"><option value="no">No</option><option value="yes" ${ui.eGst === 'yes' ? 'selected' : ''}>Yes</option></select></label>
-          ${ui.eGst === 'yes' ? html`<label class="f">GSTIN<input class="in" data-model="eGstin" maxlength="15"></label><label class="f">Food GST rate (%)<input class="in" inputmode="decimal" data-model="eRate" value="${ui.eRate ?? '5'}"></label>` : ''}
-          <label class="f">Yearly limit (₹, optional)<input class="in" inputmode="decimal" data-model="eLimit"></label>
-          <label class="f">Warn at (₹)<input class="in" inputmode="decimal" data-model="eWarn1"></label><label class="f">Warn again at (₹)<input class="in" inputmode="decimal" data-model="eWarn2"></label>
-          <label class="f">Stop offering at (₹)<input class="in" inputmode="decimal" data-model="eStop"></label></div>
-        <div><button class="btn pri" type="submit" data-act="addEntity" data-submit>Save billing name</button></div></form></section>`;
+          ${ui.eGst === 'yes' ? html`<label class="f">GSTIN<input class="in" data-model="eGstin" maxlength="15" value="${ui.eGstin ?? ''}"></label><label class="f">Food GST rate (%)<input class="in" inputmode="decimal" data-model="eRate" value="${ui.eRate ?? '5'}"></label>` : ''}
+          <label class="f">Yearly limit (₹, optional)<input class="in" inputmode="decimal" data-model="eLimit" value="${ui.eLimit ?? ''}"></label>
+          <label class="f">Warn at (₹)<input class="in" inputmode="decimal" data-model="eWarn1" value="${ui.eWarn1 ?? ''}"></label><label class="f">Warn again at (₹)<input class="in" inputmode="decimal" data-model="eWarn2" value="${ui.eWarn2 ?? ''}"></label>
+          <label class="f">Stop offering at (₹)<input class="in" inputmode="decimal" data-model="eStop" value="${ui.eStop ?? ''}"></label></div>
+        <div class="row"><button class="btn pri" type="submit" data-act="addEntity" data-submit>Save billing name</button>${ui.editEntity ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
     if (tab === 'accounts') body = html`<section class="panel"><h2>UPI accounts</h2><p class="quiet small">Each QR's bank account belongs to one billing name. A bill paid into another name's account is asked about at the counter.</p>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Account</th><th>Belongs to</th><th>Bookr account id</th></tr></thead><tbody>
-        ${cache.payAccounts.map((a) => html`<tr><td>${a.name}</td><td>${a.entityName}</td><td class="small">${a.bookrAccountId ?? ''}</td></tr>`)}</tbody></table></div>
-      <form class="grid3"><label class="f">Account name<input class="in" data-model="aName"></label>
+        ${cache.payAccounts.map((a) => html`<tr><td>${a.name}${a.active ? '' : ' (not used)'}</td><td>${a.entityName}</td><td class="small">${a.bookrAccountId ?? ''}</td>
+          <td><button class="btn" type="button" data-act="acctEdit" data-id="${a.id}">Edit</button></td></tr>`)}</tbody></table></div>
+      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editAcct ? 'Edit account' : 'Add account'}</h2><label class="f">Account name<input class="in" data-model="aName" value="${ui.aName ?? ''}"></label>
         <label class="f">Belongs to<select class="in" data-model="aEntity"><option value="">Choose</option>${cache.entities.map((e) => html`<option value="${e.id}" ${ui.aEntity === e.id ? 'selected' : ''}>${e.name}</option>`)}</select></label>
-        <label class="f">Bookr account id (optional)<input class="in" data-model="aBookr"></label><div><button class="btn pri" type="submit" data-act="addAccount" data-submit>Add account</button></div></form></section>`;
+        <label class="f">Bookr account id (optional)<input class="in" data-model="aBookr" value="${ui.aBookr ?? ''}"></label>
+        ${ui.editAcct ? html`<label class="f">Status<select class="in" data-model="aActive"><option value="yes">In use</option><option value="no" ${ui.aActive === 'no' ? 'selected' : ''}>Not used</option></select></label>` : ''}
+        <div class="row"><button class="btn pri" type="submit" data-act="addAccount" data-submit>${ui.editAcct ? 'Save account' : 'Add account'}</button>${ui.editAcct ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
     if (tab === 'staff') body = html`<section class="panel"><h2>Staff and PINs</h2>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
-        ${ui.staff.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td></tr>`)}</tbody></table></div>
-      <form class="grid3"><label class="f">Name<input class="in" data-model="sName"></label>
+        ${ui.staff.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
+          <td><button class="btn" type="button" data-act="staffEdit" data-id="${s.id}">Edit</button></td></tr>`)}</tbody></table></div>
+      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editStaff ? 'Edit person (leave PIN and password empty to keep them)' : 'Add person'}</h2><label class="f">Name<input class="in" data-model="sName" value="${ui.sName ?? ''}"></label>
         <label class="f">Role<select class="in" data-model="sRole">${['cashier', 'captain', 'manager', 'owner'].map((r) => html`<option value="${r}" ${ui.sRole === r ? 'selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`)}</select></label>
         <label class="f">PIN (4–6 digits)<input class="in" inputmode="numeric" data-model="sPin" maxlength="6" autocomplete="off"></label>
-        ${['manager', 'owner'].includes(ui.sRole) ? html`<label class="f">Email<input class="in" type="email" data-model="sEmail"></label><label class="f">Password (12+ characters)<input class="in" type="password" data-model="sPassword" autocomplete="new-password"></label>` : ''}
-        <div><button class="btn pri" type="submit" data-act="addStaff" data-submit>Add person</button></div></form></section>`;
+        ${['manager', 'owner'].includes(ui.sRole) ? html`<label class="f">Email<input class="in" type="email" data-model="sEmail" value="${ui.sEmail ?? ''}"></label><label class="f">Password (12+ characters)<input class="in" type="password" data-model="sPassword" autocomplete="new-password"></label>` : ''}
+        ${ui.editStaff ? html`<label class="f">Status<select class="in" data-model="sActive"><option value="yes">Active</option><option value="no" ${ui.sActive === 'no' ? 'selected' : ''}>Inactive (cannot sign in)</option></select></label>` : ''}
+        <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
     if (tab === 'device') body = html`<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Device</th><th>Added</th><th></th></tr></thead><tbody>
         ${ui.devices.map((d) => html`<tr><td>${d.name}</td><td>${dateTime(d.createdAt)}</td><td>${d.revokedAt ? 'Removed' : html`<button class="btn danger" type="button" data-act="revoke" data-id="${d.id}">Remove</button>`}</td></tr>`)}</tbody></table></div>
@@ -667,7 +759,14 @@ const entityBody = (e, change) => ({
   stopAt: e.stop_paise ? rupees(e.stop_paise) : '', isDefault: !!e.is_default, offered: !!e.offered, active: !!e.active, ...change,
 });
 actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await api('PUT', `${B()}/menu/${m.id}`, { name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, station: m.station, active: !m.active }); route(); };
-actions.addItem = async () => { await api('POST', B() + '/menu', { name: ui.iName, category: ui.iCat, price: ui.iPrice ?? '', station: ui.iStation ?? 'kitchen' }); flash = { kind: 'ok', text: `${ui.iName} added.` }; route(); };
+actions.addItem = async () => {
+  const body = { name: ui.iName, category: ui.iCat, price: ui.iPrice ?? '', station: ui.iStation ?? 'kitchen' };
+  if (ui.editItem) { const m = cache.menu.find((x) => x.id === ui.editItem); await api('PUT', `${B()}/menu/${m.id}`, { ...body, sac: m.sac, active: !!m.active }); }
+  else await api('POST', B() + '/menu', body);
+  flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.` }; route();
+};
+actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStation: m.station }); rerender(); };
+actions.editCancel = () => route();
 actions.retire = async (d) => { await api('POST', `${B()}/reasons/${d.id}/retire`); route(); };
 actions.addReason = async () => { await api('POST', B() + '/reasons', { kind: ui.rKind ?? 'discount', label: ui.rLabel }); route(); };
 actions.entFlag = async (d) => {
@@ -677,12 +776,33 @@ actions.entFlag = async (d) => {
 };
 actions.addEntity = async () => {
   const rate = ui.eGst === 'yes' ? Math.round(Number(ui.eRate ?? '5') * 100) : 0;
-  await api('POST', B() + '/entities', { name: ui.eName, kind: ui.eKind ?? 'company', seriesPrefix: ui.ePrefix, gstRegistered: ui.eGst === 'yes', gstin: ui.eGstin, gstRateBp: rate,
-    yearlyLimit: ui.eLimit, warn1: ui.eWarn1, warn2: ui.eWarn2, stopAt: ui.eStop });
+  const body = { name: ui.eName, kind: ui.eKind ?? 'company', seriesPrefix: ui.ePrefix, gstRegistered: ui.eGst === 'yes', gstin: ui.eGstin, gstRateBp: rate,
+    yearlyLimit: ui.eLimit, warn1: ui.eWarn1, warn2: ui.eWarn2, stopAt: ui.eStop };
+  if (ui.editEntity) { const e = cache.entities.find((x) => x.id === ui.editEntity); await api('PUT', `${B()}/entities/${e.id}`, { ...body, isDefault: !!e.is_default, offered: !!e.offered, active: !!e.active }); }
+  else await api('POST', B() + '/entities', body);
   flash = { kind: 'ok', text: `${ui.eName} added.` }; route();
 };
-actions.addAccount = async () => { await api('POST', B() + '/pay-accounts', { name: ui.aName, entityId: ui.aEntity, bookrAccountId: ui.aBookr }); route(); };
-actions.addStaff = async () => { await api('POST', B() + '/staff', { name: ui.sName, role: ui.sRole ?? 'cashier', pin: ui.sPin, email: ui.sEmail, password: ui.sPassword }); flash = { kind: 'ok', text: `${ui.sName} added.` }; route(); };
+actions.entEdit = (d) => {
+  const e = cache.entities.find((x) => x.id === d.id);
+  const r = (p) => (p ? rupees(p) : '');
+  Object.assign(ui, { editEntity: e.id, eName: e.name, eKind: e.kind, ePrefix: e.series_prefix, eGst: e.gst_registered ? 'yes' : 'no', eGstin: e.gstin ?? '', eRate: String(e.gst_rate_bp / 100),
+    eLimit: r(e.yearly_limit_paise), eWarn1: r(e.warn1_paise), eWarn2: r(e.warn2_paise), eStop: r(e.stop_paise) });
+  rerender();
+};
+actions.addAccount = async () => {
+  const body = { name: ui.aName, entityId: ui.aEntity, bookrAccountId: ui.aBookr };
+  if (ui.editAcct) await api('PUT', `${B()}/pay-accounts/${ui.editAcct}`, { ...body, active: ui.aActive !== 'no' });
+  else await api('POST', B() + '/pay-accounts', body);
+  route();
+};
+actions.acctEdit = (d) => { const a = cache.payAccounts.find((x) => x.id === d.id); Object.assign(ui, { editAcct: a.id, aName: a.name, aEntity: a.entityId, aBookr: a.bookrAccountId ?? '', aActive: a.active ? 'yes' : 'no' }); rerender(); };
+actions.addStaff = async () => {
+  const body = { name: ui.sName, role: ui.sRole ?? 'cashier', pin: ui.sPin, email: ui.sEmail, password: ui.sPassword };
+  if (ui.editStaff) await api('PUT', `${B()}/staff/${ui.editStaff}`, { ...body, active: ui.sActive !== 'no' });
+  else await api('POST', B() + '/staff', body);
+  flash = { kind: 'ok', text: `${ui.sName} ${ui.editStaff ? 'saved' : 'added'}.` }; route();
+};
+actions.staffEdit = (d) => { const p = ui.staff.find((x) => x.id === d.id); Object.assign(ui, { editStaff: p.id, sName: p.name, sRole: p.role, sEmail: p.email ?? '', sActive: p.active ? 'yes' : 'no', sPin: '', sPassword: '' }); rerender(); };
 actions.addDevice = async () => { await api('POST', B() + '/devices', { name: ui.dName || 'Billing counter' }); flash = { kind: 'ok', text: 'This browser is now a counter device. Staff can sign in here with their PIN.' }; route(); };
 actions.revoke = async (d) => { await api('POST', `${B()}/devices/${d.id}/revoke`); route(); };
 

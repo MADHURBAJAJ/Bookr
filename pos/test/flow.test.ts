@@ -224,3 +224,48 @@ describe('tabs and shift close', () => {
     }
   });
 });
+
+describe('money out and reports', () => {
+  it('takes a paid-out and an advance refund off the cash expected at shift close', async () => {
+    const s = await setupBusiness();
+    const stay = (await s.counter.post(`${s.B}/stays`, { room: '305', guestName: 'K. Das' })).json.id;
+    const folio = (await s.counter.get(`${s.B}/stays`)).json.stays.find((x: any) => x.id === stay).accountId;
+    await s.counter.post(`${s.B}/debtors/${folio}/receipts`, { kind: 'advance', payments: [{ mode: 'cash', amount: '1000' }] });
+    const { bill } = await billed(s, [['Masala Dosa', 2]]); // 378
+    await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'advance', amount: '378', debtorAccountId: folio }] });
+    expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(409); // ₹622 of advance still held
+    expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { mode: 'cash', amount: '700' })).json.error).toMatch(/only ₹622/);
+    expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { mode: 'cash', amount: '622' })).json.balancePaise).toBe(0);
+    expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(200);
+
+    expect((await s.counter.post(`${s.B}/drawer-outs`, { amount: '150' })).status).toBe(400); // needs what it was for
+    expect((await s.counter.post(`${s.B}/drawer-outs`, { amount: '150', note: 'Vegetables' })).status).toBe(201);
+    const sum = (await s.counter.get(`${s.B}/shifts/${bill.shiftDay}`)).json.summary;
+    expect(sum).toMatchObject({ cashInPaise: 100000, cashOutPaise: 77200 });
+    // 500 float + 1,000 advance − 622 refund − 150 vegetables = 728
+    const r = await s.counter.post(`${s.B}/shifts/${bill.shiftDay}/close`, { openingFloat: '500', counted: { '500': 1, '200': 1, loose: '28' } });
+    expect(r.json).toMatchObject({ expectedPaise: 72800, differencePaise: 0 });
+    expect((await q("SELECT count(*) AS n FROM outbox WHERE business_id = ? AND kind = 'drawer_out'", s.businessId))[0].n).toBe(2);
+  });
+
+  it('reports sales by billing name with GST, by mode and by item, and who owes what', async () => {
+    const s = await setupBusiness({ huf: true });
+    const a = (await billed(s, [['Masala Dosa', 2], ['Butter Naan', 1]], { discount: { kind: 'pct', bp: 1000, reasonId: s.reasons.discount } })).bill;
+    const b = (await billed(s, [['Beer 650 ml', 1]], { entityId: s.huf })).bill;
+    await s.counter.post(`${s.B}/settlements`, { billIds: [a.id], payments: [{ mode: 'cash', amount: rupees(a.totalPaise) }] });
+    await s.counter.post(`${s.B}/settlements`, { billIds: [b.id], payments: [{ mode: 'credit', amount: '320', newCredit: { name: 'Sunrise Travels' } }] });
+    const day = a.shiftDay;
+    expect((await s.counter.get(`${s.B}/reports/sales?from=${day}&to=${day}`)).status).toBe(403); // cashier
+    const r = (await s.owner.get(`${s.B}/reports/sales?from=${day}&to=${day}`)).json;
+    expect(r.byEntity.map((e: any) => [e.name, e.taxablePaise, e.cgstPaise, e.totalPaise])).toEqual([
+      ['Sample Hotels Pvt Ltd', 37800, 945, a.totalPaise], ['Sample HUF 1', 32000, 0, 32000],
+    ]);
+    expect(r.byMode).toEqual(expect.arrayContaining([expect.objectContaining({ mode: 'cash', paise: a.totalPaise }), expect.objectContaining({ mode: 'credit', paise: 32000 })]));
+    expect(r.items[0]).toMatchObject({ name: 'Masala Dosa', qty: 2, amountPaise: 36000 });
+    expect(r.discounts).toEqual([{ reason: 'Regular guest', n: 1, paise: 4200 }]);
+    const d = (await s.owner.get(`${s.B}/reports/debtors`)).json.accounts.find((x: any) => x.name === 'Sunrise Travels');
+    expect(d).toMatchObject({ balancePaise: 32000, d0_30: 32000, d31_60: 0 });
+  });
+});
+
+const rupees = (p: number) => `${Math.floor(p / 100)}.${String(p % 100).padStart(2, '0')}`;

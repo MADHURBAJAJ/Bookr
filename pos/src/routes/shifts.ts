@@ -7,7 +7,7 @@ import { parsePaise } from '../../../src/money';
 import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { rs } from '../billing';
-import { clock, loadBusiness } from '../util';
+import { clock, isTrigger, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
@@ -37,9 +37,14 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const tabs = await all<{ place: string; guest: string; since: string; paise: number }>(db, `SELECT o.place, o.guest_name AS guest, o.opened_shift_day AS since,
       coalesce(sum(l.qty * l.price_paise), 0) AS paise
     FROM orders o LEFT JOIN order_lines l ON l.order_id = o.id WHERE o.business_id = ? AND o.status = 'tab' GROUP BY o.id ORDER BY o.opened_at`, bid);
+  const outs = await all<{ kind: string; mode: string; amount_paise: number; note: string; at: number; by_name: string | null }>(db, `SELECT o.kind, o.mode, o.amount_paise, o.note, o.at, s.name AS by_name
+    FROM drawer_outs o LEFT JOIN staff s ON s.id = o.by_staff WHERE o.business_id = ? AND o.shift_day = ? ORDER BY o.at`, bid, day);
   const cashIn = [...byMode, ...receipts].filter((r) => r.mode === 'cash').reduce((s, r) => s + r.paise, 0);
+  const cashOut = outs.filter((o) => o.mode === 'cash').reduce((s, o) => s + o.amount_paise, 0);
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
-  return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })), cashInPaise: cashIn };
+  return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
+    cashInPaise: cashIn, cashOutPaise: cashOut,
+    drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })) };
 }
 
 shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
@@ -78,10 +83,10 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   if (loose === null || loose < 0) fail(400, 'Coins and small notes must be an amount in rupees.');
   counted.loose_paise = loose;
   countedPaise += loose;
-  const expected = float + s.cashInPaise;
+  const expected = float + s.cashInPaise - s.cashOutPaise;
   const diff = countedPaise - expected;
   const reason = text(data, 'reason', 'A reason for the difference', { optional: diff === 0, max: 200 });
-  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs };
+  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts };
   const id = newId();
   try {
     await db.batch([
@@ -99,6 +104,31 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   }
   sendSoon(c, bid);
   return c.json({ ok: true, countedPaise, expectedPaise: expected, differencePaise: diff, message: diff === 0 ? 'Drawer agrees.' : `Drawer is ${diff < 0 ? 'short' : 'over'} by ${rs(Math.abs(diff))}.` }, 201);
+});
+
+// Cash paid out of the drawer (vegetables, a delivery): a note is required; it reduces the cash expected at shift close.
+shiftRoutes.post(`${B}/drawer-outs`, requireAction('bills.settle'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  const amount = parsePaise(typeof data.amount === 'string' ? data.amount : '');
+  if (amount === null || amount <= 0) fail(400, 'Amount must be above zero, in rupees.');
+  const note = text(data, 'note', 'What it was for', { max: 120 })!;
+  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const id = newId();
+  try {
+    await db.batch([
+      stmt(db, "INSERT INTO drawer_outs (id, business_id, kind, mode, amount_paise, note, shift_day, by_staff, at) VALUES (?, ?, 'paid_out', 'cash', ?, ?, ?, ?, ?)",
+        id, bid, amount, note, shiftDay, c.get('staff').id, t),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'drawer_out', ?, ?)", newId(), bid,
+        JSON.stringify({ drawerOutId: id, kind: 'paid_out', mode: 'cash', amountPaise: amount, note, shiftDay, at: t, by: c.get('staff').name }), t),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed.');
+    throw e;
+  }
+  sendSoon(c, bid);
+  return c.json({ id }, 201);
 });
 
 // The exceptions report: every void, reprint, cancelled KOT line, discount, complimentary bill and limit warning of a shift.

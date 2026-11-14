@@ -238,6 +238,39 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   return c.json({ settlementId, balancePaise: await balance(db, acc.id) }, 201);
 });
 
+// An unused advance paid back (at check-out, or a credit account closing): by cash from the drawer or by UPI.
+settleRoutes.post(`${B}/debtors/:id/refund`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const acc = await one<{ id: string; kind: string; name: string }>(db, 'SELECT id, kind, name FROM debtor_accounts WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  if (!acc) fail(404, 'Account not found.');
+  const data = await body(c);
+  const mode = data.mode;
+  if (mode !== 'cash' && mode !== 'upi') fail(400, 'A refund is paid by cash or UPI.');
+  const amount = amountOf(data.amount, 'Refund amount');
+  const credit = -(await balance(db, acc.id));
+  if (credit <= 0) fail(409, `${acc.name} has no advance to refund.`);
+  if (amount > credit) fail(409, `${acc.name} has only ${rs(credit)} of advance to refund.`);
+  const note = text(data, 'note', 'Note', { optional: true, max: 120 }) ?? 'Advance refunded';
+  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const id = newId();
+  const staff = c.get('staff');
+  try {
+    await db.batch([
+      stmt(db, "INSERT INTO drawer_outs (id, business_id, kind, mode, amount_paise, debtor_account_id, note, shift_day, by_staff, at) VALUES (?, ?, 'refund', ?, ?, ?, ?, ?, ?, ?)",
+        id, bid, mode, amount, acc.id, note, shiftDay, staff.id, t),
+      stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, by_staff, at) VALUES (?, ?, ?, 'refund', ?, ?, ?)", newId(), bid, acc.id, amount, staff.id, t),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'drawer_out', ?, ?)", newId(), bid,
+        JSON.stringify({ drawerOutId: id, kind: 'refund', mode, amountPaise: amount, note, account: { id: acc.id, kind: acc.kind, name: acc.name }, shiftDay, at: t, by: staff.name }), t),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed.');
+    throw e;
+  }
+  sendSoon(c, bid);
+  return c.json({ balancePaise: await balance(db, acc.id) }, 201);
+});
+
 settleRoutes.get(`${B}/debtors/:id`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
   const acc = await one(c.env.DB, 'SELECT id, kind, name, phone, credit_limit_paise AS creditLimitPaise FROM debtor_accounts WHERE id = ? AND business_id = ?', c.req.param('id'), bid);

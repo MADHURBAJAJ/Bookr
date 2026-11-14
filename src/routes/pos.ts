@@ -135,6 +135,18 @@ async function file(db: DB, bid: string, id: string, kind: string, body: Obj): P
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, bid, day, id, int(body, 'countedPaise'), int(body, 'expectedPaise'), int(body, 'differencePaise'),
       str(body, 'differenceReason', true), int(body, 'closedAt'), str(body, 'closedBy', true))];
   }
+  if (kind === 'drawer_out') {
+    const at = int(body, 'at')!;
+    const k = str(body, 'kind')!;
+    const mode = str(body, 'mode')!;
+    if (k !== 'paid_out' && k !== 'refund') throw new Bad('kind must be paid_out or refund.');
+    if (mode !== 'cash' && mode !== 'upi') throw new Bad('mode must be cash or upi.');
+    const amount = int(body, 'amountPaise')!;
+    if (amount <= 0) throw new Bad('amountPaise must be above zero.');
+    const acc = body.account && typeof body.account === 'object' ? (body.account as Obj) : null;
+    return [stmt(db, 'INSERT INTO pos_drawer_outs (id, business_id, message_id, kind, mode, amount_paise, note, debtor_name, at, shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      str(body, 'drawerOutId'), bid, id, k, mode, amount, str(body, 'note'), acc ? str(acc, 'name', true) : null, at, shiftDayOf(at))];
+  }
   throw new Bad(`kind ${kind} is not known.`);
 }
 
@@ -164,7 +176,7 @@ posRoutes.post('/pos/messages', async (c) => {
     const t = now();
     const save = (outcome: 'stored' | 'rejected', note: string | null) => stmt(db,
       'INSERT INTO pos_messages (id, business_id, kind, body, outcome, note, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      id, bid, ['bill_settled', 'bill_void', 'receipt', 'shift_closed'].includes(kind) ? kind : 'bill_settled', JSON.stringify(body ?? {}), outcome, note, t);
+      id, bid, ['bill_settled', 'bill_void', 'receipt', 'shift_closed', 'drawer_out'].includes(kind) ? kind : 'bill_settled', JSON.stringify(body ?? {}), outcome, note, t);
     try {
       if (!body) throw new Bad('body is missing.');
       await db.batch([save('stored', null), ...(await file(db, bid, id, kind, body))]);
@@ -229,6 +241,7 @@ posRoutes.get('/businesses/:businessId/pos', requireRole('sales.view'), async (c
     bills: bills.map((b) => ({ ...b, paidTogether: JSON.parse(String(b.paidTogether)), payments: lines.filter((l) => l.bill_id === b.id).map(lineOut) })),
     receipts: lines.filter((l) => l.kind !== 'bill').map(lineOut),
     byMode,
+    drawerOuts: await all(db, 'SELECT kind, mode, amount_paise AS amountPaise, note, debtor_name AS debtor, at FROM pos_drawer_outs WHERE business_id = ? AND shift_day = ? ORDER BY at', bid, day),
     voids: await all(db, 'SELECT bill_no AS billNo, total_paise AS totalPaise, reason, voided_at AS voidedAt FROM pos_voids WHERE business_id = ? AND shift_day = ?', bid, day),
     shiftClose: await one(db, `SELECT counted_paise AS countedPaise, expected_paise AS expectedPaise, difference_paise AS differencePaise, difference_reason AS differenceReason,
       closed_at AS closedAt, closed_by AS closedBy FROM pos_shift_closes WHERE business_id = ? AND shift_day = ?`, bid, day),

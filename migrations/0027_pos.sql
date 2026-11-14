@@ -15,7 +15,7 @@ CREATE TABLE pos_links (
 CREATE TABLE pos_messages (
   id          TEXT PRIMARY KEY,
   business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('bill_settled', 'bill_void', 'receipt', 'shift_closed')),
+  kind        TEXT NOT NULL CHECK (kind IN ('bill_settled', 'bill_void', 'receipt', 'shift_closed', 'drawer_out')),
   body        TEXT NOT NULL CHECK (json_valid(body)),
   outcome     TEXT NOT NULL CHECK (outcome IN ('stored', 'rejected')),
   note        TEXT,
@@ -96,3 +96,18 @@ CREATE TABLE pos_shift_closes (
   closed_by        TEXT,
   PRIMARY KEY (business_id, shift_day)
 );
+
+-- Cash paid out of the POS drawer, or an unused advance refunded (cash or UPI).
+CREATE TABLE pos_drawer_outs (
+  id           TEXT PRIMARY KEY,                -- the POS's id
+  business_id  TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  message_id   TEXT NOT NULL REFERENCES pos_messages(id),
+  kind         TEXT NOT NULL CHECK (kind IN ('paid_out', 'refund')),
+  mode         TEXT NOT NULL CHECK (mode IN ('cash', 'upi')),
+  amount_paise INTEGER NOT NULL CHECK (amount_paise > 0),
+  note         TEXT NOT NULL,
+  debtor_name  TEXT,
+  at           INTEGER NOT NULL,
+  shift_day    TEXT NOT NULL
+);
+CREATE INDEX pos_drawer_outs_shift_idx ON pos_drawer_outs (business_id, shift_day);

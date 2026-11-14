@@ -6475,6 +6475,7 @@ async function posView(biz, query = '') {
           </tr>`) : html`<tr><td colspan="5" class="note">No POS bills in this shift.</td></tr>`}</tbody>
         </table></div>
         ${r.receipts.length ? html`<h2>Money received on folios and credit accounts</h2>${r.receipts.map((p) => html`<div>₹ ${money(p.amountPaise)} · ${p.kind === 'advance' ? 'Advance' : 'Payment'} from ${p.debtor} · ${payText(p)}${evid(p)}</div>`)}` : ''}
+        ${r.drawerOuts?.length ? html`<h2>Paid out of the POS drawer</h2>${r.drawerOuts.map((o) => html`<div>₹ ${money(o.amountPaise)} · ${o.kind === 'refund' ? `Advance refunded to ${o.debtor ?? ''}` : 'Paid out'} · ${o.note}${o.mode === 'upi' ? ' (UPI)' : ''}</div>`)}` : ''}
         ${r.voids.length ? html`<h2>Voided bills</h2>${r.voids.map((v) => html`<div class="mono">${v.billNo} · ₹ ${money(v.totalPaise)} · ${v.reason}</div>`)}` : ''}
       </section>
       <section class="card grow2">
