@@ -269,3 +269,31 @@ describe('money out and reports', () => {
 });
 
 const rupees = (p: number) => `${Math.floor(p / 100)}.${String(p % 100).padStart(2, '0')}`;
+
+describe('split bills', () => {
+  it('moves chosen items to a new order at the same table, each billed with its own number and GST', async () => {
+    const s = await setupBusiness();
+    const order = (await s.counter.post(`${s.B}/orders`, { kind: 'table', place: 'T7' })).json.id;
+    await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: 3 });
+    await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Chai'], delta: 2 });
+    await s.counter.post(`${s.B}/orders/${order}/kot`);
+    await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: 1 }); // 4 dosas, 1 not sent yet
+
+    expect((await s.counter.post(`${s.B}/orders/${order}/split`, { lines: [{ itemId: s.items['Masala Dosa'], qty: 4 }, { itemId: s.items['Masala Chai'], qty: 2 }] })).status).toBe(400);
+    const r = await s.counter.post(`${s.B}/orders/${order}/split`, { lines: [{ itemId: s.items['Masala Dosa'], qty: 2 }, { itemId: s.items['Masala Chai'], qty: 1 }] });
+    expect(r.status).toBe(201);
+    const a = (await s.counter.get(`${s.B}/orders/${order}`)).json.order;
+    const b = (await s.counter.get(`${s.B}/orders/${r.json.id}`)).json.order;
+    expect(b.place).toBe('T7 · 2');
+    expect(a.lines.map((l: any) => [l.name, l.qty, l.sentQty])).toEqual([['Masala Dosa', 2, 2], ['Masala Chai', 1, 1]]);
+    expect(b.lines.map((l: any) => [l.name, l.qty, l.sentQty])).toEqual([['Masala Dosa', 2, 1], ['Masala Chai', 1, 1]]);
+
+    // Nothing reprints for the kitchen except the dosa not sent before.
+    const kot = (await s.counter.post(`${s.B}/orders/${r.json.id}/kot`)).json.kots;
+    expect(kot.flatMap((k: any) => k.lines)).toEqual([{ name: 'Masala Dosa', qty: 1 }]);
+    const billA = (await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.company })).json.bill;
+    const billB = (await s.counter.post(`${s.B}/orders/${r.json.id}/bill`, { entityId: s.company })).json.bill;
+    expect([billA.totalPaise, billB.totalPaise]).toEqual([42000, 42000]); // 400 + 5% each
+    expect(billA.billNo).not.toBe(billB.billNo);
+  });
+});

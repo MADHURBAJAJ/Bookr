@@ -266,7 +266,14 @@ async function orderScreen(id) {
         <div class="sums"><div class="big"><span>Items</span><span>${rs(o.lines.reduce((s, l) => s + l.qty * l.pricePaise, 0))}</span></div></div>
         <div class="row"><button class="btn grow" type="button" data-act="kot" ${unsent ? '' : 'disabled'}>Send KOT</button>
           ${can('bills.print') ? html`<a class="btn pri grow" href="#/bill/${o.id}" ${!o.lines.length || unsent ? html`aria-disabled="true" style="pointer-events:none;opacity:.5"` : ''}>Bill</a>` : ''}</div>
-        <div class="row">${o.status === 'open' ? html`<button class="btn grow" type="button" data-act="keepTab">Keep open as a tab</button>` : ''}
+        ${ui.splitting ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Split bill:</strong> choose what moves to a new bill at this table. Each bill gets its own number and GST.</p>
+          ${o.lines.map((l) => html`<div class="line"><span class="grow">${l.name} <span class="quiet small">(${l.qty} on this bill)</span></span>
+            <button class="sq" type="button" data-act="splitLess" data-id="${l.itemId}" aria-label="Move one less ${l.name}">−</button>
+            <span style="width:22px;text-align:center;font-weight:700">${ui.split[l.itemId] ?? 0}</span>
+            <button class="sq" type="button" data-act="splitMore" data-id="${l.itemId}" aria-label="Move one more ${l.name}">+</button></div>`)}
+          <div class="row" style="margin-top:10px"><button class="btn pri" type="button" data-act="splitGo">Move to a new bill</button><button class="btn" type="button" data-act="splitNo">Cancel</button></div></div>` : ''}
+        <div class="row">${o.lines.reduce((n, l) => n + l.qty, 0) > 1 && !ui.splitting ? html`<button class="btn grow" type="button" data-act="splitAsk">Split bill</button>` : ''}
+          ${o.status === 'open' ? html`<button class="btn grow" type="button" data-act="keepTab">Keep open as a tab</button>` : ''}
           ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>` : ''}</div>
         ${ui.tabAsk ? html`<form class="msg warn"><label class="f">Guest name for the tab<input class="in" data-model="tabGuest" value="${o.guestName ?? ''}" autofocus></label>
           <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
@@ -290,6 +297,16 @@ actions.kot = async () => {
   printKots(kots); rerender();
 };
 actions.keepTab = () => { ui.tabAsk = true; rerender(); };
+actions.splitAsk = () => { ui.splitting = true; ui.split = {}; rerender(); };
+actions.splitNo = () => { ui.splitting = false; rerender(); };
+actions.splitMore = (d) => { const l = ui.order.lines.find((x) => x.itemId === d.id); ui.split[d.id] = Math.min(l.qty, (ui.split[d.id] ?? 0) + 1); rerender(); };
+actions.splitLess = (d) => { ui.split[d.id] = Math.max(0, (ui.split[d.id] ?? 0) - 1); rerender(); };
+actions.splitGo = async () => {
+  const lines = Object.entries(ui.split).filter(([, q]) => q > 0).map(([itemId, qty]) => ({ itemId, qty }));
+  const r = await api('POST', `${B()}/orders/${ui.order.id}/split`, { lines });
+  flash = { kind: 'ok', text: `Split. This is the new bill; ${ui.order.place} keeps the rest.` };
+  go(`#/order/${r.id}`);
+};
 actions.tabGo = async () => { await api('POST', `${B()}/orders/${ui.order.id}/tab`, { guestName: ui.tabGuest ?? ui.order.guestName }); flash = { kind: 'ok', text: `${ui.order.place} kept as a tab.` }; go('#/'); };
 actions.dropOrder = async () => { await api('POST', `${B()}/orders/${ui.order.id}/cancel`); go('#/'); };
 
@@ -376,8 +393,10 @@ async function settleScreen(billId) {
       </section>
       <section class="panel"><h2>How was it paid?</h2>
         <div class="chips">${modes.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${m === k}" data-act="mode" data-m="${k}">${t}</button>`)}</div>
+        <div class="row small"><span class="quiet">Split equally between</span>${[2, 3, 4, 5, 6].map((n) => html`<button type="button" class="chip" style="min-height:36px" aria-pressed="${ui.shares === n}" data-act="shares" data-n="${n}">${n}</button>`)}
+          ${ui.shares ? html`<span>Share ${Math.min(ui.pays.length + 1, ui.shares)} of ${ui.shares}</span>` : ''}</div>
         <form class="grid2">
-          ${amountField ? html`<label class="f">${m === 'cash' ? 'Amount for this bill (₹)' : 'Amount (₹)'}<input class="in" inputmode="decimal" data-model="amount" value="${ui.amount ?? (left > 0 ? rupees(left) : '')}"></label>` : ''}
+          ${amountField ? html`<label class="f">${m === 'cash' ? 'Amount for this bill (₹)' : 'Amount (₹)'}<input class="in" inputmode="decimal" data-model="amount" value="${ui.amount ?? (left > 0 ? rupees(shareOf(due, left)) : '')}"></label>` : ''}
           ${m === 'cash' ? html`<label class="f">Cash given (₹, optional)<input class="in" inputmode="decimal" data-model="tendered" value="${ui.tendered ?? ''}"></label>` : ''}
           ${m === 'upi' ? html`<div class="f" style="grid-column:1/-1">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
           ${m === 'card' ? html`<label class="f">Approval code (from the slip)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="6" autocomplete="off"></label>
@@ -402,6 +421,13 @@ async function settleScreen(billId) {
   };
   rerender();
 }
+/** With "split equally", each payment is an equal share; the last share takes what is left (the odd paise). */
+function shareOf(due, left) {
+  if (!ui.shares) return left;
+  const share = Math.floor(due / ui.shares);
+  return ui.pays.length >= ui.shares - 1 ? left : Math.min(left, share);
+}
+actions.shares = (d) => { const n = Number(d.n); ui.shares = ui.shares === n ? null : n; ui.amount = undefined; rerender(); };
 actions.together = (d) => { ui.together = ui.together.includes(d.id) ? ui.together.filter((x) => x !== d.id) : [...ui.together, d.id]; ui.amount = undefined; rerender(); };
 actions.mode = (d) => { ui.mode = d.m; ui.error = null; ui.amount = undefined; ui.debtorAccountId = null; rerender(); };
 actions.pick = (d) => { ui[d.k] = d.id; rerender(); };
@@ -411,7 +437,7 @@ actions.addPay = () => {
   const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
   const left = due - ui.pays.reduce((s, p) => s + p.amountPaise, 0);
   const m = ui.mode;
-  let amountPaise = ['room', 'credit', 'comp'].includes(m) ? left : toPaise(ui.amount ?? rupees(left));
+  let amountPaise = ['room', 'credit', 'comp'].includes(m) ? shareOf(due, left) : toPaise(ui.amount ?? rupees(shareOf(due, left)));
   if (!amountPaise || amountPaise <= 0) throw new Error('Type the amount.');
   if (amountPaise > left) throw new Error(m === 'cash' ? 'Type the bill amount here, and the note handed over as "cash given".' : 'More than what is left to pay.');
   const p = { mode: m, amount: rupees(amountPaise), amountPaise, label: { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Room', credit: 'Credit', comp: 'Complimentary', advance: 'Advance' }[m], detail: '' };

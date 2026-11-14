@@ -137,6 +137,46 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
   return c.json({ kots: kots.map((k) => ({ kotNo: k.kot_no, station: k.station, place: o.place, lines: JSON.parse(k.lines) })) }, 201);
 });
 
+// Split by item: chosen quantities move to a new order at the same place ("T4 · 2"), billed on its own with its own number
+// and GST. What was already sent to the kitchen stays sent, so no new KOT prints for it.
+orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const o = await order(c, bid, c.req.param('id'), true);
+  const data = await body(c);
+  if (!Array.isArray(data.lines) || !data.lines.length) fail(400, 'Choose what moves to the new bill.');
+  const ls = await lines(c.env.DB, o.id);
+  const moves: { line: LineRow; qty: number }[] = [];
+  for (const raw of data.lines) {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const line = ls.find((l) => l.item_id === r.itemId);
+    const qty = r.qty;
+    if (!line || typeof qty !== 'number' || !Number.isInteger(qty) || qty < 0 || qty > line.qty) fail(400, 'A quantity to move is not on the order.');
+    if (qty > 0 && !moves.some((m) => m.line.id === line.id)) moves.push({ line, qty });
+  }
+  if (!moves.length) fail(400, 'Choose what moves to the new bill.');
+  const leftAfter = ls.reduce((n, l) => n + l.qty, 0) - moves.reduce((n, m) => n + m.qty, 0);
+  if (leftAfter <= 0) fail(400, 'Leave something on this bill; nothing would be split.');
+  const b = await loadBusiness(c.env.DB, bid);
+  const { t, shiftDay } = clock(b);
+  const base = o.place.replace(/ · \d+$/, '');
+  const siblings = await one<{ n: number }>(c.env.DB, "SELECT count(*) AS n FROM orders WHERE business_id = ? AND (place = ? OR place LIKE ?) AND status IN ('open', 'tab', 'billed')",
+    bid, base, `${base} · %`);
+  const id = newId();
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)',
+      id, bid, o.kind, `${base} · ${(siblings?.n ?? 1) + 1}`, o.stay_id, c.get('staff').id, t, shiftDay),
+    ...moves.flatMap(({ line, qty }) => {
+      const sentMoved = Math.max(0, qty - (line.qty - line.sent_qty)); // not-yet-sent move first
+      return [
+        stmt(c.env.DB, 'UPDATE order_lines SET qty = qty - ?, sent_qty = sent_qty - ? WHERE id = ?', qty, sentMoved, line.id),
+        stmt(c.env.DB, 'INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t),
+      ];
+    }),
+  ]);
+  return c.json({ id }, 201);
+});
+
 // Keeps the order open as a tab across shifts (for guests not in a room). It is billed when the guest settles.
 orderRoutes.post(`${B}/orders/:id/tab`, requireAction('orders.edit'), async (c) => {
   const bid = c.get('businessId');
