@@ -39,12 +39,16 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
     FROM orders o LEFT JOIN order_lines l ON l.order_id = o.id WHERE o.business_id = ? AND o.status = 'tab' GROUP BY o.id ORDER BY o.opened_at`, bid);
   const outs = await all<{ kind: string; mode: string; amount_paise: number; note: string; at: number; by_name: string | null }>(db, `SELECT o.kind, o.mode, o.amount_paise, o.note, o.at, s.name AS by_name
     FROM drawer_outs o LEFT JOIN staff s ON s.id = o.by_staff WHERE o.business_id = ? AND o.shift_day = ? ORDER BY o.at`, bid, day);
+  const creditNotes = await all<{ cn_no: string; bill_no: string; total_paise: number; refund_mode: string; reason: string }>(db, `SELECT n.cn_no, b.bill_no, n.total_paise, n.refund_mode, n.reason
+    FROM credit_notes n JOIN bills b ON b.id = n.bill_id WHERE n.business_id = ? AND n.shift_day = ? ORDER BY n.seq`, bid, day);
   const cashIn = [...byMode, ...receipts].filter((r) => r.mode === 'cash').reduce((s, r) => s + r.paise, 0);
-  const cashOut = outs.filter((o) => o.mode === 'cash').reduce((s, o) => s + o.amount_paise, 0);
+  const cashOut = outs.filter((o) => o.mode === 'cash').reduce((s, o) => s + o.amount_paise, 0)
+    + creditNotes.filter((n) => n.refund_mode === 'cash').reduce((s, n) => s + n.total_paise, 0);
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
   return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut,
-    drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })) };
+    drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })),
+    creditNotes: creditNotes.map((n) => ({ cnNo: n.cn_no, billNo: n.bill_no, totalPaise: n.total_paise, refundMode: n.refund_mode, reason: n.reason })) };
 }
 
 shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
@@ -86,7 +90,7 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const expected = float + s.cashInPaise - s.cashOutPaise;
   const diff = countedPaise - expected;
   const reason = text(data, 'reason', 'A reason for the difference', { optional: diff === 0, max: 200 });
-  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts };
+  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes };
   const id = newId();
   try {
     await db.batch([

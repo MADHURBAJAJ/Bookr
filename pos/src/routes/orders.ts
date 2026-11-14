@@ -271,14 +271,24 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
-  const items = await all(db, 'SELECT name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise FROM bill_lines WHERE bill_id = ?', id);
+  const items = await all(db, 'SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise FROM bill_lines WHERE bill_id = ? ORDER BY rowid', id);
+  const creditNotes = await all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id);
   const pays = await all(db, `SELECT p.mode, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
       d.name AS debtorAccount, p.comp_guest AS compGuest, p.comp_reason AS compReason, p.tendered_paise AS tenderedPaise
     FROM allocations a JOIN payments p ON p.id = a.payment_id LEFT JOIN pay_accounts pa ON pa.id = p.pay_account_id LEFT JOIN debtor_accounts d ON d.id = p.debtor_account_id
     WHERE a.bill_id = ? ORDER BY p.at, p.rowid`, id);
   const { entity_id, ...rest } = b;
-  return { ...rest, entityId: entity_id, items, payments: pays };
+  return { ...rest, entityId: entity_id, items, payments: pays, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
+
+// Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.
+orderRoutes.get(`${B}/bills`, requireAction('bills.print'), async (c) => {
+  const no = (c.req.query('no') ?? '').trim().toUpperCase();
+  if (!/^[A-Z0-9/-]{1,16}$/.test(no)) fail(400, 'Type a bill number.');
+  return c.json({ bills: await all(c.env.DB, `SELECT b.id, b.bill_no AS billNo, b.status, b.total_paise AS totalPaise, b.printed_at AS printedAt, o.place
+    FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.business_id = ? AND (b.bill_no = ? OR b.bill_no LIKE ?) ORDER BY b.printed_at DESC LIMIT 10`,
+    c.get('businessId'), no, `%${no}`) });
+});
 
 orderRoutes.get(`${B}/bills/:id`, requireAction('pos.view'), async (c) => {
   if (!isUuid(c.req.param('id'))) fail(404, 'Bill not found.');

@@ -202,6 +202,9 @@ async function tablesScreen() {
           <button class="btn" type="button" data-act="newOrder" data-kind="room">Room service</button>
           <button class="btn" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button></div>` : ''}</div>
       ${errorBox()}
+      ${can('bills.print') ? html`<form class="row" style="margin-bottom:16px"><input class="in" style="max-width:260px" data-model="findNo" placeholder="Find a bill: number or its end" value="${ui.findNo ?? ''}">
+        <button class="btn" type="submit" data-act="findBill" data-submit>Find</button>
+        ${ui.found ? (ui.found.length ? ui.found.map((b) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`) : ''}</form>` : ''}
       ${ui.picking ? newOrderForm() : ''}
       ${ui.orders.length ? html`<div class="tiles">${ui.orders.map(tile)}</div>` : html`<p class="quiet">No open orders. Start one above.</p>`}`));
   };
@@ -220,6 +223,7 @@ function newOrderForm() {
     <div class="row"><button class="btn pri" type="submit" data-act="openOrder" data-submit>Start order</button><button class="btn" type="button" data-act="newOrder" data-kind="">Cancel</button></div>
   </form>`;
 }
+actions.findBill = async () => { ui.found = (await api('GET', `${B()}/bills?no=${encodeURIComponent(ui.findNo ?? '')}`)).bills; rerender(); };
 actions.newOrder = (d) => { ui.picking = d.kind || null; ui.stayId = null; ui.error = null; rerender(); };
 actions.pickStay = (d) => { ui.stayId = d.id; rerender(); };
 actions.openOrder = async () => {
@@ -483,15 +487,61 @@ actions.reprint = async () => { const r = await api('POST', `${B()}/bills/${(ui.
 
 async function doneScreen(billId) {
   const { bill } = await api('GET', `${B()}/bills/${billId}`);
-  ui.done = bill;
-  rerender = () => paint(shell('#/', html`<div class="settle">
+  if (can('bills.void') && bill.status === 'settled') await load('payAccounts', 'stays', 'credit');
+  ui.done = bill; ui.cn = null;
+  const credited = {};
+  for (const n of bill.creditNotes) for (const l of n.lines) credited[l.lineId] = (credited[l.lineId] ?? 0) + l.qty;
+  const leftOf = (i) => i.qty - (credited[i.id] ?? 0);
+  rerender = () => {
+    const cn = ui.cn;
+    const anyLeft = bill.items.some((i) => leftOf(i) > 0);
+    paint(shell('#/', html`<div class="settle">
     <section class="panel" style="align-items:center">${receipt(bill)}</section>
     <section class="panel"><h1>${bill.status === 'settled' ? 'Settled' : bill.status === 'void' ? 'Void' : 'Printed, not paid'}</h1>
       <p>${bill.billNo} · ${bill.place} · ${rs(bill.totalPaise)}</p>
-      <p class="quiet">The printed bill cannot be edited. A mistake before payment is fixed by voiding it with a reason and billing again.</p>
-      <div class="row"><button class="btn pri" type="button" data-act="printDone">Print receipt</button><a class="btn" href="#/">Next order</a></div>
+      ${bill.creditNotes.length ? html`<div class="sums"><div><strong>Money given back</strong></div>${bill.creditNotes.map((n) => html`<div><span>${n.cnNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
+      <p class="quiet">The printed bill cannot be edited. Before payment a mistake is voided and billed again; after payment, money given back is a credit note.</p>
+      ${errorBox()}
+      <div class="row"><button class="btn pri" type="button" data-act="printDone">Print receipt</button><a class="btn" href="#/">Next order</a>
+        ${can('bills.void') && bill.status === 'settled' && anyLeft && !cn ? html`<button class="btn danger" type="button" data-act="cnAsk">Give money back</button>` : ''}</div>
+      ${cn ? html`<form class="msg warn" style="display:flex;flex-direction:column;gap:10px"><strong>Credit note on ${bill.billNo}</strong>
+        <div class="chips"><button type="button" class="chip" aria-pressed="${cn.full}" data-act="cnFull">Whole bill (what is left)</button><button type="button" class="chip" aria-pressed="${!cn.full}" data-act="cnPart">Chosen items</button></div>
+        ${cn.full ? '' : bill.items.filter((i) => leftOf(i) > 0).map((i) => html`<div class="line"><span class="grow">${i.name} <span class="small quiet">(${leftOf(i)} left)</span></span>
+          <button class="sq" type="button" data-act="cnLess" data-id="${i.id}" aria-label="One less ${i.name}">−</button><span style="width:22px;text-align:center;font-weight:700">${cn.qty[i.id] ?? 0}</span>
+          <button class="sq" type="button" data-act="cnMore" data-id="${i.id}" data-max="${leftOf(i)}" aria-label="One more ${i.name}">+</button></div>`)}
+        <label class="f">Reason (required)<input class="in" data-model="cnReason" value="${ui.cnReason ?? ''}" placeholder="e.g. Cold food, wrong order"></label>
+        <div class="f">Money goes back by<div class="chips">${[['cash', 'Cash from the drawer'], ['upi', 'UPI'], ['card', 'Card machine reversal'], ['account', 'Credit to folio or account'], ['none', 'Nothing (not paid in money)']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${cn.mode === k}" data-act="cnMode" data-m="${k}">${t}</button>`)}</div></div>
+        ${cn.mode === 'upi' ? html`<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${cn.payAccountId === a.id}" data-act="cnPick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
+        ${cn.mode === 'account' ? html`<div class="chips">${[...cache.stays.map((x) => ({ id: x.accountId, name: `Room ${x.room} · ${x.guestName}` })), ...cache.credit.map((x) => ({ id: x.id, name: x.name }))].map((a) => html`<button type="button" class="chip" aria-pressed="${cn.debtorAccountId === a.id}" data-act="cnPick" data-k="debtorAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
+        <div class="row"><button class="btn danger" type="submit" data-act="cnGo" data-submit>Make credit note</button><button class="btn" type="button" data-act="cnNo">Cancel</button></div></form>` : ''}
     </section></div>`));
+  };
   rerender();
+}
+actions.cnAsk = () => { ui.cn = { full: true, qty: {}, mode: 'cash' }; rerender(); };
+actions.cnNo = () => { ui.cn = null; rerender(); };
+actions.cnFull = () => { ui.cn.full = true; rerender(); };
+actions.cnPart = () => { ui.cn.full = false; rerender(); };
+actions.cnMore = (d) => { ui.cn.qty[d.id] = Math.min(Number(d.max), (ui.cn.qty[d.id] ?? 0) + 1); rerender(); };
+actions.cnLess = (d) => { ui.cn.qty[d.id] = Math.max(0, (ui.cn.qty[d.id] ?? 0) - 1); rerender(); };
+actions.cnMode = (d) => { ui.cn.mode = d.m; rerender(); };
+actions.cnPick = (d) => { ui.cn[d.k] = d.id; rerender(); };
+actions.cnGo = async () => {
+  const cn = ui.cn;
+  const r = await api('POST', `${B()}/bills/${ui.done.id}/credit-note`, {
+    full: cn.full, lines: cn.full ? undefined : Object.entries(cn.qty).filter(([, q]) => q > 0).map(([lineId, qty]) => ({ lineId, qty })),
+    reason: ui.cnReason ?? '', refundMode: cn.mode, payAccountId: cn.payAccountId, debtorAccountId: cn.debtorAccountId,
+  });
+  printCreditNote(r.bill, r.creditNote);
+  flash = { kind: 'ok', text: r.creditNote.message }; route();
+};
+function printCreditNote(b, n) {
+  printArea.innerHTML = asHtml(html`<div class="receipt"><div class="hd">${b.entityName}</div>${b.gstRegistered ? html`<div class="c">GSTIN ${b.gstin}</div>` : ''}
+    <div class="c">CREDIT NOTE</div><div class="rl"><span>${n.cnNo}</span><span>${dateTime(Date.now())}</span></div><div>Against bill ${b.billNo}</div><hr>
+    <div class="rl"><span>Value</span><span>${rs(n.taxablePaise)}</span></div>
+    ${n.cgstPaise ? html`<div class="rl"><span>CGST</span><span>${rs(n.cgstPaise)}</span></div><div class="rl"><span>SGST</span><span>${rs(n.sgstPaise)}</span></div>` : ''}
+    <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(n.totalPaise)}</span></div></div>`);
+  window.print();
 }
 actions.printDone = () => printReceipt(ui.done);
 
@@ -598,8 +648,9 @@ async function shiftScreen() {
           ${s.byAccount.map((a) => html`<div><span class="quiet">UPI: ${a.name}</span><span>${rs(a.paise)}</span></div>`)}
           ${s.receipts.map((m) => html`<div><span class="quiet">Received on folios and credit: ${modeName[m.mode]}</span><span>${rs(m.paise)}</span></div>`)}</div>
         <div class="sums">${s.billed.map((b) => html`<div><span>${b.entity}: ${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}</span><span>${rs(b.paise)}</span></div>`)}</div>
-        <div class="sums">${s.events.map((e) => html`<div><span>${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings' }[e.kind]}</span><span>${e.n} · ${rs(e.paise)}</span></div>`)}</div>
+        <div class="sums">${s.events.map((e) => html`<div><span>${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings', credit_note: 'Credit notes', stock_waste: 'Stock breakage', stock_count: 'Stock count variances' }[e.kind]}</span><span>${e.n} · ${rs(e.paise)}</span></div>`)}</div>
         ${s.tabs.length ? html`<div class="sums"><div><strong>Tabs carried to the next shift (not in these totals)</strong></div>${s.tabs.map((t) => html`<div><span>${t.place} · ${t.guest} · since ${t.since}${t.old ? ' · overdue' : ''}</span><span>${rs(t.paise)}</span></div>`)}</div>` : ''}
+        ${s.creditNotes.length ? html`<div class="sums"><div><strong>Credit notes (money given back)</strong></div>${s.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
         ${s.drawerOuts.length ? html`<div class="sums"><div><strong>Paid out of the drawer</strong></div>${s.drawerOuts.map((o) => html`<div><span>${o.kind === 'refund' ? 'Advance refunded' : 'Paid out'}${o.mode === 'upi' ? ' (UPI)' : ''}${o.note && o.note !== 'Advance refunded' ? ' · ' + o.note : ''} · ${o.byName ?? ''}</span><span>${rs(-o.amountPaise)}</span></div>`)}</div>` : ''}
         ${ui.closed ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
           <label class="f">What for<input class="in" data-model="outNote" value="${ui.outNote ?? ''}" placeholder="e.g. Vegetables"></label>
@@ -672,11 +723,17 @@ async function reportsScreen(tab = 'sales', range = '') {
         ${r.byEntity.map((e) => html`<tr><td>${e.name}<div class="small quiet">${e.gstRegistered ? 'GSTIN ' + e.gstin : 'Not registered for GST'}</div></td><td>${e.bills}<div class="small quiet">${e.firstBill} to ${e.lastBill}</div></td>
           <td class="num">${rs(e.grossPaise)}</td><td class="num">${rs(e.discountPaise)}</td><td class="num">${rs(e.taxablePaise)}</td><td class="num">${rs(e.cgstPaise)}</td><td class="num">${rs(e.sgstPaise)}</td><td class="num"><strong>${rs(e.totalPaise)}</strong></td></tr>`)}
         <tr><td><strong>Total</strong></td><td>${sum('bills')}</td><td class="num">${rs(sum('grossPaise'))}</td><td class="num">${rs(sum('discountPaise'))}</td><td class="num">${rs(sum('taxablePaise'))}</td>
-          <td class="num">${rs(sum('cgstPaise'))}</td><td class="num">${rs(sum('sgstPaise'))}</td><td class="num"><strong>${rs(sum('totalPaise'))}</strong></td></tr></tbody></table></div></section>
+          <td class="num">${rs(sum('cgstPaise'))}</td><td class="num">${rs(sum('sgstPaise'))}</td><td class="num"><strong>${rs(sum('totalPaise'))}</strong></td></tr>
+        ${r.creditNotes.map((n) => html`<tr><td>Less credit notes · ${n.name}<div class="small quiet">${n.first} to ${n.last}</div></td><td>${n.n}</td><td></td><td></td>
+          <td class="num">${rs(-n.taxablePaise)}</td><td class="num">${rs(-n.cgstPaise)}</td><td class="num">${rs(-n.sgstPaise)}</td><td class="num">${rs(-n.totalPaise)}</td></tr>`)}
+        ${r.creditNotes.length ? html`<tr><td><strong>Net</strong></td><td></td><td></td><td></td><td class="num">${rs(sum('taxablePaise') - r.creditNotes.reduce((t, n) => t + n.taxablePaise, 0))}</td>
+          <td class="num">${rs(sum('cgstPaise') - r.creditNotes.reduce((t, n) => t + n.cgstPaise, 0))}</td><td class="num">${rs(sum('sgstPaise') - r.creditNotes.reduce((t, n) => t + n.sgstPaise, 0))}</td>
+          <td class="num"><strong>${rs(sum('totalPaise') - r.creditNotes.reduce((t, n) => t + n.totalPaise, 0))}</strong></td></tr>` : ''}</tbody></table></div></section>
     <div class="grid2" style="margin-top:16px;align-items:start">
       <section class="panel"><h2>By payment</h2><div class="sums">${r.byMode.map((m) => html`<div><span>${modeName[m.mode]} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
         ${r.discounts.length ? html`<h2>Discounts</h2><div class="sums">${r.discounts.map((d) => html`<div><span>${d.reason} (${d.n})</span><span>${rs(d.paise)}</span></div>`)}</div>` : ''}
         ${r.comps.length ? html`<h2>Complimentary</h2><div class="sums">${r.comps.map((c) => html`<div><span>${c.day} · ${c.guest} · ${c.reason} · by ${c.byName ?? ''}</span><span>${rs(c.paise)}</span></div>`)}</div>` : ''}
+        ${r.creditNoteList.length ? html`<h2>Credit notes</h2><div class="sums">${r.creditNoteList.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(n.totalPaise)}</span></div>`)}</div>` : ''}
         ${r.voids.length ? html`<h2>Void bills</h2><div class="sums">${r.voids.map((v) => html`<div><span>${v.billNo} · ${v.reason}</span><span>${rs(v.totalPaise)}</span></div>`)}</div>` : ''}
         ${r.days.length > 1 ? html`<h2>By shift</h2><div class="sums">${r.days.map((d) => html`<div><span>${d.day} (${d.bills} bills)</span><span>${rs(d.totalPaise)}</span></div>`)}</div>` : ''}</section>
       <section class="panel"><h2>Items sold</h2><div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Amount</th></tr></thead><tbody>
@@ -698,7 +755,7 @@ actions.printStatement = () => {
 
 async function exceptionsScreen(day = me.business.shiftDay) {
   const { events } = await api('GET', `${B()}/events?day=${encodeURIComponent(day)}`);
-  const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning' };
+  const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance' };
   rerender = () => paint(shell('#/exceptions', html`<section class="panel"><div class="row" style="justify-content:space-between"><h1>Exceptions · shift ${day}</h1>
       <form class="row"><input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"><button class="btn" type="submit" data-act="exDay" data-submit>Show</button></form></div>
     <p class="quiet small">Every void, reprint, cancelled KOT line, discount and complimentary bill, with who and why. Nothing here can be changed.</p>

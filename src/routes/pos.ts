@@ -147,6 +147,15 @@ async function file(db: DB, bid: string, id: string, kind: string, body: Obj): P
     return [stmt(db, 'INSERT INTO pos_drawer_outs (id, business_id, message_id, kind, mode, amount_paise, note, debtor_name, at, shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       str(body, 'drawerOutId'), bid, id, k, mode, amount, str(body, 'note'), acc ? str(acc, 'name', true) : null, at, shiftDayOf(at))];
   }
+  if (kind === 'credit_note') {
+    const at = int(body, 'at')!;
+    const mode = str(body, 'refundMode')!;
+    if (!['cash', 'upi', 'card', 'account', 'none'].includes(mode)) throw new Bad('refundMode is not known.');
+    return [stmt(db, `INSERT INTO pos_credit_notes (id, business_id, message_id, cn_no, bill_no, reason, taxable_paise, cgst_paise, sgst_paise, total_paise, refund_mode,
+        account_id, debtor_name, at, shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      str(body, 'creditNoteId'), bid, id, str(body, 'cnNo'), str(body, 'billNo'), str(body, 'reason'), int(body, 'taxablePaise'), int(body, 'cgstPaise'),
+      int(body, 'sgstPaise'), int(body, 'totalPaise'), mode, await bookrAccount(db, bid, str(body, 'bookrAccountId', true)), str(body, 'debtorName', true), at, shiftDayOf(at))];
+  }
   throw new Bad(`kind ${kind} is not known.`);
 }
 
@@ -176,7 +185,7 @@ posRoutes.post('/pos/messages', async (c) => {
     const t = now();
     const save = (outcome: 'stored' | 'rejected', note: string | null) => stmt(db,
       'INSERT INTO pos_messages (id, business_id, kind, body, outcome, note, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      id, bid, ['bill_settled', 'bill_void', 'receipt', 'shift_closed', 'drawer_out'].includes(kind) ? kind : 'bill_settled', JSON.stringify(body ?? {}), outcome, note, t);
+      id, bid, ['bill_settled', 'bill_void', 'receipt', 'shift_closed', 'drawer_out', 'credit_note'].includes(kind) ? kind : 'bill_settled', JSON.stringify(body ?? {}), outcome, note, t);
     try {
       if (!body) throw new Bad('body is missing.');
       await db.batch([save('stored', null), ...(await file(db, bid, id, kind, body))]);
@@ -241,6 +250,7 @@ posRoutes.get('/businesses/:businessId/pos', requireRole('sales.view'), async (c
     bills: bills.map((b) => ({ ...b, paidTogether: JSON.parse(String(b.paidTogether)), payments: lines.filter((l) => l.bill_id === b.id).map(lineOut) })),
     receipts: lines.filter((l) => l.kind !== 'bill').map(lineOut),
     byMode,
+    creditNotes: await all(db, 'SELECT cn_no AS cnNo, bill_no AS billNo, reason, total_paise AS totalPaise, refund_mode AS refundMode, at FROM pos_credit_notes WHERE business_id = ? AND shift_day = ? ORDER BY at', bid, day),
     drawerOuts: await all(db, 'SELECT kind, mode, amount_paise AS amountPaise, note, debtor_name AS debtor, at FROM pos_drawer_outs WHERE business_id = ? AND shift_day = ? ORDER BY at', bid, day),
     voids: await all(db, 'SELECT bill_no AS billNo, total_paise AS totalPaise, reason, voided_at AS voidedAt FROM pos_voids WHERE business_id = ? AND shift_day = ?', bid, day),
     shiftClose: await one(db, `SELECT counted_paise AS countedPaise, expected_paise AS expectedPaise, difference_paise AS differencePaise, difference_reason AS differenceReason,

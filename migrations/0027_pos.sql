@@ -15,7 +15,7 @@ CREATE TABLE pos_links (
 CREATE TABLE pos_messages (
   id          TEXT PRIMARY KEY,
   business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-  kind        TEXT NOT NULL CHECK (kind IN ('bill_settled', 'bill_void', 'receipt', 'shift_closed', 'drawer_out')),
+  kind        TEXT NOT NULL CHECK (kind IN ('bill_settled', 'bill_void', 'receipt', 'shift_closed', 'drawer_out', 'credit_note')),
   body        TEXT NOT NULL CHECK (json_valid(body)),
   outcome     TEXT NOT NULL CHECK (outcome IN ('stored', 'rejected')),
   note        TEXT,
@@ -111,3 +111,24 @@ CREATE TABLE pos_drawer_outs (
   shift_day    TEXT NOT NULL
 );
 CREATE INDEX pos_drawer_outs_shift_idx ON pos_drawer_outs (business_id, shift_day);
+
+-- Money given back on a POS bill already paid: a credit note against it, with the GST it takes back.
+CREATE TABLE pos_credit_notes (
+  id             TEXT PRIMARY KEY,               -- the POS's id
+  business_id    TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  message_id     TEXT NOT NULL REFERENCES pos_messages(id),
+  cn_no          TEXT NOT NULL,
+  bill_no        TEXT NOT NULL,
+  reason         TEXT NOT NULL,
+  taxable_paise  INTEGER NOT NULL,
+  cgst_paise     INTEGER NOT NULL,
+  sgst_paise     INTEGER NOT NULL,
+  total_paise    INTEGER NOT NULL CHECK (total_paise > 0),
+  refund_mode    TEXT NOT NULL CHECK (refund_mode IN ('cash', 'upi', 'card', 'account', 'none')),
+  account_id     TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  debtor_name    TEXT,
+  at             INTEGER NOT NULL,
+  shift_day      TEXT NOT NULL,
+  UNIQUE (business_id, cn_no)
+);
+CREATE INDEX pos_credit_notes_shift_idx ON pos_credit_notes (business_id, shift_day);

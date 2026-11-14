@@ -99,4 +99,31 @@ export function rs(p: number): string {
   return `${neg ? '-' : ''}₹${r}${ps ? '.' + String(ps).padStart(2, '0') : ''}`;
 }
 
+/** Credit note number: PREFIX-CNYYYY-NNNN ('C', '2026-27', 1 → 'C-CN2627-0001'). At most 16 characters. */
+export function creditNoteNo(prefix: string, fy: string, seq: number): string {
+  const short = fy.length === 7 ? fy.slice(2, 4) + fy.slice(5, 7) : fy.slice(2);
+  const out = `${prefix}-CN${short}-${String(seq).padStart(4, '0')}`;
+  if (out.length > 16) throw new Error('cn_no_too_long');
+  return out;
+}
+
+export interface BillAmounts extends Totals { gstRateBp: number }
+
+/**
+ * What a credit note takes back. Credited lines carry the bill's own discount share and GST rate; values are exact to the
+ * paisa (no rupee rounding). When this note credits everything still left on the bill, it takes exactly what is left,
+ * so a bill and its credit notes always come to zero together.
+ */
+export function creditTotals(bill: BillAmounts, already: Totals, linesGross: number, lastOne: boolean): Totals {
+  if (lastOne) {
+    const left = (k: keyof Totals) => bill[k] - already[k];
+    return { grossPaise: left('grossPaise'), discountPaise: left('discountPaise'), taxablePaise: left('taxablePaise'), cgstPaise: left('cgstPaise'),
+      sgstPaise: left('sgstPaise'), roundOffPaise: left('roundOffPaise'), totalPaise: left('totalPaise') };
+  }
+  const disc = bill.grossPaise ? roundDiv(linesGross * bill.discountPaise, bill.grossPaise) : 0;
+  const taxable = linesGross - disc;
+  const half = roundDiv(taxable * bill.gstRateBp, 20000);
+  return { grossPaise: linesGross, discountPaise: disc, taxablePaise: taxable, cgstPaise: half, sgstPaise: half, roundOffPaise: 0, totalPaise: taxable + 2 * half };
+}
+
 export { IST_OFFSET_MS };

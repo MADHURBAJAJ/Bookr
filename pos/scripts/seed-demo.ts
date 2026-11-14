@@ -29,7 +29,8 @@ const insert = (table: string, row: Record<string, string | number | null>) =>
 const B = DEMO_BUSINESS;
 
 // Remove the previous demo restaurant, children first (printed bills and payments are otherwise kept by triggers).
-for (const table of ['allocations', 'debtor_entries', 'payments', 'settlements', 'pos_events', 'outbox', 'shift_closes', 'audit_log', 'kots', 'order_lines', 'sessions', 'devices']) {
+// pos_events, bills and bill_lines go with the business: their no-delete rules hold only while it exists.
+for (const table of ['credit_notes', 'drawer_outs', 'allocations', 'debtor_entries', 'payments', 'settlements', 'outbox', 'shift_closes', 'audit_log', 'kots', 'order_lines', 'sessions', 'devices']) {
   out.push(table === 'sessions'
     ? `DELETE FROM sessions WHERE staff_id IN (SELECT id FROM staff WHERE business_id = ${lit(B)});`
     : `DELETE FROM ${table} WHERE business_id = ${lit(B)};`);

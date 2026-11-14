@@ -35,7 +35,12 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
     FROM payments p LEFT JOIN staff s ON s.id = p.by_staff WHERE p.business_id = ? AND p.shift_day BETWEEN ? AND ? AND p.mode = 'comp' ORDER BY p.at`, bid, from, to);
   const voids = await all(db, `SELECT bill_no AS billNo, total_paise AS totalPaise, void_reason AS reason FROM bills
     WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND status = 'void' ORDER BY bill_no`, bid, from, to);
-  return c.json({ from, to, days, byEntity, byMode, items, discounts, comps, voids });
+  const creditNotes = await all(db, `SELECT e.name, count(*) AS n, sum(n.taxable_paise) AS taxablePaise, sum(n.cgst_paise) AS cgstPaise, sum(n.sgst_paise) AS sgstPaise,
+      sum(n.total_paise) AS totalPaise, min(n.cn_no) AS first, max(n.cn_no) AS last
+    FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, from, to);
+  const creditNoteList = await all(db, `SELECT n.cn_no AS cnNo, b.bill_no AS billNo, n.total_paise AS totalPaise, n.reason, n.refund_mode AS refundMode, n.shift_day AS day
+    FROM credit_notes n JOIN bills b ON b.id = n.bill_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? ORDER BY n.at`, bid, from, to);
+  return c.json({ from, to, days, byEntity, byMode, items, discounts, comps, voids, creditNotes, creditNoteList });
 });
 
 // Who owes what, aged: what is owed is taken to be the newest charges (older ones were paid first).
