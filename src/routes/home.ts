@@ -70,7 +70,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   const notBilled = (await one<{ n: number }>(db, `SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND close_note = ? AND difference = 'missing_in_software'
     AND closed_at >= ?`, businessId, NOT_BILLED_NOTE, Date.now() - 7 * 86400000))?.n ?? 0;
   const result = {
-    today, watchDays: WATCH_DAYS,
+    today, watchDays: WATCH_DAYS, bringIn: null as null | { day: string; software: number; registerPages: number },
     shifts: { count: open.length, list: open.slice(0, MAX_SHIFTS) },
     waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled },
     fresh: {
@@ -85,6 +85,15 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     cash: null as null | { day: string; differencePaise: number | null; counted: boolean }[],
     photos: null as null | { count: number; paise: number; pages: { uploadId: string; day: string; count: number; paise: number }[] },
   };
+
+  // The shift that ended at 8 am this morning, while its files are still missing (Today, approved 14 Nov 2026).
+  const lastShift = addDays(shiftDayOf(Date.now()), -1);
+  const [sw, reg, saved] = await Promise.all([
+    one<{ n: number }>(db, 'SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND sw_amount_paise IS NOT NULL', businessId, lastShift),
+    one<{ n: number }>(db, "SELECT count(*) AS n FROM uploads WHERE business_id = ? AND business_day = ? AND kind = 'bill_register'", businessId, lastShift),
+    one<{ n: number }>(db, "SELECT count(*) AS n FROM shifts WHERE business_id = ? AND shift_day = ? AND status = 'confirmed'", businessId, lastShift),
+  ]);
+  const bringIn = !saved?.n && (!sw?.n || !reg?.n) ? { day: lastShift, software: sw?.n ?? 0, registerPages: reg?.n ?? 0 } : null;
 
   if (bank) {
     const [accounts, unbooked, unsettled, cardStatus] = await Promise.all([
@@ -131,6 +140,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
       GROUP BY upload_id ORDER BY min(day)`, businessId);
     result.photos = { count: pages.reduce((t, p) => t + p.count, 0), paise: pages.reduce((t, p) => t + p.paise, 0), pages };
   }
+  result.bringIn = bringIn;
   return result;
 }
 

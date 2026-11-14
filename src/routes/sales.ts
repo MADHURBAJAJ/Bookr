@@ -313,7 +313,8 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/progress', requireRole('sal
   const bid = c.get('businessId');
   const n = async (sql: string, ...args: unknown[]) => (await one<{ n: number }>(db, sql, ...args))?.n ?? 0;
   const w = shiftWindow(day);
-  const [rows, toCheck, toDecide, status, bills, credits] = await Promise.all([
+  const [software, rows, toCheck, toDecide, status, bills, credits] = await Promise.all([
+    n('SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND sw_amount_paise IS NOT NULL', bid, day),
     n('SELECT count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day),
     n("SELECT count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day = ? AND status <> 'checked'", bid, day),
     n(`SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND decision IS NULL
@@ -328,7 +329,7 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/progress', requireRole('sal
   const k = bills != null && status?.status === 'confirmed' ? await shiftCards(db, bid, day, null) : null;
   // What the card side explains counts once, there.
   const twice = k ? { credits: k.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).length, bills: k.explains.bills.filter((x) => x.shiftDay === day).length } : { credits: 0, bills: 0 };
-  return c.json({ rows, toCheck, toDecide, status: status?.status ?? null,
+  return c.json({ software, rows, toCheck, toDecide, status: status?.status ?? null,
     bank: bills == null ? null : { billsLeft: bills - twice.bills, creditsLeft: (credits ?? 0) - twice.credits, cardsLeft: k?.left ?? 0 } });
 });
 

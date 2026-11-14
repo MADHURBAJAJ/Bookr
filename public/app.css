@@ -19,6 +19,12 @@ a { color: var(--teal); text-decoration: none; }
 .nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 8px; color: var(--side-ink); font-size: 15px; }
 .nav.on { background: var(--side-on); font-weight: 600; }
 .nav .soon { font-size: 11px; color: var(--side-muted); }
+.nav-n { font-size: 12px; min-width: 20px; text-align: center; padding: 1px 7px; border-radius: 10px; background: #F59E0B; color: #1F2937; font-weight: 600; }
+.nav-g { font-size: 12px; color: var(--side-muted); padding: 14px 12px 4px; text-transform: none; cursor: default; }
+.nav-set { margin-top: auto; }
+.nav-set > summary { cursor: pointer; list-style: none; }
+.nav-set > summary::after { content: ' ▾'; }
+.nav-set[open] > summary::after { content: ' ▴'; }
 .side-foot { margin-top: auto; padding: 16px 12px 0; font-size: 13px; color: var(--side-muted); line-height: 1.5; }
 .side-foot button { margin-top: 8px; background: transparent; border: 1px solid #3A5266; color: var(--side-ink); border-radius: 8px; min-height: 36px; padding: 0 12px; font: inherit; font-size: 13px; cursor: pointer; }
 .main { flex: 999 1 560px; min-width: 0; padding: 28px 32px; display: flex; flex-direction: column; gap: 20px; }
@@ -431,3 +437,6 @@ details.menu[open] { z-index: 40; }
 .upitag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--income-bg); color: var(--income); }
 
 .nb-next { flex-basis: 100%; color: #92400E; }
+
+.today-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink); }
+.today-row:hover { background: var(--surface-2, #F6F7F9); }

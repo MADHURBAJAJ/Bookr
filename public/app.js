@@ -104,20 +104,36 @@ function render(view) {
 
 // ---------- shell: sidebar + header with business switcher
 
+// The menu in three groups (approved 14 Nov 2026): daily work, books, and settings folded at the foot.
+// A count beside an item says what is waiting there (from the Today figures).
 const NAV = [
-  { key: 'dashboard', label: 'Dashboard', needs: 'reports.view' },
-  { key: 'bringin', label: 'Bring in', needs: 'rows.upload' },
-  // Review, Compare sales and Reconcile are tabs of one shift (the shift bar at the top of each).
-  { key: 'shifts', label: 'Shifts', needs: 'sales.view', screens: ['review', 'compare', 'compare-old', 'reconcile'] },
-  // Bank (approved 10 Nov 2026): statements, money in and out, card settlements, done, as tabs of one page.
-  { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards'] },
-  { key: 'money-out', label: 'Money out', needs: 'bank.link' },
-  { key: 'accounts', label: 'Accounts' },
-  { key: 'heads', label: 'Heads and rules' },
-  { key: 'reports', label: 'Reports', needs: 'reports.view' },
-  { key: 'export', label: 'Export', phase: 5 },
-  { key: 'users', label: 'Users and roles', owner: true },
+  { key: 'dashboard', label: 'Today', needs: 'reports.view', badge: 'today' },
+  // Bring in, Register and Reconcile are the three steps of one shift (the shift bar at the top of each).
+  { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts' },
+  // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
+  { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
+  { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books' },
+  { key: 'accounts', label: 'Accounts', group: 'Settings' },
+  { key: 'heads', label: 'Heads and rules', group: 'Settings' },
+  { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
 ];
+// The menu counts: the Today figures, kept a minute so moving between pages does not ask again.
+let navCounts = { bizId: null, at: 0, n: null };
+async function fillNavCounts(biz) {
+  if (!biz.actions.includes('reports.view')) return;
+  if (navCounts.bizId !== biz.id || Date.now() - navCounts.at > 60000) {
+    try { navCounts = { bizId: biz.id, at: Date.now(), n: todayCounts(await api('GET', `/businesses/${biz.id}/home`), biz) }; } catch { return; }
+  }
+  for (const [k, v] of Object.entries(navCounts.n ?? {})) {
+    const el = document.querySelector(`[data-navn="${k}"]`);
+    if (el) { el.textContent = v ? String(v) : ''; el.hidden = !v; }
+  }
+}
+/** What each menu count shows, from the Today figures. */
+function todayCounts(h, biz) {
+  const bank = (h.bookExpenses?.count ?? 0) + (h.upi?.credits.count ?? 0) + (h.cards?.days ?? 0);
+  return { shifts: h.shifts?.count ?? 0, bank, today: todayItems(h, biz).length };
+}
 
 // The shift being worked on (7 Nov 2026): Review, Compare sales and Reconcile open on the day last worked on anywhere,
 // on this device. Their menu links carry it; the day changes when a page of another day is opened.
@@ -129,10 +145,12 @@ const lastSheet = (bizId) => { try { return JSON.parse(localStorage.getItem(shee
 const rememberSheet = (bizId, u) => { try { localStorage.setItem(sheetKey(bizId), JSON.stringify({ id: u.id, day: u.day })); } catch { /* storage unavailable */ } };
 const screenKey = (bizId) => `bookr.screen.${bizId}`;
 // Compare sales is Reconcile's All bills tab now (approved 10 Nov 2026): the shift has two steps.
-const SHIFT_SCREENS = [['review', 'Register', 'rows.edit'], ['reconcile', 'Reconcile', 'sales.view']];
+// Bring in is the first step of a shift (approved 14 Nov 2026).
+const SHIFT_SCREENS = [['bringin', 'Bring in', 'rows.upload'], ['review', 'Register', 'rows.edit'], ['reconcile', 'Reconcile', 'sales.view']];
 /** Where a shift screen opens for a day. Review: the sheet last opened, if it is of that day; else the day's first page. */
 function screenHref(biz, key, day) {
   if (!day) return `#/b/${biz.id}/${key}`;
+  if (key === 'bringin') return `#/b/${biz.id}/bringin/${day}`;
   if (key !== 'review') return `#/b/${biz.id}/${key}/${day}`;
   const sh = lastSheet(biz.id);
   return sh?.day === day ? `#/b/${biz.id}/review/${sh.id}` : `#/b/${biz.id}/review?day=${day}`;
@@ -173,7 +191,9 @@ async function wireShiftBar(biz, days = null) {
   const [list, p] = await Promise.all([days ? { shifts: days.map((d) => ({ day: d })) } : api('GET', `/businesses/${biz.id}/shifts`).catch(() => ({ shifts: [] })),
     api('GET', `/businesses/${biz.id}/shifts/${day}/progress`).catch(() => null)]);
   if (!bar.isConnected) return;
-  const all = [...new Set([day, ...list.shifts.map((x) => x.day)])].sort();
+  // Bring in can go on to a shift with nothing in it yet, up to the one running now.
+  const ahead = screen === 'bringin' ? [addDaysIso(day, 1), addDaysIso(day, -1)].filter((d) => d <= currentShiftDay()) : [];
+  const all = [...new Set([day, ...ahead, ...list.shifts.map((x) => x.day)])].sort();
   const pick = bar.querySelector('[data-sbpick]');
   pick.innerHTML = html`${[...all].reverse().map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}`.__html;
   const to = (d) => go(screenHref(biz, screen, d));
@@ -186,6 +206,7 @@ async function wireShiftBar(biz, days = null) {
   });
   if (!p) return;
   const set = (k, text, cls) => { const el = bar.querySelector(`[data-sbn="${k}"]`); if (el) { el.textContent = text; el.className = `sb-n ${cls}`; } };
+  set('bringin', !p.software && !p.rows ? 'to bring in' : !p.software ? 'no sales report' : !p.rows ? 'no register' : '✓', p.software && p.rows ? 'ok' : 'wait');
   set('review', !p.rows ? 'no page' : p.toCheck ? `${p.toCheck} to check` : '✓', p.rows && !p.toCheck ? 'ok' : p.toCheck ? 'wait' : '');
   const left = p.bank ? p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0) : 0;
   set('reconcile', p.status !== 'confirmed' ? (p.toDecide ? `${p.toDecide} to decide · not saved` : 'not saved') : left ? `${left} left` : '✓',
@@ -193,10 +214,18 @@ async function wireShiftBar(biz, days = null) {
 }
 
 function shell(biz, current, title, subtitle, body, opts = {}) {
-  const nav = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))).map((n) => html`
-    <a class="nav ${(n.screens ?? [n.key]).includes(current) ? 'on' : ''}" href="${navHref(biz, n.key)}">
-      <span>${n.label}</span>${n.phase ? html`<span class="soon">Phase ${n.phase}</span>` : ''}
-    </a>`);
+  const shown = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))
+    && (n.key !== 'shifts' || SHIFT_SCREENS.some(([, , need]) => biz.actions.includes(need))));
+  const link = (n) => html`<a class="nav ${(n.screens ?? [n.key]).includes(current) ? 'on' : ''}" href="${navHref(biz, n.key)}">
+      <span>${n.label}</span>${n.badge ? html`<span class="nav-n" data-navn="${n.badge}" hidden></span>` : ''}</a>`;
+  const settings = shown.filter((n) => n.group === 'Settings');
+  const inSettings = settings.some((n) => (n.screens ?? [n.key]).includes(current));
+  let lastGroup = null;
+  const nav = [...shown.filter((n) => n.group !== 'Settings').map((n) => {
+    const head = n.group && n.group !== lastGroup ? html`<div class="nav-g">${n.group}</div>` : '';
+    lastGroup = n.group ?? lastGroup;
+    return html`${head}${link(n)}`;
+  }), settings.length ? html`<details class="nav-set" ${inSettings ? 'open' : ''}><summary class="nav-g">Settings</summary>${settings.map(link)}</details>` : ''];
   const others = me.businesses.map((b) => html`
     <a href="#/b/${b.id}/${current}" class="${b.id === biz.id ? 'on' : ''}"><span>${b.name}</span><span class="chip">${ROLE_LABELS[b.role]}</span></a>`);
   return html`
@@ -204,10 +233,6 @@ function shell(biz, current, title, subtitle, body, opts = {}) {
     <aside class="side">
       <div class="brand">Bookr</div>
       ${nav}
-      <div class="side-foot">Signed in as<br>${ROLE_LABELS[biz.role]} · ${biz.name}<br>
-        <span class="tiny">${me.user.email}</span><br>
-        <button id="signout" type="button">Sign out</button>
-      </div>
     </aside>
     <main class="main">
       ${biz.isDemo && !opts.tools ? html`<div class="demo-band">Demo business. Sample data only.</div>` : ''}
@@ -222,6 +247,8 @@ function shell(biz, current, title, subtitle, body, opts = {}) {
           <div class="menu" id="switch-menu" hidden>
             ${others}
             <a href="#/choose"><span>All businesses</span></a>
+            <div class="tiny" style="padding:8px 12px;border-top:1px solid var(--line-soft)">${ROLE_LABELS[biz.role]} · ${me.user.email}
+              <div><button id="signout" type="button" class="btn plain" style="margin-top:6px;min-height:32px">Sign out</button></div></div>
           </div>
         </div>
       </div>
@@ -231,6 +258,8 @@ function shell(biz, current, title, subtitle, body, opts = {}) {
 }
 
 function wireShell() {
+  const sb = me?.businesses?.find((b) => b.id === currentBizId());
+  if (sb) fillNavCounts(sb);
   document.getElementById('signout')?.addEventListener('click', async () => {
     await api('POST', '/auth/logout', {}).catch(() => {});
     me = null;
@@ -310,109 +339,65 @@ function fyDefault() {
   return `${year}-04-01`;
 }
 
-// The dashboard (approved 9 Nov 2026): jobs waiting, most urgent first. Each card opens where the job is done;
-// a card with nothing waiting folds to one grey line. Bank and card parts come only for Owner and Accountant.
-async function dashboardView(biz) {
-  const [h, { accounts, heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/home`), api('GET', `/businesses/${biz.id}/dashboard`)]);
+// Today (approved 14 Nov 2026; was the dashboard of 9 Nov): one line for each thing waiting, oldest first, each opening
+// where it is done. What is done folds to one line. Bank and card parts only for Owner and Accountant, as before.
+function todayItems(h, biz) {
   const can = (a) => biz.actions.includes(a);
   const n = (x, one, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
   const rs = (p) => `₹ ${money(p)}`;
+  const items = [];
+  const add = (day, text, href, label, late = '') => items.push({ day, text, href, label, late });
+  if (h.bringIn && can('rows.upload')) {
+    const b = h.bringIn;
+    const miss = [!b.software && 'sales report', !b.registerPages && 'register photos'].filter(Boolean).join(' and ');
+    add(b.day, html`<strong>${dayLabel(b.day)} shift</strong> · ${miss} not in yet`, screenHref(biz, 'bringin', b.day), 'Bring in');
+  }
+  for (const s of h.shifts?.list ?? []) {
+    const parts = [s.toCheck && n(s.toCheck, 'row') + ' to check', s.toDecide && n(s.toDecide, 'bill') + ' to decide',
+      s.bank?.billsLeft && `${s.bank.billsLeft} UPI bill${s.bank.billsLeft === 1 ? '' : 's'} not in the bank`, s.bank?.creditsLeft && n(s.bank.creditsLeft, 'UPI credit') + ' not matched',
+      s.bank?.cardsLeft && `${s.bank.cardsLeft} card`].filter(Boolean);
+    const step = s.toCheck && can('rows.edit') ? ['review', 'Register'] : ['reconcile', 'Reconcile'];
+    add(s.day, html`<strong>${dayLabel(s.day)} shift</strong> · ${s.status !== 'confirmed' ? 'not saved' : 'saved'}${parts.length ? ` · ${parts.join(' · ')}` : ''}`, screenHref(biz, step[0], s.day), step[1]);
+  }
+  if (h.photos?.count) add(h.photos.pages[0]?.day ?? null, `${n(h.photos.count, 'expense line')} to approve · ${rs(h.photos.paise)}`, `#/b/${biz.id}/review/${h.photos.pages[0]?.uploadId ?? ''}`, 'Approve');
+  if (h.bookExpenses?.count) {
+    const b = h.bookExpenses;
+    add(b.oldestDay, `${n(b.count, 'bank payment')} to book · ${rs(b.paise)}`, `#/b/${biz.id}/money-out?${new URLSearchParams({ from: b.oldestDay ?? h.today, to: h.today, waiting: '1' })}`, 'Book');
+  }
+  if (h.upi?.credits.count) add(h.upi.credits.oldestDay, `${n(h.upi.credits.count, 'UPI credit')} with no bill · ${rs(h.upi.credits.paise)}`, `#/b/${biz.id}/bank?tab=in`, 'Match',
+    h.upi.credits.late ? `${h.upi.credits.late} over ${h.watchDays} days` : '');
+  if (h.cards?.days) add(h.cards.oldestDay, `${n(h.cards.days, 'card day')} to settle · ${rs(h.cards.netPaise)} net`, `#/b/${biz.id}/cards`, 'Settle');
+  for (const k of h.cash ?? []) add(k.day, html`<strong>${dayLabel(k.day)} cash</strong> · ${!k.counted ? 'cash in hand not entered' : k.differencePaise < 0 ? `${rs(-k.differencePaise)} short` : `${rs(k.differencePaise)} over`}`,
+    `#/b/${biz.id}/reconcile/${k.day}?tab=cash`, 'Cash');
+  if (h.waitingBills?.count) add(h.waitingBills.firstDay, `${n(h.waitingBills.count, 'waiting bill')} need a look`, `#/b/${biz.id}/reconcile/${h.waitingBills.firstDay}?top=wait`, 'Open',
+    h.waitingBills.late ? `${h.waitingBills.late} over ${h.watchDays} days` : '');
+  return items.sort((x, y) => (x.day ?? '9999').localeCompare(y.day ?? '9999'));
+}
+
+async function dashboardView(biz) {
+  const [h, { accounts, heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/home`), api('GET', `/businesses/${biz.id}/dashboard`)]);
+  navCounts = { bizId: biz.id, at: Date.now(), n: todayCounts(h, biz) };
+  const items = todayItems(h, biz);
   const STALE = 36 * 3600000;
   const stale = (ms) => ms == null || Date.now() - ms > STALE;
-  const done = (title) => html`<section class="card dash-done"><span class="ok-msg">✓</span> ${title}</section>`;
-  const card = (title, body, opts = {}) => html`<section class="card dash-card ${opts.big ? 'dash-big' : ''}" style="gap:8px">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>${title}</h2>${opts.chip ?? ''}</div>${body}</section>`;
-  const goBtn = (href, label) => html`<a class="btn plain dash-go" href="${href}">${label} ›</a>`;
-  const cards = [];
-
-  // 1. Book expenses: bank payments not booked yet, up to the last bank data synced.
-  if (h.bookExpenses) {
-    const b = h.bookExpenses;
-    cards.push(b.count ? card('Book expenses', html`
-      <div class="dash-num">${n(b.count, 'payment')} · ${rs(b.paise)}</div>
-      <div class="note">Not booked yet, oldest ${dayLabel(b.oldestDay)}. Counted up to the bank data synced.</div>
-      ${b.accounts.map((a) => html`<div class="list-row"><span>${a.name}${a.lastAt ? html` <span class="note">· data up to ${when(a.lastAt)}</span>` : ''}</span><span class="amount">${a.count} · ${rs(a.paise)}</span></div>`)}
-      ${goBtn(`#/b/${biz.id}/money-out?${new URLSearchParams({ from: b.oldestDay, to: h.today, waiting: '1' })}`, 'Book on Money out')}`, { big: true }) : done('Book expenses: every bank payment is booked'));
-  }
-
-  // 2. Shifts to finish.
-  if (h.shifts.count) {
-    const next = (s) => {
-      if (s.toCheck && can('rows.edit')) return 'review';
-      if (s.toDecide || !s.bank || !can('bank.link')) return 'reconcile';
-      return 'reconcile';
-    };
-    const parts = (s) => [s.toCheck && n(s.toCheck, 'row') + ' to check', s.toDecide && n(s.toDecide, 'bill') + ' to decide',
-      s.bank?.billsLeft && `${s.bank.billsLeft} UPI bill${s.bank.billsLeft === 1 ? '' : 's'}`, s.bank?.creditsLeft && n(s.bank.creditsLeft, 'UPI credit'),
-      s.bank?.cardsLeft && `${s.bank.cardsLeft} card`, !s.toCheck && !s.toDecide && s.status !== 'confirmed' && 'to confirm'].filter(Boolean).join(' · ');
-    cards.push(card('Shifts to finish', html`
-      ${h.shifts.list.map((s) => html`<a class="list-row dash-link" href="${screenHref(biz, next(s), s.day)}"><span>${dayLabel(s.day)}</span><span class="note">${parts(s)} ›</span></a>`)}
-      ${h.shifts.count > h.shifts.list.length ? html`<div class="note">and ${h.shifts.count - h.shifts.list.length} more.</div>` : ''}`,
-      { chip: html`<span class="chip wait">${h.shifts.count}</span>` }));
-  } else cards.push(done('Shifts: all confirmed'));
-
-  // 3. UPI credits not matched.
-  if (h.upi) {
-    const { credits: c, bills: b } = h.upi;
-    cards.push(c.count || b.count ? card('UPI not matched', html`
-      ${c.count ? html`<div class="dash-num">${n(c.count, 'credit')} · ${rs(c.paise)}</div><div class="note">Money received with no bill yet, oldest ${dayLabel(c.oldestDay)}.</div>` : ''}
-      ${b.count ? html`<div class="note">${n(b.count, 'UPI bill')} (${rs(b.paise)}) still without a credit, oldest ${dayLabel(b.oldestDay)}.</div>` : ''}
-      ${goBtn(`#/b/${biz.id}/reconcile/all`, 'Open entries')}`, { chip: c.late ? html`<span class="chip bad">${c.late} over ${h.watchDays} days</span>` : '' }) : done('UPI: every credit matched'));
-  }
-
-  // 4. Card settlements.
-  if (h.cards) {
-    cards.push(h.cards.days ? card('Card settlements', html`
-      <div class="dash-num">${n(h.cards.days, 'day')} · ${rs(h.cards.netPaise)} net</div>
-      <div class="note">Card report days not settled against a bank credit yet, oldest ${dayLabel(h.cards.oldestDay)}.</div>
-      ${goBtn(`#/b/${biz.id}/cards`, 'Card settlements')}`) : done('Card settlements: all settled'));
-  }
-
-  // 5. Cash check.
-  if (h.cash) {
-    cards.push(h.cash.length ? card('Cash check', html`
-      ${h.cash.map((k) => html`<a class="list-row dash-link" href="#/b/${biz.id}/compare/${k.day}"><span>${dayLabel(k.day)}</span>
-        <span class="note">${!k.counted ? 'cash in hand not entered' : k.differencePaise < 0 ? `${rs(-k.differencePaise)} short` : `${rs(k.differencePaise)} over`} ›</span></a>`)}`) : done('Cash: every confirmed shift of the week checks out'));
-  }
-
-  // 6. Expense photos to approve.
-  if (h.photos) {
-    cards.push(h.photos.count ? card('Expense photos to approve', html`
-      <div class="dash-num">${n(h.photos.count, 'row')} · ${rs(h.photos.paise)}</div>
-      ${h.photos.pages.map((p) => html`<a class="list-row dash-link" href="#/b/${biz.id}/review/${p.uploadId}"><span>${dayLabel(p.day)}</span><span class="note">${n(p.count, 'row')} · ${rs(p.paise)} ›</span></a>`)}`) : done('Expense photos: all approved'));
-  }
-
-  // 7. Bills waiting for their other side.
-  if (h.waitingBills.count || h.waitingBills.grey?.some((g) => g.waitFor !== 'unsaved') || h.waitingBills.notBilled) {
-    // Unsaved shifts have their own card (Shifts to finish); here only bills waiting for a file.
-    const greys = (h.waitingBills.grey ?? []).filter((g) => g.waitFor !== 'unsaved');
-    const greyN = greys.reduce((t, g) => t + g.n, 0);
-    cards.push(card('Waiting bills that need a look', html`
-      ${h.waitingBills.count ? html`<div class="note">${h.waitingBills.count} bill${h.waitingBills.count === 1 ? '' : 's'} where something should have turned up and has not.</div>
-        ${goBtn(`#/b/${biz.id}/reconcile/${h.waitingBills.firstDay}?top=wait`, 'Open Waiting')}` : html`<div class="ok-msg">Nothing needs a look.</div>`}
-      ${greyN ? html`<div class="note" style="color:var(--muted)">${greyN} more not counted yet: ${greys.slice(0, 3).map(greyText).join('; ')}${greys.length > 3 ? '; …' : ''}.</div>` : ''}
-      ${h.waitingBills.notBilled ? html`<div class="note">${h.waitingBills.notBilled} bill${h.waitingBills.notBilled === 1 ? '' : 's'} not billed in software this week.</div>` : ''}`,
-      { chip: h.waitingBills.late ? html`<span class="chip bad">${h.waitingBills.late} over ${h.watchDays} days</span>` : '' }));
-  }
-
-  // Data freshness: what each figure above is counted up to.
+  const done = [!h.shifts.count && 'every shift saved', h.bookExpenses && !h.bookExpenses.count && 'every bank payment booked',
+    h.upi && !h.upi.credits.count && 'every UPI credit matched', h.cards && !h.cards.days && 'card days settled',
+    h.cash && !h.cash.length && 'cash checks out', h.photos && !h.photos.count && 'expense photos approved'].filter(Boolean);
   const f = h.fresh;
-  const bit = (label, text, old) => html`<span class="chip ${old ? 'wait' : ''}">${label}: ${text}</span>`;
-  const strip = html`<section class="card dash-fresh">
-    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
-      ${(f.bank ?? []).filter((a) => a.linked || a.lastAt).map((a) => bit(a.name, a.lastAt ? `up to ${when(a.lastAt)}` : 'no lines yet', stale(a.lastAt)))}
-      ${f.cards?.folder ? bit('Card', f.cards.lastAt ? `up to ${when(f.cards.lastAt)}` : 'no report yet', stale(f.cards.lastAt)) : ''}
-      ${bit('Register', f.registerDay ? dayLabel(f.registerDay) : 'none yet', !f.registerDay || f.registerDay < addDaysIso(h.today, -1))}
-      ${bit('Sales report', f.reportDay ? dayLabel(f.reportDay) : 'none yet', !f.reportDay || f.reportDay < addDaysIso(h.today, -1))}
-      ${f.bank ? html`<button class="btn plain" id="dashsync" type="button" style="margin-left:auto">Sync bank and card</button>` : ''}
-    </div><div id="dashmsg"></div></section>`;
-
-  const total = accounts.reduce((s, a) => s + a.openingBalancePaise, 0);
-  render(shell(biz, 'dashboard', 'Dashboard', 'What is waiting, most urgent first.', html`
-    ${strip}
-    <div class="dash-grid">${cards.filter((c) => !c.__html.includes('dash-done'))}</div>
-    ${cards.filter((c) => c.__html.includes('dash-done'))}
-    <details class="card cmp-fold" style="margin-top:16px"><summary><h2>Opening balances and set-up</h2></summary>
+  const bit = (label, text, old) => html`<span style="${old ? 'color:#92400E' : ''}">${label} ${text}</span>`;
+  const fresh = [...(f.bank ?? []).filter((a) => a.linked || a.lastAt).map((a) => bit(a.name, a.lastAt ? `up to ${when(a.lastAt)}` : 'no lines yet', stale(a.lastAt))),
+    ...(f.cards?.folder ? [bit('Card', f.cards.lastAt ? `up to ${when(f.cards.lastAt)}` : 'no report yet', stale(f.cards.lastAt))] : [])];
+  const total = accounts.reduce((t, a) => t + a.openingBalancePaise, 0);
+  render(shell(biz, 'dashboard', 'Today', '', html`
+    ${fresh.length || f.bank ? html`<div class="note" style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center">${fresh}
+      ${f.bank ? html`<button class="btn plain" id="dashsync" type="button" style="min-height:32px">Sync</button>` : ''}</div><div id="dashmsg"></div>` : ''}
+    <section class="card" style="gap:0;padding-top:4px;padding-bottom:4px">
+      ${items.length ? items.map((x, i) => html`<a class="today-row" href="${x.href}" style="${i === items.length - 1 ? 'border-bottom:0' : ''}">
+        <span>${x.text}${x.late ? html` <span class="chip bad">${x.late}</span>` : ''}</span><span class="btn plain dchip">${x.label} ›</span></a>`)
+        : html`<div class="ok-msg" style="padding:12px 0">Nothing waiting.</div>`}
+    </section>
+    ${done.length ? html`<div class="note">✓ ${done.join(' · ')}</div>` : ''}
+    <details class="card cmp-fold"><summary><h2>Opening balances and set-up</h2></summary>
       ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalancePaise)}</span></div>`)}
       <div class="list-row" style="font-weight:600"><span>Combined</span><span class="amount">₹ ${money(total)}</span></div>
       <div class="note">${accounts.length} accounts · ${heads.income} income heads · ${heads.expense} expense heads ·
@@ -421,8 +406,8 @@ async function dashboardView(biz) {
   wireShell();
   document.getElementById('dashsync')?.addEventListener('click', async (e) => {
     e.target.disabled = true; e.target.textContent = 'Syncing…';
-    try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); await dashboardView(biz); document.getElementById('dashmsg').innerHTML = syncResultHtml(r).__html; }
-    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync bank and card'; showError(document.getElementById('dashmsg'), err); }
+    try { const r = await apiFull('POST', `/businesses/${biz.id}/bank/sync-all`, {}); navCounts.at = 0; await dashboardView(biz); document.getElementById('dashmsg').innerHTML = syncResultHtml(r).__html; }
+    catch (err) { e.target.disabled = false; e.target.textContent = 'Sync'; showError(document.getElementById('dashmsg'), err); }
   });
 }
 
@@ -903,7 +888,8 @@ async function moneyOutView(biz, query) {
   const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
   const act = (l) => (l.source !== 'bank' ? '' : l.status === 'not_booked' ? html`<button class="btn plain" type="button" style="${SMALL}" data-mobook="${l.id}">Book</button>`
     : l.status === 'booked' ? html`<button class="btn plain" type="button" style="${SMALL}" data-moundo="${l.id}">Undo</button>` : '');
-  render(shell(biz, 'money-out', 'Money out', '', html`
+  render(shell(biz, 'money-out', 'Bank', '', html`
+    ${bankTabs(biz, null, 'payments')}
     <section class="card" style="gap:10px">
       <h2>All payments</h2>
       <div class="note">Every payment from a bank account or from Cash, by shift (8 am to 8 am). A bank line booked to a head is one payment, shown once. <strong>Book</strong> a bank payment to a head here; cash expenses are booked on Review.</div>
@@ -3557,26 +3543,32 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
 const BANK_KIND = { upi_in: 'UPI in', upi_out: 'UPI out', upi_fee: 'UPI card fee', reversal: 'Reversal', card_settlement: 'Card settlement', card_purchase: 'Card purchase', other: 'Other' };
 const hhmm = (ms) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
 
-// The Bank page's top (approved 10 Nov 2026): how far each source is in, what is left, and the tabs. Money out stays its
-// own page; this page's Money out tab is the bank's payments to book.
+// The Bank page's top (approved 10 Nov 2026): how far each source is in, what is left, and the tabs. All payments (the old Money out page) is a tab;
+// the Money out tab is the bank's payments to book (14 Nov 2026).
 const shiftStartNow = () => Date.parse(`${new Date(Date.now() + IST_MS - 8 * 3600e3).toISOString().slice(0, 10)}T08:00:00+05:30`);
 const accountBehind = (a) => !!a.sheetId && (a.lastAt ?? 0) < shiftStartNow() - 3600e3;
 const cardsBehind = (k) => !!k?.folder && (k.lastSettled ?? '') < addDaysIso(todayIst(), -1);
 const bankBehind = (b) => b.accounts.some(accountBehind) || cardsBehind(b.cards);
 
+/** The Bank tabs (approved 14 Nov 2026: All payments, the old Money out page, is a tab here). Counts when the bank figures are at hand. */
+function bankTabs(biz, b, active) {
+  const tabs = [['in', 'Money in', b ? b.open?.in ?? 0 : null, `#/b/${biz.id}/bank?tab=in`], ['out', 'Money out', b ? b.open?.out ?? 0 : null, `#/b/${biz.id}/bank?tab=out`],
+    ['payments', 'All payments', null, `#/b/${biz.id}/money-out`],
+    ['cards', 'Card settlements', b ? b.cards?.days ?? 0 : null, `#/b/${biz.id}/cards`],
+    ['statements', 'Statements', b ? (bankBehind(b) ? b.accounts.filter(accountBehind).length + (cardsBehind(b.cards) ? 1 : 0) : 0) : null, `#/b/${biz.id}/bank?tab=statements`],
+    ['done', 'Done', null, `#/b/${biz.id}/bank?tab=done`]];
+  return html`<div class="seg mode-tabs bank-tabs" role="tablist" aria-label="Bank" style="margin:4px 0 10px">${tabs.map(([k, l, n, href]) => html`<a role="tab" href="${href}" class="${k === active ? 'on' : ''}" aria-selected="${k === active}">${l}${n == null ? '' : n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</a>`)}</div>`;
+}
 function bankTop(biz, b, active) {
   const lastBank = Math.max(0, ...b.accounts.map((a) => a.lastAt ?? 0));
   const tile = (label, value, warn) => html`<div class="bank-tile"><div class="tiny">${label}</div><div style="font-weight:600;${warn ? 'color:var(--danger)' : ''}">${value}</div></div>`;
-  const tabs = [['statements', 'Statements', bankBehind(b) ? b.accounts.filter(accountBehind).length + (cardsBehind(b.cards) ? 1 : 0) : 0, `#/b/${biz.id}/bank?tab=statements`],
-    ['in', 'Money in', b.open?.in ?? 0, `#/b/${biz.id}/bank?tab=in`], ['out', 'Money out', b.open?.out ?? 0, `#/b/${biz.id}/bank?tab=out`],
-    ['cards', 'Card settlements', b.cards?.days ?? 0, `#/b/${biz.id}/cards`], ['done', 'Done', null, `#/b/${biz.id}/bank?tab=done`]];
   return html`<div class="bank-strip">
       ${tile('Bank in up to', lastBank ? when(lastBank) : 'nothing yet', b.accounts.some(accountBehind))}
       ${tile('Card report in up to', b.cards?.lastSettled ? `settled ${dayLabel(b.cards.lastSettled)}` : 'nothing yet', cardsBehind(b.cards))}
       ${tile('Money in left', `${b.open?.in ?? 0} line${b.open?.in === 1 ? '' : 's'}`)}
       ${tile('Money out left', `${b.open?.out ?? 0} line${b.open?.out === 1 ? '' : 's'}`)}
       ${tile('Card days to settle', b.cards?.days ? `${b.cards.days} · ₹ ${rs(b.cards.daysNetPaise)}` : 'none')}</div>
-    <div class="seg mode-tabs bank-tabs" role="tablist" aria-label="Bank" style="margin:4px 0 10px">${tabs.map(([k, l, n, href]) => html`<a role="tab" href="${href}" class="${k === active ? 'on' : ''}" aria-selected="${k === active}">${l}${n == null ? '' : n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</a>`)}</div>`;
+    ${bankTabs(biz, b, active)}`;
 }
 
 async function bankView(biz, query = '') {
@@ -3746,7 +3738,7 @@ async function bankView(biz, query = '') {
         ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
   };
 
-  render(shell(biz, 'bank', 'Bank', 'Statements from each bank account and the card machine, money in and out, and card settlements. Nothing is booked until a person confirms it.', html`
+  render(shell(biz, 'bank', 'Bank', '', html`
     ${bankTop(biz, b, tab)}
     <div id="bmsg"></div>
     ${tab === 'statements' ? html`<section class="card" style="gap:10px">
@@ -4565,6 +4557,7 @@ async function reconcileView(biz, dayArg) {
   if (dayPart === 'all' && biz.actions.includes('bank.link')) return unmatchedView(biz);
   const more = Number(new URLSearchParams(qs).get('more')) || 1;
   if (new URLSearchParams(qs).get('top') === 'wait' && isDay(dayPart)) recKeep = { day: dayPart, top: 'wait' };
+  if (new URLSearchParams(qs).get('tab') === 'cash' && isDay(dayPart)) recKeep = { day: dayPart, top: 'pay', tab: 'cash' };
   let day = isDay(dayPart) ? dayPart : null;
   if (!day) {
     const { shifts } = await api('GET', `/businesses/${biz.id}/shifts`);
@@ -6012,6 +6005,7 @@ const rememberBringInDay = (bizId, day) => { try { localStorage.setItem(`bookr.b
 async function bringInView(biz, dayArg) {
   const day = isDay(dayArg) ? dayArg : lastBringInDay(biz.id) ?? addDaysIso(currentShiftDay(), -1);
   rememberBringInDay(biz.id, day);
+  rememberDay(biz.id, day);
   const v = await api('GET', `/businesses/${biz.id}/shifts/${day}/inputs`);
   const pagesOf = (k) => v.pages.filter((p) => p.kind === k);
   const regs = pagesOf('bill_register');
@@ -6055,12 +6049,10 @@ async function bringInView(biz, dayArg) {
       <div data-tilelist="${kind}"></div>
       ${drop(kind, '📷', ps.length ? 'Add more' : 'Drop photos here', hint, 'image/jpeg,image/png,application/pdf', true)}</div>`;
   };
-  render(shell(biz, 'bringin', 'Bring in', `Everything for one shift, in order. ${dayLabel(day)} 8 am → ${dayLabel(addDaysIso(day, 1))} 8 am.`, html`
-    <div class="form-row" style="align-items:center;gap:10px"><label for="bid" class="note">Shift</label>
-      <input id="bid" type="date" value="${day}" class="compact" style="max-width:180px">
-      <button class="linkbtn" type="button" data-shift="${addDaysIso(day, -1)}">← Day before</button>
-      <button class="linkbtn" type="button" data-shift="${addDaysIso(day, 1)}">Day after →</button>
-      ${v.shiftStatus === 'confirmed' ? html`<span class="chip ok">Confirmed</span>` : ''}</div>
+  // Step 1 of the shift (approved 14 Nov 2026): the same shift bar and day as Register and Reconcile.
+  render(shell(biz, 'bringin', 'Bring in', '', html`
+    ${shiftBar(biz, day, 'bringin')}
+    <div class="note">${dayLabel(day)} 8 am → ${dayLabel(addDaysIso(day, 1))} 8 am${v.shiftStatus === 'confirmed' ? html` · <span class="chip ok">Saved</span>` : ''}</div>
     ${stepper}
     <div id="bmsg"></div>
 
@@ -6092,9 +6084,9 @@ async function bringInView(biz, dayArg) {
     </section>
 
     <section class="card step-card" id="step-ready" style="${allOk ? 'border-color:#86EFAC;background:#F0FDF4' : ''}">
-      ${head('✨', allOk, false, allOk ? 'Everything is in' : 'Then', allOk ? 'Go and match the shift.' : `Still to come: ${[!softwareOk && 'software report', v.bank && !bankOk && 'bank up to 8 am', !pagesOk && (regs.length ? 'pages read and a cash summary' : 'register pages')].filter(Boolean).join(' · ')}`)}
-      <div class="form-row"><a class="btn" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/compare/${day}">All bills of the shift →</a>
-        ${v.bank ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/reconcile/${day}">Reconcile</a>` : ''}</div>
+      ${head('✨', allOk, false, allOk ? 'Everything is in' : 'Then', allOk ? '' : `Still to come: ${[!softwareOk && 'software report', v.bank && !bankOk && 'bank up to 8 am', !pagesOk && (regs.length ? 'pages read and a cash summary' : 'register pages')].filter(Boolean).join(' · ')}`)}
+      <div class="form-row">${biz.actions.includes('rows.edit') ? html`<a class="btn ${allOk ? '' : 'plain'}" style="display:inline-flex;align-items:center" href="${screenHref(biz, 'review', day)}">Next: Register ›</a>` : ''}
+        ${biz.actions.includes('sales.view') ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="${screenHref(biz, 'reconcile', day)}">Reconcile ›</a>` : ''}</div>
     </section>
     ${biz.role === 'owner' ? html`<details class="card" style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">Check reading accuracy</summary>
       <p class="note">Reads register pages whose rows have all been checked again, the way pages are read now, and compares the first reading and the new one with what was ticked.
@@ -6119,8 +6111,7 @@ async function bringInView(biz, dayArg) {
     catch (err) { b.disabled = false; showError(msg, err); msg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
   }));
   const msg = document.getElementById('bmsg');
-  document.getElementById('bid').addEventListener('change', (e) => go(`#/b/${biz.id}/bringin/${e.target.value}`));
-  app.querySelectorAll('[data-shift]').forEach((b) => b.addEventListener('click', () => go(`#/b/${biz.id}/bringin/${b.dataset.shift}`)));
+  wireShiftBar(biz);
   app.querySelectorAll('[data-goto]').forEach((s) => s.addEventListener('click', () => document.getElementById(`step-${s.dataset.goto}`)?.scrollIntoView({ behavior: 'smooth' })));
   app.querySelectorAll('[data-reveal]').forEach((b) => b.addEventListener('click', () => { app.querySelector(`[data-revealed="${b.dataset.reveal}"]`).hidden = false; b.remove(); }));
   // Drop zones: tap or drop.
@@ -6614,7 +6605,7 @@ async function cardsView(biz, query = '') {
       <div class="inset" style="gap:8px"><strong>Bank</strong>${bankBlock(s)}</div>
     </section>`;
   };
-  render(shell(biz, 'bank', 'Bank', 'Statements from each bank account and the card machine, money in and out, and card settlements. Nothing is booked until a person confirms it.', html`
+  render(shell(biz, 'bank', 'Bank', '', html`
     ${bankTop(biz, b, 'cards')}
     <section class="card" style="gap:12px">
       <div id="recmsg"></div>
