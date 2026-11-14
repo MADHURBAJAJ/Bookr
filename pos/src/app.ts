@@ -8,6 +8,7 @@ import { settleRoutes } from './routes/settle';
 import { shiftRoutes } from './routes/shifts';
 import { reportRoutes } from './routes/reports';
 import { creditRoutes } from './routes/credit';
+import { stockRoutes } from './routes/stock';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -30,6 +31,7 @@ app.route('/', settleRoutes);
 app.route('/', shiftRoutes);
 app.route('/', reportRoutes);
 app.route('/', creditRoutes);
+app.route('/', stockRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

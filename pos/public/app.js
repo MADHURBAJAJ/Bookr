@@ -70,7 +70,7 @@ const counterEntities = () => (cache.entities ?? []).filter((e) => e.active && e
 
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
-    ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Exceptions', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
+    ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Exceptions', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   return html`<header class="top">
     <div class="row"><span class="brand">${me.business.name}</span>
       <nav aria-label="Main">${links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`)}</nav></div>
@@ -98,6 +98,7 @@ async function route() {
     if (path === 'shift') return await shiftScreen();
     if (path === 'exceptions') return await exceptionsScreen(a);
     if (path === 'reports') return await reportsScreen(a, b);
+    if (path === 'stock') return await stockScreen(a);
     if (path === 'settings') return await settingsScreen(a);
     return await tablesScreen();
   } catch (e) {
@@ -753,6 +754,94 @@ actions.printStatement = () => {
     <hr><div class="rl" style="font-weight:700"><span>Balance</span><span>${rs(bal)}</span></div></div>`);
   window.print();
 };
+
+// ---------- stock (Owner and manager)
+
+async function stockScreen(tab = 'hand') {
+  const st = await api('GET', `${B()}/stock`);
+  await load('menu');
+  ui.st = st;
+  const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['report', 'Report'], ['items', 'Items and recipes']];
+  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/stock/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
+  const items = st.items.filter((i) => i.active);
+  const storeSel = (model, label) => html`<label class="f">${label}<select class="in" data-model="${model}"><option value="">Choose</option>${st.stores.map((x) => html`<option value="${x.id}" ${ui[model] === x.id ? 'selected' : ''}>${x.name}</option>`)}</select></label>`;
+  const itemSel = (model) => html`<label class="f">Item<select class="in" data-model="${model}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${ui[model] === i.id ? 'selected' : ''}>${i.name} (${i.unit})</option>`)}</select></label>`;
+  const qtyText = (q, i) => i.unit === 'ml' || i.unit === 'g' ? `${q} ${i.unit}${i.packSize > 1 && Math.abs(q) >= i.packSize ? ` (${(q / i.packSize).toFixed(1)} ${i.packName})` : ''}` : `${q} ${i.unit}`;
+  if (tab === 'report') { ui.rFrom ??= me.business.shiftDay; ui.rTo ??= me.business.shiftDay; ui.rStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
+  if (tab === 'report' && ui.rStore) ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`);
+  rerender = () => {
+    let body = '';
+    if (!st.stores.length && tab !== 'items') body = html`<section class="panel"><p>No stores yet. Add them on <a href="#/stock/items">Items and recipes</a>.</p></section>`;
+    else if (tab === 'hand') body = html`<section class="panel"><h2>Stock on hand</h2>${errorBox()}<div class="scroll"><table class="t"><thead><tr><th>Item</th>${st.stores.map((x) => html`<th class="num">${x.name}</th>`)}<th class="num">Total</th><th class="num">Value</th></tr></thead><tbody>
+      ${items.map((i) => html`<tr><td>${i.name}${i.low ? html`<div class="small" style="color:var(--bad)">Below reorder level (${qtyText(i.reorderLevel, i)})</div>` : ''}</td>
+        ${st.stores.map((x) => html`<td class="num" style="${i.byStore[x.id] < 0 ? 'color:var(--bad)' : ''}">${qtyText(i.byStore[x.id], i)}</td>`)}<td class="num"><strong>${qtyText(i.total, i)}</strong></td><td class="num">${rs(i.valuePaise)}</td></tr>`)}
+      <tr><td><strong>Total value</strong></td>${st.stores.map(() => html`<td></td>`)}<td></td><td class="num"><strong>${rs(items.reduce((t, i) => t + i.valuePaise, 0))}</strong></td></tr></tbody></table></div>
+      <p class="small quiet">Value is at the last price paid. Bar sales take stock from the bar store when a bill is settled, by each menu item's recipe.</p></section>`;
+    else if (tab === 'receive') body = html`<form class="panel"><h2>Receive goods</h2>${errorBox()}<div class="grid3">${storeSel('rcStore', 'Into store')}<label class="f">Vendor<input class="in" data-model="rcVendor" value="${ui.rcVendor ?? ''}"></label>
+        <label class="f">Invoice number<input class="in" data-model="rcInv" value="${ui.rcInv ?? ''}"></label>${itemSel('rcItem')}
+        <label class="f">How many ${(items.find((i) => i.id === ui.rcItem)?.packName ?? 'pack')}s<input class="in" inputmode="numeric" data-model="rcPacks" value="${ui.rcPacks ?? ''}"></label>
+        <label class="f">Price per ${(items.find((i) => i.id === ui.rcItem)?.packName ?? 'pack')} (₹)<input class="in" inputmode="decimal" data-model="rcCost" value="${ui.rcCost ?? ''}"></label></div>
+      <div><button class="btn pri" type="submit" data-act="stReceive" data-submit>Receive</button></div></form>`;
+    else if (tab === 'transfer') body = html`<form class="panel"><h2>Move stock between stores</h2>${errorBox()}<div class="grid3">${storeSel('trFrom', 'From')}${storeSel('trTo', 'To')}${itemSel('trItem')}
+        <label class="f">Quantity (${items.find((i) => i.id === ui.trItem)?.unit ?? 'units'})<input class="in" inputmode="numeric" data-model="trQty" value="${ui.trQty ?? ''}"></label></div>
+      <p class="small quiet">A 750 ml bottle is 750; a case of 12 beers is 12.</p><div><button class="btn pri" type="submit" data-act="stTransfer" data-submit>Move</button></div></form>`;
+    else if (tab === 'waste') body = html`<form class="panel"><h2>Breakage, spillage or loss</h2>${errorBox()}<div class="grid3">${storeSel('waStore', 'Store')}${itemSel('waItem')}
+        <label class="f">Quantity (${items.find((i) => i.id === ui.waItem)?.unit ?? 'units'})<input class="in" inputmode="numeric" data-model="waQty" value="${ui.waQty ?? ''}"></label>
+        <label class="f" style="grid-column:1/-1">Reason (required)<input class="in" data-model="waReason" value="${ui.waReason ?? ''}" placeholder="e.g. Bottle broken"></label></div>
+      <div><button class="btn pri" type="submit" data-act="stWaste" data-submit>Record</button></div><p class="small quiet">Shown on the exceptions report with who recorded it.</p></form>`;
+    else if (tab === 'count') {
+      const sid = ui.ctStore;
+      body = html`<form class="panel"><h2>Count a store</h2>${errorBox()}<div class="grid3">${storeSel('ctStore', 'Store')}</div>
+        ${sid ? html`<p class="small quiet">Type what is physically there, in ${'ml'} for bottles (a full 750 ml bottle is 750) and pieces for the rest. Leave blank to skip an item.</p>
+          <div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Book</th><th>Counted</th></tr></thead><tbody>
+          ${items.map((i) => html`<tr><td>${i.name}</td><td class="num">${qtyText(i.byStore[sid] ?? 0, i)}</td><td><input class="in" inputmode="numeric" style="max-width:160px" data-model="ct_${i.id}" value="${ui['ct_' + i.id] ?? ''}" aria-label="Counted ${i.name}"></td></tr>`)}</tbody></table></div>
+          <div><button class="btn pri" type="submit" data-act="stCount" data-submit>Save count</button></div>` : ''}
+        ${ui.countResult ? html`<div class="sums">${ui.countResult.map((l) => html`<div><span>${l.name}: book ${l.book}, counted ${l.counted} ${l.unit}</span><span style="color:${l.variance ? 'var(--bad)' : 'var(--accent)'}">${l.variance ? `${l.variance > 0 ? '+' : ''}${l.variance} ${l.unit} · ${rs(l.valuePaise)}` : 'agrees'}</span></div>`)}</div>` : ''}</form>`;
+    } else if (tab === 'report') {
+      const r = ui.report;
+      body = html`<section class="panel"><form class="row" style="align-items:end">${storeSel('rStore', 'Store')}<label class="f">From<input class="in" type="date" data-model="rFrom" value="${ui.rFrom}"></label>
+          <label class="f">To<input class="in" type="date" data-model="rTo" value="${ui.rTo}"></label><button class="btn" type="submit" data-act="stReport" data-submit>Show</button></form>
+        ${r ? html`<h2>${r.store.name} · ${r.from === r.to ? r.from : `${r.from} to ${r.to}`}</h2><div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Opening</th><th class="num">Received</th><th class="num">In</th><th class="num">Out</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Variance</th><th class="num">Closing</th></tr></thead><tbody>
+          ${r.items.map((i) => html`<tr><td>${i.name} <span class="small quiet">${i.unit}</span></td><td class="num">${i.opening}</td><td class="num">${i.received}</td><td class="num">${i.transferIn}</td><td class="num">${i.transferOut}</td><td class="num">${i.sold}</td>
+            <td class="num">${i.waste}${i.waste ? html`<div class="small quiet">${rs(i.wasteValuePaise)}</div>` : ''}</td><td class="num" style="${i.variance ? 'color:var(--bad)' : ''}">${i.variance}${i.variance ? html`<div class="small">${rs(i.varianceValuePaise)}</div>` : ''}</td>
+            <td class="num"><strong>${i.closing}</strong><div class="small quiet">${rs(i.closingValuePaise)}</div></td></tr>`)}</tbody></table></div>
+          <p class="small quiet">Sold comes from bills by recipe. Variance is what counts found against the book: a minus means stock went missing.</p>` : ''}</section>`;
+    } else if (tab === 'items') body = html`<div class="grid2" style="align-items:start">
+      <section class="panel"><h2>Stock items</h2>${errorBox()}
+        <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Unit</th><th>Pack</th><th class="num">Price per pack</th><th class="num">Reorder at</th></tr></thead><tbody>
+          ${st.items.map((i) => html`<tr><td>${i.name}${i.active ? '' : ' (not used)'}</td><td>${i.unit}</td><td>${i.packName} of ${i.packSize}</td><td class="num">${rs(i.costPerPackPaise)}</td><td class="num">${i.reorderLevel}</td></tr>`)}</tbody></table></div>
+        <form class="grid2"><label class="f">Name<input class="in" data-model="siName" placeholder="e.g. Sample Whisky"></label>
+          <label class="f">Counted in<select class="in" data-model="siUnit"><option value="ml">ml</option><option value="pcs" ${ui.siUnit === 'pcs' ? 'selected' : ''}>pieces</option><option value="g" ${ui.siUnit === 'g' ? 'selected' : ''}>g</option></select></label>
+          <label class="f">Bought as<input class="in" data-model="siPack" placeholder="bottle, case"></label><label class="f">Units in one (e.g. 750)<input class="in" inputmode="numeric" data-model="siSize"></label>
+          <label class="f">Price per pack (₹)<input class="in" inputmode="decimal" data-model="siCost"></label><label class="f">Reorder when total is at or below (units)<input class="in" inputmode="numeric" data-model="siReorder"></label>
+          <div><button class="btn pri" type="submit" data-act="stItem" data-submit>Add stock item</button></div></form>
+        <h2>Stores</h2><p>${st.stores.map((x) => x.name).join(', ') || 'None yet'}</p>
+        <form class="row" style="align-items:end"><label class="f">Store name<input class="in" data-model="sStoreName" placeholder="e.g. Bar"></label>
+          <label class="f">Kind<select class="in" data-model="sStoreKind"><option value="bar">Bar</option><option value="main" ${ui.sStoreKind === 'main' ? 'selected' : ''}>Main store</option><option value="kitchen" ${ui.sStoreKind === 'kitchen' ? 'selected' : ''}>Kitchen</option></select></label>
+          <button class="btn" type="submit" data-act="stStore" data-submit>Add store</button></form></section>
+      <section class="panel"><h2>Recipes</h2><p class="small quiet">What one portion of a menu item uses. Bar items take from the bar store; kitchen items from the kitchen store.</p>
+        <div class="sums">${cache.menu.filter((m) => st.recipes.some((r) => r.menuItemId === m.id)).map((m) => html`<div><span>${m.name}</span><span>${st.recipes.filter((r) => r.menuItemId === m.id).map((r) => { const i = st.items.find((x) => x.id === r.stockItemId); return `${r.qty} ${i?.unit ?? ''} ${i?.name ?? ''}`; }).join(' + ')}</span></div>`)}</div>
+        <form class="grid2"><label class="f">Menu item<select class="in" data-model="rcMenu"><option value="">Choose</option>${cache.menu.map((m) => html`<option value="${m.id}" ${ui.rcMenu === m.id ? 'selected' : ''}>${m.name}</option>`)}</select></label>
+          ${itemSel('rcStock')}<label class="f">Uses (${items.find((i) => i.id === ui.rcStock)?.unit ?? 'units'} per portion)<input class="in" inputmode="numeric" data-model="rcQty"></label>
+          <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="stRecipe" data-submit>Set recipe</button><button class="btn" type="button" data-act="stRecipeClear">Remove recipe</button></div></div></form></section></div>`;
+    paint(shell('#/stock', html`${head}${body}`));
+  };
+  rerender();
+}
+const int = (v) => (/^\d+$/.test(String(v ?? '').trim()) ? Number(v) : NaN);
+actions.stReceive = async () => { await api('POST', `${B()}/stock/purchases`, { storeId: ui.rcStore, vendor: ui.rcVendor, invoiceNo: ui.rcInv, lines: [{ itemId: ui.rcItem, packs: int(ui.rcPacks), costPerPack: ui.rcCost }] }); flash = { kind: 'ok', text: 'Received.' }; go('#/stock/hand'); };
+actions.stTransfer = async () => { await api('POST', `${B()}/stock/transfers`, { fromStoreId: ui.trFrom, toStoreId: ui.trTo, lines: [{ itemId: ui.trItem, qty: int(ui.trQty) }] }); flash = { kind: 'ok', text: 'Moved.' }; go('#/stock/hand'); };
+actions.stWaste = async () => { await api('POST', `${B()}/stock/waste`, { storeId: ui.waStore, itemId: ui.waItem, qty: int(ui.waQty), reason: ui.waReason }); flash = { kind: 'ok', text: 'Recorded.' }; go('#/stock/hand'); };
+actions.stCount = async () => {
+  const lines = ui.st.items.filter((i) => i.active && String(ui['ct_' + i.id] ?? '').trim() !== '').map((i) => ({ itemId: i.id, counted: int(ui['ct_' + i.id]) }));
+  const r = await api('POST', `${B()}/stock/counts`, { storeId: ui.ctStore, lines });
+  const keep = ui.ctStore; await stockScreen('count'); ui.ctStore = keep; ui.countResult = r.lines; rerender();
+};
+actions.stReport = async () => { ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`); rerender(); };
+actions.stItem = async () => { await api('POST', `${B()}/stock/items`, { name: ui.siName, unit: ui.siUnit ?? 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0') }); route(); };
+actions.stStore = async () => { await api('POST', `${B()}/stock/stores`, { name: ui.sStoreName, kind: ui.sStoreKind ?? 'bar' }); route(); };
+actions.stRecipe = async () => { await api('PUT', `${B()}/stock/recipes/${ui.rcMenu}`, { lines: [{ stockItemId: ui.rcStock, qty: int(ui.rcQty) }] }); route(); };
+actions.stRecipeClear = async () => { await api('PUT', `${B()}/stock/recipes/${ui.rcMenu}`, { lines: [] }); route(); };
 
 // ---------- exceptions
 

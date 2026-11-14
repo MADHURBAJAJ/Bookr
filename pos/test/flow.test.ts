@@ -335,3 +335,45 @@ describe('credit notes', () => {
     expect((await s.counter.get(`${s.B}/debtors/${acc.id}`)).json.balancePaise).toBe(0);
   });
 });
+
+describe('bar stock', () => {
+  it('receives, transfers, takes sales by recipe, records breakage and count variance, and reports it', async () => {
+    const s = await setupBusiness();
+    const B = s.B;
+    const ok = s.ok;
+    const main = (await ok(s.owner.post(`${B}/stock/stores`, { name: 'Main store', kind: 'main' }))).id;
+    const bar = (await ok(s.owner.post(`${B}/stock/stores`, { name: 'Bar', kind: 'bar' }))).id;
+    const whisky = (await ok(s.owner.post(`${B}/stock/items`, { name: 'Sample Whisky', unit: 'ml', packName: 'bottle', packSize: 750, costPerPack: '1800', reorderLevel: 750 }))).id;
+    const beer = (await ok(s.owner.post(`${B}/stock/items`, { name: 'Sample Beer 650 ml', unit: 'pcs', packName: 'case', packSize: 12, costPerPack: '1800' }))).id;
+    const peg = (await ok(s.owner.post(`${B}/menu`, { name: 'Whisky 30 ml', price: '220', station: 'bar' }))).id;
+    s.items['Whisky 30 ml'] = peg;
+    await ok(s.owner.put(`${B}/stock/recipes/${peg}`, { lines: [{ stockItemId: whisky, qty: 30 }] }));
+    await ok(s.owner.put(`${B}/stock/recipes/${s.items['Beer 650 ml']}`, { lines: [{ stockItemId: beer, qty: 1 }] }));
+    expect((await s.counter.post(`${B}/stock/items`, { name: 'X', unit: 'ml', packSize: 1 })).status).toBe(403); // cashier
+
+    await ok(s.owner.post(`${B}/stock/purchases`, { storeId: main, vendor: 'Sample Wines', invoiceNo: 'INV-1', lines: [{ itemId: whisky, packs: 2, costPerPack: '1800' }, { itemId: beer, packs: 1 }] }));
+    expect((await s.owner.post(`${B}/stock/transfers`, { fromStoreId: main, toStoreId: bar, lines: [{ itemId: whisky, qty: 2000 }] })).json.error).toMatch(/only 1500 ml/);
+    await ok(s.owner.post(`${B}/stock/transfers`, { fromStoreId: main, toStoreId: bar, lines: [{ itemId: whisky, qty: 1500 }, { itemId: beer, qty: 12 }] }));
+
+    // 3 pegs and 2 beers sold; a voided bill takes nothing.
+    const { bill } = await billed(s, [['Whisky 30 ml', 3], ['Beer 650 ml', 2]]);
+    await s.counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: rupees(bill.totalPaise) }] });
+    const voided = (await billed(s, [['Whisky 30 ml', 1]])).bill;
+    await s.counter.post(`${B}/bills/${voided.id}/void`, { reasonId: s.reasons.void });
+
+    await ok(s.owner.post(`${B}/stock/waste`, { storeId: bar, itemId: whisky, qty: 30, reason: 'Spilt' }));
+    const count = (await ok(s.owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: whisky, counted: 1350 }, { itemId: beer, counted: 10 }] }))).lines;
+    expect(count.map((l: any) => [l.name, l.book, l.counted, l.variance])).toEqual([['Sample Whisky', 1380, 1350, -30], ['Sample Beer 650 ml', 10, 10, 0]]);
+    expect(count[0].valuePaise).toBe(-7200); // 30 ml of a ₹1,800 bottle
+
+    const day = bill.shiftDay;
+    const r = (await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${bar}`))).items;
+    expect(r.find((x: any) => x.name === 'Sample Whisky')).toMatchObject({ opening: 0, transferIn: 1500, sold: 90, waste: 30, variance: -30, closing: 1350 });
+    expect(r.find((x: any) => x.name === 'Sample Beer 650 ml')).toMatchObject({ transferIn: 12, sold: 2, closing: 10 });
+    const onHand = (await ok(s.owner.get(`${B}/stock`))).items.find((x: any) => x.name === 'Sample Whisky');
+    expect(onHand).toMatchObject({ total: 1350, low: false, valuePaise: 324000 });
+    const kinds = (await s.owner.get(`${B}/events?day=${day}`)).json.events.map((e: any) => e.kind);
+    expect(kinds).toEqual(expect.arrayContaining(['stock_waste', 'stock_count']));
+    await expect(q('UPDATE stock_moves SET qty = 1 WHERE business_id = ?', s.businessId)).rejects.toThrow(/stock_move_frozen/);
+  });
+});

@@ -11,6 +11,7 @@ import { allocate, rs } from '../billing';
 import { clock, event, isTrigger, loadBusiness, reasonLabel } from '../util';
 import { billOut } from './orders';
 import { sendSoon } from '../sync';
+import { saleMoves } from '../stock';
 import type { AppEnv } from '../types';
 
 export const settleRoutes = new Hono<AppEnv>();
@@ -164,6 +165,8 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     ...ordered.map((x) => stmt(db, "UPDATE orders SET status = 'closed' WHERE id = ?", x.order_id)),
     ...pays.filter((p) => p.mode === 'comp').map((p) => event(db, bid, 'comp', ordered.map((x) => x.bill_no).join(', '), p.amountPaise, p.compReason, `Guest: ${p.compGuest}`, staff.id, shiftDay)),
   ];
+  // Stock the bills used (recipes), in the same batch.
+  statements.push(...(await saleMoves(db, bid, ordered.map((x) => x.id), staff.id, shiftDay, t)));
   // One message per bill for Bookr, in the same batch, with the bill as printed and its share of each payment.
   for (const x of ordered) {
     const { payments: _none, ...printed } = await billOut(db, bid, x.id);

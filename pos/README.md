@@ -63,6 +63,16 @@ tab age limit, menu and reason lists are settings per business.
   advances.
 - **Shift close.** Drawer count by note against float plus cash taken; a difference needs a reason. Open orders must be billed
   or kept as tabs, and printed bills paid or voided, first. Tabs are listed apart. No payment can land in a closed shift.
+- **Split bills.** By item (chosen dishes move to a new bill at the same table, each with its own number and GST), or one
+  bill paid in equal shares, each share its own way.
+- **Credit notes.** Money given back on a paid bill: whole or chosen items, at the bill's own discount and GST, numbered per
+  billing name (`C-CN2627-0001`), with a reason and how the money went back. A bill can be found by its number.
+- **Money out.** Cash paid out of the drawer, and an unused advance refunded; both reduce the cash expected at shift close.
+- **Reports.** Sales by billing name with GST (credit notes netted), by payment mode and by item; discounts, complimentary
+  bills and voids; who owes what, aged, with printable statements.
+- **Bar stock.** Stores (main, bar, kitchen), items in ml or pieces with their pack size and price, recipes per menu item;
+  settled bills take stock by recipe; receiving, transfers, breakage and counts with variance; a stock report per store.
+- **Phones and tablets.** Menu and order side by side from tablet width; on a phone a bar at the bottom shows the order.
 - **Exceptions report.** Voids, reprints, cancelled KOT lines, discounts, complimentary bills and limit warnings, append-only.
 
 ## Run and test
