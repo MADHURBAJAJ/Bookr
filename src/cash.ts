@@ -40,9 +40,10 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
       FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
       ORDER BY 2`, businessId, day, businessId, day),
-    one<{ approved: number; waiting: number }>(db, `SELECT
+    one<{ approved: number; waiting: number; waitingPaise: number }>(db, `SELECT
         coalesce(sum(CASE WHEN status = 'approved' THEN amount_paise END), 0) AS approved,
-        count(CASE WHEN status <> 'approved' THEN 1 END) AS waiting
+        count(CASE WHEN status <> 'approved' THEN 1 END) AS waiting,
+        coalesce(sum(CASE WHEN status <> 'approved' THEN amount_paise END), 0) AS waitingPaise
       FROM transactions WHERE business_id = ? AND day = ? AND source = 'cash_photo' AND type = 'expense'`, businessId, day),
     one<{ total: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS total FROM transactions
       WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage'`, businessId, day),
@@ -92,6 +93,7 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     notInRegisterBookedPaise: notInRegisterRows.filter((c) => c.decision === 'use_software').reduce((t, c) => t + c.amountPaise, 0),
     expensesPaise: expenses!.approved,
     expensesWaiting: expenses!.waiting,
+    expensesWaitingPaise: expenses!.waitingPaise,
     shortagePaise: shortages!.total,
     depositedPaise: moved!.deposited,
     drawnPaise: moved!.drawn,

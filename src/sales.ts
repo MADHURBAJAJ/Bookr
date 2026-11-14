@@ -1404,3 +1404,47 @@ export async function complimentaryBills(db: DB, businessId: string, from: strin
   }));
   return { lines, count: lines.length, valuePaise: lines.reduce((t, l) => t + (l.valuePaise ?? 0), 0), noName: lines.filter((l) => !l.name && !l.remarks).length };
 }
+
+/**
+ * The Cash tab before saving (approved 14 Nov 2026): what Save would book in cash now, and every bill that touches cash
+ * with both sides' cash and what is counted, so the difference shows live. After saving, "counted" is the booked sale.
+ */
+export async function cashBills(db: DB, businessId: string, day: string) {
+  const { status, rg, paysByRow, groups } = await loadShiftData(db, businessId, day);
+  const confirmed = status === 'confirmed';
+  const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
+  const counted = new Map<string, number>();
+  let plannedCash = 0;
+  if (confirmed) {
+    for (const t of await all<{ comparison_id: string; amount_paise: number }>(db, `SELECT comparison_id, amount_paise FROM transactions
+      WHERE business_id = ? AND shift_day = ? AND source = 'software_report' AND type = 'income' AND payment_mode = 'cash' AND comparison_id IS NOT NULL`, businessId, day)) {
+      counted.set(t.comparison_id, (counted.get(t.comparison_id) ?? 0) + t.amount_paise);
+    }
+  } else {
+    for (const r of await plannedRows(db, businessId, day)) {
+      if (r.mode !== 'cash') continue;
+      plannedCash += r.amount;
+      counted.set(r.c.id, (counted.get(r.c.id) ?? 0) + r.amount);
+    }
+  }
+  const rgById = new Map(rg.map((r) => [r.id, r]));
+  const headOf = new Map(groups.flatMap((g) => g.rowIds.map((id) => [id, g] as const)));
+  const bills = comps.flatMap((c) => {
+    const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
+    const pays = r ? paysByRow.get(r.id) ?? [] : [];
+    const rgCash = pays.filter((p) => p.mode === 'cash').reduce((t, p) => t + p.amount_paise, 0);
+    const swCash = c.sw_mode === 'cash' ? c.sw_amount_paise : null;
+    const cnt = counted.get(c.id) ?? 0;
+    if (!swCash && !rgCash && !cnt) return [];
+    const state = c.difference === 'match' ? 'match' : c.difference === 'complimentary' ? 'complimentary' : c.decision === 'leave_out' ? 'left_out' : c.decision ? 'decided' : 'undecided';
+    const g = r ? headOf.get(r.id) : undefined;
+    const differs = state === 'undecided' || (swCash ?? 0) !== rgCash || (state === 'decided' && !r);
+    return [{
+      comparisonId: c.id, billNo: c.bill_no, difference: c.difference, decision: c.decision, state, differs,
+      swCashPaise: swCash, swMode: c.sw_mode, swAmountPaise: c.sw_amount_paise,
+      rgCashPaise: r ? rgCash : null, rgOther: pays.filter((p) => p.mode !== 'cash').map((p) => ({ mode: p.mode, amountPaise: p.amount_paise })),
+      rgAmountPaise: c.rg_amount_paise, countedPaise: cnt, rowId: r?.id ?? null, uploadId: r?.upload_id ?? null, groupSize: g ? g.rowIds.length : 0,
+    }];
+  }).sort((a, b) => Number(b.differs) - Number(a.differs) || a.billNo.localeCompare(b.billNo));
+  return { confirmed, plannedCashPaise: confirmed ? null : plannedCash, bills };
+}

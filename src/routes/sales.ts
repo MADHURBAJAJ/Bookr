@@ -14,7 +14,7 @@ import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { waitingPicture } from '../waiting';
 import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { CASH_BY_UPI_MIN, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { CASH_BY_UPI_MIN, cashBills, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -634,8 +634,14 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/cash', requireRole('sales.v
   const db = c.env.DB;
   const bid = c.get('businessId');
   const day = dayParam(c.req.param('day'));
-  const k = await cashCheck(db, bid, day);
-  return c.json({ ...k, pair: await cashPairOf(db, bid, day, k), reasons: LEAVE_OUT_REASONS });
+  const [k, cb] = await Promise.all([cashCheck(db, bid, day), cashBills(db, bid, day)]);
+  // Before saving, the same sum from what Save would book now (approved 14 Nov 2026). The figures above stay final-only,
+  // as other screens use them.
+  const draftShould = !k.confirmed && k.openingPaise !== null
+    ? k.openingPaise + cb.plannedCashPaise! - k.expensesPaise - k.shortagePaise - k.depositedPaise + k.drawnPaise : null;
+  const draft = k.confirmed ? null : { cashSalesPaise: cb.plannedCashPaise, shouldBePaise: draftShould,
+    differencePaise: draftShould !== null && k.countedPaise !== null ? k.countedPaise - draftShould : null };
+  return c.json({ ...k, draft, bills: cb.bills, pair: await cashPairOf(db, bid, day, k), reasons: LEAVE_OUT_REASONS });
 });
 
 // A short day and an over day by the same amount, settled together: the cash was counted a day late. Owner or Accountant.
