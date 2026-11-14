@@ -1477,5 +1477,32 @@ export async function cashBills(db: DB, businessId: string, day: string) {
       rgAmountPaise: c.rg_amount_paise, countedPaise: cnt, rowId: r?.id ?? null, uploadId: r?.upload_id ?? null, groupSize: g ? g.rowIds.length : 0,
     }];
   }).sort((a, b) => Number(b.differs) - Number(a.differs) || a.billNo.localeCompare(b.billNo));
-  return { confirmed, plannedCashPaise: confirmed ? null : plannedCash, bills };
+  // The other side of a cash bill that differs (14 Nov 2026): when it says UPI or card, is there a payment of that amount
+  // near the bill (a bank credit within 3 hours, a card-machine payment within an hour)? Told, never applied.
+  const want = bills.filter((b) => b.differs && b.state !== 'complimentary').flatMap((b) => {
+    const side = b.rgOther.length === 1 && !b.rgCashPaise ? b.rgOther[0] : b.swCashPaise === null && (b.swMode === 'upi' || b.swMode === 'card') ? { mode: b.swMode, amountPaise: b.swAmountPaise ?? 0 } : null;
+    return side && side.amountPaise && (side.mode === 'upi' || side.mode === 'card') ? [{ b, side }] : [];
+  });
+  const witness = new Map<string, { mode: string; amountPaise: number; found: string | null }>();
+  if (want.length && !confirmed) {
+    const times = new Map((await all<{ id: string; paid_at: number | null }>(db, `SELECT c.id, s.paid_at FROM bill_comparisons c LEFT JOIN software_bills s ON s.id = c.software_bill_id
+      WHERE c.business_id = ? AND c.shift_day = ?`, businessId, day)).map((x) => [x.id, x.paid_at]));
+    const w = shiftWindow(day);
+    const [credits, machine] = await Promise.all([
+      all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched'
+        AND posted_at >= ? AND posted_at < ?`, businessId, w.from - 3 * 3600e3, w.to + 3 * 3600e3),
+      all<{ amount_paise: number; paid_at: number; scheme: string | null }>(db, `SELECT s.amount_paise, s.paid_at, s.scheme FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
+        AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, w.from - 3600e3, w.to + 3600e3),
+    ]);
+    const hhmm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
+    for (const { b, side } of want) {
+      const at = times.get(b.comparisonId) ?? null;
+      const near = (t: number, min: number) => (at == null ? t >= w.from && t < w.to : Math.abs(t - at) <= min * 60000);
+      const cr = side.mode === 'upi' ? credits.find((c) => c.amount_paise === side.amountPaise && near(c.posted_at, 180)) : undefined;
+      const mp = machine.find((m) => m.amount_paise === side.amountPaise && near(m.paid_at, 60) && (side.mode === 'card' || (m.scheme ?? '').toUpperCase() === 'UPI'));
+      witness.set(b.comparisonId, { mode: side.mode, amountPaise: side.amountPaise,
+        found: cr ? `Bank UPI credit at ${hhmm(cr.posted_at)}` : mp ? `Card machine ${side.mode === 'upi' ? 'UPI' : 'payment'} at ${hhmm(mp.paid_at)}` : null });
+    }
+  }
+  return { confirmed, plannedCashPaise: confirmed ? null : plannedCash, bills: bills.map((b) => ({ ...b, witness: witness.get(b.comparisonId) ?? null })) };
 }

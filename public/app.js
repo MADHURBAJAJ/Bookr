@@ -2845,11 +2845,23 @@ function cashPanelHtml(biz, k, opts = {}) {
       text = html`Cash ₹ ${money(sw)} in the software, ₹ ${money(rg)} in the register${b.rgOther.length ? ` (and ${other(b)})` : ''}.`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Use register', rg]] : [];
     }
+    // Each side as a choice with what it does to the difference (14 Nov 2026): a person can switch the side here.
+    const both = b.swAmountPaise != null && b.rgCashPaise !== null && b.state !== 'complimentary' && !b.groupSize && draft && biz.actions.includes('sales.decide');
+    const after = (v) => (diff == null ? null : diff - (v - (b.countedPaise ?? 0)));
+    const word = (d) => (d == null ? '' : d === 0 ? 'cash agrees' : d < 0 ? `short ₹ ${money(-d)}` : `₹ ${money(d)} over`);
+    const sideName = (which) => (which === 'use_software' ? `${MODE_LABELS[b.swMode] ?? b.swMode ?? 'no mode'} ₹ ${money(b.swAmountPaise ?? 0)}`
+      : [...(b.rgCashPaise ? [`Cash ${money(b.rgCashPaise)}`] : []), ...b.rgOther.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${money(p.amountPaise)}`)].join(' + ') || 'no payment');
+    const switches = both ? [['use_software', sw], ['use_register', rg]].map(([d, v]) => ({ d, v, on: b.decision === d, text: `${d === 'use_software' ? 'Use software' : 'Use register'} (${sideName(d)})`, then: word(after(v)) })) : [];
+    const wit = b.witness ? (b.witness.found ? html`<div class="tiny" style="color:var(--teal)">✓ ${b.witness.found}: ${MODE_LABELS[b.witness.mode] ?? b.witness.mode} ₹ ${money(b.witness.amountPaise)} was received</div>`
+      : html`<div class="tiny" style="color:#92400E">No ${b.witness.mode === 'upi' ? 'UPI credit in the bank or UPI on the card machine' : 'card-machine payment'} of ₹ ${money(b.witness.amountPaise)} near this bill</div>`) : '';
     const same = gap ? (b.rgCashPaise === null && b.decision === 'use_software' && sw === gap) || effects.some(([, v]) => v === gap) || Math.abs(sw - rg) === gap : false;
     items.push({ same, html: html`<div class="ent-line" style="${same ? 'border:1px solid #F3B4B4;border-radius:8px;padding:8px 10px' : ''}">
       <div>${same ? html`<span class="chip bad">Same amount</span> ` : html`<span class="chip wait">${b.rgCashPaise === null ? 'Not in register' : b.state === 'undecided' ? 'Not decided' : 'Differs'}</span> `}Bill <span class="mono">${b.billNo}</span>: ${text}</div>
-      ${effects.length ? html`<div class="tiny note">${effects.map(([l, v]) => `${l}: ${v ? `+₹ ${money(v)}` : '₹ 0'}`).join(' · ')}</div>` : ''}
-      <div class="form-row" style="gap:6px;margin-top:4px">${edit(b)}${b.state === 'undecided' ? decide : ''}</div></div>` });
+      ${effects.length && !switches.length ? html`<div class="tiny note">${effects.map(([l, v]) => `${l}: ${v ? `+₹ ${money(v)}` : '₹ 0'}`).join(' · ')}</div>` : ''}
+      ${wit}
+      ${switches.length ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:stretch">${switches.map((x) => html`<button type="button" class="btn ${x.on ? 'ghost' : 'plain'} dchip" ${x.on ? 'disabled style="font-weight:600;background:#E3F1EF"' : ''}
+          data-cashswitch="${b.comparisonId}" data-d="${x.d}" data-was="${b.decision ?? ''}" data-bill="${b.billNo}" data-label="${x.text}">${x.on ? '✓ ' : ''}${x.text}<span class="tiny" style="display:block;font-weight:400">${x.on ? `now: ${word(diff)}` : `then: ${x.then}`}</span></button>`)}</div>` : ''}
+      <div class="form-row" style="gap:6px;margin-top:4px">${edit(b)}${b.state === 'undecided' && !switches.length ? decide : ''}</div></div>` });
   }
   if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'} ₹ ${money(k.expensesWaitingPaise)}, not taken off yet.</div>
     <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review">Review</a></div></div>` });
@@ -6346,13 +6358,19 @@ document.addEventListener('click', async (e) => {
   const mk = e.target.closest?.('[data-makecomp]');
   const pb = e.target.closest?.('[data-paidby]');
   const lo = e.target.closest?.('[data-leaveunk]');
-  if (!mk && !pb && !lo) return;
+  const sw = e.target.closest?.('[data-cashswitch]');
+  if (!mk && !pb && !lo && !sw) return;
   e.preventDefault(); e.stopPropagation();
   const bizId = currentBizId();
   const reload = async () => { await (drawerReload ?? route)(); };
   const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
   try {
-    if (lo) {
+    if (sw) {
+      const id = sw.dataset.cashswitch;
+      await apiFull('PUT', `/businesses/${bizId}/comparisons/${id}`, { decision: sw.dataset.d });
+      await reload();
+      doneToast(`Bill ${sw.dataset.bill}: ${sw.dataset.label}.`, async () => { await apiFull('PUT', `/businesses/${bizId}/comparisons/${id}`, { decision: sw.dataset.was || null }); }, reload);
+    } else if (lo) {
       const why = (prompt(`Leave bill ${lo.dataset.bill} out of the sales? Say why (e.g. cancelled, test bill):`, '') ?? '').trim();
       if (!why) return;
       await apiFull('PUT', `/businesses/${bizId}/comparisons/${lo.dataset.leaveunk}`, { decision: 'leave_out', note: why });
