@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { bookTransferStatements, ownAccounts, transferHints, undoTransferStatements } from '../transfers';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, newId, now, one, stmt } from '../db';
@@ -6,7 +7,7 @@ import { body, fail, isUuid, optionalPaise, text } from '../http';
 import { parseStatementRows, parseStatementText } from '../bankstatement';
 import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
 import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, ruleFor, settleOnCredit, suggestionsFor, type BankRow } from '../bank';
-import { byName, inText, loadHistory, loadParties, pickHead, resolveVendor } from '../parties';
+import { byName, headFromItem, inText, loadHistory, loadItemHistory, loadParties, pickHead, resolveVendor } from '../parties';
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
 import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
@@ -180,7 +181,9 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
     LEFT JOIN transactions bt ON bt.id = r.transaction_id LEFT JOIN heads h ON h.id = bt.head_id
     WHERE r.business_id = ? AND r.day BETWEEN ? AND ? AND (? IS NULL OR r.account_id = ?) AND (? IS NULL OR r.status = ?)
     ORDER BY r.posted_at, r.tran_id LIMIT 3000`, bid, from, to, account, account, status, status);
-  const [rules, sug, parties, history] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to), loadParties(db, bid), loadHistory(db, bid)]);
+  const [rules, sug, parties, history, transfers] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to), loadParties(db, bid), loadHistory(db, bid),
+    transferHints(db, bid, rows)]);
+  const itemHistory = rows.some((r) => r.status === 'unmatched' && r.direction === 'DR') ? await loadItemHistory(db, bid) : [];
   // Not a sale (Stage 5): interest named in the description suggests the interest head, when nothing better is known.
   const interestHead = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = 'interest received'", bid);
   const looksInterest = (r: { direction: string; description: string }) => r.direction === 'CR' && /\bINT(EREST)?\.?\s*(PD|PAID|CR|CREDIT)\b|\bINTEREST\b/i.test(r.description);
@@ -216,10 +219,16 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           const head = party ? pickHead(party, history, item) : null;
           const rf = refundOf.get(r.id);
           if (rf && !head?.headId && !rule) return { item: `Refund: bill ${rf.bills} cancelled`, party: party?.name ?? null, headId: refundHead?.id ?? null, headChoices: head?.choices ?? [], learned: false };
-          return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? (looksInterest(r) ? interestHead?.id ?? null : null), headChoices: head?.choices ?? [], learned: !!head?.headId };
+          // Where the head came from, told on the line (approved 14 Nov 2026): the party, a rule, or the same item booked before.
+          const fromItem = !head?.headId && !rule && item && r.direction === 'DR' ? headFromItem(itemHistory, item) : null;
+          return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null), headChoices: head?.choices ?? [], learned: !!head?.headId,
+            from: head?.headId ? 'party' : rule?.head_id ? 'rule' : fromItem ? 'item' : null, ruleName: rule?.name ?? null };
         })() : null,
         clear: sug.clear.has(r.id),
         cashMove: r.status === 'unmatched' ? cashMoveOf(r) : null,
+        // Money moved between the business's own accounts (approved 14 Nov 2026).
+        transfer: transfers.get(r.id) ?? null,
+        ownTransfer: r.status === 'booked' && /^Transfer (to|from) /.test(r.note ?? ''),
         refundOf: refundOf.has(r.id) ? { creditId: refundOf.get(r.id)!.id, postedAt: refundOf.get(r.id)!.posted_at, billNos: refundOf.get(r.id)!.bills } : null,
       };
     }),
@@ -1221,6 +1230,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('ba
   const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose a head.');
   const partyName = text(data, 'party', 'Party', { optional: true, max: 120 });
   const note = text(data, 'note', 'Note', { optional: true, max: 300 });
+  const item = text(data, 'item', 'Item', { optional: true, max: 120 });
   // Asked first by the screens: a bill of this amount waiting means booking this too may count one sale twice.
   if (data.checkBills === true && row.kind === 'upi_in') {
     const bills = await waitingBillsLike(db, bid, row.amount_paise, row.day);
@@ -1234,7 +1244,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('ba
     partyId = p?.id ?? newId();
     if (!p) statements.push(stmt(db, 'INSERT INTO parties (id, business_id, name, aliases, default_head_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', partyId, bid, partyName, '[]', headId, t));
   }
-  statements.push(...(await bookStatements(db, bid, row, headId, partyId, note, c.get('user').id, t, 'by hand')));
+  statements.push(...(await bookStatements(db, bid, row, headId, partyId, note, c.get('user').id, t, 'by hand', item)));
   await db.batch(statements);
   return c.json({ ok: true });
 });
@@ -1293,6 +1303,46 @@ bankRoutes.post('/businesses/:businessId/bank-rows/ignore-reversals', requireRol
   return c.json({ pairs: pairs.length });
 });
 
+/**
+ * A transfer between the business's own accounts (approved 14 Nov 2026), booked by a person from either line:
+ * with its pair (the other account's line), or joined to a transfer booked earlier from the other side (legId), or
+ * one-sided (the other side's line joins it when it comes). "remember" keeps a word of the description on the other
+ * account, so its next line is known by itself.
+ */
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/own-transfer', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row!.status !== 'unmatched') fail(409, 'This line is already matched, booked or skipped.');
+  const data = await body(c);
+  const otherAccountId = typeof data.otherAccountId === 'string' && isUuid(data.otherAccountId) ? data.otherAccountId : fail(400, 'Choose the other account.');
+  if (otherAccountId === row!.account_id) fail(400, 'Choose another account.');
+  const accounts = await ownAccounts(db, bid);
+  const other = accounts.find((a) => a.id === otherAccountId);
+  if (!other || other.kind !== 'bank') fail(400, 'Choose another bank account of this business. Cash goes through Cash deposited / Cash for the drawer.');
+  const pair = typeof data.pairRowId === 'string' && isUuid(data.pairRowId) ? await getRow(db, bid, data.pairRowId) : null;
+  if (pair && (pair.status !== 'unmatched' || pair.account_id !== otherAccountId || pair.amount_paise !== row!.amount_paise || pair.direction === row!.direction))
+    fail(409, 'The other line is not a matching transfer any more. Reload.');
+  const legId = typeof data.legId === 'string' && isUuid(data.legId) ? data.legId : null;
+  if (legId) {
+    const leg = await one<{ n: number }>(db, `SELECT count(*) AS n FROM transactions WHERE id = ? AND business_id = ? AND account_id = ? AND type = 'transfer' AND amount_paise = ?
+      AND json_extract(ocr_original, '$.transfer') = 'own' AND json_extract(ocr_original, '$.bankRowId') IS NULL`, legId, bid, row!.account_id, row!.amount_paise);
+    if (!leg?.n) fail(409, 'That transfer already has its line. Reload.');
+  }
+  const remember = typeof data.remember === 'string' ? data.remember.trim().slice(0, 60) : '';
+  const t = now();
+  const user = c.get('user').id;
+  const st = await bookTransferStatements(db, bid, row!, otherAccountId, pair, legId, user, t);
+  if (!st) fail(400, 'Choose the other account.');
+  const ids: string[] = (() => { try { return JSON.parse(other!.identifiers); } catch { return []; } })();
+  const learn = remember.length >= 3 && !ids.some((w) => w.toLowerCase() === remember.toLowerCase());
+  await db.batch([...st!,
+    ...(learn ? [stmt(db, 'UPDATE accounts SET identifiers = ? WHERE id = ? AND business_id = ?', JSON.stringify([...ids, remember]), other!.id, bid),
+      stmt(db, AUDIT, ...audit(bid, user, 'account.identifier_learned', row!.id, { identifiers: ids }, { accountId: other!.id, word: remember }, t))] : [])]);
+  return c.json({ ok: true, remembered: learn ? remember : null });
+});
+
 /** Undo: a booked line's transaction is removed (kept in the audit log); an ignored line opens again. */
 bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
@@ -1302,7 +1352,10 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('
   if (row.status !== 'booked' && row.status !== 'ignored') fail(409, 'Only a booked or ignored line can be opened again. Unmatch a matched one.');
   const tx = row.transaction_id ? await one(db, 'SELECT * FROM transactions WHERE id = ?', row.transaction_id) : null;
   const t = now();
+  // A transfer between own accounts: both rows go and both lines open again (approved 14 Nov 2026).
+  const own = row.transaction_id ? await undoTransferStatements(db, bid, row.transaction_id) : [];
   await db.batch([
+    ...own,
     // A card settlement booked against this credit comes apart with it.
     ...unsettleStatements(db, row.id),
     stmt(db, "UPDATE bank_rows SET status = 'unmatched', transaction_id = NULL, note = NULL, done_by = NULL, done_at = NULL WHERE id = ?", row.id),

@@ -5,7 +5,7 @@ import { all } from '../db';
 import { fail, isUuid } from '../http';
 import { addDays, istDay } from '../time';
 import { loadRules, ruleFor } from '../bank';
-import { byName, inText, loadHistory, loadParties, pickHead } from '../parties';
+import { byName, headFromItem, inText, itemKey, loadHistory, loadItemHistory, loadParties, pickHead } from '../parties';
 
 export const moneyOutRoutes = new Hono<AppEnv>();
 
@@ -15,7 +15,9 @@ export const moneyOutRoutes = new Hono<AppEnv>();
  *   payment, so the line is listed with that expense's head and party, and the expense is not listed again.
  * - Cash: expense rows from expense-list photos (draft or approved), and cash shortages booked by an Owner.
  * Left out: bank_sheet expenses that are not a debit's booking (the difference when a UPI credit is less than its
- * bills: less came in, nothing was paid). No code writes 'transfer' rows yet, so there are none to list.
+ * bills: less came in, nothing was paid). A bank line booked as a transfer (between own accounts, or cash moved
+ * to or from the drawer) is listed, tagged, and left out of the totals: it is not money spent (14 Nov 2026).
+ * Totals by head, by party and by item (the item's first word) for the lines shown.
  * Days are shifts (8 am to 8 am, India time): a bank line counts on the shift of its posted time, as on Bank sync.
  * Bank data, so Owner and Accountant only ('bank.link', the same as Bank sync).
  * A bank line not booked yet carries what Bank sync would suggest for it (item, party, head), so it can be booked
@@ -26,8 +28,9 @@ type Line = {
   accountId: string; accountName: string; accountKind: 'cash' | 'bank';
   partyId: string | null; party: string | null; headId: string | null; head: string | null;
   narration: string; detail: string | null; amountPaise: number;
-  status: 'not_booked' | 'booked' | 'matched' | 'left_out' | 'draft' | 'approved'; note: string | null; uploadId: string | null;
-  suggest?: { item: string; party: string | null; headId: string | null } | null;
+  status: 'not_booked' | 'booked' | 'matched' | 'left_out' | 'draft' | 'approved' | 'transfer'; note: string | null; uploadId: string | null;
+  suggest?: { item: string; party: string | null; headId: string | null; from: 'party' | 'rule' | 'item' | null } | null;
+  item?: string | null;
 };
 type BankLine = Line & { vpa: string | null; remark: string | null; kind: string };
 
@@ -52,13 +55,14 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
   const head = q.head === 'none' ? 'none' : q.head && isUuid(q.head) ? q.head : null;
   const party = q.party === 'none' ? 'none' : q.party && isUuid(q.party) ? q.party : null;
   const waiting = q.waiting === '1';
+  const item = q.item && /^[a-z0-9]{3,40}$/.test(q.item) ? q.item : null;
 
   const [bank, cash, accounts, heads, parties] = await Promise.all([
     all<BankLine>(db, `
       SELECT r.id, 'bank' AS source, r.vpa, r.remark, r.kind, ${SHIFT_OF} AS day, r.posted_at AS at, a.id AS accountId, a.name AS accountName, a.kind AS accountKind,
         p.id AS partyId, p.name AS party, h.id AS headId, h.name AS head,
         coalesce(nullif(t.narration, ''), nullif(r.remark, ''), r.description) AS narration, r.description AS detail, r.amount_paise AS amountPaise,
-        CASE r.status WHEN 'unmatched' THEN 'not_booked' WHEN 'ignored' THEN 'left_out' ELSE r.status END AS status, r.note, NULL AS uploadId
+        CASE WHEN t.type = 'transfer' THEN 'transfer' WHEN r.status = 'unmatched' THEN 'not_booked' WHEN r.status = 'ignored' THEN 'left_out' ELSE r.status END AS status, r.note, NULL AS uploadId
       FROM bank_rows r JOIN accounts a ON a.id = r.account_id
       LEFT JOIN transactions t ON t.id = r.transaction_id LEFT JOIN heads h ON h.id = t.head_id LEFT JOIN parties p ON p.id = t.party_id
       WHERE r.business_id = ? AND r.direction = 'DR' AND r.day BETWEEN ? AND ? AND ${SHIFT_OF} BETWEEN ? AND ?`,
@@ -78,19 +82,23 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
 
   // As on Bank sync: the party known by this UPI ID (or named in the note), and its head for this item; else a rule's head.
   const open = bank.filter((l) => l.status === 'not_booked');
-  const [rules, known, history] = open.length ? await Promise.all([loadRules(db, bid), loadParties(db, bid), loadHistory(db, bid)]) : [[], [], []];
+  const [rules, known, history, items] = open.length ? await Promise.all([loadRules(db, bid), loadParties(db, bid), loadHistory(db, bid), loadItemHistory(db, bid)]) : [[], [], [], []];
   const expenseHeads = new Set(heads.map((h) => h.id));
   const bankLines: Line[] = bank.map(({ vpa, remark, kind, ...l }) => {
     if (l.status !== 'not_booked') return l;
     const item = plainNote(remark);
     const p = (vpa ? byName(known, vpa) : null) ?? (item ? inText(known, item) : null);
     const rule = kind === 'upi_in' ? null : ruleFor(rules, { direction: 'DR', account_id: l.accountId, description: l.detail ?? '', vpa, amount_paise: l.amountPaise });
-    const headId = (p ? pickHead(p, history, item).headId : null) ?? rule?.head_id ?? null;
-    return { ...l, suggest: { item, party: p?.name ?? null, headId: headId && expenseHeads.has(headId) ? headId : null } };
+    const fromParty = p ? pickHead(p, history, item).headId : null;
+    const fromItem = !fromParty && !rule && item ? headFromItem(items, item) : null;
+    const headId = fromParty ?? rule?.head_id ?? fromItem ?? null;
+    const from = fromParty ? 'party' as const : rule?.head_id ? 'rule' as const : fromItem ? 'item' as const : null;
+    return { ...l, suggest: { item, party: p?.name ?? null, headId: headId && expenseHeads.has(headId) ? headId : null, from: headId && expenseHeads.has(headId) ? from : null } };
   });
 
-  const lines = [...bankLines, ...cash]
+  const lines = [...bankLines, ...cash].map((l) => ({ ...l, item: l.status === 'transfer' ? null : itemKey(l.status === 'not_booked' ? l.suggest?.item || l.narration : l.narration) }))
     .filter((l) => (!account || l.accountId === account)
+      && (!item || l.item === item)
       && (!head || (head === 'none' ? !l.headId : l.headId === head))
       && (!party || (party === 'none' ? !l.partyId : l.partyId === party))
       && (!waiting || WAITING.has(l.status)))
@@ -98,7 +106,7 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
     .sort((a, b) => b.day.localeCompare(a.day) || (b.at ?? 0) - (a.at ?? 0) || a.narration.localeCompare(b.narration));
 
   // A bank line left out (e.g. a payment and its reversal) is shown but is not money out.
-  const counted = lines.filter((l) => l.status !== 'left_out');
+  const counted = lines.filter((l) => l.status !== 'left_out' && l.status !== 'transfer');
   const sum = (key: (l: Line) => string, label: (l: Line) => string) => {
     const m = new Map<string, { id: string; name: string; count: number; paise: number }>();
     for (const l of counted) {
@@ -112,12 +120,15 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
   };
   return c.json({
     from, to,
-    filters: { account, head, party, waiting },
+    filters: { account, head, party, waiting, item },
     total: { count: counted.length, paise: counted.reduce((s, l) => s + l.amountPaise, 0) },
     waiting: { count: counted.filter((l) => WAITING.has(l.status)).length, paise: counted.filter((l) => WAITING.has(l.status)).reduce((s, l) => s + l.amountPaise, 0) },
     leftOut: { count: lines.length - counted.length, paise: lines.filter((l) => l.status === 'left_out').reduce((s, l) => s + l.amountPaise, 0) },
     byHead: sum((l) => l.headId ?? 'none', (l) => l.head ?? 'No head yet'),
     byAccount: sum((l) => l.accountId, (l) => l.accountName),
+    byParty: sum((l) => l.partyId ?? 'none', (l) => l.party ?? 'No party'),
+    byItem: sum((l) => l.item ?? 'none', (l) => l.item ?? 'No item'),
+    transfers: { count: lines.filter((l) => l.status === 'transfer').length, paise: lines.filter((l) => l.status === 'transfer').reduce((s, l) => s + l.amountPaise, 0) },
     lines,
     options: { accounts, heads, parties },
   });

@@ -15,6 +15,7 @@ import { cardRoutes } from './routes/cards';
 import { dayRoutes } from './routes/day';
 import { moneyOutRoutes } from './routes/moneyout';
 import { homeRoutes } from './routes/home';
+import { expenseRoutes } from './routes/expenses';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -50,6 +51,7 @@ app.route('/', cardRoutes);
 app.route('/', dayRoutes);
 app.route('/', moneyOutRoutes);
 app.route('/', homeRoutes);
+app.route('/', expenseRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

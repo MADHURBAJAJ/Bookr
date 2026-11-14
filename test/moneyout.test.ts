@@ -116,7 +116,7 @@ describe('money out', () => {
     const line = async (n: string) => (await h.list()).json.lines.find((l: any) => l.detail?.includes(n));
     // A party known by the UPI ID gives its head; nothing known gives no head.
     await sql`UPDATE parties SET aliases = '["xxmilk@ybl"]', default_head_id = ${h.veg} WHERE id = ${h.party}`;
-    expect((await line('Milk')).suggest).toEqual({ item: 'Milk', party: 'Sabzi Wala', headId: h.veg });
+    expect((await line('Milk')).suggest).toEqual({ item: 'Milk', party: 'Sabzi Wala', headId: h.veg, from: 'party' });
     expect((await line('UPICCMDR')).suggest).toMatchObject({ party: null, headId: null });
     expect((await line('Veg')).suggest).toBeUndefined(); // already booked
     // A rule fits the card fee: its head is suggested (expense heads only).

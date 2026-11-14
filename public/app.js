@@ -113,6 +113,7 @@ const NAV = [
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
   { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books' },
+  { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
   { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
@@ -362,7 +363,7 @@ function todayItems(h, biz) {
   if (h.photos?.count) add(h.photos.pages[0]?.day ?? null, `${n(h.photos.count, 'expense line')} to approve · ${rs(h.photos.paise)}`, `#/b/${biz.id}/review/${h.photos.pages[0]?.uploadId ?? ''}`, 'Approve');
   if (h.bookExpenses?.count) {
     const b = h.bookExpenses;
-    add(b.oldestDay, `${n(b.count, 'bank payment')} to book · ${rs(b.paise)}`, `#/b/${biz.id}/money-out?${new URLSearchParams({ from: b.oldestDay ?? h.today, to: h.today, waiting: '1' })}`, 'Book');
+    add(b.oldestDay, `${n(b.count, 'bank payment')} to book · ${rs(b.paise)}`, `#/b/${biz.id}/bank?${new URLSearchParams({ tab: 'out', from: b.oldestDay ?? h.today, to: h.today })}`, 'Book');
   }
   if (h.upi?.credits.count) add(h.upi.credits.oldestDay, `${n(h.upi.credits.count, 'UPI credit')} with no bill · ${rs(h.upi.credits.paise)}`, `#/b/${biz.id}/bank?tab=in`, 'Match',
     h.upi.credits.late ? `${h.upi.credits.late} over ${h.watchDays} days` : '');
@@ -417,14 +418,17 @@ async function accountsView(biz, editId) {
   const editing = accounts.find((a) => a.id === editId);
   const rows = accounts.map((a) => html`
     <tr>
-      <td><div style="font-weight:500">${a.name}</div>${a.accountNumber ? html`<div class="note mono">${a.accountNumber}</div>` : ''}</td>
+      <td><div style="font-weight:500">${a.name}</div>${a.accountNumber ? html`<div class="note mono">${a.accountNumber}</div>` : ''}
+        ${a.kind === 'bank' ? html`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;align-items:center" title="How this account appears on your other statements: a line naming one of these is shown as a transfer between your accounts">
+          ${(a.identifiers ?? []).map((w) => html`<span class="chip" style="display:inline-flex;gap:4px;align-items:center">${w}${canEdit ? html`<button type="button" class="linkbtn tiny" data-idrm="${a.id}" data-w="${w}" aria-label="Remove ${w}">✕</button>` : ''}</span>`)}
+          ${canEdit ? html`<button type="button" class="linkbtn tiny" data-idadd="${a.id}" data-name="${a.name}">+ How it appears on other statements</button>` : ''}</div>` : ''}</td>
       <td>${a.kind === 'cash' ? 'Cash' : 'Bank'}</td>
       <td class="mono">${a.openingDate}</td>
       <td class="amount">₹ ${money(a.openingBalancePaise)}</td>
       <td style="text-align:right">${canEdit ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/accounts/${a.id}">Edit</a>` : ''}</td>
     </tr>`);
   const f = editing ? { ...editing, openingBalance: rupeesForInput(editing.openingBalancePaise) } : { name: '', kind: 'bank', accountNumber: '', openingBalance: '0.00', openingDate: biz.fyStart };
-  render(shell(biz, 'accounts', 'Accounts', canEdit ? 'Cash and each bank account, with the balance on the opening date.' : 'Only Owner and Accountant can change these.', html`
+  render(shell(biz, 'accounts', 'Accounts', canEdit ? 'Every account here is the business\'s own: money moved between them is a transfer, not an expense or income.' : 'Only Owner and Accountant can change these.', html`
     <div class="row">
       <section class="card grow3">
         <h2>Accounts in ${biz.name}</h2>
@@ -455,6 +459,18 @@ async function accountsView(biz, editId) {
       </form>` : ''}
     </div>`));
   wireShell();
+  // How an account appears on the business's other statements (approved 14 Nov 2026).
+  const saveIds = async (id, list) => { await api('PUT', `/businesses/${biz.id}/accounts/${id}/identifiers`, { identifiers: list }); await accountsView(biz, editId); };
+  app.querySelectorAll('[data-idadd]').forEach((x) => x.addEventListener('click', async () => {
+    const w = (prompt(`A UPI ID, name or words that ${x.dataset.name} shows as on your other bank statements (for example huf.madhur@okicici, BIS HOSTEL):`, '') ?? '').trim();
+    if (w.length < 3) return;
+    const a = accounts.find((y) => y.id === x.dataset.idadd);
+    try { await saveIds(a.id, [...(a.identifiers ?? []), w]); } catch (err) { alert(err.message); }
+  }));
+  app.querySelectorAll('[data-idrm]').forEach((x) => x.addEventListener('click', async () => {
+    const a = accounts.find((y) => y.id === x.dataset.idrm);
+    try { await saveIds(a.id, (a.identifiers ?? []).filter((w) => w !== x.dataset.w)); } catch (err) { alert(err.message); }
+  }));
   const form = document.getElementById('acct');
   form && onSubmit(form, async (d) => {
     if (editing) await api('PATCH', `/businesses/${biz.id}/accounts/${editing.id}`, d);
@@ -555,15 +571,9 @@ async function headsView(biz, editId) {
           <div id="crmsg"></div>
         </div>
         <div style="border-top:1px solid var(--line-soft);padding-top:14px;display:flex;flex-direction:column;gap:8px">
-          <h2>Parties</h2>
-          <div class="note">Each party is remembered under the heads it is booked to, e.g. Blinkit under Kitchen purchases and Housekeeping. Its first head is its main head. With several heads, a line gets the head its item had before, or a one-click choice.${canEdit ? ' Change the main head or rename a party here.' : ''}</div>
-          ${parties.length ? parties.map((p) => html`<div class="form-row" style="align-items:center;border-top:1px solid var(--line-soft);padding-top:8px">
-            ${canEdit ? html`<input class="cell" data-vname="${p.id}" value="${p.name}" style="width:180px" aria-label="Party name">` : html`<span style="width:180px">${p.name}</span>`}
-            ${canEdit ? html`<select class="compact" data-vhead="${p.id}" aria-label="Main head for ${p.name}" title="Main head: used when the party has only one, and offered first"><option value="">No head yet</option>
-              ${heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}" ${p.defaultHeadId === h.id ? 'selected' : ''}>${h.name}</option>`)}</select>`
-              : html`<span>${heads.find((h) => h.id === p.defaultHeadId)?.name ?? 'No head yet'}</span>`}
-            <span class="note">${p.lines} line${p.lines === 1 ? '' : 's'}${(p.heads ?? []).length > 1 ? ` · used under ${p.heads.map((x) => `${heads.find((h) => h.id === x.headId)?.name ?? '?'} (${x.lines})`).join(', ')}` : ''}</span>
-          </div>`) : html`<div class="note">No parties yet. Add one by naming the party on an expense line.</div>`}
+          <h2>What Bookr has learned from items</h2>
+          <div class="note">The head each item word went to, from the lines booked so far. A new line with the same word gets this head (shown as "From item"). Parties are on <a href="#/b/${biz.id}/parties">Parties</a>.</div>
+          <div data-learned><div class="note">Loading…</div></div>
           <div id="vmsg"></div>
         </div>
       </section>
@@ -578,6 +588,30 @@ async function headsView(biz, editId) {
   };
   app.querySelectorAll('[data-vhead]').forEach((el) => el.addEventListener('change', () => saveVendor(el.dataset.vhead)));
   app.querySelectorAll('[data-vname]').forEach((el) => el.addEventListener('change', () => saveVendor(el.dataset.vname)));
+  // What Bookr has learned from items (approved 14 Nov 2026): Change sends the word to another head, Forget starts it again.
+  const learnedBox = app.querySelector('[data-learned]');
+  const showLearned = async () => {
+    let items;
+    try { ({ items } = await api('GET', `/businesses/${biz.id}/learned-items`)); } catch (e) { showError(learnedBox, e); return; }
+    if (!learnedBox.isConnected) return;
+    const exp = heads.filter((h) => h.type === 'expense');
+    const row = (x) => html`<tr><td>${x.word}${x.mixed ? html` <span class="tiny" title="Booked under more than one head; the latest is used">· mixed</span>` : ''}</td>
+      <td>${canEdit ? html`<select class="compact" data-litem="${x.word}" aria-label="Head for ${x.word}">${exp.map((h) => html`<option value="${h.id}" ${h.id === x.headId ? 'selected' : ''}>${h.name}</option>`)}</select>` : x.head ?? ''}</td>
+      <td class="amount">${x.set ? 'set' : x.lines}</td><td style="text-align:right">${canEdit ? html`<button type="button" class="btn plain dchip" data-lforget="${x.word}">Forget</button>` : ''}</td></tr>`;
+    learnedBox.innerHTML = (items.length ? html`<div class="scroll"><table style="min-width:420px"><thead><tr><th>Item word</th><th>Head</th><th style="text-align:right">Lines</th><th></th></tr></thead>
+      <tbody>${items.slice(0, 15).map(row)}</tbody></table></div>
+      ${items.length > 15 ? html`<details><summary class="note">Show ${items.length - 15} more</summary><div class="scroll"><table style="min-width:420px"><tbody>${items.slice(15).map(row)}</tbody></table></div></details>` : ''}`
+      : html`<div class="note">Nothing yet: it fills as expense lines are booked with an item.</div>`).__html;
+    const put = async (word, headId, text) => {
+      try { await api('PUT', `/businesses/${biz.id}/learned-items`, { word, headId }); await showLearned(); doneToast(text, null, null); }
+      catch (e) { showError(learnedBox, e); }
+    };
+    learnedBox.querySelectorAll('[data-litem]').forEach((el) => el.addEventListener('change', () => put(el.dataset.litem, el.value, `"${el.dataset.litem}" goes to ${exp.find((h) => h.id === el.value)?.name} from now on.`)));
+    learnedBox.querySelectorAll('[data-lforget]').forEach((el) => el.addEventListener('click', () => {
+      if (confirm(`Forget "${el.dataset.lforget}"? Its earlier lines stay as booked; Bookr stops using them to fill the head.`)) put(el.dataset.lforget, null, `"${el.dataset.lforget}" forgotten.`);
+    }));
+  };
+  if (learnedBox) showLearned();
   const saveCardRule = async (tid) => {
     const msg = document.getElementById('crmsg');
     const feeHeadId = app.querySelector(`[data-crfee="${tid}"]`).value;
@@ -865,14 +899,16 @@ async function reportsView(biz, query) {
  */
 const MONEY_OUT_STATUS = {
   not_booked: ['wait', 'Not booked yet'], booked: ['ok', 'Booked'], matched: ['ok', 'Matched'], left_out: ['', 'Left out'],
-  draft: ['wait', 'Draft, not approved'], approved: ['ok', 'Approved'],
+  draft: ['wait', 'Draft, not approved'], approved: ['ok', 'Approved'], transfer: ['', 'Transfer'],
 };
 async function moneyOutView(biz, query) {
   const q = new URLSearchParams(query);
   const pick = (k) => q.get(k) ?? '';
-  const r = await api('GET', `/businesses/${biz.id}/money-out?${new URLSearchParams({ from: pick('from'), to: pick('to'), account: pick('account'), head: pick('head'), party: pick('party'), waiting: pick('waiting') })}`);
+  const r = await api('GET', `/businesses/${biz.id}/money-out?${new URLSearchParams({ from: pick('from'), to: pick('to'), account: pick('account'), head: pick('head'), party: pick('party'), waiting: pick('waiting'), item: pick('item') })}`);
   const f = r.filters;
-  const link = (over) => `#/b/${biz.id}/money-out?${new URLSearchParams({ from: r.from, to: r.to, account: f.account ?? '', head: f.head ?? '', party: f.party ?? '', waiting: f.waiting ? '1' : '', ...over })}`;
+  // Group the totals by head, party or item (approved 14 Nov 2026); kept in the link.
+  const group = ['head', 'party', 'item'].includes(q.get('group')) ? q.get('group') : 'head';
+  const link = (over) => `#/b/${biz.id}/money-out?${new URLSearchParams({ from: r.from, to: r.to, account: f.account ?? '', head: f.head ?? '', party: f.party ?? '', item: f.item ?? '', waiting: f.waiting ? '1' : '', group, ...over })}`;
   const where = (l) => {
     if (l.source === 'bank') return `#/b/${biz.id}/bank?${new URLSearchParams({ from: l.day, to: l.day, account: l.accountId, tab: l.status === 'not_booked' ? 'out' : 'done' })}`;
     if (l.source === 'cash_photo' && l.uploadId) return `#/b/${biz.id}/review/${l.uploadId}`;
@@ -883,16 +919,17 @@ async function moneyOutView(biz, query) {
   const subtotal = (title, groups, key) => html`<div style="flex:1 1 280px;min-width:0">
     <h3 style="margin:0 0 6px;font-size:15px">${title}</h3>
     <table><tbody>${groups.map((g) => html`<tr>
-      <td><a href="${link({ [key]: g.id })}">${g.name}</a> <span class="tiny">${g.count}</span></td><td class="amount">${money(g.paise)}</td></tr>`)}</tbody></table></div>`;
-  const filtered = f.account || f.head || f.party || f.waiting;
+      <td>${g.id === 'none' && key === 'item' ? g.name : html`<a href="${link({ [key]: g.id })}">${g.name}</a>`} <span class="tiny">${g.count}</span></td><td class="amount">${money(g.paise)}</td></tr>`)}</tbody></table></div>`;
+  const filtered = f.account || f.head || f.party || f.waiting || f.item;
   const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
-  const act = (l) => (l.source !== 'bank' ? '' : l.status === 'not_booked' ? html`<button class="btn plain" type="button" style="${SMALL}" data-mobook="${l.id}">Book</button>`
-    : l.status === 'booked' ? html`<button class="btn plain" type="button" style="${SMALL}" data-moundo="${l.id}">Undo</button>` : '');
+  // A list to read (approved 14 Nov 2026): bank payments are booked on Bank › Money out, so a line not booked opens there.
+  const act = (l) => (l.source === 'bank' && l.status === 'not_booked' ? html`<a class="btn plain" style="${SMALL};display:inline-flex;align-items:center" href="${where(l)}">Open to book ›</a>` : '');
+  const groups = { head: ['By head', r.byHead, 'head'], party: ['By party', r.byParty, 'party'], item: ['By item', r.byItem, 'item'] }[group];
   render(shell(biz, 'money-out', 'Bank', '', html`
     ${bankTabs(biz, null, 'payments')}
     <section class="card" style="gap:10px">
       <h2>All payments</h2>
-      <div class="note">Every payment from a bank account or from Cash, by shift (8 am to 8 am). A bank line booked to a head is one payment, shown once. <strong>Book</strong> a bank payment to a head here; cash expenses are booked on Review.</div>
+      <div class="note">Every payment from every account and Cash, by shift (8 am to 8 am). Transfers between your accounts are listed but not counted.</div>
       <datalist id="moparties">${r.options.parties.map((p) => html`<option value="${p.name}">`)}</datalist>
       <form id="moform" class="form-row" style="align-items:flex-end">
         <div class="field"><label for="mofrom">From shift</label><input id="mofrom" type="date" name="from" value="${r.from}" required></div>
@@ -900,15 +937,18 @@ async function moneyOutView(biz, query) {
         <div class="field"><label for="moacc">Paid from</label><select id="moacc" name="account">${opt('', 'All accounts', f.account)}${r.options.accounts.map((a) => opt(a.id, a.name, f.account))}</select></div>
         <div class="field"><label for="mohead">Head</label><select id="mohead" name="head">${opt('', 'All heads', f.head)}${opt('none', 'No head yet', f.head)}${r.options.heads.map((h) => opt(h.id, h.name, f.head))}</select></div>
         <div class="field"><label for="moparty">Party</label><select id="moparty" name="party">${opt('', 'All parties', f.party)}${opt('none', 'No party', f.party)}${r.options.parties.map((p) => opt(p.id, p.name, f.party))}</select></div>
+        ${f.item ? html`<input type="hidden" name="item" value="${f.item}"><span class="chip">Item: ${f.item}</span>` : ''}
         <label style="display:flex;gap:6px;align-items:center;min-height:44px;white-space:nowrap"><input type="checkbox" name="waiting" value="1" style="width:18px;height:18px;min-height:0" ${f.waiting ? 'checked' : ''}> Not booked yet</label>
         <button class="btn plain" type="submit">Show</button>
       </form>
       <div class="note"><strong>${r.total.count} payment${r.total.count === 1 ? '' : 's'} · ₹ ${money(r.total.paise)}</strong>
         ${r.waiting.count && !f.waiting ? html` · <a href="${link({ waiting: '1' })}">${r.waiting.count} not booked or approved yet</a> (₹ ${money(r.waiting.paise)})` : ''}
         ${r.leftOut.count ? html` · ${r.leftOut.count} bank line${r.leftOut.count === 1 ? '' : 's'} left out, not counted (₹ ${money(r.leftOut.paise)})` : ''}
-        ${filtered ? html` · <a href="${`#/b/${biz.id}/money-out?${new URLSearchParams({ from: r.from, to: r.to })}`}">Clear filters</a>` : ''}</div>
-      ${r.total.count ? html`<div style="display:flex;flex-wrap:wrap;gap:16px 28px">
-        ${subtotal('By head', r.byHead, 'head')}${subtotal('By paid from', r.byAccount, 'account')}</div>` : ''}
+        ${r.transfers?.count ? html` · ${r.transfers.count} transfer${r.transfers.count === 1 ? '' : 's'} between your accounts, not counted (₹ ${money(r.transfers.paise)})` : ''}
+        ${filtered ? html` · <a href="${`#/b/${biz.id}/money-out?${new URLSearchParams({ from: r.from, to: r.to, group })}`}">Clear filters</a>` : ''}</div>
+      ${r.total.count ? html`<div class="seg" role="group" aria-label="Group by" style="align-self:flex-start">${[['head', 'Head'], ['party', 'Party'], ['item', 'Item']].map(([k, l]) => html`<a href="${link({ group: k })}" class="${k === group ? 'on' : ''}" style="padding:4px 12px">${l}</a>`)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:16px 28px">
+        ${subtotal(groups[0], groups[1], groups[2])}${subtotal('By paid from', r.byAccount, 'account')}</div>` : ''}
     </section>
     <section class="card" style="gap:10px">
       ${r.lines.length ? html`<ul class="mo-list">${r.lines.map((l) => {
@@ -939,55 +979,73 @@ async function moneyOutView(biz, query) {
   const form = document.getElementById('moform');
   const show = () => {
     const d = new FormData(form);
-    location.hash = link({ from: d.get('from'), to: d.get('to'), account: d.get('account'), head: d.get('head'), party: d.get('party'), waiting: d.get('waiting') ? '1' : '' });
+    location.hash = link({ from: d.get('from'), to: d.get('to'), account: d.get('account'), head: d.get('head'), party: d.get('party'), item: d.get('item') ?? '', waiting: d.get('waiting') ? '1' : '' });
   };
   form.addEventListener('submit', (e) => { e.preventDefault(); show(); });
   form.querySelectorAll('select, input[type=checkbox]').forEach((el) => el.addEventListener('change', show));
-  const reload = () => moneyOutView(biz, query);
-  const base = `/businesses/${biz.id}/bank-rows`;
-  // Book: a form under the line (the row of the table, or the card on a phone). Amount and date come from the bank.
-  app.querySelectorAll('[data-mobook]').forEach((b) => b.addEventListener('click', () => {
-    const l = r.lines.find((x) => x.id === b.dataset.mobook);
-    const holder = b.closest('tr') ?? b.closest('li');
-    const open = holder.nextElementSibling?.matches?.('.mobookbox') ? holder.nextElementSibling : holder.querySelector('.mobookbox');
-    if (open) { open.remove(); return; }
-    const sg = l.suggest ?? {};
-    const box = document.createElement(holder.tagName === 'TR' ? 'tr' : 'div');
-    box.className = 'mobookbox';
-    const inner = html`<form class="inset" style="display:flex;flex-direction:column;gap:8px">
-      <div style="font-weight:600">Book ₹ ${money(l.amountPaise)} paid on ${dayLabel(l.day)} from ${l.accountName} as an expense</div>
+}
+
+// Parties (approved 14 Nov 2026): who was paid, under which heads, how much this month, and likely duplicates to merge.
+async function partiesView(biz, query = '') {
+  const q = new URLSearchParams(query);
+  const month = /^\d{4}-\d{2}$/.test(q.get('month') ?? '') ? q.get('month') : null;
+  const [r, { heads }] = await Promise.all([api('GET', `/businesses/${biz.id}/parties-summary${month ? `?month=${month}` : ''}`), api('GET', `/businesses/${biz.id}/heads`)]);
+  const canEdit = biz.actions.includes('heads.edit');
+  const canBank = biz.actions.includes('bank.link');
+  const exp = heads.filter((h) => h.type === 'expense');
+  const [y, m] = r.month.split('-').map(Number);
+  const monthEnd = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+  const total = r.parties.reduce((t, p) => t + p.monthPaise, 0);
+  const row = (p) => html`<details class="party-row" data-pname="${p.name.toLowerCase()} ${(p.aliases ?? []).join(' ').toLowerCase()}">
+    <summary style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1.2fr) 110px 90px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
+      <span>${p.name}${p.aliases?.length ? html` <span class="tiny">· ${p.aliases.length} other name${p.aliases.length === 1 ? '' : 's'}</span>` : ''}
+        ${p.sameAs ? html` <span class="chip wait" title="The names look alike. Open to merge.">Same as ${p.sameAs.name}?</span>` : ''}</span>
+      <span>${p.defaultHead ?? html`<span class="note">No head yet</span>`}${p.heads.length > 1 ? html` <span class="tiny">+${p.heads.length - 1}</span>` : ''}</span>
+      <span class="amount">${p.monthPaise ? `₹ ${money(p.monthPaise)}` : '—'}</span><span class="tiny" style="text-align:right">${p.lastDay ? dayLabel(p.lastDay) : ''}</span></summary>
+    <div class="inset" style="display:flex;flex-direction:column;gap:8px;margin:6px 0 10px" data-party="${p.id}">
       <div class="form-row" style="align-items:flex-end">
-        <div class="field"><label>Head</label><select name="headId" required><option value="">Choose</option>${r.options.heads.map((h) => html`<option value="${h.id}" ${h.id === sg.headId ? 'selected' : ''}>${h.name}</option>`)}</select></div>
-        <div class="field"><label>Party (optional)</label><input name="party" value="${sg.party ?? ''}" list="moparties" autocomplete="off"></div>
-        <div class="field"><label>Note (optional)</label><input name="item" value="${sg.item ?? ''}" placeholder="What was paid for"></div>
-        <button class="btn" type="submit">Book</button><button class="btn plain" type="button" data-mocancel>Cancel</button>
-      </div>
-      ${sg.headId ? html`<div class="tiny">Head filled in from how this party was booked before, or a rule. Change it if it is wrong.</div>` : ''}
-      <div class="form-msg"></div></form>`.__html;
-    box.innerHTML = holder.tagName === 'TR' ? `<td colspan="7">${inner}</td>` : inner;
-    if (holder.tagName === 'TR') holder.after(box); else holder.appendChild(box);
-    const fm = box.querySelector('form');
-    box.querySelector('[data-mocancel]').addEventListener('click', () => box.remove());
-    fm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = fm.querySelector('button[type=submit]');
-      btn.disabled = true;
-      try {
-        const res = await apiFull('POST', `${base}/book-many`, { items: [{ rowId: l.id, headId: fm.headId.value, party: fm.party.value.trim() || null, item: fm.item.value.trim() || null }] });
-        if (!res.booked) throw new Error(`Not booked: ${res.skipped.join(' ')}`);
-        await reload();
-        const head = r.options.heads.find((h) => h.id === fm.headId.value)?.name ?? 'its head';
-        doneToast(`Booked ₹ ${money(l.amountPaise)} to ${head}.`, () => apiFull('POST', `${base}/${l.id}/reopen`, {}), reload);
-      } catch (err) { btn.disabled = false; showError(fm.querySelector('.form-msg'), err); }
+        <div class="field"><label>Name</label><input data-pn value="${p.name}" ${canEdit ? '' : 'disabled'}></div>
+        <div class="field"><label>Usual head</label><select data-ph ${canEdit ? '' : 'disabled'}><option value="">No head yet</option>${exp.map((h) => html`<option value="${h.id}" ${h.id === p.defaultHeadId ? 'selected' : ''}>${h.name}</option>`)}</select></div>
+        ${canEdit ? html`<button class="btn plain" type="button" data-psave>Save</button>` : ''}</div>
+      ${p.heads.length ? html`<div class="tiny">Booked under: ${p.heads.map((h) => `${h.name} (${h.lines})`).join(', ')}</div>` : ''}
+      ${p.aliases?.length ? html`<div class="tiny">Other names and UPI IDs: ${p.aliases.join(', ')}</div>` : ''}
+      <div class="form-row" style="gap:8px;align-items:center">
+        ${canBank ? html`<a class="btn plain dchip" href="#/b/${biz.id}/money-out?${new URLSearchParams({ from: `${r.month}-01`, to: monthEnd, party: p.id })}">Payments this month ›</a>` : ''}
+        ${canEdit ? html`<select class="compact" data-pmerge aria-label="Merge ${p.name} into"><option value="">Merge into…</option>${r.parties.filter((o) => o.id !== p.id).map((o) => html`<option value="${o.id}" ${o.id === p.sameAs?.id ? 'selected' : ''}>${o.name}</option>`)}</select>
+          <button class="btn plain dchip" type="button" data-pmergego>Merge</button>` : ''}</div>
+      <div class="form-msg"></div></div></details>`;
+  render(shell(biz, 'parties', 'Parties', '', html`
+    <section class="card" style="gap:10px">
+      <div class="form-row" style="align-items:center;gap:10px"><input id="psearch" placeholder="Search party" style="flex:1;min-width:180px" autocomplete="off">
+        <input id="pmonth" type="month" value="${r.month}" class="compact" style="max-width:170px"></div>
+      <div class="note">${r.parties.length} parties · ₹ ${money(total)} paid in ${new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' })}</div>
+      <div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1.2fr) 110px 90px;gap:10px" class="tiny"><span>Party</span><span>Usual head</span><span style="text-align:right">This month</span><span style="text-align:right">Last paid</span></div>
+      ${r.parties.length ? r.parties.map(row) : html`<div class="note">No parties yet. A party is added when it is named on an expense line.</div>`}
+      <div id="pmsg"></div>
+    </section>`));
+  wireShell();
+  document.getElementById('pmonth').addEventListener('change', (e) => go(`#/b/${biz.id}/parties?month=${e.target.value}`));
+  document.getElementById('psearch').addEventListener('input', (e) => {
+    const t = e.target.value.trim().toLowerCase();
+    app.querySelectorAll('[data-pname]').forEach((d) => { d.hidden = !!t && !d.dataset.pname.includes(t); });
+  });
+  app.querySelectorAll('[data-party]').forEach((box) => {
+    const id = box.dataset.party;
+    const msg = box.querySelector('.form-msg');
+    box.querySelector('[data-psave]')?.addEventListener('click', async () => {
+      try { await api('PATCH', `/businesses/${biz.id}/parties/${id}`, { name: box.querySelector('[data-pn]').value.trim(), defaultHeadId: box.querySelector('[data-ph]').value || null }); await partiesView(biz, query); doneToast('Party saved.', null, null); }
+      catch (e) { showError(msg, e); }
     });
-  }));
-  // Undo: the expense booked from the line is removed (kept in the audit log); the line is not booked again.
-  app.querySelectorAll('[data-moundo]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('Undo this? The expense is removed (it stays in the audit log).')) return;
-    b.disabled = true;
-    try { await apiFull('POST', `${base}/${b.dataset.moundo}/reopen`, {}); await reload(); }
-    catch (err) { b.disabled = false; alert(err.message); }
-  }));
+    box.querySelector('[data-pmergego]')?.addEventListener('click', async () => {
+      const into = box.querySelector('[data-pmerge]').value;
+      if (!into) { msg.innerHTML = '<div class="note">Choose the party to merge into.</div>'; return; }
+      const from = r.parties.find((p) => p.id === id);
+      const to = r.parties.find((p) => p.id === into);
+      if (!confirm(`Merge ${from.name} into ${to.name}? Its ${from.lines} line${from.lines === 1 ? '' : 's'} and other names move to ${to.name}, and ${from.name} goes. This cannot be undone here.`)) return;
+      try { const res = await apiFull('POST', `/businesses/${biz.id}/parties/${id}/merge`, { into }); await partiesView(biz, query); doneToast(`${from.name} merged into ${to.name}: ${res.moved} line${res.moved === 1 ? '' : 's'} moved.`, null, null); }
+      catch (e) { showError(msg, e); }
+    });
+  });
 }
 
 function laterView(biz, key) {
@@ -2425,14 +2483,15 @@ function expensePanel(biz, u, heads, parties = []) {
     <section class="card grow3" style="gap:12px">
       <div class="note">Each line is an expense paid from Cash. It counts only after an Owner or Accountant approves it.</div>
       <div class="scroll"><table style="min-width:560px">
-        <thead><tr><th>#</th><th>Item</th><th>Party</th><th style="text-align:right">Amount</th><th>Head</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>#</th><th>Party</th><th>Item</th><th style="text-align:right">₹</th><th>Head</th><th>Status</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.headId); const read = readVendor(r); return html`<tr>
-          <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td>
+          <td class="note">${r.lineNo}</td>
           <td>${r.vendor ?? (read ? html`<span class="chip wait" title="Read from the page; not a known party yet. Edit the line to keep it.">${read}?</span>` : html`<span class="note">—</span>`)}</td>
+          <td>${needs(q, 'item', r.narration || '—')}</td>
           <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
           <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? (headFromOf(r.ocrOriginal) === 'item'
-              ? html` <span class="chip wait" title="Filled in from how the same item was booked before">Learned from item</span>`
-              : html` <span class="chip wait" title="Filled in from how this party was booked before">Learned</span>`) : ''}`
+              ? html` <span class="chip wait" title="The same item was booked under this head before">From item</span>`
+              : html` <span class="chip wait" title="From party ${r.vendor ?? ''}: booked under this head before">Learned</span>`) : ''}`
             : r.suggestHead && name(r.suggestHead.headId) && r.status === 'draft' && headChoices(r).length <= 1 ? html`<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
                 <button class="btn plain" type="button" style="min-height:32px;font-size:13px;padding:0 8px;border-style:dashed" data-quickhead="${r.id}" data-head="${r.suggestHead.headId}"
                   title="${r.suggestHead.from === 'item' ? 'The same item was booked under this head before' : `Usual head for "${r.suggestHead.word}"`}">${name(r.suggestHead.headId)}?</button>
@@ -3684,7 +3743,7 @@ async function bankView(biz, query = '') {
     return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
       <input class="compact" data-item="${r.id}" value="${sg.item ?? ''}" placeholder="Item" aria-label="Item" style="width:150px">
       <input class="compact" data-party="${r.id}" value="${sg.party ?? ''}" list="bankparties" placeholder="Party" aria-label="Party" style="width:150px" autocomplete="off">
-      ${headSelect(r, sg.headId)}${sg.learned ? html`<span class="chip wait" title="Filled in from how this party was booked before">Learned</span>` : r.rule ? html`<span class="tiny">rule: ${r.rule.name}</span>` : ''}
+      ${headSelect(r, sg.headId)}${headFromChip(sg, sg.party)}
       ${r.kind === 'upi_fee' ? html`<span class="tiny">Fee on a credit card paid through UPI</span>` : r.kind === 'reversal' ? (r.pairStatus === 'matched'
         ? html`<span class="tiny error">Gives back a payment already matched to a bill</span> <button class="btn plain dchip" type="button" data-revunpaid="${r.id}">Bill unpaid again</button>`
         : html`<span class="tiny">Gives back a failed payment</span>`) : ''}</div>`;
@@ -3706,7 +3765,24 @@ async function bankView(biz, query = '') {
         <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.suggest?.headId && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
         ${payer(r)}${amt(r)}${rowHtml(r)}</div>`)}
     </div>`;
-  const skipLink = (r) => html`<button class="btn plain" type="button" style="${SMALL}" data-ignore="${r.id}" title="Not business money, e.g. a transfer between your own accounts">Skip</button>`;
+  const skipLink = (r) => html`<button class="btn plain" type="button" style="${SMALL}" data-ignore="${r.id}" title="Not business money">Skip</button>`;
+  // Money moved between the business's own accounts (approved 14 Nov 2026): Bookr's guess first, as one card; any
+  // other line can be booked as a transfer from "Own account".
+  const notTr = (() => { try { return new Set(JSON.parse(localStorage.getItem(`bookr.nottr.${biz.id}`) ?? '[]')); } catch { return new Set(); } })();
+  const isTr = (r) => r.transfer && !notTr.has(r.id);
+  const ownLink = (r) => r.kind === 'card_settlement' || b.accounts.length < 2 ? ''
+    : html`<button class="btn plain" type="button" style="${SMALL}" data-owntrpick="${r.id}" data-dir="${r.direction}" title="Money moved to or from another account of this business: not an expense or income">Own account</button>`;
+  const trWhy = (t) => (t.why === 'pair' ? 'both sides found' : t.why === 'leg' ? 'joins a transfer booked from the other side' : `names ${t.word}`);
+  const transferCards = (list) => {
+    const trs = list.filter(isTr);
+    return trs.length ? html`<div style="display:flex;flex-direction:column;gap:8px">${trs.map((r) => html`<div class="rv-card" style="gap:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><span><strong>Transfer ${r.direction === 'DR' ? `${r.accountName} → ${r.transfer.otherAccountName}` : `${r.transfer.otherAccountName} → ${r.accountName}`}</strong>
+        · ₹ ${money(r.amountPaise)} · ${when(r.postedAt)}</span><span class="tchip ${r.transfer.why === 'words' ? 'warn' : 'ok'}">${trWhy(r.transfer)}</span></div>
+      <div class="tiny mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.description}</div>
+      <div style="display:flex;gap:6px;justify-content:flex-end"><button class="btn" type="button" style="${SMALL}" data-owntr="${r.id}" data-other="${r.transfer.otherAccountId}" data-pair="${r.transfer.pairRowId ?? ''}" data-leg="${r.transfer.legId ?? ''}">Book as transfer</button>
+        <details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary><div class="menu-pop" style="min-width:220px;gap:6px">
+          <button class="btn plain dchip" type="button" data-nottr="${r.id}">Not a transfer: book as ${r.direction === 'DR' ? 'expense' : 'income'}</button></div></details></div></div>`)}</div>` : '';
+  };
   // Cash moved between the drawer and the bank (Stage 6): offered first where the description says so.
   const cashLink = (r) => r.kind === 'upi_in' || r.kind === 'upi_out' || r.kind === 'card_settlement' ? ''
     : html`<button class="btn ${r.cashMove ? '' : 'plain'}" type="button" style="${SMALL}" data-cashmove="${r.id}" data-dir="${r.direction}" data-shift="${shiftOfMs(r.postedAt)}"
@@ -3717,9 +3793,9 @@ async function bankView(biz, query = '') {
       return html`<div style="border:1px solid var(--line-soft);border-radius:8px">${list.map((r) => html`<div style="display:grid;grid-template-columns:minmax(180px,1.4fr) 120px minmax(200px,2fr);gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft)">${payer(r)}${amt(r)}<div>${suggestion(r)}</div></div>`)}</div>`;
     }
     if (tab === 'in') {
-      const found = list.filter((r) => r.candidates.length);
-      const rest = list.filter((r) => !r.candidates.length);
-      return html`${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
+      const found = list.filter((r) => r.candidates.length && !isTr(r));
+      const rest = list.filter((r) => !r.candidates.length && !isTr(r));
+      return html`${transferCards(list)}${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
           <div>${r.candidates.length === 1 ? html`<span class="${r.candidates[0].strong ? '' : 'note'}">${candText(r.candidates[0])}</span><input type="hidden" data-cand="${r.id}" value="${candValue(r.candidates[0])}">`
             : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${candValue(k)}">${candText(k)}</option>`)}</select>`}
             ${r.candidates[0].adjust ? adjustNote(r.candidates[0]) : ''}</div>
@@ -3728,14 +3804,14 @@ async function bankView(biz, query = '') {
           ${lineFields(r)}<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
             <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="fnb" title="A sale nobody billed: booked as F&B income">Unbilled F&amp;B</button>
             <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="room" title="A sale nobody billed: booked as Room income">Unbilled Room</button>
-            ${cashLink(r)}${skipLink(r)}</div>`, 'book')}`;
+            ${cashLink(r)}${ownLink(r)}${skipLink(r)}</div>`, 'book')}`;
     }
-    const known = list.filter((r) => r.suggest?.headId);
-    const rest = list.filter((r) => !r.suggest?.headId);
-    return html`${section('ruled', 'Head suggested', 'From the party\'s past lines or a rule; change anything that is wrong', known, (r) => html`
-        ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}
+    const known = list.filter((r) => r.suggest?.headId && !isTr(r));
+    const rest = list.filter((r) => !r.suggest?.headId && !isTr(r));
+    return html`${transferCards(list)}${section('ruled', 'Head suggested', 'From the party\'s past lines or a rule; change anything that is wrong', known, (r) => html`
+        ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${ownLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}
       ${section('needs', 'Needs a head', 'Give the item, party and head once: next time the party fills in its head', rest, (r) => html`
-        ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
+        ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${ownLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
   };
 
   render(shell(biz, 'bank', 'Bank', '', html`
@@ -3761,8 +3837,8 @@ async function bankView(biz, query = '') {
         <button class="btn plain" type="submit">Show</button>
       </form>
       ${tab === 'in' ? html`<div class="note">UPI money in is reconciled shift by shift on <a href="#/b/${biz.id}/reconcile/${from}">Reconcile</a>. Use this list for other money received, or to book a credit under any head.</div>` : ''}
-      <div class="note">${tab === 'in' ? html`<strong>Match to bill</strong>: the credit is the payment for a bill already counted in sales (nothing new is booked). <strong>Book under a head</strong>: money received that is not a bill, e.g. hostel rent. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
-        : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Make a rule</strong> once and the same supplier is suggested every time. <strong>Skip</strong>: not business money, e.g. a transfer between your own accounts.`
+      <div class="note">${tab === 'in' ? html`<strong>Match to bill</strong>: the credit is the payment for a bill already counted in sales (nothing new is booked). <strong>Book under a head</strong>: money received that is not a bill, e.g. hostel rent. <strong>Own account</strong>: money from another account of the business, not income.`
+        : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Own account</strong>: money moved to another account of the business, not an expense.`
         : 'Lines already matched, booked or skipped. Undo puts a line back.'}</div>
       ${tab === 'out' && reversals ? html`<div><button class="btn plain" type="button" id="gorev">Skip ${reversals} failed payment${reversals > 1 ? 's' : ''} and ${reversals > 1 ? 'their' : 'its'} reversal</button></div>` : ''}
       <datalist id="bankparties">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
@@ -3803,7 +3879,7 @@ async function bankView(biz, query = '') {
   wireShell();
   const msg = document.getElementById('bmsg');
   const run = async (fn, okText) => {
-    try { const r = await fn(); await bankView(biz, query); if (okText) document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${okText(r)}</div>`.__html; }
+    try { const r = await fn(); await bankView(biz, query); if (okText) document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${typeof okText === 'function' ? okText(r) : okText}</div>`.__html; }
     catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   };
   if (document.getElementById('bfilter')) onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account })));
@@ -3910,6 +3986,30 @@ async function bankView(biz, query = '') {
   // A UPI payment for a sale nobody billed: booked under the F&B or Room income head, with what it was.
   app.querySelectorAll('[data-revunpaid]').forEach((b) => b.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.revunpaid}/reversed-unpaid`, {}),
     'Match undone: the bill waits for its money again.')));
+  // Transfers between own accounts (approved 14 Nov 2026).
+  const ownTransfer = async (rowId, payload) => {
+    const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/${rowId}/own-transfer`, payload);
+    return r;
+  };
+  app.querySelectorAll('[data-owntr]').forEach((x) => x.addEventListener('click', () => run(() => ownTransfer(x.dataset.owntr,
+    { otherAccountId: x.dataset.other, pairRowId: x.dataset.pair || null, legId: x.dataset.leg || null }), 'Booked as a transfer between your accounts: not an expense or income. Undo is on Done.')));
+  app.querySelectorAll('[data-nottr]').forEach((x) => x.addEventListener('click', async () => {
+    try { const k = `bookr.nottr.${biz.id}`; const s0 = new Set(JSON.parse(localStorage.getItem(k) ?? '[]')); s0.add(x.dataset.nottr); localStorage.setItem(k, JSON.stringify([...s0].slice(-500))); } catch { /* storage unavailable */ }
+    await bankView(biz, query);
+  }));
+  app.querySelectorAll('[data-owntrpick]').forEach((x) => x.addEventListener('click', () => {
+    const line = lines.rows.find((r) => r.id === x.dataset.owntrpick);
+    const others = b.accounts.filter((a) => a.id !== line?.accountId);
+    if (!line || !others.length) return;
+    const pick = others.length === 1 ? '1' : prompt(`${line.direction === 'DR' ? 'Moved to' : 'Moved from'} which account?\n${others.map((a, i) => `${i + 1}. ${a.name}`).join('\n')}`, '1');
+    const other = others[Number(pick) - 1];
+    if (!other) return;
+    const guess = (line.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(line.remark) ? line.remark : line.description.split(/[/-]/).filter((w) => /[A-Za-z]{3,}/.test(w) && !/^(UPI|NEFT|IMPS|RTGS|P2A|CR|DR)$/i.test(w.trim()))[0] ?? '').trim();
+    const remember = prompt(`Booked as a transfer ${line.direction === 'DR' ? 'to' : 'from'} ${other.name}. Remember words of this line as ${other.name}, so the next one is known by itself? (leave empty to skip)`, guess);
+    if (remember === null) return;
+    run(() => ownTransfer(line.id, { otherAccountId: other.id, remember: remember.trim() || null }),
+      (r) => `Booked as a transfer ${line.direction === 'DR' ? 'to' : 'from'} ${other.name}.${r.remembered ? ` "${r.remembered}" is remembered on ${other.name}.` : ''} Undo is on Done.`);
+  }));
   app.querySelectorAll('[data-cashmove]').forEach((b) => b.addEventListener('click', () => {
     const dep = b.dataset.dir === 'CR';
     const def = b.dataset.shift ?? '';
@@ -6436,6 +6536,10 @@ document.addEventListener('click', async (e) => {
     }
   } catch (err) { if (where) showError(where, err); else alert(err.message); }
 }, true);
+// Where a head came from, on a bank or cash expense line (approved 14 Nov 2026); hover says exactly.
+const headFromChip = (sg, party) => (sg.from === 'party' || (!sg.from && sg.learned) ? html`<span class="chip wait" title="From party ${party ?? ''}: booked under this head before">Learned</span>`
+  : sg.from === 'rule' ? html`<span class="chip wait" title="Rule: ${sg.ruleName ?? ''}">Rule</span>`
+  : sg.from === 'item' ? html`<span class="chip wait" title="The same item was booked under this head before">From item</span>` : '');
 // Paid by ▾: the three modes in a small menu, the hinted one first and marked (approved 14 Nov 2026).
 const paidByMenu = (c, pick = null) => html`<details class="menu"><summary class="btn plain dchip">Paid by ▾</summary><div class="menu-pop" style="min-width:140px;gap:6px">${[...(pick ? [pick] : []), ...['cash', 'upi', 'card'].filter((m) => m !== pick)].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}</div></details>`;
 const paidByChips = (c, pick = null) => html`<span class="tiny note">Paid by</span>${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}`;
@@ -6707,6 +6811,7 @@ async function route() {
       if (screen === 'reconcile' || screen === 'upi') return reconcileView(biz, parts[3]);
       if (screen === 'reports') return reportsView(biz, query);
       if (screen === 'money-out') return moneyOutView(biz, query);
+      if (screen === 'parties') return partiesView(biz, query);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);

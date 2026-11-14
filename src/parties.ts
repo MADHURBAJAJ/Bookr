@@ -100,19 +100,48 @@ export function markLearned(ocrOriginal: string | null, learned: boolean, from: 
 
 export interface PastItem { head_id: string; narration: string }
 
-/** Past expense lines with a head, party or not: how each item has been booked before. */
+// Words a bank statement adds that say nothing about what was bought ("UPI/2200…/Petrol bike/xx@ybl" → petrol bike).
+const BANK_WORDS = new Set(['upi', 'neft', 'imps', 'rtgs', 'nach', 'ach', 'ecs', 'atm', 'pos', 'chq', 'cheque', 'trf', 'mmt', 'inft', 'p2a', 'p2m', 'payment', 'paid', 'from', 'via',
+  'ybl', 'okicici', 'okaxis', 'oksbi', 'okhdfcbank', 'paytm', 'axl', 'ibl', 'apl', 'sent', 'using', 'remarks', 'the', 'and', 'for']);
+/** An item's words: no numbers, no bank words, no UPI IDs. */
+export const itemWords = (narration: string | null) => norm(narration ?? '').replace(/\S+@\S+/g, ' ').replace(/[^a-z0-9 ]/g, ' ').split(' ')
+  .filter((w) => w.length >= 3 && !/\d/.test(w) && !BANK_WORDS.has(w) && !/^(ici|hdf|sbi|utib|kkbk)[a-z]{3,}$/.test(w));
+
+/** The word an item is known by: its first word ("Petrol bike" → petrol). */
+export function itemKey(narration: string | null): string | null {
+  return itemWords(narration)[0] ?? null;
+}
+
+/** What a person said about an item on Heads and rules (approved 14 Nov 2026): its head from now on, or forget it. Latest per word. */
+export async function itemOverrides(db: DB, businessId: string) {
+  const rows = await all<{ action: string; after: string; created_at: number }>(db, `SELECT action, after, created_at FROM audit_log
+    WHERE business_id = ? AND action IN ('item.head_set', 'item.forget') ORDER BY id`, businessId);
+  const m = new Map<string, { headId: string | null; at: number }>();
+  for (const r of rows) { const a = JSON.parse(r.after) as { word: string; headId?: string }; m.set(a.word, { headId: r.action === 'item.head_set' ? a.headId ?? null : null, at: r.created_at }); }
+  return m;
+}
+
+/**
+ * Past expense lines with a head, party or not: how each item has been booked before. An item a person changed or
+ * forgot on Heads and rules starts again from then: its earlier lines are not used, and a changed one leads with its head.
+ */
 export async function loadItemHistory(db: DB, businessId: string): Promise<PastItem[]> {
-  return all<PastItem>(db, `SELECT head_id, narration FROM transactions WHERE business_id = ? AND type = 'expense' AND head_id IS NOT NULL
-    AND narration IS NOT NULL AND trim(narration) <> '' ORDER BY created_at DESC LIMIT 5000`, businessId);
+  const [rows, over] = await Promise.all([all<PastItem & { created_at: number }>(db, `SELECT head_id, narration, created_at FROM transactions WHERE business_id = ? AND type = 'expense' AND head_id IS NOT NULL
+    AND narration IS NOT NULL AND trim(narration) <> '' ORDER BY created_at DESC LIMIT 5000`, businessId), itemOverrides(db, businessId)]);
+  if (!over.size) return rows;
+  const kept = rows.filter((r) => { const o = over.get(itemKey(r.narration) ?? ''); return !o || r.created_at > o.at; });
+  const set = [...over].filter(([, o]) => o.headId).map(([word, o]) => ({ head_id: o.headId!, narration: word, created_at: o.at }));
+  return [...kept.filter((r) => { const o = over.get(itemKey(r.narration) ?? ''); return !o?.headId; }), ...set,
+    ...kept.filter((r) => over.get(itemKey(r.narration) ?? '')?.headId)].sort((a, b) => b.created_at - a.created_at);
 }
 
 /** The head of the latest earlier line with the same item ("Petrol"), else the same first word ("Petrol bike" after "Petrol"). */
 export function headFromItem(history: PastItem[], narration: string): string | null {
-  const item = words(narration).filter((w) => !/^\d+$/.test(w));
+  const item = itemWords(narration);
   if (!item.length) return null;
   const key = item.join(' ');
-  const same = history.find((h) => words(h.narration).filter((w) => !/^\d+$/.test(w)).join(' ') === key)
-    ?? history.find((h) => words(h.narration).filter((w) => !/^\d+$/.test(w))[0] === item[0]);
+  const same = history.find((h) => itemWords(h.narration).join(' ') === key)
+    ?? history.find((h) => itemWords(h.narration)[0] === item[0]);
   return same?.head_id ?? null;
 }
 

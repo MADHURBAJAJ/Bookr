@@ -25,10 +25,10 @@ const DUPLICATE_ACCOUNT = 'An account with this name already exists.';
 
 bookRoutes.get('/businesses/:businessId/accounts', requireRole('accounts.view'), async (c) => {
   const accounts = await all(c.env.DB, `
-    SELECT id, name, kind, account_number AS accountNumber,
+    SELECT id, name, kind, account_number AS accountNumber, identifiers,
            opening_balance_paise AS openingBalancePaise, opening_date AS openingDate
     FROM accounts WHERE business_id = ? ORDER BY kind = 'bank', name`, c.get('businessId'));
-  return c.json({ accounts });
+  return c.json({ accounts: accounts.map((a) => ({ ...a, identifiers: JSON.parse((a as { identifiers: string }).identifiers) })) });
 });
 
 // Every account change and its audit row are one batch: both land or neither does.
@@ -73,6 +73,29 @@ bookRoutes.patch('/businesses/:businessId/accounts/:accountId', requireRole('acc
   // No row in this business: the batch changed nothing (no audit row either).
   if (!results[1].meta.changes) fail(404, 'Account not found.');
   return c.json({ ok: true });
+});
+
+/**
+ * How an account appears on the business's other statements (approved 14 Nov 2026): UPI IDs, names or words. A line on
+ * another account naming one of them is shown as a transfer between own accounts.
+ */
+bookRoutes.put('/businesses/:businessId/accounts/:accountId/identifiers', requireRole('accounts.edit'), async (c) => {
+  const accountId = c.req.param('accountId');
+  if (!isUuid(accountId)) fail(404, 'Account not found.');
+  const data = await body(c);
+  if (!Array.isArray(data.identifiers)) fail(400, 'Send the list of words.');
+  const words = [...new Map((data.identifiers as unknown[]).filter((w): w is string => typeof w === 'string').map((w) => w.trim()).filter((w) => w.length >= 3)
+    .map((w) => [w.toLowerCase(), w.slice(0, 60)] as const)).values()].slice(0, 30);
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const e = { businessId: bid, userId: c.get('user').id, action: 'account.identifiers', accountId, at: now() };
+  const results = await db.batch([
+    auditAccountBefore(db, e),
+    stmt(db, 'UPDATE accounts SET identifiers = ? WHERE id = ? AND business_id = ?', JSON.stringify(words), accountId, bid),
+    auditAccountAfter(db, { ...e, isCreate: false }),
+  ]);
+  if (!results[1].meta.changes) fail(404, 'Account not found.');
+  return c.json({ identifiers: words });
 });
 
 // ---- Heads: income and expense categories, each with an optional Tally ledger name.
