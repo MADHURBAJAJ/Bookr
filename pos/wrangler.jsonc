@@ -15,8 +15,8 @@
     {
       "binding": "DB",
       "database_name": "pos-demo",
-      // Set after `wrangler d1 create pos-demo`. An id, not a secret.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // Made by `wrangler d1 create pos-demo --location apac` (14 Nov 2026). An id, not a secret.
+      "database_id": "4fb23f6b-0647-4c16-b315-186af02baa48",
       "migrations_dir": "migrations"
     }
   ],
