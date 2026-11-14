@@ -22,6 +22,13 @@ describe('U/N bills', () => {
     // Case 2: amounts differ: a person decides.
     expect(await cmp('2610322')).toMatchObject({ difference: 'amount_and_mode', decision: null });
 
+    // On the Cash list: under "Mode not known", not counted as cash.
+    const ent = (await acc.get(`/businesses/${h.bid}/shifts/2026-10-31/entries`)).json;
+    expect(ent.cash.entries.filter((e: any) => e.noMode).map((e: any) => [e.billNo, e.evidence, e.state])).toEqual([
+      ['2610323', null, 'decide'], ['2610324', null, 'decide'], ['2610325', null, 'decide']]);
+    expect(ent.cash.noModePaise).toBe(46000);
+    expect(ent.cash.totalPaise).toBe(65000); // only 2610322's register cash
+
     // Case 3: not in the register: on the tab, needing a look.
     const tab = async () => (await acc.get(`/businesses/${h.bid}/shifts/2026-10-31/complimentary`)).json;
     let t = await tab();

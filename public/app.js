@@ -2986,6 +2986,15 @@ const bankNoneOf = (v, c) => (!c.bank && c.bankNone && !(v.columnHints ?? []).so
 
 /** The decision menu of one bill: the same choices on Compare sales and on Reconcile (approved 9 Nov 2026). */
 function decideMenuHtml(c, v) {
+  // U/N in the software and not in the register (approved 14 Nov 2026): nobody knows how it was paid, so the person says
+  // how (a register line is written), or makes it complimentary, or leaves it out with a reason, or carries it forward.
+  if (c.difference === 'missing_in_register' && c.software?.mode === 'unknown' && !(c.otherDay && !c.otherDay.closed)) {
+    const on = c.decision === 'carry_forward';
+    return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${paidByChips({ comparisonId: c.id, billNo: c.billNo })}
+      <button class="btn plain dchip" type="button" data-makecomp="${c.id}" data-bill="${c.billNo}" data-name="${c.software?.name ?? ''}" title="Given free: not counted as a sale. Asks the guest's name.">Complimentary</button>
+      <button class="btn plain dchip" type="button" data-leaveunk="${c.id}" data-bill="${c.billNo}">Leave out…</button>
+      <button class="btn ${on ? 'ghost' : 'plain'} dchip" data-cmp="${c.id}" data-d="carry_forward" data-type="" data-link="">${on ? '✓ ' : ''}Carry forward</button></div>`;
+  }
   return html`<div style="display:flex;flex-wrap:wrap;gap:6px">${decisionChoices(c).map(([k, l, type, link]) => {
     const on = c.decision === k && (!type || c.billType === type) && (link ?? null) === (c.linkedToId ?? null);
     if (k === 'leave_out' && !link && !c.register && c.software?.mode === 'cash') {
@@ -4396,7 +4405,7 @@ function editChip(x) {
 function entriesHtml(biz, day, t, mode, cv) {
   const canDecide = biz.actions.includes('sales.decide');
   const side = (x) => (x ? html`${x.mode ? ENTRY_MODE[x.mode] ?? MODE_LABELS[x.mode] ?? x.mode : 'no mode'}` : html`<em class="note">missing</em>`);
-  const received = (e) => (e.evidence ? html`<span style="color:var(--teal)">✓ ${e.evidence}</span>`
+  const received = (e) => (e.noMode ? html`<span style="color:#92400E">Mode not known: say how it was paid</span>` : e.evidence ? html`<span style="color:var(--teal)">✓ ${e.evidence}</span>`
     : e.state === 'waiting' ? html`<span style="color:#92400E">⏳ ${mode === 'upi' ? 'No bank credit yet' : mode === 'card' ? 'No machine payment yet' : 'Waiting'}</span>`
     : e.state === 'decide' ? html`<span class="note">Decide first</span>` : html`<span class="note">—</span>`);
   const action = (e) => {
@@ -4423,18 +4432,22 @@ function entriesHtml(biz, day, t, mode, cv) {
       <td style="white-space:normal">${received(es[0])}<div class="tiny">Open to see each bill</div></td></tr>`;
   };
   const seen = new Set();
-  const rows = t.entries.flatMap((e) => {
+  // Bills with no mode on either side come first, under their own heading: not cash until a person says so.
+  const unknown = t.entries.filter((e) => e.noMode);
+  const rows = [...(unknown.length ? [html`<tr data-pstate="decide"><td colspan="4" style="background:#FEF3C7;white-space:normal"><strong>Mode not known (${unknown.length}) · ₹ ${money(t.noModePaise ?? 0)}</strong>
+    <div class="tiny">The software says U/N and the register does not have them. Not counted as cash: say how each was paid, make it complimentary, or leave it out.</div></td></tr>`, ...unknown.map((e) => row(e))] : []),
+    ...t.entries.filter((e) => !e.noMode).flatMap((e) => {
     if (!e.group) return [row(e)];
     if (seen.has(e.group.id)) return [];
     seen.add(e.group.id);
     const es = t.entries.filter((x) => x.group?.id === e.group.id);
     return [groupRow(es), ...es.map((x) => row(x, e.group.id))];
-  });
+  })];
   const units = t.entries.filter((e) => !e.group).map((e) => e.state);
   for (const id of seen) { const es = t.entries.filter((x) => x.group?.id === id); units.push(es.some((e) => e.state === 'decide') ? 'decide' : es[0].state); }
   const nLeft = units.filter((x) => x !== 'done').length;
   const nDone = units.length - nLeft;
-  const sum = (f) => t.entries.filter(f).reduce((a, e) => a + (e.amountPaise ?? 0), 0);
+  const sum = (f) => t.entries.filter((e) => !e.noMode && f(e)).reduce((a, e) => a + (e.amountPaise ?? 0), 0);
   const filter = nLeft ? 'left' : 'all';
   return html`<details class="card cmp-fold" ${t.left ? 'open' : ''}><summary><h2>${ENTRY_MODE[mode]} bills (${t.entries.length}) · ₹ ${money(t.totalPaise)}</h2></summary>
     ${t.entries.length ? html`<div class="paytable" data-pfilter="${filter}" style="display:flex;flex-direction:column;gap:8px">
@@ -4446,7 +4459,7 @@ function entriesHtml(biz, day, t, mode, cv) {
         <thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Register · Software</th><th>Money received</th></tr></thead>
         <tbody>${rows}</tbody>
         <tfoot><tr style="font-weight:600"><td>Total</td><td class="amount">${money(t.totalPaise)}</td><td></td>
-          <td class="tiny">Received ₹ ${money(sum((e) => e.state === 'done'))} · waiting ₹ ${money(sum((e) => e.state === 'waiting'))}${sum((e) => e.state === 'decide') ? ` · to decide ₹ ${money(sum((e) => e.state === 'decide'))}` : ''}</td></tr></tfoot>
+          <td class="tiny">Received ₹ ${money(sum((e) => e.state === 'done'))} · waiting ₹ ${money(sum((e) => e.state === 'waiting'))}${sum((e) => e.state === 'decide') ? ` · to decide ₹ ${money(sum((e) => e.state === 'decide'))}` : ''}${t.noModePaise ? ` · mode not known ₹ ${money(t.noModePaise)}` : ''}</td></tr></tfoot>
       </table></div></div>`
       : html`<div class="note">No ${ENTRY_MODE[mode]} bills in this shift.</div>`}
     <div class="note">✎ marks a change (hover for who and when): the register as read and as corrected, the side used when the register and the software differ, or a mode changed later.</div></details>`;

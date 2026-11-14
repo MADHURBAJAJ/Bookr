@@ -21,6 +21,8 @@ export interface Entry {
   rowId: string | null; uploadId: string | null; transactionId: string | null; part: string | null;
   /** Bills paid together: one payment for the group, its evidence on the group; amountPaise is the bill's own amount. */
   group: { id: string; billNos: string[]; paymentPaise: number; billsPaise: number; paidPaise: number; otherModes: { mode: Mode; paise: number }[] } | null;
+  /** Neither side says how it was paid (U/N in the software, not in the register): listed with Cash, not counted as cash (approved 14 Nov 2026). */
+  noMode?: boolean;
 }
 
 const rs = (p: number | null | undefined) => (p == null ? '—' : `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: p % 100 ? 2 : 0, maximumFractionDigits: 2 })}`);
@@ -161,13 +163,14 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
       parts = ps.map((p) => ({ mode: p.mode as Mode, amount: p.amount_paise })).sort((a, b) => order.indexOf(a.mode) - order.indexOf(b.mode) || b.amount - a.amount);
       if (!parts.length && ['cash', 'upi', 'card'].includes(c.register.mode as string)) parts = [{ mode: c.register.mode as Mode, amount: c.register.amountPaise as number }];
     } else if (c.software && ['cash', 'upi', 'card'].includes(c.software.mode as string)) parts = [{ mode: c.software.mode as Mode, amount: c.software.amountPaise as number }];
+    const noMode = !parts.length && !decided && c.software?.mode === 'unknown' && !c.register;
     if (!parts.length) parts = [{ mode: 'cash', amount: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number }];
     parts.forEach((p, i) => {
-      const evidence = p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}`
+      const evidence = noMode ? null : p.mode === 'upi' ? (c.bank ? `${c.bank.machine ? `${c.bank.machine.label} · settles ${c.bank.machine.settledOn}:` : 'Bank'} ${rs(c.bank.amountPaise)} at ${hm(c.bank.postedAt)}`
           : chosen.has(c.id) ? chosenText(chosen.get(c.id)!) : sameSale.get(c.id) ?? null)
         : p.mode === 'card' ? (trial?.matches[c.id] ? onSave(trial.matches[c.id]) : c.machine ? `${c.machine.label} ${rs(c.machine.amountPaise)} at ${hm(c.machine.paidAt)}` : null) : 'In the cash count';
       entries.push({ ...base, key: `${c.id}:${i}`, mode: p.mode, amountPaise: p.amount, state: open ? 'decide' : p.mode === 'cash' || evidence ? 'done' : 'waiting', evidence, edits,
-        transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null });
+        transactionId: null, part: parts.length > 1 ? `part ${i + 1} of ${parts.length}` : null, ...(noMode ? { noMode: true } : {}) });
     });
   }
   // Bills paid together (approved 9 Nov 2026): one block per group and mode. The group's one payment and what backs it
@@ -218,9 +221,11 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
     const list = entries.filter((e) => e.mode === m);
     // A group counts once, by its payment.
     const groups = [...new Map(list.filter((e) => e.group).map((e) => [e.group!.id, e])).values()];
-    const single = list.filter((e) => !e.group);
-    return { entries: list, left: single.filter((e) => e.state !== 'done').length + groups.filter((e) => e.state !== 'done').length,
-      totalPaise: single.reduce((t, e) => t + e.amountPaise, 0) + groups.reduce((t, e) => t + e.group!.paymentPaise, 0) };
+    const single = list.filter((e) => !e.group && !e.noMode);
+    const noMode = list.filter((e) => e.noMode);
+    return { entries: list, left: single.filter((e) => e.state !== 'done').length + groups.filter((e) => e.state !== 'done').length + noMode.length,
+      totalPaise: single.reduce((t, e) => t + e.amountPaise, 0) + groups.reduce((t, e) => t + e.group!.paymentPaise, 0),
+      noModePaise: noMode.reduce((t, e) => t + e.amountPaise, 0) };
   };
   return { day, confirmed, cash: tab('cash'), upi: tab('upi'), card: tab('card') };
 }
