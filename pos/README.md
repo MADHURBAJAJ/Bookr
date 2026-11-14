@@ -4,6 +4,33 @@ A separate Cloudflare Worker with its own D1 database, kept in the Bookr reposit
 crypto code. It sends each settled bill, debtor receipt, void and shift close to Bookr, which files them and shows them on its
 POS page (not yet booked as income). Plan and decisions: the "Hotel restaurant POS: research and plan" doc.
 
+## Try it on its own, with demo data (not connected to Bookr)
+
+The POS runs fine without Bookr: with no `BOOKR_URL` or key set, its messages for Bookr just wait in its own database.
+The demo restaurant is invented data: a company with 5% GST, two HUFs without GST (₹20 lakh limit), 16 menu items,
+reasons, two in-house rooms and one credit account.
+
+On this computer:
+
+```bash
+npm run pos:migrate:local
+DEMO_PASSWORD='choose-one-locally' npm run pos:seed-demo:local
+npm run pos:dev                      # http://127.0.0.1:8788
+```
+
+On Cloudflare (once): `npx wrangler login`, then `npx wrangler d1 create pos-demo --location apac` and put the
+`database_id` it prints into `pos/wrangler.jsonc`. Then:
+
+```bash
+npm run pos:migrate:remote
+DEMO_PASSWORD='choose-one' npm run pos:seed-demo:remote
+npm run pos:deploy
+```
+
+Sign in as `pos-owner@example.com` with the demo password, open **Settings › This device** and press **Make this a
+counter device**. Sign out: the counter now shows the PIN pad (demo PINs 1111 cashier, 2222 captain, 3333 manager).
+Running the seed again resets the demo restaurant.
+
 ## Connecting to Bookr
 
 1. In Bookr, the Owner opens **POS** and presses **Connect POS**. The key is shown once.
