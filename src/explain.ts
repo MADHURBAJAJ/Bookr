@@ -12,7 +12,7 @@ import { addDays, shiftWindow } from './time';
 
 /** A call, or on a trial reconcile a change to a register row (op) or a link to open (href). */
 export interface Action { label: string; method?: 'POST' | 'PUT' | 'DELETE'; path?: string; body?: Record<string, unknown>; primary?: boolean; needsNote?: string;
-  op?: 'fixNumber' | 'setMode' | 'pick'; rowId?: string; uploadId?: string; billNo?: string; mode?: string; href?: string;
+  op?: 'fixNumber' | 'setMode' | 'pick' | 'noDiscount'; rowId?: string; uploadId?: string; billNo?: string; mode?: string; href?: string;
   /** op 'pick': the credits and sales to tick in Match by hand. */
   credits?: string[]; sales?: string[] }
 /** What each of the three says, and which one is wrong (shown struck out). */

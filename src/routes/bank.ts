@@ -236,6 +236,7 @@ bankRoutes.get('/businesses/:businessId/upi', requireRole('bank.link'), async (c
   const sales = await all(db, `
     SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.match_status AS matchStatus, t.matched_bank_row AS bankRowId,
       sb.paid_at AS paidAt, r.posted_at AS creditAt, a.name AS accountName, r.tran_id AS tranId, rr.id AS registerRowId, rr.upload_id AS uploadId,
+      (SELECT min(s.paid_at) FROM card_matches m JOIN card_settlements s ON s.id = m.settlement_id WHERE m.transaction_id = t.id) AS machineAt,
       rr.amount_paise AS billPaise, rr.discount_paise - rr.tip_paise AS discountPaise,
       (SELECT group_concat(DISTINCT p.column_label) FROM register_payments p WHERE p.register_row_id = coalesce(rr.paid_with_row_id, rr.id) AND p.mode = 'upi') AS labels,
       (SELECT count(*) FROM transactions o WHERE o.comparison_id = t.comparison_id AND o.type = 'income' AND o.payment_mode = 'upi') AS parts, t.comparison_id AS comparisonId,

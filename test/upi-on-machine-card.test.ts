@@ -66,5 +66,11 @@ describe('UPI on the card machine', () => {
     await h.confirm();
     const rows = await sql`SELECT t.bill_no, t.payment_mode FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.settlement_id = ${pay}`;
     expect(rows).toEqual([{ bill_no: '2610311', payment_mode: 'upi' }]);
+    // Saved: received through the machine, not "not found in the bank" (14 Nov 2026).
+    const saved = await h.reconcile();
+    expect(saved.open?.bills?.map((x: any) => x.billNo) ?? []).not.toContain('2610311');
+    expect(saved.strip.billsLeft).toBe(0);
+    const upi = (await acc.get(`/businesses/${h.bid}/upi?day=2026-10-31`)).json;
+    expect(upi.sales.find((x: any) => x.billNo === '2610311').machineAt).not.toBeNull();
   });
 });

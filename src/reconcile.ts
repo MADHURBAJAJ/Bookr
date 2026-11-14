@@ -33,8 +33,9 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     explainShift(db, businessId, day),
     suggestionsFor(db, businessId, day, addDays(day, 1), true),
     all<{ id: string; billNo: string | null; amountPaise: number; bankRowId: string | null; paidAt: number | null; creditAt: number | null;
-      creditPaise: number | null; tranId: string | null; accountName: string | null }>(db, `
+      creditPaise: number | null; tranId: string | null; accountName: string | null; machineAt: number | null }>(db, `
       SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.matched_bank_row AS bankRowId, sb.paid_at AS paidAt,
+        (SELECT min(s.paid_at) FROM card_matches m JOIN card_settlements s ON s.id = m.settlement_id WHERE m.transaction_id = t.id) AS machineAt,
         r.posted_at AS creditAt, r.amount_paise AS creditPaise, r.tran_id AS tranId, a.name AS accountName
       FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       LEFT JOIN bank_rows r ON r.id = t.matched_bank_row LEFT JOIN accounts a ON a.id = r.account_id
@@ -54,7 +55,9 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     const c = creditOf.get(id)!;
     return { creditId: c.id, tranId: c.tran_id, accountName: c.account_name, postedAt: c.posted_at, amountPaise: c.amount_paise, vpa: c.vpa, remark: c.remark };
   };
-  const waiting = new Set(sales.filter((s) => !s.bankRowId).map((s) => s.id));
+  // Paid by UPI on the card machine and matched to that payment (14 Nov 2026): received, through the machine's settlement.
+  const got = (x: { bankRowId: string | null; machineAt: number | null }) => !!x.bankRowId || x.machineAt != null;
+  const waiting = new Set(sales.filter((s) => !got(s)).map((s) => s.id));
   const mine = (ids: string[]) => ids.every((x) => waiting.has(x));
 
   // Clear: the explainer's clear pairs, for this shift's bills.
@@ -120,7 +123,7 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     });
 
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
-  const left = sales.filter((s) => !s.bankRowId);
+  const left = sales.filter((s) => !got(s));
   const creditsLeft = sug.credits.filter((c) => c.posted_at >= w.from && c.posted_at < w.to);
   const matched = new Map<string, { rowId: string; tranId: string | null; accountName: string | null; postedAt: number | null; creditPaise: number | null; bills: string[]; billsPaise: number }>();
   for (const s of sales.filter((x) => x.bankRowId)) {
@@ -135,7 +138,7 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     note: ex.note,
     strip: {
       upiSalesPaise: sum(sales), bills: sales.length,
-      matchedPaise: sum(sales.filter((s) => s.bankRowId)),
+      matchedPaise: sum(sales.filter(got)),
       billsLeft: left.length, billsLeftPaise: sum(left),
       creditsLeft: creditsLeft.length, creditsLeftPaise: creditsLeft.reduce((t, c) => t + c.amount_paise, 0),
       // Of those, credits no bill of that amount could be (the rest have one that did not pair).
@@ -246,6 +249,24 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       witnesses: { software: b.c.software ? `${rs(b.c.software.amountPaise as number)} · ${b.c.software.mode}` : null, register: b.c.register ? `${rs(b.c.register.amountPaise as number)} · ${b.c.register.mode}` : null,
         bank: `${rs(b.c.bank!.amountPaise)} at ${hm(b.c.bank!.postedAt)}`, odd: useSoftware ? 'register' : 'software' },
       actions: [{ label: `Use ${useSoftware ? 'software' : 'register'}`, primary: true, method: 'PUT', path: `${base}/comparisons/${b.c.id}`, body: { decision: b.c.bank!.suggest, note: 'Bank credit agrees (trial reconcile)' } }] });
+  }
+
+  // The bank got the bill before its discount (14 Nov 2026): the credit equals the register's amount before the
+  // discount, so the discount was probably not given. Save books the bill after the discount and matches only a credit
+  // of that amount, so this is settled now: paid in full (the discount goes), or the line is opened to check.
+  for (const b of bills.filter((x) => x.c.bank && !x.grouped && x.c.register?.rowId && (x.c.bank.parts?.length ?? 1) <= 1)) {
+    const disc = (b.c.register!.discountPaise as number) ?? 0;
+    const got = b.c.bank!.amountPaise;
+    if (disc <= 0 || got === b.amount || got !== b.amount + disc) continue;
+    const one = paysOf(b.c.register!.rowId as string).length === 1;
+    cards.push({ key: `trial-discount:${b.c.id}`, kind: 'discount_not_given', billNos: [b.c.billNo], title: `Bill ${b.c.billNo}: the bank got ${rs(got)}, the register says ${rs(b.amount)} after a ${rs(disc)} discount`,
+      evidence: [`A UPI credit of ${rs(got)} came in at ${hm(b.c.bank!.postedAt)}: the bill before its discount.`,
+        `Saving books ${rs(b.amount)} and matches only a credit of ${rs(b.amount)}, so this credit and bill would stay open. Was the discount given?`],
+      score: 82, uses: [`cmp:${b.c.id}`, `cr:${b.c.bank!.creditId}`],
+      witnesses: { software: b.c.software ? `${rs(b.c.software.amountPaise as number)} · ${b.c.software.mode}` : null, register: `${rs(b.amount + disc)} − ${rs(disc)} discount = ${rs(b.amount)}`, bank: `${rs(got)} at ${hm(b.c.bank!.postedAt)}`, odd: 'register' },
+      actions: [
+        ...(one ? [{ label: `Paid in full ${rs(got)}`, primary: true, op: 'noDiscount' as const, rowId: b.c.register!.rowId as string, uploadId: b.c.register!.uploadId as string }] : []),
+        { label: 'Open the line', href: `#/b/${businessId}/review/${b.c.register!.uploadId}/${b.c.register!.rowId}` }] });
   }
 
   // A group's one payment a few rupees off what was written (audit, 9 Nov 2026): the credit is offered for the group,
