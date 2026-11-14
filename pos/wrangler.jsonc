@@ -1,0 +1,25 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  // The restaurant POS: a separate Worker with its own D1 database (approved 14 Nov 2026). It pushes settled bills and shift
+  // closes to Bookr. Run from the repo root: npx wrangler dev -c pos/wrangler.jsonc
+  "name": "pos-demo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pos-demo",
+      // Set after `wrangler d1 create pos-demo`. An id, not a secret.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // POS_SETUP_TOKEN is a Worker secret (wrangler secret put POS_SETUP_TOKEN -c pos/wrangler.jsonc), never here.
+  "observability": { "enabled": true }
+}
