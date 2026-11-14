@@ -33,7 +33,8 @@ const GAP = 1000; // ₹10: an offer may be this far from the bill (a tip or a d
 const rs = (p: number) => `₹ ${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export async function waitingPicture(db: DB, businessId: string, today: string) {
-  const [bills, upiSales, cardSales, lastBank, lastCard, regDays] = await Promise.all([
+  // Everything this needs is read in one trip where it can be; the offers for each bill are asked for together below.
+  const [bills, upiSales, cardSales, lastBank, lastCard, regDays, shiftRows, openDayRows, reversed] = await Promise.all([
     waitingBills(db, businessId, today),
     // Saved UPI and card sales whose money has not been matched yet.
     all<{ id: string; comparisonId: string | null; billNo: string; day: string; amountPaise: number; paidAt: number | null }>(db, `
@@ -50,22 +51,36 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
       WHERE r.business_id = ? AND s.receives_upi_label IS NOT NULL`, businessId),
     one<{ paid: number | null; settled: string | null }>(db, 'SELECT max(paid_at) AS paid, max(settled_on) AS settled FROM card_settlements WHERE business_id = ?', businessId),
     all<{ day: string }>(db, 'SELECT DISTINCT shift_day AS day FROM register_rows WHERE business_id = ?', businessId),
+    all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ?', businessId),
+    all<{ d: string }>(db, `SELECT DISTINCT k.shift_day AS d FROM shift_choices k LEFT JOIN shifts s ON s.business_id = k.business_id AND s.shift_day = k.shift_day
+      WHERE k.business_id = ? AND coalesce(s.status, '') <> 'confirmed'`, businessId),
+    // A credit matched to a bill, then reversed by the bank (Stage 6, 10 Nov 2026): the bill is paid by money that went back.
+    all<{ revId: string; revAt: number; amount: number; creditAt: number; txId: string; billNo: string | null; day: string; comparisonId: string | null }>(db, `
+      SELECT r.id AS revId, r.posted_at AS revAt, c.amount_paise AS amount, c.posted_at AS creditAt, t.id AS txId, t.bill_no AS billNo, t.shift_day AS day, t.comparison_id AS comparisonId
+      FROM bank_rows r JOIN bank_rows c ON c.id = r.pair_row_id JOIN bank_matches m ON m.bank_row_id = c.id JOIN transactions t ON t.id = m.transaction_id
+      WHERE r.business_id = ? AND r.kind = 'reversal' AND r.status = 'unmatched' AND c.status = 'matched'`, businessId),
   ]);
   const hasRegister = new Set(regDays.map((r) => r.day));
   const bankIn = (day: string) => (lastBank?.at ?? 0) >= shiftWindow(day).to - 30 * 60000;
   const cardIn = (day: string) => (lastCard?.paid ?? 0) >= shiftWindow(day).to || (lastCard?.settled ?? '') >= addDays(day, 2);
   const days = (day: string) => Math.round((Date.parse(today) - Date.parse(day)) / 86400000);
-  const statusOf = new Map((await all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ?', businessId)).map((s) => [s.day, s.status]));
-  const swCovered = new Map<string, boolean>();
-  const softwareIn = async (day: string) => {
-    if (!swCovered.has(day)) swCovered.set(day, !(await coverage(db, businessId, day)).gaps.length);
+  const statusOf = new Map(shiftRows.map((s) => [s.day, s.status]));
+  // Kept as promises, one per shift, so the shifts are read together and never twice.
+  const swCovered = new Map<string, Promise<boolean>>();
+  const softwareIn = (day: string) => {
+    if (!swCovered.has(day)) swCovered.set(day, coverage(db, businessId, day).then((c) => !c.gaps.length));
     return swCovered.get(day)!;
   };
-  const cashOf = new Map<string, Awaited<ReturnType<typeof cashCheck>>>();
-  const cash = async (day: string) => {
-    if (!cashOf.has(day)) cashOf.set(day, await cashCheck(db, businessId, day));
+  const cashOf = new Map<string, ReturnType<typeof cashCheck>>();
+  const cash = (day: string) => {
+    if (!cashOf.has(day)) cashOf.set(day, cashCheck(db, businessId, day));
     return cashOf.get(day)!;
   };
+  for (const b of bills) {
+    if (b.oddNumber || !b.confirmed || b.decision === 'carry_forward') continue;
+    if (b.side === 'register') void softwareIn(b.day).catch(() => {});
+    else if (b.mode === 'cash' && hasRegister.has(b.day)) void cash(b.day).catch(() => {});
+  }
 
   // Offers: open credits (or card payments) within ₹10, on the bill's shift and the shifts either side.
   const span = (day: string) => ({ from: shiftWindow(addDays(day, -1)).from, to: shiftWindow(addDays(day, 1)).to });
@@ -88,6 +103,8 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   };
 
   const out: WaitItem[] = [];
+  // Offers for each bill are asked for at the same time; their lines are added when all have come back.
+  const later: Promise<unknown>[] = [];
   const seen = new Set<string>();
   const sales = new Map([...upiSales, ...cardSales].filter((t) => t.comparisonId).map((t) => [t.comparisonId!, t]));
 
@@ -130,15 +147,15 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     if (b.mode === 'upi') {
       if (!sale) continue; // its credit is matched: the bank backs it
       if (!bankIn(b.day)) { grey('bank', 'Until bank sync'); continue; }
-      const offers = await credits(b.day, base.amountPaise, sale?.paidAt ?? null);
-      look(offers.length ? 'Not in the register, and no credit matched yet' : 'Not in the register, and no credit of this amount in the bank', offers);
+      later.push(credits(b.day, base.amountPaise, sale?.paidAt ?? null).then((offers) =>
+        look(offers.length ? 'Not in the register, and no credit matched yet' : 'Not in the register, and no credit of this amount in the bank', offers)));
       continue;
     }
     if (b.mode === 'card') {
       if (!sale) continue; // its machine payment is matched
       if (!cardIn(b.day)) { grey('card', 'Until the card report'); continue; }
-      const offers = await payments(b.day, base.amountPaise, sale?.paidAt ?? null);
-      look(offers.length ? 'Not in the register, and no machine payment matched yet' : 'Not in the register, and no machine payment of this amount', offers);
+      later.push(payments(b.day, base.amountPaise, sale?.paidAt ?? null).then((offers) =>
+        look(offers.length ? 'Not in the register, and no machine payment matched yet' : 'Not in the register, and no machine payment of this amount', offers)));
       continue;
     }
     look('Not in the register; the software does not say how it was paid');
@@ -148,10 +165,10 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   // nothing is wrong, it is matched when that shift is saved. Shown, not counted.
   const at = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
   const chosenFor = new Map<string, { day: string; with: string }>();
-  const openDays = (await all<{ d: string }>(db, `SELECT DISTINCT k.shift_day AS d FROM shift_choices k LEFT JOIN shifts s ON s.business_id = k.business_id AND s.shift_day = k.shift_day
-    WHERE k.business_id = ? AND coalesce(s.status, '') <> 'confirmed'`, businessId)).map((x) => x.d);
-  for (const d of openDays) {
-    const [ups, cards] = await Promise.all([shiftChoices(db, businessId, d), cardShiftChoices(db, businessId, d)]);
+  const openDays = openDayRows.map((x) => x.d);
+  const choices = await Promise.all(openDays.map((d) => Promise.all([shiftChoices(db, businessId, d), cardShiftChoices(db, businessId, d)])));
+  for (const [i, d] of openDays.entries()) {
+    const [ups, cards] = choices[i];
     const note = (ids: string[], nos: string[], i: number, money: string) => {
       const others = nos.filter((_, j) => j !== i);
       return `${money}${others.length ? `, with bill ${others.join(' + ')}` : ''}`;
@@ -174,8 +191,9 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     const base = { key: `t:${t.id}`, comparisonId: t.comparisonId, billNo: t.billNo, day: t.day, amountPaise: t.amountPaise, mode: 'upi', side: 'both' as const, confirmed: true,
       daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null };
     if (!bankIn(t.day)) { out.push({ ...base, group: 'grey', waitFor: 'bank', reason: 'Until bank sync', offers: [] }); continue; }
-    const offers = await credits(t.day, t.amountPaise, t.paidAt);
-    out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no credit matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
+    later.push(credits(t.day, t.amountPaise, t.paidAt).then((offers) => {
+      out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no credit matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
+    }));
   }
   for (const t of cardSales) {
     if (t.comparisonId && seen.has(t.comparisonId)) continue;
@@ -189,15 +207,12 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     const base = { key: `t:${t.id}`, comparisonId: t.comparisonId, billNo: t.billNo, day: t.day, amountPaise: t.amountPaise, mode: 'card', side: 'both' as const, confirmed: true,
       daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null };
     if (!cardIn(t.day)) { out.push({ ...base, group: 'grey', waitFor: 'card', reason: 'Until the card report', offers: [] }); continue; }
-    const offers = await payments(t.day, t.amountPaise, t.paidAt);
-    out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no machine payment matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
+    later.push(payments(t.day, t.amountPaise, t.paidAt).then((offers) => {
+      out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no machine payment matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
+    }));
   }
 
-  // A credit matched to a bill, then reversed by the bank (Stage 6, 10 Nov 2026): the bill is paid by money that went back.
-  const reversed = await all<{ revId: string; revAt: number; amount: number; creditAt: number; txId: string; billNo: string | null; day: string; comparisonId: string | null }>(db, `
-    SELECT r.id AS revId, r.posted_at AS revAt, c.amount_paise AS amount, c.posted_at AS creditAt, t.id AS txId, t.bill_no AS billNo, t.shift_day AS day, t.comparison_id AS comparisonId
-    FROM bank_rows r JOIN bank_rows c ON c.id = r.pair_row_id JOIN bank_matches m ON m.bank_row_id = c.id JOIN transactions t ON t.id = m.transaction_id
-    WHERE r.business_id = ? AND r.kind = 'reversal' AND r.status = 'unmatched' AND c.status = 'matched'`, businessId);
+  await Promise.all(later);
   for (const x of reversed) {
     out.push({ key: `r:${x.revId}:${x.txId}`, comparisonId: x.comparisonId, billNo: x.billNo ?? '', day: x.day, amountPaise: x.amount, mode: 'upi', side: 'both', confirmed: true,
       group: 'look', waitFor: null, reason: `Its ${rs(x.amount)} credit was reversed by the bank on ${dayOf(x.revAt, x.day)}: the payment failed`, daysWaiting: days(x.day),
@@ -208,7 +223,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
       reason: `The ${day} shift is not saved yet`, daysWaiting: days(day), watchEnd: null, unresolved: false, watchNote: null, offers: [], count: n });
   }
   const sortKey = (x: WaitItem) => `${x.day}\u0000${x.billNo}`;
-  out.sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : 1));
+  out.sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : a.key < b.key ? -1 : 1));
   return {
     watchDays: WATCH_DAYS,
     look: out.filter((x) => x.group === 'look'),

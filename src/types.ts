@@ -33,6 +33,7 @@ export interface Vars {
   sessionId: string;
   businessId: string;
   role: Role;
+  pathRole?: { businessId: string; role: string | null };
 }
 
 export type AppEnv = { Bindings: Env; Variables: Vars };

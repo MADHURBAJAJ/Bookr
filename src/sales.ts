@@ -562,6 +562,19 @@ export async function creditsForShift(db: DB, businessId: string, day: string) {
 
 /** Everything the Compare sales screen shows for one shift, plus what still blocks confirming it. */
 export async function shiftView(db: DB, businessId: string, day: string) {
+  // Reads that need only the day start now, beside the first batch (fewer trips to the database, one after another).
+  const quiet = <T>(p: Promise<T>) => { p.catch(() => {}); return p; };
+  const w0 = shiftWindow(day);
+  const lateP = quiet(all<{ linked_to_id: string; shift_day: string; rg_amount_paise: number | null; rg_mode: string | null }>(db, `
+    SELECT linked_to_id, shift_day, rg_amount_paise, rg_mode FROM bill_comparisons WHERE business_id = ? AND difference = 'missing_in_software'
+      AND linked_to_id IN (SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ?)`, businessId, businessId, day));
+  const oldPosP = quiet(oldPosLastSeen(db, businessId, day));
+  const cashAccP = quiet(cashAccountId(db, businessId));
+  let numbersP: ReturnType<typeof numberContext> | null = null;
+  const numbersOnce = () => (numbersP ??= quiet(numberContext(db, businessId, day)));
+  let bankReadP: Promise<[Awaited<ReturnType<typeof bankIn>>, Awaited<ReturnType<typeof creditsForShift>>, Awaited<ReturnType<typeof machineUpiPayments>>]> | null = null;
+  const bankRead = () => (bankReadP ??= quiet(Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day),
+    machineUpiPayments(db, businessId, w0.from - 3600e3, w0.to + 3 * 3600e3)])));
   const [{ sw, rg, written, paysByRow, groups }, cov, comparisons, shift, conflicts, typeHeads] = await Promise.all([
     loadShiftData(db, businessId, day),
     coverage(db, businessId, day),
@@ -583,17 +596,15 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   if (!sw.length) blockers.push('No software report has bills in this shift yet.');
   if (cov.gaps.length) blockers.push('Some hours of this shift are not covered by a software report.');
   if (conflicts.length) blockers.push(`${conflicts.length} bill${conflicts.length > 1 ? 's' : ''} with two different lines in the software (two reports, or the same number twice in one). Decide which line to keep.`);
-  const others = await otherDays(db, businessId, day, comparisons);
+  if (shift?.status !== 'confirmed') { void bankRead(); void numbersOnce(); }
+  const [others, lateRows] = await Promise.all([otherDays(db, businessId, day, comparisons), lateP]);
   // A bill counted here whose register line turned up on a later day, linked to this one (Stage 3, 10 Nov 2026).
-  const lateLines = new Map((await all<{ linked_to_id: string; shift_day: string; rg_amount_paise: number | null; rg_mode: string | null }>(db, `
-    SELECT linked_to_id, shift_day, rg_amount_paise, rg_mode FROM bill_comparisons WHERE business_id = ? AND difference = 'missing_in_software'
-      AND linked_to_id IN (SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ?)`, businessId, businessId, day))
-    .map((x) => [x.linked_to_id, { day: x.shift_day, amountPaise: x.rg_amount_paise, mode: x.rg_mode }]));
+  const lateLines = new Map(lateRows.map((x) => [x.linked_to_id, { day: x.shift_day, amountPaise: x.rg_amount_paise, mode: x.rg_mode }]));
   // What is odd about a register number, until a person has decided the bill.
   // Also a bill the software has for another amount (11 Nov 2026): its register line may be a slip for another bill.
   const amountOff = (c: (typeof comparisons)[number]) => (c.difference === 'amount' || c.difference === 'amount_and_mode');
   const toCheck = comparisons.filter((c) => (c.difference === 'missing_in_software' || amountOff(c)) && c.register_row_id && !c.decided_by && !c.closed_at);
-  const [numbers, lastOldPos] = await Promise.all([toCheck.length && shift?.status !== 'confirmed' ? numberContext(db, businessId, day) : null, oldPosLastSeen(db, businessId, day)]);
+  const [numbers, lastOldPos] = await Promise.all([toCheck.length && shift?.status !== 'confirmed' ? numbersOnce() : null, oldPosP]);
   const oldPosInUse = !!lastOldPos && lastOldPos >= addDays(day, -OLD_POS_FADE_DAYS);
   const flagsOf = new Map(numbers ? toCheck.map((c) => {
     const r = rg.find((x) => x.id === c.register_row_id);
@@ -623,7 +634,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   // A line whose amount is another bill's, one digit away and not in the register, is probably that bill (11 Nov 2026).
   const numberSlips: { writtenAs: string; billNo: string; amountPaise: number; paidPaise: number; rowId: string; uploadId: string; lineNo: number }[] = [];
   if (repeated.length) {
-    const ctx = numbers ?? (shift?.status !== 'confirmed' ? await numberContext(db, businessId, day) : null);
+    const ctx = numbers ?? (shift?.status !== 'confirmed' ? await numbersOnce() : null);
     for (const r of ctx ? rg.filter((x) => repeated.includes(x.bill_no)) : []) {
       const s = sw.find((b) => b.bill_no === r.bill_no);
       const gross = r.amount_paise + r.discount_paise;
@@ -659,7 +670,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const neededTypes = new Set(counted.map(typeOf).filter(Boolean) as string[]);
   const unmapped = [...neededTypes].filter((t) => !typed.has(t));
   if (unmapped.length) blockers.push(`Choose the income head for ${unmapped.map((t) => (t === 'fnb' ? 'F&B' : 'Room')).join(' and ')} bills on Heads and rules.`);
-  if (!(await cashAccountId(db, businessId))) blockers.push('This business has no cash account.');
+  if (!(await cashAccP)) blockers.push('This business has no cash account.');
   // Warnings do not stop confirming. A cash bill counted from the software but missing in the register is cash
   // that should be in hand: it is flagged on its own day so it cannot go missing quietly.
   // Undecided ones too: the bank may show one was paid by UPI (warned only then, below).
@@ -675,8 +686,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const near = new Map<string, { creditId: string; amountPaise: number; postedAt: number; label: string | null; minutes: number }>();
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: OpenCredit[] } | null = null;
   if (shift?.status !== 'confirmed') {
-    const [cov2, credits, onMachine] = await Promise.all([bankIn(db, businessId, day), creditsForShift(db, businessId, day),
-      machineUpiPayments(db, businessId, cov.window.from - 3600e3, cov.window.to + 3 * 3600e3)]);
+    const [cov2, credits, onMachine] = await bankRead();
     // UPI paid on the card machine is evidence too (approved 9 Nov 2026): it comes in the machine's settlement, not as its
     // own credit, and into no UPI column's account. The closer of a credit and a machine payment pays a bill.
     const machineCredits: EvidenceCredit[] = onMachine.map((p) => ({ id: p.id, amount: p.amount_paise, postedAt: p.paid_at, label: null, machine: { settledOn: p.settled_on, label: machineLabel(p) } }));

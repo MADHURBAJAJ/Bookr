@@ -42,10 +42,14 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   const db = c.env.DB;
   const id = await sha256(token);
   const t = now();
-  const row = await one<{ id: string; name: string; email: string; last_seen_at: number }>(db, `
-    SELECT u.id, u.name, u.email, s.last_seen_at
+  // The caller's role in the business the path names comes in the same query (one trip to the database, not two);
+  // requireRole still checks it for every request.
+  const bizInPath = /\/businesses\/([0-9a-f-]{36})(?:\/|$)/i.exec(c.req.path)?.[1] ?? null;
+  const row = await one<{ id: string; name: string; email: string; last_seen_at: number; role: string | null }>(db, `
+    SELECT u.id, u.name, u.email, s.last_seen_at, m.role
     FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.id = ? AND s.expires_at > ?`, id, t);
+    LEFT JOIN memberships m ON m.user_id = u.id AND m.business_id = ?
+    WHERE s.id = ? AND s.expires_at > ?`, bizInPath, id, t);
   if (!row) {
     deleteCookie(c, SESSION_COOKIE, { path: '/', secure: true });
     fail(401, 'Please sign in.');
@@ -58,6 +62,7 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
   c.set('user', { id: row.id, name: row.name, email: row.email });
   c.set('sessionId', id);
+  if (bizInPath) c.set('pathRole', { businessId: bizInPath.toLowerCase(), role: row.role });
   await next();
 };
 
@@ -67,8 +72,9 @@ export function requireRole(action: Action): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const businessId = c.req.param('businessId');
     if (!isUuid(businessId)) fail(404, 'Business not found.');
-    const m = await one<{ role: string }>(c.env.DB,
-      'SELECT role FROM memberships WHERE business_id = ? AND user_id = ?', businessId, c.get('user').id);
+    const known = c.get('pathRole');
+    const m = known && known.businessId === businessId.toLowerCase() ? (known.role ? { role: known.role } : null)
+      : await one<{ role: string }>(c.env.DB, 'SELECT role FROM memberships WHERE business_id = ? AND user_id = ?', businessId, c.get('user').id);
     if (!m || !isRole(m.role)) fail(404, 'Business not found.');
     if (!can(m.role, action)) fail(403, 'Your role in this business does not allow this.');
     c.set('businessId', businessId);

@@ -3,7 +3,7 @@
 // left to do, and every change made to it shown as before → after: the register as read against as corrected, the side
 // chosen when the two differ, and a mode changed later ("paid another way"). Read only: it changes nothing.
 
-import { all, type DB } from './db';
+import { all, one, type DB } from './db';
 import { repaidFor } from './repay';
 import { machineLabel } from './cards';
 import { trialCards, type TrialMatch } from './cardTrial';
@@ -44,9 +44,14 @@ const DIFF: Record<string, string> = {
 const DECISION: Record<string, string> = { use_register: 'used the register', use_software: 'used the software', leave_out: 'left out', carry_forward: 'carried forward' };
 
 export async function shiftEntries(db: DB, businessId: string, day: string) {
-  const view = await shiftView(db, businessId, day);
-  const confirmed = view.status === 'confirmed';
-  const [rows, pays, txs, matches, repaid, deciders, trial] = await Promise.all([
+  // Read in two trips, not one after another: the shift's status first (beside everything that does not need it),
+  // then what depends on it.
+  const quiet = <T>(p: Promise<T>) => { p.catch(() => {}); return p; };
+  const viewP = quiet(shiftView(db, businessId, day));
+  const st = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day);
+  const confirmed = st?.status === 'confirmed';
+  const [view, rows, pays, txs, matches, repaid, deciders, trial, choices, plans] = await Promise.all([
+    viewP,
     all<{ id: string; bill_no: string; amount_paise: number; ocr_original: string | null; edited_at: number | null; editor: string | null; paid_with_row_id: string | null }>(db, `
       SELECT r.id, r.bill_no, r.amount_paise, r.ocr_original, r.edited_at, u.name AS editor, r.paid_with_row_id FROM register_rows r LEFT JOIN users u ON u.id = r.edited_by
       WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
@@ -63,18 +68,20 @@ export async function shiftEntries(db: DB, businessId: string, day: string) {
       JOIN transactions t ON t.id = m.transaction_id WHERE m.business_id = ? AND t.shift_day = ?`, businessId, day) : Promise.resolve([]),
     repaidFor(db, businessId, day),
     all<{ row_id: string; name: string | null; created_at: number }>(db, `SELECT a.row_id, u.name, a.created_at FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
-      WHERE a.business_id = ? AND a.action = 'comparison.decide' AND a.row_table = 'bill_comparisons' ORDER BY a.id`, businessId),
+      WHERE a.business_id = ? AND a.action = 'comparison.decide' AND a.row_table = 'bill_comparisons'
+        AND a.row_id IN (SELECT id FROM bill_comparisons WHERE business_id = ? AND shift_day = ?) ORDER BY a.id`, businessId, businessId, day),
     // Before saving, the machine payment each card bill would be matched to (approved 10 Nov 2026).
     confirmed ? Promise.resolve(null) : trialCards(db, businessId, day),
+    confirmed ? Promise.resolve([]) : shiftChoices(db, businessId, day),
+    confirmed ? Promise.resolve([]) : plansFor(db, businessId, day),
   ]);
   // Before saving, a credit chosen on the tray for a bill: matched on save, so the bill is not waiting for one.
   const chosen = new Map<string, Awaited<ReturnType<typeof shiftChoices>>[number]>();
   const sameSale = new Map<string, string>();
-  if (!confirmed) for (const k of await shiftChoices(db, businessId, day)) if (k.open) for (const id of k.comparisonIds) chosen.set(id, k);
+  if (!confirmed) for (const k of choices) if (k.open) for (const id of k.comparisonIds) chosen.set(id, k);
   const chosenText = (k: Awaited<ReturnType<typeof shiftChoices>>[number]) => `Bank ${rs(k.amountPaise)} at ${hm(k.postedAt)}${k.accountName ? ` · ${k.accountName}` : ''} · chosen, matched on save`;
   // Before saving, a credit booked as a sale on another day and chosen as this bill (Same sale): joined on save (11 Nov 2026).
   if (!confirmed) {
-    const plans = await plansFor(db, businessId, day);
     const credits = plans.length ? await all<{ id: string; amountPaise: number; postedAt: number; accountName: string | null }>(db, `SELECT r.id, r.amount_paise AS amountPaise,
       r.posted_at AS postedAt, a.name AS accountName FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id
       WHERE r.business_id = ? AND r.id IN (${plans.map(() => '?').join(',')})`, businessId, ...plans.map((x) => x.rowId)) : [];

@@ -21,10 +21,36 @@ function html(strings, ...values) {
 }
 const asHtml = (v) => (v && typeof v === 'object' && '__html' in v ? v.__html : esc(v));
 
+/**
+ * Runs fn over a list a few at a time (the requests go together, not one after another). Every item is tried; the first
+ * error is thrown once all have finished.
+ */
+async function eachAtOnce(list, fn, n = 6) {
+  const errors = [];
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => {
+    while (i < list.length) { const x = list[i++]; try { await fn(x); } catch (e) { errors.push(e); } }
+  }));
+  if (errors.length) throw errors[0];
+}
+
+// What rarely changes (the business, its heads and accounts) is kept for two minutes, so moving between pages does not
+// ask again. A change to any of them, or a sign-in, clears it. The server still checks the role on every request.
+const GET_CACHE = new Map();
+const CACHEABLE = /^\/businesses\/[0-9a-f-]{36}(\/heads|\/accounts)?$/;
+const CACHE_MS = 120000;
+const clearsCache = (path) => /\/(heads|accounts|bill-type-heads|learned-items|rules|members|cash\/shortage|shortage)(\/|$|\?)|^\/businesses\/[0-9a-f-]{36}$|^\/businesses$|^\/auth\//.test(path);
+function cacheAfter(method, path, data) {
+  if (method === 'GET') { if (CACHEABLE.test(path)) GET_CACHE.set(path, { at: Date.now(), data }); }
+  else if (clearsCache(path)) GET_CACHE.clear();
+}
+
 // A change always goes as JSON (the server refuses anything else, see app.ts), so one with no body sends {}.
 const bodyFor = (method, body) => (body === undefined && method !== 'GET' ? {} : body);
 async function api(method, path, body) {
   body = bodyFor(method, body);
+  const hit = method === 'GET' ? GET_CACHE.get(path) : null;
+  if (hit && Date.now() - hit.at < CACHE_MS) return structuredClone(hit.data);
   const res = await fetch(`/api${path}`, {
     method,
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
@@ -34,6 +60,7 @@ async function api(method, path, body) {
   const data = res.status === 204 ? null : await res.json().catch(() => null);
   if (res.status === 401 && path !== '/me' && !path.startsWith('/auth/') && !path.startsWith('/invites/')) {
     me = null;
+    GET_CACHE.clear();
     go('#/login');
     throw new Error('Please sign in.');
   }
@@ -42,6 +69,7 @@ async function api(method, path, body) {
     if (window.confirm(`${data.error}\n\nOK = the bill really is ₹0 (complimentary). Cancel = type the amount first.`)) return api(method, path, { ...body, confirm: [...(body.confirm ?? []), 'amount'] });
   }
   if (!res.ok) throw new Error(data?.error ?? 'Something went wrong.');
+  cacheAfter(method, path, data);
   return data;
 }
 
@@ -122,12 +150,18 @@ const NAV = [
 let navCounts = { bizId: null, at: 0, n: null };
 async function fillNavCounts(biz) {
   if (!biz.actions.includes('reports.view')) return;
+  const show = () => {
+    if (navCounts.bizId !== biz.id) return;
+    for (const [k, v] of Object.entries(navCounts.n ?? {})) {
+      const el = document.querySelector(`[data-navn="${k}"]`);
+      if (el) { el.textContent = v ? String(v) : ''; el.hidden = !v; }
+    }
+  };
+  // The counts last known show at once; older than a minute, they are asked for again in the background.
+  show();
   if (navCounts.bizId !== biz.id || Date.now() - navCounts.at > 60000) {
     try { navCounts = { bizId: biz.id, at: Date.now(), n: todayCounts(await api('GET', `/businesses/${biz.id}/home`), biz) }; } catch { return; }
-  }
-  for (const [k, v] of Object.entries(navCounts.n ?? {})) {
-    const el = document.querySelector(`[data-navn="${k}"]`);
-    if (el) { el.textContent = v ? String(v) : ''; el.hidden = !v; }
+    show();
   }
 }
 /** What each menu count shows, from the Today figures. */
@@ -1267,6 +1301,7 @@ async function apiFull(method, path, body) {
     if (window.confirm(`${data.error}\n\nOK = the bill really is ₹0 (complimentary). Cancel = type the amount first.`)) return apiFull(method, path, { ...body, confirm: [...(body.confirm ?? []), 'amount'] });
   }
   if (!res.ok) { const e = new Error(data?.error ?? 'Something went wrong.'); e.problems = data?.problems; throw e; }
+  cacheAfter(method, path, data);
   return data;
 }
 
@@ -4530,7 +4565,7 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
         const matches = ready.filter((p) => tOf(p).kind !== 'parts').map((p) => ({ credit: p.credits[0], bills: p.bills }));
         const res = matches.length ? await post(matches) : { ids: [] };
         const undo = async () => {
-          for (const id of res.ids ?? []) await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${id}`, {}).catch(() => {});
+          await eachAtOnce(res.ids ?? [], (id) => apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${id}`, {}).catch(() => {}));
           for (const u of undos.reverse()) await u();
         };
         await reload();
@@ -5166,7 +5201,7 @@ async function reconcileView(biz, dayArg) {
     clearBtn.disabled = true;
     const ids = ticked('data-clear').map((x) => x.dataset.clear);
     act(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/match-clear`, { ids }),
-      { text: `Matched ${ids.length} bill${ids.length === 1 ? '' : 's'} to the bank.`, undo: async () => { for (const id of ids) await unmatch(id); } });
+      { text: `Matched ${ids.length} bill${ids.length === 1 ? '' : 's'} to the bank.`, undo: () => eachAtOnce(ids, unmatch) });
   });
   const likelyBtn = document.getElementById('matchlikely');
   app.querySelectorAll('[data-likely]').forEach((x) => x.addEventListener('change', () => {
@@ -5176,13 +5211,13 @@ async function reconcileView(biz, dayArg) {
   likelyBtn?.addEventListener('click', () => {
     likelyBtn.disabled = true;
     const pairs = ticked('data-likely').map((x) => r.likely.find((l) => l.creditId === x.dataset.likely));
-    act(async () => { for (const p of pairs) await apiFull('POST', `/businesses/${biz.id}/bank-rows/${p.creditId}/match`, { transactionIds: p.transactionIds }); },
-      { text: `Matched ${pairs.length} bill${pairs.length === 1 ? '' : 's'} to the bank.`, undo: async () => { for (const p of pairs) await unmatch(p.creditId); } });
+    act(() => eachAtOnce(pairs, (p) => apiFull('POST', `/businesses/${biz.id}/bank-rows/${p.creditId}/match`, { transactionIds: p.transactionIds })),
+      { text: `Matched ${pairs.length} bill${pairs.length === 1 ? '' : 's'} to the bank.`, undo: () => eachAtOnce(pairs, (p) => unmatch(p.creditId)) });
   });
   // Money with no bill: each row, and the ticked rows together. Every booking can be undone (Open again).
   const nbBase = `/businesses/${biz.id}/bank-rows`;
   const nbWhat = (id) => app.querySelector(`[data-nbwhat="${id}"]`)?.value.trim() || null;
-  const nbReopen = (ids) => async () => { for (const id of ids) await apiFull('POST', `${nbBase}/${id}/reopen`, {}); };
+  const nbReopen = (ids) => () => eachAtOnce(ids, (id) => apiFull('POST', `${nbBase}/${id}/reopen`, {}));
   const nbMany = async (items) => { const res = await apiFull('POST', `${nbBase}/book-many`, { items }); if (!res.booked) throw new Error(res.skipped.join(' ') || 'Not booked.'); return res; };
   const nbTicks = () => [...app.querySelectorAll('[data-nbtick]')].filter((x) => x.checked).map((x) => x.dataset.nbtick);
   const nbBulk = () => {
@@ -6013,11 +6048,7 @@ function undoFor(biz, a, res) {
   const inPath = path.match(/\/bank-rows\/([0-9a-f-]{36})\//)?.[1];
   const ids = [...(a.body?.ids ?? []), ...(a.body?.rowIds ?? []), ...(a.body?.rowId ? [a.body.rowId] : []), ...(inPath ? [inPath] : [])];
   if (!ids.length) return null;
-  return async () => {
-    for (const id of ids) {
-      await apiFull('DELETE', `${base}/bank-rows/${id}/match`, {}).catch((e) => { if (ids.length === 1) throw e; });
-    }
-  };
+  return () => eachAtOnce(ids, (id) => apiFull('DELETE', `${base}/bank-rows/${id}/match`, {}).catch((e) => { if (ids.length === 1) throw e; }));
 }
 function wireExplain(ex, reload, biz, root = document) {
   if (!ex) return;

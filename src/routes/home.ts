@@ -35,15 +35,17 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   const decide = can(role, 'sales.decide');
   const approve = can(role, 'rows.approve');
   // Nothing before the books start (the earliest account opening date) is waiting (14 Nov 2026).
-  const start = await booksStart(db, businessId);
-  const since = [addDays(today, -SHIFT_DAYS), start].sort()[1];
+  // The books start is read with everything else (one trip to the database, not two); what is before it is dropped below.
+  // The rest runs at the same time too, in a second trip: every part below needs only these.
+  const since0 = addDays(today, -SHIFT_DAYS);
   const byDay = (rows: Count[]) => new Map(rows.map((r) => [r.day, r.n]));
 
-  const [shifts, toCheck, toDecide, upiBills0, upiCredits0, waiting0, uploads] = await Promise.all([
-    all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? AND shift_day >= ? ORDER BY shift_day', businessId, since),
-    all<Count>(db, `SELECT shift_day AS day, count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day >= ? AND status <> 'checked' GROUP BY shift_day`, businessId, since),
+  const [start, shifts0, toCheck, toDecide, upiBills0, upiCredits0, waiting0, uploads] = await Promise.all([
+    booksStart(db, businessId),
+    all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? AND shift_day >= ? ORDER BY shift_day', businessId, since0),
+    all<Count>(db, `SELECT shift_day AS day, count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day >= ? AND status <> 'checked' GROUP BY shift_day`, businessId, since0),
     all<Count>(db, `SELECT shift_day AS day, count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day >= ? AND decision IS NULL
-      AND difference IN (${NEEDS_DECISION.map(() => '?').join(',')}) GROUP BY shift_day`, businessId, since, ...NEEDS_DECISION),
+      AND difference IN (${NEEDS_DECISION.map(() => '?').join(',')}) GROUP BY shift_day`, businessId, since0, ...NEEDS_DECISION),
     bank ? all<Count & { paise: number }>(db, `SELECT shift_day AS day, count(*) AS n, sum(amount_paise) AS paise FROM transactions WHERE business_id = ? AND type = 'income'
       AND payment_mode = 'upi' AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL GROUP BY shift_day`, businessId) : [],
     bank ? all<Count & { paise: number }>(db, `SELECT ${SHIFT_OF} AS day, count(*) AS n, sum(amount_paise) AS paise FROM bank_rows
@@ -52,6 +54,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     all<{ kind: string; day: string | null }>(db, `SELECT kind, max(business_day) AS day FROM uploads WHERE business_id = ? AND kind IN ('bill_register', 'software_sales_csv') GROUP BY kind`, businessId),
   ]);
 
+  const since = [since0, start].sort()[1];
+  const shifts = shifts0.filter((s) => s.day >= since);
   const upiBills = upiBills0.filter((x) => x.day >= start);
   const upiCredits = upiCredits0.filter((x) => x.day >= start);
   const waiting = { ...waiting0, look: waiting0.look.filter((b) => b.day >= start), grey: waiting0.grey.filter((g) => g.day >= start) };
@@ -60,25 +64,24 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   const decideN = byDay(toDecide);
   const bills = byDay(upiBills);
   const credits = byDay(upiCredits);
-  const list = await Promise.all(shifts.map(async (s) => {
+  const listP = Promise.all(shifts.map(async (s) => {
     const cardsLeft = bank && s.status === 'confirmed' ? (await shiftCards(db, businessId, s.day, null)).left : 0;
     return {
       day: s.day, status: s.status, toCheck: check.get(s.day) ?? 0, toDecide: decideN.get(s.day) ?? 0,
       bank: bank ? { billsLeft: bills.get(s.day) ?? 0, creditsLeft: credits.get(s.day) ?? 0, cardsLeft } : null,
     };
   }));
-  const open = list.filter((s) => s.status !== 'confirmed' || (s.bank && s.bank.billsLeft + s.bank.creditsLeft + s.bank.cardsLeft > 0));
 
   // Waiting counts only what needs a look (Stage 2, 10 Nov 2026); what waits for a file is told apart.
   const greyBy = new Map<string, { waitFor: string; day: string; n: number }>();
   for (const g of waiting.grey) { const k = `${g.waitFor}|${g.day}`; const x = greyBy.get(k) ?? { waitFor: g.waitFor ?? '', day: g.day, n: 0 }; x.n += g.count ?? 1; greyBy.set(k, x); }
   // Bills written in the register but never billed in the software, closed this week (Stage 4, 10 Nov 2026).
-  const notBilled = (await one<{ n: number }>(db, `SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND close_note = ? AND difference = 'missing_in_software'
-    AND closed_at >= ?`, businessId, NOT_BILLED_NOTE, Date.now() - 7 * 86400000))?.n ?? 0;
+  const notBilledP = (one<{ n: number }>(db, `SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND close_note = ? AND difference = 'missing_in_software'
+    AND closed_at >= ?`, businessId, NOT_BILLED_NOTE, Date.now() - 7 * 86400000));
   const result = {
     today, watchDays: WATCH_DAYS, bringIn: null as null | { day: string; software: number; registerPages: number },
-    shifts: { count: open.length, list: open.slice(0, MAX_SHIFTS) },
-    waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled },
+    shifts: { count: 0, list: [] as Awaited<typeof listP> },
+    waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled: 0 },
     fresh: {
       registerDay: uploads.find((u) => u.kind === 'bill_register')?.day ?? null,
       reportDay: uploads.find((u) => u.kind === 'software_sales_csv')?.day ?? null,
@@ -94,13 +97,12 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
 
   // The shift that ended at 8 am this morning, while its files are still missing (Today, approved 14 Nov 2026).
   const lastShift = addDays(shiftDayOf(Date.now()), -1);
-  const [sw, reg, saved] = await Promise.all([
+  const bringInP = Promise.all([
     one<{ n: number }>(db, 'SELECT count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND sw_amount_paise IS NOT NULL', businessId, lastShift),
     one<{ n: number }>(db, "SELECT count(*) AS n FROM uploads WHERE business_id = ? AND business_day = ? AND kind = 'bill_register'", businessId, lastShift),
     one<{ n: number }>(db, "SELECT count(*) AS n FROM shifts WHERE business_id = ? AND shift_day = ? AND status = 'confirmed'", businessId, lastShift),
   ]);
-  const bringIn = lastShift >= start && !saved?.n && (!sw?.n || !reg?.n) ? { day: lastShift, software: sw?.n ?? 0, registerPages: reg?.n ?? 0 } : null;
-
+  const bankP = (async () => {
   if (bank) {
     const [accounts, unbooked, unsettled, cardStatus] = await Promise.all([
       all<{ id: string; name: string; lastSyncedAt: number | null; note: string | null; linked: number; lastAt: number | null }>(db, `
@@ -130,7 +132,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     result.fresh.bank = accounts.map((a) => ({ id: a.id, name: a.name, lastSyncedAt: a.lastSyncedAt, lastAt: a.lastAt, note: a.note, linked: !!a.linked }));
     result.fresh.cards = { folder: !!cardStatus.folder, lastAt: cardStatus.lastAt };
   }
-
+  })();
+  const decideP = (async () => {
   if (decide) {
     // Confirmed shifts of the last week whose cash is not counted yet, or differs and was not accepted.
     const days = shifts.filter((s) => s.status === 'confirmed' && s.day >= addDays(today, -CASH_DAYS));
@@ -138,7 +141,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     result.cash = checks.filter((k) => !k.settled && (k.countedPaise == null || k.differencePaise != null))
       .map((k) => ({ day: k.day, differencePaise: k.differencePaise, counted: k.countedPaise != null }));
   }
-
+  })();
+  const approveP = (async () => {
   if (approve) {
     const pages = await all<{ uploadId: string; day: string; count: number; paise: number }>(db, `
       SELECT upload_id AS uploadId, min(day) AS day, count(*) AS count, sum(amount_paise) AS paise FROM transactions
@@ -146,7 +150,12 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
       GROUP BY upload_id HAVING min(day) >= ? ORDER BY min(day)`, businessId, start);
     result.photos = { count: pages.reduce((t, p) => t + p.count, 0), paise: pages.reduce((t, p) => t + p.paise, 0), pages };
   }
-  result.bringIn = bringIn;
+  })();
+  const [list, notBilled, [sw, reg, saved]] = await Promise.all([listP, notBilledP, bringInP, bankP, decideP, approveP]);
+  const open = list.filter((s) => s.status !== 'confirmed' || (s.bank && s.bank.billsLeft + s.bank.creditsLeft + s.bank.cardsLeft > 0));
+  result.shifts = { count: open.length, list: open.slice(0, MAX_SHIFTS) };
+  result.waitingBills.notBilled = notBilled?.n ?? 0;
+  result.bringIn = lastShift >= start && !saved?.n && (!sw?.n || !reg?.n) ? { day: lastShift, software: sw?.n ?? 0, registerPages: reg?.n ?? 0 } : null;
   return result;
 }
 

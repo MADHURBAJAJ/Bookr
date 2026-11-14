@@ -450,16 +450,17 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/nearby', requireRole('bank.l
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
   const db = c.env.DB;
   const bid = c.get('businessId');
-  const credits: unknown[] = [];
-  const payments: unknown[] = [];
-  for (const adj of [addDays(day, -1), addDays(day, 1)]) {
+  // The shift before and the shift after are read at the same time.
+  const sides = await Promise.all([addDays(day, -1), addDays(day, 1)].map(async (adj) => {
+    const credits: unknown[] = [];
+    const payments: unknown[] = [];
     const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, adj))?.status;
     const w = shiftWindow(adj);
     if (status && status !== 'confirmed') {
       const [r, k] = await Promise.all([trialReconcile(db, bid, adj), trialCards(db, bid, adj)]);
       credits.push(...r.open.credits.map((x) => ({ ...x, shiftDay: adj })));
       payments.push(...k.open.payments.map((x) => ({ ...x, shiftDay: adj })));
-      continue;
+      return { credits, payments };
     }
     // A saved shift (or none): whatever is still open in its hours.
     const [cr, pays] = await Promise.all([
@@ -475,8 +476,9 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/nearby', requireRole('bank.l
     credits.push(...cr.map((x) => ({ ...x, shiftDay: adj })));
     payments.push(...pays.filter((p) => !isMachineUpi(p)).map((p) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, terminalId: p.terminal_id, upi: false,
       label: machineLabel(p), shiftDay: adj })));
-  }
-  return c.json({ credits, payments });
+    return { credits, payments };
+  }));
+  return c.json({ credits: sides.flatMap((x) => x.credits), payments: sides.flatMap((x) => x.payments) });
 });
 
 bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('bank.link'), async (c) => {
@@ -484,8 +486,17 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
   const db = c.env.DB;
   const bid = c.get('businessId');
-  const shifts = await all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid);
-  const status = (await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day))?.status;
+  const [shifts, st] = await Promise.all([
+    all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? ORDER BY shift_day DESC LIMIT 60', bid),
+    one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day),
+  ]);
+  const status = st?.status;
+  // The parts that do not depend on the UPI picture are started now and run beside it (fewer trips to the database).
+  const quiet = <T>(p: Promise<T>) => { p.catch(() => {}); return p; };
+  const trialCardsP = status === 'confirmed' ? null : quiet(trialCards(db, bid, day));
+  const cashOverP = status === 'confirmed' ? quiet(cashOver(db, bid, day)) : null;
+  const byUpiP = status === 'confirmed' ? null : quiet(paidByUpi(db, bid, day));
+  const hereP = quiet(settledHere(db, bid, day));
   const [r, hints] = await Promise.all([status === 'confirmed' ? reconcileShift(db, bid, day) : trialReconcile(db, bid, day), columnHints(db, bid, day)]);
   // Credits nothing pairs that a register slip on a nearby bill explains (a column hint explains its own credit). Every
   // leftover credit is tried, not only those with no bill of their amount: a ₹32 credit is left over when two ₹32 bills
@@ -497,28 +508,34 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
     const carded = new Set(r.fixes.flatMap((k) => k.uses).filter((u) => u.startsWith('cr:')).map((u) => u.slice(3)));
     leftIds = r.open.credits.map((x) => x.id).filter((id) => !carded.has(id));
   }
-  const slips = await shiftSlips(db, bid, day, leftIds.filter((id) => !hinted.has(id)));
+  const slipsP = shiftSlips(db, bid, day, leftIds.filter((id) => !hinted.has(id)));
   // The card picture (approved 8 Nov 2026), for a confirmed shift: its card sales are made on confirm.
   // Credits the UPI side already offers to a bill are not offered to a card bill as well.
   const offered = 'clear' in r ? new Set([...r.clear, ...r.likely].map((x) => x.creditId)) : new Set<string>();
   // Before saving, the trial card picture (approved 10 Nov 2026): what Save would match, and what needs a person.
-  const cards = status === 'confirmed' ? await shiftCards(db, bid, day, await cashOver(db, bid, day), offered) : await trialCards(db, bid, day);
+  const [slips, cards] = await Promise.all([slipsP, status === 'confirmed' ? cashOverP!.then((over) => shiftCards(db, bid, day, over, offered)) : trialCardsP!]);
   // What the card side explains is told there, and counted once (approved 9 Nov 2026).
   if (cards && !('trial' in cards) && 'left' in r) {
     const w = shiftWindow(day);
     const cr = new Set(cards.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).map((x) => x.id));
     const bl = new Set(cards.explains.bills.filter((x) => x.shiftDay === day).map((x) => x.id));
-    const crPaise = (await Promise.all([...cr].map((id) => one<{ a: number }>(db, 'SELECT amount_paise AS a FROM bank_rows WHERE id = ?', id)))).reduce((t, x) => t + (x?.a ?? 0), 0);
-    const blPaise = (await Promise.all([...bl].map((id) => one<{ a: number }>(db, 'SELECT amount_paise AS a FROM transactions WHERE id = ?', id)))).reduce((t, x) => t + (x?.a ?? 0), 0);
+    // Summed in chunks (D1 takes at most 100 values a query), all chunks at once.
+    const sumOf = async (table: string, ids: string[]) => {
+      const parts = [];
+      for (let i = 0; i < ids.length; i += 90) parts.push(ids.slice(i, i + 90));
+      const rows = await Promise.all(parts.map((p) => one<{ a: number | null }>(db, `SELECT sum(amount_paise) AS a FROM ${table} WHERE id IN (${p.map(() => '?').join(',')})`, ...p)));
+      return rows.reduce((t, x) => t + (x?.a ?? 0), 0);
+    };
+    const [crPaise, blPaise] = await Promise.all([sumOf('bank_rows', [...cr]), sumOf('transactions', [...bl])]);
     r.strip.creditsLeft -= cr.size; r.strip.creditsLeftPaise -= crPaise;
     r.strip.billsLeft -= bl.size; r.strip.billsLeftPaise -= blPaise;
     r.noBill = r.noBill.filter((x) => !cr.has(x.creditId));
     r.strip.creditsNoBill = r.noBill.length;
   }
   // Card or cash bills one UPI credit paid instead (approved 11 Nov 2026), before saving.
-  const byUpi = status === 'confirmed' ? [] : await paidByUpi(db, bid, day);
+  const byUpi = byUpiP ? await byUpiP : [];
   // Bills of an earlier saved shift settled here, counted there in another mode (approved 11 Nov 2026).
-  const here = await settledHere(db, bid, day);
+  const here = await hereP;
   const paidLater = paidOtherwise(here);
   // Changed already (the earlier sale now has the line's mode): told with its Undo until its money is matched.
   const changed = here.filter((x) => x.txMode === x.rowMode && x.open);
