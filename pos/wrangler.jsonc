@@ -5,8 +5,9 @@
   "name": "pos-demo",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  // Runs the Worker next to its database, so each database question is a few milliseconds, not a trip across Asia.
-  "placement": { "mode": "smart" },
+  // Runs the Worker next to its database (APAC, Singapore), so each database question is a few milliseconds.
+  // Smart Placement left it wherever the guest's request lands (often Europe for Indian networks), ~170 ms per question.
+  "placement": { "region": "aws:ap-southeast-1" },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
