@@ -21,6 +21,8 @@ export interface ParsedBill {
   discountPaise: number;
   /** The NAME column; null when empty or "U/N". */
   name: string | null;
+  /** The mode as the software wrote it (e.g. PREPAID), upper case; null when empty (approved 14 Nov 2026). */
+  modeText: string | null;
 }
 
 export interface Footer {
@@ -76,6 +78,9 @@ const COLUMNS = { SINO: 'si', POSNO: 'pos', DATETIME: 'when', BILLNO: 'bill', NA
 type Col = (typeof COLUMNS)[keyof typeof COLUMNS];
 
 const FOOTER_LABELS: Record<string, keyof Footer> = { TOTALBILLS: 'bills', UPI: 'upiPaise', CARD: 'cardPaise', CASH: 'cashPaise', TOTALSALE: 'totalPaise' };
+
+/** The mode word as written, for words such as PREPAID; empty or "U/N" is none. */
+const modeWord = (v: string) => { const m = v.trim().toUpperCase().slice(0, 30); return m && !/^U\s*\/\s*N$/.test(m) ? m : null; };
 
 function parseMode(v: string): Mode {
   const m = v.trim().toUpperCase();
@@ -148,7 +153,7 @@ export function parseSalesCsv(text: string): ParsedReport {
       if (paidAt !== null && amount !== null && discount !== null && billNo) {
         const name = cell(r, 'name').replace(/\s+/g, ' ').slice(0, 120);
         (again ? twice : bills).push({ siNo: cell(r, 'si'), posNo, billNo, paidAt, mode: parseMode(cell(r, 'mode')), amountPaise: amount, discountPaise: discount,
-          name: name && !/^u\s*\/\s*n$/i.test(name) ? name : null });
+          name: name && !/^u\s*\/\s*n$/i.test(name) ? name : null, modeText: modeWord(cell(r, 'mode')) });
       }
       continue;
     }

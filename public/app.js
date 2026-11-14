@@ -813,7 +813,7 @@ function complimentaryReport(biz, cp) {
     <td><a href="#/b/${biz.id}/compare/${l.day}">${dayLabel(l.day)}</a></td>
     <td class="mono">${l.rowId && biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${l.uploadId}/${l.rowId}">${l.billNo}</a>` : l.billNo}</td>
     <td>${l.billType === 'room' ? 'Room' : l.billType === 'fnb' ? 'F&B' : ''}</td>
-    <td>${l.name ?? html`<span class="note">No name</span>`}</td>
+    <td>${l.name ?? html`<span class="note">No name</span>`}${l.why === 'prepaid' ? html` <span class="tiny">PREPAID</span>` : l.why === 'marked' ? html` <span class="tiny">made complimentary</span>` : ''}</td>
     <td class="note">${l.remarks ?? ''}</td>
     <td class="amount">${l.valuePaise != null ? money(l.valuePaise) : html`<span class="note">Not shown</span>`}</td>
     <td class="note">${IN[l.in]}</td></tr>`;
@@ -821,7 +821,7 @@ function complimentaryReport(biz, cp) {
     <td class="amount"><strong>${money(ls.reduce((t, l) => t + (l.valuePaise ?? 0), 0))}</strong></td><td></td></tr>`; };
   return html`<section class="card" id="comps" style="gap:10px">
     <h2>Complimentary bills</h2>
-    <div class="note">Bills of ₹0 with no money paid, never counted as sales. The name comes from the software report, the remarks from the register. Value is the bill before it came to ₹0, when the register or the software shows it. A row that comes to ₹0 under its group's discount is paid with its group and is not listed.</div>
+    <div class="note">Bills never counted as sales: PREPAID in the software, made complimentary by a person (with the guest's name), or ₹0 with no money paid. The name is the guest a person gave, else the software report's; the remarks come from the register. Value is the software's amount, or the bill before it came to ₹0. A row that comes to ₹0 under its group's discount is paid with its group and is not listed.</div>
     <form class="repdates form-row" style="align-items:flex-end">
       <div class="field"><label for="cpfrom">From shift</label><input id="cpfrom" type="date" name="from" value="${cp.from}" required></div>
       <div class="field"><label for="cpto">To shift</label><input id="cpto" type="date" name="to" value="${cp.to}" required></div>
@@ -2813,7 +2813,7 @@ function cashPanelHtml(biz, k, opts = {}) {
     <td>${label}</td><td class="note">${sub}</td><td class="amount">${paise == null ? '—' : money(paise)}</td><td>${extra}</td></tr>`;
   const bills = k.bills ?? [];
   const differ = bills.filter((b) => b.differs);
-  const edit = (b) => html`<button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}">Edit</button>`;
+  const edit = (b) => html`<button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}">Edit</button>${draft && b.state !== 'complimentary' && biz.actions.includes('sales.decide') ? html`<button type="button" class="btn plain dchip" data-makecomp="${b.comparisonId}" data-bill="${b.billNo}">Make complimentary</button>` : ''}`;
   const decide = opts.decide ? html`<button type="button" class="btn plain dchip" data-goto="all">Decide on All bills</button>` : '';
   const other = (b) => b.rgOther.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${money(p.amountPaise)}`).join(' + ');
   // What could explain the difference: each bill that differs, with what each choice would add to the cash.
@@ -2904,6 +2904,35 @@ function cashPanelHtml(biz, k, opts = {}) {
   </section>`;
 }
 
+/**
+ * Payments › Complimentary (approved 14 Nov 2026): the shift's complimentary bills (PREPAID in the software, ₹0, or made
+ * complimentary by a person with the guest's name), and PREPAID bills that need a look because the register shows money.
+ * Each: Complimentary ✓ (asks the guest's name) or Paid by Cash / UPI / Card. Never counted as sales; value on Reports.
+ */
+function compPanelHtml(biz, comp, canAct) {
+  const WHY = { prepaid: 'PREPAID in the software', zero: '₹0 bill', marked: 'Made complimentary' };
+  const looks = comp.lines.filter((l) => l.status === 'look');
+  const oks = comp.lines.filter((l) => l.status === 'ok');
+  const line = (l) => html`<div class="ent-line" style="${l.status === 'look' ? 'border-left:3px solid #F59E0B;padding-left:10px' : ''}">
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${l.billNo}</strong></span>
+      <span class="amount">${l.valuePaise ? `₹ ${money(l.valuePaise)}` : '₹ 0'}</span>
+      <span class="chip ${l.status === 'ok' ? 'ok' : 'wait'}">${l.status === 'ok' ? 'Complimentary' : 'Needs a look'}</span>
+      <span class="tiny note">${WHY[l.why]}</span>
+      <button type="button" class="linkbtn tiny" data-bill-drawer="${l.billNo}|${comp.day}">Details</button></div>
+    <div class="tiny">${l.guestName ? html`Guest: <strong>${l.guestName}</strong>${l.markedBy ? ` · by ${l.markedBy}` : ''}` : l.name ? `Software name: ${l.name}` : html`<span class="note">No guest name yet</span>`}${l.remarks ? ` · Register: ${l.remarks}` : ''}</div>
+    ${l.look ? html`<div class="tiny error">${l.look}</div>` : ''}
+    ${canAct ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">
+      <button type="button" class="btn ${l.status === 'look' ? '' : 'plain'} dchip" data-makecomp="${l.comparisonId}" data-bill="${l.billNo}" data-name="${l.guestName ?? l.name ?? ''}" ${l.guestName ? 'data-had="1"' : ''}>${l.guestName ? 'Change guest name' : 'Complimentary ✓'}</button>
+      ${paidByChips(l)}</div>` : ''}
+  </div>`;
+  return html`<section class="card" style="gap:10px">
+    <div class="lane-h"><strong>Complimentary bills</strong><span class="tchip">${oks.length} · ₹ ${money(comp.valuePaise)} given free</span></div>
+    <div class="note">Not counted as sales. PREPAID bills in the software and ₹0 bills come here by themselves; any other bill can be made complimentary from All bills, Cash or its details. A bill that was paid after all: choose how under "Paid by", and it moves to that tab.</div>
+    ${looks.length ? html`<strong style="font-size:15px">Needs a look (${looks.length})</strong>${looks.map(line)}` : ''}
+    ${oks.length ? html`${looks.length ? html`<strong style="font-size:15px">Complimentary (${oks.length})</strong>` : ''}${oks.map(line)}` : html`<div class="note">None in this shift yet.</div>`}
+  </section>`;
+}
+
 /** Set by the Cash panel: the drawer's register editor shows what a change does to the cash (approved 14 Nov 2026). */
 let drawerCash = null;
 
@@ -2964,7 +2993,7 @@ function decideMenuHtml(c, v) {
     const sugg = !c.decision && (c.bank?.suggest ?? none?.suggest) === k && !type && !link;
     const why = !sugg ? '' : c.bank?.suggest ? `The bank backs this: ₹ ${money(c.bank.amountPaise)} came in at ${hhmm(c.bank.postedAt)}` : `The bank backs this: no UPI credit of ₹ ${money(none.upiPaise)} came in near this bill`;
     return html`<button class="btn ${on ? 'ghost' : 'plain'} dchip ${sugg ? 'sugg' : ''}" style="${on ? 'font-weight:600;background:#E3F1EF' : ''}" data-cmp="${c.id}" data-d="${k}" data-type="${type ?? ''}" data-link="${link ?? ''}" ${sugg ? `title="${why}"` : ''}>${on ? '✓ ' : ''}${l}${sugg ? html` <span class="bank-tag">bank</span>` : ''}</button>`;
-  })}</div>`;
+  })}<button class="btn plain dchip" type="button" data-makecomp="${c.id}" data-bill="${c.billNo}" data-name="${c.software?.name ?? ''}" title="Given free: not counted as a sale. Asks the guest's name.">Make complimentary</button></div>`;
 }
 
 /** Wires every decision menu under root. act(fn) runs a change and reloads; back is where "Check the row" returns to. */
@@ -4343,7 +4372,7 @@ function choicesHtml(r) {
 }
 
 const RECONCILE_TAB_KEY = 'bookr.reconcile.tab';
-const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
+const reconcileTabPref = () => { try { const t = localStorage.getItem(RECONCILE_TAB_KEY); return ['cash', 'upi', 'card', 'comp'].includes(t) ? t : 'upi'; } catch { return 'upi'; } };
 const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 
 /** Every bill of the shift paid this way (approved 9 Nov 2026): register and software, what backs it, and each change as before → after. */
@@ -4492,12 +4521,14 @@ async function reconcileView(biz, dayArg) {
     return wireShell();
   }
   if (!biz.actions.includes('bank.link')) return reconcileReadOnly(biz, day);
-  const [r, v, { heads }, ent, cash, cv, waitPic] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
+  const [r, v, { heads }, ent, cash, cv, waitPic, comp] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
     api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`),
     api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
     // The Compare sales view of the shift: every bill and its decision menu (approved 9 Nov 2026).
-    api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/waiting`).catch(() => null)]);
-  const tab = recKeep?.day === day && recKeep.tab ? recKeep.tab : reconcileTabPref();
+    api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/waiting`).catch(() => null),
+    api('GET', `/businesses/${biz.id}/shifts/${day}/complimentary`).catch(() => ({ lines: [], valuePaise: 0 }))]);
+  const tab0 = recKeep?.day === day && recKeep.tab ? recKeep.tab : reconcileTabPref();
+  const tab = tab0 === 'comp' && !comp.lines.length ? 'upi' : tab0;
   const top = recKeep?.day === day ? recKeep.top : 'todo';
   recKeep = null;
   recTopNow = top;
@@ -4713,7 +4744,8 @@ async function reconcileView(biz, dayArg) {
     </div>
     <div data-rtop="pay" ${top === 'pay' ? '' : 'hidden'}>
     <div class="seg mode-tabs" role="tablist" aria-label="Paid by" style="margin:0 0 10px">
-      ${tabBtn('cash', 'Cash', cashN)}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', cardN)}</div>
+      ${tabBtn('cash', 'Cash', cashN)}${tabBtn('upi', 'UPI', ent.upi.left)}${tabBtn('card', 'Card', cardN)}${comp.lines.length ? tabBtn('comp', `Complimentary${comp.lines.filter((l) => l.status === 'ok').length ? ` (${comp.lines.filter((l) => l.status === 'ok').length})` : ''}`, comp.lines.filter((l) => l.status === 'look').length) : ''}</div>
+    <div data-rpanel="comp" ${tab === 'comp' ? '' : 'hidden'}>${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
       ${cashOnCardHtml}
       ${cashPanelHtml(biz, cash, { decide: true })}
@@ -6090,8 +6122,8 @@ async function csvCard(biz, day, csv, name, card, done, cancel) {
   // Already in Bookr, but imported before names were kept (12 Nov 2026): this file can add its bills' names.
   if (p.namesOnly) {
     card.innerHTML = html`<div style="display:flex;flex-direction:column;gap:8px"><div class="fileline" style="font-size:14px"><span>📄</span><span class="nm"><strong>Already imported</strong> <span class="tiny">${name}</span></span></div>
-      <div class="tiny">${p.names} bill${p.names === 1 ? '' : 's'} in it ${p.names === 1 ? 'has' : 'have'} a guest or company name Bookr does not have yet (bills imported before names were kept). Adding them changes nothing else.</div>
-      <div class="form-msg"></div><div class="form-row" style="align-items:center"><button class="btn" type="button" data-names>Add ${p.names} name${p.names === 1 ? '' : 's'}</button><button class="linkbtn" type="button" data-cancel>Cancel</button></div></div>`.__html;
+      <div class="tiny">${[p.names ? `${p.names} bill${p.names === 1 ? '' : 's'} in it ${p.names === 1 ? 'has' : 'have'} a guest or company name` : '', p.modes ? `${p.modes} bill${p.modes === 1 ? '' : 's'} ${p.modes === 1 ? 'has its' : 'have their'} mode as the software wrote it (e.g. PREPAID)` : ''].filter(Boolean).join(', and ')} that Bookr does not have yet (bills imported before these were kept). A PREPAID bill then counts as complimentary on an unsaved shift. Nothing else changes.</div>
+      <div class="form-msg"></div><div class="form-row" style="align-items:center"><button class="btn" type="button" data-names>Add ${p.names && p.modes ? 'names and modes' : p.names ? `${p.names} name${p.names === 1 ? '' : 's'}` : `${p.modes} mode${p.modes === 1 ? '' : 's'}`}</button><button class="linkbtn" type="button" data-cancel>Cancel</button></div></div>`.__html;
     card.querySelector('[data-cancel]').addEventListener('click', () => cancel?.());
     card.querySelector('[data-names]').addEventListener('click', async (e) => {
       e.target.disabled = true;
@@ -6179,7 +6211,10 @@ async function openBillDrawer(biz, billNo, day) {
         <a href="#/b/${biz.id}/review/${r.upload_id}/${r.id}">Open on its register page (with the photo)</a></div>`) : html`<div class="note">Not in the register.</div>`)}
     ${section('Comparison', b.comparisons.length ? b.comparisons.map((c) => html`<div>${dayLabel(c.shift_day)} shift: <span class="chip ${c.difference === 'match' ? 'ok' : 'wait'}">${DIFF_LABELS[c.difference]}</span>
         ${c.decision ? ` · ${DECISION_LABELS[c.decision]}${c.note ? `: ${c.note}` : ''}` : ''}${c.shift_status === 'confirmed' ? ' · confirmed' : ''}
-        <div><a href="#/b/${biz.id}/compare/${c.shift_day}">Open in All bills</a></div></div>`) : html`<div class="note">No comparison.</div>`)}
+        <div><a href="#/b/${biz.id}/compare/${c.shift_day}">Open in All bills</a></div>
+        ${c.shift_status !== 'confirmed' && biz.actions?.includes('sales.decide') ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">${c.difference === 'complimentary'
+          ? html`<button type="button" class="btn plain dchip" data-makecomp="${c.id}" data-bill="${c.bill_no}">Guest name</button>${paidByChips({ comparisonId: c.id, billNo: c.bill_no })}`
+          : html`<button type="button" class="btn plain dchip" data-makecomp="${c.id}" data-bill="${c.bill_no}">Make complimentary</button>`}</div>` : ''}</div>`) : html`<div class="note">No comparison.</div>`)}
     ${section('Money', b.sales.length ? b.sales.map((x) => {
       const paid = b.money.filter((m) => m.saleId === x.id);
       return html`<div>Sale ₹ ${money(x.amount_paise)} · ${MODE_LABELS[x.payment_mode] ?? x.payment_mode}${x.head ? ` · ${x.head}` : ''}
@@ -6276,13 +6311,40 @@ const HISTORY_LABELS = {
   'register.edit': 'Register line changed', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };
 const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
+// Complimentary (approved 14 Nov 2026), from any page: data-makecomp="comparisonId" asks the guest's name;
+// data-paidby="comparisonId" with data-mode turns a complimentary or PREPAID bill into a Cash, UPI or Card sale. Both undo.
+document.addEventListener('click', async (e) => {
+  const mk = e.target.closest?.('[data-makecomp]');
+  const pb = e.target.closest?.('[data-paidby]');
+  if (!mk && !pb) return;
+  e.preventDefault(); e.stopPropagation();
+  const bizId = currentBizId();
+  const reload = async () => { await (drawerReload ?? route)(); };
+  const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
+  try {
+    if (mk) {
+      const guest = (prompt(`Make bill ${mk.dataset.bill} complimentary. Guest name:`, mk.dataset.name ?? '') ?? '').trim();
+      if (!guest) return;
+      await apiFull('POST', `/businesses/${bizId}/comparisons/${mk.dataset.makecomp}/complimentary`, { guestName: guest });
+      await reload();
+      doneToast(`Bill ${mk.dataset.bill}: complimentary, ${guest}. Not counted as a sale.`, mk.dataset.had ? null : async () => { await apiFull('DELETE', `/businesses/${bizId}/comparisons/${mk.dataset.makecomp}/complimentary`, {}); }, reload);
+    } else {
+      const word = { cash: 'Cash', upi: 'UPI', card: 'Card' }[pb.dataset.mode];
+      await apiFull('POST', `/businesses/${bizId}/comparisons/${pb.dataset.paidby}/paid-by`, { mode: pb.dataset.mode });
+      await reload();
+      doneToast(`Bill ${pb.dataset.bill}: paid by ${word}, counted as a sale${pb.dataset.mode === 'cash' ? '' : ` and matched on the ${word} tab`}.`, async () => { await apiFull('POST', `/businesses/${bizId}/comparisons/${pb.dataset.paidby}/paid-by/undo`, {}); }, reload);
+    }
+  } catch (err) { if (where) showError(where, err); else alert(err.message); }
+}, true);
+const paidByChips = (c) => html`<span class="tiny note">Paid by</span>${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="btn plain dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}`;
 // Any element with data-bill-drawer="billNo|day" opens the drawer.
 document.addEventListener('click', (e) => {
   const el = e.target.closest?.('[data-bill-drawer]');
   if (!el) return;
   e.preventDefault(); e.stopPropagation();
   const [no, day] = el.dataset.billDrawer.split('|');
-  const biz = { id: currentBizId() };
+  const id = currentBizId();
+  const biz = { id, actions: me?.businesses?.find((x) => x.id === id)?.actions ?? [] };
   openBillDrawer(biz, no, day || null);
 }, true);
 const drawerBtn = (billNo, day) => html`<button type="button" class="btn plain" data-bill-drawer="${billNo}|${day ?? ''}" title="Everything about this bill" style="min-height:26px;padding:0 6px;font-size:12px;margin-left:4px">Details</button>`;

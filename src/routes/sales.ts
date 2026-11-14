@@ -14,7 +14,7 @@ import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { waitingPicture } from '../waiting';
 import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD } from '../cash';
-import { CASH_BY_UPI_MIN, cashBills, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
+import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
 
@@ -62,24 +62,35 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
   const contentSha = await sha256(csv);
   // Names (approved 12 Nov 2026): bills imported before kept no name. The same file again fills in the names of its
   // bills still without one, and changes nothing else.
+  // Names and the software's own mode word (e.g. PREPAID) for bills already in Bookr, imported before these were kept:
+  // filled from the same file uploaded again (names 12 Nov, mode word 14 Nov 2026). Nothing else about a bill changes.
   const nameFills = async () => {
-    const named = parsed.bills.filter((b) => b.name);
-    if (!named.length) return [];
-    const have = await all<{ id: string; pos_no: string; bill_no: string; paid_at: number; amount_paise: number }>(db, `SELECT id, pos_no, bill_no, paid_at, amount_paise FROM software_bills
-      WHERE business_id = ? AND customer_name IS NULL AND (pos_no || char(0) || bill_no) IN (SELECT value FROM json_each(?))`, bid, JSON.stringify(named.map((b) => `${b.posNo}\u0000${b.billNo}`)));
+    const want = parsed.bills.filter((b) => b.name || b.modeText);
+    if (!want.length) return [];
+    const have = await all<{ id: string; pos_no: string; bill_no: string; paid_at: number; amount_paise: number; customer_name: string | null; mode_text: string | null; shift_day: string }>(db, `
+      SELECT id, pos_no, bill_no, paid_at, amount_paise, customer_name, mode_text, shift_day FROM software_bills
+      WHERE business_id = ? AND (customer_name IS NULL OR mode_text IS NULL) AND (pos_no || char(0) || bill_no) IN (SELECT value FROM json_each(?))`,
+      bid, JSON.stringify(want.map((b) => `${b.posNo}\u0000${b.billNo}`)));
     return have.flatMap((h) => {
-      const b = named.find((x) => x.posNo === h.pos_no && x.billNo === h.bill_no && x.paidAt === h.paid_at && x.amountPaise === h.amount_paise);
-      return b ? [{ id: h.id, name: b.name! }] : [];
+      const b = want.find((x) => x.posNo === h.pos_no && x.billNo === h.bill_no && x.paidAt === h.paid_at && x.amountPaise === h.amount_paise);
+      const name = !h.customer_name && b?.name ? b.name : null;
+      const modeText = !h.mode_text && b?.modeText ? b.modeText : null;
+      return b && (name || modeText) ? [{ id: h.id, name, modeText, day: h.shift_day }] : [];
     });
   };
-  const namesOnly = async (fills: { id: string; name: string }[]) => {
-    if (dryRun) return c.json({ namesOnly: true, names: fills.length });
+  const fillStatements = (fills: { id: string; name: string | null; modeText: string | null }[]) => fills.map((f) =>
+    stmt(db, 'UPDATE software_bills SET customer_name = coalesce(customer_name, ?), mode_text = coalesce(mode_text, ?) WHERE id = ?', f.name, f.modeText, f.id));
+  const namesOnly = async (fills: { id: string; name: string | null; modeText: string | null; day: string }[]) => {
+    const names = fills.filter((f) => f.name).length;
+    if (dryRun) return c.json({ namesOnly: true, names, modes: fills.filter((f) => f.modeText).length });
     await db.batch([
-      ...fills.map((f) => stmt(db, 'UPDATE software_bills SET customer_name = ? WHERE id = ? AND customer_name IS NULL', f.name, f.id)),
+      ...fillStatements(fills),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'sales_report.names', 'software_bills', ?, NULL, ?, ?)`,
-        bid, c.get('user').id, fills[0].id, JSON.stringify({ names: fills.length }), now()),
+        bid, c.get('user').id, fills[0].id, JSON.stringify({ names, modes: fills.filter((f) => f.modeText).length }), now()),
     ]);
-    return c.json({ namesOnly: true, names: fills.length });
+    // A mode word such as PREPAID changes how a bill is read (complimentary): open shifts are compared again.
+    for (const d of [...new Set(fills.filter((f) => f.modeText).map((f) => f.day))]) await refreshComparisons(db, bid, d, c.get('user').id);
+    return c.json({ namesOnly: true, names, modes: fills.filter((f) => f.modeText).length });
   };
   if (await one(db, 'SELECT 1 AS ok FROM uploads WHERE business_id = ? AND content_sha256 = ?', bid, contentSha)) {
     const fills = await nameFills();
@@ -157,6 +168,7 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
   const key = storageKey(bid, uploadId);
   const t = now();
   await c.env.UPLOADS.put(key, parsed.redacted, { httpMetadata: { contentType: 'text/csv' } });
+  const laterFills = (await nameFills()).filter((f) => !toAdd.some((b) => addIds.get(b) === f.id));
   try {
     await db.batch([
       stmt(db, `INSERT INTO uploads (id, business_id, kind, business_day, storage_key, content_sha256, status, uploaded_by, created_at)
@@ -174,11 +186,11 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
       ] : []),
       ...touched.map((d) => shiftStatement(db, bid, d)),
       ...toAdd.map((b) => stmt(db, `INSERT INTO software_bills (id, business_id, report_id, pos_no, bill_no, si_no, paid_at, shift_day, mode,
-        amount_paise, discount_paise, is_complimentary, customer_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        amount_paise, discount_paise, is_complimentary, customer_name, mode_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         addIds.get(b)!, bid, reportId, b.posNo, b.billNo, b.siNo, b.paidAt, shiftDayOf(b.paidAt), b.mode, b.amountPaise, b.discountPaise,
-        b.amountPaise === 0 ? 1 : 0, b.name, t)),
-      // A bill already stored the same, imported before names were kept, takes its name from this file.
-      ...(await nameFills()).filter((f) => !toAdd.some((b) => addIds.get(b) === f.id)).map((f) => stmt(db, 'UPDATE software_bills SET customer_name = ? WHERE id = ? AND customer_name IS NULL', f.name, f.id)),
+        b.amountPaise === 0 || isPrepaid(b.modeText) ? 1 : 0, b.name, b.modeText, t)),
+      // A bill already stored the same, imported before names or mode words were kept, takes them from this file.
+      ...fillStatements(laterFills),
       ...toFlag.map((f) => stmt(db, `INSERT INTO software_bill_conflicts (id, business_id, report_id, existing_bill_id, incoming_paid_at,
         incoming_mode, incoming_amount_paise, incoming_discount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         newId(), bid, reportId, f.existing.id, f.bill.paidAt, f.bill.mode, f.bill.amountPaise, f.bill.discountPaise, t)),
@@ -196,7 +208,7 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
     if (isUniqueViolation(e)) fail(409, 'Another import changed these bills at the same moment. Try again.');
     throw e;
   }
-  for (const d of touched) await refreshComparisons(db, bid, d, c.get('user').id);
+  for (const d of new Set([...touched, ...laterFills.filter((f) => f.modeText).map((f) => f.day)])) await refreshComparisons(db, bid, d, c.get('user').id);
   return c.json({ id: reportId, ...summary }, 201);
 });
 

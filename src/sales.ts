@@ -19,7 +19,7 @@ export const WATCH_DAYS = 7;
 
 export const NEEDS_DECISION: Difference[] = ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'];
 
-interface SwBill { id: string; pos_no: string; bill_no: string; paid_at: number; mode: string; amount_paise: number; is_complimentary: number; customer_name?: string | null }
+interface SwBill { id: string; pos_no: string; bill_no: string; paid_at: number; mode: string; amount_paise: number; is_complimentary: number; customer_name?: string | null; mode_text?: string | null }
 /** amount_paise here is the register amount after discount and tip (what should have been paid); discount_paise is signed (negative = tip). */
 interface RgRow { id: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; status: string; line_no: number; upload_id: string; paid_with_row_id: string | null }
 interface RgPay { register_row_id: string; mode: string; amount_paise: number; column_label: string | null }
@@ -68,6 +68,16 @@ export function discountShares(rows: { id: string; amount_paise: number; discoun
     out.set(r.id, { discountPaise: g.discount, grossPaise: g.gross, pct: g.gross ? Math.round((g.discount * 100) / g.gross) : 0, large });
   }
   return out;
+}
+
+/** The software's PREPAID mode: a complimentary bill (approved 14 Nov 2026). */
+export const isPrepaid = (modeText: string | null | undefined) => !!modeText && /^PRE\s*-?\s*PAID$/i.test(modeText.trim());
+
+/** Bills a person made complimentary on a shift, by bill number, with the guest's name (approved 14 Nov 2026). */
+export async function complimentaryMarks(db: DB, businessId: string, day: string) {
+  const rows = await all<{ bill_no: string; guest_name: string; marked_by: string | null; marked_at: number; user: string | null }>(db, `SELECT m.bill_no, m.guest_name, m.marked_by, m.marked_at, u.name AS user
+    FROM complimentary_marks m LEFT JOIN users u ON u.id = m.marked_by WHERE m.business_id = ? AND m.shift_day = ?`, businessId, day);
+  return new Map(rows.map((r) => [r.bill_no, r]));
 }
 
 export function classify(sw: { amount: number; mode: string } | null, rg: { amount: number; mode: string | null; gross?: number } | null): Difference {
@@ -166,7 +176,7 @@ export function applyPaidTogether(rows: RgRow[], written: Map<string, RgPay[]>) 
 async function loadShiftData(db: DB, businessId: string, day: string) {
   const [status, sw, rg, pays, existing] = await db.batch([
     stmt(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
-    stmt(db, `SELECT id, pos_no, bill_no, paid_at, mode, amount_paise, is_complimentary, customer_name FROM software_bills
+    stmt(db, `SELECT id, pos_no, bill_no, paid_at, mode, amount_paise, is_complimentary, customer_name, mode_text FROM software_bills
       WHERE business_id = ? AND shift_day = ? ORDER BY paid_at`, businessId, day),
     stmt(db, `SELECT id, bill_no, bill_type, amount_paise - discount_paise + tip_paise AS amount_paise, discount_paise - tip_paise AS discount_paise, status, line_no, upload_id, paid_with_row_id, ocr_original FROM register_rows
       WHERE business_id = ? AND shift_day = ? ORDER BY upload_id, line_no`, businessId, day),
@@ -226,6 +236,15 @@ export async function refreshComparisons(db: DB, businessId: string, day: string
   for (const g of groups) {
     const members = [...wanted.values()].filter((w) => w.register_row_id && g.rowIds.includes(w.register_row_id));
     if (!groupMismatch(g, members)) for (const w of members) w.difference = 'match';
+  }
+  // Complimentary (approved 14 Nov 2026): a bill a person made complimentary, or one the software calls PREPAID that the
+  // register shows no money for. A PREPAID bill with money written in the register is compared as usual, for a person.
+  const marks = await complimentaryMarks(db, businessId, day);
+  const swById = new Map(sw.map((b) => [b.id, b]));
+  for (const w of wanted.values()) {
+    const paid = w.register_row_id ? (paysByRow.get(w.register_row_id) ?? []).reduce((t, p) => t + p.amount_paise, 0) : 0;
+    const prepaid = w.software_bill_id ? isPrepaid(swById.get(w.software_bill_id)?.mode_text) : false;
+    if (marks.has(w.bill_no) || (prepaid && !paid)) w.difference = 'complimentary';
   }
 
   const t = now();
@@ -1388,18 +1407,24 @@ export async function largeDiscounts(db: DB, businessId: string, from: string, t
  * bill was before it came to ₹0: the register's amount, or the software's discount when only the software has it.
  */
 export async function complimentaryBills(db: DB, businessId: string, from: string, to: string) {
+  // PREPAID in the software and bills a person made complimentary (with the guest's name) are here too (14 Nov 2026);
+  // their value is the software's amount.
   const rows = await all<{ id: string; day: string; billNo: string; posNo: string; regPaise: number | null; regDiscount: number | null; remarks: string | null;
-    uploadId: string | null; rowId: string | null; billType: string | null; swDiscount: number | null; name: string | null; paidAt: number | null; swId: string | null; paid: number }>(db, `
+    uploadId: string | null; rowId: string | null; billType: string | null; swPaise: number | null; swDiscount: number | null; name: string | null; modeText: string | null;
+    guest: string | null; paidAt: number | null; swId: string | null; paid: number }>(db, `
     SELECT c.id, c.shift_day AS day, c.bill_no AS billNo, c.pos_no AS posNo, r.amount_paise AS regPaise, r.discount_paise AS regDiscount, r.remarks, r.upload_id AS uploadId,
-      r.id AS rowId, coalesce(r.bill_type, c.bill_type) AS billType, s.discount_paise AS swDiscount, s.customer_name AS name, s.paid_at AS paidAt, s.id AS swId,
+      r.id AS rowId, coalesce(r.bill_type, c.bill_type) AS billType, s.amount_paise AS swPaise, s.discount_paise AS swDiscount, s.customer_name AS name, s.mode_text AS modeText,
+      m.guest_name AS guest, s.paid_at AS paidAt, s.id AS swId,
       (SELECT count(*) FROM register_payments p WHERE p.register_row_id IN (r.id, r.paid_with_row_id))
-        + (SELECT count(*) FROM register_rows m WHERE m.paid_with_row_id = r.id) AS paid
+        + (SELECT count(*) FROM register_rows x WHERE x.paid_with_row_id = r.id) AS paid
     FROM bill_comparisons c LEFT JOIN register_rows r ON r.id = c.register_row_id LEFT JOIN software_bills s ON s.id = c.software_bill_id
+      LEFT JOIN complimentary_marks m ON m.business_id = c.business_id AND m.shift_day = c.shift_day AND m.bill_no = c.bill_no
     WHERE c.business_id = ? AND c.shift_day BETWEEN ? AND ? AND c.difference = 'complimentary'
     ORDER BY c.shift_day, coalesce(s.paid_at, 0), c.bill_no`, businessId, from, to);
-  const lines = rows.filter((r) => !r.paid).map((r) => ({
-    day: r.day, billNo: r.billNo, posNo: r.posNo || null, billType: r.billType, name: r.name, remarks: r.remarks, paidAt: r.paidAt,
-    valuePaise: r.regPaise ? r.regPaise : r.swDiscount || null,
+  const lines = rows.filter((r) => !r.paid || r.guest).map((r) => ({
+    day: r.day, billNo: r.billNo, posNo: r.posNo || null, billType: r.billType, name: r.guest ?? r.name, remarks: r.remarks, paidAt: r.paidAt,
+    why: r.guest ? 'marked' : isPrepaid(r.modeText) ? 'prepaid' : 'zero',
+    valuePaise: r.swPaise ? r.swPaise : r.regPaise ? r.regPaise : r.swDiscount || null,
     in: r.rowId && r.swId ? 'both' : r.rowId ? 'register' : 'software', uploadId: r.uploadId, rowId: r.rowId,
   }));
   return { lines, count: lines.length, valuePaise: lines.reduce((t, l) => t + (l.valuePaise ?? 0), 0), noName: lines.filter((l) => !l.name && !l.remarks).length };

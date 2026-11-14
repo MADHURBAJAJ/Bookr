@@ -26,8 +26,8 @@ describe('names on software bills', () => {
     // A report imported before names were kept: the same file fills them in, and adds no report or bill.
     await sql`UPDATE software_bills SET customer_name = NULL`;
     const before = (await sql`SELECT count(*) AS n FROM software_bills`)[0].n;
-    expect((await post({ dryRun: true })).json).toEqual({ namesOnly: true, names: 2 });
-    expect((await post()).json).toEqual({ namesOnly: true, names: 2 });
+    expect((await post({ dryRun: true })).json).toEqual({ namesOnly: true, names: 2, modes: 0 });
+    expect((await post()).json).toEqual({ namesOnly: true, names: 2, modes: 0 });
     expect(await name('2610314')).toBe('Asha Rao, Room 4');
     expect((await sql`SELECT count(*) AS n FROM software_bills`)[0].n).toBe(before);
     expect((await sql`SELECT count(*) AS n FROM sales_reports`)[0].n).toBe(1);
