@@ -49,16 +49,19 @@ async function api(method, path, body) {
 let me = null;          // { staff, business, actions }
 let cache = {};         // menu, reasons, entities, payAccounts, stays, credit (loaded per screen)
 let ui = {};            // the current screen's own state; reset on every route change
-let flash = null;       // { kind, text } shown once at the top
+let flash = null;       // { kind, text, link?: [href, text] } shown once at the top
 const can = (a) => !!me?.actions.includes(a);
 const B = () => `/businesses/${me.business.id}`;
 
 function go(hash) { if (location.hash === hash) route(); else location.hash = hash; }
 window.addEventListener('hashchange', route);
 
+// Menu, reasons and UPI accounts change only in Settings, so they are fetched once per sign-in (Settings fetches afresh).
+// Stays, credit accounts and billing names carry balances and year totals, so they are fetched every time.
+const KEEP = ['menu', 'reasons', 'payAccounts'];
 async function load(...keys) {
   const paths = { menu: '/menu', reasons: '/reasons', entities: '/entities', payAccounts: '/pay-accounts', stays: '/stays', credit: '/credit-accounts' };
-  await Promise.all(keys.map(async (k) => {
+  await Promise.all(keys.filter((k) => !(KEEP.includes(k) && cache[k])).map(async (k) => {
     const d = await api('GET', B() + paths[k]);
     cache[k] = k === 'menu' ? d.items : k === 'entities' ? d.entities : k === 'payAccounts' ? d.accounts : k === 'credit' ? d.accounts : d[k];
   }));
@@ -76,7 +79,7 @@ function shell(active, body) {
       <nav aria-label="Main">${links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`)}</nav></div>
     <div class="who"><span>Shift ${me.business.shiftDay} · ${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
   </header>
-  <main>${flash ? html`<div class="msg ${flash.kind}" role="status" style="margin-bottom:14px">${flash.text}</div>` : ''}${body}</main>`;
+  <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status">${flash.text}${flash.link ? html` <a href="${flash.link[0]}">${flash.link[1]}</a>` : ''}</div>` : ''}${body}</main>`;
 }
 
 function paint(view) { root.innerHTML = asHtml(view); flash = null; const f = root.querySelector('[autofocus]'); if (f) f.focus(); }
@@ -115,11 +118,14 @@ root.addEventListener('click', async (ev) => {
   if (!el || el.disabled) return;
   ev.preventDefault();
   const fn = actions[el.dataset.act];
-  if (!fn) return;
+  if (!fn || el.classList.contains('busy')) return;
+  // Taps that only change the screen finish at once; one that waits on the server shows it is working, and a second tap is ignored.
+  el.classList.add('busy');
+  const wait = setTimeout(() => el.setAttribute('aria-busy', 'true'), 150);
   try { await fn(el.dataset, el); } catch (e) {
     if (e instanceof ApiError && e.status === 401) return;
     ui.error = e.message; rerender();
-  }
+  } finally { clearTimeout(wait); el.classList.remove('busy'); el.removeAttribute('aria-busy'); }
 });
 root.addEventListener('input', (ev) => {
   const el = ev.target;
@@ -187,8 +193,8 @@ actions.logout = async () => { await api('POST', '/auth/logout'); me = null; cac
 // ---------- tables
 
 async function tablesScreen() {
-  const [{ orders }] = await Promise.all([api('GET', B() + '/orders'), load('stays')]);
-  ui.orders = orders;
+  const [{ orders, tables }] = await Promise.all([api('GET', B() + '/orders'), load('stays')]);
+  ui.orders = orders; ui.tables = tables ?? [];
   rerender = () => {
     const tile = (o) => {
       const st = o.status === 'billed' ? html`<span class="st billed">Bill ${o.bill?.billNo} · ${rs(o.bill?.totalPaise ?? 0)} to pay</span>`
@@ -207,10 +213,23 @@ async function tablesScreen() {
         <button class="btn" type="submit" data-act="findBill" data-submit>Find</button>
         ${ui.found ? (ui.found.length ? ui.found.map((b) => html`<a class="chip" style="display:inline-flex;align-items:center;text-decoration:none;color:inherit" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`) : ''}</form>` : ''}
       ${ui.picking ? newOrderForm() : ''}
+      ${can('orders.edit') && ui.tables.length ? tableGrid() : ''}
       ${ui.orders.length ? html`<div class="tiles">${ui.orders.map(tile)}</div>` : html`<p class="quiet">No open orders. Start one above.</p>`}`));
   };
   rerender();
 }
+/** Tables used before: a busy one opens its order or bill, a free one starts an order with one tap. */
+function tableGrid() {
+  const busy = new Map(ui.orders.filter((o) => o.kind === 'table').map((o) => [o.place.toLowerCase(), o]));
+  return html`<div style="margin-bottom:18px"><p class="small quiet" style="font-weight:600;margin-bottom:6px">Tables · tap a free one to start</p>
+    <div class="tgrid">${ui.tables.map((t) => {
+      const o = busy.get(t.toLowerCase());
+      if (!o) return html`<button type="button" class="tcell free" data-act="quickTable" data-place="${t}">${t}</button>`;
+      const href = o.status === 'billed' ? `#/settle/${o.bill.id}` : `#/order/${o.id}`;
+      return html`<a class="tcell ${o.status}" href="${href}">${t}<span>${o.status === 'billed' ? 'bill out' : rs(o.itemsPaise)}</span></a>`;
+    })}</div></div>`;
+}
+actions.quickTable = async (d) => { const r = await api('POST', B() + '/orders', { kind: 'table', place: d.place }); go(`#/order/${r.id}`); };
 function newOrderForm() {
   const k = ui.picking;
   return html`<form class="panel" style="margin-bottom:16px;max-width:560px">
@@ -238,7 +257,7 @@ actions.openOrder = async () => {
 async function orderScreen(id) {
   await load('menu', 'reasons');
   ui.order = (await api('GET', `${B()}/orders/${id}`)).order;
-  ui.cat = 'All';
+  ui.cat = 'All'; ui.q = '';
   rerender = () => {
     const o = ui.order;
     if (o.status === 'billed' || o.status === 'closed') { paint(shell('#/', html`<p>This order is already billed. <a href="#/">Back to tables</a></p>`)); return; }
@@ -248,8 +267,9 @@ async function orderScreen(id) {
     const unsent = o.lines.some((l) => l.qty > l.sentQty);
     paint(shell('#/', html`<div class="order">
       <section class="menu" aria-label="Menu">
-        <div class="chips">${cats.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.cat === c}" data-act="cat" data-c="${c}">${c}</button>`)}</div>
-        <div class="items">${menu.filter((m) => ui.cat === 'All' || m.category === ui.cat).map((m) => html`<button type="button" class="item" data-act="add" data-id="${m.id}">
+        <input class="in" type="search" data-model="q" data-live placeholder="Search the menu" value="${ui.q}" aria-label="Search the menu" autocomplete="off">
+        ${ui.q ? '' : html`<div class="chips">${cats.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.cat === c}" data-act="cat" data-c="${c}">${c}</button>`)}</div>`}
+        <div class="items">${menu.filter((m) => (ui.q ? m.name.toLowerCase().includes(ui.q.trim().toLowerCase()) : ui.cat === 'All' || m.category === ui.cat)).map((m) => html`<button type="button" class="item" data-act="add" data-id="${m.id}">
           <strong>${m.name}</strong><span class="quiet small">${rs(m.pricePaise)}</span>${qty(m.id) ? html`<span class="q">${qty(m.id)}</span>` : ''}</button>`)}</div>
       </section>
       <section class="ticket panel" aria-label="Order" id="ticket">
@@ -270,7 +290,7 @@ async function orderScreen(id) {
           </div>`) : html`<p class="quiet">Tap dishes to add them.</p>`}</div>
         <div class="sums"><div class="big"><span>Items</span><span>${rs(o.lines.reduce((s, l) => s + l.qty * l.pricePaise, 0))}</span></div></div>
         <div class="row"><button class="btn grow" type="button" data-act="kot" ${unsent ? '' : 'disabled'}>Send KOT</button>
-          ${can('bills.print') ? html`<a class="btn pri grow" href="#/bill/${o.id}" ${!o.lines.length || unsent ? html`aria-disabled="true" style="pointer-events:none;opacity:.5"` : ''}>Bill</a>` : ''}</div>
+          ${can('bills.print') ? html`<button class="btn pri grow" type="button" data-act="toBill" ${!o.lines.length || unsent ? 'disabled' : ''}>Bill</button>` : ''}</div>
         ${ui.splitting ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Split bill:</strong> choose what moves to a new bill at this table. Each bill gets its own number and GST.</p>
           ${o.lines.map((l) => html`<div class="line"><span class="grow">${l.name} <span class="quiet small">(${l.qty} on this bill)</span></span>
             <button class="sq" type="button" data-act="splitLess" data-id="${l.itemId}" aria-label="Move one less ${l.name}">−</button>
@@ -290,17 +310,45 @@ async function orderScreen(id) {
 }
 actions.toTicket = () => document.getElementById('ticket')?.scrollIntoView({ behavior: 'smooth' });
 actions.cat = (d) => { ui.cat = d.c; rerender(); };
-actions.add = async (d) => { ui.error = null; ui.kotDone = null; ui.order = (await api('POST', `${B()}/orders/${ui.order.id}/items`, { itemId: d.id, delta: 1 })).order; rerender(); };
-actions.less = async (d) => {
+// Dish taps show at once and are saved one after another behind the screen. Sending the KOT, billing or leaving waits for them.
+let saving = Promise.resolve();
+let pendingSaves = 0;
+function change(itemId, delta, reasonId) {
+  const o = ui.order;
+  const l = o.lines.find((x) => x.itemId === itemId);
+  if (l) l.qty += delta;
+  else { const m = cache.menu.find((x) => x.id === itemId); o.lines.push({ itemId, name: m.name, pricePaise: m.pricePaise, qty: delta, sentQty: 0 }); }
+  o.lines = o.lines.filter((x) => x.qty > 0);
+  ui.error = null; ui.kotDone = null; rerender();
+  const orderId = o.id;
+  pendingSaves++;
+  saving = saving.then(async () => {
+    try {
+      const r = await api('POST', `${B()}/orders/${orderId}/items`, { itemId, delta, reasonId });
+      if (--pendingSaves === 0 && ui.order?.id === orderId) { ui.order = r.order; rerender(); }
+    } catch (e) {
+      pendingSaves--;
+      if (ui.order?.id !== orderId) return;
+      // Put the screen back to what the server holds, and say what failed.
+      ui.order = (await api('GET', `${B()}/orders/${orderId}`).catch(() => ({ order: ui.order }))).order;
+      ui.error = e.message; rerender();
+    }
+  });
+}
+const saved = () => saving;
+actions.add = (d) => change(d.id, 1);
+actions.less = (d) => {
   const l = ui.order.lines.find((x) => x.itemId === d.id);
   if (l.qty <= l.sentQty) { ui.asking = d.id; rerender(); return; }
-  ui.order = (await api('POST', `${B()}/orders/${ui.order.id}/items`, { itemId: d.id, delta: -1 })).order; rerender();
+  change(d.id, -1);
 };
-actions.lessWhy = async (d) => { ui.asking = null; ui.order = (await api('POST', `${B()}/orders/${ui.order.id}/items`, { itemId: d.id, delta: -1, reasonId: d.r })).order; rerender(); };
+actions.lessWhy = (d) => { ui.asking = null; change(d.id, -1, d.r); };
+actions.toBill = async () => { await saved(); if (!ui.error) go(`#/bill/${ui.order.id}`); };
 actions.lessNo = () => { ui.asking = null; rerender(); };
 actions.kot = async () => {
-  const { kots } = await api('POST', `${B()}/orders/${ui.order.id}/kot`);
-  ui.order = (await api('GET', `${B()}/orders/${ui.order.id}`)).order;
+  await saved();
+  const { kots, order } = await api('POST', `${B()}/orders/${ui.order.id}/kot`);
+  ui.order = order;
   ui.kotDone = `KOT ${kots.map((k) => k.kotNo).join(', ')} sent (${kots.map((k) => k.station).join(', ')}).`;
   printKots(kots); rerender();
 };
@@ -310,19 +358,21 @@ actions.splitNo = () => { ui.splitting = false; rerender(); };
 actions.splitMore = (d) => { const l = ui.order.lines.find((x) => x.itemId === d.id); ui.split[d.id] = Math.min(l.qty, (ui.split[d.id] ?? 0) + 1); rerender(); };
 actions.splitLess = (d) => { ui.split[d.id] = Math.max(0, (ui.split[d.id] ?? 0) - 1); rerender(); };
 actions.splitGo = async () => {
+  await saved();
   const lines = Object.entries(ui.split).filter(([, q]) => q > 0).map(([itemId, qty]) => ({ itemId, qty }));
   const r = await api('POST', `${B()}/orders/${ui.order.id}/split`, { lines });
   flash = { kind: 'ok', text: `Split. This is the new bill; ${ui.order.place} keeps the rest.` };
   go(`#/order/${r.id}`);
 };
-actions.tabGo = async () => { await api('POST', `${B()}/orders/${ui.order.id}/tab`, { guestName: ui.tabGuest ?? ui.order.guestName }); flash = { kind: 'ok', text: `${ui.order.place} kept as a tab.` }; go('#/'); };
-actions.dropOrder = async () => { await api('POST', `${B()}/orders/${ui.order.id}/cancel`); go('#/'); };
+actions.tabGo = async () => { await saved(); await api('POST', `${B()}/orders/${ui.order.id}/tab`, { guestName: ui.tabGuest ?? ui.order.guestName }); flash = { kind: 'ok', text: `${ui.order.place} kept as a tab.` }; go('#/'); };
+actions.dropOrder = async () => { await saved(); await api('POST', `${B()}/orders/${ui.order.id}/cancel`); go('#/'); };
 
 // ---------- bill (choose the billing name and discount, then print)
 
 async function billScreen(orderId) {
-  await load('entities', 'reasons');
-  ui.order = (await api('GET', `${B()}/orders/${orderId}`)).order;
+  await saved();
+  const [{ order }] = await Promise.all([api('GET', `${B()}/orders/${orderId}`), load('entities', 'reasons')]);
+  ui.order = order;
   const ents = counterEntities();
   ui.entityId = (ents.find((e) => e.is_default) ?? ents[0])?.id;
   ui.disc = 0; ui.discReason = null;
@@ -372,8 +422,7 @@ actions.printBill = async () => {
 // ---------- settle
 
 async function settleScreen(billId) {
-  await load('reasons', 'payAccounts', 'stays', 'credit', 'entities');
-  const [{ bill }, { orders }] = await Promise.all([api('GET', `${B()}/bills/${billId}`), api('GET', B() + '/orders')]);
+  const [{ bill }, { orders }] = await Promise.all([api('GET', `${B()}/bills/${billId}`), api('GET', B() + '/orders'), load('reasons', 'payAccounts', 'stays', 'credit', 'entities')]);
   if (bill.status !== 'printed') { go(`#/done/${billId}`); return; }
   ui.bill = bill; ui.others = orders.filter((o) => o.status === 'billed' && o.bill && o.bill.id !== billId);
   ui.together = []; ui.pays = []; ui.mode = 'cash';
@@ -400,6 +449,10 @@ async function settleScreen(billId) {
           <div class="chips">${reasonsOf('void').map((r) => html`<button type="button" class="chip" data-act="voidGo" data-r="${r.id}">${r.label}</button>`)}<button type="button" class="chip" data-act="voidAsk">Keep the bill</button></div></div>` : ''}
       </section>
       <section class="panel"><h2>How was it paid?</h2>
+        ${!ui.pays.length && !ui.shares ? html`<div class="quick"><span class="small quiet" style="width:100%">Paid in full, one tap:</span>
+          <button class="btn pri" type="button" data-act="quick" data-m="cash">Cash ${rs(due)}</button>
+          ${cache.payAccounts.filter((a) => a.active).map((a) => html`<button class="btn" type="button" data-act="quick" data-m="upi" data-id="${a.id}">UPI · ${a.name}</button>`)}</div>
+          <p class="small quiet">Or below: card, room, credit, complimentary, part payments, change.</p>` : ''}
         <div class="chips">${modes.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${m === k}" data-act="mode" data-m="${k}">${t}</button>`)}</div>
         <div class="row small"><span class="quiet">Split equally between</span>${[2, 3, 4, 5, 6].map((n) => html`<button type="button" class="chip" style="min-height:36px" aria-pressed="${ui.shares === n}" data-act="shares" data-n="${n}">${n}</button>`)}
           ${ui.shares ? html`<span>Share ${Math.min(ui.pays.length + 1, ui.shares)} of ${ui.shares}</span>` : ''}</div>
@@ -491,6 +544,16 @@ actions.addPay = () => {
   ui.amount = undefined; ui.tendered = undefined; ui.cardApproval = undefined; ui.cardLast4 = undefined;
   rerender();
 };
+/** The whole amount by cash, or by one account's UPI QR, settled at once. */
+actions.quick = async (d) => {
+  const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
+  const acct = cache.payAccounts.find((a) => a.id === d.id);
+  ui.pays = [d.m === 'cash' ? { mode: 'cash', amount: rupees(due), amountPaise: due, label: 'Cash', detail: 'Exact' }
+    : { mode: 'upi', amount: rupees(due), amountPaise: due, payAccountId: acct.id, label: 'UPI', detail: acct.name }];
+  ui.diff = null;
+  // A refusal clears the payment again; a "billing name differs" question keeps it, so "Settle anyway" works.
+  try { await actions.settle({}); } catch (e) { ui.pays = []; throw e; }
+};
 actions.settle = async (d) => {
   ui.error = null;
   const dueNow = ui.bill.totalPaise + ui.together.reduce((s2, id) => s2 + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
@@ -499,8 +562,9 @@ actions.settle = async (d) => {
     difference: leftNow !== 0 && diffOk(leftNow) ? ui.diff : undefined };
   try {
     const r = await api('POST', B() + '/settlements', body);
-    if (r.changePaise) flash = { kind: 'ok', text: `Give change: ${rs(r.changePaise)}` };
-    go(`#/done/${ui.bill.id}`);
+    const paidBy = [...new Set(ui.pays.map((p) => p.label))].join(' + ');
+    flash = { kind: 'ok', text: `${ui.bill.place}: ${ui.bill.billNo} settled · ${paidBy}.${r.changePaise ? ` Give change: ${rs(r.changePaise)}.` : ''}`, link: [`#/done/${ui.bill.id}`, 'View receipt'] };
+    go('#/');
   } catch (e) {
     if (e.code === 'entity_mismatch') { ui.mismatch = e.message; rerender(); return; }
     throw e;
@@ -890,6 +954,7 @@ async function settingsScreen(tab = 'menu') {
   const tabs = [['menu', 'Menu', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
     ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
+  for (const k of KEEP) delete cache[k];
   await load('menu', 'reasons', 'entities', 'payAccounts');
   if (tab === 'staff') ui.staff = (await api('GET', B() + '/staff')).staff;
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;

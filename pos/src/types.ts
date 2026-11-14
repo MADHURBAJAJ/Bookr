@@ -20,6 +20,8 @@ export interface Staff {
 
 export interface Vars {
   staff: Staff;
+  /** The business row, loaded with the session (one database trip instead of two). */
+  business: import('./util').Business;
   sessionId: string;
   deviceId: string | null;
   businessId: string;

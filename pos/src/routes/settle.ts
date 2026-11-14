@@ -8,7 +8,7 @@ import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { allocateLoose, rs } from '../billing';
-import { clock, event, isTrigger, loadBusiness, reasonLabel } from '../util';
+import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel } from '../util';
 import { billOut } from './orders';
 import { sendSoon } from '../sync';
 import { saleMoves } from '../stock';
@@ -152,7 +152,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     return c.json({ error: 'The UPI was paid into an account of another billing name. Check, then confirm to settle anyway.', code: 'entity_mismatch' }, 409);
   }
 
-  const b = await loadBusiness(db, bid);
+  const b = bizOf(c);
   const { t, shiftDay } = clock(b);
   const staff = c.get('staff');
   const settlementId = newId();
@@ -239,7 +239,7 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   const total = pays.reduce((s, p) => s + p.amountPaise, 0);
   const owed = await balance(db, acc.id);
   if (kind === 'receipt' && total > owed) fail(400, owed > 0 ? `${acc.name} owes ${rs(owed)}. Take the rest as an advance.` : `${acc.name} owes nothing. Take it as an advance.`);
-  const b = await loadBusiness(db, bid);
+  const b = bizOf(c);
   const { t, shiftDay } = clock(b);
   const staff = c.get('staff');
   const settlementId = newId();
@@ -277,7 +277,7 @@ settleRoutes.post(`${B}/debtors/:id/refund`, requireAction('debtors.receive'), a
   if (credit <= 0) fail(409, `${acc.name} has no advance to refund.`);
   if (amount > credit) fail(409, `${acc.name} has only ${rs(credit)} of advance to refund.`);
   const note = text(data, 'note', 'Note', { optional: true, max: 120 }) ?? 'Advance refunded';
-  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const { t, shiftDay } = clock(bizOf(c));
   const id = newId();
   const staff = c.get('staff');
   try {

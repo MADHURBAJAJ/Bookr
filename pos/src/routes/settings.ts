@@ -6,7 +6,7 @@ import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, optionalPaise, paise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { isRole } from '../permissions';
-import { audit, clock, loadBusiness } from '../util';
+import { audit, clock, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 
 export const settingsRoutes = new Hono<AppEnv>();
@@ -114,7 +114,7 @@ interface EntityRow {
 }
 
 settingsRoutes.get(`${B}/entities`, requireAction('pos.view'), async (c) => {
-  const { fy } = clock(await loadBusiness(c.env.DB, c.get('businessId')));
+  const { fy } = clock(bizOf(c));
   const rows = await all<EntityRow & { year_paise: number }>(c.env.DB, `
     SELECT e.*, coalesce((SELECT sum(total_paise) FROM bills b WHERE b.entity_id = e.id AND b.fy = ? AND b.status <> 'void'), 0) AS year_paise
     FROM billing_entities e WHERE e.business_id = ? ORDER BY e.is_default DESC, e.name`, fy, c.get('businessId'));
@@ -318,7 +318,7 @@ settingsRoutes.get(`${B}/stays`, requireAction('pos.view'), async (c) => {
 
 settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
-  const b = await loadBusiness(c.env.DB, bid);
+  const b = bizOf(c);
   const data = await body(c);
   const room = text(data, 'room', 'Room', { max: 20 })!;
   const guest = text(data, 'guestName', 'Guest name', { max: 80 })!;

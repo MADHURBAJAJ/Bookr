@@ -7,7 +7,7 @@ import { all, newId, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { creditTotals, rs, type Totals } from '../billing';
-import { clock, event, isTrigger, loadBusiness } from '../util';
+import { clock, event, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendSoon } from '../sync';
 import { billOut } from './orders';
 import type { AppEnv } from '../types';
@@ -75,7 +75,7 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.void'), asy
     if (!debtor) fail(400, 'Choose the folio or credit account to credit.');
   }
 
-  const b = await loadBusiness(db, bid);
+  const b = bizOf(c);
   const { t, shiftDay, fy } = clock(b);
   const short = fy.length === 7 ? fy.slice(2, 4) + fy.slice(5, 7) : fy.slice(2);
   const id = newId();

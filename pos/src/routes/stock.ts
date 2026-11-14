@@ -5,7 +5,7 @@ import { Hono } from 'hono';
 import { all, isUniqueViolation, newId, one, stmt, type DB } from '../../../src/db';
 import { body, date, fail, optionalPaise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { audit, clock, event, loadBusiness } from '../util';
+import { audit, clock, event, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 
 export const stockRoutes = new Hono<AppEnv>();
@@ -138,7 +138,7 @@ stockRoutes.post(`${B}/stock/purchases`, requireAction('stock.edit'), async (c) 
   const vendor = text(data, 'vendor', 'Vendor', { max: 80 })!;
   const invoice = text(data, 'invoiceNo', 'Invoice number', { optional: true, max: 40 });
   if (!Array.isArray(data.lines) || !data.lines.length || data.lines.length > 50) fail(400, 'Add what was received.');
-  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const { t, shiftDay } = clock(bizOf(c));
   const statements = [];
   for (const raw of data.lines) {
     const r = (raw ?? {}) as Record<string, unknown>;
@@ -162,7 +162,7 @@ stockRoutes.post(`${B}/stock/transfers`, requireAction('stock.edit'), async (c) 
   const to = await store(db, bid, data.toStoreId, 'To store');
   if (from.id === to.id) fail(400, 'Choose two different stores.');
   if (!Array.isArray(data.lines) || !data.lines.length || data.lines.length > 50) fail(400, 'Add what moves.');
-  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const { t, shiftDay } = clock(bizOf(c));
   const ref = newId();
   const statements = [];
   for (const raw of data.lines) {
@@ -190,7 +190,7 @@ stockRoutes.post(`${B}/stock/waste`, requireAction('stock.edit'), async (c) => {
   const i = await item(db, bid, data.itemId);
   const qty = whole(data.qty, 'Quantity');
   const reason = text(data, 'reason', 'Reason', { max: 120 })!;
-  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const { t, shiftDay } = clock(bizOf(c));
   const value = Math.round((qty * i.cost_per_pack_paise) / i.pack_size);
   await db.batch([
     stmt(db, "INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, reason, by_staff, shift_day, at) VALUES (?, ?, ?, ?, 'waste', ?, ?, ?, ?, ?)",
@@ -207,7 +207,7 @@ stockRoutes.post(`${B}/stock/counts`, requireAction('stock.edit'), async (c) => 
   const data = await body(c);
   const s = await store(db, bid, data.storeId);
   if (!Array.isArray(data.lines) || !data.lines.length || data.lines.length > 200) fail(400, 'Add what was counted.');
-  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const { t, shiftDay } = clock(bizOf(c));
   const statements = [];
   const result = [];
   for (const raw of data.lines) {

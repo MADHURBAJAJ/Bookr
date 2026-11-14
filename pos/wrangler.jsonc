@@ -5,6 +5,8 @@
   "name": "pos-demo",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
+  // Runs the Worker next to its database, so each database question is a few milliseconds, not a trip across Asia.
+  "placement": { "mode": "smart" },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

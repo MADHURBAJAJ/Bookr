@@ -122,3 +122,16 @@ a.btn.pri { color: #fff; }
 .orderbar .btn { color: var(--ink); }
 .ticket > .row:first-child .btn { flex: none; }
 .notes { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
+
+/* busy buttons, flash, table grid, one-tap settle */
+.busy[aria-busy] { opacity: .6; cursor: progress; }
+.flash { margin-bottom: 14px; font-size: 15px; }
+.flash a { font-weight: 600; color: inherit; }
+.tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
+.tcell { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 64px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: inherit; font: inherit; font-weight: 700; font-size: 16px; text-decoration: none; cursor: pointer; }
+.tcell span { font-size: 12px; font-weight: 500; }
+.tcell.free { border-style: dashed; }
+.tcell.open, .tcell.tab { background: var(--accent-tint); border-color: #9ccbc4; }
+.tcell.billed { background: var(--warn-tint); border-color: var(--warn-line); }
+.quick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.quick .btn { min-height: 52px; font-size: 16px; }

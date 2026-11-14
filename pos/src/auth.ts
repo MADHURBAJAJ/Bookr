@@ -49,20 +49,23 @@ export async function currentDevice(c: Context<AppEnv>): Promise<{ id: string; b
 export const requireStaff: MiddlewareHandler<AppEnv> = async (c, next) => {
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) fail(401, 'Please sign in.');
-  const row = await one<{ id: string; name: string; role: string; business_id: string; kind: string; device_id: string | null; sid: string }>(c.env.DB, `
-    SELECT st.id, st.name, st.role, st.business_id, s.kind, s.device_id, s.id AS sid
-    FROM sessions s JOIN staff st ON st.id = s.staff_id
-    WHERE s.id = ? AND s.expires_at > ? AND st.active = 1`, await sha256(token), now());
+  const deviceToken = getCookie(c, DEVICE_COOKIE);
+  // One trip: the session, the person, their business, and (for a PIN session) that it is on its own, unrevoked device.
+  const row = await one<{ id: string; name: string; role: string; business_id: string; kind: string; device_id: string | null; sid: string; device_ok: number;
+    b_name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number }>(c.env.DB, `
+    SELECT st.id, st.name, st.role, st.business_id, s.kind, s.device_id, s.id AS sid,
+      (s.kind <> 'pin' OR EXISTS (SELECT 1 FROM devices d WHERE d.id = s.device_id AND d.token_hash = ? AND d.revoked_at IS NULL)) AS device_ok,
+      b.name AS b_name, b.fy_start_month, b.shift_start_hour, b.tab_age_days
+    FROM sessions s JOIN staff st ON st.id = s.staff_id JOIN businesses b ON b.id = st.business_id
+    WHERE s.id = ? AND s.expires_at > ? AND st.active = 1`, deviceToken ? await sha256(deviceToken) : '', await sha256(token), now());
   if (!row || !isRole(row.role)) {
     deleteCookie(c, SESSION_COOKIE, { path: '/', secure: true });
     fail(401, 'Please sign in.');
   }
-  if (row.kind === 'pin') {
-    // A PIN session lives only on the device it was made on, and ends when that device is revoked.
-    const device = await currentDevice(c);
-    if (!device || device.id !== row.device_id) fail(401, 'Please sign in.');
-  }
+  // A PIN session lives only on the device it was made on, and ends when that device is revoked.
+  if (!row.device_ok) fail(401, 'Please sign in.');
   c.set('staff', { id: row.id, name: row.name, role: row.role, businessId: row.business_id });
+  c.set('business', { id: row.business_id, name: row.b_name, fy_start_month: row.fy_start_month, shift_start_hour: row.shift_start_hour, tab_age_days: row.tab_age_days });
   c.set('sessionId', row.sid);
   c.set('deviceId', row.device_id);
   await next();

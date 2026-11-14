@@ -6,7 +6,7 @@ import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { billTotals, limitState, rs, type Discount } from '../billing';
-import { clock, event, isTrigger, loadBusiness, reasonLabel } from '../util';
+import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel } from '../util';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
@@ -40,19 +40,24 @@ function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
 // Open orders and tabs (with their lines), and bills printed but not yet paid: the counter's main screen.
 orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
-  const os = await all<OrderRow>(c.env.DB, "SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at", bid);
-  const ls = await all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed')", bid);
-  const bills = await all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
-    "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid);
+  const [os, ls, bills, used] = await Promise.all([
+    all<OrderRow>(c.env.DB, "SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at", bid),
+    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
+    all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
+      "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
+    // The tables this restaurant has used in the last 60 days: the counter shows them as a grid to tap.
+    all<{ place: string }>(c.env.DB, "SELECT min(place) AS place FROM orders WHERE business_id = ? AND kind = 'table' AND opened_at > ? GROUP BY lower(place) LIMIT 80",
+      bid, Date.now() - 60 * 86_400_000),
+  ]);
   return c.json({ orders: os.map((o) => {
     const b = bills.find((x) => x.order_id === o.id);
     return orderOut(o, ls.filter((l) => l.order_id === o.id), b ? { id: b.id, billNo: b.bill_no, totalPaise: b.total_paise, entityId: b.entity_id } : null);
-  }) });
+  }), tables: used.map((u) => u.place).sort((x, y) => x.localeCompare(y, 'en', { numeric: true })) });
 });
 
 orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
   const bid = c.get('businessId');
-  const b = await loadBusiness(c.env.DB, bid);
+  const b = bizOf(c);
   const data = await body(c);
   const kind = data.kind;
   if (kind !== 'table' && kind !== 'room' && kind !== 'takeaway') fail(400, 'Order kind must be table, room or takeaway.');
@@ -90,19 +95,15 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
   const itemId = text(data, 'itemId', 'Item')!;
   const delta = data.delta;
   if (typeof delta !== 'number' || !Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 50) fail(400, 'Change must be a whole number of items.');
-  const line = await one<LineRow>(c.env.DB, 'SELECT id, item_id, name, price_paise, sac, station, qty, sent_qty FROM order_lines WHERE order_id = ? AND item_id = ?', o.id, itemId);
   const t = now();
   if (delta > 0) {
-    if (line) {
-      await stmt(c.env.DB, 'UPDATE order_lines SET qty = qty + ? WHERE id = ?', delta, line.id).run();
-    } else {
-      const item = await one<{ name: string; price_paise: number; sac: string; station: string }>(c.env.DB,
-        'SELECT name, price_paise, sac, station FROM menu_items WHERE id = ? AND business_id = ? AND active = 1', itemId, bid);
-      if (!item) fail(400, 'Item not on the menu.');
-      await stmt(c.env.DB, 'INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        newId(), bid, o.id, itemId, item.name, item.price_paise, item.sac, item.station, delta, t).run();
-    }
+    // One trip: add the line from the menu, or add to it if it is already on the order.
+    const r = await stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, created_at)
+        SELECT ?, ?, ?, id, name, price_paise, sac, station, ?, ? FROM menu_items WHERE id = ? AND business_id = ? AND active = 1
+        ON CONFLICT (order_id, item_id) DO UPDATE SET qty = qty + excluded.qty`, newId(), bid, o.id, delta, t, itemId, bid).run();
+    if (!r.meta.changes) fail(400, 'Item not on the menu.');
   } else {
+    const line = await one<LineRow>(c.env.DB, 'SELECT id, item_id, name, price_paise, sac, station, qty, sent_qty FROM order_lines WHERE order_id = ? AND item_id = ?', o.id, itemId);
     if (!line || line.qty + delta < 0) fail(400, 'There are not that many on the order.');
     const newQty = line.qty + delta;
     const cancelSent = Math.max(0, line.sent_qty - newQty);
@@ -110,7 +111,7 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
     if (cancelSent > 0) {
       const reason = await reasonLabel(c.env.DB, bid, 'kot_cancel', data.reasonId, 'A reason for cancelling an item already sent to the kitchen');
       statements.push(event(c.env.DB, bid, 'kot_cancel', `${o.place} · ${cancelSent} × ${line.name}`, cancelSent * line.price_paise, reason, null,
-        c.get('staff').id, clock(await loadBusiness(c.env.DB, bid)).shiftDay));
+        c.get('staff').id, clock(bizOf(c)).shiftDay));
     }
     await c.env.DB.batch(statements);
     return c.json({ order: orderOut(o, await lines(c.env.DB, o.id)), cancelledSent: cancelSent });
@@ -134,7 +135,7 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
     ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id)),
   ]);
   const kots = await all<{ kot_no: number; station: string; lines: string }>(c.env.DB, `SELECT kot_no, station, lines FROM kots WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY kot_no`, ...ids);
-  return c.json({ kots: kots.map((k) => ({ kotNo: k.kot_no, station: k.station, place: o.place, lines: JSON.parse(k.lines) })) }, 201);
+  return c.json({ kots: kots.map((k) => ({ kotNo: k.kot_no, station: k.station, place: o.place, lines: JSON.parse(k.lines) })), order: orderOut(o, await lines(c.env.DB, o.id)) }, 201);
 });
 
 // Split by item: chosen quantities move to a new order at the same place ("T4 · 2"), billed on its own with its own number
@@ -156,7 +157,7 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
   if (!moves.length) fail(400, 'Choose what moves to the new bill.');
   const leftAfter = ls.reduce((n, l) => n + l.qty, 0) - moves.reduce((n, m) => n + m.qty, 0);
   if (leftAfter <= 0) fail(400, 'Leave something on this bill; nothing would be split.');
-  const b = await loadBusiness(c.env.DB, bid);
+  const b = bizOf(c);
   const { t, shiftDay } = clock(b);
   const base = o.place.replace(/ · \d+$/, '');
   const siblings = await one<{ n: number }>(c.env.DB, "SELECT count(*) AS n FROM orders WHERE business_id = ? AND (place = ? OR place LIKE ?) AND status IN ('open', 'tab', 'billed')",
@@ -202,14 +203,20 @@ interface Entity { id: string; name: string; gst_rate_bp: number; series_prefix:
 // Prints the bill: the cashier chooses the billing name (the default is preselected on screen) and any discount, with its reason.
 orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c) => {
   const bid = c.get('businessId');
-  const b = await loadBusiness(c.env.DB, bid);
-  const o = await order(c, bid, c.req.param('id'), true);
-  const ls = (await lines(c.env.DB, o.id)).filter((l) => l.qty > 0);
-  if (!ls.length) fail(409, 'The order has no items.');
-  if (ls.some((l) => l.qty > l.sent_qty)) fail(409, 'Send the new items to the kitchen first.');
+  const b = bizOf(c);
   const data = await body(c);
   const entityId = text(data, 'entityId', 'Billing name')!;
-  const e = await one<Entity>(c.env.DB, 'SELECT id, name, gst_rate_bp, series_prefix, offered, active, warn1_paise, warn2_paise, stop_paise FROM billing_entities WHERE id = ? AND business_id = ?', entityId, bid);
+  const { t, shiftDay, fy } = clock(b);
+  // Everything the bill needs, read in one go: the order, its lines, the billing name and its year so far.
+  const [o, allLines, e, yearRow] = await Promise.all([
+    order(c, bid, c.req.param('id'), true),
+    lines(c.env.DB, c.req.param('id')),
+    one<Entity>(c.env.DB, 'SELECT id, name, gst_rate_bp, series_prefix, offered, active, warn1_paise, warn2_paise, stop_paise FROM billing_entities WHERE id = ? AND business_id = ?', entityId, bid),
+    one<{ s: number }>(c.env.DB, "SELECT coalesce(sum(total_paise), 0) AS s FROM bills WHERE entity_id = ? AND fy = ? AND status <> 'void'", entityId, fy),
+  ]);
+  const ls = allLines.filter((l) => l.qty > 0);
+  if (!ls.length) fail(409, 'The order has no items.');
+  if (ls.some((l) => l.qty > l.sent_qty)) fail(409, 'Send the new items to the kitchen first.');
   if (!e || !e.active || !e.offered) fail(400, 'That billing name is not offered at the counter.');
 
   const d = (data.discount ?? { kind: 'none' }) as Record<string, unknown>;
@@ -225,8 +232,7 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
   const discountReason = totals.discountPaise > 0 ? await reasonLabel(c.env.DB, bid, 'discount', d.reasonId, 'A reason for the discount') : null;
 
-  const { t, shiftDay, fy } = clock(b);
-  const year = (await one<{ s: number }>(c.env.DB, "SELECT coalesce(sum(total_paise), 0) AS s FROM bills WHERE entity_id = ? AND fy = ? AND status <> 'void'", e.id, fy))!.s;
+  const year = yearRow!.s;
   const was = limitState(e, year);
   const will = limitState(e, year, totals.totalPaise);
   if (will === 'stop') fail(409, `${e.name} would pass its stop point for ${fy} (${rs(year)} billed so far). Choose another billing name.`);
@@ -248,16 +254,15 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
       ...ls.map((l) => stmt(c.env.DB, 'INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise)),
       stmt(c.env.DB, "UPDATE orders SET status = 'billed' WHERE id = ?", o.id),
+      // The exceptions report, in the same batch: the discount takes its bill number from the row just written.
+      ...(totals.discountPaise > 0 ? [stmt(c.env.DB, `INSERT INTO pos_events (business_id, kind, ref, amount_paise, reason, detail, by_staff, shift_day, at)
+        SELECT ?, 'discount', bill_no, ?, ?, NULL, ?, ?, ? FROM bills WHERE id = ?`, bid, totals.discountPaise, discountReason, staffId, shiftDay, t, id)] : []),
+      ...(will !== was ? [event(c.env.DB, bid, 'limit_warning', e.name, year + totals.totalPaise, null, `${e.name} reached ${rs(year + totals.totalPaise)} billed in ${fy}`, staffId, shiftDay)] : []),
     ]);
   } catch (err) {
     if (isTrigger(err, 'UNIQUE constraint failed')) fail(409, 'Another bill was printed at the same moment. Try again.');
     throw err;
   }
-  const billNo = (await one<{ bill_no: string }>(c.env.DB, 'SELECT bill_no FROM bills WHERE id = ?', id))!.bill_no;
-  const later = [];
-  if (totals.discountPaise > 0) later.push(event(c.env.DB, bid, 'discount', billNo, totals.discountPaise, discountReason, null, staffId, shiftDay));
-  if (will !== was) later.push(event(c.env.DB, bid, 'limit_warning', e.name, year + totals.totalPaise, null, `${e.name} reached ${rs(year + totals.totalPaise)} billed in ${fy}`, staffId, shiftDay));
-  if (later.length) await c.env.DB.batch(later);
   const warning = will === 'warn1' || will === 'warn2' ? `${e.name} has ${rs(year + totals.totalPaise)} billed in ${fy}${e.stop_paise ? `; it stops at ${rs(e.stop_paise)}` : ''}.` : null;
   return c.json({ bill: await billOut(c.env.DB, bid, id), warning }, 201);
 });
@@ -271,15 +276,17 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
-  const items = await all(db, 'SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise FROM bill_lines WHERE bill_id = ? ORDER BY rowid', id);
-  const creditNotes = await all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id);
-  const pays = await all(db, `SELECT p.mode, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
+  const [items, creditNotes, pays, differences] = await Promise.all([
+    all(db, 'SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise FROM bill_lines WHERE bill_id = ? ORDER BY rowid', id),
+    all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id),
+    all(db, `SELECT p.mode, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
       d.name AS debtorAccount, p.comp_guest AS compGuest, p.comp_reason AS compReason, p.tendered_paise AS tenderedPaise
     FROM allocations a JOIN payments p ON p.id = a.payment_id LEFT JOIN pay_accounts pa ON pa.id = p.pay_account_id LEFT JOIN debtor_accounts d ON d.id = p.debtor_account_id
-    WHERE a.bill_id = ? ORDER BY p.at, p.rowid`, id);
+    WHERE a.bill_id = ? ORDER BY p.at, p.rowid`, id),
+    all(db, `SELECT d.kind, d.amount_paise AS amountPaise, d.reason, p.mode FROM settle_differences d LEFT JOIN payments p ON p.id = d.payment_id
+    WHERE d.bill_id = ? OR (d.kind = 'tip' AND d.settlement_id = (SELECT settlement_id FROM bills WHERE id = ?)) ORDER BY d.rowid`, id, id),
+  ]);
   const { entity_id, ...rest } = b;
-  const differences = await all(db, `SELECT d.kind, d.amount_paise AS amountPaise, d.reason, p.mode FROM settle_differences d LEFT JOIN payments p ON p.id = d.payment_id
-    WHERE d.bill_id = ? OR (d.kind = 'tip' AND d.settlement_id = (SELECT settlement_id FROM bills WHERE id = ?)) ORDER BY d.rowid`, id, id);
   return { ...rest, entityId: entity_id, items, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
 
@@ -309,7 +316,7 @@ orderRoutes.post(`${B}/bills/:id/void`, requireAction('bills.void'), async (c) =
   const reason = await reasonLabel(c.env.DB, bid, 'void', (await body(c)).reasonId, 'A reason for the void');
   const staffId = c.get('staff').id;
   const t = now();
-  const { shiftDay } = clock(await loadBusiness(c.env.DB, bid), t);
+  const { shiftDay } = clock(bizOf(c), t);
   await c.env.DB.batch([
     stmt(c.env.DB, "UPDATE bills SET status = 'void', void_reason = ?, void_by = ?, void_at = ? WHERE id = ? AND status = 'printed'", reason, staffId, t, id),
     stmt(c.env.DB, "UPDATE orders SET status = 'open' WHERE id = ?", bill.order_id),
@@ -331,7 +338,7 @@ orderRoutes.post(`${B}/bills/:id/reprint`, requireAction('bills.print'), async (
   const reason = text(await body(c), 'reason', 'Reason for the reprint', { optional: true, max: 80 }) ?? 'Copy';
   await c.env.DB.batch([
     stmt(c.env.DB, 'UPDATE bills SET print_count = print_count + 1 WHERE id = ?', id),
-    event(c.env.DB, bid, 'reprint', bill.bill_no, bill.total_paise, reason, null, c.get('staff').id, clock(await loadBusiness(c.env.DB, bid)).shiftDay),
+    event(c.env.DB, bid, 'reprint', bill.bill_no, bill.total_paise, reason, null, c.get('staff').id, clock(bizOf(c)).shiftDay),
   ]);
   return c.json({ bill: await billOut(c.env.DB, bid, id) });
 });

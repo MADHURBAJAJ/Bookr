@@ -7,7 +7,7 @@ import { parsePaise } from '../../../src/money';
 import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { rs } from '../billing';
-import { clock, isTrigger, loadBusiness } from '../util';
+import { clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 
@@ -57,7 +57,7 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
 
 shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
   const bid = c.get('businessId');
-  const b = await loadBusiness(c.env.DB, bid);
+  const b = bizOf(c);
   const day = date({ day: c.req.param('day') }, 'day', 'Shift day');
   const closed = await one(c.env.DB, `SELECT opening_float_paise AS openingFloatPaise, counted, counted_paise AS countedPaise, expected_paise AS expectedPaise,
     difference_paise AS differencePaise, difference_reason AS differenceReason, closed_at AS closedAt FROM shift_closes WHERE business_id = ? AND shift_day = ?`, bid, day);
@@ -67,7 +67,7 @@ shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
 shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
-  const b = await loadBusiness(db, bid);
+  const b = bizOf(c);
   const day = date({ day: c.req.param('day') }, 'day', 'Shift day');
   const { t, shiftDay: current } = clock(b);
   if (day > current) fail(400, 'That shift has not started.');
@@ -122,7 +122,7 @@ shiftRoutes.post(`${B}/drawer-outs`, requireAction('bills.settle'), async (c) =>
   const amount = parsePaise(typeof data.amount === 'string' ? data.amount : '');
   if (amount === null || amount <= 0) fail(400, 'Amount must be above zero, in rupees.');
   const note = text(data, 'note', 'What it was for', { max: 120 })!;
-  const { t, shiftDay } = clock(await loadBusiness(db, bid));
+  const { t, shiftDay } = clock(bizOf(c));
   const id = newId();
   try {
     await db.batch([

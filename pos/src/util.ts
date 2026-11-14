@@ -10,6 +10,11 @@ export async function loadBusiness(db: DB, id: string): Promise<Business> {
   return b;
 }
 
+/** The signed-in person's business, already loaded with their session. */
+export function bizOf(c: { get(k: 'business'): Business }): Business {
+  return c.get('business');
+}
+
 /** The current shift day and financial year of a business, at `t` (default now). */
 export function clock(b: Business, t = now()) {
   const shiftDay = shiftDayAt(t, b.shift_start_hour);

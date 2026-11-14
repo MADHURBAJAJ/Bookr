@@ -4,7 +4,7 @@ import { DUMMY_HASH, hashPassword, randomToken, sha256, verifyPassword } from '.
 import { body, fail, isEmail, isUuid, text } from '../../../src/http';
 import { currentDevice, endSession, PIN_LOCK_MS, PIN_TRIES, requireAction, requireStaff, setDeviceCookie, startSession } from '../auth';
 import { PERMISSIONS, type Action } from '../permissions';
-import { clock, loadBusiness } from '../util';
+import { clock, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 
 export const authRoutes = new Hono<AppEnv>();
@@ -87,7 +87,7 @@ authRoutes.get('/me', requireStaff, async (c) => {
   const b = await one<{ name: string; shift_start_hour: number; fy_start_month: number; tab_age_days: number }>(c.env.DB,
     'SELECT name, shift_start_hour, fy_start_month, tab_age_days FROM businesses WHERE id = ?', s.businessId);
   const actions = (Object.keys(PERMISSIONS) as Action[]).filter((a) => (PERMISSIONS[a] as readonly string[]).includes(s.role));
-  return c.json({ staff: s, business: { id: s.businessId, ...b, shiftDay: clock(await loadBusiness(c.env.DB, s.businessId)).shiftDay }, actions });
+  return c.json({ staff: s, business: { id: s.businessId, ...b, shiftDay: clock(bizOf(c)).shiftDay }, actions });
 });
 
 // Makes this browser a counter device of the business (Owner, signed in with a password on that device).

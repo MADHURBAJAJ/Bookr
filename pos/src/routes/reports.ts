@@ -4,7 +4,7 @@ import { Hono } from 'hono';
 import { all } from '../../../src/db';
 import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { clock, loadBusiness } from '../util';
+import { clock, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 
 export const reportRoutes = new Hono<AppEnv>();
@@ -51,7 +51,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
 reportRoutes.get(`${B}/reports/debtors`, requireAction('reports.view'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
-  const { t } = clock(await loadBusiness(db, bid));
+  const { t } = clock(bizOf(c));
   const accounts = await all<{ id: string; kind: string; name: string; phone: string | null; limit: number | null; balance: number; open: number }>(db, `
     SELECT d.id, d.kind, d.name, d.phone, d.credit_limit_paise AS "limit", coalesce(sum(e.amount_paise), 0) AS balance,
       (d.kind = 'credit' OR EXISTS (SELECT 1 FROM stays s WHERE s.id = d.stay_id AND s.checked_out_at IS NULL)) AS open
