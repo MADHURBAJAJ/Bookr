@@ -8,7 +8,7 @@ import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../
 import { asReading, columnTotals, type ColumnTotals, draftRegisterRows, TOTALS_INSTRUCTIONS, TotalsReading, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
 import { refreshComparisons } from '../sales';
 import { parsePaise } from '../money';
-import { loadHistory, loadParties } from '../parties';
+import { loadHistory, loadItemHistory, loadParties } from '../parties';
 
 export const ocrRoutes = new Hono<AppEnv>();
 
@@ -127,7 +127,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
       ({ statements, written, columns } = r);
       rows = asReading(data as never).rows.length;
     } else if (kind === 'expense_list') {
-      const r = expenseStatements(ctx, data as never, cashAccount!, await loadParties(db, bid), await loadHistory(db, bid));
+      const r = expenseStatements(ctx, data as never, cashAccount!, await loadParties(db, bid), await loadHistory(db, bid), await loadItemHistory(db, bid));
       ({ statements, written } = r);
       rows = (data as { rows: unknown[] }).rows.length;
     } else {

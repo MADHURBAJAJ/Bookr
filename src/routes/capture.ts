@@ -6,7 +6,7 @@ import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type D
 import { body, date, fail, isUuid, optionalPaise, paise, text } from '../http';
 import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { cashSummaryChecks, LARGE_DISCOUNT_PCT, numberContext, numberFlags, refreshComparisons, suggestBills, type SummaryValues } from '../sales';
-import { loadHistory, loadParties, markLearned, resolveVendor } from '../parties';
+import { headFromItem, headFromWords, loadHistory, loadItemHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { onPayingRow, spreadDifference } from '../discounts';
 import { findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
@@ -305,8 +305,20 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       t.ocr_original AS ocrOriginal, t.party_id AS partyId, p.name AS vendor,
       (SELECT json_group_array(DISTINCT h) FROM (SELECT p.default_head_id AS h WHERE p.default_head_id IS NOT NULL
          UNION SELECT x.head_id FROM transactions x WHERE x.party_id = t.party_id AND x.head_id IS NOT NULL AND x.type = 'expense')) AS vendorHeads
-      FROM transactions t LEFT JOIN parties p ON p.id = t.party_id WHERE t.upload_id = ? ORDER BY t.line_no`, u.id);
-    return c.json({ ...base, rows });
+      FROM transactions t LEFT JOIN parties p ON p.id = t.party_id WHERE t.upload_id = ? ORDER BY t.line_no`, u.id) as { id: string; narration: string | null; headId: string | null; status: string }[];
+    // A draft line with no head: a one-click suggestion, from an earlier line with the same item, else from common words
+    // (petrol → Transport). Never filled in by itself (approved 14 Nov 2026).
+    const open = rows.filter((r) => r.status === 'draft' && !r.headId && r.narration);
+    const [items, heads] = open.length ? await Promise.all([loadItemHistory(db, bid),
+      all<{ id: string; name: string }>(db, "SELECT id, name FROM heads WHERE business_id = ? AND type = 'expense' ORDER BY created_at", bid)]) : [[], []];
+    const suggest = (r: (typeof rows)[number]) => {
+      if (r.status !== 'draft' || r.headId || !r.narration) return null;
+      const fromItem = headFromItem(items.filter((h) => heads.some((x) => x.id === h.head_id)), r.narration);
+      if (fromItem) return { headId: fromItem, from: 'item', word: null };
+      const w = headFromWords(heads, r.narration);
+      return w ? { headId: w.headId, from: 'words', word: w.word } : null;
+    };
+    return c.json({ ...base, rows: rows.map((r) => ({ ...r, suggestHead: suggest(r) })) });
   }
   if (u.kind === 'cash_summary') {
     const s = await one<SummaryValues & { id: string; shift_day: string; status: string; mismatch_note: string | null; mismatch_accepted_at: number | null }>(db,
@@ -911,6 +923,13 @@ async function expenseHead(db: DB, businessId: string, data: Record<string, unkn
   return headId;
 }
 
+/** No head chosen and none from the party: the head of an earlier line with the same item (approved 14 Nov 2026). */
+async function withItemHead<T extends { headId: string | null; learned: boolean }>(db: DB, bid: string, narration: string, v: T): Promise<T & { from: 'party' | 'item' }> {
+  if (v.headId) return { ...v, from: 'party' };
+  const headId = headFromItem(await loadItemHistory(db, bid), narration);
+  return headId ? { ...v, headId, learned: true, from: 'item' } : { ...v, from: 'party' };
+}
+
 captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
@@ -922,7 +941,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows', req
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
   const chosenHead = await expenseHead(db, bid, data);
   const vendor = text(data, 'vendor', 'Party', { optional: true, max: 120 });
-  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid));
+  const v = await withItemHead(db, bid, narration, resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid)));
   const account = await cashAccount(db, bid);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM transactions WHERE upload_id = ?', u.id);
   const id = newId();
@@ -930,7 +949,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows', req
     ...v.statements,
     stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode,
       upload_id, line_no, party_id, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?, ?, ?)`,
-      id, bid, account, u.business_day, amount, v.headId, narration, u.id, last!.n + 1, v.partyId, markLearned(null, v.learned), now()),
+      id, bid, account, u.business_day, amount, v.headId, narration, u.id, last!.n + 1, v.partyId, markLearned(null, v.learned, v.from), now()),
     stmt(db, "UPDATE uploads SET ocr_engine = coalesce(ocr_engine, 'manual') WHERE id = ?", u.id),
   ]);
   return c.json({ id }, 201);
@@ -950,14 +969,14 @@ captureRoutes.put('/businesses/:businessId/expense-rows/:rowId', requireRole('ro
   if (amount <= 0) fail(400, 'Amount must be more than zero.');
   const chosenHead = await expenseHead(db, bid, data);
   const vendor = text(data, 'vendor', 'Party', { optional: true, max: 120 });
-  const v = resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid));
+  const v = await withItemHead(db, bid, narration, resolveVendor(db, bid, await loadParties(db, bid), { vendor, narration, headId: chosenHead }, await loadHistory(db, bid)));
   await db.batch([
     ...v.statements,
     stmt(db, `UPDATE transactions SET narration = ?, amount_paise = ?, head_id = ?, party_id = ?, ocr_original = ?
       WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'draft'`,
-      narration, amount, v.headId, v.partyId, markLearned(old.ocr_original, v.learned), rowId, bid),
+      narration, amount, v.headId, v.partyId, markLearned(old.ocr_original, v.learned, v.from), rowId, bid),
   ]);
-  return c.json({ ok: true, headId: v.headId, learned: v.learned });
+  return c.json({ ok: true, headId: v.headId, learned: v.learned, from: v.from });
 });
 
 captureRoutes.delete('/businesses/:businessId/expense-rows/:rowId', requireRole('rows.edit'), async (c) => {

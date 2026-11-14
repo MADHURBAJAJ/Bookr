@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { newId, now, stmt, type DB } from './db';
 import { parsePaise } from './money';
 import type { PageImage } from './claude';
-import { byName, inText, pickHead, type Party, type PastLine } from './parties';
+import { byName, headFromItem, inText, pickHead, type Party, type PastItem, type PastLine } from './parties';
 import { onPayingRow } from './discounts';
 
 const Orientation = z.enum(['upright', 'rotated_90_clockwise', 'rotated_180', 'rotated_90_counterclockwise']);
@@ -379,7 +379,7 @@ export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softw
 }
 
 /** Statements that replace the page's draft expense rows with the reading. Rows have no head: a person chooses it. */
-export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, cashAccountId: string, parties: Party[] = [], history: PastLine[] = []): { statements: D1PreparedStatement[]; written: number | null } {
+export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, cashAccountId: string, parties: Party[] = [], history: PastLine[] = [], items: PastItem[] = []): { statements: D1PreparedStatement[]; written: number | null } {
   const t = now();
   const statements: D1PreparedStatement[] = [stmt(ctx.db, "DELETE FROM transactions WHERE upload_id = ? AND status = 'draft'", ctx.uploadId)];
   r.rows.forEach((row, i) => {
@@ -389,12 +389,15 @@ export function expenseStatements(ctx: Ctx, r: z.infer<typeof ExpenseReading>, c
     if (!row.item) unclear.add('item');
     // A vendor already known gives the line its remembered head ("Learned"); an unknown one waits for a person.
     const party = (row.vendor ? byName(parties, row.vendor) : null) ?? inText(parties, `${row.item ?? ''} ${row.vendor ?? ''}`);
-    const headId = party ? pickHead(party, history, row.item ?? '').headId : null;
+    const partyHead = party ? pickHead(party, history, row.item ?? '').headId : null;
+    // No party, or one with no head yet: the head of an earlier line with the same item (approved 14 Nov 2026).
+    const itemHead = partyHead ? null : headFromItem(items, row.item ?? '');
+    const headId = partyHead ?? itemHead;
     statements.push(stmt(ctx.db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status,
       payment_mode, upload_id, line_no, party_id, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, 'expense', ?, ?, 'cash_photo', 'draft', 'cash', ?, ?, ?, ?, ?)`,
       newId(), ctx.businessId, cashAccountId, ctx.day, amt !== null && amt > 0 ? amt : 0, headId, row.item ?? '',
       ctx.uploadId, i + 1, party?.id ?? null,
-      JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear], inferred: headId ? ['head'] : [] }), t));
+      JSON.stringify({ ...base(ctx, r.orientation), line: row.line, read: row, unclear: [...unclear], inferred: headId ? ['head'] : [], ...(itemHead ? { headFrom: 'item' } : {}) }), t));
   });
   return { statements, written: amount(r.page_total) };
 }

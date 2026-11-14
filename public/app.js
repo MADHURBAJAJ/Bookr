@@ -2444,7 +2444,13 @@ function expensePanel(biz, u, heads, parties = []) {
           <td class="note">${r.lineNo}</td><td>${needs(q, 'item', r.narration || '—')}</td>
           <td>${r.vendor ?? (read ? html`<span class="chip wait" title="Read from the page; not a known party yet. Edit the line to keep it.">${read}?</span>` : html`<span class="note">—</span>`)}</td>
           <td class="amount">${needs(q, 'amount', money(r.amountPaise))}</td>
-          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? html` <span class="chip wait" title="Filled in from how this party was booked before">Learned</span>` : ''}`
+          <td>${name(r.headId) ? html`${name(r.headId)}${r.status === 'draft' && inferredOf(r.ocrOriginal).has('head') ? (headFromOf(r.ocrOriginal) === 'item'
+              ? html` <span class="chip wait" title="Filled in from how the same item was booked before">Learned from item</span>`
+              : html` <span class="chip wait" title="Filled in from how this party was booked before">Learned</span>`) : ''}`
+            : r.suggestHead && name(r.suggestHead.headId) && r.status === 'draft' && headChoices(r).length <= 1 ? html`<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+                <button class="btn plain" type="button" style="min-height:32px;font-size:13px;padding:0 8px;border-style:dashed" data-quickhead="${r.id}" data-head="${r.suggestHead.headId}"
+                  title="${r.suggestHead.from === 'item' ? 'The same item was booked under this head before' : `Usual head for "${r.suggestHead.word}"`}">${name(r.suggestHead.headId)}?</button>
+                <span class="tiny note">${r.suggestHead.from === 'item' ? 'as before' : 'suggested'}</span></div>`
             : headChoices(r).length > 1 && r.status === 'draft' ? html`<div style="display:flex;flex-wrap:wrap;gap:4px">${headChoices(r).map((hid) => html`<button class="btn plain" type="button" style="min-height:32px;font-size:13px;padding:0 8px" data-quickhead="${r.id}" data-head="${hid}" title="${r.vendor} is used under this head">${name(hid)}</button>`)}</div>`
             : html`<span class="chip bad">Needs input</span>`}</td>
           <td>${r.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Draft</span>`}</td>
@@ -2474,6 +2480,9 @@ function expensePanel(biz, u, heads, parties = []) {
       </div>` : ''}
     </section>`;
 }
+
+/** Where a filled-in head came from: 'item' when from an earlier line with the same item. */
+function headFromOf(ocrOriginal) { try { return JSON.parse(ocrOriginal ?? 'null')?.headFrom ?? null; } catch { return null; } }
 
 /** The heads a line's party has been booked under, offered as one-click choices when there are several. */
 function headChoices(r) {
@@ -3965,7 +3974,7 @@ async function bankView(biz, query = '') {
 
 // ---------- Reconcile: one screen per confirmed shift (approved 5 Nov 2026)
 
-const CARD_TAGS = { change_in_cash: 'Change in cash', wrong_column: 'Wrong UPI column', register_slip: 'Register slip', number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
+const CARD_TAGS = { discount_not_given: 'Discount not given?', change_in_cash: 'Change in cash', wrong_column: 'Wrong UPI column', register_slip: 'Register slip', number_typo: 'Bill number typo', payment_written_wrong: 'Written wrong', paid_in_parts: 'Paid in parts', one_credit_many_bills: 'One table',
   clear_matches: 'Same amount, close in time', same_sale: 'Booked directly', bank_backs: 'Bank agrees', no_upi_credit: 'No credit in the bank', no_bill: 'No bill' };
 const witnessHtml = (label, value, odd) => html`<div class="wit ${odd ? 'odd' : ''}"><div class="wit-l">${label}</div><div class="wit-v">${value ?? 'Not found'}</div></div>`;
 /** A suggestion: what Bookr saw, its reason as a tag, and one click to act. A person always makes the click. */
@@ -4618,7 +4627,8 @@ async function reconcileView(biz, dayArg) {
     ${rows.map((x) => html`<tr>${attr ? html`<td><input type="checkbox" ${attr}="${x.creditId}" ${ticked ? 'checked' : ''} aria-label="Match bill ${x.billNos.join(' + ')}" style="width:18px;height:18px;min-height:0"></td>` : ''}
       <td>${billsCell(x)}${x.others ? html`<div class="tiny" style="color:#92400E">${x.others} other possible match${x.others > 1 ? 'es' : ''}: check before ticking</div>` : ''}${x.far ? html`<div class="tiny" style="color:#92400E">${x.postedAt < x.paidAt ? `Paid ${farGap(x.paidAt - x.postedAt)} before the bill: an advance?` : `Came ${farGap(x.postedAt - x.paidAt)} after the bill: posted late by the bank?`} The only credit of this amount in that time.</div>` : ''}</td><td class="amount">${money(x.amountPaise)}</td><td>${creditCell(x)}</td></tr>`)}
   </tbody></table></div>`;
-  const waiting = v.sales.filter((x) => !x.bankRowId);
+  // A UPI sale matched to the card machine's UPI payment is received (14 Nov 2026).
+  const waiting = v.sales.filter((x) => !x.bankRowId && x.machineAt == null);
   const clearCard = r.clear.length ? html`<div class="rv-card" id="laneclear">
     <div class="lane-h"><strong>${r.clear.length} bill${r.clear.length === 1 ? '' : 's'} match the bank exactly</strong><span class="tchip ok">${CARD_TAGS.clear_matches}</span></div>
     <div class="note">Same amount, closest in time, within an hour; each bill and credit used once.${r.confirmed ? '' : ' They are matched when you save.'}</div>
@@ -5726,7 +5736,9 @@ async function changeRegisterRow(biz, a) {
   const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
     payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
   const put = (b) => apiFull('PUT', `/businesses/${biz.id}/register-rows/${r.id}`, b);
-  const changed = a.op === 'fixNumber' ? { ...payload, billNo: a.billNo }
+  // Paid in full (14 Nov 2026): the discount goes, and the one payment is the bill's whole amount.
+  const changed = a.op === 'noDiscount' ? { ...payload, discount: '0', payments: payload.payments.map((p) => ({ ...p, amount: rupeesForInput(r.amountPaise) })) }
+    : a.op === 'fixNumber' ? { ...payload, billNo: a.billNo }
     : { ...payload, payments: payload.payments.map((p) => ({ ...p, mode: a.mode, columnLabel: PAY_COLS.find(([m]) => m === a.mode)?.[1] ?? null })) };
   await put(changed);
   return () => put(payload);
