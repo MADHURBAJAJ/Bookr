@@ -304,6 +304,53 @@ salesRoutes.get('/businesses/:businessId/shifts', requireRole('sales.view'), asy
 });
 
 /**
+ * The shift calendar (approved 15 Nov 2026): a month of shifts, each saved, in progress or not started, and how many
+ * things are still open on it (bills to decide; for people who can see the bank, UPI bills and credits not matched).
+ * Days before the books start and after the shift running now cannot be opened. "Oldest to do" is the oldest shift not
+ * saved, counted from the day the bank's books start (the cash book often starts earlier, at the year start).
+ */
+salesRoutes.get('/businesses/:businessId/shifts/calendar', requireRole('sales.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const today = shiftDayOf(now());
+  const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(c.req.query('month') ?? '') ? c.req.query('month')! : today.slice(0, 7);
+  const first = `${month}-01`;
+  const last = addDays(addDays(`${month}-28`, 4).slice(0, 7) + '-01', -1);
+  const opening = await one<{ books: string | null; bank: string | null }>(db, `SELECT min(opening_date) AS books,
+    min(CASE WHEN kind = 'bank' THEN opening_date END) AS bank FROM accounts WHERE business_id = ?`, bid);
+  const booksStart = opening?.books ?? today;
+  const workStart = opening?.bank ?? booksStart;
+  const bankToo = can(c.get('role'), 'bank.link');
+  const w = { from: shiftWindow(first).from, to: shiftWindow(last).to };
+  const [saved, started, decide, bills, credits] = await Promise.all([
+    all<{ d: string }>(db, `SELECT shift_day AS d FROM shifts WHERE business_id = ? AND status = 'confirmed' AND shift_day >= ? AND shift_day <= ?`,
+      bid, workStart < first ? workStart : first, today),
+    all<{ d: string }>(db, `SELECT shift_day AS d FROM shifts WHERE business_id = ? AND shift_day BETWEEN ? AND ?
+      UNION SELECT business_day FROM uploads WHERE business_id = ? AND business_day BETWEEN ? AND ?
+      UNION SELECT shift_day FROM register_rows WHERE business_id = ? AND shift_day BETWEEN ? AND ?`, bid, first, last, bid, first, last, bid, first, last),
+    all<{ d: string; n: number }>(db, `SELECT shift_day AS d, count(*) AS n FROM bill_comparisons WHERE business_id = ? AND shift_day BETWEEN ? AND ?
+      AND decision IS NULL AND difference IN (${NEEDS_DECISION.map(() => '?').join(',')}) GROUP BY shift_day`, bid, first, last, ...NEEDS_DECISION),
+    bankToo ? all<{ d: string; n: number }>(db, `SELECT shift_day AS d, count(*) AS n FROM transactions WHERE business_id = ? AND shift_day BETWEEN ? AND ?
+      AND type = 'income' AND payment_mode = 'upi' AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL GROUP BY shift_day`, bid, first, last) : [],
+    bankToo ? all<{ d: string; n: number }>(db, `SELECT date((posted_at - 9000000) / 1000, 'unixepoch') AS d, count(*) AS n FROM bank_rows
+      WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched' AND posted_at >= ? AND posted_at < ? GROUP BY d`, bid, w.from, w.to) : [],
+  ]);
+  const done = new Set(saved.map((r) => r.d));
+  const begun = new Set(started.map((r) => r.d));
+  const open = new Map<string, number>();
+  for (const r of [...decide, ...bills, ...credits]) open.set(r.d, (open.get(r.d) ?? 0) + r.n);
+  const days = [];
+  for (let d = first; d <= last; d = addDays(d, 1)) {
+    const off = d < booksStart || d > today;
+    const state = off || d < workStart ? null : done.has(d) ? 'saved' : begun.has(d) ? 'started' : 'not_started';
+    days.push({ day: d, off, state, open: off ? 0 : open.get(d) ?? 0 });
+  }
+  let oldestToDo: string | null = null;
+  for (let d = workStart; d <= today; d = addDays(d, 1)) if (!done.has(d)) { oldestToDo = d; break; }
+  return c.json({ month, booksStart, workStart, today, oldestToDo, days });
+});
+
+/**
  * What is left on a shift, for the shift bar's tabs (7 Nov 2026): rows to check, bills to decide, and (for people who
  * can see the bank) UPI bills and credits not matched yet. Counts only, from what is stored; nothing is recomputed.
  */

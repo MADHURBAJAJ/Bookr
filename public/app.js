@@ -42,7 +42,7 @@ const CACHE_MS = 120000;
 const clearsCache = (path) => /\/(heads|accounts|bill-type-heads|learned-items|rules|members|cash\/shortage|shortage)(\/|$|\?)|^\/businesses\/[0-9a-f-]{36}$|^\/businesses$|^\/auth\//.test(path);
 function cacheAfter(method, path, data) {
   if (method === 'GET') { if (CACHEABLE.test(path)) GET_CACHE.set(path, { at: Date.now(), data }); }
-  else if (clearsCache(path)) GET_CACHE.clear();
+  else { CAL_CACHE.clear(); if (clearsCache(path)) GET_CACHE.clear(); }
 }
 
 // A change always goes as JSON (the server refuses anything else, see app.ts), so one with no body sends {}.
@@ -212,33 +212,30 @@ function shiftBar(biz, day, screen) {
   const tabs = SHIFT_SCREENS.filter(([, , need]) => biz.actions.includes(need));
   return html`<nav class="shiftbar" aria-label="Shift" data-day="${day}" data-screen="${screen}">
     <div class="sb-day"><a class="btn plain" data-sbstep="-1" href="#" aria-label="Previous shift">‹</a>
-      <label class="cmp-pick"><span class="sr-only">Shift</span><select data-sbpick><option value="${day}" selected>${dayLabel(day)} shift</option></select></label>
+      <span class="sb-cal"><button class="btn plain sb-pick" type="button" data-sbpick aria-haspopup="dialog" aria-expanded="false">${dayLabel(day)} shift <span aria-hidden="true">▾</span></button></span>
       <a class="btn plain" data-sbstep="1" href="#" aria-label="Next shift">›</a></div>
     <div class="sb-tabs" role="tablist">${tabs.map(([k, label], i) => html`<a role="tab" class="${k === screen ? 'on' : ''}" aria-selected="${k === screen}" href="${screenHref(biz, k, day)}">
       <span class="sb-i">${i + 1}</span>${label}<span class="sb-n" data-sbn="${k}"></span></a>`)}</div>
   </nav>`;
 }
-async function wireShiftBar(biz, days = null) {
+async function wireShiftBar(biz) {
   const bar = document.querySelector('.shiftbar');
   if (!bar) return;
   const day = bar.dataset.day;
   const screen = bar.dataset.screen;
-  const [list, p] = await Promise.all([days ? { shifts: days.map((d) => ({ day: d })) } : api('GET', `/businesses/${biz.id}/shifts`).catch(() => ({ shifts: [] })),
-    api('GET', `/businesses/${biz.id}/shifts/${day}/progress`).catch(() => null)]);
-  if (!bar.isConnected) return;
-  // Bring in can go on to a shift with nothing in it yet, up to the one running now.
-  const ahead = screen === 'bringin' ? [addDaysIso(day, 1), addDaysIso(day, -1)].filter((d) => d <= currentShiftDay()) : [];
-  const all = [...new Set([day, ...ahead, ...list.shifts.map((x) => x.day)])].sort();
-  const pick = bar.querySelector('[data-sbpick]');
-  pick.innerHTML = html`${[...all].reverse().map((d) => html`<option value="${d}" ${d === day ? 'selected' : ''}>${dayLabel(d)} shift</option>`)}`.__html;
   const to = (d) => go(screenHref(biz, screen, d));
-  pick.addEventListener('change', () => to(pick.value));
+  const [cal, p] = await Promise.all([shiftCalendar(biz, day.slice(0, 7)), api('GET', `/businesses/${biz.id}/shifts/${day}/progress`).catch(() => null)]);
+  if (!bar.isConnected) return;
+  // ‹ and › go one day at a time, from the books start up to the shift running now (15 Nov 2026).
+  const first = cal?.booksStart ?? '0000-00-00';
+  const last = cal?.today ?? currentShiftDay();
   bar.querySelectorAll('[data-sbstep]').forEach((a) => {
-    const d = all[all.indexOf(day) + Number(a.dataset.sbstep)];
-    if (!d) { a.classList.add('off'); a.removeAttribute('href'); return; }
+    const d = addDaysIso(day, Number(a.dataset.sbstep));
+    if (d < first || d > last) { a.classList.add('off'); a.removeAttribute('href'); return; }
     a.title = dayLabel(d);
     a.addEventListener('click', (e) => { e.preventDefault(); to(d); });
   });
+  wireShiftCalendar(biz, bar.querySelector('.sb-cal'), day, cal, to);
   if (!p) return;
   const set = (k, text, cls) => { const el = bar.querySelector(`[data-sbn="${k}"]`); if (el) { el.textContent = text; el.className = `sb-n ${cls}`; } };
   set('bringin', !p.software && !p.rows ? 'to bring in' : !p.software ? 'no sales report' : !p.rows ? 'no register' : '✓', p.software && p.rows ? 'ok' : 'wait');
@@ -246,6 +243,70 @@ async function wireShiftBar(biz, days = null) {
   const left = p.bank ? p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0) : 0;
   set('reconcile', p.status !== 'confirmed' ? (p.toDecide ? `${p.toDecide} to decide · not saved` : 'not saved') : left ? `${left} left` : '✓',
     p.status !== 'confirmed' ? (p.toDecide ? 'wait' : '') : left ? 'wait' : 'ok');
+}
+
+/**
+ * The shift calendar (approved 15 Nov 2026): the shift name opens a month; each day shows a tick (saved), an amber dot
+ * (in progress) or a hollow dot (not started), and a small number when something is still open on it. Days before the
+ * books start and after today cannot be opened. "Oldest to do" opens the oldest shift not saved.
+ */
+const CAL_CACHE = new Map();
+async function shiftCalendar(biz, month) {
+  const k = `${biz.id}|${month}`;
+  const hit = CAL_CACHE.get(k);
+  if (hit && Date.now() - hit.at < 30e3) return hit.data;
+  const data = await api('GET', `/businesses/${biz.id}/shifts/calendar?month=${month}`).catch(() => null);
+  if (data) CAL_CACHE.set(k, { at: Date.now(), data });
+  return data;
+}
+function wireShiftCalendar(biz, box, day, cal, to) {
+  if (!box) return;
+  const btn = box.querySelector('[data-sbpick]');
+  let pop = null;
+  const close = () => { pop?.remove(); pop = null; btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', esc); };
+  const outside = (e) => { if (!box.contains(e.target)) close(); };
+  const esc = (e) => { if (e.key === 'Escape') { close(); btn.focus(); } };
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const draw = async (month, data) => {
+    if (!pop) return;
+    if (!data) data = await shiftCalendar(biz, month);
+    if (!pop) return;
+    if (!data) { pop.innerHTML = '<div class="tiny error">Could not load the calendar.</div>'; return; }
+    const [y, m] = month.split('-').map(Number);
+    const lead = (new Date(Date.UTC(y, m - 1, 1)).getUTCDay() + 6) % 7;
+    const prevM = addDaysIso(`${month}-01`, -1).slice(0, 7);
+    const nextM = addDaysIso(`${month}-28`, 7).slice(0, 7);
+    const canPrev = `${month}-01` > data.booksStart;
+    const canNext = nextM <= data.today.slice(0, 7);
+    const mark = (s) => (s === 'saved' ? '<span class="cal-ok">✓</span>' : s === 'started' ? '<span class="cal-dot wip"></span>' : s === 'not_started' ? '<span class="cal-dot todo"></span>' : '');
+    const words = { saved: 'saved', started: 'in progress', not_started: 'not started' };
+    const cells = data.days.map((x) => {
+      const n = Number(x.day.slice(8));
+      const label = `${dayLabel(x.day)}${x.state ? `, ${words[x.state]}` : ''}${x.open ? `, ${x.open} still open` : ''}`;
+      return html`<button type="button" class="cal-d ${x.day === day ? 'sel' : ''} ${x.day === data.today ? 'today' : ''}" data-calday="${x.day}" ${x.off ? 'disabled' : ''} aria-label="${label}" title="${label}">
+        <span class="cal-n">${n}</span><span class="cal-m">${{ __html: mark(x.state) }}</span>${x.open ? html`<span class="cal-c">${x.open}</span>` : ''}</button>`;
+    });
+    pop.innerHTML = html`<div class="cal-head"><button type="button" class="cal-nav" data-calm="${prevM}" ${canPrev ? '' : 'disabled'} aria-label="Previous month">‹</button>
+        <strong>${MONTHS[m - 1]} ${y}</strong><button type="button" class="cal-nav" data-calm="${nextM}" ${canNext ? '' : 'disabled'} aria-label="Next month">›</button></div>
+      <div class="cal-g">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((w) => html`<span class="cal-w">${w}</span>`)}${Array.from({ length: lead }, () => html`<span></span>`)}${cells}</div>
+      <div class="cal-leg"><span><span class="cal-ok">✓</span>Saved</span><span><span class="cal-dot wip"></span>In progress</span><span><span class="cal-dot todo"></span>Not started</span></div>
+      <div class="cal-foot">${data.oldestToDo ? html`<button type="button" class="linkbtn" data-calgo="${data.oldestToDo}">Oldest to do: ${dayLabel(data.oldestToDo)}</button>` : html`<span class="tiny">All shifts saved</span>`}
+        <button type="button" class="linkbtn" data-calgo="${data.today}">Today</button></div>`.__html;
+    pop.querySelectorAll('[data-calm]').forEach((b) => b.addEventListener('click', () => draw(b.dataset.calm)));
+    pop.querySelectorAll('[data-calday],[data-calgo]').forEach((b) => b.addEventListener('click', () => { const d = b.dataset.calday ?? b.dataset.calgo; close(); if (d !== day) to(d); }));
+  };
+  btn.addEventListener('click', () => {
+    if (pop) return close();
+    pop = document.createElement('div');
+    pop.className = 'cal-pop';
+    pop.setAttribute('role', 'dialog');
+    pop.setAttribute('aria-label', 'Choose a shift');
+    box.appendChild(pop);
+    btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', esc);
+    draw(day.slice(0, 7), cal && cal.month === day.slice(0, 7) ? cal : null);
+  });
 }
 
 function shell(biz, current, title, subtitle, body, opts = {}) {
@@ -4795,7 +4856,7 @@ async function reconcileReadOnly(biz, day) {
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>${P.bar}<div id="allmsg"></div>${P.banners}${P.warningsHtml}${P.shiftPane}</div>
     <div data-rtop="wait" ${top === 'wait' ? '' : 'hidden'}>${waitingPanelHtml(biz, waiting, false)}</div>`));
   wireShell();
-  wireShiftBar(biz, P.shiftOptions);
+  wireShiftBar(biz);
   P.wire(app.querySelector('[data-rtop="all"]'), document.getElementById('allmsg'));
   app.querySelectorAll('[data-rtopbtn]').forEach((b) => b.addEventListener('click', () => {
     recTopNow = b.dataset.rtopbtn;
@@ -5168,7 +5229,7 @@ async function reconcileView(biz, dayArg) {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('waitmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   });
   const msg = document.getElementById('recmsg');
-  wireShiftBar(biz, days);
+  wireShiftBar(biz);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {
     try { localStorage.setItem(RECONCILE_VIEW_KEY, b.dataset.view); } catch { /* storage unavailable */ }
     reload();
@@ -6380,6 +6441,7 @@ async function bringInView(biz, dayArg) {
     const zone = app.querySelector('[data-drop="csv"]');
     zone.hidden = true;
     const showZone = () => { if (!csvBox.querySelector('[data-imp]')) zone.hidden = false; };
+    if (files.length > 1) return csvBatch(biz, files.slice(0, MAX_FILES), csvBox, reload, showZone);
     for (const f of files.slice(0, MAX_FILES)) {
       const card = document.createElement('div');
       card.className = 'inset';
@@ -6427,6 +6489,57 @@ async function bringInView(biz, dayArg) {
     await readPages(biz, [{ id: b.dataset.readnow, kind: b.dataset.kind, set: (state, error) => { if (error) showError(msg, new Error(error)); } }]);
     reload();
   }));
+}
+
+/**
+ * Several daily CSVs dropped together (15 Nov 2026): each is checked, then shown as one line under the shift its bills
+ * fall in, and one button imports every file that is ready. A file already in Bookr, or for a saved shift, is left out
+ * and says why. The bills are filed by their own times, as with one file.
+ */
+async function csvBatch(biz, files, box, reload, showZone) {
+  const card = document.createElement('div');
+  card.className = 'inset';
+  card.innerHTML = html`<div class="fileline"><span class="spinner"></span><span class="nm">Checking ${files.length} files…</span></div>`.__html;
+  box.appendChild(card);
+  const rows = await Promise.all(files.map(async (f) => {
+    const csv = await f.text();
+    try {
+      const p = await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day: currentShiftDay(), csv, dryRun: true });
+      const days = p.shifts ?? [];
+      const why = p.namesOnly ? 'Already in Bookr. Drop it alone to add names.' : p.confirmedShifts?.length ? `Shift ${p.confirmedShifts.map(dayLabel).join(', ')} is saved. An Owner must reopen it first.`
+        : !p.add ? 'Already in Bookr' : null;
+      return { f, csv, p, days, why, sort: days[0] ?? '9999' };
+    } catch (err) { return { f, csv, p: null, days: [], why: [err.message, ...(err.problems ?? [])].join(' '), sort: '9999' }; }
+  }));
+  rows.sort((a, b) => a.sort.localeCompare(b.sort) || a.f.name.localeCompare(b.f.name));
+  const ready = rows.filter((r) => !r.why);
+  const shiftOf = (r) => (!r.days.length ? r.f.name : r.days.length === 1 ? `${dayLabel(r.days[0])} shift` : `${dayLabel(r.days[0])} – ${dayLabel(r.days[r.days.length - 1])}`);
+  card.innerHTML = html`<div style="display:flex;flex-direction:column;gap:8px">
+    <div class="fileline" style="font-size:14px"><span>📄</span><span class="nm"><strong>${files.length} files read</strong> <span class="tiny">each filed by its bill times</span></span></div>
+    <div>${rows.map((r) => html`<div class="list-row" style="padding:6px 0"><span>${shiftOf(r)} <span class="tiny">${r.days.length ? r.f.name : ''}</span></span>
+      ${r.why ? html`<span class="tiny" style="color:var(--wait)">${r.why}</span>`
+        : html`<span class="tiny">${r.p.add} new bill${r.p.add === 1 ? '' : 's'}${r.p.flag ? ` · ${r.p.flag} differ: you will decide` : ''} <span class="chip ok" title="The bills add up to the totals at the bottom of the file">✓</span></span>`}</div>`)}</div>
+    <div class="form-msg"></div>
+    <div class="form-row" style="align-items:center">${ready.length ? html`<button class="btn" type="button" data-all>Import ${ready.length} file${ready.length === 1 ? '' : 's'}</button>` : ''}
+      <button class="linkbtn" type="button" data-cancel>${ready.length ? 'Cancel' : 'Close'}</button></div></div>`.__html;
+  card.querySelector('[data-cancel]').addEventListener('click', () => { card.remove(); showZone(); });
+  card.querySelector('[data-all]')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Importing…';
+    // One after another: two files can hold the same bill, and the second must see the first.
+    const failed = [];
+    let bills = 0;
+    for (const r of ready) {
+      const d = r.days[0];
+      try {
+        await apiFull('POST', `/businesses/${biz.id}/sales-reports`, { day: d, csv: r.csv, coversFrom: fromLocalInput(`${toLocalInput(r.p.firstPaidAt).slice(0, 10)}T00:00:00`), coversTo: fromLocalInput(`${toLocalInput(r.p.lastPaidAt).slice(0, 10)}T23:59:59`) });
+        bills += r.p.add;
+      } catch (err) { failed.push(`${r.f.name}: ${err.message}`); }
+    }
+    await reload();
+    const m = document.getElementById('bmsg');
+    if (m) m.innerHTML = html`<div class="${failed.length ? 'error' : 'ok-msg'}">Imported ${bills} bill${bills === 1 ? '' : 's'} from ${ready.length - failed.length} file${ready.length - failed.length === 1 ? '' : 's'}.${failed.length ? ` Not imported: ${failed.join(' ')}` : ''}</div>`.__html;
+  });
 }
 
 /** A short check of a software CSV before importing it: what matters at a glance, the rest one tap away. */
