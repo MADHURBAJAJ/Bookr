@@ -11,6 +11,8 @@ export interface MissedBill {
   comparisonId: string; day: string; billNo: string; amountPaise: number | null; mode: string | null; paidAt: number | null;
   /** open, added (written in from the software report), counted, left_out, other_day, carried */
   status: string; otherDay: string | null; note: string | null;
+  /** Written in a later shift's register and linked to this bill (18 Nov 2026). */
+  lateDay: string | null;
 }
 export interface MissedCredit {
   id: string; day: string; postedAt: number; amountPaise: number; accountName: string | null; remark: string | null; vpa: string | null;
@@ -24,9 +26,10 @@ const statusOf = (decision: string | null, added: boolean, otherDay: string | nu
 export async function missedEntries(db: DB, businessId: string, from: string, to: string) {
   const [bills, credits, confirmed] = await Promise.all([
     all<{ id: string; day: string; billNo: string; difference: string; swPaise: number | null; swMode: string | null; rgPaise: number | null; rgMode: string | null;
-      paidAt: number | null; decision: string | null; note: string | null; added: number; otherDay: string | null; closeNote: string | null }>(db, `
+      paidAt: number | null; decision: string | null; note: string | null; added: number; otherDay: string | null; closeNote: string | null; lateDay: string | null }>(db, `
       SELECT c.id, c.shift_day AS day, c.bill_no AS billNo, c.difference, c.sw_amount_paise AS swPaise, c.sw_mode AS swMode, c.rg_amount_paise AS rgPaise, c.rg_mode AS rgMode,
-        sb.paid_at AS paidAt, c.decision, c.note, c.close_note AS closeNote, coalesce(r.ocr_original LIKE '%"source":"software_report"%', 0) AS added, l.shift_day AS otherDay
+        sb.paid_at AS paidAt, c.decision, c.note, c.close_note AS closeNote, coalesce(r.ocr_original LIKE '%"source":"software_report"%', 0) AS added, l.shift_day AS otherDay,
+        (SELECT min(x.shift_day) FROM bill_comparisons x WHERE x.business_id = c.business_id AND x.linked_to_id = c.id) AS lateDay
       FROM bill_comparisons c LEFT JOIN register_rows r ON r.id = c.register_row_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
         LEFT JOIN bill_comparisons l ON l.id = c.linked_to_id
       WHERE c.business_id = ? AND c.shift_day BETWEEN ? AND ?
@@ -44,7 +47,7 @@ export async function missedEntries(db: DB, businessId: string, from: string, to
   const oldPos = (b: { billNo: string; closeNote: string | null }) => isOldPosBill(b.billNo) || /old pos/i.test(b.closeNote ?? '');
   const bill = (b: (typeof bills)[number], side: 'sw' | 'rg'): MissedBill => ({
     comparisonId: b.id, day: b.day, billNo: b.billNo, amountPaise: side === 'sw' ? b.swPaise : b.rgPaise, mode: side === 'sw' ? b.swMode : b.rgMode,
-    paidAt: b.paidAt, status: statusOf(b.decision, !!b.added, b.otherDay), otherDay: b.otherDay, note: b.note,
+    paidAt: b.paidAt, status: statusOf(b.decision, !!b.added, b.otherDay), otherDay: b.otherDay, note: b.note, lateDay: b.lateDay,
   });
   return {
     notInRegister: bills.filter((b) => b.difference === 'missing_in_register' || b.added).map((b) => bill(b, 'sw')),

@@ -31,12 +31,12 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     summaryFor(db, businessId, addDays(day, -1)),
     one<{ total: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS total FROM transactions
       WHERE business_id = ? AND shift_day = ? AND source = 'software_report' AND type = 'income' AND payment_mode = 'cash'`, businessId, day),
-    all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number }>(db, `
-      SELECT c.id, c.bill_no, c.sw_amount_paise, c.decision, c.bill_type, c.note, sb.paid_at, 0 AS typed FROM bill_comparisons c
+    all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number; close_note: string | null }>(db, `
+      SELECT c.id, c.bill_no, c.sw_amount_paise, c.decision, c.bill_type, c.note, sb.paid_at, 0 AS typed, c.close_note FROM bill_comparisons c
       LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.sw_mode = 'cash'
       UNION ALL
-      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1
+      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1, NULL
       FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
       ORDER BY 2`, businessId, day, businessId, day),
@@ -45,8 +45,8 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
         count(CASE WHEN status <> 'approved' THEN 1 END) AS waiting,
         coalesce(sum(CASE WHEN status <> 'approved' THEN amount_paise END), 0) AS waitingPaise
       FROM transactions WHERE business_id = ? AND day = ? AND source = 'cash_photo' AND type = 'expense'`, businessId, day),
-    one<{ total: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS total FROM transactions
-      WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage'`, businessId, day),
+    all<{ id: string; amount_paise: number; narration: string | null; ocr_original: string | null }>(db, `SELECT id, amount_paise, narration, ocr_original FROM transactions
+      WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage' ORDER BY created_at`, businessId, day),
     one<{ after: string }>(db, `SELECT after FROM audit_log WHERE business_id = ? AND action = 'cash.difference_accepted'
       AND row_table = 'shifts' AND json_extract(after, '$.day') = ? ORDER BY id DESC LIMIT 1`, businessId, day),
     // Cash moved to or from the bank on this shift (Stage 6).
@@ -61,10 +61,12 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
   const opening = yesterday?.cash_in_hand_paise ?? today?.opening_paise ?? null;
   const openingFrom = yesterday?.cash_in_hand_paise != null ? 'previous' : today?.opening_paise != null ? 'page' : null;
   const counted = today?.cash_in_hand_paise ?? null;
-  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortages!.total - moved!.deposited + moved!.drawn : null;
+  const shortageTotal = shortages.reduce((t, x) => t + x.amount_paise, 0);
+  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortageTotal - moved!.deposited + moved!.drawn : null;
   const difference = shouldBe !== null && counted !== null ? counted - shouldBe : null;
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
-  const notInRegisterRows = notInRegister.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note }));
+  const notInRegisterRows = notInRegister.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note,
+    paidAt: c.paid_at, closeNote: c.close_note }));
 
   // A short count is first explained by the cash bills the register does not have (Stage 3, approved 10 Nov 2026):
   // counted from the software, so they raise "should be in hand", but the cash may never have reached the drawer.
@@ -74,7 +76,7 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
   if (difference !== null && difference < 0 && !settled) {
     let left = -difference;
     const bills = [];
-    for (const c of notInRegister.filter((x) => !x.typed && x.decision === 'use_software').sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
+    for (const c of notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note).sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
       if (left <= 0) break;
       const part = Math.min(left, c.sw_amount_paise);
       bills.push({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, partPaise: part });
@@ -94,7 +96,10 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     expensesPaise: expenses!.approved,
     expensesWaiting: expenses!.waiting,
     expensesWaitingPaise: expenses!.waitingPaise,
-    shortagePaise: shortages!.total,
+    shortagePaise: shortageTotal,
+    // Each shortage booked on this shift, and the bill it was booked for (18 Nov 2026).
+    shortages: shortages.map((x) => { let o: { comparisonId?: string; billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
+      return { id: x.id, amountPaise: x.amount_paise, note: x.narration, comparisonId: o.comparisonId ?? null, billNo: o.billNo ?? null }; }),
     depositedPaise: moved!.deposited,
     drawnPaise: moved!.drawn,
     shouldBePaise: shouldBe,
@@ -123,4 +128,19 @@ export async function cashPairOf(db: DB, businessId: string, day: string, k?: Aw
     }
   }
   return null;
+}
+
+/**
+ * A cash count over by exactly a shortage booked on one of the 7 shifts before (18 Nov 2026): the cash came late, so the
+ * shortage can be reversed and the two days settled as paid late. Offered, never done by itself.
+ */
+export async function shortageToReverse(db: DB, businessId: string, day: string, k: Awaited<ReturnType<typeof cashCheck>>) {
+  const over = k.confirmed ? k.differencePaise : null;
+  if (over == null || over <= 0 || k.settled) return null;
+  const x = await one<{ id: string; shift_day: string; amount_paise: number; ocr_original: string | null }>(db, `SELECT id, shift_day, amount_paise, ocr_original FROM transactions
+    WHERE business_id = ? AND source = 'cash_shortage' AND amount_paise = ? AND shift_day < ? AND shift_day >= ? ORDER BY shift_day DESC LIMIT 1`,
+    businessId, over, day, addDays(day, -7));
+  if (!x) return null;
+  let o: { billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
+  return { id: x.id, day: x.shift_day, amountPaise: x.amount_paise, billNo: o.billNo ?? null };
 }

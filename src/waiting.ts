@@ -27,7 +27,16 @@ export interface WaitItem {
   chosenOn?: string; chosenWith?: string;
   /** A matched credit the bank reversed (Stage 6): the reversal line, to make the bill unpaid again. */
   reversalId?: string;
+  /**
+   * What the bill waits as (18 Nov 2026): no money found (not_received), money of about its amount found but not matched
+   * (found), money in but the paperwork differs (paperwork), a cash bill not in the register inside its 2 days
+   * (cash_wait), or something else for a person (other). Grey lines have none.
+   */
+  kind?: WaitKind;
 }
+export type WaitKind = 'not_received' | 'found' | 'paperwork' | 'cash_wait' | 'other';
+/** A cash bill not in the register is usually written the next day: it waits 2 days, then counts as not received (18 Nov 2026). */
+export const CASH_WATCH_DAYS = 2;
 
 const GAP = 1000; // ₹10: an offer may be this far from the bill (a tip or a discount)
 const rs = (p: number) => `₹ ${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -119,7 +128,8 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     const base = { key: `c:${b.id}`, comparisonId: b.id, billNo: b.billNo, day: b.day, amountPaise: b.amountPaise ?? 0, mode: b.mode, side: b.side as 'software' | 'register',
       confirmed, daysWaiting: b.daysWaiting, watchEnd: b.watchEnd, unresolved: b.unresolved, watchNote: b.watchNote, offers: [] as Offer[] };
     const grey = (waitFor: WaitFor, reason: string) => out.push({ ...base, group: 'grey', waitFor, reason, unresolved: false });
-    const look = (reason: string, offers: Offer[] = []) => out.push({ ...base, group: 'look', waitFor: null, reason, offers });
+    const look = (reason: string, offers: Offer[] = [], kind: WaitKind = 'other', extra: Partial<WaitItem> = {}) =>
+      out.push({ ...base, group: 'look', waitFor: null, reason, offers, kind, ...extra });
     if (b.decision === 'carry_forward') {
       const next = addDays(b.day, 1);
       if (statusOf.get(next) === 'confirmed') look(`Carried forward, but the ${next} shift was saved without it`);
@@ -129,7 +139,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     if (b.side === 'register') {
       // In the register only: the software bill may come on another day. Waits 7 days (a billing gap).
       if (!(await softwareIn(b.day))) grey('software', 'Until the software report covers the shift');
-      else look('In the register, not in the software report');
+      else look('In the register, not in the software report', [], 'paperwork');
       continue;
     }
     // In the software only.
@@ -140,22 +150,25 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
       if (k.differencePaise === null) { grey('count', 'Until the cash count is in'); continue; }
       if (k.settled || k.differencePaise >= 0) continue; // the cash backs it: not waiting
       const part = k.explained?.bills.find((x) => x.id === b.id);
+      // Inside its 2 days it waits for the late register line and its cash; then it is not received (18 Nov 2026).
+      const late = b.daysWaiting > CASH_WATCH_DAYS && !b.watchNote;
       look(part ? `Not in the register; explains ${rs(part.partPaise)} of the ${rs(-k.differencePaise)} short cash count`
-        : `Not in the register, and the cash count is ${rs(-k.differencePaise)} short`);
+        : `Not in the register, and the cash count is ${rs(-k.differencePaise)} short`, [], late ? 'not_received' : 'cash_wait',
+        { unresolved: late || b.unresolved, watchEnd: b.watchNote ? b.watchEnd : addDays(b.day, CASH_WATCH_DAYS) });
       continue;
     }
     if (b.mode === 'upi') {
       if (!sale) continue; // its credit is matched: the bank backs it
       if (!bankIn(b.day)) { grey('bank', 'Until bank sync'); continue; }
       later.push(credits(b.day, base.amountPaise, sale?.paidAt ?? null).then((offers) =>
-        look(offers.length ? 'Not in the register, and no credit matched yet' : 'Not in the register, and no credit of this amount in the bank', offers)));
+        look(offers.length ? 'Not in the register, and no credit matched yet' : 'Not in the register, and no credit of this amount in the bank', offers, offers.length ? 'found' : 'not_received')));
       continue;
     }
     if (b.mode === 'card') {
       if (!sale) continue; // its machine payment is matched
       if (!cardIn(b.day)) { grey('card', 'Until the card report'); continue; }
       later.push(payments(b.day, base.amountPaise, sale?.paidAt ?? null).then((offers) =>
-        look(offers.length ? 'Not in the register, and no machine payment matched yet' : 'Not in the register, and no machine payment of this amount', offers)));
+        look(offers.length ? 'Not in the register, and no machine payment matched yet' : 'Not in the register, and no machine payment of this amount', offers, offers.length ? 'found' : 'not_received')));
       continue;
     }
     look('Not in the register; the software does not say how it was paid');
@@ -192,7 +205,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
       daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null };
     if (!bankIn(t.day)) { out.push({ ...base, group: 'grey', waitFor: 'bank', reason: 'Until bank sync', offers: [] }); continue; }
     later.push(credits(t.day, t.amountPaise, t.paidAt).then((offers) => {
-      out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no credit matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
+      out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no credit matched yet', offers, unresolved: days(t.day) > WATCH_DAYS, kind: offers.length ? 'found' : 'not_received' });
     }));
   }
   for (const t of cardSales) {
@@ -208,7 +221,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
       daysWaiting: days(t.day), watchEnd: null, unresolved: false, watchNote: null };
     if (!cardIn(t.day)) { out.push({ ...base, group: 'grey', waitFor: 'card', reason: 'Until the card report', offers: [] }); continue; }
     later.push(payments(t.day, t.amountPaise, t.paidAt).then((offers) => {
-      out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no machine payment matched yet', offers, unresolved: days(t.day) > WATCH_DAYS });
+      out.push({ ...base, group: 'look', waitFor: null, reason: 'Saved, no machine payment matched yet', offers, unresolved: days(t.day) > WATCH_DAYS, kind: offers.length ? 'found' : 'not_received' });
     }));
   }
 
@@ -216,7 +229,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   for (const x of reversed) {
     out.push({ key: `r:${x.revId}:${x.txId}`, comparisonId: x.comparisonId, billNo: x.billNo ?? '', day: x.day, amountPaise: x.amount, mode: 'upi', side: 'both', confirmed: true,
       group: 'look', waitFor: null, reason: `Its ${rs(x.amount)} credit was reversed by the bank on ${dayOf(x.revAt, x.day)}: the payment failed`, daysWaiting: days(x.day),
-      watchEnd: null, unresolved: false, watchNote: null, offers: [], reversalId: x.revId });
+      watchEnd: null, unresolved: false, watchNote: null, offers: [], reversalId: x.revId, kind: 'not_received' });
   }
   for (const [day, n] of unsaved) {
     out.push({ key: `s:${day}`, comparisonId: null, billNo: '', day, amountPaise: 0, mode: null, side: 'both', confirmed: false, group: 'grey', waitFor: 'unsaved',
@@ -225,7 +238,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   const sortKey = (x: WaitItem) => `${x.day}\u0000${x.billNo}`;
   out.sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : sortKey(a) > sortKey(b) ? 1 : a.key < b.key ? -1 : 1));
   return {
-    watchDays: WATCH_DAYS,
+    watchDays: WATCH_DAYS, cashWatchDays: CASH_WATCH_DAYS,
     look: out.filter((x) => x.group === 'look'),
     grey: out.filter((x) => x.group === 'grey'),
     oddNumbers: bills.filter((x) => x.oddNumber),

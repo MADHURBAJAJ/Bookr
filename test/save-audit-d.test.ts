@@ -73,8 +73,8 @@ describe('D15 cash after the sales', () => {
     expect(await cashOf(h)).toMatchObject({ shouldBePaise: 280000, differencePaise: -20000, settled: false });
     expect((await h.clients.accountant.post(`${base}/accept`, { note: 'Counted again tomorrow' })).status).toBe(200);
     expect(await cashOf(h)).toMatchObject({ differencePaise: -20000, settled: true, accepted: 'Counted again tomorrow' });
-    // Only an Owner books a shortage; once booked the cash agrees and it cannot be booked again.
-    expect((await h.clients.accountant.post(`${base}/shortage`, { note: 'Short' })).status).toBe(403);
+    // Owner or Accountant books a shortage (18 Nov 2026); once booked the cash agrees and it cannot be booked again.
+    expect((await h.clients.entry_staff.post(`${base}/shortage`, { note: 'Short' })).status).toBe(403);
     expect((await h.clients.owner.post(`${base}/shortage`, { note: 'Short' })).json).toMatchObject({ ok: true, amountPaise: 20000 });
     expect(await cashOf(h)).toMatchObject({ shortagePaise: 20000, shouldBePaise: 260000, differencePaise: 0, settled: true });
     expect((await h.clients.owner.post(`${base}/shortage`, { note: 'Again' })).status).toBe(409);

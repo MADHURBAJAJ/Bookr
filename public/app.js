@@ -484,14 +484,81 @@ async function dashboardView(biz) {
   const fresh = [...(f.bank ?? []).filter((a) => a.linked || a.lastAt).map((a) => bit(a.name, a.lastAt ? `up to ${when(a.lastAt)}` : 'no lines yet', stale(a.lastAt))),
     ...(f.cards?.folder ? [bit('Card', f.cards.lastAt ? `up to ${when(f.cards.lastAt)}` : 'no report yet', stale(f.cards.lastAt))] : [])];
   const total = accounts.reduce((t, a) => t + a.openingBalancePaise, 0);
+  // Today (redesigned 18 Nov 2026): how far each file goes, the one next step, the shifts as a strip of days, money as
+  // tiles, then approvals. Every count is the server's; nothing here is worked out twice.
+  const can = (a) => biz.actions.includes(a);
+  const istDayOf = (ms) => new Date(ms + 19800000).toISOString().slice(0, 10);
+  const short = (d) => (d ? new Date(`${d}T12:00:00+05:30`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' }) : '–');
+  const lastShift = addDaysIso(h.today, -1);
+  const behind = (d) => !d || d < addDaysIso(lastShift, -1);
+  const bankAt = (f.bank ?? []).map((a) => a.lastAt).filter(Boolean).sort((x, y) => x - y)[0] ?? null;
+  const upto = [
+    f.bank ? html`<span>Bank <b class="${stale(bankAt) ? 'td-amber' : ''}">${bankAt ? short(istDayOf(bankAt)) : 'none'}</b></span>` : '',
+    html`<span>Register <b class="${behind(f.registerDay) ? 'td-amber' : ''}">${short(f.registerDay)}</b></span>`,
+    html`<span>Sales report <b class="${behind(f.reportDay) ? 'td-amber' : ''}">${short(f.reportDay)}</b></span>`,
+    f.cards?.folder ? html`<span>Card <b class="${stale(f.cards.lastAt) ? 'td-amber' : ''}">${f.cards.lastAt ? short(istDayOf(f.cards.lastAt)) : 'none'}</b></span>` : ''];
+  // What each shift needs, in the order it is done.
+  const stage = (s) => (s.status === 'confirmed' ? 'saved'
+    : f.reportDay && s.day > f.reportDay ? 'report' : f.registerDay && s.day > f.registerDay ? 'register'
+    : s.toCheck || s.toDecide ? 'work' : 'ready');
+  const list = (h.shifts?.list ?? []).map((s) => ({ ...s, stage: stage(s) }));
+  if (h.bringIn && !list.some((s) => s.day === h.bringIn.day)) list.push({ day: h.bringIn.day, stage: 'none', toCheck: 0, toDecide: 0 });
+  list.sort((x, y) => x.day.localeCompare(y.day));
+  const STAGES = { ready: ['td-g', 'Ready to save'], work: ['td-a', 'To check or decide'], report: ['td-n', 'Waiting for the sales report'], register: ['td-n', 'Waiting for the register'],
+    none: ['td-u', 'Nothing brought in yet'], saved: ['td-s', 'Saved, money still to match'] };
+  const daysText = (xs) => {
+    // Runs of days in a row are told as one range: 3–8 Nov.
+    const out = []; let run = [];
+    const flush = () => { if (run.length) out.push(run.length > 2 ? `${short(run[0]).split(' ')[0]}–${short(run.at(-1))}` : run.map(short).join(', ')); run = []; };
+    for (const d of xs) { if (run.length && addDaysIso(run.at(-1), 1) !== d) flush(); run.push(d); }
+    flush(); return out.join(', ');
+  };
+  const legend = Object.entries(STAGES).map(([k, [cls, label]]) => {
+    const xs = list.filter((s) => s.stage === k);
+    if (!xs.length) return '';
+    const detail = k === 'work' ? xs.map((s) => `${short(s.day)}${s.toCheck ? ` · ${s.toCheck} row${s.toCheck === 1 ? '' : 's'} to check` : ''}${s.toDecide ? ` · ${s.toDecide} to decide` : ''}`).join('; ') : daysText(xs.map((s) => s.day));
+    const act = k === 'none' && can('rows.upload') ? html`<a href="${screenHref(biz, 'bringin', xs[0].day)}">Bring in ›</a>` : '';
+    return html`<div class="td-lg"><span class="td-dot ${cls}"></span><span style="flex:1">${label} · ${detail}</span>${act || html`<span class="note">${xs.length} shift${xs.length === 1 ? '' : 's'}</span>`}</div>`;
+  });
+  const hrefOf = (s) => (s.stage === 'none' ? screenHref(biz, 'bringin', s.day) : s.toCheck && can('rows.edit') ? screenHref(biz, 'review', s.day) : screenHref(biz, 'reconcile', s.day));
+  // The one next step: Bring in for the last shift, else the oldest shift ready to save, else the oldest with work.
+  const firstReady = list.find((s) => s.stage === 'ready');
+  const firstWork = list.find((s) => s.stage === 'work');
+  const next = h.bringIn && can('rows.upload') ? { title: `Bring in the ${dayLabel(h.bringIn.day)} shift`, why: [!h.bringIn.software && 'sales report', !h.bringIn.registerPages && 'register photos'].filter(Boolean).join(' and ') + ' not in yet', href: screenHref(biz, 'bringin', h.bringIn.day), label: 'Bring in' }
+    : firstReady && can('sales.decide') ? { title: `Save the ${dayLabel(firstReady.day)} shift`, why: 'Every row checked, nothing to decide', href: screenHref(biz, 'reconcile', firstReady.day), label: `Open ${short(firstReady.day)}` }
+    : firstWork ? { title: `Finish the ${dayLabel(firstWork.day)} shift`, why: [firstWork.toCheck && `${firstWork.toCheck} rows to check`, firstWork.toDecide && `${firstWork.toDecide} bills to decide`].filter(Boolean).join(' · '), href: hrefOf(firstWork), label: `Open ${short(firstWork.day)}` }
+    : items[0] ? { title: items[0].text, why: '', href: items[0].href, label: items[0].label } : null;
+  // Money: the Waiting groups over saved shifts (the same as each shift's To do), then the bank's own jobs.
+  const kd = h.waitingBills?.kinds ?? {};
+  const waitHref = (k) => (kd[k]?.days?.[0] ? `#/b/${biz.id}/reconcile/${kd[k].days[0]}?top=wait` : null);
+  const tile = (cls, label, big, small, href) => html`<a class="td-tile ${cls}" ${href ? `href="${href}"` : ''}><div class="td-tl">${label}</div><div class="td-tv">${big}</div><div class="td-ts">${small}</div></a>`;
+  const nOf = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const tiles = [
+    can('sales.view') ? tile('td-red', 'Payment not received', kd.not_received?.n ? `₹ ${rs(kd.not_received.paise)}` : '–',
+      kd.not_received?.n ? `${nOf(kd.not_received.n, 'bill')} · ${daysText(kd.not_received.days)}` : h.shifts.list.some((s) => s.status !== 'confirmed') ? 'shows as shifts are saved' : 'none', waitHref('not_received')) : '',
+    kd.cash_wait?.n ? tile('td-amb', 'Cash bills not in the register', `₹ ${rs(kd.cash_wait.paise)}`, `${nOf(kd.cash_wait.n, 'bill')} · usually written next day`, waitHref('cash_wait')) : '',
+    kd.found?.n ? tile('td-teal', 'Payment found, to match', `₹ ${rs(kd.found.paise)}`, `${nOf(kd.found.n, 'bill')} · ${daysText(kd.found.days)}`, waitHref('found')) : '',
+    h.upi ? tile('', 'UPI credits with no bill', h.upi.credits.count ? `₹ ${rs(h.upi.credits.paise)}` : '–',
+      h.upi.credits.count ? html`${h.upi.credits.count.toLocaleString('en-IN')}${h.upi.credits.late ? html` · <span class="td-redtext">${h.upi.credits.late} over ${h.watchDays} days</span>` : ''}` : 'all matched', `#/b/${biz.id}/bank?tab=in`) : '',
+    h.bookExpenses ? tile('', 'Bank payments to book', h.bookExpenses.count ? `₹ ${rs(h.bookExpenses.paise)}` : '–', h.bookExpenses.count ? `${h.bookExpenses.count} · since ${short(h.bookExpenses.oldestDay)}` : 'all booked',
+      `#/b/${biz.id}/bank?${new URLSearchParams({ tab: 'out', from: h.bookExpenses.oldestDay ?? h.today, to: h.today })}`) : '',
+    h.cards ? tile('', 'Card days to settle', h.cards.days ? `₹ ${rs(h.cards.netPaise)}` : '–', h.cards.days ? `${h.cards.days} days net` : 'all settled', `#/b/${biz.id}/cards`) : '',
+  ].filter(Boolean);
   render(shell(biz, 'dashboard', 'Today', '', html`
-    ${fresh.length || f.bank ? html`<div class="note" style="display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center">${fresh}
-      ${f.bank ? html`<button class="btn plain" id="dashsync" type="button" style="min-height:32px">Sync</button>` : ''}</div><div id="dashmsg"></div>` : ''}
-    <section class="card" style="gap:0;padding-top:4px;padding-bottom:4px">
-      ${items.length ? items.map((x, i) => html`<a class="today-row" href="${x.href}" style="${i === items.length - 1 ? 'border-bottom:0' : ''}">
-        <span>${x.text}${x.late ? html` <span class="chip bad">${x.late}</span>` : ''}</span><span class="btn plain dchip">${x.label} ›</span></a>`)
-        : html`<div class="ok-msg" style="padding:12px 0">Nothing waiting.</div>`}
-    </section>
+    <div class="td-upto">${upto}${f.bank ? html`<button class="btn plain" id="dashsync" type="button" style="min-height:32px">Sync</button>` : ''}</div><div id="dashmsg"></div>
+    ${next ? html`<section class="card td-next"><div><div class="note">Next</div><div class="td-nt">${next.title}</div>${next.why ? html`<div class="note">${next.why}</div>` : ''}</div>
+      <a class="btn" href="${next.href}">${next.label} ›</a></section>` : html`<div class="ok-msg">Nothing waiting.</div>`}
+    ${list.length ? html`<section class="card" style="gap:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>Shifts · ${nOf(list.filter((s) => s.stage !== 'saved').length, 'shift')} not saved</h2><span class="note">Press a day to open it</span></div>
+      <div class="td-strip">${list.map((s, i) => html`<a class="td-day ${STAGES[s.stage][0]}" href="${hrefOf(s)}" title="${dayLabel(s.day)} · ${STAGES[s.stage][1]}">${short(s.day).split(' ')[0]}${i === 0 || s.day.slice(5, 7) !== list[i - 1].day.slice(5, 7) ? html`<small>${short(s.day).split(' ')[1]}</small>` : ''}</a>`)}</div>
+      ${legend}
+    </section>` : ''}
+    ${tiles.length ? html`<section class="card" style="gap:10px"><h2>Money</h2><div class="td-tiles">${tiles}</div></section>` : ''}
+    ${h.photos?.count ? html`<section class="card td-row"><div><h2 style="margin:0">Approve · ${nOf(h.photos.count, 'expense line')} · ₹ ${rs(h.photos.paise)}</h2>
+      <div class="note">${nOf(h.photos.pages.length, 'cash page')}: ${daysText([...new Set(h.photos.pages.map((p) => p.day))].sort())}</div></div>
+      <a class="btn plain" href="#/b/${biz.id}/review/${h.photos.pages[0]?.uploadId ?? ''}">Approve ›</a></section>` : ''}
+    ${(h.cash ?? []).length ? html`<section class="card" style="gap:4px"><h2>Cash</h2>${h.cash.map((k) => html`<a class="today-row" href="#/b/${biz.id}/reconcile/${k.day}?tab=cash">
+      <span><strong>${dayLabel(k.day)}</strong> · ${!k.counted ? 'cash in hand not entered' : k.differencePaise < 0 ? `₹ ${rs(-k.differencePaise)} short` : `₹ ${rs(k.differencePaise)} over`}</span><span class="btn plain dchip">Cash ›</span></a>`)}</section>` : ''}
     ${done.length ? html`<div class="note">✓ ${done.join(' · ')}</div>` : ''}
     <details class="card cmp-fold"><summary><h2>Opening balances and set-up</h2></summary>
       ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalancePaise)}</span></div>`)}
@@ -1013,16 +1080,19 @@ async function reportDayView(biz, dayIn) {
   if (!day) day = (await api('GET', `/businesses/${biz.id}/reports/missed?${new URLSearchParams({ to: currentShiftDay() })}`)).lastDay ?? currentShiftDay();
   const range = new URLSearchParams({ from: day, to: day });
   const canBank = biz.actions.includes('bank.link');
-  const [m, d, cp, rc] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/missed?${range}`), api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`),
-    api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`), canBank ? api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).catch(() => null) : null]);
+  const [m, d, cp, rc, cash] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/missed?${range}`), api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`),
+    api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`), canBank ? api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).catch(() => null) : null,
+    api('GET', `/businesses/${biz.id}/shifts/${day}/cash`).catch(() => null)]);
   const bankIn = !!rc?.coverage?.covered;
   const cardsIn = !!rc?.cards?.covered;
-  // Payments not received: UPI bills with no credit, card bills with no machine payment (once the card report is in).
-  const noUpi = (rc?.noCredit ?? []).filter((k) => k.kind === 'no_upi_credit').map((k) => ({ billNo: k.billNos.join(' + '), amountPaise: k.amountPaise ?? null, paidAt: k.paidAt ?? null, mode: 'upi',
-    why: k.evidence?.[0] ?? k.title }));
-  const noCard = cardsIn ? (rc?.cards?.noSwipe ?? []).map((x) => ({ billNo: x.billNo ?? (x.billNos ?? []).join(' + '), amountPaise: x.amountPaise ?? null, paidAt: x.paidAt ?? null, mode: 'card',
-    why: 'No card machine payment of this amount' })) : [];
-  const unpaid = [...noUpi, ...noCard].sort((a, b) => (a.paidAt ?? 0) - (b.paidAt ?? 0));
+  // Payments not received, the same rule as To do's Waiting card (18 Nov 2026): UPI bills with no credit, card bills with
+  // no machine payment, and cash bills not in the register more than 2 days with the cash short.
+  const oneSided = [...m.notInRegister.map((x) => ({ ...x, side: 'software' })), ...m.notInSoftware.map((x) => ({ ...x, side: 'register' }))]
+    .filter((x) => x.status !== 'left_out' && x.status !== 'added')
+    .map((x) => ({ comparisonId: x.comparisonId, billNo: x.billNo, amountPaise: x.amountPaise ?? 0, mode: x.mode, side: x.side, paidAt: x.paidAt,
+      otherDay: x.lateDay ? { day: x.lateDay } : x.otherDay ? { day: x.otherDay } : null, oldPos: false }));
+  const split = waitSplit({ day, rc: canBank ? rc : null, cash, oneSided });
+  const unpaid = split.notReceived;
   const unpaidNos = new Set(unpaid.flatMap((x) => x.billNo.split(' + ')));
   const sum = (xs) => xs.reduce((t, x) => t + (x.amountPaise ?? 0), 0);
   // A missed bill added to the register since now matches: left out here.
@@ -1030,7 +1100,7 @@ async function reportDayView(biz, dayIn) {
   const payCell = (x) => {
     if (unpaidNos.has(x.billNo)) return html`<td class="rd-bad">Not received</td>`;
     if (x.status === 'left_out') return html`<td class="note">Not expected</td>`;
-    if (x.mode === 'cash') return html`<td class="note">In the cash count</td>`;
+    if (x.mode === 'cash') { const w = split.cashWait.find((y) => y.billNo === x.billNo); return w ? html`<td class="rd-wait">Waiting, day ${Math.max(1, w.age)} of ${CASH_WATCH_DAYS}</td>` : html`<td class="note">In the cash count</td>`; }
     if (x.mode === 'upi') return bankIn ? html`<td class="rd-ok">✓ Received</td>` : html`<td class="note">Bank not in yet</td>`;
     if (x.mode === 'mixed') return bankIn ? html`<td class="rd-ok">✓ UPI part received</td>` : html`<td class="note">Bank not in yet</td>`;
     if (x.mode === 'card') return cardsIn ? html`<td class="rd-ok">✓ Received</td>` : html`<td class="note">Card report not in yet</td>`;
@@ -1070,6 +1140,8 @@ async function reportDayView(biz, dayIn) {
           <tbody>${unpaid.map((x) => html`<tr class="rd-red"><td class="mono">${x.billNo}</td><td>${timeOf(x.paidAt)}</td><td class="amount">${x.amountPaise == null ? '' : rs(x.amountPaise)}</td>
             <td>${MODE_LABELS[x.mode] ?? x.mode}</td><td class="rd-bad">${x.why}</td></tr>`)}</tbody></table></div>
         <div class="note">Paid or not is as on Reconcile: bank credits, the card machine and matches made there.</div></div>` : ''}
+      ${split.found.length ? html`<div class="rd-box"><h3>Payment found, to match <span class="note">· money of about its amount came in, not matched yet</span></h3>
+        ${split.found.map((x) => html`<div class="list-row"><span><span class="mono">${x.billNo}</span> · ${MODE_LABELS[x.mode] ?? x.mode} ${timeOf(x.paidAt)} · ₹ ${money(x.offer.amountPaise)} at ${timeOf(x.offer.at)}</span><span class="amount">${rs(x.amountPaise)}</span></div>`)}</div>` : ''}
       <div class="rd-box">
         <h3>Missed in the register <span class="note">· in the software, not written in the register</span></h3>
         ${inReg.length ? html`<div class="scroll"><table style="min-width:600px">${head(true)}<tbody>${rows(inReg, true)}</tbody></table></div>` : html`<div class="ok-msg">None on this day.</div>`}
@@ -1087,6 +1159,7 @@ async function reportDayView(biz, dayIn) {
             <td>${x.status === 'booked' ? html`Booked <span class="note">${x.headName ?? ''}${x.note ? ` · ${x.note}` : ''}</span>` : 'Not matched'}</td></tr>`)}</tbody></table></div>`
           : html`<div class="ok-msg">None on this day.</div>`}
       </div>
+      ${(m.shortages ?? []).map((x) => html`<div class="note"><span class="chip bad">Cash shortage booked</span> ₹ ${money(x.amountPaise)}${x.billNo ? ` · bill ${x.billNo} not received` : ''}${x.note ? ` · ${x.note}` : ''}</div>`)}
       ${(m.cashRevised ?? []).map((x) => html`<div class="note">Cash sheet figures changed from the photo: <strong>${({ revised: 'sheet revised, the new one not uploaded', misread: 'the photo was misread', other: 'other' })[x.reason] ?? x.reason}</strong>${x.note ? ` · ${x.note}` : ''}.
         ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${x.uploadId}">Open the cash sheet</a>` : ''}</div>`)}
       <details class="rd-more"><summary>Large discounts · ${d.lines.length ? `${d.lines.length} · ₹ ${rs(largeTotal)}` : 'none'}</summary>
@@ -3316,6 +3389,103 @@ function waitingPanelHtml(biz, w, canDecide) {
 }
 
 
+/** Days from a shift to the shift being worked today (8 am to 8 am). */
+const shiftAge = (day) => Math.round((Date.parse(currentShiftDay()) - Date.parse(day)) / 86400000);
+const CASH_WATCH_DAYS = 2;
+
+/**
+ * One shift's waiting bills in four groups (18 Nov 2026), before and after saving; the same rule on To do and in the day
+ * report. Payment not received: no UPI credit or machine payment of its amount, or a cash bill not in the register more
+ * than 2 days with the count short. Payment found, to match: money within ₹10 near it, not matched. Paid, bill missing:
+ * the money is in, only the paperwork differs. Cash bill not in the register: inside its 2 days, usually written next day.
+ * oneSided: { comparisonId, billNo, amountPaise, mode, side: 'software'|'register', otherDay, oldPos }.
+ */
+function waitSplit({ day, rc, cash, oneSided }) {
+  const out = { notReceived: [], found: [], paperwork: [], cashWait: [], closed: [] };
+  const bankIn = !!rc?.coverage?.covered;
+  const cardsIn = !!rc?.cards?.covered;
+  const credits = (rc?.noBill ?? []).filter((c) => c.amountPaise != null);
+  const nearCredit = (amount, at) => credits.filter((c) => Math.abs(c.amountPaise - amount) <= 1000 && (at == null || Math.abs(c.postedAt - at) <= 3 * 3600e3))
+    .sort((a, b) => Math.abs(a.amountPaise - amount) - Math.abs(b.amountPaise - amount) || (at == null ? 0 : Math.abs(a.postedAt - at) - Math.abs(b.postedAt - at)))[0] ?? null;
+  for (const k of (rc?.noCredit ?? []).filter((x) => x.kind === 'no_upi_credit')) {
+    const x = { billNo: k.billNos.join(' + '), amountPaise: k.amountPaise ?? 0, paidAt: k.paidAt ?? null, mode: 'upi', why: k.evidence?.[0] ?? k.title };
+    const o = nearCredit(x.amountPaise, x.paidAt);
+    if (o) out.found.push({ ...x, offer: { amountPaise: o.amountPaise, at: o.postedAt, label: o.accountName ?? null } });
+    else out.notReceived.push(x);
+  }
+  if (cardsIn) for (const c of rc?.cards?.noSwipe ?? []) {
+    const x = { billNo: c.billNo ?? (c.billNos ?? []).join(' + '), amountPaise: c.amountPaise ?? 0, paidAt: c.paidAt ?? null, mode: 'card', why: 'No card machine payment of this amount' };
+    if (c.near) out.found.push({ ...x, offer: { amountPaise: c.near.amountPaise, at: c.near.paidAt, label: c.near.label } });
+    else out.notReceived.push(x);
+  }
+  const listed = new Set([...out.notReceived, ...out.found].flatMap((x) => x.billNo.split(' + ')));
+  // Cash bills the register does not have: the short count is explained by them, oldest first.
+  const diff = cash ? (cash.confirmed ? (cash.settled ? 0 : cash.differencePaise) : cash.draft?.differencePaise ?? null) : null;
+  const late = new Map(oneSided.filter((o) => o.otherDay && !o.otherDay.closed).map((o) => [o.comparisonId, o.otherDay]));
+  const cashBills = (cash?.notInRegister ?? []).filter((x) => x.decision === 'use_software' && !/^Added to the register/.test(x.note ?? ''));
+  let left = diff != null && diff < 0 ? -diff : 0;
+  for (const b of [...cashBills].sort((a, b2) => (a.paidAt ?? 0) - (b2.paidAt ?? 0))) {
+    const x = { comparisonId: b.id, billNo: b.billNo, amountPaise: b.amountPaise, paidAt: b.paidAt ?? null, mode: 'cash' };
+    listed.add(b.billNo);
+    if (b.closeNote) { out.closed.push({ ...x, why: b.closeNote }); continue; }
+    const o = late.get(b.id);
+    if (o) { out.paperwork.push({ ...x, why: `Written late on the ${dayLabel(o.day)} register${cash?.pair ? `; the ${dayLabel(cash.pair.day)} cash is ${cash.pair.differencePaise > 0 ? 'over' : 'short'} by the same: settle them together on the Cash tab` : ''}` }); continue; }
+    if (diff == null) { out.cashWait.push({ ...x, why: 'Not in the register; the cash count is not in yet', age: shiftAge(day) }); continue; }
+    if (left <= 0) { out.paperwork.push({ ...x, why: 'Paid in cash: the cash count backs it, only the register line is missing' }); continue; }
+    const part = Math.min(left, b.amountPaise);
+    left -= part;
+    const why = `Not in the register, and the cash is short by ₹ ${rs(-diff)}${part < b.amountPaise ? ` (explains ₹ ${rs(part)})` : ''}`;
+    if (shiftAge(day) > CASH_WATCH_DAYS) out.notReceived.push({ ...x, why: `${why}: not written in any register since` });
+    else out.cashWait.push({ ...x, why, age: shiftAge(day) });
+  }
+  // The rest on one side only: money in, only the paperwork differs.
+  for (const o of oneSided) {
+    if (listed.has(o.billNo) || o.mode === 'cash' || o.oldPos) continue;
+    if (o.side === 'register') out.paperwork.push({ ...o, why: o.otherDay ? `In the register; billed in the software on ${dayLabel(o.otherDay.day)}` : 'In the register, not in the software report' });
+    else if ((o.mode === 'upi' && bankIn) || (o.mode === 'card' && cardsIn)) out.paperwork.push({ ...o, why: `${o.mode === 'upi' ? 'UPI credit' : 'Machine payment'} matched; ${o.otherDay ? `written in the ${dayLabel(o.otherDay.day)} register` : 'not in the register'}` });
+  }
+  const byTime = (a, b) => (a.paidAt ?? 0) - (b.paidAt ?? 0);
+  for (const k of Object.keys(out)) out[k].sort(byTime);
+  return out;
+}
+
+/** The Waiting card of one shift's To do (18 Nov 2026): the four groups, each line with its fix in place. */
+function waitCardHtml(biz, day, sp, waitPic, opts) {
+  const sum = (xs) => xs.reduce((t, x) => t + (x.amountPaise ?? 0), 0);
+  const n = sp.notReceived.length + sp.found.length + sp.paperwork.length + sp.cashWait.length;
+  const pic = new Map((waitPic?.look ?? []).filter((x) => x.day === day).map((x) => [x.billNo, x]));
+  const canDecide = opts.canDecide;
+  const line = (x, extra) => html`<div class="wc-row"><span class="mono">${x.billNo}${drawerBtn(x.billNo.split(' + ')[0], day)}</span><span class="amount">${money(x.amountPaise)}</span>
+    <span class="wc-why">${MODE_LABELS[x.mode] ?? x.mode ?? ''}${x.paidAt ? `, ${timeOf(x.paidAt)}` : ''} · ${x.why}${extra ?? ''}</span></div>`;
+  const savedActs = (x) => {
+    const w = pic.get(x.billNo);
+    if (!w || !canDecide) return '';
+    return html`<div class="wc-acts">
+      ${w.reversalId ? html`<button class="btn plain dchip" type="button" data-reversed="${w.reversalId}" data-bill="${w.billNo}">Bill unpaid again</button>` : ''}
+      ${w.side === 'both' && w.mode === 'upi' && w.key.startsWith('t:') ? html`<button class="btn plain dchip" type="button" data-owedtx="${w.key.slice(2)}" data-bill="${w.billNo}">Owed by guest/company</button>` : ''}
+      ${w.comparisonId && w.side !== 'both' ? html`<button class="btn plain dchip" type="button" data-closebill="${w.comparisonId}" data-bill="${w.billNo}">Close with a reason</button>
+        <button class="btn plain dchip" type="button" data-keepwait="${w.comparisonId}" data-bill="${w.billNo}">Keep waiting</button>` : ''}</div>`;
+  };
+  const cashActs = (x, red) => (canDecide ? html`<div class="wc-acts">${red ? '' : html`<span class="note">Already know?</span>`}
+    <button type="button" class="btn plain dchip" data-leaveunk="${x.comparisonId}" data-bill="${x.billNo}">Not paid: leave it out</button>
+    <button type="button" class="btn plain dchip" data-bill-drawer="${x.billNo}|${day}">Paid, add to the register</button>
+    ${opts.confirmed && opts.canWriteoff ? html`<button type="button" class="btn plain dchip" data-shortbill="${x.comparisonId}" data-bill="${x.billNo}" data-amt="${x.amountPaise}">Book as shortage</button>` : ''}</div>` : '');
+  const group = (cls, title, xs, body) => (xs.length ? html`<div class="wc-g ${cls}"><div class="wc-gh">${title} · ${xs.length} bill${xs.length === 1 ? '' : 's'} · ₹ ${rs(sum(xs))}</div>${body}</div>` : '');
+  const empty = [!sp.found.length && 'payment found, to match', !sp.cashWait.length && 'cash bills not in the register'].filter(Boolean);
+  return html`<section class="card wc" style="gap:6px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Waiting · ${n ? `${n} bill${n === 1 ? '' : 's'}` : 'nothing'}</h2>
+      <span class="note">${opts.confirmed ? 'Saved' : 'Before saving: what will wait when saved'}</span></div>
+    ${group('red', 'Payment not received', sp.notReceived, sp.notReceived.map((x) => html`${line(x)}${x.mode === 'cash' ? cashActs(x, true) : x.mode === 'upi' && !opts.confirmed ? html`<div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:upi">Fix on the UPI tab ›</button></div>` : savedActs(x)}`))}
+    ${group('teal', 'Payment found, to match', sp.found, sp.found.map((x) => html`${line(x, html`<div class="tiny" style="color:var(--teal-ink)">${x.mode === 'card' ? 'Machine payment' : 'Credit'} ₹ ${money(x.offer.amountPaise)} at ${timeOf(x.offer.at)}${x.offer.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(x.offer.amountPaise - x.amountPaise))} ${x.offer.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}</div>`)}
+      <div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:${x.mode === 'card' ? 'card' : 'upi'}">Match on the ${x.mode === 'card' ? 'Card' : 'UPI'} tab ›</button></div>`))}
+    ${group('amb', 'Cash bill not in the register', sp.cashWait, sp.cashWait.map((x) => html`${line(x, html` <span class="chip wait">day ${Math.max(1, x.age)} of ${CASH_WATCH_DAYS}</span><div class="tiny">Counted as a ${dayLabel(day)} sale. Closes by itself when a later register writes it.</div>`)}${cashActs(x, false)}`))}
+    ${group('', 'Paid, bill missing', sp.paperwork, sp.paperwork.map((x) => line(x)))}
+    ${sp.closed.length ? html`<div class="wc-g"><div class="wc-gh note">Closed</div>${sp.closed.map((x) => line(x))}</div>` : ''}
+    ${n && empty.length ? html`<div class="note">None: ${empty.join(' · ')}.</div>` : ''}
+    ${opts.others ? html`<div class="note">${opts.others} more bill${opts.others === 1 ? '' : 's'} wait${opts.others === 1 ? 's' : ''} on other saved shifts: <a href="#/b/${biz.id}/dashboard">Today ›</a></div>` : ''}
+  </section>`;
+}
+
 function wireWaiting(biz, root, act) {
   root.querySelectorAll('[data-oddclose]').forEach((b) => b.addEventListener('click', () => act(() => apiFull('POST', `/businesses/${biz.id}/comparisons/${b.dataset.oddclose}/close`, { note: SHORT_OLD_POS_NOTE }))));
   root.querySelectorAll('[data-closebill]').forEach((b) => b.addEventListener('click', () => {
@@ -3345,18 +3515,6 @@ function wireWaiting(biz, root, act) {
  * colour; then what could explain it, worked out from the bills that touch cash; then the bills, those that differ first.
  * Each bill opens its register line with the photo (Edit). Accept and shortage act on the final figure only.
  */
-// Keep it as short (17 Nov 2026): the choices fold away on this device; the bill stays counted.
-const CASH_KEPT_KEY = 'bookr.cash.kept';
-const cashKept = () => { try { return JSON.parse(localStorage.getItem(CASH_KEPT_KEY) ?? '[]'); } catch { return []; } };
-document.addEventListener('click', (e) => {
-  const b = e.target.closest?.('[data-cashkeep], [data-cashunkeep]');
-  if (!b) return;
-  const id = b.dataset.cashkeep ?? b.dataset.cashunkeep, keep = !!b.dataset.cashkeep;
-  try { localStorage.setItem(CASH_KEPT_KEY, JSON.stringify([...cashKept().filter((x) => x !== id), ...(keep ? [id] : [])].slice(-200))); } catch { /* this device only */ }
-  const box = b.closest('[data-keepbox]');
-  box.querySelector('[data-keepchoices]').hidden = keep;
-  box.querySelector('[data-keptline]').hidden = !keep;
-});
 const cmpTypeOf = (v, id) => v.comparisons.find((c) => c.id === id)?.billType ?? null;
 /** A cash bill in the software, not in the register, with a UPI credit of its amount near it: one button writes it in
  *  the register as UPI, the credit matched on save (on the Cash tab too, approved 17 Nov 2026). */
@@ -3418,18 +3576,24 @@ function cashPanelHtml(biz, k, opts = {}) {
     // explain the difference (17 Nov 2026). Old POS bills are decided in To do's old POS block.
     if (!same && b.swAmountPaise == null && b.rgCashPaise != null && b.state !== 'complimentary' && b.state !== 'left_out'
       && (opts.oldPos?.has(b.comparisonId) || b.decision === 'use_register')) continue;
-    // Cash in the software, not in the register, of the difference's amount (17 Nov 2026): three plain choices.
-    if (same && b.rgCashPaise === null && (b.decision === 'use_software' || b.state === 'undecided') && draft && biz.actions.includes('sales.decide')) {
-      const kept = cashKept().includes(b.comparisonId);
-      items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #F3B4B4;border-radius:8px;padding:10px 12px" data-keepbox="${b.comparisonId}">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>This explains the ${diff < 0 ? 'short' : 'difference'}</strong><span class="chip bad">Same amount</span></div>
+    // Cash in the software, not in the register, of the difference's amount: it waits (18 Nov 2026). It is counted as a
+    // sale of its day and usually written in the next day's register; nothing is asked at saving. After 2 days with no
+    // late line it is not received, and its choices show.
+    if (same && b.rgCashPaise === null && (b.decision === 'use_software' || b.state === 'undecided')) {
+      const age = shiftAge(k.day);
+      const red = age > CASH_WATCH_DAYS;
+      const decideIt = biz.actions.includes('sales.decide');
+      const writeoff = !draft && biz.actions.includes('cash.writeoff') && diff < 0;
+      const acts = html`<button type="button" class="btn plain dchip" data-leaveunk="${b.comparisonId}" data-bill="${b.billNo}" title="Asks why. The bill is not counted, so the cash agrees.">Not paid: leave it out</button>
+          <button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}" title="Opens the bill: write the cash on its register line">Paid, add to the register</button>
+          ${writeoff ? html`<button type="button" class="btn plain dchip" data-shortbill="${b.comparisonId}" data-bill="${b.billNo}" data-amt="${sw}" title="An expense under Cash shortage for this bill's amount">Book as shortage</button>` : ''}`;
+      items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid ${red ? '#F3B4B4' : '#FCD34D'};border-radius:8px;padding:10px 12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>${red ? 'Payment not received' : 'Explained by a bill not in the register · waiting'}</strong>
+          <span class="chip ${red ? 'bad' : 'wait'}">${red ? `${age} days` : `day ${Math.max(1, age)} of ${CASH_WATCH_DAYS}`}</span></div>
         <div>Bill <span class="mono">${b.billNo}</span> · ₹ ${money(sw)} cash in the software, not in the register.</div>
         ${cashUpiFix(b, opts.byUpi?.get(b.comparisonId), true)}
-        <div class="form-row" style="gap:6px;margin-top:4px" data-keepchoices ${kept ? 'hidden' : ''}>
-          <button type="button" class="btn plain dchip" data-leaveunk="${b.comparisonId}" data-bill="${b.billNo}" title="Asks why. The bill is not counted, so the cash agrees.">Not paid: leave it out</button>
-          <button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}" title="Opens the bill: write the cash on its register line">Paid, add to the register</button>
-          <button type="button" class="btn plain dchip" data-cashkeep="${b.comparisonId}" title="Counted as a sale; the drawer stays short. Book the shortage after saving.">Keep it as short</button></div>
-        <div class="tiny note" data-keptline ${kept ? '' : 'hidden'}>Kept as short: counted as a sale, the drawer is short by it. <button type="button" class="linkbtn tiny" data-cashunkeep="${b.comparisonId}">Show the choices</button></div></div>` });
+        <div class="tiny note">${red ? `Not written in any register in ${CASH_WATCH_DAYS} days, and the cash is short by the same.` : `Counted as a ${dayLabel(k.day)} sale. Usually written in the next day's register: it closes by itself then. Saving is not blocked.`}</div>
+        ${decideIt ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">${red ? '' : html`<span class="note">Already know?</span>`}${acts}</div>` : ''}</div>` });
       continue;
     }
     // One line per bill (approved 14 Nov 2026): what differs, then the two sides as choices with the cash after each;
@@ -3495,6 +3659,9 @@ function cashPanelHtml(biz, k, opts = {}) {
     ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px">${tops.map((x) => x.html)}
       ${rest.length ? html`<strong>${tops.length ? 'Could also explain it' : 'What could explain it'}</strong>${rest.map((x) => x.html)}`
         : tops.length ? '' : html`<div class="note">No bill explains it. Check the count on the cash page.</div>`}
+      ${k.reverse ? html`<div class="ent-line"><span class="chip">Came late?</span> Over by ₹ ${money(k.reverse.amountPaise)}: a shortage of the same was booked on ${dayLabel(k.reverse.day)}${k.reverse.billNo ? ` for bill ${k.reverse.billNo}` : ''}.
+        ${biz.actions.includes('cash.writeoff') ? html`<button class="btn plain dchip" type="button" id="cashreverse" data-tx="${k.reverse.id}" data-day="${k.reverse.day}">Reverse that shortage</button>` : ''}
+        <div class="tiny note">Takes the shortage out of the books; then settle the two days together as paid late.</div></div>` : ''}
       ${k.pair ? html`<div class="ent-line"><span class="chip">Paid late?</span> ₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.
         ${!draft && biz.actions.includes('sales.decide') ? html`<button class="btn plain dchip" type="button" id="cashpair" data-other="${k.pair.day}">Settle both as paid late</button>` : html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${k.pair.day}">Open ${dayLabel(k.pair.day)}</a>`}</div>` : ''}
     </div>` : ''}
@@ -3561,6 +3728,11 @@ function wireCashPanel(biz, day, reload, msg, k = null) {
   if (k) drawerCash = { day, shouldBePaise: k.confirmed ? k.shouldBePaise : k.draft?.shouldBePaise ?? null, countedPaise: k.countedPaise };
   document.getElementById('cashonly')?.addEventListener('change', (e) => {
     document.querySelectorAll('#cashbills tbody tr').forEach((tr) => { tr.hidden = e.target.checked && !tr.dataset.differs; });
+  });
+  document.getElementById('cashreverse')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    if (!confirm(`Reverse the cash shortage booked on ${dayLabel(b.dataset.day)}? The cash came in late.`)) return;
+    try { await apiFull('POST', `/businesses/${biz.id}/cash-shortages/${b.dataset.tx}/reverse`, { note: `Cash came in on ${dayLabel(day)}` }); reload(); } catch (err) { showError(msg, err); }
   });
   document.getElementById('cashpair')?.addEventListener('click', async (e) => {
     try { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/cash/pair`, { otherDay: e.currentTarget.dataset.other }); reload(); } catch (err) { showError(msg, err); }
@@ -5576,7 +5748,14 @@ async function reconcileView(biz, dayArg) {
   // The row paying for a group may come to ₹0 under the group's discount (approved 7 Nov 2026): told only when that
   // discount is large, as on Review.
   const paidZero = r.confirmed ? [] : cv.comparisons.filter((c) => c.difference === 'complimentary' && (c.register?.paidPaise ?? 0) > 0 && !groupZero(c, cv));
-  const waitN = (waitPic?.look?.length ?? 0) + (waitPic?.oddNumbers?.length ?? 0);
+  // This shift's waiting bills in four groups (18 Nov 2026): the Waiting card of To do.
+  const oneSided = cv.comparisons.filter((c) => ['missing_in_register', 'missing_in_software'].includes(c.difference) && c.decision !== 'leave_out')
+    .map((c) => ({ comparisonId: c.id, billNo: c.billNo, amountPaise: c.software?.amountPaise ?? c.register?.amountPaise ?? 0, mode: c.software?.mode ?? c.register?.mode ?? null,
+      side: c.difference === 'missing_in_register' ? 'software' : 'register', otherDay: c.otherDay, oldPos: !!c.oldPos || /^1[45]\d{4}$/.test(c.billNo ?? ''), paidAt: c.paidAt ?? null }));
+  const split = waitSplit({ day, rc: r, cash, oneSided });
+  const splitN = split.notReceived.length + split.found.length + split.cashWait.length;
+  const othersN = (waitPic?.look ?? []).filter((x) => x.day !== day).length;
+  const waitN = splitN + (waitPic?.oddNumbers?.length ?? 0);
   // Before saving, the draft difference counts too (14 Nov 2026), so the Cash tab never shows ✓ while the count is off.
   const cashDiff = cash.confirmed ? (cash.settled ? 0 : cash.differencePaise) : cash.draft?.differencePaise;
   const cashN = ent.cash.left + (cashDiff ? 1 : 0);
@@ -5669,6 +5848,8 @@ async function reconcileView(biz, dayArg) {
         <span class="todo-n">${x.left ? i + 1 : '✓'}</span><span class="todo-t"><strong>${x.title}</strong> <span class="note">· ${x.left ? (x.sub ?? `${x.left} left`) : x.sub ?? 'done'}</span></span>
         ${x.link ?? (x.body && x.left ? html`<span class="todo-car">${openStep === x.key ? '▾' : '▸'}</span>` : '')}</div>
       ${x.body && x.left ? html`<div class="todo-body" ${openStep === x.key ? '' : 'hidden'}>${x.body}</div>` : ''}</section>`)}
+    <div data-rsec="wait"><div id="waitmsg"></div>${waitCardHtml(biz, day, split, waitPic, { canDecide, confirmed: r.confirmed, canWriteoff: biz.actions.includes('cash.writeoff'), others: othersN })}
+      ${oddNumbersHtml(biz, waitPic, canDecide)}</div>
     <div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
       ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`;
   // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
@@ -5685,7 +5866,6 @@ async function reconcileView(biz, dayArg) {
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
       ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${comp.lines.length ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}</div>
     <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
-      ${waitN ? html`<div data-rsec="wait"><div id="waitmsg"></div>${waitingPanelHtml(biz, waitPic, biz.actions.includes('sales.decide'))}</div>` : ''}
     </div>
     ${comp.lines.length ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>
@@ -5813,9 +5993,15 @@ async function reconcileView(biz, dayArg) {
     go(mode ?? (key === 'pay' ? 'cash' : key));
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }));
-  if (app.querySelector('[data-rsec="wait"]')) wireWaiting(biz, app.querySelector('[data-rsec="wait"]'), async (fn) => {
+  const waitAct = async (fn) => {
     try { await fn(); await reload(); } catch (err) { showError(document.getElementById('waitmsg'), err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
-  });
+  };
+  if (app.querySelector('[data-rsec="wait"]')) wireWaiting(biz, app.querySelector('[data-rsec="wait"]'), waitAct);
+  // Book a cash bill not received as a shortage (18 Nov 2026): only its amount, with a note.
+  app.querySelectorAll('[data-shortbill]').forEach((b) => b.addEventListener('click', () => {
+    const note = (prompt(`Bill ${b.dataset.bill}: ₹ ${money(Number(b.dataset.amt))} cash never reached the drawer. Book it as a cash shortage? Write why:`) ?? '').trim();
+    if (note) waitAct(() => apiFull('POST', `/businesses/${biz.id}/shifts/${day}/cash/shortage`, { note, comparisonId: b.dataset.shortbill }));
+  }));
   const msg = document.getElementById('recmsg');
   wireShiftBar(biz);
   document.querySelectorAll('#recview [data-view]').forEach((b) => b.addEventListener('click', () => {

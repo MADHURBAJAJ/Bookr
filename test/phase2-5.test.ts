@@ -218,7 +218,8 @@ describe('cash for a shift', () => {
     // 4,303.50 register cash + 353 cash bill not in the register = 4,656.50
     expect(k).toMatchObject({ confirmed: true, openingPaise: 840000, openingFrom: 'page', cashSalesPaise: 465650, expensesPaise: 0,
       shouldBePaise: 1305650, countedPaise: 1270350, differencePaise: -35300, settled: false, notInRegisterBookedPaise: 35300 });
-    expect(k.notInRegister).toEqual([{ id: expect.any(String), billNo: '2610319', amountPaise: 35300, decision: 'use_software', billType: 'fnb', note: 'Added to the register from the software report' }]);
+    expect(k.notInRegister).toEqual([{ id: expect.any(String), billNo: '2610319', amountPaise: 35300, decision: 'use_software', billType: 'fnb', note: 'Added to the register from the software report',
+      paidAt: null, closeNote: null }]);
   });
 
   it('a difference is accepted with a note, and only that exact difference', async () => {
@@ -229,9 +230,9 @@ describe('cash for a shift', () => {
     expect((await cash(h)).json).toMatchObject({ settled: true, accepted: 'Counted again: 353 in the drawer, not written' });
   });
 
-  it('an Owner books a shortage: an approved Cash expense under Cash shortage, and the cash then agrees', async () => {
+  it('an Owner or Accountant books a shortage: an approved Cash expense under Cash shortage, and the cash then agrees', async () => {
     const h = await confirmedWithSummary('12703.50');
-    expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/shortage`, { note: 'x' })).status).toBe(403);
+    expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/shortage`, { note: 'x' })).status).toBe(403);
     const res = await h.clients.owner.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/shortage`, { note: 'Cashier to repay' });
     expect(res.json).toEqual({ ok: true, amountPaise: 35300 });
     const [t] = await sql`SELECT t.amount_paise, t.type, t.status, t.source, hd.name AS head, a.kind FROM transactions t

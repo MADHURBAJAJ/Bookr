@@ -25,7 +25,7 @@ const SHIFT_OF = "date((posted_at - 9000000) / 1000, 'unixepoch')";
 /** Shifts looked at for "Shifts to finish" and the cash check. Older leftovers show on the UPI and card cards. */
 const SHIFT_DAYS = 30;
 const CASH_DAYS = 7;
-const MAX_SHIFTS = 10;
+const MAX_SHIFTS = SHIFT_DAYS + 1;
 
 type Count = { day: string; n: number };
 
@@ -81,7 +81,12 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   const result = {
     today, watchDays: WATCH_DAYS, bringIn: null as null | { day: string; software: number; registerPages: number },
     shifts: { count: 0, list: [] as Awaited<typeof listP> },
-    waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled: 0 },
+    waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled: 0,
+      // The same groups as a shift's To do (18 Nov 2026), over every saved shift: each with its count, total and shifts.
+      kinds: Object.fromEntries((['not_received', 'found', 'paperwork', 'cash_wait'] as const).map((k) => {
+        const xs = waiting.look.filter((b) => b.kind === k);
+        return [k, { n: xs.length, paise: xs.reduce((t, b) => t + (b.amountPaise ?? 0), 0), days: [...new Set(xs.map((b) => b.day))].sort() }];
+      })) as Record<'not_received' | 'found' | 'paperwork' | 'cash_wait', { n: number; paise: number; days: string[] }> },
     fresh: {
       registerDay: uploads.find((u) => u.kind === 'bill_register')?.day ?? null,
       reportDay: uploads.find((u) => u.kind === 'software_sales_csv')?.day ?? null,
@@ -153,6 +158,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   })();
   const [list, notBilled, [sw, reg, saved]] = await Promise.all([listP, notBilledP, bringInP, bankP, decideP, approveP]);
   const open = list.filter((s) => s.status !== 'confirmed' || (s.bank && s.bank.billsLeft + s.bank.creditsLeft + s.bank.cardsLeft > 0));
+  // Every shift to finish, for the strip of days on Today (18 Nov 2026).
   result.shifts = { count: open.length, list: open.slice(0, MAX_SHIFTS) };
   result.waitingBills.notBilled = notBilled?.n ?? 0;
   result.bringIn = lastShift >= start && !saved?.n && (!sw?.n || !reg?.n) ? { day: lastShift, software: sw?.n ?? 0, registerPages: reg?.n ?? 0 } : null;

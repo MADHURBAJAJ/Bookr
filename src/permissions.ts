@@ -38,7 +38,8 @@ export const PERMISSIONS = {
   'sales.import': PREPARERS,
   'sales.decide': BOOKS,
   'shift.reopen': OWNER,
-  'cash.writeoff': OWNER,
+  // Booking a cash shortage: Owner or Accountant (18 Nov 2026).
+  'cash.writeoff': BOOKS,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;
