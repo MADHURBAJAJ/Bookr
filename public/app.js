@@ -3399,9 +3399,11 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
     const suggest = c.bank?.suggest ?? n?.suggest ?? m?.suggest;
     if (!suggest || c.decision === suggest) return '';
     const text = c.bank?.suggest ? `${c.bank.machine ? 'The card machine' : 'The bank'} got ₹ ${rs(c.bank.amountPaise)} by UPI at ${hhmm(c.bank.postedAt)}: ${sideName(suggest)} is right.`
+      : m?.toCard ? `The card machine got ₹ ${rs(m.amountPaise)} (${m.label}) at ${hhmm(m.paidAt)}, the register's amount: paid by card at the register's amount.`
       : m ? `The card machine got ₹ ${rs(m.amountPaise)} (${m.label}) at ${hhmm(m.paidAt)}: ${sideName(suggest)} is right.`
       : `No UPI credit of ₹ ${rs(n.upiPaise)} near this bill${n.takenBy ? ` (the one at ${hhmm(n.takenBy.postedAt)} went to bill ${n.takenBy.billNo})` : ''}: it was most likely paid by ${MODE_LABELS[n.mode]?.toLowerCase() ?? n.mode}, as ${sideName(suggest)} says.`;
-    return html`<div class="tiny" style="white-space:normal;max-width:260px;color:${c.decision ? 'var(--warn-ink, #8a5a00)' : 'var(--teal-ink)'}">${c.decision ? '⚠ Decided the other way. ' : ''}${text}</div>`;
+    return html`<div class="tiny" style="white-space:normal;max-width:260px;color:${c.decision ? 'var(--warn-ink, #8a5a00)' : 'var(--teal-ink)'}">${c.decision ? '⚠ Decided the other way. ' : ''}${text}</div>${m?.toCard && c.register?.uploadId && biz.actions.includes('sales.decide')
+      ? html`<button class="btn plain dchip" type="button" data-machinetocard="${c.id}" title="Changes the register's payment to Card, uses the register, and matches the machine payment when you save. One Undo.">Paid by card ₹ ${rs(m.amountPaise)}: change the register to Card and use it</button>` : ''}`;
   };
   const bankChip = (c) => {
     // The card machine's payment, for a card-or-not difference (approved 9 Nov 2026).
@@ -3608,6 +3610,15 @@ function compareParts(biz, day, v, shifts, { reload, back, onReconcile = false }
       }
       if (skipped.length) throw new Error(`Not changed: ${skipped.map((x) => `bill ${x.billNo}, ${x.reason}`).join('; ')}.`);
     });
+  }));
+  // Paid by card at the register's amount (17 Nov 2026): the register's payment becomes Card and the register is used.
+  root.querySelectorAll('[data-machinetocard]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const c = v.comparisons.find((x) => x.id === b.dataset.machinetocard);
+    const m = c?.machine;
+    if (!m?.toCard) return;
+    paidOnCardClick(biz, day, { payment: { id: m.toCard.paymentId, amountPaise: m.amountPaise, paidAt: m.paidAt, upi: m.upi },
+      written: { comparisonId: c.id, billNo: c.billNo, mode: c.register.mode, amountPaise: m.amountPaise, rowId: c.register.rowId, uploadId: c.register.uploadId } }, b, reload);
   }));
   root.querySelectorAll('[data-slip]').forEach((b) => b.addEventListener('click', async (e) => {
     e.stopPropagation();

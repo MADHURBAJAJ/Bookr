@@ -124,4 +124,34 @@ describe('stage 6', () => {
     expect(bill(v, '2610311').machine).toMatchObject({ suggest: 'use_software', amountPaise: 90000 });
     expect(bill(v, '2610312').machine).toMatchObject({ suggest: 'use_register', amountPaise: 60000 });
   });
+
+  it('backs the register when the machine got its amount though the software says card at another amount (17 Nov 2026)', async () => {
+    const h = await hotel();
+    await h.software([['2610313', '31 19:30', 'CARD', '188']]);
+    await h.register([{ no: '2610313', amount: '188', discount: '9', pays: [['upi', '179']] }]);
+    await h.swipe('31 19:32', 179);
+    const v = await h.view();
+    const c = bill(v, '2610313');
+    expect(c.machine).toMatchObject({ suggest: 'use_register', amountPaise: 17900, toCard: { paymentId: expect.any(String) } });
+    // The button's steps: the register's payment becomes Card, the register is used, the payment is matched on save.
+    const acc = h.clients.accountant;
+    const base = `/businesses/${h.bid}`;
+    const r = (await acc.get(`${base}/uploads/${c.register.uploadId}`)).json.rows.find((x: any) => x.id === c.register.rowId);
+    expect((await acc.put(`${base}/register-rows/${r.id}`, { billNo: r.billNo, billType: r.billType, amount: '188', discount: '9', status: r.status, remarks: r.remarks,
+      paidWithRowId: null, payments: [{ mode: 'card', columnLabel: 'Card', amount: '179' }] })).status).toBe(200);
+    const c2 = bill(await h.view(), '2610313');
+    if (c2.difference !== 'match') expect((await acc.put(`${base}/comparisons/${c2.id}`, { decision: 'use_register', note: 'machine' })).status).toBe(200);
+    expect((await acc.post(`${base}/shifts/2026-10-31/card-choices`, { paymentId: c.machine.toCard.paymentId, comparisonIds: [c2.id] })).status).toBe(200);
+    await h.decideRest();
+    await h.confirm();
+    expect(await sql`SELECT 1 FROM card_matches m JOIN card_settlements s ON s.id = m.settlement_id WHERE s.id = ${c.machine.toCard.paymentId}`).toHaveLength(1);
+  });
+
+  it('does not offer Card for a register bill the machine has no payment of', async () => {
+    const h = await hotel();
+    await h.software([['2610314', '31 19:30', 'CARD', '188']]);
+    await h.register([{ no: '2610314', amount: '188', discount: '9', pays: [['upi', '179']] }]);
+    await h.swipe('31 19:32', 250);
+    expect(bill(await h.view(), '2610314').machine).toBeNull();
+  });
 });

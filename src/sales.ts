@@ -767,7 +767,9 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   // The card machine as a witness too (approved 9 Nov 2026): a mode difference where one side says card, and the card
   // report has a payment of that side's amount within an hour of the bill (card, or UPI on the machine). Each payment
   // once, closest first. A person still decides.
-  const machine = new Map<string, { suggest: 'use_software' | 'use_register'; amountPaise: number; paidAt: number; upi: boolean; label: string; minutes: number }>();
+  // Either amount (17 Nov 2026): the software says card and the register another mode at another amount, and the machine
+  // got the register's amount: paid by card at the register's amount; toCard says the register's payment becomes Card.
+  const machine = new Map<string, { suggest: 'use_software' | 'use_register'; amountPaise: number; paidAt: number; upi: boolean; label: string; minutes: number; toCard?: { paymentId: string } }>();
   if (shift?.status !== 'confirmed') {
     // Amount-only differences on a card bill too (Stage 6, 10 Nov 2026): the payment backs the side it equals.
     const diffs = comparisons.filter((c) => c.paid_at != null && c.rg_mode !== 'mixed' && c.decision !== 'leave_out' && c.decision !== 'carry_forward'
@@ -785,19 +787,23 @@ export async function shiftView(db: DB, businessId: string, day: string) {
           AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, cov.window.from - 3600e3, cov.window.to + 3600e3)).filter((p) => !isMachineUpi(p));
       const usedPay = new Set<string>();
       const options = diffs.flatMap((c) => {
-        const sides = c.difference === 'amount' ? (['software', 'register'] as const) : [c.sw_mode === 'card' ? 'software' as const : 'register' as const];
+        const cardSide = c.sw_mode === 'card' ? 'software' as const : 'register' as const;
+        const toCard = c.difference !== 'amount' && cardSide === 'software' && (c.rg_mode === 'upi' || c.rg_mode === 'cash') && c.register_row_id != null
+          && !grouped.has(c.register_row_id) && (paysByRow.get(c.register_row_id) ?? []).length === 1 && paysByRow.get(c.register_row_id)![0].amount_paise !== c.sw_amount_paise;
+        const sides = c.difference === 'amount' ? (['software', 'register'] as const) : toCard ? (['software', 'register'] as const) : [cardSide];
         return sides.flatMap((side) => {
-          const amount = (side === 'software' ? c.sw_amount_paise : c.rg_amount_paise) ?? 0;
+          // The register's one payment, what was paid after its discount, when it is to become Card.
+          const amount = (side === 'software' ? c.sw_amount_paise : toCard ? paysByRow.get(c.register_row_id!)![0].amount_paise : c.rg_amount_paise) ?? 0;
           return pays.filter((p) => p.amount_paise === amount && Math.abs(p.paid_at - c.paid_at!) <= 60 * 60000)
-            .map((p) => ({ c, p, side, gap: Math.abs(p.paid_at - c.paid_at!) }));
+            .map((p) => ({ c, p, side, gap: Math.abs(p.paid_at - c.paid_at!), toCard: toCard && side === 'register' }));
         });
       }).concat(splits.flatMap((c) => pays.filter((p) => p.amount_paise === cardPart(c)[0].amount_paise && Math.abs(p.paid_at - c.paid_at!) <= 60 * 60000)
-        .map((p) => ({ c, p, side: 'register' as const, gap: Math.abs(p.paid_at - c.paid_at!) })))).sort((a, b) => a.gap - b.gap);
+        .map((p) => ({ c, p, side: 'register' as const, gap: Math.abs(p.paid_at - c.paid_at!), toCard: false })))).sort((a, b) => a.gap - b.gap);
       for (const o of options) {
         if (usedPay.has(o.p.id) || machine.has(o.c.id)) continue;
         usedPay.add(o.p.id);
         machine.set(o.c.id, { suggest: o.side === 'software' ? 'use_software' : 'use_register', amountPaise: o.p.amount_paise, paidAt: o.p.paid_at, upi: o.p.scheme === 'UPI',
-          label: machineLabel(o.p), minutes: Math.round(o.gap / 60000) });
+          label: machineLabel(o.p), minutes: Math.round(o.gap / 60000), ...(o.toCard ? { toCard: { paymentId: o.p.id } } : {}) });
       }
     }
   }
