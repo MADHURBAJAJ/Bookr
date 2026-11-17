@@ -7,6 +7,8 @@ import { body, date, fail, optionalPaise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { audit, clock, event, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
+import { z } from 'zod';
+import { OcrError, readWithClaude } from '../../../src/claude';
 
 export const stockRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -140,17 +142,112 @@ stockRoutes.post(`${B}/stock/purchases`, requireAction('stock.edit'), async (c) 
   if (!Array.isArray(data.lines) || !data.lines.length || data.lines.length > 50) fail(400, 'Add what was received.');
   const { t, shiftDay } = clock(bizOf(c));
   const statements = [];
+  // A bill photo read earlier: the goods are received against it, once.
+  let billId: string | null = null;
+  if (data.billId !== undefined && data.billId !== null) {
+    const pb = await one<{ id: string; status: string }>(db, 'SELECT id, status FROM purchase_bills WHERE id = ? AND business_id = ?', data.billId, bid);
+    if (!pb) fail(400, 'That bill photo was not found.');
+    if (pb.status === 'received') fail(409, 'The goods on this bill were already received.');
+    billId = pb.id;
+    statements.push(stmt(db, "UPDATE purchase_bills SET status = 'received', vendor = ?, invoice_no = ?, received_at = ? WHERE id = ? AND status = 'draft'", vendor, invoice, t, billId));
+  }
   for (const raw of data.lines) {
     const r = (raw ?? {}) as Record<string, unknown>;
     const i = await item(db, bid, r.itemId);
     const packs = whole(r.packs, `Packs of ${i.name}`, 1, 100000);
     const cost = optionalPaise(r, 'costPerPack', `Price per pack of ${i.name}`);
-    statements.push(stmt(db, `INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, cost_per_pack_paise, ref, vendor, by_staff, shift_day, at)
-      VALUES (?, ?, ?, ?, 'purchase', ?, ?, ?, ?, ?, ?, ?)`, newId(), bid, i.id, s.id, packs * i.pack_size, cost, invoice, vendor, c.get('staff').id, shiftDay, t));
+    statements.push(stmt(db, `INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, cost_per_pack_paise, ref, vendor, by_staff, shift_day, at, bill_id)
+      VALUES (?, ?, ?, ?, 'purchase', ?, ?, ?, ?, ?, ?, ?, ?)`, newId(), bid, i.id, s.id, packs * i.pack_size, cost, invoice, vendor, c.get('staff').id, shiftDay, t, billId));
     if (cost !== null) statements.push(stmt(db, 'UPDATE stock_items SET cost_per_pack_paise = ? WHERE id = ?', cost, i.id));
   }
   await db.batch(statements);
   return c.json({ ok: true }, 201);
+});
+
+// ---------- supplier bill photos, read by Claude
+
+const BillReading = z.object({
+  vendor: z.string().nullable(),
+  invoiceNo: z.string().nullable(),
+  billDate: z.string().nullable(),
+  totalRupees: z.number().nullable(),
+  lines: z.array(z.object({
+    description: z.string(),
+    stockItemId: z.string().nullable(),
+    packs: z.number().nullable(),
+    pricePerPackRupees: z.number().nullable(),
+    lineTotalRupees: z.number().nullable(),
+  })),
+});
+const MAX_PHOTO = 5 * 1024 * 1024;
+
+function billInstructions(items: { id: string; name: string; unit: string; pack_name: string; pack_size: number }[]) {
+  return `This is a photo of a supplier's bill (tax invoice or delivery bill) for a restaurant and bar in India.
+Read it and return:
+- vendor: the supplier's name as printed; invoiceNo: the bill or invoice number; billDate: the bill date as YYYY-MM-DD.
+- totalRupees: the bill's grand total in rupees.
+- lines: one entry per item row on the bill, in order. description = the item as printed (name, size, brand).
+  packs = how many packs were bought, counted in the pack of the matched stock item below (for example bottles or cases).
+  If the bill counts in a different unit (cases against bottles), convert to the stock item's pack; if unsure, use null.
+  pricePerPackRupees = what was paid for one such pack including the tax shown on the bill, so packs x price is the real cost.
+  lineTotalRupees = the row's amount as printed.
+  stockItemId = the id of the matching stock item below, only when you are confident it is the same product and size; otherwise null.
+Use null for anything you cannot read clearly. Never guess a number.
+
+The restaurant's stock items (id | name | counted in | pack):
+${items.map((i) => `${i.id} | ${i.name} | ${i.unit} | ${i.pack_name} of ${i.pack_size} ${i.unit}`).join('\n') || '(none yet)'}`;
+}
+
+// A photo of a supplier's bill (JPEG or PNG, sent as the request body): kept, then read by Claude into a draft to check.
+// When Claude is not set up or cannot read it, the photo is still kept and the person types the lines in.
+stockRoutes.post(`${B}/stock/bills`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  if (!c.env.BILLS) fail(503, 'Bill photos are not set up on the server yet (no BILLS storage). Type the bill in below.');
+  const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim();
+  if (type !== 'image/jpeg' && type !== 'image/png') fail(400, 'Send the bill as a JPEG or PNG photo.');
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (!bytes.length) fail(400, 'The photo is empty.');
+  if (bytes.length > MAX_PHOTO) fail(400, 'The photo is larger than 5 MB. Take it again at a lower resolution.');
+  const id = newId();
+  const t = Date.now();
+  const key = `pos/${bid}/bills/${id}.${type === 'image/png' ? 'png' : 'jpg'}`;
+  await c.env.BILLS.put(key, bytes, { httpMetadata: { contentType: type } });
+
+  // Cost guard: at most N readings per business per day (default 30).
+  const limit = Number(c.env.BILL_READS_PER_DAY) || 30;
+  const today = await one<{ n: number }>(db, 'SELECT count(*) AS n FROM purchase_bills WHERE business_id = ? AND read_model IS NOT NULL AND created_at > ?', bid, t - 86_400_000);
+  let read: z.infer<typeof BillReading> | null = null;
+  let model: string | null = null;
+  let error: string | null = null;
+  if (today!.n >= limit) error = `Today's limit of ${limit} bill readings is used up. Type this bill in; the photo is kept.`;
+  else {
+    const items = await all<{ id: string; name: string; unit: string; pack_name: string; pack_size: number }>(db,
+      'SELECT id, name, unit, pack_name, pack_size FROM stock_items WHERE business_id = ? AND active = 1 ORDER BY name', bid);
+    try {
+      const r = await readWithClaude(c.env, { bytes, mediaType: type }, billInstructions(items), BillReading);
+      read = r.data;
+      model = r.model;
+      // Keep only matches to this business's own items.
+      const ids = new Set(items.map((i) => i.id));
+      for (const l of read.lines) if (l.stockItemId && !ids.has(l.stockItemId)) l.stockItemId = null;
+    } catch (e) {
+      if (!(e instanceof OcrError)) throw e;
+      error = e.message;
+    }
+  }
+  await stmt(db, `INSERT INTO purchase_bills (id, business_id, photo_key, read_json, read_model, read_error, vendor, invoice_no, by_staff, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, key, read ? JSON.stringify(read) : null, model, error, read?.vendor ?? null, read?.invoiceNo ?? null, c.get('staff').id, t).run();
+  return c.json({ billId: id, read, error }, 201);
+});
+
+// The photo itself, for checking against what was read (only to people who handle stock).
+stockRoutes.get(`${B}/stock/bills/:id/photo`, requireAction('stock.edit'), async (c) => {
+  const pb = await one<{ photo_key: string | null }>(c.env.DB, 'SELECT photo_key FROM purchase_bills WHERE id = ? AND business_id = ?', c.req.param('id'), c.get('businessId'));
+  if (!pb?.photo_key || !c.env.BILLS) fail(404, 'Photo not found.');
+  const obj = await c.env.BILLS.get(pb.photo_key);
+  if (!obj) fail(404, 'Photo not found.');
+  return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType ?? 'image/jpeg', 'Cache-Control': 'private, max-age=3600' } });
 });
 
 // Moves stock between stores (e.g. main store to bar), in units of the item (ml, pcs).

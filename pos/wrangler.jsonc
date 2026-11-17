@@ -23,8 +23,11 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Photos of supplier bills. Made by `wrangler r2 bucket create pos-demo-bills`; served only through the Worker after a role check.
+  "r2_buckets": [{ "binding": "BILLS", "bucket_name": "pos-demo-bills" }],
   // Bookr's address. The key Bookr gives each business goes in the BOOKR_KEYS Worker secret, never here.
-  "vars": { "BOOKR_URL": "" },
+  // Bill photos are read by Claude: the API key is the ANTHROPIC_API_KEY Worker secret, never here.
+  "vars": { "BOOKR_URL": "", "CLAUDE_OCR_MODEL": "claude-opus-5-5", "BILL_READS_PER_DAY": "30" },
   // Sends Bookr whatever is still waiting, every 5 minutes.
   "triggers": { "crons": ["*/5 * * * *"] },
   // POS_SETUP_TOKEN is a Worker secret (wrangler secret put POS_SETUP_TOKEN -c pos/wrangler.jsonc), never here.

@@ -18,8 +18,10 @@ app.use('*', async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
     const origin = c.req.header('Origin');
     if (origin && origin !== new URL(c.req.url).origin) throw new HTTPException(403, { message: 'Cross-site request refused.' });
+    // JSON, or a raw photo body for a supplier bill. Neither can be sent cross-site without a preflight.
     const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
-    if (type !== 'application/json') throw new HTTPException(415, { message: 'Send JSON.' });
+    const photo = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/stock\/bills$/.test(c.req.path);
+    if (type !== 'application/json' && !(photo && ['image/jpeg', 'image/png'].includes(type))) throw new HTTPException(415, { message: 'Send JSON.' });
   }
   await next();
 });

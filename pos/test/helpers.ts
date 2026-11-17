@@ -10,7 +10,7 @@ import { app } from '../src/app';
 const MIGRATIONS = new URL('../migrations/', import.meta.url);
 
 const dir = mkdtempSync(join(tmpdir(), 'pos-d1-'));
-const proxy = await getPlatformProxy<{ DB: D1Database }>({ persist: { path: dir } });
+const proxy = await getPlatformProxy<{ DB: D1Database; UPLOADS: R2Bucket }>({ persist: { path: dir } });
 export const db = proxy.env.DB;
 for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()) {
   await db.batch(splitStatements(readFileSync(new URL(file, MIGRATIONS), 'utf8')).map((s) => db.prepare(s)));
@@ -21,7 +21,8 @@ export async function dispose() {
 }
 
 export const SETUP_TOKEN = 'test-setup-token-not-a-secret';
-export const env = { DB: db, POS_SETUP_TOKEN: SETUP_TOKEN };
+// BILLS: a local R2 bucket (the root config's), so bill photos are stored and read back in tests.
+export const env = { DB: db, POS_SETUP_TOKEN: SETUP_TOKEN, BILLS: proxy.env.UPLOADS };
 
 export async function q(sql: string, ...params: unknown[]): Promise<any[]> {
   return (await db.prepare(sql).bind(...params).all()).results;

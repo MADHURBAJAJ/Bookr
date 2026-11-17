@@ -961,11 +961,37 @@ async function stockScreen(tab = 'hand') {
         ${st.stores.map((x) => html`<td class="num" style="${i.byStore[x.id] < 0 ? 'color:var(--bad)' : ''}">${qtyText(i.byStore[x.id], i)}</td>`)}<td class="num"><strong>${qtyText(i.total, i)}</strong></td><td class="num">${rs(i.valuePaise)}</td></tr>`)}
       <tr><td><strong>Total value</strong></td>${st.stores.map(() => html`<td></td>`)}<td></td><td class="num"><strong>${rs(items.reduce((t, i) => t + i.valuePaise, 0))}</strong></td></tr></tbody></table></div>
       <p class="small quiet">Value is at the last price paid. Bar sales take stock from the bar store when a bill is settled, by each menu item's recipe.</p></section>`;
-    else if (tab === 'receive') body = html`<form class="panel"><h2>Receive goods</h2>${errorBox()}<div class="grid3">${storeSel('rcStore', 'Into store')}<label class="f">Vendor<input class="in" data-model="rcVendor" value="${ui.rcVendor ?? ''}"></label>
-        <label class="f">Invoice number<input class="in" data-model="rcInv" value="${ui.rcInv ?? ''}"></label>${itemSel('rcItem')}
-        <label class="f">How many ${(items.find((i) => i.id === ui.rcItem)?.packName ?? 'pack')}s<input class="in" inputmode="numeric" data-model="rcPacks" value="${ui.rcPacks ?? ''}"></label>
-        <label class="f">Price per ${(items.find((i) => i.id === ui.rcItem)?.packName ?? 'pack')} (₹)<input class="in" inputmode="decimal" data-model="rcCost" value="${ui.rcCost ?? ''}"></label></div>
-      <div><button class="btn pri" type="submit" data-act="stReceive" data-submit>Receive</button></div></form>`;
+    else if (tab === 'receive') {
+      ui.rcLines ??= [{ k: 1, desc: '' }];
+      const lineTotal = ui.rcLines.reduce((t, l) => t + (int(ui[`rcl${l.k}packs`]) || 0) * (toPaise(ui[`rcl${l.k}cost`] ?? '') ?? 0), 0);
+      const billTotal = ui.rcTotal != null ? Math.round(ui.rcTotal * 100) : null;
+      body = html`<section class="panel"><h2>Supplier bill</h2>
+        <p class="small quiet">Take a photo of the bill, or choose one. Claude reads it into the lines below; you check every line before anything is received. You can also type the bill in without a photo.</p>
+        <div class="row"><label class="btn pri" style="${ui.rcReading ? 'pointer-events:none;opacity:.6' : ''}">${ui.rcReading ? 'Reading the bill…' : ui.rcBillId ? 'Take another photo' : 'Take or choose photo'}<input type="file" accept="image/*" data-bill-photo style="display:none"></label>
+          ${ui.rcBillId ? html`<a class="btn" href="/api${B()}/stock/bills/${ui.rcBillId}/photo" target="_blank" rel="noopener">See the photo</a>` : ''}</div>
+        ${ui.rcReading ? html`<p class="small quiet">This can take up to a minute.</p>` : ''}
+        ${ui.rcError ? html`<div class="msg warn">${ui.rcError}</div>` : ''}
+        ${ui.rcRead ? html`<div class="msg ok">Read ${ui.rcLines.length} line${ui.rcLines.length === 1 ? '' : 's'}${ui.rcUnmatched ? `; ${ui.rcUnmatched} need${ui.rcUnmatched === 1 ? 's' : ''} a stock item chosen` : ''}. Check quantities and prices against the photo.</div>` : ''}</section>
+      <form class="panel" style="margin-top:16px"><h2>Check and receive</h2>${errorBox()}
+        <div class="grid3">${storeSel('rcStore', 'Into store')}<label class="f">Vendor<input class="in" data-model="rcVendor" value="${ui.rcVendor ?? ''}"></label>
+          <label class="f">Invoice number<input class="in" data-model="rcInv" value="${ui.rcInv ?? ''}"></label></div>
+        <div class="scroll"><table class="t"><thead><tr><th>Stock item</th><th class="num">Packs</th><th class="num">Price paid per pack, tax included (₹)</th><th class="num">Amount</th><th></th></tr></thead><tbody>
+          ${ui.rcLines.map((l) => {
+            const it = items.find((i) => i.id === ui[`rcl${l.k}item`]);
+            const amt = (int(ui[`rcl${l.k}packs`]) || 0) * (toPaise(ui[`rcl${l.k}cost`] ?? '') ?? 0);
+            return html`<tr><td><select class="in" data-model="rcl${l.k}item" aria-label="Stock item" style="${it ? '' : 'border-color:var(--warn-line)'}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${it?.id === i.id ? 'selected' : ''}>${i.name} (${i.packName} of ${i.packSize} ${i.unit})</option>`)}</select>
+                ${l.desc ? html`<div class="small quiet">On the bill: ${l.desc}</div>` : ''}</td>
+              <td class="num"><input class="in" style="max-width:90px" inputmode="numeric" data-live data-model="rcl${l.k}packs" value="${ui[`rcl${l.k}packs`] ?? ''}" aria-label="Packs">${it ? html`<div class="small quiet">${it.packName}s</div>` : ''}</td>
+              <td class="num"><input class="in" style="max-width:120px" inputmode="decimal" data-live data-model="rcl${l.k}cost" value="${ui[`rcl${l.k}cost`] ?? ''}" aria-label="Price per pack"></td>
+              <td class="num">${amt ? rs(amt) : ''}</td>
+              <td><button class="btn" type="button" data-act="rcDrop" data-k="${l.k}" aria-label="Remove this line">Remove</button></td></tr>`;
+          })}</tbody></table></div>
+        <div class="row" style="justify-content:space-between"><button class="btn" type="button" data-act="rcAdd">Add a line</button>
+          <div class="sums" style="min-width:260px"><div><span>Lines total</span><span>${rs(lineTotal)}</span></div>
+            ${billTotal != null ? html`<div><span>Bill total (read)</span><span>${rs(billTotal)}</span></div>
+              ${Math.abs(billTotal - lineTotal) >= 100 ? html`<div style="color:var(--bad)"><span>Difference</span><span>${rs(billTotal - lineTotal)}</span></div>` : ''}` : ''}</div></div>
+        <div><button class="btn pri" type="submit" data-act="stReceive" data-submit>Receive</button></div></form>`;
+    }
     else if (tab === 'transfer') body = html`<form class="panel"><h2>Move stock between stores</h2>${errorBox()}<div class="grid3">${storeSel('trFrom', 'From')}${storeSel('trTo', 'To')}${itemSel('trItem')}
         <label class="f">Quantity (${items.find((i) => i.id === ui.trItem)?.unit ?? 'units'})<input class="in" inputmode="numeric" data-model="trQty" value="${ui.trQty ?? ''}"></label></div>
       <p class="small quiet">A 750 ml bottle is 750; a case of 12 beers is 12.</p><div><button class="btn pri" type="submit" data-act="stTransfer" data-submit>Move</button></div></form>`;
@@ -1021,7 +1047,52 @@ async function stockScreen(tab = 'hand') {
   rerender();
 }
 const int = (v) => (/^\d+$/.test(String(v ?? '').trim()) ? Number(v) : NaN);
-actions.stReceive = async () => { await api('POST', `${B()}/stock/purchases`, { storeId: ui.rcStore, vendor: ui.rcVendor, invoiceNo: ui.rcInv, lines: [{ itemId: ui.rcItem, packs: int(ui.rcPacks), costPerPack: ui.rcCost }] }); flash = { kind: 'ok', text: 'Received.' }; go('#/stock/hand'); };
+actions.stReceive = async () => {
+  const lines = ui.rcLines.map((l) => ({ itemId: ui[`rcl${l.k}item`], packs: int(ui[`rcl${l.k}packs`]), costPerPack: (ui[`rcl${l.k}cost`] ?? '').trim() || undefined }));
+  if (!lines.length) throw new Error('Add what was received.');
+  if (lines.some((l) => !l.itemId)) throw new Error('Choose the stock item on every line, or remove the line.');
+  if (lines.some((l) => !(l.packs > 0))) throw new Error('Type how many packs on every line.');
+  await api('POST', `${B()}/stock/purchases`, { storeId: ui.rcStore, vendor: ui.rcVendor, invoiceNo: ui.rcInv, billId: ui.rcBillId ?? undefined, lines });
+  flash = { kind: 'ok', text: `Received ${lines.length} line${lines.length === 1 ? '' : 's'}${ui.rcVendor ? ' from ' + ui.rcVendor : ''}.` }; go('#/stock/hand');
+};
+actions.rcAdd = () => { const k = Math.max(0, ...ui.rcLines.map((l) => l.k)) + 1; ui.rcLines.push({ k, desc: '' }); rerender(); };
+actions.rcDrop = (d) => { ui.rcLines = ui.rcLines.filter((l) => String(l.k) !== d.k); rerender(); };
+/** A bill photo: made smaller on the device (at most 2000 px, JPEG), kept on the server and read by Claude into the lines. */
+async function sendBillPhoto(file) {
+  const img = await createImageBitmap(file);
+  const scale = Math.min(1, 2000 / Math.max(img.width, img.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale); canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.85));
+  const r = await fetch(`/api${B()}/stock/bills`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+  const data = await r.json().catch(() => null);
+  if (r.status === 401) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401); }
+  if (!r.ok) throw new ApiError(data?.error ?? 'Could not send the photo.', r.status);
+  return data;
+}
+root.addEventListener('change', async (ev) => {
+  const el = ev.target;
+  if (!el.matches?.('[data-bill-photo]') || !el.files?.[0]) return;
+  ui.rcReading = true; ui.rcError = null; ui.error = null; rerender();
+  try {
+    const r = await sendBillPhoto(el.files[0]);
+    ui.rcBillId = r.billId; ui.rcError = r.error; ui.rcRead = !!r.read;
+    if (r.read) {
+      if (r.read.vendor) ui.rcVendor = r.read.vendor;
+      if (r.read.invoiceNo) ui.rcInv = r.read.invoiceNo;
+      ui.rcTotal = r.read.totalRupees;
+      ui.rcLines = r.read.lines.map((l, i) => {
+        const k = i + 1;
+        ui[`rcl${k}item`] = l.stockItemId ?? ''; ui[`rcl${k}packs`] = l.packs != null ? String(l.packs) : ''; ui[`rcl${k}cost`] = l.pricePerPackRupees != null ? String(l.pricePerPackRupees) : '';
+        return { k, desc: `${l.description}${l.lineTotalRupees != null ? ' · ' + rs(Math.round(l.lineTotalRupees * 100)) : ''}` };
+      });
+      if (!ui.rcLines.length) ui.rcLines = [{ k: 1, desc: '' }];
+      ui.rcUnmatched = r.read.lines.filter((l) => !l.stockItemId).length;
+    }
+  } catch (e) { if (!(e instanceof ApiError && e.status === 401)) ui.rcError = e.message; }
+  ui.rcReading = false; rerender();
+});
 actions.stTransfer = async () => { await api('POST', `${B()}/stock/transfers`, { fromStoreId: ui.trFrom, toStoreId: ui.trTo, lines: [{ itemId: ui.trItem, qty: int(ui.trQty) }] }); flash = { kind: 'ok', text: 'Moved.' }; go('#/stock/hand'); };
 actions.stWaste = async () => { await api('POST', `${B()}/stock/waste`, { storeId: ui.waStore, itemId: ui.waItem, qty: int(ui.waQty), reason: ui.waReason }); flash = { kind: 'ok', text: 'Recorded.' }; go('#/stock/hand'); };
 actions.stCount = async () => {

@@ -30,7 +30,7 @@ function toBase64(bytes: Uint8Array): string {
 }
 
 export async function readWithClaude<T extends z.ZodType>(
-  env: Env,
+  env: Pick<Env, 'ANTHROPIC_API_KEY' | 'CLAUDE_OCR_MODEL'>,
   page: PageImage,
   instructions: string,
   schema: T,

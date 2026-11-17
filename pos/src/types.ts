@@ -9,6 +9,14 @@ export interface Env {
   /** Worker secret: the key Bookr gave each business, JSON {"<business id>": "<key>"}. Never sent to the browser. */
   BOOKR_KEYS?: string;
   ASSETS?: { fetch: typeof fetch };
+  /** R2 bucket for photos of supplier bills. Served only through the Worker after a role check. */
+  BILLS?: R2Bucket;
+  /** Worker secret: the Anthropic API key used to read bill photos. Never sent to the browser. */
+  ANTHROPIC_API_KEY?: string;
+  /** Which Claude model reads bill photos (a setting, not a secret). */
+  CLAUDE_OCR_MODEL?: string;
+  /** Most bill photos read per business per day (cost guard). */
+  BILL_READS_PER_DAY?: string;
 }
 
 export interface Staff {
