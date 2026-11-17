@@ -1692,6 +1692,9 @@ function rowIssues(r) {
     info.push(`${dayLabel(od.day)} bill: in that day's software report${od.amount != null ? ` as ${odMode(od.mode)} ₹ ${rs(od.amount)}` : ''}, counted there${rowMode && od.mode && rowMode !== od.mode ? `. Paid here by ${odMode(rowMode)}: change it on Reconcile` : ''}.`);
   } else if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
   else if (!bm?.exact && isOddBill(r.billNo) && r.numberSettled) info.push(r.numberSettled); // a person settled it on Compare
+  // Ticked (17 Nov 2026): a person has checked the number against the photo, so its format is not raised again here;
+  // Compare and Reconcile still decide what the bill is.
+  else if (r.status === 'checked' && isOddBill(r.billNo)) { /* checked as written */ }
   else if (!bm && isOddBill(r.billNo)) {
     flags.bill_no = 'red';
     red.push(html`Number is neither new POS (date and running number) nor old POS (14xxxx–15xxxx)`);
