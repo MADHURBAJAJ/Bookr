@@ -18,7 +18,7 @@ creditRoutes.use(`${B}/*`, requireStaff);
 
 const ZERO: Totals = { grossPaise: 0, discountPaise: 0, taxablePaise: 0, cgstPaise: 0, sgstPaise: 0, roundOffPaise: 0, totalPaise: 0 };
 
-creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.void'), async (c) => {
+creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
   const billId = c.req.param('id');

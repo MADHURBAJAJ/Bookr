@@ -31,7 +31,7 @@ describe('POS to Bookr', () => {
     await s.counter.post(`${s.B}/settlements`, { billIds: [a.id], payments: [{ mode: 'card', amount: '189', cardApproval: 'XY12ZZ', cardLast4: '1111' }] });
     await s.counter.post(`${s.B}/settlements`, { billIds: [b.id], payments: [{ mode: 'upi', amount: '84', payAccountId: s.upiCompany }] });
     const voided = (await billed(s, [['Butter Naan', 1]])).bill;
-    await s.counter.post(`${s.B}/bills/${voided.id}/void`, { reasonId: s.reasons.void });
+    await s.owner.post(`${s.B}/bills/${voided.id}/void`, { reasonId: s.reasons.void });
 
     // Evidence already in Bookr: the card machine's payment and a UPI credit of 84 into the company account.
     const t = Date.now();

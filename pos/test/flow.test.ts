@@ -93,8 +93,9 @@ describe('orders, KOT and bills', () => {
   it('voids a printed bill with a reason, keeps its number, and bills the order again', async () => {
     const s = await setupBusiness({ huf: true });
     const { order, bill } = await billed(s, [['Masala Dosa', 1]]);
-    expect((await s.counter.post(`${s.B}/bills/${bill.id}/void`, {})).status).toBe(400);
-    expect((await s.counter.post(`${s.B}/bills/${bill.id}/void`, { reasonId: s.reasons.void })).status).toBe(200);
+    expect((await s.counter.post(`${s.B}/bills/${bill.id}/void`, { reasonId: s.reasons.void })).status).toBe(403); // a cashier cannot void
+    expect((await s.owner.post(`${s.B}/bills/${bill.id}/void`, {})).status).toBe(400);
+    expect((await s.owner.post(`${s.B}/bills/${bill.id}/void`, { reasonId: s.reasons.void })).status).toBe(200);
     const again = (await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.huf })).json.bill;
     expect(again.billNo).toMatch(/^H1-/);
     const rows = await q('SELECT bill_no, status FROM bills WHERE order_id = ? ORDER BY printed_at', order);
@@ -359,7 +360,7 @@ describe('bar stock', () => {
     const { bill } = await billed(s, [['Whisky 30 ml', 3], ['Beer 650 ml', 2]]);
     await s.counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: rupees(bill.totalPaise) }] });
     const voided = (await billed(s, [['Whisky 30 ml', 1]])).bill;
-    await s.counter.post(`${B}/bills/${voided.id}/void`, { reasonId: s.reasons.void });
+    await s.owner.post(`${B}/bills/${voided.id}/void`, { reasonId: s.reasons.void });
 
     await ok(s.owner.post(`${B}/stock/waste`, { storeId: bar, itemId: whisky, qty: 30, reason: 'Spilt' }));
     const count = (await ok(s.owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: whisky, counted: 1350 }, { itemId: beer, counted: 10 }] }))).lines;
@@ -450,7 +451,7 @@ describe('sales insights and menu mix', () => {
     await ok(counter.post(`${B}/orders/${k}/kot`));
     await ok(counter.post(`${B}/orders/${k}/bill`, { entityId: s.company }));
     const v = await billed(s, [['Masala Dosa', 1]]);
-    await ok(counter.post(`${B}/bills/${v.bill.id}/void`, { reasonId: s.reasons.void }));
+    await ok(s.owner.post(`${B}/bills/${v.bill.id}/void`, { reasonId: s.reasons.void }));
 
     const day = tb.shiftDay;
     expect((await counter.get(`${B}/reports/insights?from=${day}&to=${day}`)).status).toBe(403); // cashier
@@ -485,7 +486,7 @@ describe('daily check and GSTR-1', () => {
     const paid = (await billed(s, [['Masala Dosa', 2]])).bill;
     await ok(counter.post(`${B}/settlements`, { billIds: [paid.id], payments: [{ mode: 'cash', amount: rupees(paid.totalPaise) }] }));
     const voided = (await billed(s, [['Butter Naan', 1]], {}, 'T7')).bill;
-    await ok(counter.post(`${B}/bills/${voided.id}/void`, { reasonId: s.reasons.void })); // T7 reopens, its naan not paid for
+    await ok(owner.post(`${B}/bills/${voided.id}/void`, { reasonId: s.reasons.void })); // T7 reopens, its naan not paid for
     const open = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T8' }))).id;
     await ok(counter.post(`${B}/orders/${open}/items`, { itemId: s.items['Beer 650 ml'], delta: 1 }));
     await ok(counter.post(`${B}/orders/${open}/kot`));
@@ -514,7 +515,7 @@ describe('daily check and GSTR-1', () => {
     const a = (await billed(s, [['Masala Dosa', 2]])).bill; // ₹360 + 5%
     await ok(counter.post(`${B}/settlements`, { billIds: [a.id], payments: [{ mode: 'cash', amount: rupees(a.totalPaise) }] }));
     const v = (await billed(s, [['Butter Naan', 1]])).bill;
-    await ok(counter.post(`${B}/bills/${v.id}/void`, { reasonId: s.reasons.void }));
+    await ok(owner.post(`${B}/bills/${v.id}/void`, { reasonId: s.reasons.void }));
     const dosa = a.items.find((i: any) => i.name === 'Masala Dosa');
     await ok(counter.post(`${B}/bills/${a.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' }));
 

@@ -448,6 +448,7 @@ async function settleScreen(billId) {
           <div class="chips">${ui.others.map((o) => html`<button type="button" class="chip" aria-pressed="${ui.together.includes(o.bill.id)}" data-act="together" data-id="${o.bill.id}">${o.place} · ${o.bill.billNo} · ${rs(o.bill.totalPaise)}</button>`)}</div></div>` : ''}
         <div class="sums"><div class="big"><span>To pay</span><span>${rs(due)}</span></div></div>
         <div class="row">${can('bills.void') ? html`<button class="btn danger" type="button" data-act="voidAsk">Void bill</button>` : ''}<button class="btn" type="button" data-act="reprint">Reprint</button></div>
+        ${can('bills.void') ? '' : html`<p class="small quiet">Voiding a bill needs a manager: they sign in with their PIN on this device.</p>`}
         ${ui.voidAsk ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Void ${ui.bill.billNo}?</strong> The number stays used, and the order opens again to be billed afresh.</p>
           <div class="chips">${reasonsOf('void').map((r) => html`<button type="button" class="chip" data-act="voidGo" data-r="${r.id}">${r.label}</button>`)}<button type="button" class="chip" data-act="voidAsk">Keep the bill</button></div></div>` : ''}
       </section>
@@ -579,7 +580,7 @@ actions.reprint = async () => { const r = await api('POST', `${B()}/bills/${(ui.
 
 async function doneScreen(billId) {
   const { bill } = await api('GET', `${B()}/bills/${billId}`);
-  if (can('bills.void') && bill.status === 'settled') await load('payAccounts', 'stays', 'credit');
+  if (can('bills.refund') && bill.status === 'settled') await load('payAccounts', 'stays', 'credit');
   ui.done = bill; ui.cn = null;
   const credited = {};
   for (const n of bill.creditNotes) for (const l of n.lines) credited[l.lineId] = (credited[l.lineId] ?? 0) + l.qty;
@@ -595,7 +596,7 @@ async function doneScreen(billId) {
       <p class="quiet">The printed bill cannot be edited. Before payment a mistake is voided and billed again; after payment, money given back is a credit note.</p>
       ${errorBox()}
       <div class="row"><button class="btn pri" type="button" data-act="printDone">Print receipt</button><a class="btn" href="#/">Next order</a>
-        ${can('bills.void') && bill.status === 'settled' && anyLeft && !cn ? html`<button class="btn danger" type="button" data-act="cnAsk">Give money back</button>` : ''}</div>
+        ${can('bills.refund') && bill.status === 'settled' && anyLeft && !cn ? html`<button class="btn danger" type="button" data-act="cnAsk">Give money back</button>` : ''}</div>
       ${cn ? html`<form class="msg warn" style="display:flex;flex-direction:column;gap:10px"><strong>Credit note on ${bill.billNo}</strong>
         <div class="chips"><button type="button" class="chip" aria-pressed="${cn.full}" data-act="cnFull">Whole bill (what is left)</button><button type="button" class="chip" aria-pressed="${!cn.full}" data-act="cnPart">Chosen items</button></div>
         ${cn.full ? '' : bill.items.filter((i) => leftOf(i) > 0).map((i) => html`<div class="line"><span class="grow">${i.name} <span class="small quiet">(${leftOf(i)} left)</span></span>

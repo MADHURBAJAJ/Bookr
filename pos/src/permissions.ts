@@ -14,7 +14,8 @@ export const PERMISSIONS = {
   'orders.edit': ALL,            // open an order, add or cancel lines, send KOT, keep as a tab
   'bills.print': TILL,           // bill an order (choose the billing name and discount), reprint
   'bills.settle': TILL,          // take payments; create a credit account at the counter
-  'bills.void': TILL,            // void an unsettled bill with a reason (shown on the exceptions report)
+  'bills.void': MANAGE,          // void an unsettled bill with a reason (manager only from 18 Nov 2026: stops bill-then-void at the bar)
+  'bills.refund': TILL,          // a credit note on a paid bill: money given back, with a reason (on the Daily check)
   'stays.edit': TILL,            // open and close in-house stays
   'debtors.receive': TILL,       // take an advance, or a payment against a folio or credit account
   'shift.close': TILL,
