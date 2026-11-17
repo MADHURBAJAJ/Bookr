@@ -6772,6 +6772,10 @@ document.addEventListener('click', async (e) => {
   const sw = e.target.closest?.('[data-cashswitch]');
   if (!mk && !pb && !lo && !sw) return;
   e.preventDefault(); e.stopPropagation();
+  // One click at a time (17 Nov 2026): the button stays off until the change is saved, so it is never sent twice.
+  const btn = mk ?? pb ?? lo ?? sw;
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = '1'; btn.disabled = true;
   const bizId = currentBizId();
   const reload = async () => { await (drawerReload ?? route)(); if (document.getElementById('billdrawer') && drawerReopen) await drawerReopen(); };
   const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
@@ -6800,6 +6804,7 @@ document.addEventListener('click', async (e) => {
       doneToast(`Bill ${pb.dataset.bill}: paid by ${word}, counted as a sale${pb.dataset.mode === 'cash' ? '' : ` and matched on the ${word} tab`}.`, async () => { await apiFull('POST', `/businesses/${bizId}/comparisons/${pb.dataset.paidby}/paid-by/undo`, {}); }, reload);
     }
   } catch (err) { if (where) showError(where, err); else alert(err.message); }
+  finally { delete btn.dataset.busy; btn.disabled = false; }
 }, true);
 // Where a head came from, on a bank or cash expense line (approved 14 Nov 2026); hover says exactly.
 const headFromChip = (sg, party) => (sg.from === 'party' || (!sg.from && sg.learned) ? html`<span class="chip wait" title="From party ${party ?? ''}: booked under this head before">Learned</span>`

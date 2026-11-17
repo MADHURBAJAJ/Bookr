@@ -28,6 +28,10 @@ describe('complimentary bills report', () => {
     expect(r.status).toBe(200);
     expect(r.json.lines).toEqual([expect.objectContaining({ day: '2026-10-31', billNo: '2610316', name: "Mr Mehta (owner's guest)", remarks: 'Complimentary', in: 'both', billType: 'fnb' })]);
     expect(r.json.count).toBe(1);
+    // Reconcile's Complimentary list leaves out the group too: neither the row that pays for it nor the bill paid with it.
+    // (The ₹0 row with money on it is listed there as needing a look.)
+    const tab = (await h.clients.accountant.get(`/businesses/${h.bid}/shifts/2026-10-31/complimentary`)).json;
+    expect(tab.lines.map((l: { billNo: string; status: string }) => [l.billNo, l.status])).toEqual([['2610316', 'ok'], ['2610399', 'look']]);
   });
 
   it('only those who can see reports get it', async () => {

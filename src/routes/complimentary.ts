@@ -33,11 +33,12 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
   const day = c.req.param('day');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(404, 'Shift not found.');
   const [rows, marks] = await Promise.all([all<{ id: string; bill_no: string; difference: string; decision: string | null; sw_amount_paise: number | null; sw_mode: string | null; paid_at: number | null; mode_text: string | null; name: string | null;
-    row_id: string | null; upload_id: string | null; rg_amount: number | null; rg_discount: number | null; remarks: string | null; paid_with: string | null; paid: number; modes: string | null }>(db, `
+    row_id: string | null; upload_id: string | null; rg_amount: number | null; rg_discount: number | null; remarks: string | null; paid_with: string | null; paid: number; modes: string | null; members: number }>(db, `
     SELECT c.id, c.bill_no, c.difference, c.decision, c.sw_amount_paise, c.sw_mode, s.paid_at, s.mode_text, s.customer_name AS name, r.id AS row_id, r.upload_id, r.amount_paise AS rg_amount,
       r.discount_paise - r.tip_paise AS rg_discount, r.remarks, r.paid_with_row_id AS paid_with,
       coalesce((SELECT sum(p.amount_paise) FROM register_payments p WHERE p.register_row_id = r.id), 0) AS paid,
-      (SELECT group_concat(DISTINCT p.mode) FROM register_payments p WHERE p.register_row_id = r.id) AS modes
+      (SELECT group_concat(DISTINCT p.mode) FROM register_payments p WHERE p.register_row_id = r.id) AS modes,
+      (SELECT count(*) FROM register_rows x WHERE x.paid_with_row_id = r.id) AS members
     FROM bill_comparisons c LEFT JOIN software_bills s ON s.id = c.software_bill_id LEFT JOIN register_rows r ON r.id = c.register_row_id
     WHERE c.business_id = ? AND c.shift_day = ? ORDER BY c.bill_no`, bid, day), complimentaryMarks(db, bid, day)]);
   const lines = rows.flatMap((r) => {
@@ -56,7 +57,8 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
     }
     if (!comp && !prepaid) return [];
     // Paid with another row whose group is over ₹0: paid with its group, not complimentary.
-    if (comp && !prepaid && !mark && r.paid_with) return [];
+    // Pays for other bills and the group's discount brings its own row to ₹0 (17 Nov 2026): paid with its group too.
+    if (comp && !prepaid && !mark && (r.paid_with || r.members > 0)) return [];
     const why = mark ? 'marked' : prepaid ? 'prepaid' : 'zero';
     const look = !comp ? `PREPAID in the software, but the register shows ${r.modes ? r.modes.split(',').map((m) => MODE_WORD[m] ?? m).join(' + ') : ''} ${rs(r.paid)} paid`
       : r.paid > 0 ? `Complimentary, but the register shows ${rs(r.paid)} paid on its row`
@@ -150,10 +152,20 @@ complimentaryRoutes.post('/businesses/:businessId/comparisons/:id/paid-by', requ
   const row = cmp.register_row_id ? await one<Record<string, unknown> & { id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; bill_type: string | null }>(db,
     'SELECT * FROM register_rows WHERE id = ?', cmp.register_row_id) : null;
   if (row?.paid_with_row_id) fail(400, `Bill ${cmp.bill_no} is paid together with another bill: change the payment on that bill's line.`);
+  // A line that pays for other bills carries the group's payment and discount (17 Nov 2026): its payment is changed on the Register.
+  if (row && (await one(db, 'SELECT 1 AS ok FROM register_rows WHERE paid_with_row_id = ? LIMIT 1', row.id))) {
+    fail(400, `Bill ${cmp.bill_no} pays for other bills too: change the group's payment on the Register.`);
+  }
   const pays = row ? await all<Record<string, unknown>>(db, 'SELECT * FROM register_payments WHERE register_row_id = ?', row.id) : [];
   const amount = row && row.amount_paise ? row.amount_paise : cmp.sw_amount_paise ?? 0;
   if (!amount) fail(400, `Bill ${cmp.bill_no} is ₹0 on both sides: correct its amount on the register first.`);
   const net = row ? amount - row.discount_paise + row.tip_paise : amount;
+  if (net <= 0) fail(400, `Bill ${cmp.bill_no} comes to ${rs(net)} after its discount: correct the discount on the Register first.`);
+  // Pressed again with the same mode: already so, nothing changes (and Undo still goes back to before the first press).
+  if (row && !mark && pays.length === 1 && pays[0].mode === mode && pays[0].amount_paise === net && row.amount_paise === amount
+    && (await one(db, "SELECT 1 AS ok FROM audit_log WHERE business_id = ? AND row_id = ? AND action = 'bill.paid_by' LIMIT 1", bid, cmp.id))) {
+    return c.json({ ok: true, unchanged: true });
+  }
   const word = MODE_WORD[mode];
   const label = mode === 'cash' ? 'CASH' : mode === 'card' ? 'Card' : 'UPI';
   const statements: D1PreparedStatement[] = [];
@@ -197,7 +209,12 @@ complimentaryRoutes.post('/businesses/:businessId/comparisons/:id/paid-by/undo',
   const db = c.env.DB;
   const bid = c.get('businessId');
   const cmp = await comparison(db, bid, c.req.param('id'));
-  const a = await one<{ before: string; after: string }>(db, "SELECT before, after FROM audit_log WHERE business_id = ? AND action = 'bill.paid_by' AND row_id = ? ORDER BY id DESC LIMIT 1", bid, cmp.id);
+  // Each Undo takes back one Paid by, the latest not undone yet (17 Nov 2026), so pressing Undo again goes further back.
+  const log = await all<{ action: string; before: string; after: string }>(db, `SELECT action, before, after FROM audit_log
+    WHERE business_id = ? AND row_id = ? AND action IN ('bill.paid_by', 'bill.paid_by_undone') ORDER BY id`, bid, cmp.id);
+  const open: typeof log = [];
+  for (const x of log) { if (x.action === 'bill.paid_by') open.push(x); else open.pop(); }
+  const a = open.at(-1);
   if (!a) fail(400, 'Nothing to undo.');
   const b = JSON.parse(a.before) as { mark: Record<string, unknown> | null; row: { id: string; amount_paise: number } | null; pays: Record<string, unknown>[] };
   const f = JSON.parse(a.after) as { addedRowId: string | null };

@@ -66,4 +66,37 @@ describe('complimentary bills', () => {
     const sales = await sql`SELECT bill_no FROM transactions WHERE type = 'income' ORDER BY bill_no`;
     expect(sales.map((x: any) => x.bill_no)).toEqual(['2610312', '2610313']);
   });
+
+  it('Paid by: refused on a line that pays for other bills or comes to ₹0 or less; a second press changes nothing; each Undo goes one step back', async () => {
+    const h = await hotel();
+    await h.software([['2610320', '31 19:00', 'PREPAID' as never, '400']]);
+    // Old POS 144898 pays for 144743; the group's discount brings its own line below ₹0 (as on 30 Oct live).
+    await h.register([
+      { no: '144898', amount: '385', discount: '385', pays: [['upi', '3481', 'UPI Bank 2']] },
+      { no: '144743', amount: '3481', pays: [], paidWith: '144898' },
+      { no: '2610320', amount: '400', pays: [['upi', '400']] },
+    ]);
+    const acc = h.clients.accountant;
+    const cmp = async (bill: string) => (await sql`SELECT id, difference, decision FROM bill_comparisons WHERE bill_no = ${bill}`)[0];
+    const tab = async () => (await acc.get(`/businesses/${h.bid}/shifts/2026-10-31/complimentary`)).json;
+    // Not listed as complimentary: it is paid with its group.
+    expect((await tab()).lines.map((l: any) => l.billNo)).not.toContain('144898');
+    const head = await acc.post(`/businesses/${h.bid}/comparisons/${(await cmp('144898')).id}/paid-by`, { mode: 'cash' });
+    expect(head.status).toBe(400);
+    expect(head.json.error).toMatch(/pays for other bills/);
+    expect((await sql`SELECT p.mode, p.amount_paise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.bill_no = '144898'`)).toEqual([{ mode: 'upi', amount_paise: 348100 }]);
+
+    // PREPAID with UPI written: Cash, Cash again (no change), then UPI; Undo twice is back to the UPI written on the page.
+    const c20 = (await cmp('2610320')).id;
+    const pay = async () => (await sql`SELECT p.mode, p.amount_paise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.bill_no = '2610320'`);
+    expect((await acc.post(`/businesses/${h.bid}/comparisons/${c20}/paid-by`, { mode: 'cash' })).status).toBe(200);
+    expect((await acc.post(`/businesses/${h.bid}/comparisons/${c20}/paid-by`, { mode: 'cash' })).json).toMatchObject({ unchanged: true });
+    expect((await acc.post(`/businesses/${h.bid}/comparisons/${c20}/paid-by`, { mode: 'card' })).status).toBe(200);
+    expect(await pay()).toEqual([{ mode: 'card', amount_paise: 40000 }]);
+    expect((await acc.post(`/businesses/${h.bid}/comparisons/${c20}/paid-by/undo`, {})).status).toBe(200);
+    expect(await pay()).toEqual([{ mode: 'cash', amount_paise: 40000 }]);
+    expect((await acc.post(`/businesses/${h.bid}/comparisons/${c20}/paid-by/undo`, {})).status).toBe(200);
+    expect(await pay()).toEqual([{ mode: 'upi', amount_paise: 40000 }]);
+    expect((await acc.post(`/businesses/${h.bid}/comparisons/${c20}/paid-by/undo`, {})).status).toBe(400);
+  });
 });
