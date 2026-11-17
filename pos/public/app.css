@@ -143,3 +143,5 @@ a.chip.link[aria-pressed="true"] { color: #fff; }
 .hrow { display: grid; grid-template-columns: 110px 1fr 130px; align-items: center; gap: 10px; }
 .bar { height: 12px; background: var(--accent); border-radius: 4px; }
 @media (max-width: 560px) { .hrow { grid-template-columns: 90px 1fr 100px; } }
+
+h3 { font-size: 14px; font-weight: 700; margin: 6px 0 0; }

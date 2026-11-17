@@ -477,3 +477,56 @@ describe('sales insights and menu mix', () => {
     expect(r.notSold).toEqual([{ name: 'Masala Chai', category: 'Food', station: 'kitchen' }]);
   });
 });
+
+describe('daily check and GSTR-1', () => {
+  it('lists the day, every unpaid order holding sent food, and breaks in a bill-number series', async () => {
+    const s = await setupBusiness();
+    const { B, counter, owner, ok } = s;
+    const paid = (await billed(s, [['Masala Dosa', 2]])).bill;
+    await ok(counter.post(`${B}/settlements`, { billIds: [paid.id], payments: [{ mode: 'cash', amount: rupees(paid.totalPaise) }] }));
+    const voided = (await billed(s, [['Butter Naan', 1]], {}, 'T7')).bill;
+    await ok(counter.post(`${B}/bills/${voided.id}/void`, { reasonId: s.reasons.void })); // T7 reopens, its naan not paid for
+    const open = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T8' }))).id;
+    await ok(counter.post(`${B}/orders/${open}/items`, { itemId: s.items['Beer 650 ml'], delta: 1 }));
+    await ok(counter.post(`${B}/orders/${open}/kot`));
+    const notSent = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T9' }))).id;
+    await ok(counter.post(`${B}/orders/${notSent}/items`, { itemId: s.items['Masala Chai'], delta: 1 })); // never sent: not listed
+
+    const day = paid.shiftDay;
+    expect((await counter.get(`${B}/reports/daily-check?day=${day}`)).status).toBe(403); // cashier
+    let r = (await owner.get(`${B}/reports/daily-check?day=${day}`)).json;
+    expect(r.sales).toMatchObject({ bills: 1, netPaise: 36000, voids: 1 });
+    expect(r.events.void).toEqual({ n: 1, paise: voided.totalPaise });
+    expect(r.unpaid.map((o: any) => [o.place, o.sentPaise, o.voided])).toEqual([['T7', 6000, true], ['T8', 32000, false]]);
+    expect(r.series).toEqual([{ name: expect.any(String), prefix: expect.any(String), count: 2, last: 2, missing: [] }]);
+    expect(r.shiftClose).toBeNull();
+
+    // A bill number that skips one shows as missing.
+    await q(`INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, status)
+      SELECT 'gap-bill', business_id, order_id, entity_id, fy, 4, bill_no || '-X', shift_day, printed_at, printed_by, gross_paise, 0, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, 'settled' FROM bills WHERE id = ?`, paid.id);
+    r = (await owner.get(`${B}/reports/daily-check?day=${day}`)).json;
+    expect(r.series[0]).toMatchObject({ count: 3, last: 4, missing: [3] });
+  });
+
+  it('gives B2C sales by rate net of credit notes, the SAC summary and the document summary for the month', async () => {
+    const s = await setupBusiness();
+    const { B, counter, owner, ok } = s;
+    const a = (await billed(s, [['Masala Dosa', 2]])).bill; // ₹360 + 5%
+    await ok(counter.post(`${B}/settlements`, { billIds: [a.id], payments: [{ mode: 'cash', amount: rupees(a.totalPaise) }] }));
+    const v = (await billed(s, [['Butter Naan', 1]])).bill;
+    await ok(counter.post(`${B}/bills/${v.id}/void`, { reasonId: s.reasons.void }));
+    const dosa = a.items.find((i: any) => i.name === 'Masala Dosa');
+    await ok(counter.post(`${B}/bills/${a.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' }));
+
+    const month = new Date(a.printedAt + 19_800_000).toISOString().slice(0, 7);
+    expect((await owner.get(`${B}/reports/gstr1?month=2026-13`)).status).toBe(400);
+    const r = (await owner.get(`${B}/reports/gstr1?month=${month}`)).json;
+    expect(r.entities).toHaveLength(1);
+    const e = r.entities[0];
+    expect(e.registered).toBe(true);
+    expect(e.b2cs).toEqual([{ ratePct: 5, taxablePaise: 18000, cgstPaise: 450, sgstPaise: 450 }]); // 36000 - 18000; 900 - 450 each
+    expect(e.sac).toEqual([{ sac: '996332', qty: 2, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
+    expect(e.invoices).toMatchObject({ total: 2, cancelled: 1 });
+    expect(e.creditNotes).toMatchObject({ total: 1, cancelled: 0 });
+  });
+});

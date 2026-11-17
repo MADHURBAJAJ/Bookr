@@ -73,7 +73,7 @@ const counterEntities = () => (cache.entities ?? []).filter((e) => e.active && e
 
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
-    ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Exceptions', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
+    ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   return html`<header class="top">
     <div class="row"><span class="brand">${me.business.name}</span>
       <nav aria-label="Main">${links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`)}</nav></div>
@@ -869,16 +869,62 @@ async function insightsTab(tab, head, from, to) {
   rerender();
 }
 
+async function gstTab(head, month) {
+  const r = await api('GET', `${B()}/reports/gstr1?month=${month}`);
+  ui.gst = r;
+  const money = (p) => rupees(p);
+  rerender = () => paint(shell('#/reports', html`${head}
+    <section class="panel"><div class="row" style="justify-content:space-between"><h2>GSTR-1 working · ${month}</h2>${r.entities.length ? html`<button class="btn" type="button" data-act="gstCsv">Download for CA (CSV)</button>` : ''}</div>
+      <p class="quiet small">By bill date (when printed, India time), not shift. All sales are shown as B2C small (unregistered buyers): the POS does not take a guest's GSTIN yet. Credit notes are netted off in B2C. Check with your CA before filing.</p>
+      ${r.entities.length ? '' : html`<p class="quiet">No bills in this month.</p>`}</section>
+    ${r.entities.map((e) => html`<section class="panel" style="margin-top:16px"><h2>${e.name}</h2>
+      ${e.registered ? html`<p class="small">GSTIN ${e.gstin}</p>
+        <h3>B2C small (Table 7)</h3>
+        <div class="scroll"><table class="t"><thead><tr><th>Rate</th><th class="num">Taxable value (₹)</th><th class="num">CGST (₹)</th><th class="num">SGST (₹)</th></tr></thead><tbody>
+          ${e.b2cs.map((x) => html`<tr><td>${x.ratePct}%</td><td class="num">${money(x.taxablePaise)}</td><td class="num">${money(x.cgstPaise)}</td><td class="num">${money(x.sgstPaise)}</td></tr>`)}</tbody></table></div>
+        <h3>SAC summary (Table 12)</h3>
+        <div class="scroll"><table class="t"><thead><tr><th>SAC</th><th class="num">Quantity</th><th class="num">Taxable value (₹)</th><th class="num">CGST (₹)</th><th class="num">SGST (₹)</th></tr></thead><tbody>
+          ${e.sac.map((x) => html`<tr><td>${x.sac}</td><td class="num">${x.qty}</td><td class="num">${money(x.taxablePaise)}</td><td class="num">${money(x.cgstPaise)}</td><td class="num">${money(x.sgstPaise)}</td></tr>`)}</tbody></table></div>`
+        : html`<p class="small quiet">Not registered for GST: no GSTR-1. Turnover this month ${rs(e.totalPaise)}; watch the ₹20 lakh registration limit on the Billing names screen.</p>`}
+      <h3>Documents issued (Table 13)</h3>
+      <div class="scroll"><table class="t"><thead><tr><th>Document</th><th>From</th><th>To</th><th class="num">Total</th><th class="num">Cancelled</th><th class="num">Net issued</th></tr></thead><tbody>
+        ${[['Invoices', e.invoices], ['Credit notes', e.creditNotes]].filter(([, x]) => x).map(([name, x]) => html`<tr><td>${name}</td><td>${x.from}</td><td>${x.to}</td><td class="num">${x.total}</td><td class="num">${x.cancelled}</td><td class="num">${x.total - x.cancelled}</td></tr>`)}</tbody></table></div>
+    </section>`)}`));
+  rerender();
+}
+actions.gstGo = () => go(`#/reports/gst/${ui.gstMonth}`);
+/** The month's GSTR-1 working as one CSV file for the CA (made in the browser from what is on screen). */
+actions.gstCsv = () => {
+  const r = ui.gst;
+  const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = [['Month', 'Billing name', 'GSTIN', 'Section', 'Rate or SAC or document', 'Quantity or from', 'Taxable value or to', 'CGST or total', 'SGST or cancelled']];
+  for (const e of r.entities) {
+    if (e.registered) {
+      for (const x of e.b2cs) rows.push([r.month, e.name, e.gstin, 'B2C small', `${x.ratePct}%`, '', rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise)]);
+      for (const x of e.sac) rows.push([r.month, e.name, e.gstin, 'SAC summary', x.sac, x.qty, rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise)]);
+    }
+    if (e.invoices) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: invoices', 'Invoices', e.invoices.from, e.invoices.to, e.invoices.total, e.invoices.cancelled]);
+    if (e.creditNotes) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: credit notes', 'Credit notes', e.creditNotes.from, e.creditNotes.to, e.creditNotes.total, e.creditNotes.cancelled]);
+  }
+  const blob = new Blob([rows.map((row) => row.map(cell).join(',')).join('\n') + '\n'], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `gstr1-working-${r.month}.csv`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+
 async function reportsScreen(tab = 'sales', range = '') {
   const [qf, qt] = range.split('_');
   const isD = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '');
   const from = isD(qf) ? qf : me.business.shiftDay;
   const to = isD(qt) ? qt : from;
   ui.from = from; ui.to = to; ui.repTab = tab;
+  ui.gstMonth = /^\d{4}-\d{2}$/.test(qf ?? '') ? qf : me.business.shiftDay.slice(0, 7);
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const head = html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><div class="chips">
-      ${[['sales', 'Sales'], ['when', 'When and where'], ['mix', 'Menu mix'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip link" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
-    ${tab !== 'owed' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
+      ${[['sales', 'Sales'], ['when', 'When and where'], ['mix', 'Menu mix'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip link" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
+    ${tab === 'gst' ? html`<form class="row"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
+      <div class="f">&nbsp;<button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></div></form>`
+    : tab !== 'owed' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
       <div class="f">&nbsp;<button class="btn" type="submit" data-act="repGo" data-submit>Show</button></div></form>` : ''}</div>`;
   if (tab === 'owed') {
     const { accounts } = await api('GET', `${B()}/reports/debtors`);
@@ -901,6 +947,7 @@ async function reportsScreen(tab = 'sales', range = '') {
     return;
   }
   if (tab === 'when' || tab === 'mix') { await insightsTab(tab, head, from, to); return; }
+  if (tab === 'gst') { await gstTab(head, ui.gstMonth); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   rerender = () => paint(shell('#/reports', html`${head}
@@ -1109,10 +1156,41 @@ actions.stRecipeClear = async () => { await api('PUT', `${B()}/stock/recipes/${u
 // ---------- exceptions
 
 async function exceptionsScreen(day = me.business.shiftDay) {
-  const { events } = await api('GET', `${B()}/events?day=${encodeURIComponent(day)}`);
+  const [{ events }, d] = await Promise.all([api('GET', `${B()}/events?day=${encodeURIComponent(day)}`), api('GET', `${B()}/reports/daily-check?day=${encodeURIComponent(day)}`)]);
   const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance' };
-  rerender = () => paint(shell('#/exceptions', html`<section class="panel"><div class="row" style="justify-content:space-between"><h1>Exceptions · shift ${day}</h1>
+  const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
+  const ev = (k) => d.events[k] ?? { n: 0, paise: 0 };
+  const df = (k) => d.differences[k] ?? { n: 0, paise: 0 };
+  const flag = (n, text, money) => html`<div><span style="${n ? 'color:var(--warn)' : ''}">${text}</span><span>${n ? `${n}${money !== undefined ? ' · ' + rs(money) : ''}` : 'none'}</span></div>`;
+  const broken = d.series.filter((x) => x.missing.length).concat(d.creditNoteSeries.filter((x) => x.missing.length));
+  const statusName = { open: 'Open order', tab: 'Tab', billed: 'Bill printed, not paid' };
+  rerender = () => paint(shell('#/exceptions', html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><h1>Daily check · shift ${day}</h1>
       <form class="row"><input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"><button class="btn" type="submit" data-act="exDay" data-submit>Show</button></form></div>
+    <div class="grid2" style="align-items:start">
+      <section class="panel"><h2>Money</h2>
+        <div class="sums"><div class="big"><span>Net sales · ${d.sales.bills} bills</span><span>${rs(d.sales.netPaise)}</span></div>
+          <div><span class="quiet">With GST</span><span>${rs(d.sales.totalPaise)}</span></div>
+          ${d.byMode.map((m) => html`<div><span>${modeName[m.mode] ?? m.mode} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
+        <h2>Shift close</h2>
+        ${d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
+          : html`<p style="color:var(--warn)">Not closed yet.</p>`}
+        <h2>Bill numbers (${d.fy})</h2>
+        ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: number${x.missing.length > 1 ? 's' : ''} ${x.missing.join(', ')} missing</div>`)}</div>`
+          : html`<p>${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</p>`}
+        <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span>${x.count} bills, last no. ${x.last}</span></div>`)}</div></section>
+      <section class="panel"><h2>Exceptions</h2>
+        <div class="sums">${flag(ev('void').n, 'Void bills', ev('void').paise)}${flag(ev('discount').n + df('discount').n, 'Discounts', ev('discount').paise + df('discount').paise)}
+          ${flag(ev('comp').n, 'Complimentary', ev('comp').paise)}${flag(ev('kot_cancel').n, 'Cancelled after KOT')}${flag(ev('reprint').n, 'Reprints')}
+          ${flag(ev('credit_note').n, 'Credit notes', ev('credit_note').paise)}${flag(df('tip').n, 'Tips', df('tip').paise)}
+          ${flag(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise)}${flag(ev('stock_count').n, 'Stock count differences')}${flag(ev('limit_warning').n, 'Billing name limit warnings')}</div>
+        <h2>Sent to kitchen, not paid (right now)</h2>
+        <p class="small quiet">Every order holding food or drinks already sent to the kitchen or bar, with no paid bill. Old ones (tabs past ${me.business.tab_age_days ?? 3} days, others past 6 hours) are in red.</p>
+        ${d.unpaid.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Where</th><th>State</th><th class="num">Sent</th><th class="num">Open for</th></tr></thead><tbody>
+          ${d.unpaid.map((o) => html`<tr style="${o.old ? 'color:var(--bad)' : ''}"><td><a href="#/order/${o.id}">${o.place}</a>${o.guestName ? html`<div class="small quiet">${o.guestName}</div>` : ''}</td>
+            <td>${statusName[o.status]}${o.billNo ? ' · ' + o.billNo : ''}${o.voided ? html`<div class="small">A bill was voided</div>` : ''}</td><td class="num">${rs(o.sentPaise)}</td>
+            <td class="num">${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d ${o.hours % 24} h` : `${o.hours} h`}</td></tr>`)}</tbody></table></div>` : html`<p>Nothing: everything sent was paid for.</p>`}</section>
+    </div>
+    <section class="panel" style="margin-top:16px"><h2>Every exception, in order</h2>
     <p class="quiet small">Every void, reprint, cancelled KOT line, discount and complimentary bill, with who and why. Nothing here can be changed.</p>
     <div class="scroll"><table class="t"><thead><tr><th>Time</th><th>What</th><th>Bill or item</th><th class="num">Amount</th><th>By</th><th>Reason</th></tr></thead><tbody>
       ${events.length ? events.map((e) => html`<tr><td>${time(e.at)}</td><td>${kind[e.kind]}</td><td>${e.ref}</td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
