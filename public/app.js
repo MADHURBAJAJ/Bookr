@@ -547,6 +547,7 @@ async function accountsView(biz, editId) {
           <div class="field"><label for="ad">Opening date</label><input id="ad" name="openingDate" type="date" value="${f.openingDate}" required
             title="The day this account's books start: its bank lines before it are kept but not waiting"></div>
         </div>
+        <div class="tiny" style="margin-top:-4px">Opening balance: the balance at 8 am on the opening date, when its first shift starts. For a bank, the balance on the last statement line before that time; for cash, the cash counted at the 8 am handover.</div>
         <div class="form-msg"></div>
         <div class="form-row">
           <button class="btn" type="submit">${editing ? 'Save account' : 'Add account'}</button>

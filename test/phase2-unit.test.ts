@@ -115,6 +115,17 @@ describe('software sales CSV', () => {
     expect(parseSalesCsv(noFooter).problems.join(' ')).toMatch(/footer is missing/);
   });
 
+  it('reads a missing UPI, CARD or CASH footer line as no sales of that mode, and still checks it', () => {
+    const dropCard = (t: string) => t.split(/\r?\n/).filter((l) => !/^,+CARD,/.test(l)).join('\n');
+    const noCard = REPORT_31_OCT.filter((b) => b.mode !== 'CARD');
+    const ok = parseSalesCsv(dropCard(buildSalesCsv(noCard)));
+    expect(ok.problems).toEqual([]);
+    expect(ok.footer?.cardPaise).toBe(0);
+    // Card bills in the file but no CARD line: refused, saying so.
+    expect(REPORT_31_OCT.some((b) => b.mode === 'CARD')).toBe(true);
+    expect(parseSalesCsv(dropCard(buildSalesCsv(REPORT_31_OCT))).problems.join(' ')).toMatch(/CARD bills .* no CARD line/);
+  });
+
   it('accepts a footer written in one cell and a byte-order mark', () => {
     const text = '﻿' + buildSalesCsv(REPORT_1_NOV_EARLY).replace(/,,TOTAL BILLS,(\d+)/, 'TOTAL BILLS : $1');
     expect(parseSalesCsv(text).problems).toEqual([]);

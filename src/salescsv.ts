@@ -167,7 +167,11 @@ export function parseSalesCsv(text: string): ParsedReport {
   }
 
   let fullFooter: Footer | null = null;
-  const missing = (Object.keys(FOOTER_LABELS) as string[]).filter((k) => footer[FOOTER_LABELS[k]] === undefined);
+  // A day with no sales of a mode has no line for it (e.g. no CARD line, 17 Nov 2026): that mode's total is 0, and the
+  // check below still fails if the file has bills of that mode. TOTAL BILLS and TOTAL SALE must be there.
+  const noLine = (['upiPaise', 'cardPaise', 'cashPaise'] as const).filter((k) => footer[k] === undefined);
+  for (const k of noLine) footer[k] = 0;
+  const missing = (['TOTALBILLS', 'TOTALSALE'] as string[]).filter((k) => footer[FOOTER_LABELS[k]] === undefined);
   if (missing.length) {
     problems.push(`The footer is missing: ${missing.map((k) => ({ TOTALBILLS: 'TOTAL BILLS', TOTALSALE: 'TOTAL SALE' } as Record<string, string>)[k] ?? k).join(', ')}.`);
   } else {
@@ -177,7 +181,10 @@ export function parseSalesCsv(text: string): ParsedReport {
     const rupees = (p: number) => `${p < 0 ? '-' : ''}${Math.trunc(Math.abs(p) / 100)}.${String(Math.abs(p) % 100).padStart(2, '0')}`;
     if (all.length !== fullFooter.bills) problems.push(`The file has ${all.length} bills but the footer says ${fullFooter.bills}.`);
     for (const [mode, label, want] of [['upi', 'UPI', fullFooter.upiPaise], ['card', 'CARD', fullFooter.cardPaise], ['cash', 'CASH', fullFooter.cashPaise]] as const) {
-      if (sum(mode) !== want) problems.push(`${label} bills add up to ${rupees(sum(mode))} but the footer says ${rupees(want)}.`);
+      if (sum(mode) !== want) {
+        problems.push(noLine.includes(`${mode}Paise` as never) ? `The file has ${label} bills (${rupees(sum(mode))}) but the footer has no ${label} line.`
+          : `${label} bills add up to ${rupees(sum(mode))} but the footer says ${rupees(want)}.`);
+      }
     }
     if (sum() !== fullFooter.totalPaise) problems.push(`All bills add up to ${rupees(sum())} but TOTAL SALE says ${rupees(fullFooter.totalPaise)}.`);
   }
