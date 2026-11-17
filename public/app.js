@@ -3165,6 +3165,11 @@ function cashPanelHtml(biz, k, opts = {}) {
   const rounded = bills.filter((b) => b.roundedPaise);
   const off = rounded.filter((b) => b.roundedPaise > 0).reduce((t, b) => t + b.roundedPaise, 0);
   const extra = -rounded.filter((b) => b.roundedPaise < 0).reduce((t, b) => t + b.roundedPaise, 0);
+  // The bills behind a line of the working, on a click (17 Nov 2026).
+  const counting = bills.filter((b) => b.countedPaise);
+  const notInReg = counting.filter((b) => b.rgCashPaise === null);
+  const billsOpen = (label, list) => (list.length ? html`<details><summary style="cursor:pointer">${label} · <u>${list.length} bill${list.length === 1 ? '' : 's'}</u></summary>
+    ${list.map((b) => html`<div class="tiny"><button type="button" class="linkbtn tiny mono" data-bill-drawer="${b.billNo}|${k.day}">${b.billNo}</button> · ₹ ${money(b.countedPaise)}${b.groupSize > 1 ? ` · group of ${b.groupSize}` : ''}${b.state === 'decided' ? ` · ${b.decision === 'use_software' ? 'Use software' : b.decision === 'use_register' ? 'Use register' : DECISION_LABELS[b.decision] ?? ''}` : b.state === 'undecided' ? ' · not decided' : ''}</div>`)}</details>` : label);
   // Discount at the till (17 Nov 2026): one line in the working, its bills listed on a click.
   const tillLine = (list, word, paise) => (list.length ? html`<tr><td></td><td class="note" colspan="3"><details><summary style="cursor:pointer">${word} on <u>${list.length} bill${list.length === 1 ? '' : 's'}</u> · ₹ ${money(paise)}</summary>
     ${list.map((b) => html`<div class="tiny"><span class="mono">${b.billNo}</span> · software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)} · ${b.roundedPaise > 0 ? 'discount' : 'extra'} ₹ ${money(Math.abs(b.roundedPaise))}</div>`)}</details></td></tr>` : '');
@@ -3190,8 +3195,8 @@ function cashPanelHtml(biz, k, opts = {}) {
     </div>
     <details><summary class="note">How ${shouldBe == null ? 'it' : `₹ ${money(shouldBe)}`} is worked out</summary><div class="scroll"><table style="min-width:560px">
       ${row('Opening cash', k.openingFrom === 'previous' ? 'previous day\'s cash in hand' : k.openingFrom === 'page' ? 'opening written on this day\'s cash page' : 'no cash summary for the previous day', k.openingPaise, k.openingPaise == null ? '' : tag(true))}
-      ${row('+ Cash sales', draft ? 'what Save would book now' : 'booked for this shift', sales, tag(!draft))}
-      ${k.notInRegisterBookedPaise ? row('', 'of which not in the register (Use software)', k.notInRegisterBookedPaise) : ''}
+      ${row('+ Cash sales', billsOpen(draft ? 'what Save would book now' : 'booked for this shift', counting), sales, tag(!draft))}
+      ${k.notInRegisterBookedPaise ? row('', billsOpen('of which not in the register (Use software)', notInReg), k.notInRegisterBookedPaise) : ''}
       ${roundedRows}
       ${row('− Cash expenses', 'approved lines', k.expensesPaise, tag(true))}
       ${k.expensesWaiting ? html`<tr style="color:var(--muted)"><td></td><td>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval (not taken off)</td><td class="amount">${money(k.expensesWaitingPaise ?? 0)}</td><td><a href="#/b/${biz.id}/review">Review</a></td></tr>` : ''}
