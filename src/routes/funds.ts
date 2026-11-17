@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
-import { all } from '../db';
+import { all, SUMMARY_IN_USE } from '../db';
 import { fail } from '../http';
 import { addDays, shiftDayOf } from '../time';
 
@@ -94,8 +94,8 @@ fundsRoutes.get('/businesses/:businessId/reports/funds-flow', requireRole('bank.
         FROM bank_rows r JOIN accounts a ON a.id = r.account_id
         WHERE r.business_id = ? AND r.day <= ? AND ${SHIFT_OF} <= ? AND ${SHIFT_OF} >= a.opening_date) WHERE n = 1`, bid, addDays(to, 1), to),
     // The cash counted on the last cash summary page up to the end of the period.
-    all<{ shift_day: string; cash_in_hand_paise: number }>(db, `SELECT shift_day, cash_in_hand_paise FROM cash_summaries
-      WHERE business_id = ? AND shift_day <= ? AND shift_day >= ? AND cash_in_hand_paise IS NOT NULL
+    all<{ shift_day: string; cash_in_hand_paise: number; ocr_original: string | null }>(db, `SELECT shift_day, cash_in_hand_paise, ocr_original FROM cash_summaries
+      WHERE business_id = ? AND shift_day <= ? AND shift_day >= ? AND cash_in_hand_paise IS NOT NULL AND ${SUMMARY_IN_USE}
       ORDER BY shift_day DESC, status = 'approved' DESC, created_at DESC LIMIT 1`, bid, to, start),
     // Sales billed in these shifts, and what of them has not come in yet.
     all<{ mode: string | null; waiting: number; n: number; paise: number }>(db, `SELECT payment_mode AS mode, match_status IS NOT NULL AS waiting, count(*) AS n, coalesce(sum(amount_paise), 0) AS paise
@@ -194,12 +194,18 @@ fundsRoutes.get('/businesses/:businessId/reports/funds-flow', requireRole('bank.
     const at = d >= to ? endOf[a.id] : await cashAt(db, bid, a, d);
     checks[a.id] = { what: 'counted', day: d, paise: counted[0].cash_in_hand_paise, differencePaise: counted[0].cash_in_hand_paise - at };
   }
+  // What the cash check needs said (17 Nov 2026): a count from a sheet revised by hand, and shifts not saved yet, whose
+  // cash sales are not in the books.
+  const rev = (() => { try { return (JSON.parse(counted[0]?.ocr_original ?? '{}') as { revision?: { reason: string; note: string | null } }).revision ?? null; } catch { return null; } })();
+  const unsaved = (await all<{ day: string }>(db, `SELECT DISTINCT b.shift_day AS day FROM software_bills b WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ?
+    AND NOT EXISTS (SELECT 1 FROM shifts s WHERE s.business_id = b.business_id AND s.shift_day = b.shift_day AND s.status = 'confirmed') ORDER BY b.shift_day`, bid, from, to)).map((x) => x.day);
+  const cashNotes = { revised: counted[0] && rev ? { day: counted[0].shift_day, reason: rev.reason, note: rev.note } : null, unsaved };
 
   const sum = (f: (b: typeof billed[number]) => boolean) => billed.filter(f).reduce((s, b) => ({ n: s.n + b.n, paise: s.paise + b.paise }), { n: 0, paise: 0 });
   return c.json({
     from, to, booksStart: start,
     accounts: accounts.map((a) => ({ id: a.id, name: a.name, kind: a.kind, openingDate: a.opening_date })),
-    start: startOf, rows: list, end: endOf, checks,
+    start: startOf, rows: list, end: endOf, checks, cashNotes,
     memo: {
       billed: sum(() => true),
       upiWaiting: sum((b) => b.mode === 'upi' && !!b.waiting),

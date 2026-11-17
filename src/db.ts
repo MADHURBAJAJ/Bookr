@@ -2,6 +2,9 @@
 // db.batch([...]), which commits or rolls back as a whole. Invariants that must hold whichever
 // request runs first (last Owner, single-use invites) are database triggers.
 
+/** A cash summary page not replaced by a revised sheet of the same day (17 Nov 2026). */
+export const SUMMARY_IN_USE = "json_extract(coalesce(ocr_original, '{}'), '$.replacedBy') IS NULL";
+
 export type DB = D1Database;
 
 export function stmt(db: DB, sql: string, ...params: unknown[]): D1PreparedStatement {

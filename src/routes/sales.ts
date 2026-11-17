@@ -884,7 +884,12 @@ salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.v
   if (from < addDays(to, -366)) from = addDays(to, -366);
   // The last shift with bills, where the day view opens (17 Nov 2026).
   const last = await one<{ day: string | null }>(c.env.DB, 'SELECT max(shift_day) AS day FROM bill_comparisons WHERE business_id = ? AND shift_day <= ?', c.get('businessId'), istDay(Date.now()));
-  return c.json({ from, to, lastDay: last?.day ?? null, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });
+  // Cash sheets whose figures were changed from the photo, with the reason (17 Nov 2026).
+  const sheets = await all<{ day: string; uploadId: string; o: string }>(c.env.DB, `SELECT shift_day AS day, upload_id AS uploadId, ocr_original AS o FROM cash_summaries
+    WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND json_extract(coalesce(ocr_original, '{}'), '$.revision') IS NOT NULL
+      AND json_extract(coalesce(ocr_original, '{}'), '$.replacedBy') IS NULL ORDER BY shift_day`, c.get('businessId'), from, to);
+  const cashRevised = sheets.map((x) => { const r = JSON.parse(x.o).revision as { reason: string; note: string | null; fields: string[] }; return { day: x.day, uploadId: x.uploadId, ...r }; });
+  return c.json({ from, to, lastDay: last?.day ?? null, cashRevised, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });
 });
 
 salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRole('sales.decide'), async (c) => {

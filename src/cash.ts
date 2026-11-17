@@ -2,7 +2,7 @@
 // Opening (previous day's cash in hand) + confirmed cash sales - approved cash expenses (and any
 // booked shortage) = should be in hand; counted = cash in hand on the day's cash summary page.
 
-import { all, one, type DB } from './db';
+import { all, one, type DB, SUMMARY_IN_USE } from './db';
 import { addDays } from './time';
 
 export const SHORTAGE_HEAD = { name: 'Cash shortage', tally: 'Cash Shortage' };
@@ -21,7 +21,7 @@ export const LEAVE_OUT_REASONS = ['Cancelled in POS', 'Paid another way', "In an
 async function summaryFor(db: DB, businessId: string, day: string) {
   return one<{ upload_id: string; opening_paise: number | null; cash_in_hand_paise: number | null; status: string }>(db, `
     SELECT upload_id, opening_paise, cash_in_hand_paise, status FROM cash_summaries
-    WHERE business_id = ? AND shift_day = ? ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, businessId, day);
+    WHERE business_id = ? AND shift_day = ? AND ${SUMMARY_IN_USE} ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, businessId, day);
 }
 
 export async function cashCheck(db: DB, businessId: string, day: string) {

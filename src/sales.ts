@@ -8,7 +8,7 @@ import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
 import { cardAdvancePlans, joinCardAdvanceStatements } from './cardAdvance';
-import { all, newId, now, one, stmt, type DB } from './db';
+import { all, newId, now, one, stmt, type DB, SUMMARY_IN_USE } from './db';
 import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
 
 export type Difference = 'match' | 'amount' | 'mode' | 'amount_and_mode' | 'missing_in_register' | 'missing_in_software' | 'complimentary';
@@ -1220,9 +1220,18 @@ export async function cashSummaryChecks(db: DB, businessId: string, day: string,
   checks.push({ key: 'arithmetic', label: 'Opening + received − expenses = cash in hand', state: arith ? 'pass' : 'fail',
     detail: arith ? 'The page adds up.' : `Opening + received = ${rs(o + r)} (page says balance ${rs(b)}); balance − expenses = ${rs(b - e)} (page says cash in hand ${rs(h)}).` });
 
-  const prev = await one<{ cash_in_hand_paise: number | null }>(db, `SELECT cash_in_hand_paise FROM cash_summaries
-    WHERE business_id = ? AND shift_day = ? ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, businessId, addDays(day, -1));
-  if (!prev || prev.cash_in_hand_paise === null) {
+  const [prev, acc] = await Promise.all([
+    one<{ cash_in_hand_paise: number | null }>(db, `SELECT cash_in_hand_paise FROM cash_summaries
+      WHERE business_id = ? AND shift_day = ? AND ${SUMMARY_IN_USE} ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, businessId, addDays(day, -1)),
+    one<{ opening_balance_paise: number; opening_date: string }>(db, `SELECT opening_balance_paise, opening_date FROM accounts WHERE business_id = ? AND kind = 'cash'
+      ORDER BY lower(name) = 'cash' DESC, created_at LIMIT 1`, businessId),
+  ]);
+  if ((!prev || prev.cash_in_hand_paise === null) && acc && acc.opening_date === day) {
+    // The first day of the books (17 Nov 2026): the opening is the Cash account's opening balance.
+    const ok = acc.opening_balance_paise === o;
+    checks.push({ key: 'opening', label: "Opening equals the Cash account's opening balance", state: ok ? 'pass' : 'fail',
+      detail: ok ? `Both are ${rs(o)}.` : `The Cash account opens on this day with ${rs(acc.opening_balance_paise)}; this page's opening is ${rs(o)}.` });
+  } else if (!prev || prev.cash_in_hand_paise === null) {
     checks.push({ key: 'opening', label: "Opening equals the previous day's cash in hand", state: 'unavailable', detail: 'There is no cash summary for the previous day.' });
   } else {
     const ok = prev.cash_in_hand_paise === o;

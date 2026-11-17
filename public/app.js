@@ -948,7 +948,7 @@ function complimentaryReport(biz, cp) {
       <thead><tr><th>Shift</th><th>Bill</th><th>Type</th><th>Name</th><th>Remarks</th><th style="text-align:right">Value ₹</th><th>Found in</th></tr></thead>
       <tbody>${months.length > 1 ? months.map((ym) => html`${cp.lines.filter((l) => l.day.startsWith(ym)).map(row)}${sub(ym)}`) : cp.lines.map(row)}</tbody>
     </table></div>
-    <div class="note">Names for reports imported before 12 Nov: upload the same software report again and press <strong>Add names</strong>.</div>` : html`<div class="ok-msg">No complimentary bills in these shifts.</div>`}
+    ${cp.noName ? html`<div class="note">Bills with no name may be from reports imported before 12 Nov: upload the same software report again and press <strong>Add names</strong>.</div>` : ''}` : html`<div class="ok-msg">No complimentary bills in these shifts.</div>`}
   </section>`;
 }
 
@@ -1087,6 +1087,8 @@ async function reportDayView(biz, dayIn) {
             <td>${x.status === 'booked' ? html`Booked <span class="note">${x.headName ?? ''}${x.note ? ` · ${x.note}` : ''}</span>` : 'Not matched'}</td></tr>`)}</tbody></table></div>`
           : html`<div class="ok-msg">None on this day.</div>`}
       </div>
+      ${(m.cashRevised ?? []).map((x) => html`<div class="note">Cash sheet figures changed from the photo: <strong>${({ revised: 'sheet revised, the new one not uploaded', misread: 'the photo was misread', other: 'other' })[x.reason] ?? x.reason}</strong>${x.note ? ` · ${x.note}` : ''}.
+        ${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${x.uploadId}">Open the cash sheet</a>` : ''}</div>`)}
       <details class="rd-more"><summary>Large discounts · ${d.lines.length ? `${d.lines.length} · ₹ ${rs(largeTotal)}` : 'none'}</summary>
         ${d.lines.length ? html`<div class="scroll"><table style="min-width:640px"><thead><tr><th>Bills</th><th style="text-align:right">Bills ₹</th><th style="text-align:right">Discount ₹</th><th style="text-align:right">%</th><th style="text-align:right">Paid ₹</th><th>Remarks</th></tr></thead>
           <tbody>${d.lines.map((l) => html`<tr><td class="mono" style="white-space:normal">${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${l.uploadId}/${l.rowId}">${l.billNos.join(' + ')}</a>` : l.billNos.join(' + ')}</td>
@@ -1182,6 +1184,14 @@ async function fundsView(biz, query) {
           <tr><td class="tiny">Check</td>${accs.map(checkCell)}<td class="amount ${checkedTotal ? '' : 'tiny'}" style="${checkedTotal ? 'color:var(--danger)' : ''}">${checkedTotal == null ? '' : checkedTotal ? `differs ${rs(checkedTotal)}` : '✓'}</td></tr>`}
         </tbody>
       </table></div>
+      ${(() => {
+        // Why the cash may differ (17 Nov 2026): shifts not saved yet have no cash sales in the books; a count from a
+        // sheet changed by hand is said with its reason.
+        const n = r.cashNotes ?? {};
+        const cashOff = r.accounts.some((a) => a.kind === 'cash' && r.checks[a.id]?.differencePaise);
+        return html`${cashOff && n.unsaved?.length ? html`<div class="note">Cash: ${n.unsaved.length === 1 ? `the ${dayLabel(n.unsaved[0])} shift is` : `${n.unsaved.length} shifts (${n.unsaved.map(dayLabel).join(', ')}) are`} not saved yet, so ${n.unsaved.length === 1 ? 'its' : 'their'} cash sales are not in the books. Save ${n.unsaved.length === 1 ? 'it' : 'them'} on <a href="#/b/${biz.id}/reconcile/${n.unsaved[0]}">Reconcile</a>.</div>` : ''}
+          ${n.revised ? html`<div class="note">Cash counted ${dayLabel(n.revised.day)} is from a sheet changed by hand: ${({ revised: 'sheet revised, the new one not uploaded', misread: 'the photo was misread', other: 'other' })[n.revised.reason] ?? n.revised.reason}${n.revised.note ? ` (${n.revised.note})` : ''}.</div>` : ''}`;
+      })()}
       <div class="ff-memo">
         <div style="font-weight:600;margin-bottom:4px">Sales made but not received yet <span class="tiny">(not in the flow above)</span></div>
         <div class="list-row"><span>Sales billed in these shifts (${m.billed.n} bill${m.billed.n === 1 ? '' : 's'})</span><span class="amount">${rs(m.billed.paise)}</span></div>
@@ -3051,21 +3061,48 @@ function wireExpense(biz, u, parties = []) {
 
 const CHECK_CHIPS = { pass: ['Matches', 'ok'], fail: ['Does not match', 'bad'], waiting: ['Waiting', 'wait'], unavailable: ['Not available', ''] };
 
+/** What the photo of a cash summary was read as, per figure (paise), and the reason saved when figures differ from it. */
+const summaryOcr = (s) => { try { return JSON.parse(s.ocrOriginal ?? '{}') ?? {}; } catch { return {}; } };
+const SUMMARY_KEYS = [['opening', 'Opening balance', 'openingPaise', 'opening'], ['received', 'Received total', 'receivedPaise', 'received'], ['balance', 'Balance', 'balancePaise', 'balance'],
+  ['expenses', 'Expenses total', 'expensesPaise', 'expenses'], ['cashInHand', 'Cash in hand', 'cashInHandPaise', 'cash_in_hand']];
+const summaryRead = (s) => { const r = summaryOcr(s).read ?? {}; return Object.fromEntries(SUMMARY_KEYS.map(([k, , , f]) => [k, r[f] == null || r[f] === '' ? null : parsePaiseText(String(r[f]).trim())])); };
+
 function summaryPanel(biz, u) {
   const s = u.summary;
   const v = (p) => (p == null ? '' : rupeesForInput(p));
   const failing = u.checks.filter((c) => c.state === 'fail');
   const waiting = u.checks.filter((c) => c.state === 'waiting');
   const approved = s.status === 'approved';
+  const o = summaryOcr(s);
+  const read = summaryRead(s);
+  const rev = o.revision ?? null;
+  const reasons = u.reasons ?? {};
+  // Other pages of the same day: this one may be the revised sheet, or be replaced by it.
+  const pages = u.samePages ?? [];
+  const replacedBy = o.replacedBy ? pages.find((p) => p.uploadId === o.replacedBy) : null;
+  const canReplace = !approved && !o.replaces && !o.replacedBy ? pages.filter((p) => !p.replacedBy && p.status !== 'approved' && p.createdAt < u.createdAt) : [];
+  const differs = SUMMARY_KEYS.some(([k, , pk]) => read[k] != null && s[pk] != null && read[k] !== s[pk]);
   return html`
     <section class="card grow3" style="gap:14px">
+      ${replacedBy ? html`<div class="note" style="background:var(--wait-bg);color:var(--wait);padding:8px 10px;border-radius:8px">Replaced by the revised sheet uploaded ${when(replacedBy.createdAt)}: this page is kept with its photo, and is no longer counted.
+        <a href="#/b/${biz.id}/review/${replacedBy.uploadId}">Open the revised sheet</a> · <button type="button" class="linkbtn" data-unreplace="${replacedBy.id}">Undo</button></div>` : ''}
+      ${o.replaces ? html`<div class="note">This is the revised sheet: it replaces the page uploaded earlier for this day. <button type="button" class="linkbtn" data-unreplace2="${pages.find((p) => p.uploadId === o.replaces)?.id ?? ''}">Undo</button></div>` : ''}
+      ${rev && differs ? html`<div class="sum-rev">Figures changed from the photo · <strong>${reasons[rev.reason] ?? rev.reason}</strong>${rev.note ? ` · ${rev.note}` : ''}</div>` : differs ? html`<div class="sum-rev">Figures differ from the photo, with no reason given yet.</div>` : ''}
       <form id="sform" class="inset">
         <div style="font-size:15px;font-weight:600">Figures written on the page (₹)</div>
         <div class="form-row">
-          ${[['opening', 'Opening balance', s.openingPaise, 'opening'], ['received', 'Received total', s.receivedPaise, 'received'], ['balance', 'Balance', s.balancePaise, 'balance'], ['expenses', 'Expenses total', s.expensesPaise, 'expenses'], ['cashInHand', 'Cash in hand', s.cashInHandPaise, 'cash_in_hand']]
-            .map(([k, l, p, f]) => html`<div class="field"><label>${needs(unclearOf(s.ocrOriginal, s.status === 'draft'), f, l)}</label><input name="${k}" class="mono" value="${v(p)}" ${approved ? 'disabled' : ''}></div>`)}
+          ${SUMMARY_KEYS.map(([k, l, pk, f]) => html`<div class="field"><label>${needs(unclearOf(s.ocrOriginal, s.status === 'draft'), f, l)}</label><input name="${k}" class="mono" value="${v(s[pk])}" ${approved ? 'disabled' : ''} data-read="${read[k] ?? ''}">
+            <span class="tiny sum-photo" data-photo="${k}" ${read[k] != null && s[pk] != null && read[k] !== s[pk] ? '' : 'hidden'}>Photo: ${read[k] == null ? '' : rs(read[k])}</span></div>`)}
         </div>
+        ${approved ? '' : html`<div class="sum-why" ${differs ? '' : 'hidden'}>
+          <div class="field"><label for="sreason">These figures differ from the photo. Why?</label>
+            <select id="sreason" name="reason"><option value="">Choose…</option>${Object.entries(reasons).map(([k2, l2]) => html`<option value="${k2}" ${rev?.reason === k2 ? 'selected' : ''}>${l2}</option>`)}</select></div>
+          <div class="field"><label for="sreasonnote">Note</label><input id="sreasonnote" name="reasonNote" value="${rev?.note ?? ''}" placeholder="Revised after a difference of ₹ 2,620"></div>
+        </div>`}
         ${s.status === 'draft' && s.openingPaise != null ? html`<div class="note">Check each figure against the photo, then press Save figures. Approval needs a person to have saved them.</div>` : ''}
+        ${canReplace.length ? html`<div class="note">Another cash page was uploaded earlier for this day. If this is its revised sheet:
+          ${canReplace.map((p) => html`<button type="button" class="btn plain dchip" data-replaces="${p.id}">This replaces the page uploaded ${when(p.createdAt)}</button>`)}</div>`
+          : !pages.length && differs && !approved ? html`<div class="note">Have the revised sheet? Upload it on Bring in as another cash page for this day, then mark it there as the revised sheet.</div>` : ''}
         <div class="form-msg"></div>
         ${approved ? '' : html`<button class="btn plain" type="submit" style="align-self:flex-start">Save figures</button>`}
       </form>
@@ -3083,7 +3120,32 @@ function summaryPanel(biz, u) {
 
 function wireSummary(biz, u) {
   const form = document.getElementById('sform');
-  form && onSubmit(form, async (d) => { await api('PUT', `/businesses/${biz.id}/cash-summaries/${u.summary.id}`, d); reviewView(biz, u.id); });
+  // The photo's figure shows beside a box changed from it, and the reason is asked for while any figure differs.
+  const why = form?.querySelector('.sum-why');
+  const showDiff = () => {
+    let any = false;
+    form.querySelectorAll('input[data-read]').forEach((inp) => {
+      const r = inp.dataset.read === '' ? null : Number(inp.dataset.read);
+      const now = parsePaiseText(inp.value.trim());
+      const off = r != null && now != null && now !== r;
+      form.querySelector(`[data-photo="${inp.name}"]`)?.toggleAttribute('hidden', !off);
+      any ||= off;
+    });
+    if (why) why.hidden = !any;
+  };
+  form?.querySelectorAll('input[data-read]').forEach((inp) => inp.addEventListener('input', showDiff));
+  form && onSubmit(form, async (d) => {
+    try { await apiFull('PUT', `/businesses/${biz.id}/cash-summaries/${u.summary.id}`, { ...d, reason: d.reason || null, reasonNote: d.reasonNote || null }); }
+    catch (err) { if (err.code === 'summary_reason' && why) { why.hidden = false; document.getElementById('sreason')?.focus(); } throw err; }
+    reviewView(biz, u.id);
+  });
+  const link = async (summaryId, newId, undo) => {
+    try { await api('POST', `/businesses/${biz.id}/cash-summaries/${newId}/replaces`, { summaryId, undo }); reviewView(biz, u.id); }
+    catch (err) { showError(document.getElementById('rmsg') ?? form.querySelector('.form-msg'), err); }
+  };
+  document.querySelectorAll('[data-replaces]').forEach((b) => b.addEventListener('click', () => link(b.dataset.replaces, u.summary.id, false)));
+  document.querySelector('[data-unreplace]')?.addEventListener('click', (e) => link(u.summary.id, e.currentTarget.dataset.unreplace, true));
+  document.querySelector('[data-unreplace2]')?.addEventListener('click', (e) => e.currentTarget.dataset.unreplace2 && link(e.currentTarget.dataset.unreplace2, u.summary.id, true));
   const ap = document.getElementById('sapprove');
   ap && onSubmit(ap, async (d) => {
     try { await apiFull('POST', `/businesses/${biz.id}/cash-summaries/${u.summary.id}/approve`, { note: d.note || null }); }

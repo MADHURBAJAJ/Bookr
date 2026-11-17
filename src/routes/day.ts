@@ -28,10 +28,10 @@ dayRoutes.get('/businesses/:businessId/shifts/:day/inputs', requireRole('rows.up
         -- Still to review: register rows not ticked, expense lines not approved, a cash summary not approved.
         CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id AND r.status <> 'checked')
           WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status <> 'approved')
-          ELSE (SELECT count(*) FROM cash_summaries s WHERE s.upload_id = u.id AND s.status <> 'approved') END AS unclear,
+          ELSE (SELECT count(*) FROM cash_summaries s WHERE s.upload_id = u.id AND s.status <> 'approved' AND json_extract(coalesce(s.ocr_original, '{}'), '$.replacedBy') IS NULL) END AS unclear,
         CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id AND r.status = 'checked')
           WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id AND t.status = 'approved')
-          ELSE (SELECT count(*) FROM cash_summaries s WHERE s.upload_id = u.id AND s.status = 'approved') END AS reviewed
+          ELSE (SELECT count(*) FROM cash_summaries s WHERE s.upload_id = u.id AND (s.status = 'approved' OR json_extract(coalesce(s.ocr_original, '{}'), '$.replacedBy') IS NOT NULL)) END AS reviewed
       FROM uploads u WHERE u.business_id = ? AND u.business_day = ? AND u.kind IN ('bill_register', 'expense_list', 'cash_summary') ORDER BY u.created_at`, bid, day),
     one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day),
   ]);
@@ -43,7 +43,7 @@ dayRoutes.get('/businesses/:businessId/shifts/:day/inputs', requireRole('rows.up
     FROM sales_reports r JOIN uploads u ON u.id = r.upload_id
     WHERE r.business_id = ? AND r.id IN (SELECT value FROM json_each(?)) ORDER BY r.covers_from`, bid, JSON.stringify(cov.reports.map((r) => r.id))) : [];
   const summary = await one<{ cash: number | null }>(db, `SELECT cash_in_hand_paise AS cash FROM cash_summaries WHERE business_id = ? AND shift_day = ?
-    ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, bid, day);
+    AND json_extract(coalesce(ocr_original, '{}'), '$.replacedBy') IS NULL ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, bid, day);
   let bank = null;
   if (can(c.get('role'), 'bank.link')) {
     const accounts = await all<{ id: string; name: string; sheet: number; label: string | null; lastAt: number | null }>(db, `

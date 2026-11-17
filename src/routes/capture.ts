@@ -113,7 +113,7 @@ captureRoutes.get('/businesses/:businessId/uploads', requireRole('rows.edit'), a
   const waiting = await all<{ day: string; drafts: number }>(db, `
     SELECT s.shift_day AS day, (SELECT count(*) FROM transactions t WHERE t.business_id = s.business_id AND t.day = s.shift_day
       AND t.source = 'cash_photo' AND t.type = 'expense' AND t.status <> 'approved') AS drafts
-    FROM cash_summaries s WHERE s.business_id = ? AND s.status <> 'approved'`, bid);
+    FROM cash_summaries s WHERE s.business_id = ? AND s.status <> 'approved' AND json_extract(coalesce(s.ocr_original, '{}'), '$.replacedBy') IS NULL`, bid);
   const notices = waiting.filter((w) => w.drafts > 0).map((w) => ({
     day: w.day,
     text: `The cash summary for ${w.day} cannot be checked yet: ${w.drafts} expense row${w.drafts > 1 ? 's' : ''} for that day ${w.drafts > 1 ? 'are' : 'is'} not approved.`,
@@ -321,8 +321,13 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   if (u.kind === 'cash_summary') {
     const s = await one<SummaryValues & { id: string; shift_day: string; status: string; mismatch_note: string | null; mismatch_accepted_at: number | null }>(db,
       'SELECT * FROM cash_summaries WHERE upload_id = ?', u.id);
-    const checks = await cashSummaryChecks(db, bid, s!.shift_day, s!);
-    return c.json({ ...base, summary: {
+    const [checks, samePages] = await Promise.all([cashSummaryChecks(db, bid, s!.shift_day, s!),
+      // Other cash summary pages of the same day, for "this is the revised sheet".
+      all<{ id: string; uploadId: string; createdAt: number; status: string; ocrOriginal: string | null }>(db, `SELECT id, upload_id AS uploadId, created_at AS createdAt, status, ocr_original AS ocrOriginal
+        FROM cash_summaries WHERE business_id = ? AND shift_day = ? AND id <> ? ORDER BY created_at`, bid, s!.shift_day, s!.id)]);
+    return c.json({ ...base, samePages: samePages.map((p) => { let o: SummaryOcr = {}; try { o = p.ocrOriginal ? JSON.parse(p.ocrOriginal) : {}; } catch { /* none */ }
+      return { id: p.id, uploadId: p.uploadId, createdAt: p.createdAt, status: p.status, replacedBy: o.replacedBy ?? null, replaces: o.replaces ?? null }; }),
+      reasons: REVISION_REASONS, summary: {
       id: s!.id, status: s!.status, openingPaise: s!.opening_paise, receivedPaise: s!.received_paise, balancePaise: s!.balance_paise,
       expensesPaise: s!.expenses_paise, cashInHandPaise: s!.cash_in_hand_paise, mismatchNote: s!.mismatch_note, mismatchAcceptedAt: s!.mismatch_accepted_at,
       ocrOriginal: (s as unknown as { ocr_original: string | null }).ocr_original,
@@ -1102,8 +1107,19 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/expense-rows/appro
 
 // ---- Cash account summary
 
+// The five figures of a cash summary page. A figure that differs from what was read off the photo needs a reason
+// (approved 17 Nov 2026): the sheet was revised after a difference and the new one not uploaded, the photo was misread,
+// or something else with a note. The reason stays with the page and each change goes to History.
+const SUMMARY_FIELDS = [['opening', 'opening', 'Opening'], ['received', 'received', 'Received'], ['balance', 'balance', 'Balance'],
+  ['expenses', 'expenses', 'Expenses'], ['cashInHand', 'cash_in_hand', 'Cash in hand']] as const;
+const REVISION_REASONS: Record<string, string> = { revised: 'Sheet revised, the new one not uploaded', misread: 'The photo was misread', other: 'Other' };
+type SummaryOcr = { read?: Record<string, string | null>; revision?: { reason: string; note: string | null; fields: string[]; by: string; at: number };
+  replacedBy?: string; replaces?: string } & Record<string, unknown>;
+const readPaise = (o: SummaryOcr, f: string) => { const v = o.read?.[f]; return v == null || v === '' ? null : parsePaiseText(String(v).trim()); };
+
 captureRoutes.put('/businesses/:businessId/cash-summaries/:summaryId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
+  const bid = c.get('businessId');
   const id = c.req.param('summaryId');
   if (!isUuid(id)) fail(404, 'Summary not found.');
   const data = await body(c);
@@ -1114,11 +1130,67 @@ captureRoutes.put('/businesses/:businessId/cash-summaries/:summaryId', requireRo
     expenses: optionalPaise(data, 'expenses', 'Expenses'),
     cashInHand: optionalPaise(data, 'cashInHand', 'Cash in hand'),
   };
+  const old = await one<SummaryValues & { status: string; ocr_original: string | null; shift_day: string }>(db,
+    'SELECT * FROM cash_summaries WHERE id = ? AND business_id = ?', id, bid);
+  if (!old || old.status === 'approved') fail(404, 'Summary not found, or already approved.');
   const filled = Object.values(v).every((x) => x !== null);
-  const res = await stmt(db, `UPDATE cash_summaries SET opening_paise = ?, received_paise = ?, balance_paise = ?, expenses_paise = ?,
-    cash_in_hand_paise = ?, status = ? WHERE id = ? AND business_id = ? AND status <> 'approved'`,
-    v.opening, v.received, v.balance, v.expenses, v.cashInHand, filled ? 'checked' : 'draft', id, c.get('businessId')).run();
-  if (!res.meta.changes) fail(404, 'Summary not found, or already approved.');
+  let o: SummaryOcr = {};
+  try { o = old.ocr_original ? JSON.parse(old.ocr_original) : {}; } catch { o = {}; }
+  // Figures that differ from the photo's reading.
+  const differ = SUMMARY_FIELDS.filter(([k, f]) => { const r = readPaise(o, f); return r !== null && v[k] !== null && v[k] !== r; });
+  const reason = typeof data.reason === 'string' && REVISION_REASONS[data.reason] ? data.reason : null;
+  const reasonNote = text(data, 'reasonNote', 'Reason', { optional: true, max: 200 });
+  const why = reason ?? o.revision?.reason ?? null;
+  if (differ.length && filled && !why) {
+    throw new HTTPException(400, { message: `${differ.map(([k, f, l]) => `${l}: the photo says ${rupees(readPaise(o, f)!)}, saved as ${rupees(v[k]!)}`).join('; ')}. Say why these differ from the photo.`,
+      cause: { code: 'summary_reason' } });
+  }
+  if (why === 'other' && differ.length && !(reasonNote ?? o.revision?.note)) fail(400, 'Write a note for the reason.');
+  const user = c.get('user').id;
+  const t = now();
+  if (differ.length && why) o.revision = { reason: why, note: reasonNote ?? (reason ? null : o.revision?.note ?? null), fields: differ.map(([k]) => k), by: user, at: t };
+  else delete o.revision;
+  const before = { opening: old.opening_paise, received: old.received_paise, balance: old.balance_paise, expenses: old.expenses_paise, cashInHand: old.cash_in_hand_paise };
+  const changes = SUMMARY_FIELDS.filter(([k]) => before[k] !== v[k]).map(([k, , l]) => `${l} ${before[k] == null ? '–' : rupees(before[k]!)} → ${v[k] == null ? '–' : rupees(v[k]!)}`);
+  const ocrText = Object.keys(o).length ? JSON.stringify(o) : old.ocr_original;
+  const res = await db.batch([
+    stmt(db, `UPDATE cash_summaries SET opening_paise = ?, received_paise = ?, balance_paise = ?, expenses_paise = ?,
+      cash_in_hand_paise = ?, status = ?, ocr_original = ? WHERE id = ? AND business_id = ? AND status <> 'approved'`,
+      v.opening, v.received, v.balance, v.expenses, v.cashInHand, filled ? 'checked' : 'draft', ocrText, id, bid),
+    ...(changes.length ? [stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash_summary.edit', 'cash_summaries', ?, ?, ?, ?)`, bid, user, id, JSON.stringify(before),
+      JSON.stringify({ ...v, changes: `${changes.join('; ')}${differ.length && why ? `. Differs from the photo: ${REVISION_REASONS[why]}${o.revision?.note ? ` (${o.revision.note})` : ''}` : ''}` }), t)] : []),
+  ]);
+  if (!res[0].meta.changes) fail(404, 'Summary not found, or already approved.');
+  return c.json({ ok: true });
+});
+
+// A revised sheet uploaded later as another page of the same day replaces the first page (17 Nov 2026): the first stays
+// with its photo, marked, and is no longer counted or waited on. undo puts it back.
+captureRoutes.post('/businesses/:businessId/cash-summaries/:summaryId/replaces', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const ids = [c.req.param('summaryId'), data.summaryId];
+  if (!ids.every((x) => typeof x === 'string' && isUuid(x)) || ids[0] === ids[1]) fail(400, 'Choose the earlier page.');
+  const [nw, old] = await Promise.all(ids.map((x) => one<{ id: string; upload_id: string; shift_day: string; status: string; ocr_original: string | null }>(db,
+    'SELECT id, upload_id, shift_day, status, ocr_original FROM cash_summaries WHERE id = ? AND business_id = ?', x as string, bid)));
+  if (!nw || !old) fail(404, 'Summary not found.');
+  if (nw.shift_day !== old.shift_day) fail(400, 'Both pages must be for the same day.');
+  if (old.status === 'approved') fail(409, 'The earlier page is approved; it cannot be replaced.');
+  const parse = (x: string | null): SummaryOcr => { try { return x ? JSON.parse(x) : {}; } catch { return {}; } };
+  const on = parse(nw.ocr_original), oo = parse(old.ocr_original);
+  const undo = data.undo === true;
+  if (undo) { delete oo.replacedBy; delete on.replaces; } else { oo.replacedBy = nw.upload_id; on.replaces = old.upload_id; }
+  const user = c.get('user').id;
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE cash_summaries SET ocr_original = ? WHERE id = ?', JSON.stringify(oo), old.id),
+    stmt(db, 'UPDATE cash_summaries SET ocr_original = ? WHERE id = ?', JSON.stringify(on), nw.id),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash_summary.replaced', 'cash_summaries', ?, NULL, ?, ?)`, bid, user, old.id,
+      JSON.stringify({ by: nw.upload_id, undo, changes: undo ? 'No longer replaced by the revised sheet' : 'Replaced by a revised sheet of the same day' }), t),
+  ]);
   return c.json({ ok: true });
 });
 

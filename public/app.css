@@ -556,3 +556,8 @@ tr.rd-red td { background: #FCEBEB; }
 .rd-bad { color: #A32D2D; font-weight: 600; }
 .rd-ok { color: var(--ok, #1D7A4F); }
 .rd-more summary { cursor: pointer; padding: 4px 0; }
+/* Cash summary changed from its photo (17 Nov 2026). */
+.sum-rev { background: var(--wait-bg); color: var(--wait); padding: 8px 10px; border-radius: 8px; font-size: 14px; }
+.sum-photo { color: var(--wait); }
+.sum-why { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+.sum-why[hidden], .sum-photo[hidden] { display: none; }
