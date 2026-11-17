@@ -137,3 +137,9 @@ a.btn.pri { color: #fff; }
 .quick .btn { min-height: 52px; font-size: 16px; }
 a.chip.link { display: inline-flex; align-items: center; text-decoration: none; color: inherit; }
 a.chip.link[aria-pressed="true"] { color: #fff; }
+
+/* report bars */
+.hours { display: flex; flex-direction: column; gap: 6px; }
+.hrow { display: grid; grid-template-columns: 110px 1fr 130px; align-items: center; gap: 10px; }
+.bar { height: 12px; background: var(--accent); border-radius: 4px; }
+@media (max-width: 560px) { .hrow { grid-template-columns: 90px 1fr 100px; } }

@@ -779,16 +779,88 @@ actions.closeShift = async () => {
 
 // ---------- reports (Owner and manager)
 
+// Meal periods by the hour the bill was printed (India time).
+const PERIODS = [['Breakfast', 6, 11], ['Lunch', 11, 16], ['Evening', 16, 19], ['Dinner', 19, 23], ['Late night', 23, 30]];
+const periodOf = (h) => PERIODS.find(([, a, b]) => (h < 6 ? h + 24 : h) >= a && (h < 6 ? h + 24 : h) < b)[0];
+const pct = (part, whole) => (whole ? `${Math.round((part * 1000) / whole) / 10}%` : '');
+const bar = (part, max) => html`<div class="bar" style="width:${max ? Math.max(2, Math.round((part * 100) / max)) : 0}%"></div>`;
+const hourLabel = (h) => `${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`;
+
+async function insightsTab(tab, head, from, to) {
+  const r = await api('GET', `${B()}/reports/insights?from=${from}&to=${to}`);
+  const title = from === to ? from : `${from} to ${to}`;
+  const net = r.byService.reduce((t, x) => t + x.netPaise, 0);
+  const bills = r.byService.reduce((t, x) => t + x.bills, 0);
+  const none = html`<p class="quiet">No bills in these shifts.</p>`;
+  if (tab === 'when') {
+    const periods = PERIODS.map(([name]) => {
+      const hs = r.byHour.filter((h) => periodOf(h.hour) === name);
+      return { name, bills: hs.reduce((t, h) => t + h.bills, 0), netPaise: hs.reduce((t, h) => t + h.netPaise, 0), covers: hs.reduce((t, h) => t + h.covers, 0) };
+    }).filter((p) => p.bills);
+    const maxHour = Math.max(0, ...r.byHour.map((h) => h.netPaise));
+    const kindName = { table: 'Dine-in', room: 'Room service', takeaway: 'Takeaway' };
+    rerender = () => paint(shell('#/reports', html`${head}
+      <section class="panel"><h2>When and where · ${title}</h2>
+        <p class="quiet small">Net sales = after bill discounts, before GST. Void bills left out. Hours are when the bill was printed.</p>
+        ${bills ? html`<div class="sums"><div class="big"><span>Net sales · ${bills} bills · average ${rs(Math.round(net / bills))}</span><span>${rs(net)}</span></div></div>` : none}</section>
+      ${bills ? html`<div style="margin-top:16px">
+        <section class="panel"><h2>By service</h2>
+          <div class="scroll"><table class="t"><thead><tr><th>Service</th><th class="num">Bills</th><th class="num">Net sales</th><th class="num">Share</th><th class="num">Average bill</th><th class="num">Guests</th><th class="num">Per guest</th><th class="num">Turns</th></tr></thead><tbody>
+            ${r.byService.map((x) => html`<tr><td>${kindName[x.kind] ?? x.kind}</td><td class="num">${x.bills}</td><td class="num">${rs(x.netPaise)}</td><td class="num">${pct(x.netPaise, net)}</td>
+              <td class="num">${rs(Math.round(x.netPaise / x.bills))}</td><td class="num">${x.covers || ''}</td><td class="num">${x.covers ? rs(Math.round(x.coveredNetPaise / x.covers)) : ''}</td>
+              <td class="num">${x.kind === 'table' && x.placeDays ? (Math.round((x.bills * 10) / x.placeDays) / 10).toFixed(1) : ''}</td></tr>`)}</tbody></table></div>
+          <p class="small quiet">Per guest counts only orders where the number of guests was entered. Turns = bills per table per shift, for tables that were used.</p>
+        </section></div>
+      <div class="grid2" style="margin-top:16px;align-items:start">
+        <section class="panel"><h2>By meal period</h2>
+          <div class="scroll"><table class="t"><thead><tr><th>Period</th><th class="num">Bills</th><th class="num">Net sales</th><th class="num">Share</th><th class="num">Guests</th></tr></thead><tbody>
+            ${periods.map((p) => html`<tr><td>${p.name}</td><td class="num">${p.bills}</td><td class="num">${rs(p.netPaise)}</td><td class="num">${pct(p.netPaise, net)}</td><td class="num">${p.covers || ''}</td></tr>`)}</tbody></table></div>
+          <p class="small quiet">Breakfast 6–11, lunch 11–4, evening 4–7, dinner 7–11, late night 11 pm–6 am.</p>
+          <h2>By hour</h2>
+          <div class="hours">${r.byHour.map((h) => html`<div class="hrow"><span class="small">${hourLabel(h.hour)}</span>${bar(h.netPaise, maxHour)}<span class="num small">${rs(h.netPaise)} · ${h.bills}</span></div>`)}</div></section>
+        <section class="panel"><h2>By who took the order</h2>
+          <div class="scroll"><table class="t"><thead><tr><th>Staff</th><th class="num">Bills</th><th class="num">Net sales</th><th class="num">Average bill</th><th class="num">Discounts</th><th class="num">Voids</th></tr></thead><tbody>
+            ${r.byStaff.map((x) => html`<tr><td>${x.name}<div class="small quiet">${x.role ?? ''}</div></td><td class="num">${x.bills}</td><td class="num">${rs(x.netPaise)}</td>
+              <td class="num">${x.bills ? rs(Math.round(x.netPaise / x.bills)) : ''}</td><td class="num">${x.discountBills ? `${x.discountBills} · ${rs(x.discountPaise)}` : ''}</td><td class="num">${x.voids || ''}</td></tr>`)}</tbody></table></div></section>
+      </div>` : ''}`));
+    rerender();
+    return;
+  }
+  const itemsTotal = r.mix.reduce((t, m) => t + m.amountPaise, 0);
+  const st = (k) => r.mix.filter((m) => m.station === k).reduce((t, m) => t + m.amountPaise, 0);
+  const cats = Object.values(r.mix.reduce((acc, m) => {
+    const c = acc[m.category] ?? (acc[m.category] = { category: m.category, qty: 0, amountPaise: 0, stations: new Set() });
+    c.qty += m.qty; c.amountPaise += m.amountPaise; c.stations.add(m.station); return acc;
+  }, {})).sort((a, b) => b.amountPaise - a.amountPaise);
+  const maxCat = Math.max(0, ...cats.map((c) => c.amountPaise));
+  rerender = () => paint(shell('#/reports', html`${head}
+    <section class="panel"><h2>Menu mix · ${title}</h2>
+      <p class="quiet small">Item values are before bill discounts and GST. Void bills left out. Cuisine comes from each dish's category in Settings, Menu.</p>
+      ${itemsTotal ? html`<div class="sums"><div><span>Kitchen</span><span>${rs(st('kitchen'))} · ${pct(st('kitchen'), itemsTotal)}</span></div>
+        <div><span>Bar</span><span>${rs(st('bar'))} · ${pct(st('bar'), itemsTotal)}</span></div>
+        <div class="big"><span>All items</span><span>${rs(itemsTotal)}</span></div></div>` : none}</section>
+    ${itemsTotal ? html`<div class="grid2" style="margin-top:16px;align-items:start">
+      <section class="panel"><h2>By cuisine or category</h2>
+        <div class="hours">${cats.map((c) => html`<div class="hrow"><span class="small">${c.category}</span>${bar(c.amountPaise, maxCat)}<span class="num small">${rs(c.amountPaise)} · ${pct(c.amountPaise, itemsTotal)}</span></div>`)}</div>
+        <h2>Not sold in these shifts</h2>
+        ${r.notSold.length ? html`<div class="sums">${r.notSold.map((n) => html`<div><span>${n.name}</span><span class="quiet">${n.category}</span></div>`)}</div>` : html`<p class="quiet small">Every dish on the menu sold at least once.</p>`}</section>
+      <section class="panel"><h2>Dishes, best first</h2>
+        <div class="scroll"><table class="t"><thead><tr><th>#</th><th>Dish</th><th>Category</th><th class="num">Qty</th><th class="num">Value</th><th class="num">Share</th></tr></thead><tbody>
+          ${r.items.map((i, n) => html`<tr><td class="quiet">${n + 1}</td><td>${i.name}${i.station === 'bar' ? html` <span class="small quiet">bar</span>` : ''}</td><td>${i.category}</td><td class="num">${i.qty}</td><td class="num">${rs(i.amountPaise)}</td><td class="num">${pct(i.amountPaise, itemsTotal)}</td></tr>`)}</tbody></table></div></section>
+    </div>` : ''}`));
+  rerender();
+}
+
 async function reportsScreen(tab = 'sales', range = '') {
   const [qf, qt] = range.split('_');
   const isD = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '');
   const from = isD(qf) ? qf : me.business.shiftDay;
   const to = isD(qt) ? qt : from;
-  ui.from = from; ui.to = to;
+  ui.from = from; ui.to = to; ui.repTab = tab;
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const head = html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><div class="chips">
-      ${[['sales', 'Sales'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip link" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
-    ${tab === 'sales' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
+      ${[['sales', 'Sales'], ['when', 'When and where'], ['mix', 'Menu mix'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip link" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
+    ${tab !== 'owed' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
       <div class="f">&nbsp;<button class="btn" type="submit" data-act="repGo" data-submit>Show</button></div></form>` : ''}</div>`;
   if (tab === 'owed') {
     const { accounts } = await api('GET', `${B()}/reports/debtors`);
@@ -810,6 +882,7 @@ async function reportsScreen(tab = 'sales', range = '') {
     rerender();
     return;
   }
+  if (tab === 'when' || tab === 'mix') { await insightsTab(tab, head, from, to); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   rerender = () => paint(shell('#/reports', html`${head}
@@ -838,7 +911,7 @@ async function reportsScreen(tab = 'sales', range = '') {
     </div>`));
   rerender();
 }
-actions.repGo = () => go(`#/reports/sales/${ui.from}_${ui.to}`);
+actions.repGo = () => go(`#/reports/${ui.repTab ?? 'sales'}/${ui.from}_${ui.to}`);
 actions.statement = async (d) => { ui.statement = await api('GET', `${B()}/debtors/${d.id}`); rerender(); };
 actions.printStatement = () => {
   const st = ui.statement; let bal = 0;

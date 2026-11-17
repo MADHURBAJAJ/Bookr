@@ -430,3 +430,41 @@ describe('tables list', () => {
     expect((await s.counter.get(`${s.B}/orders`)).json.tablesFixed).toBe(false);
   });
 });
+
+describe('sales insights and menu mix', () => {
+  it('splits net sales by hour, service type and order taker, counts covers, and shows the menu mix and what did not sell', async () => {
+    const s = await setupBusiness();
+    const { B, counter, ok } = s;
+    // A table of 4 and a takeaway, then one voided bill that must not count as sales.
+    const t = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T1', covers: 4 }))).id;
+    await ok(counter.post(`${B}/orders/${t}/items`, { itemId: s.items['Masala Dosa'], delta: 2 }));
+    await ok(counter.post(`${B}/orders/${t}/items`, { itemId: s.items['Beer 650 ml'], delta: 1 }));
+    await ok(counter.post(`${B}/orders/${t}/kot`));
+    const tb = (await ok(counter.post(`${B}/orders/${t}/bill`, { entityId: s.company }))).bill;
+    const k = (await ok(counter.post(`${B}/orders`, { kind: 'takeaway' }))).id;
+    await ok(counter.post(`${B}/orders/${k}/items`, { itemId: s.items['Butter Naan'], delta: 3 }));
+    await ok(counter.post(`${B}/orders/${k}/kot`));
+    await ok(counter.post(`${B}/orders/${k}/bill`, { entityId: s.company }));
+    const v = await billed(s, [['Masala Dosa', 1]]);
+    await ok(counter.post(`${B}/bills/${v.bill.id}/void`, { reasonId: s.reasons.void }));
+
+    const day = tb.shiftDay;
+    expect((await counter.get(`${B}/reports/insights?from=${day}&to=${day}`)).status).toBe(403); // cashier
+    const r = (await s.owner.get(`${B}/reports/insights?from=${day}&to=${day}`)).json;
+
+    const table = r.byService.find((x: any) => x.kind === 'table');
+    expect(table).toMatchObject({ bills: 1, netPaise: 68000, covers: 4, coveredNetPaise: 68000, placeDays: 1 });
+    expect(r.byService.find((x: any) => x.kind === 'takeaway')).toMatchObject({ bills: 1, netPaise: 18000 });
+    expect(r.byHour.reduce((n: number, h: any) => n + h.bills, 0)).toBe(2);
+    expect(r.byHour.every((h: any) => h.hour >= 0 && h.hour < 24)).toBe(true);
+
+    const taker = r.byStaff[0];
+    expect(taker).toMatchObject({ bills: 2, netPaise: 86000, voids: 1 });
+
+    const bar = r.mix.find((m: any) => m.station === 'bar');
+    expect(bar).toMatchObject({ qty: 1, amountPaise: 32000 });
+    expect(r.mix.filter((m: any) => m.station === 'kitchen').reduce((n: number, m: any) => n + m.amountPaise, 0)).toBe(54000);
+    expect(r.items[0]).toMatchObject({ name: 'Masala Dosa', qty: 2, amountPaise: 36000 });
+    expect(r.notSold.map((x: any) => x.name)).toEqual(['Masala Chai']);
+  });
+});
