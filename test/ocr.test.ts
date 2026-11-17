@@ -249,6 +249,23 @@ describe('Read page: who, how many, and failures', () => {
     expect(status.json).toMatchObject({ configured: true, usedToday: 2, dailyLimit: 2 });
   });
 
+  it('a try that Claude never read (bad key, busy, unreachable) does not use up the daily cap', async () => {
+    env.OCR_DAILY_PAGE_LIMIT = '1';
+    const p = await page('expense_list');
+    mocked.mockRejectedValueOnce(new OcrError(503, 'The server could not sign in to Claude. Check the ANTHROPIC_API_KEY secret. You can still type the rows in.', true));
+    mocked.mockRejectedValueOnce(new OcrError(429, 'Claude is busy right now. Try again in a minute.', true));
+    mocked.mockResolvedValue({ data: { orientation: 'upright', legible: true, page_total: null, rows: [] }, model: 'm' } as never);
+    expect((await p.read()).status).toBe(503);
+    expect((await p.read()).status).toBe(429);
+    expect((await p.clients.entry_staff.get(`/businesses/${p.bid}/ocr`)).json).toMatchObject({ usedToday: 0 });
+    expect((await p.read()).status).toBe(200);
+    const after = await p.read();
+    expect(after.status).toBe(429);
+    expect(after.json.error).toMatch(/limit of 1 page reads/);
+    const log = await sql`SELECT after FROM audit_log WHERE action = 'ocr.read' ORDER BY id`;
+    expect(log.map((r) => JSON.parse(r.after).free ?? false)).toEqual([true, true, false]);
+  });
+
   it('allows only a few pages at a time', async () => {
     env.OCR_MAX_PARALLEL = '1';
     const p = await page('expense_list');

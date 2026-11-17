@@ -10,7 +10,10 @@ import type { Env } from './types';
 export const DEFAULT_OCR_MODEL = 'claude-opus-5-5';
 
 export class OcrError extends Error {
-  constructor(public status: 400 | 409 | 429 | 502 | 503, message: string) {
+  /** free: Claude never read the page (bad key, unknown model, busy, unreachable), so the try does not count toward the daily limit. */
+  /** detail: what the API answered (status and its message; never the key), kept in the audit log to diagnose failures. */
+  public detail?: string;
+  constructor(public status: 400 | 409 | 429 | 502 | 503, message: string, public free = false) {
     super(message);
   }
 }
@@ -61,13 +64,21 @@ export async function readWithClaude<T extends z.ZodType>(
     return { data: response.parsed_output as z.infer<T>, model: response.model };
   } catch (e) {
     if (e instanceof OcrError) throw e;
+    const err = mapApiError(e, model);
+    if (e instanceof Anthropic.APIError) err.detail = `${e.status ?? ''} ${String(e.message ?? '').slice(0, 300)}`.replaceAll(env.ANTHROPIC_API_KEY, '[key]');
+    throw err;
+  }
+}
+
+function mapApiError(e: unknown, model: string): OcrError {
+  {
     if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
-      throw new OcrError(503, 'The server could not sign in to Claude. Check the ANTHROPIC_API_KEY secret. You can still type the rows in.');
+      return new OcrError(503, 'The server could not sign in to Claude. Check the ANTHROPIC_API_KEY secret. You can still type the rows in.', true);
     }
-    if (e instanceof Anthropic.NotFoundError) throw new OcrError(503, `The model "${model}" was not found. Check the CLAUDE_OCR_MODEL setting.`);
-    if (e instanceof Anthropic.RateLimitError) throw new OcrError(429, 'Claude is busy right now. Try again in a minute.');
-    if (e instanceof Anthropic.BadRequestError) throw new OcrError(502, 'Claude could not read this file. Try a clearer photo, or type the rows in.');
-    if (e instanceof Anthropic.APIError) throw new OcrError(502, 'Reading the page failed on Claude’s side. Try again shortly, or type the rows in.');
-    throw new OcrError(502, 'Could not reach Claude. Try again shortly, or type the rows in.');
+    if (e instanceof Anthropic.NotFoundError) return new OcrError(503, `The model "${model}" was not found. Check the CLAUDE_OCR_MODEL setting.`, true);
+    if (e instanceof Anthropic.RateLimitError) return new OcrError(429, 'Claude is busy right now. Try again in a minute.', true);
+    if (e instanceof Anthropic.BadRequestError) return new OcrError(502, 'Claude could not read this file. Try a clearer photo, or type the rows in.');
+    if (e instanceof Anthropic.APIError) return new OcrError(502, 'Reading the page failed on Claude’s side. Try again shortly, or type the rows in.');
+    return new OcrError(502, 'Could not reach Claude. Try again shortly, or type the rows in.', true);
   }
 }

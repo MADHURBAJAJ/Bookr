@@ -15,7 +15,8 @@ export const ocrRoutes = new Hono<AppEnv>();
 const STALE_MS = 5 * 60 * 1000; // a read still running after this is treated as abandoned
 
 // Each read is recorded in audit_log as action 'ocr.read'. The row is written before Claude is
-// called (after = NULL while in progress), so it counts toward the daily cap even if the call fails.
+// called (after = NULL while in progress), so it counts toward the daily cap even if the call fails, unless Claude never
+// read the page (a bad key, an unknown model, Claude busy or unreachable): those finish with free: true and do not count.
 function limits(env: Env) {
   const n = (v: string | undefined, d: number) => (v && /^\d+$/.test(v) ? Number(v) : d);
   return { daily: n(env.OCR_DAILY_PAGE_LIMIT, 40), parallel: n(env.OCR_MAX_PARALLEL, 3), model: env.CLAUDE_OCR_MODEL || DEFAULT_OCR_MODEL };
@@ -25,7 +26,7 @@ const dayStart = (t: number) => { const [y, m, d] = istDay(t).split('-').map(Num
 
 async function usage(db: DB, businessId: string, t: number) {
   const r = await one<{ used: number; running: number }>(db, `SELECT
-      count(*) AS used,
+      count(CASE WHEN after IS NULL OR json_extract(after, '$.free') IS NOT 1 THEN 1 END) AS used,
       count(CASE WHEN after IS NULL AND created_at > ? THEN 1 END) AS running
     FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND created_at >= ?`, t - STALE_MS, businessId, dayStart(t));
   return r!;
@@ -37,7 +38,8 @@ async function reserveRead(db: DB, env: Env, bid: string, user: string, uploadId
   const t = now();
   const reserve = await stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
     SELECT ?, ?, 'ocr.read', 'uploads', ?, ?, NULL, ?
-    WHERE (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND created_at >= ?) < ?
+    WHERE (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND created_at >= ?
+        AND (after IS NULL OR json_extract(after, '$.free') IS NOT 1)) < ?
       AND (SELECT count(*) FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND after IS NULL AND created_at > ?) < ?
       AND NOT EXISTS (SELECT 1 FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND row_id = ? AND after IS NULL AND created_at > ?)`,
     bid, user, uploadId, JSON.stringify(before), t,
@@ -154,7 +156,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     const err = e instanceof OcrError ? e : null;
     await db.batch([
       stmt(db, "UPDATE uploads SET status = 'failed' WHERE id = ? AND status = 'reading'", u.id),
-      finish({ ok: false, error: err?.message ?? 'unexpected' }),
+      finish({ ok: false, error: err?.message ?? 'unexpected', ...(err?.free ? { free: true } : {}), ...(err?.detail ? { detail: err.detail } : {}) }),
     ]);
     if (isShiftConfirmed(e)) fail(409, 'This shift is confirmed. An Owner must reopen it first.');
     if (err) return c.json({ error: err.message }, err.status);
@@ -215,7 +217,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read-totals', requireR
     return c.json({ columnTotals: now2?.t ? JSON.parse(now2.t) : null });
   } catch (e) {
     const err = e instanceof OcrError ? e : null;
-    await finish({ ok: false, purpose: 'totals', error: err?.message ?? 'unexpected' });
+    await finish({ ok: false, purpose: 'totals', error: err?.message ?? 'unexpected', ...(err?.free ? { free: true } : {}), ...(err?.detail ? { detail: err.detail } : {}) });
     if (err) fail(err.status, err.message);
     throw e;
   }
@@ -279,7 +281,7 @@ ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('bu
     return c.json(result);
   } catch (e) {
     const err = e instanceof OcrError ? e : null;
-    await finish({ ok: false, purpose: 'accuracy', error: err?.message ?? 'unexpected' });
+    await finish({ ok: false, purpose: 'accuracy', error: err?.message ?? 'unexpected', ...(err?.free ? { free: true } : {}), ...(err?.detail ? { detail: err.detail } : {}) });
     if (err) fail(err.status, err.message);
     throw e;
   }
