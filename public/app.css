@@ -484,3 +484,13 @@ details.menu[open] { z-index: 40; }
 .cal-leg { display: flex; gap: 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); font-size: 12px; color: var(--muted); }
 .cal-leg > span { display: inline-flex; align-items: center; }
 .cal-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; font-size: 13px; }
+/* UPI tab (17 Nov 2026): probably the same payment, and the left-over list by time */
+.near-pair { display: grid; grid-template-columns: minmax(0,1fr) 24px minmax(0,1fr); gap: 4px 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+.near-arrow { color: var(--muted); text-align: center; }
+.near-acts { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.lo-grid { display: grid; grid-template-columns: minmax(0,1fr) 64px minmax(0,1fr); gap: 8px; align-items: start; }
+.lo-head { padding-bottom: 4px; border-bottom: 1px solid var(--line-soft); }
+.lo-row { border-bottom: 1px solid var(--line-soft); padding: 2px 0; }
+.lo-t { text-align: center; padding-top: 10px; color: var(--muted); }
+.lo-row .um-line { border: 0; }
+@media (max-width: 560px) { .lo-grid { grid-template-columns: minmax(0,1fr) 48px minmax(0,1fr); gap: 4px; } }
