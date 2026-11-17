@@ -455,8 +455,13 @@ describe('sales insights and menu mix', () => {
     const table = r.byService.find((x: any) => x.kind === 'table');
     expect(table).toMatchObject({ bills: 1, netPaise: 68000, covers: 4, coveredNetPaise: 68000, placeDays: 1 });
     expect(r.byService.find((x: any) => x.kind === 'takeaway')).toMatchObject({ bills: 1, netPaise: 18000 });
-    expect(r.byHour.reduce((n: number, h: any) => n + h.bills, 0)).toBe(2);
+    // By KOT time: every KOT of the day counts (the voided bill's food still went to the kitchen).
+    const sent = (st: string, k: 'items' | 'valuePaise') => r.byHour.filter((h: any) => h.station === st).reduce((n: number, h: any) => n + h[k], 0);
+    expect(sent('kitchen', 'items')).toBe(6);
+    expect(sent('kitchen', 'valuePaise')).toBe(2 * 18000 + 3 * 6000 + 18000);
+    expect(sent('bar', 'items')).toBe(1);
     expect(r.byHour.every((h: any) => h.hour >= 0 && h.hour < 24)).toBe(true);
+    expect(r.coversByHour.reduce((n: number, h: any) => n + h.covers, 0)).toBe(4);
 
     const taker = r.byStaff[0];
     expect(taker).toMatchObject({ bills: 2, netPaise: 86000, voids: 1 });
@@ -465,6 +470,6 @@ describe('sales insights and menu mix', () => {
     expect(bar).toMatchObject({ qty: 1, amountPaise: 32000 });
     expect(r.mix.filter((m: any) => m.station === 'kitchen').reduce((n: number, m: any) => n + m.amountPaise, 0)).toBe(54000);
     expect(r.items[0]).toMatchObject({ name: 'Masala Dosa', qty: 2, amountPaise: 36000 });
-    expect(r.notSold.map((x: any) => x.name)).toEqual(['Masala Chai']);
+    expect(r.notSold).toEqual([{ name: 'Masala Chai', category: 'Food', station: 'kitchen' }]);
   });
 });

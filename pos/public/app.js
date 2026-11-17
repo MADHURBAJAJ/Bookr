@@ -793,15 +793,24 @@ async function insightsTab(tab, head, from, to) {
   const bills = r.byService.reduce((t, x) => t + x.bills, 0);
   const none = html`<p class="quiet">No bills in these shifts.</p>`;
   if (tab === 'when') {
+    // KOT lines by hour and station → one row per hour: kitchen items, bar items, value sent, guests.
+    const hours = [...new Set(r.byHour.map((h) => h.hour))].map((hour) => {
+      const k = r.byHour.find((h) => h.hour === hour && h.station === 'kitchen');
+      const b = r.byHour.find((h) => h.hour === hour && h.station === 'bar');
+      return { hour, kitchen: k?.items ?? 0, bar: b?.items ?? 0, valuePaise: (k?.valuePaise ?? 0) + (b?.valuePaise ?? 0),
+        covers: r.coversByHour.find((c) => c.hour === hour)?.covers ?? 0 };
+    }).sort((a, b) => ((a.hour + 24 - 6) % 24) - ((b.hour + 24 - 6) % 24));
+    const sentTotal = hours.reduce((t, h) => t + h.valuePaise, 0);
     const periods = PERIODS.map(([name]) => {
-      const hs = r.byHour.filter((h) => periodOf(h.hour) === name);
-      return { name, bills: hs.reduce((t, h) => t + h.bills, 0), netPaise: hs.reduce((t, h) => t + h.netPaise, 0), covers: hs.reduce((t, h) => t + h.covers, 0) };
-    }).filter((p) => p.bills);
-    const maxHour = Math.max(0, ...r.byHour.map((h) => h.netPaise));
+      const hs = hours.filter((h) => periodOf(h.hour) === name);
+      const add = (k) => hs.reduce((t, h) => t + h[k], 0);
+      return { name, kitchen: add('kitchen'), bar: add('bar'), valuePaise: add('valuePaise'), covers: add('covers') };
+    }).filter((p) => p.kitchen || p.bar);
+    const maxHour = Math.max(0, ...hours.map((h) => h.valuePaise));
     const kindName = { table: 'Dine-in', room: 'Room service', takeaway: 'Takeaway' };
     rerender = () => paint(shell('#/reports', html`${head}
       <section class="panel"><h2>When and where · ${title}</h2>
-        <p class="quiet small">Net sales = after bill discounts, before GST. Void bills left out. Hours are when the bill was printed.</p>
+        <p class="quiet small">Net sales = after bill discounts, before GST. Void bills left out. Meal periods and hours go by when each KOT printed.</p>
         ${bills ? html`<div class="sums"><div class="big"><span>Net sales · ${bills} bills · average ${rs(Math.round(net / bills))}</span><span>${rs(net)}</span></div></div>` : none}</section>
       ${bills ? html`<div style="margin-top:16px">
         <section class="panel"><h2>By service</h2>
@@ -812,12 +821,13 @@ async function insightsTab(tab, head, from, to) {
           <p class="small quiet">Per guest counts only orders where the number of guests was entered. Turns = bills per table per shift, for tables that were used.</p>
         </section></div>
       <div class="grid2" style="margin-top:16px;align-items:start">
-        <section class="panel"><h2>By meal period</h2>
-          <div class="scroll"><table class="t"><thead><tr><th>Period</th><th class="num">Bills</th><th class="num">Net sales</th><th class="num">Share</th><th class="num">Guests</th></tr></thead><tbody>
-            ${periods.map((p) => html`<tr><td>${p.name}</td><td class="num">${p.bills}</td><td class="num">${rs(p.netPaise)}</td><td class="num">${pct(p.netPaise, net)}</td><td class="num">${p.covers || ''}</td></tr>`)}</tbody></table></div>
+        <section class="panel"><h2>By meal period (KOT time)</h2>
+          <div class="scroll"><table class="t"><thead><tr><th>Period</th><th class="num">Kitchen items</th><th class="num">Bar items</th><th class="num">Value sent</th><th class="num">Share</th><th class="num">Guests</th></tr></thead><tbody>
+            ${periods.map((p) => html`<tr><td>${p.name}</td><td class="num">${p.kitchen || ''}</td><td class="num">${p.bar || ''}</td><td class="num">${rs(p.valuePaise)}</td><td class="num">${pct(p.valuePaise, sentTotal)}</td><td class="num">${p.covers || ''}</td></tr>`)}</tbody></table></div>
           <p class="small quiet">Breakfast 6–11, lunch 11–4, evening 4–7, dinner 7–11, late night 11 pm–6 am.</p>
-          <h2>By hour</h2>
-          <div class="hours">${r.byHour.map((h) => html`<div class="hrow"><span class="small">${hourLabel(h.hour)}</span>${bar(h.netPaise, maxHour)}<span class="num small">${rs(h.netPaise)} · ${h.bills}</span></div>`)}</div></section>
+          <h2>By hour (KOT time)</h2>
+          <div class="hours">${hours.map((h) => html`<div class="hrow"><span class="small">${hourLabel(h.hour)}</span>${bar(h.valuePaise, maxHour)}<span class="num small">${rs(h.valuePaise)} · K ${h.kitchen} · B ${h.bar}</span></div>`)}</div>
+          <p class="small quiet">Every dish sent to the kitchen or bar, by the hour its KOT printed, at menu price before discounts and GST. K = kitchen items, B = bar items. Guests count at their order's first KOT.</p></section>
         <section class="panel"><h2>By who took the order</h2>
           <div class="scroll"><table class="t"><thead><tr><th>Staff</th><th class="num">Bills</th><th class="num">Net sales</th><th class="num">Average bill</th><th class="num">Discounts</th><th class="num">Voids</th></tr></thead><tbody>
             ${r.byStaff.map((x) => html`<tr><td>${x.name}<div class="small quiet">${x.role ?? ''}</div></td><td class="num">${x.bills}</td><td class="num">${rs(x.netPaise)}</td>
@@ -842,11 +852,19 @@ async function insightsTab(tab, head, from, to) {
     ${itemsTotal ? html`<div class="grid2" style="margin-top:16px;align-items:start">
       <section class="panel"><h2>By cuisine or category</h2>
         <div class="hours">${cats.map((c) => html`<div class="hrow"><span class="small">${c.category}</span>${bar(c.amountPaise, maxCat)}<span class="num small">${rs(c.amountPaise)} · ${pct(c.amountPaise, itemsTotal)}</span></div>`)}</div>
-        <h2>Not sold in these shifts</h2>
-        ${r.notSold.length ? html`<div class="sums">${r.notSold.map((n) => html`<div><span>${n.name}</span><span class="quiet">${n.category}</span></div>`)}</div>` : html`<p class="quiet small">Every dish on the menu sold at least once.</p>`}</section>
-      <section class="panel"><h2>Dishes, best first</h2>
-        <div class="scroll"><table class="t"><thead><tr><th>#</th><th>Dish</th><th>Category</th><th class="num">Qty</th><th class="num">Value</th><th class="num">Share</th></tr></thead><tbody>
-          ${r.items.map((i, n) => html`<tr><td class="quiet">${n + 1}</td><td>${i.name}${i.station === 'bar' ? html` <span class="small quiet">bar</span>` : ''}</td><td>${i.category}</td><td class="num">${i.qty}</td><td class="num">${rs(i.amountPaise)}</td><td class="num">${pct(i.amountPaise, itemsTotal)}</td></tr>`)}</tbody></table></div></section>
+      </section>
+    </div>
+    <div class="grid2" style="margin-top:16px;align-items:start">${[['kitchen', 'Kitchen'], ['bar', 'Bar']].map(([k, name]) => {
+      const list = r.items.filter((i) => i.station === k);
+      const unsold = r.notSold.filter((n) => n.station === k);
+      return html`<section class="panel"><h2>${name} dishes, best first</h2>
+        ${list.length ? html`<div class="scroll"><table class="t"><thead><tr><th>#</th><th>Dish</th><th>Category</th><th class="num">Qty</th><th class="num">Value</th><th class="num">Share of ${name.toLowerCase()}</th></tr></thead><tbody>
+          ${list.map((i, n) => html`<tr><td class="quiet">${n + 1}</td><td>${i.name}</td><td>${i.category}</td><td class="num">${i.qty}</td><td class="num">${rs(i.amountPaise)}</td><td class="num">${pct(i.amountPaise, st(k))}</td></tr>`)}</tbody></table></div>`
+          : html`<p class="quiet small">Nothing from the ${name.toLowerCase()} was billed.</p>`}
+        <h2>${name}: on the menu, not sold</h2>
+        <p class="small quiet">Dishes on the menu that were on no bill in these dates. Worth a look if they stay here week after week.</p>
+        ${unsold.length ? html`<div class="sums">${unsold.map((n) => html`<div><span>${n.name}</span><span class="quiet">${n.category}</span></div>`)}</div>` : html`<p class="quiet small">Every ${name.toLowerCase()} dish sold at least once.</p>`}</section>`;
+    })}
     </div>` : ''}`));
   rerender();
 }

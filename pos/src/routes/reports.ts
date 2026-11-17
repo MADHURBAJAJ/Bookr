@@ -49,7 +49,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
 
 // When, where and by whom the money came in, and what sold: for shifts from..to, void bills left out.
 // Money is net sales (after bill discounts, before GST); item and category values are before bill discounts.
-// Hours are India time, from when the bill was printed.
+// Hours are India time, from when each KOT was printed: what the kitchen and bar were sent, and when.
 reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
@@ -57,9 +57,21 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
   const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
   if (from > to) fail(400, 'From must be on or before To.');
   const live = "b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void'";
-  const [byHour, byService, byStaff, mix, items, notSold] = await Promise.all([
-    all(db, `SELECT ((b.printed_at + 19800000) / 3600000) % 24 AS hour, count(*) AS bills, sum(b.taxable_paise) AS netPaise, sum(coalesce(o.covers, 0)) AS covers
-      FROM bills b JOIN orders o ON o.id = b.order_id WHERE ${live} GROUP BY hour ORDER BY hour`, bid, from, to),
+  // The shifts from..to as times: from the shift start hour (India time) on From, to the same hour the day after To.
+  const startOf = (d: string) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), bizOf(c).shift_start_hour) - 19_800_000;
+  const fromMs = startOf(from);
+  const toMs = startOf(to) + 86_400_000;
+  const [byHour, coversByHour, byService, byStaff, mix, items, notSold] = await Promise.all([
+    // Each KOT line: its quantity, valued at the order's price for that dish (menu price, before discounts and GST).
+    all(db, `SELECT ((k.printed_at + 19800000) / 3600000) % 24 AS hour, k.station, count(DISTINCT k.id) AS kots,
+        sum(json_extract(j.value, '$.qty')) AS items, sum(json_extract(j.value, '$.qty') * coalesce(ol.price_paise, 0)) AS valuePaise
+      FROM kots k, json_each(k.lines) j
+      LEFT JOIN order_lines ol ON ol.order_id = k.order_id AND ol.name = json_extract(j.value, '$.name')
+      WHERE k.business_id = ? AND k.printed_at >= ? AND k.printed_at < ? GROUP BY hour, k.station ORDER BY hour`, bid, fromMs, toMs),
+    // Guests, counted at the hour of their order's first KOT.
+    all(db, `SELECT ((first + 19800000) / 3600000) % 24 AS hour, sum(covers) AS covers FROM (
+        SELECT min(k.printed_at) AS first, max(coalesce(o.covers, 0)) AS covers FROM kots k JOIN orders o ON o.id = k.order_id
+        WHERE k.business_id = ? AND k.printed_at >= ? AND k.printed_at < ? GROUP BY k.order_id) GROUP BY hour`, bid, fromMs, toMs),
     all(db, `SELECT o.kind, count(*) AS bills, sum(b.taxable_paise) AS netPaise, sum(coalesce(o.covers, 0)) AS covers,
         sum(CASE WHEN o.covers > 0 THEN b.taxable_paise ELSE 0 END) AS coveredNetPaise, count(DISTINCT lower(o.place) || b.shift_day) AS placeDays
       FROM bills b JOIN orders o ON o.id = b.order_id WHERE ${live} GROUP BY o.kind ORDER BY netPaise DESC`, bid, from, to),
@@ -74,10 +86,10 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
     all(db, `SELECT l.name, coalesce(m.category, '') AS category, coalesce(m.station, 'kitchen') AS station, sum(l.qty) AS qty, sum(l.amount_paise) AS amountPaise
       FROM bill_lines l JOIN bills b ON b.id = l.bill_id LEFT JOIN menu_items m ON m.id = l.item_id WHERE ${live}
       GROUP BY coalesce(l.item_id, l.name) ORDER BY amountPaise DESC`, bid, from, to),
-    all(db, `SELECT name, category FROM menu_items m WHERE m.business_id = ? AND m.active = 1 AND m.id NOT IN (
+    all(db, `SELECT name, category, station FROM menu_items m WHERE m.business_id = ? AND m.active = 1 AND m.id NOT IN (
         SELECT l.item_id FROM bill_lines l JOIN bills b ON b.id = l.bill_id WHERE ${live} AND l.item_id IS NOT NULL) ORDER BY category, name`, bid, bid, from, to),
   ]);
-  return c.json({ from, to, byHour, byService, byStaff, mix, items, notSold });
+  return c.json({ from, to, byHour, coversByHour, byService, byStaff, mix, items, notSold });
 });
 
 // Who owes what, aged: what is owed is taken to be the newest charges (older ones were paid first).
