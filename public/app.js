@@ -1355,6 +1355,27 @@ async function apiUpload(path, file) {
 function showError(el, err) {
   el.innerHTML = html`<div class="error">${err.message}</div>${err.problems?.length ? html`<ul class="error">${err.problems.map((p) => html`<li>${p}</li>`)}</ul>` : ''}`.__html;
 }
+// Saving only what changed (17 Nov 2026): a register row is sent as the fields this screen changed plus what they were
+// when it opened, so an older screen never undoes a save made elsewhere (the server refuses a field changed meanwhile).
+const ROW_FIELDS = ['billNo', 'billType', 'amount', 'discount', 'payments', 'paidWithRowId', 'remarks', 'status'];
+const rowInputOf = (r) => ({ paidWithRowId: r.paidWithRowId ?? null, billNo: r.billNo ?? '', billType: r.billType ?? null, amount: rupeesForInput(r.amountPaise ?? 0),
+  discount: rupeesForInput(r.discountPaise ?? 0), remarks: r.remarks ?? null, status: r.status,
+  payments: (r.payments ?? []).map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) });
+function sameRowField(f, a, b) {
+  const m = (v) => parsePaiseText(String(v ?? '').trim() || '0');
+  const str = (v) => (v == null ? '' : String(v).trim());
+  if (f === 'amount' || f === 'discount') return m(a) === m(b);
+  if (f === 'payments') {
+    const k = (v) => JSON.stringify((v ?? []).map((p) => [p.mode, m(p.amount), str(p.columnLabel)]).filter((x) => x[1] !== 0).sort());
+    return k(a) === k(b);
+  }
+  if (f === 'billNo') return str(a).replace(/\s+/g, '') === str(b).replace(/\s+/g, '');
+  if (f === 'status') return (a === 'checked') === (b === 'checked');
+  return str(a) === str(b);
+}
+/** "Discount ₹ 2", "Tip ₹ 6" or "No discount", for saying how a discount changed. */
+const discWord = (p) => (p > 0 ? `Discount ₹ ${rs(p)}` : p < 0 ? `Tip ₹ ${rs(-p)}` : 'No discount');
+const rowEditBody = (was, now, extra = {}) => ({ ...now, ...extra, only: ROW_FIELDS.filter((f) => !sameRowField(f, was[f], now[f])), was });
 async function apiFull(method, path, body) {
   body = bodyFor(method, body);
   const res = await fetch(`/api${path}`, { method, headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
@@ -1362,7 +1383,7 @@ async function apiFull(method, path, body) {
   if (!res.ok && data?.code === 'amount_unread' && method === 'PUT' && body && !(body.confirm ?? []).includes('amount')) {
     if (window.confirm(`${data.error}\n\nOK = the bill really is ₹0 (complimentary). Cancel = type the amount first.`)) return apiFull(method, path, { ...body, confirm: [...(body.confirm ?? []), 'amount'] });
   }
-  if (!res.ok) { const e = new Error(data?.error ?? 'Something went wrong.'); e.problems = data?.problems; throw e; }
+  if (!res.ok) { const e = new Error(data?.error ?? 'Something went wrong.'); e.problems = data?.problems; e.code = data?.code; throw e; }
   cacheAfter(method, path, data);
   return data;
 }
@@ -1771,19 +1792,23 @@ function regRowHtml(r, locked) {
   const grp = lead ? [lead, ...membersOf(lead)].filter((m) => !m.elsewhere).sort((p1, p2) => p1.lineNo - p2.lineNo) : [];
   const gpos = grp.length > 1 ? `grp ${grp[0].id === r.id ? 'grp-first' : ''} ${grp[grp.length - 1].id === r.id ? 'grp-last' : ''}` : '';
   const cls = `${r.status === 'checked' ? 'row-checked' : ''} ${x.needsYou ? 'needs-you' : ''} ${gpos}`;
-  const total = grp.length > 1 && grp[grp.length - 1].id === r.id ? groupTotalHtml(lead) : '';
+  const total = grp.length > 1 && grp[grp.length - 1].id === r.id ? groupTotalHtml(lead, locked) : '';
   return html`${regLineHtml(r, locked, x, cols, head, cls)}${total}`;
 }
 
 /** Under the last row of a group paid together: what the bills come to against what was paid. */
-function groupTotalHtml(lead) {
+function groupTotalHtml(lead, locked) {
   const all = [lead, ...membersOf(lead)];
   const bills = groupNet(lead);
   const paid = paidOf(lead);
   const diff = paid - bills;
   const ok = diff === 0;
+  // The discount (or tip) on the paying row that makes the group agree: one click (17 Nov 2026).
+  const to = (lead.discountPaise ?? 0) - diff;
+  const fix = !ok && !locked && !lead.elsewhere && paid > 0 && to <= all.reduce((t, m) => t + m.amountPaise, 0)
+    ? html` <button type="button" class="linkbtn" data-grpfix="${lead.id}" data-to="${to}">${to > 0 ? `Write ₹ ${rs(to)} discount` : to < 0 ? `Write ₹ ${rs(-to)} tip` : 'Take the discount off'} on ${rowLabel(lead)}</button>` : '';
   return html`<tr class="grptotal ${ok ? 'ok' : 'bad'}" aria-label="Group total"><td class="ln"></td><td colspan="12">Group of ${all.length} bills: ₹ ${rs(bills)} · paid ₹ ${rs(paid)} ·
-    ${ok ? '✓ matches' : `₹ ${rs(Math.abs(diff))} ${diff > 0 ? 'over' : 'short'}`}</td></tr>`;
+    ${ok ? '✓ matches' : `₹ ${rs(Math.abs(diff))} ${diff > 0 ? 'over' : 'short'}`}${fix}</td></tr>`;
 }
 
 function regLineHtml(r, locked, x, cols, head, cls) {
@@ -2369,36 +2394,95 @@ function wireInlineRows(biz, u, strip) {
     document.getElementById('regtools').innerHTML = regToolsHtml(u, false).__html;
     wireBar(); wireFill(); drawWaiting(biz, u); drawCards();
   };
+  // A save's answer carries the rows of the groups it touched (17 Nov 2026): the screen takes them at once instead of
+  // waiting to load the whole page again; the page is still loaded after the last save, for the number checks.
+  const patchRows = (rows) => {
+    for (const n of rows ?? []) {
+      const x = u.rows.find((y) => y.id === n.id) ?? (u.otherPageRows ?? []).find((y) => y.id === n.id);
+      if (x) Object.assign(x, n);
+    }
+    regRows = shiftRowsOf(u);
+  };
+  const discCell = (rowId) => table.querySelector(`tr[data-row="${rowId}"] [data-f="discount"]`);
+  const ocrOf = (r) => { try { return JSON.parse(r.ocrOriginal ?? '{}') ?? {}; } catch { return {}; } };
+  // What the group's discount will be, shown on the row with the payment while the save is on its way: the same rule
+  // as the server (a filled discount, or one that was exactly the gap, follows the gap when it is up to the limit).
+  const previewGroup = (tr, r) => {
+    const head = r.paidWithRowId ? headOf(r) : membersOf(r).length ? r : null;
+    if (!head || head.elsewhere) return;
+    const group = [head, ...membersOf(head)];
+    if (group.some((m) => m.id !== head.id && m.discountPaise)) return;
+    const amt = (m) => (m.id === r.id ? parsePaiseText(val(tr, 'amount').value.trim() || '0') : m.amountPaise);
+    const paidNow = head.id === r.id ? PAY_COLS.reduce((t, _, i) => t + (val(tr, `pay${i}`)?.value ?? '').split('+').reduce((t2, v) => t2 + (parsePaiseText(v.trim() || '0') ?? 0), 0), 0) : paidOf(head);
+    const grossWas = group.reduce((t, m) => t + m.amountPaise, 0);
+    const gapWas = grossWas - paidOf(head);
+    const gross = group.reduce((t, m) => t + (amt(m) ?? 0), 0);
+    const gap = gross - paidNow;
+    const follows = ocrOf(head).autoGroupDiscount || (gapWas > 0 && head.discountPaise === gapWas);
+    if (!follows || group.some((m) => !(amt(m) > 0)) || paidNow <= 0 || gap <= 0 || gap * 100 > LARGE_DISCOUNT_PCT * gross || gap === head.discountPaise) return;
+    const cell = discCell(head.id);
+    if (!cell) return;
+    cell.value = rsIn(gap);
+    cell.closest('td')?.insertAdjacentHTML('beforeend', html`<div class="tiny note disc-saving">→ ₹ ${rs(gap)} · saving…</div>`.__html);
+  };
   const save = (tr, changed, extra = {}) => {
     const id = tr.dataset.row;
     const r = u.rows.find((x) => x.id === id);
-    // Discount follows the payments: amount − payments, negative when more was paid (a tip). Not for bills paid together.
-    if (/^(amount|pay\d)$/.test(changed.dataset.f) && !r.paidWithRowId && !membersOf(r).length) {
+    const unlinked = tr.dataset.unlinked === '1';
+    // Discount follows the payments: amount − payments, negative when more was paid (a tip). Not for bills paid
+    // together; a row just given its own payment ("Own payment") is on its own again.
+    let discNote = '';
+    if (/^(amount|pay\d)$/.test(changed.dataset.f) && (!r.paidWithRowId || unlinked) && !membersOf(r).length) {
       const a = parsePaiseText(val(tr, 'amount').value);
       const paid = PAY_COLS.reduce((t, _, i) => t + (val(tr, `pay${i}`)?.value ?? '').split('+').reduce((t2, v) => t2 + (parsePaiseText(v.trim() || '0') ?? 0), 0), 0);
-      if (a !== null && paid > 0) val(tr, 'discount').value = paid !== a ? rupeesForInput(a - paid) : '';
-    }
-    const body = { ...payloadOf(tr, r), ...extra };
-    // Saves go one at a time, in the order made. The rows are fetched again only after the last one, so an
-    // earlier save's answer never redraws a row whose later change (a tick, a number) is still on its way.
+      if (a !== null && paid > 0) {
+        const was = parsePaiseText(val(tr, 'discount').value.trim() || '0') ?? 0;
+        val(tr, 'discount').value = paid !== a ? rupeesForInput(a - paid) : '';
+        // A discount someone wrote that is now replaced is said, so it is not lost unseen.
+        if (was && was !== a - paid) discNote = `Bill ${r.billNo || `on row ${r.lineNo}`}: ${discWord(was)} → ${discWord(a - paid)} (amount less paid).`;
+      }
+    } else if (/^(amount|pay\d)$/.test(changed.dataset.f)) previewGroup(tr, r);
+    const body = rowEditBody(rowInputOf(r), payloadOf(tr, r), extra);
+    // Saves go one at a time, in the order made.
     pending += 1;
     const run = chain.then(async () => {
+      let res;
       try {
-        await apiFull('PUT', `/businesses/${biz.id}/register-rows/${id}`, body);
+        res = await apiFull('PUT', `/businesses/${biz.id}/register-rows/${id}`, body);
         document.getElementById('rmsg').innerHTML = '';
       } catch (err) {
+        if (err.code === 'stale_row') {
+          // Changed on another screen: show the row as it is saved now, with the reason.
+          const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`).catch(() => null);
+          if (fresh) { Object.assign(u, { rows: fresh.rows, otherPageRows: fresh.otherPageRows, slip: fresh.slip, softwareList: fresh.softwareList }); regRows = shiftRowsOf(u); redraw(); }
+          showError(document.getElementById('rmsg'), err);
+          return;
+        }
         // Not saved: what was typed stays on screen with the reason, to be fixed, rather than snapping back.
         showError(document.getElementById('rmsg'), err);
         tr.classList.add('save-failed');
+        table.querySelectorAll('.disc-saving').forEach((x) => x.remove());
         // A tick that was refused comes off, so the row does not look checked.
         if (changed.dataset.f === 'checked') changed.checked = false;
         const cell = tr.querySelector('.c-is');
         if (cell) cell.innerHTML = html`<div class="error">Not saved: ${err.message}</div>`.__html + cell.innerHTML;
         return;
       }
-      if (pending > 1) return;
+      patchRows(res?.rows);
+      const notes = [discNote, ...(res?.notes ?? []).map((n) => {
+        const h = u.rows.find((x) => x.id === n.rowId) ?? regRows.find((x) => x.id === n.rowId);
+        return `Bill ${h?.billNo ?? ''} (${h ? rowLabel(h) : 'paying row'}): ${n.words}.`;
+      })].filter(Boolean);
+      if (notes.length) doneToast(notes.join(' '));
+      if (pending > 1) {
+        // Another save is waiting: only the discounts the server changed are put on screen now.
+        for (const n of res?.rows ?? []) { const c = discCell(n.id); if (c && c !== document.activeElement) c.value = n.discountPaise ? rsIn(n.discountPaise) : ''; }
+        table.querySelectorAll('.disc-saving').forEach((x) => x.remove());
+        return;
+      }
+      redraw();
       const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`).catch(() => null);
-      if (!fresh || pending > 1) return; // another save started meanwhile: it fetches and redraws
+      if (!fresh || pending > 1) return; // another save started meanwhile: it redraws
       u.rows = fresh.rows;
       u.otherPageRows = fresh.otherPageRows;
       u.slip = fresh.slip;
@@ -2411,6 +2495,21 @@ function wireInlineRows(biz, u, strip) {
     chain = run.catch(() => {});
     return run;
   };
+  // A group whose bills and payment do not agree: one click writes the difference as the discount (or tip) on the row
+  // with the payment (17 Nov 2026), for gaps the screen does not fill by itself (over the limit, or more paid).
+  if (!table.dataset.grpwired) {
+    table.dataset.grpwired = '1';
+    table.addEventListener('click', (e) => {
+      const b = e.target.closest?.('[data-grpfix]');
+      if (!b) return;
+      const tr = table.querySelector(`tr[data-row="${b.dataset.grpfix}"]`);
+      const d = tr && val(tr, 'discount');
+      if (!d) return;
+      d.value = rupeesForInput(Number(b.dataset.to));
+      b.disabled = true;
+      save(tr, d);
+    });
+  }
   const rowsShown = () => [...table.querySelectorAll('tbody tr[data-row]')].filter((x) => x.offsetParent !== null);
   const focusRow = (tr, f = 'billNo') => { const el = tr?.querySelector(`[data-f="${f}"]`) ?? tr?.querySelector('[data-f]'); el?.focus(); el?.select?.(); };
   const bind = (tr) => {
@@ -3327,6 +3426,20 @@ const backButton = () => {
 const bankNoneOf = (v, c) => (!c.bank && c.bankNone && !(v.columnHints ?? []).some((h) => h.rowId === c.register?.rowId)
   && !(v.slips ?? []).some((x) => slipRows(x).includes(c.register?.rowId)) ? c.bankNone : null);
 
+/** What the bank or the card machine says a bill's decision should be (the same words on All bills and To do):
+ *  { suggest, text, toCard } or null. */
+function suggestionOf(v, c) {
+  const n = bankNoneOf(v, c);
+  const m = !c.bank?.suggest && !n ? c.machine : null;
+  const suggest = c.bank?.suggest ?? n?.suggest ?? m?.suggest;
+  if (!suggest) return null;
+  const side = (d) => (d === 'use_software' ? 'the software' : 'the register');
+  const text = c.bank?.suggest ? `${c.bank.machine ? 'The card machine' : 'The bank'} got ₹ ${rs(c.bank.amountPaise)} by UPI at ${hhmm(c.bank.postedAt)}: ${side(suggest)} is right.`
+    : m?.toCard ? `The card machine got ₹ ${rs(m.amountPaise)} (${m.label}) at ${hhmm(m.paidAt)}, the register's amount: paid by card at the register's amount.`
+    : m ? `The card machine got ₹ ${rs(m.amountPaise)} (${m.label}) at ${hhmm(m.paidAt)}: ${side(suggest)} is right.`
+    : `No UPI credit of ₹ ${rs(n.upiPaise)} near this bill${n.takenBy ? ` (the one at ${hhmm(n.takenBy.postedAt)} went to bill ${n.takenBy.billNo})` : ''}: it was most likely paid by ${MODE_LABELS[n.mode]?.toLowerCase() ?? n.mode}, as ${side(suggest)} says.`;
+  return { suggest, text, toCard: m?.toCard && c.register?.uploadId ? m : null };
+}
 /** The decision menu of one bill: the same choices on Compare sales and on Reconcile (approved 9 Nov 2026). */
 function decideMenuHtml(c, v) {
   // U/N in the software and not in the register (approved 14 Nov 2026): nobody knows how it was paid, so the person says
@@ -5288,18 +5401,6 @@ async function reconcileView(biz, dayArg) {
   // The row paying for a group may come to ₹0 under the group's discount (approved 7 Nov 2026): told only when that
   // discount is large, as on Review.
   const paidZero = r.confirmed ? [] : cv.comparisons.filter((c) => c.difference === 'complimentary' && (c.register?.paidPaise ?? 0) > 0 && !groupZero(c, cv));
-  // Large discounts on bills paid together are reported, for information only: nothing to approve (10 Nov 2026).
-  const checkRow = (c) => html`<div class="ent-line">
-    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
-      <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button>
-      <strong class="amount" style="margin-left:auto">₹ ${money((c.register ?? c.software)?.amountPaise ?? 0)}</strong></div>
-    ${(c.numberFlags ?? []).map((f) => html`<div class="tiny error">${numberFlagText(f)}</div>`)}
-    ${canDecide && !c.decision && c.register?.rowId && c.register.uploadId ? (c.numberFlags ?? []).filter((f) => f.billNo && f.billNo !== c.billNo).map((f) => html`<div class="form-row" style="gap:6px;margin-top:4px">
-      <button type="button" class="btn plain dchip" data-renumber="${c.register.rowId}" data-upload="${c.register.uploadId}" data-from="${c.billNo}" data-no="${f.billNo}">${f.kind === 'pending_typo' || f.kind === 'pending' ? `Yes, it's ${f.billNo}: change the number` : `Use ${f.billNo}`}</button></div><div class="form-msg"></div>`) : ''}
-    ${!c.software && isOddBill(c.billNo) ? html`<div class="tiny error">Number fits neither format, so it can never match. Open the row to correct it.</div>` : ''}
-    ${c.reissuedAs ? html`<div class="tiny" style="color:var(--teal-ink)">Looks issued again as bill ${c.reissuedAs} (same amount, minutes later, in the register). If so, leave this one out.</div>` : ''}
-    ${c.auto ? html`<div class="tiny">Counted by Bookr before the number looked wrong${c.note ? `: ${c.note}` : ''}.</div>` : ''}
-    ${canDecide ? html`<div style="margin-top:4px">${decideMenuHtml(c, cv)}</div>` : ''}</div>`;
   const waitN = (waitPic?.look?.length ?? 0) + (waitPic?.oddNumbers?.length ?? 0);
   // Before saving, the draft difference counts too (14 Nov 2026), so the Cash tab never shows ✓ while the count is off.
   const cashDiff = cash.confirmed ? (cash.settled ? 0 : cash.differencePaise) : cash.draft?.differencePaise;
@@ -5307,30 +5408,94 @@ async function reconcileView(biz, dayArg) {
   const cardN = Math.max(ent.card.left, cardLeft);
   const compLook = comp.lines.filter((l) => l.status === 'look').length;
   const leftLines = [
-    allLeft && [`${allLeft} bill${allLeft === 1 ? '' : 's'} where the register and the software differ, to decide`, 'all'],
     cashN && [`Cash: ${ent.cash.left ? `${ent.cash.left} bill${ent.cash.left === 1 ? '' : 's'} left` : ''}${ent.cash.left && cashDiff ? ', and ' : ''}${cashDiff ? `the cash count is ${cashDiff < 0 ? 'short' : 'over'} by ₹ ${money(Math.abs(cashDiff))}${cash.confirmed ? '' : ' (draft)'}` : ''}`, 'pay:cash'],
     ent.upi.left && [`UPI: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched`, 'pay:upi'],
     cardN && [`Card: ${cardN} left${r.cards?.waitingReport ? `, ${r.cards.waitingReport} waiting for the card report` : ''}`, 'pay:card'],
     compLook && [`Complimentary: ${compLook} bill${compLook === 1 ? '' : 's'} need${compLook === 1 ? 's' : ''} a look`, 'comp'],
 
   ].filter(Boolean);
-  // Saving is on To do too: an unsaved shift is never ✓ here.
-  const todoN = checks.length + paidZero.length + (cv.conflicts?.length ? 1 : 0) + (cv.warnings?.length ?? 0) + (r.oldPos?.bills?.length ?? 0) + (r.confirmed ? 0 : 1);
+  // To do (approved 17 Nov 2026): Save at the top and the steps before it, numbered. Each step opens on a click and
+  // stays shut otherwise; a step with nothing left is green and shut. Every line has its fix in place.
+  const notSame = todoNotSame(day);
+  const canFixRow = canDecide && !r.confirmed;
+  // Step 3, Same bill?: a register number that is probably another bill's.
+  const sameQs = checks.flatMap((c) => (c.register?.rowId && c.register.uploadId && (!c.decision || c.auto) && !notSame.has(c.id)
+    ? (c.numberFlags ?? []).filter((f) => f.billNo && f.billNo !== c.billNo).slice(0, 1).map((f) => ({ c, f })) : []));
+  const inSame = new Set(sameQs.map((q) => q.c.id));
+  // Step 2, Correct register rows: a number to fix on the row, a bill written twice, payments that do not add up, ₹0
+  // with money paid.
+  const rowChecks = checks.filter((c) => !inSame.has(c.id) && !(notSame.has(c.id) && !isOddBill(c.billNo)));
+  const repeatedLines = r.confirmed ? [] : cv.repeatedLines ?? [];
+  const unbal = r.confirmed ? [] : (cv.unbalancedRows ?? []).filter((x) => !sameQs.some((q) => q.c.register?.rowId === x.rowId));
+  const inRows = new Set(rowChecks.map((c) => c.id));
+  // Step 4, the differences to decide, each with Bookr's suggestion.
+  const oldPosIds = new Set((r.oldPos?.bills ?? []).map((b) => b.comparisonId));
+  const toDecide = r.confirmed ? [] : cv.comparisons.filter((c) => !c.decision && ['amount', 'mode', 'amount_and_mode', 'missing_in_register', 'missing_in_software'].includes(c.difference)
+    && !inSame.has(c.id) && !inRows.has(c.id) && !oldPosIds.has(c.id));
+  const blockers = r.save?.blockers ?? [];
+  const told = [/differences? (is|are) not decided/, /register rows? (is|are) not checked/, /appears more than once/, /do not add up to the bill amount/];
+  const otherBlockers = blockers.filter((t) => !told.some((re) => re.test(t)));
+  const draftN = Number((blockers.find((t) => /register rows? (is|are) not checked/.test(t)) ?? '').match(/^(\d+)/)?.[1] ?? 0);
+  const sideText = (x) => (x ? `${MODE_LABELS[x.mode] ?? 'no payment written'} ₹ ${rs(x.amountPaise ?? 0)}` : 'nothing');
+  const moreMenu = (c) => (canDecide ? html`<details class="menu"><summary class="btn plain dchip" aria-label="Other choices for bill ${c.billNo}">⋯</summary><div class="menu-pop" style="min-width:240px">${decideMenuHtml(c, cv)}</div></details>` : '');
+  const openRow = (billNo) => html`<button type="button" class="btn plain dchip" data-bill-drawer="${billNo}|${day}">Open row</button>`;
+  const lineOf = (no, what, acts) => html`<div class="todo-ln"><span class="mono todo-no">${no}</span><span class="todo-what">${what}</span><span class="todo-acts">${acts}</span><div class="form-msg"></div></div>`;
+  const where = (l) => `Page ${l.pageNo ?? '?'} · line ${l.lineNo}`;
+  const offText = (gross, paid) => (paid < gross ? `₹ ${rs(gross - paid)} discount` : `₹ ${rs(paid - gross)} more than the bill`);
+  const repeatedHtml = (x) => {
+    const good = x.lines.filter((l) => l.sameAsSoftware);
+    const sugg = good.length && good.length < x.lines.length ? new Set(x.lines.filter((l) => !l.sameAsSoftware).map((l) => l.rowId)) : new Set();
+    return html`<div class="todo-ln"><span class="mono todo-no">${x.billNo}</span><span class="todo-what">written ${x.lines.length === 2 ? 'twice' : `${x.lines.length} times`} in the register <span class="note">· ${x.lines.map(where).join(', ')}</span></span>
+      <span class="todo-acts">${canFixRow ? html`<button type="button" class="btn dchip" data-todoopen="dup:${x.billNo}">Delete one ▾</button>` : ''}</span>
+      <div class="todo-dup" data-todobox="dup:${x.billNo}" hidden><div class="note">Which line is the extra? Bookr keeps the other.</div>
+      ${x.lines.map((l) => { const paid = l.payments.reduce((t, p) => t + p.amountPaise, 0); return html`<div class="todo-copy${sugg.has(l.rowId) ? ' sugg' : ''}"><div>
+        <strong>${where(l)}</strong>${sugg.has(l.rowId) ? html` <span class="tchip">Bookr suggests deleting this</span>` : ''}
+        <div class="tiny">₹ ${rs(l.amountPaise)} · paid ${l.payments.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ₹ ${rs(p.amountPaise)}${p.label ? ` (${p.label})` : ''}`).join(' + ') || 'nothing'}${paid && paid !== l.amountPaise ? ` · ${offText(l.amountPaise, paid)}` : ''}${l.remarks ? html` · <em>“${l.remarks}”</em>` : ''}</div>
+        ${l.sameAsSoftware === true ? html`<div class="tiny" style="color:var(--teal)">✓ The software's amount</div>` : l.sameAsSoftware === false ? html`<div class="tiny error">Not the software's amount</div>` : ''}</div>
+        <div class="todo-copy-acts"><button type="button" class="btn ${sugg.has(l.rowId) ? '' : 'plain'} dchip" data-dupdel="${l.rowId}" data-upload="${l.uploadId}" data-bill="${x.billNo}" data-where="${where(l)}">Delete this one</button>
+          <a class="tiny" href="#/b/${biz.id}/review/${l.uploadId}/${l.rowId}">View photo</a></div></div>`; })}</div><div class="form-msg"></div></div>`;
+  };
+  const steps = r.confirmed ? [] : [
+    { key: 'review', title: 'Check the register rows', left: draftN, sub: draftN ? `${draftN} row${draftN === 1 ? '' : 's'} not checked against the photos` : 'every row checked',
+      link: html`<a class="btn plain dchip" href="#/b/${biz.id}/review?day=${day}">Open Review ›</a>` },
+    { key: 'rows', title: 'Correct register rows', left: rowChecks.length + repeatedLines.length + unbal.length + paidZero.length,
+      body: html`${rowChecks.map((c) => lineOf(c.billNo, html`₹ ${rs((c.register ?? c.software)?.amountPaise ?? 0)} · ${!c.software && isOddBill(c.billNo) ? 'the number fits no format, so it can never match' : c.reissuedAs ? `looks issued again as bill ${c.reissuedAs}: if so, leave this one out` : (c.numberFlags ?? []).map(numberFlagText).join(' ')}`,
+          html`${openRow(c.billNo)}${moreMenu(c)}`))}
+        ${repeatedLines.map(repeatedHtml)}
+        ${unbal.map((x) => lineOf(x.billNo, html`₹ ${rs(x.amountPaise)}, paid ₹ ${rs(x.paidPaise)} · ₹ ${rs(Math.abs(x.amountPaise - x.paidPaise))} not explained`,
+          html`${canFixRow && x.paidPaise > 0 ? html`<button type="button" class="btn plain dchip" data-rowoff="${x.rowId}" data-upload="${x.uploadId}" data-bill="${x.billNo}" data-paid="${x.paidPaise}">${x.paidPaise < x.amountPaise ? `₹ ${rs(x.amountPaise - x.paidPaise)} discount` : `₹ ${rs(x.paidPaise - x.amountPaise)} tip`}</button>` : ''}${openRow(x.billNo)}`))}
+        ${paidZero.map((c) => lineOf(c.billNo, html`₹ 0${c.register?.discountPaise > 0 ? ` after a ₹ ${rs(c.register.discountPaise)} discount` : ''}, but ₹ ${rs(c.register.paidPaise)} is paid on its row`, openRow(c.billNo)))}` },
+    { key: 'same', title: 'Same bill?', left: sameQs.length,
+      body: html`${sameQs.map(({ c, f }) => { const u = (cv.unbalancedRows ?? []).find((x) => x.rowId === c.register.rowId);
+        return lineOf(c.billNo, html`₹ ${rs(c.register.amountPaise ?? 0)} · ${f.kind === 'in_range' ? html`= <strong>${f.billNo}</strong>? fits ${dayLabel(f.date)}'s running numbers, 1 to ${f.max}` : html`= <strong>${f.billNo}</strong>? ${numberFlagText(f).replace(/^Same bill as [^?]+\? |^Could be [^:]+: /, '')}`}${u ? ` · paid ₹ ${rs(u.paidPaise)}` : ''}`,
+          html`${canFixRow ? html`<button type="button" class="btn dchip" data-renumber="${c.register.rowId}" data-upload="${c.register.uploadId}" data-from="${c.billNo}" data-no="${f.billNo}">Yes, change to ${f.billNo}</button>
+            <button type="button" class="btn plain dchip" data-notsame="${c.id}" data-bill="${c.billNo}">No</button>` : ''}${openRow(c.billNo)}`); })}` },
+    { key: 'decide', title: 'Decide the differences', left: toDecide.length + (r.oldPos?.bills?.length ?? 0),
+      body: html`${oldPosHtml(biz, r)}
+        ${toDecide.filter((c) => suggestionOf(cv, c) && !suggestionOf(cv, c).toCard).length > 1 && canDecide ? html`<div class="form-row" style="gap:6px;margin:4px 0"><button type="button" class="btn plain dchip" data-acceptall>Accept all ${toDecide.filter((c) => suggestionOf(cv, c) && !suggestionOf(cv, c).toCard).length} suggestions</button></div>` : ''}
+        ${toDecide.map((c) => { const g = suggestionOf(cv, c);
+          return lineOf(c.billNo, html`${c.software && c.register ? `software ${sideText(c.software)}, register ${sideText(c.register)}` : c.software ? `software ${sideText(c.software)}, not in the register` : `register ${sideText(c.register)}, not in the software`}
+            ${g ? html`<div class="tiny" style="color:var(--teal-ink);white-space:normal">${g.text}</div>` : ''}`,
+            html`${canDecide && g ? (g.toCard ? html`<button type="button" class="btn dchip" data-machinetocard="${c.id}">Accept: card ₹ ${rs(g.toCard.amountPaise)}</button>`
+              : html`<button type="button" class="btn dchip" data-accept="${c.id}" data-d="${g.suggest}" data-bill="${c.billNo}">Accept: ${g.suggest === 'use_software' ? 'Use software' : 'Use register'}</button>`) : ''}${moreMenu(c)}`); })}` },
+    ...(otherBlockers.length ? [{ key: 'other', title: 'Also before saving', left: otherBlockers.length, body: html`${otherBlockers.map((t) => html`<div class="todo-ln"><span class="todo-what">${t}</span></div>`)}` }] : []),
+  ];
+  const stepsLeft = steps.filter((x) => x.left).length;
+  const openStep = todoOpenStep(day);
+  const todoN = r.confirmed ? 0 : stepsLeft + 1;
   const todoHtml = html`
-    ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>` : saveBar(biz, r)}
-    ${oldPosHtml(biz, r)}
+    ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>` : html`<section class="card todo-top">
+      <div><strong>${dayLabel(day)} shift · not saved</strong><div class="note">${stepsLeft ? `Before you can save: ${stepsLeft} step${stepsLeft === 1 ? '' : 's'} left` : 'Ready to save ✓'} · matches and decisions are drafts until then.</div></div>
+      ${canDecide ? html`<button class="btn" type="button" id="savereconcile" ${r.save?.canSave ? '' : 'disabled'}>Save reconcile</button>` : html`<span class="note">Owner or Accountant saves.</span>`}
+      <div class="form-msg" id="savemsg" style="flex-basis:100%"></div></section>`}
     ${P.conflictsHtml}
-    ${P.warningsHtml}
-    ${paidZero.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>₹0 bills with money paid: ${paidZero.length}</strong><span class="tchip warn">Check the amount</span></div>
-      <div class="note">A bill of ₹0 counts as complimentary, but money is written as paid on its row. Open the row, compare it with the photo, and correct the amount, the discount or the payments.</div>
-      ${paidZero.map((c) => html`<div class="ent-line"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><span class="mono"><strong>${c.billNo}</strong></span>
-        <button type="button" class="linkbtn tiny" data-bill-drawer="${c.billNo}|${day}">Open row</button></div>
-        <div class="tiny error">₹ 0${c.register?.discountPaise > 0 ? ` after a ₹ ${rs(c.register.discountPaise)} discount` : ''}, but ₹ ${rs(c.register.paidPaise)} is paid on its row.</div></div>`)}</section>` : ''}
-    ${checks.length ? html`<section class="card" style="gap:8px"><div class="lane-h"><strong>Numbers to check: ${checks.length}</strong><span class="tchip warn">Check the number</span></div>
-      <div class="note">Open the row to compare it with the photo, then decide.</div>${checks.map(checkRow)}</section>` : ''}
-    <section class="card" style="gap:8px"><h2>Left on the other tabs</h2>
-      ${leftLines.length ? leftLines.map(([t, go]) => html`<div class="list-row"><span>${t}</span><button type="button" class="btn plain dchip" data-goto="${go}">Open ›</button></div>`)
-        : html`<div class="ok-msg">Nothing left on the other tabs.</div>`}</section>`;
+    ${steps.map((x, i) => html`<section class="card todo-step${x.left ? '' : ' done'}" data-step="${x.key}">
+      <div class="todo-sh" ${x.body && x.left ? html`data-todostep="${x.key}" role="button" tabindex="0" aria-expanded="${openStep === x.key}"` : ''}>
+        <span class="todo-n">${x.left ? i + 1 : '✓'}</span><span class="todo-t"><strong>${x.title}</strong> <span class="note">· ${x.left ? (x.sub ?? `${x.left} left`) : x.sub ?? 'done'}</span></span>
+        ${x.link ?? (x.body && x.left ? html`<span class="todo-car">${openStep === x.key ? '▾' : '▸'}</span>` : '')}</div>
+      ${x.body && x.left ? html`<div class="todo-body" ${openStep === x.key ? '' : 'hidden'}>${x.body}</div>` : ''}</section>`)}
+    <div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
+      ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`;
   // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
   const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
   const oneTab = (key, label, n) => html`<button type="button" role="tab" data-rtab1="${key}" class="${curTab === key ? 'on' : ''}" aria-selected="${curTab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : ''}</button>`;
@@ -5442,6 +5607,7 @@ async function reconcileView(biz, dayArg) {
   }, `#/b/${biz.id}/reconcile/${day}`));
   wirePayTables(app);
   app.querySelectorAll('[data-rtop="todo"], [data-rtop="pay"]').forEach((root) => wireOneClickFixes(biz, root, reload));
+  if (!r.confirmed) wireTodo(biz, day, cv, app.querySelector('[data-rtop="todo"]'), reload);
   P.wire(app.querySelector('[data-rtop="all"]'), document.getElementById('allmsg'));
   P.wireShift(app.querySelector('[data-rtop="todo"]'), document.getElementById('recmsg'));
   P.wireShift(document.getElementById('shiftmenu'), document.getElementById('recmsg'));
@@ -5652,18 +5818,108 @@ async function reconcileView(biz, dayArg) {
 // paid instead. One button: the register's payment becomes UPI (in the column of the account the money came into), the
 // bill is decided Use register when the software says otherwise, and the credit is matched on save. All undone together.
 
-/** Changes a register row's bill number (one click from a number hint, approved 17 Nov 2026); returns the undo. */
-async function renumberRow(biz, uploadId, rowId, billNo) {
+/** Changes one register row (a fix done in place, approved 17 Nov 2026): change(row) gives the fields to change.
+ *  Returns the undo. */
+async function editRow(biz, uploadId, rowId, change) {
   const base = `/businesses/${biz.id}`;
   const u = await api('GET', `${base}/uploads/${uploadId}`);
   const r = u.rows.find((x) => x.id === rowId);
   if (!r) throw new Error('The register row was not found. Reload the page.');
-  const payload = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise),
-    discount: rupeesForInput((r.discountPaise ?? 0) - (r.tipPaise ?? 0)), remarks: r.remarks, status: r.status,
-    payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+  const payload = rowInputOf(r);
+  const after = { ...payload, ...change(r) };
   const put = (b) => apiFull('PUT', `${base}/register-rows/${r.id}`, b);
-  await put({ ...payload, billNo });
-  return () => put(payload);
+  await put(rowEditBody(payload, after));
+  return () => put(rowEditBody(after, payload));
+}
+const renumberRow = (biz, uploadId, rowId, billNo) => editRow(biz, uploadId, rowId, () => ({ billNo }));
+// To do's state on this device (17 Nov 2026): which step is open, and the "Same bill?" questions answered No.
+const TODO_OPEN_KEY = 'bookr.todo.open';
+const TODO_NOTSAME_KEY = 'bookr.todo.notsame';
+const todoOpenStep = (day) => { try { const o = JSON.parse(localStorage.getItem(TODO_OPEN_KEY) ?? '{}'); return o.day === day ? o.step : null; } catch { return null; } };
+const todoNotSame = (day) => { try { return new Set(JSON.parse(localStorage.getItem(TODO_NOTSAME_KEY) ?? '{}')[day] ?? []); } catch { return new Set(); } };
+/** To do's steps and their fixes: open a step, delete the extra line of a bill written twice, write the gap as a
+ *  discount or tip, answer "Same bill?" No, accept Bookr's suggestion (one or all). Each change has one Undo. */
+function wireTodo(biz, day, cv, root, reload) {
+  const msgOf = (b) => b.closest('.todo-ln')?.querySelector(':scope > .form-msg') ?? document.getElementById('recmsg');
+  const fail = (b, err) => { b.disabled = false; showError(msgOf(b), err); };
+  root.querySelectorAll('[data-todostep]').forEach((h) => {
+    const toggle = () => {
+      const step = h.closest('.todo-step');
+      const body = step.querySelector('.todo-body');
+      const opening = body.hidden;
+      root.querySelectorAll('.todo-body').forEach((x) => { x.hidden = true; });
+      root.querySelectorAll('[data-todostep]').forEach((x) => { x.setAttribute('aria-expanded', 'false'); const c = x.querySelector('.todo-car'); if (c) c.textContent = '▸'; });
+      body.hidden = !opening;
+      h.setAttribute('aria-expanded', String(opening));
+      const car = h.querySelector('.todo-car'); if (car) car.textContent = opening ? '▾' : '▸';
+      try { localStorage.setItem(TODO_OPEN_KEY, JSON.stringify({ day, step: opening ? h.dataset.todostep : null })); } catch { /* storage unavailable */ }
+    };
+    h.addEventListener('click', (e) => { if (!e.target.closest('a, button')) toggle(); });
+    h.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  });
+  root.querySelectorAll('[data-todoopen]').forEach((b) => b.addEventListener('click', () => {
+    const box = root.querySelector(`[data-todobox="${b.dataset.todoopen}"]`);
+    if (box) box.hidden = !box.hidden;
+  }));
+  root.querySelectorAll('[data-dupdel]').forEach((b) => b.addEventListener('click', async () => {
+    const base = `/businesses/${biz.id}`;
+    try {
+      const u = await api('GET', `${base}/uploads/${b.dataset.upload}`);
+      const row = u.rows.find((x) => x.id === b.dataset.dupdel);
+      if (!row) throw new Error('The line was not found. Reload the page.');
+      const why = await askDeleteReason({ ...row, lineNo: b.dataset.where.replace(/^Page (\S+) · line (\S+)$/, '$2 of page $1') });
+      if (!why) return;
+      b.disabled = true;
+      await apiFull('DELETE', `${base}/register-rows/${row.id}`, why);
+      const back = { billNo: row.billNo, billType: row.billType, amount: rupeesForInput(row.amountPaise), discount: rupeesForInput(row.discountPaise ?? 0), remarks: row.remarks, status: row.status,
+        paidWithRowId: row.paidWithRowId, payments: row.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+      await reload();
+      doneToast(`Bill ${b.dataset.bill}: ${b.dataset.where} deleted (${deleteReasonLabel(why.reason)}); the other line is kept.`,
+        () => apiFull('POST', `${base}/uploads/${b.dataset.upload}/register-rows`, back), reload);
+    } catch (err) { fail(b, err); }
+  }));
+  root.querySelectorAll('[data-rowoff]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      const paid = Number(b.dataset.paid);
+      const undo = await editRow(biz, b.dataset.upload, b.dataset.rowoff, (r) => ({ discount: rupeesForInput(r.amountPaise - paid) }));
+      await reload();
+      doneToast(`Bill ${b.dataset.bill}: ${b.textContent.trim()} written.`, undo, reload);
+    } catch (err) { fail(b, err); }
+  }));
+  root.querySelectorAll('[data-notsame]').forEach((b) => b.addEventListener('click', () => {
+    const save = (f) => { try { const o = JSON.parse(localStorage.getItem(TODO_NOTSAME_KEY) ?? '{}'); o[day] = f(new Set(o[day] ?? [])); localStorage.setItem(TODO_NOTSAME_KEY, JSON.stringify(o)); } catch { /* storage unavailable */ } };
+    const id = b.dataset.notsame;
+    save((set) => [...set.add(id)]);
+    reload().then(() => doneToast(`Bill ${b.dataset.bill}: not the same bill. It is now with the differences to decide.`, async () => save((set) => { set.delete(id); return [...set]; }), reload));
+  }));
+  const decide = (id, d) => apiFull('PUT', `/businesses/${biz.id}/comparisons/${id}`, { decision: d, note: null });
+  root.querySelectorAll('[data-accept]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await decide(b.dataset.accept, b.dataset.d);
+      await reload();
+      doneToast(`Bill ${b.dataset.bill}: ${b.dataset.d === 'use_software' ? 'Use software' : 'Use register'}.`, () => decide(b.dataset.accept, null), reload);
+    } catch (err) { fail(b, err); }
+  }));
+  root.querySelector('[data-acceptall]')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const list = [...root.querySelectorAll('[data-accept]')].map((b) => ({ id: b.dataset.accept, d: b.dataset.d }));
+    btn.disabled = true;
+    const done = [];
+    try {
+      for (const x of list) { await decide(x.id, x.d); done.push(x); }
+      await reload();
+      doneToast(`${done.length} suggestion${done.length === 1 ? '' : 's'} accepted.`, () => eachAtOnce(done, (x) => decide(x.id, null)), reload);
+    } catch (err) { await eachAtOnce(done, (x) => decide(x.id, null)).catch(() => {}); btn.disabled = false; showError(document.getElementById('recmsg'), err); }
+  });
+  root.querySelectorAll('[data-machinetocard]').forEach((b) => b.addEventListener('click', () => {
+    const c = cv.comparisons.find((x) => x.id === b.dataset.machinetocard);
+    const m = c?.machine;
+    if (!m?.toCard) return;
+    paidOnCardClick(biz, day, { payment: { id: m.toCard.paymentId, amountPaise: m.amountPaise, paidAt: m.paidAt, upi: m.upi },
+      written: { comparisonId: c.id, billNo: c.billNo, mode: c.register.mode, amountPaise: m.amountPaise, rowId: c.register.rowId, uploadId: c.register.uploadId } }, b, reload);
+  }));
 }
 /**
  * The fix a hint names, done where the hint is (approved 17 Nov 2026), each with one Undo:
@@ -7071,22 +7327,38 @@ async function drawerEditor(biz, d, r0, billNo, day) {
       await openBillDrawer(biz, billNo, day);
     } catch (err) { btn.disabled = false; showError(box.querySelector('.form-msg'), err); }
   });
-  const before = { paidWithRowId: r.paidWithRowId, billNo: r.billNo, billType: r.billType, amount: rupeesForInput(r.amountPaise), discount: rupeesForInput(r.discountPaise), remarks: r.remarks, status: r.status,
-    payments: r.payments.map((p) => ({ mode: p.mode, columnLabel: p.columnLabel, amount: rupeesForInput(p.amountPaise) })) };
+  const before = rowInputOf(r);
+  const hasMembers = [...u.rows, ...(u.otherPageRows ?? [])].some((x) => x.paidWithRowId === r.id);
   box.querySelector('[data-dsave]')?.addEventListener('click', async (e) => {
     const v = (f) => box.querySelector(`[data-df="${f}"]`)?.value.trim() ?? '';
     const payments = member ? before.payments : PAY_COLS.flatMap(([mode, label], i) => v(`pay${i}`).split('+').map((x) => x.trim()).filter(Boolean)
       .map((amount) => ({ mode, columnLabel: cols[i][0]?.columnLabel ?? label, amount })));
     const after = { ...before, billNo: v('billNo'), amount: v('amount') || '0', discount: v('discount') || '0', payments };
+    // The discount follows the amount and payments here too (17 Nov 2026), as on Review: amount − paid, negative for a
+    // tip. Only for a bill paid on its own, and not when the discount itself was changed in the drawer.
+    let discNote = '';
+    if (!member && !hasMembers && sameRowField('discount', before.discount, after.discount)
+      && (!sameRowField('amount', before.amount, after.amount) || !sameRowField('payments', before.payments, after.payments))) {
+      const a = parsePaiseText(after.amount);
+      const paid = payments.reduce((t, p) => t + (parsePaiseText(p.amount) ?? 0), 0);
+      if (a !== null && paid > 0) {
+        const want = a - paid;
+        if (want !== (parsePaiseText(before.discount) ?? 0)) {
+          after.discount = rupeesForInput(want);
+          discNote = ` ${discWord(parsePaiseText(before.discount) ?? 0)} → ${discWord(want)} (amount less paid).`;
+        }
+      }
+    }
     const put = (x) => apiFull('PUT', `/businesses/${biz.id}/register-rows/${r.id}`, x);
     const reload = async () => { await (drawerReload ?? route)(); };
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
-      await put(after);
+      const res = await put(rowEditBody(before, after));
       await reload();
       await openBillDrawer(biz, after.billNo || billNo, day);
-      doneToast(`Bill ${after.billNo || billNo}: register row saved.`, async () => { await put(before); }, async () => { await reload(); if (document.getElementById('billdrawer')) await openBillDrawer(biz, billNo, day); });
+      const notes = (res?.notes ?? []).map((n) => ` ${n.words}.`).join('');
+      doneToast(`Bill ${after.billNo || billNo}: register row saved.${discNote}${notes}`, async () => { await put(rowEditBody(after, before)); }, async () => { await reload(); if (document.getElementById('billdrawer')) await openBillDrawer(biz, billNo, day); });
     } catch (err) { btn.disabled = false; showError(box.querySelector('.form-msg'), err); }
   });
 }

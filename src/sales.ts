@@ -647,6 +647,28 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     const said = numberSlips.map((x) => `the ₹ ${(x.amountPaise / 100).toFixed(2).replace(/\.00$/, '')} line of ${x.writtenAs} is probably bill ${x.billNo} (same amount, not in the register)`);
     blockers.push(`Bill ${repeated.join(', ')} appears more than once in the register.${said.length ? ` ${said.join('; ').replace(/^t/, 'T')}: correct it on its register page.` : ''}`);
   }
+  // A bill written twice (approved 17 Nov 2026): each line with its page and line number, what it says and whether it
+  // is the software's amount, so To do can delete the extra one in place.
+  const repeatedLines: { billNo: string; lines: { rowId: string; uploadId: string; pageNo: number | null; lineNo: number; amountPaise: number; discountPaise: number;
+    payments: { mode: string; amountPaise: number; label: string | null }[]; remarks: string | null; checked: boolean; sameAsSoftware: boolean | null }[] }[] = [];
+  if (repeated.length && shift?.status !== 'confirmed') {
+    const lines = rg.filter((x) => repeated.includes(x.bill_no));
+    const [pages, notes] = await Promise.all([
+      all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
+        WHERE u.business_id = ? AND u.kind = 'bill_register' AND r.shift_day = ? ORDER BY u.created_at, u.id`, businessId, day),
+      all<{ id: string; remarks: string | null }>(db, `SELECT id, remarks FROM register_rows WHERE business_id = ? AND id IN (${lines.map(() => '?').join(',')})`, businessId, ...lines.map((x) => x.id)),
+    ]);
+    const pageNo = new Map(pages.map((x, i) => [x.id, i + 1]));
+    for (const b of repeated) {
+      const s = sw.find((x) => x.bill_no === b);
+      repeatedLines.push({ billNo: b, lines: lines.filter((x) => x.bill_no === b).map((x) => ({ rowId: x.id, uploadId: x.upload_id, pageNo: pageNo.get(x.upload_id) ?? null, lineNo: x.line_no,
+        amountPaise: x.amount_paise + x.discount_paise, discountPaise: x.discount_paise,
+        payments: (written.get(x.id) ?? []).map((p) => ({ mode: p.mode, amountPaise: p.amount_paise, label: p.column_label })),
+        remarks: notes.find((n) => n.id === x.id)?.remarks ?? null, checked: x.status === 'checked',
+        // The amount written on the line, or after a real discount (not with a tip, which makes up any shortfall).
+        sameAsSoftware: s ? s.amount_paise === x.amount_paise + x.discount_paise || (x.discount_paise > 0 && s.amount_paise === x.amount_paise) : null })) });
+    }
+  }
   const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
   const unbalanced = rg.filter((r) => !grouped.has(r.id) && (paysByRow.get(r.id) ?? []).reduce((s, p) => s + p.amount_paise, 0) !== r.amount_paise && r.amount_paise !== 0);
   for (const g of groups) {
@@ -660,6 +682,9 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       + (zero.length ? ` Rows at ₹0: ${zero.join(', ')}. Check their amounts against the photo.` : diff > 0 ? '' : ' If it was a discount, use Fill discounts on the register page.'));
   }
   if (unbalanced.length) blockers.push(`The payments written for bill ${unbalanced.map((r) => r.bill_no).join(', ')} do not add up to the bill amount.`);
+  // Each with its figures, so To do can offer the gap as a discount or tip in place (17 Nov 2026).
+  const unbalancedRows = unbalanced.map((r) => ({ billNo: r.bill_no, rowId: r.id, uploadId: r.upload_id, amountPaise: r.amount_paise,
+    paidPaise: (paysByRow.get(r.id) ?? []).reduce((t, p) => t + p.amount_paise, 0) }));
   const typed = new Set(typeHeads.map((t) => t.bill_type));
   const counted = comparisons.filter((c) => c.difference === 'match' || isCounted(c.decision));
   const rgById = new Map(rg.map((r) => [r.id, r]));
@@ -845,6 +870,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     reports: cov.reports.map((r) => ({ id: r.id, coversFrom: r.covers_from, coversTo: r.covers_to, firstPaidAt: r.first_paid_at, lastPaidAt: r.last_paid_at, billCount: r.bill_count })),
     softwareBills: sw.length,
     numberSlips,
+    repeatedLines,
+    unbalancedRows,
     registerRows: rg.length,
     registerPages: new Set(rg.map((r) => r.upload_id)).size,
     comparisons: comparisons.map((c) => ({

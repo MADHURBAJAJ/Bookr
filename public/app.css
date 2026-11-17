@@ -515,3 +515,27 @@ details.menu[open] { z-index: 40; }
 .lo-chips button { min-height: 32px; font-size: 13px; }
 .lo-row[hidden] { display: none; }
 @media (max-width: 560px) { .lo-tag { display: none; } .lo-cell { gap: 4px; } }
+
+/* To do (17 Nov 2026): Save at the top, then numbered steps that open on a click. */
+.todo-top { flex-direction: row; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; border-color: var(--teal); }
+.todo-step { gap: 0; padding-top: 12px; padding-bottom: 12px; }
+.todo-sh { display: flex; align-items: center; gap: 10px; }
+.todo-sh[data-todostep] { cursor: pointer; }
+.todo-n { width: 24px; height: 24px; border-radius: 12px; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 13px; flex: none; }
+.todo-step.done .todo-n { background: var(--teal); color: #fff; border-color: var(--teal); }
+.todo-step.done .todo-t strong { color: var(--teal); }
+.todo-t { flex: 1; min-width: 0; }
+.todo-car { color: var(--muted); font-size: 12px; }
+.todo-body { margin-top: 8px; padding-left: 34px; }
+.todo-ln { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--line-soft); }
+.todo-no { font-weight: 600; min-width: 84px; }
+.todo-what { flex: 1; min-width: 200px; }
+.todo-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.todo-ln > .form-msg { flex-basis: 100%; }
+.todo-dup { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.todo-dup[hidden] { display: none; }
+.todo-copy { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.todo-copy.sugg { border-color: var(--teal); background: #F2F9F8; }
+.todo-copy-acts { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.todo-other { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+@media (max-width: 560px) { .todo-body { padding-left: 0; } }

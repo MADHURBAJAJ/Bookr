@@ -196,23 +196,40 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
   const base = { id: u.id, kind: u.kind, day: u.business_day, status: u.status, pageWrittenTotalPaise: u.page_written_total_paise, columnTotals: u.page_column_totals ? JSON.parse(u.page_column_totals) : null, ocrEngine: u.ocr_engine, uploadedBy: u.uploaded_by, createdAt: u.created_at,
     fromSoftware: u.storage_key.startsWith('software-added/') };
   if (u.kind === 'bill_register') {
-    const rows = await all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
+    // One round trip for everything that needs only the page and its shift (17 Nov 2026: the page took ~2.7 s one query at a time).
+    const [rows, pays, shift, swBills, shiftRows, elsewhereList, pages, others, otherPays, deleted] = await Promise.all([all<{ id: string }>(db, `SELECT id, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
       discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt,
       (SELECT count(*) FROM register_bank_adjustments a WHERE a.target_id = register_rows.id AND a.reverses_id IS NULL
          AND NOT EXISTS (SELECT 1 FROM register_bank_adjustments x WHERE x.reverses_id = a.id)) > 0 AS bankAdjusted,
       (SELECT CASE WHEN c.decision = 'leave_out' THEN 'Left out' ELSE c.close_note END FROM bill_comparisons c
          WHERE c.register_row_id = register_rows.id AND (c.closed_at IS NOT NULL OR c.decision = 'leave_out') LIMIT 1) AS numberSettled,
       (SELECT 1 FROM bill_comparisons c WHERE c.register_row_id = register_rows.id AND c.decided_by IS NOT NULL LIMIT 1) AS numberDecided
-      FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id);
-    const pays = await all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
-      p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id);
-    const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, u.business_day);
-    // Bill number check against the software report of the same shift: exact, or suggestions for typos and short numbers.
-    const [swBills, shiftRows] = await Promise.all([
+      FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id),
+    all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
+      p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id),
+    one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+      // Bill number check against the software report of the same shift: exact, or suggestions for typos and short numbers.
       all<{ bill_no: string; pos_no: string; amount_paise: number; mode: string; paid_at: number }>(db,
         'SELECT bill_no, pos_no, amount_paise, mode, paid_at FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
       all<{ id: string; bill_no: string; amount_paise: number; gross_paise: number }>(db,
         'SELECT id, bill_no, amount_paise - discount_paise + tip_paise AS amount_paise, amount_paise AS gross_paise FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, u.business_day),
+      // A line whose bill is in an earlier or later shift's software report (a bill settled the next day, 11 Nov 2026):
+      // said as such, not as a number the software does not have.
+      all<{ rowId: string; day: string; mode: string | null; amount: number | null; decision: string | null }>(db, `
+      SELECT here.register_row_id AS rowId, e.shift_day AS day, e.sw_mode AS mode, e.sw_amount_paise AS amount, e.decision
+      FROM bill_comparisons here JOIN bill_comparisons e ON e.id = here.linked_to_id
+      WHERE here.business_id = ? AND here.shift_day = ? AND here.register_row_id IS NOT NULL AND e.shift_day <> here.shift_day`, bid, u.business_day),
+      // Rows of the same shift on its other register pages: bills paid together can run across sheets.
+      all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
+      WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id),
+      all<{ id: string; uploadId: string }>(db, `SELECT id, upload_id AS uploadId, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
+        discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status FROM register_rows
+        WHERE business_id = ? AND shift_day = ? AND upload_id <> ? ORDER BY line_no`, bid, u.business_day, u.id),
+      all<{ registerRowId: string }>(db, `SELECT p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel, p.amount_paise AS amountPaise
+        FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
+      all<{ before: string; after: string; at: number; by: string | null }>(db, `SELECT a.before, a.after, a.created_at AS at, us.name AS by
+      FROM audit_log a LEFT JOIN users us ON us.id = a.user_id
+      WHERE a.business_id = ? AND a.action = 'register.delete' AND json_extract(a.before, '$.uploadId') = ? ORDER BY a.id`, bid, u.id),
     ]);
     const matches = swBills.length ? suggestBills(shiftRows, swBills) : null;
     // Bill 26110158 written for ₹283 when the software's 26110158 is ₹145 (11 Nov 2026): the number may be a slip for a
@@ -225,7 +242,14 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     // Typos: a number that fits another bill or its date's running numbers. Until a person has decided the bill.
     const toCheck = shift?.status === 'confirmed' ? [] : (rows as unknown as { id: string; numberSettled: string | null; numberDecided: number | null }[])
       .filter((r) => !r.numberSettled && !r.numberDecided && (!matches?.get(r.id)?.exact || amountOff(r.id)));
-    const numbers = toCheck.length ? await numberContext(db, bid, u.business_day) : null;
+    const bankOk = can(c.get('role') as Role, 'bank.link');
+    const [numbers, credits, colHints] = await Promise.all([
+      toCheck.length ? numberContext(db, bid, u.business_day) : null,
+      bankOk ? all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows
+        WHERE business_id = ? AND kind = 'upi_in' AND day BETWEEN ? AND ?`, bid, u.business_day, addDays(u.business_day, 1)) : [],
+      // A confirmed shift's column is changed on Reconcile, together with the match.
+      bankOk && shift?.status !== 'confirmed' ? columnHints(db, bid, u.business_day) : [],
+    ]);
     const flagsOf = new Map(numbers ? toCheck.map((r) => {
       const x = shiftRows.find((y) => y.id === r.id);
       const f = x ? numberFlags(x, numbers) : [];
@@ -235,13 +259,6 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     // A cell Claude could not read (amount or payment): the software's amount for this bill, and a bank credit of that
     // amount near the bill's time, offered as a hint. Never applied by itself; clearly read cells get no hint.
     // The bank is shown only to people who can match it (Owner, Accountant); entry staff get the software's figure only.
-    const bankOk = can(c.get('role') as Role, 'bank.link');
-    const [credits, colHints] = bankOk ? await Promise.all([
-      all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows
-        WHERE business_id = ? AND kind = 'upi_in' AND day BETWEEN ? AND ?`, bid, u.business_day, addDays(u.business_day, 1)),
-      // A confirmed shift's column is changed on Reconcile, together with the match.
-      shift?.status === 'confirmed' ? [] : columnHints(db, bid, u.business_day),
-    ]) : [[], []];
     const hintFor = (r: { billNo: string; ocrOriginal: string | null }) => {
       if (!r.ocrOriginal) return null;
       let o: { unclear?: string[]; resolved?: string[] };
@@ -264,28 +281,9 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         .sort((a, b) => Math.abs(a.posted_at - sw.paid_at) - Math.abs(b.posted_at - sw.paid_at))[0];
       return x ? { amountPaise: x.amount_paise, at: x.posted_at } : null;
     };
-    // A line whose bill is in an earlier or later shift's software report (a bill settled the next day, 11 Nov 2026):
-    // said as such, not as a number the software does not have.
-    const elsewhereBill = new Map((await all<{ rowId: string; day: string; mode: string | null; amount: number | null; decision: string | null }>(db, `
-      SELECT here.register_row_id AS rowId, e.shift_day AS day, e.sw_mode AS mode, e.sw_amount_paise AS amount, e.decision
-      FROM bill_comparisons here JOIN bill_comparisons e ON e.id = here.linked_to_id
-      WHERE here.business_id = ? AND here.shift_day = ? AND here.register_row_id IS NOT NULL AND e.shift_day <> here.shift_day`, bid, u.business_day))
-      .map((x) => [x.rowId, x]));
-    // Rows of the same shift on its other register pages: bills paid together can run across sheets.
-    const pages = await all<{ id: string }>(db, `SELECT DISTINCT u.id, u.created_at FROM uploads u JOIN register_rows r ON r.upload_id = u.id
-      WHERE u.business_id = ? AND u.kind = 'bill_register' AND (r.shift_day = ? OR u.id = ?) ORDER BY u.created_at, u.id`, bid, u.business_day, u.id);
+    const elsewhereBill = new Map(elsewhereList.map((x) => [x.rowId, x]));
     const pageNo = new Map(pages.map((p, i) => [p.id, i + 1]));
-    const [others, otherPays] = await Promise.all([
-      all<{ id: string; uploadId: string }>(db, `SELECT id, upload_id AS uploadId, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
-        discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status FROM register_rows
-        WHERE business_id = ? AND shift_day = ? AND upload_id <> ? ORDER BY line_no`, bid, u.business_day, u.id),
-      all<{ registerRowId: string }>(db, `SELECT p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel, p.amount_paise AS amountPaise
-        FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
-    ]);
     const slip = pageSlip(rows as unknown as SlipRow[], pays as unknown as { registerRowId: string; amountPaise: number }[]);
-    const deleted = await all<{ before: string; after: string; at: number; by: string | null }>(db, `SELECT a.before, a.after, a.created_at AS at, us.name AS by
-      FROM audit_log a LEFT JOIN users us ON us.id = a.user_id
-      WHERE a.business_id = ? AND a.action = 'register.delete' AND json_extract(a.before, '$.uploadId') = ? ORDER BY a.id`, bid, u.id);
     return c.json({
       deletedRows: deleted.map((d) => ({ ...JSON.parse(d.before), ...JSON.parse(d.after), at: d.at, by: d.by })),
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
@@ -476,6 +474,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
   const r = registerInput(await body(c));
   await checkPaidWith(db, bid, null, u.business_day, r.paidWithRowId);
   await checkDiscount(db, bid, null, r, null);
+  const groupWas = await groupBefore(db, bid, r.paidWithRowId);
   const last = await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) AS n FROM register_rows WHERE upload_id = ?', u.id);
   const id = newId();
   const t = now();
@@ -492,7 +491,7 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/register-rows', re
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
-  await autoGroupDiscount(db, bid, [r.paidWithRowId], c.get('user').id);
+  await autoGroupDiscount(db, bid, [r.paidWithRowId], c.get('user').id, new Map(groupWas ? [groupWas] : []));
   await refreshComparisons(db, bid, u.business_day, c.get('user').id);
   return c.json({ id }, 201);
 });
@@ -594,6 +593,72 @@ captureRoutes.post('/businesses/:businessId/register-rows/:rowId/split', require
 });
 
 
+
+// ---- Saving only what changed (17 Nov 2026): a screen opened before another save sent the whole row back and undid
+// that save (bill 31 Oct row 10: ₹676 went back to ₹3,676). The screen now sends the fields it changed and what they
+// were when it opened; the rest comes from the row as it is now, and a field changed elsewhere in between is refused.
+const EDIT_FIELDS = ['billNo', 'billType', 'amount', 'discount', 'payments', 'paidWithRowId', 'remarks', 'status'] as const;
+const rupeeText = (p: number) => `${p < 0 ? '-' : ''}${Math.trunc(Math.abs(p) / 100)}.${String(Math.abs(p) % 100).padStart(2, '0')}`;
+type RowNow = { bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; status: string };
+function rowAsInput(old: RowNow, pays: { mode: string; amount_paise: number; column_label: string | null }[]): Record<string, unknown> {
+  return { billNo: old.bill_no, billType: old.bill_type, amount: rupeeText(old.amount_paise), discount: rupeeText(old.discount_paise - old.tip_paise),
+    payments: pays.map((p) => ({ mode: p.mode, columnLabel: p.column_label, amount: rupeeText(p.amount_paise) })),
+    paidWithRowId: old.paid_with_row_id, remarks: old.remarks, status: old.status };
+}
+function sameField(f: string, a: unknown, b: unknown): boolean {
+  const money = (v: unknown) => { const t = typeof v === 'number' ? String(v) : typeof v === 'string' ? v.replace(/,/g, '').trim() : ''; if (!t) return 0; const n = Number(t); return Number.isFinite(n) ? Math.round(n * 100) : t; };
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : v == null ? '' : String(v));
+  if (f === 'amount' || f === 'discount') return money(a) === money(b);
+  if (f === 'payments') {
+    const k = (v: unknown) => JSON.stringify((Array.isArray(v) ? v : []).map((p: Record<string, unknown>) => [p?.mode, money(p?.amount), str(p?.columnLabel)])
+      .filter((x) => x[1] !== 0).sort());
+    return k(a) === k(b);
+  }
+  if (f === 'billNo') return str(a).replace(/\s+/g, '') === str(b).replace(/\s+/g, '');
+  if (f === 'status') return (a === 'checked') === (b === 'checked');
+  return str(a) === str(b);
+}
+const FIELD_WORD: Record<string, string> = { billNo: 'bill number', billType: 'type', amount: 'amount', discount: 'discount', payments: 'payments',
+  paidWithRowId: 'paid-with link', remarks: 'remarks', status: 'tick' };
+function mergeEdit(raw: Record<string, unknown>, now: Record<string, unknown>): Record<string, unknown> {
+  const only = (raw.only as unknown[]).filter((f): f is (typeof EDIT_FIELDS)[number] => typeof f === 'string' && (EDIT_FIELDS as readonly string[]).includes(f));
+  const was = (raw.was && typeof raw.was === 'object' ? raw.was : {}) as Record<string, unknown>;
+  const moved = only.filter((f) => f in was && !sameField(f, was[f], now[f]) && !sameField(f, raw[f], now[f]));
+  if (moved.length) {
+    throw new HTTPException(409, { message: `This bill's ${moved.map((f) => FIELD_WORD[f]).join(' and ')} changed on another screen since this page opened. The page now shows it as saved; make your change again if it is still needed.`,
+      cause: { code: 'stale_row', fields: moved } });
+  }
+  const out: Record<string, unknown> = { ...now, confirm: raw.confirm };
+  for (const f of only) out[f] = raw[f];
+  return out;
+}
+
+/** A group's gap before a change: its bills less what was paid, and the discount (less tip) on the row with the payment. */
+async function groupBefore(db: DB, businessId: string, headId: string | null | undefined): Promise<[string, { gap: number; disc: number }] | null> {
+  if (!headId) return null;
+  const g = await one<{ gross: number; paid: number; disc: number; members: number; memberDisc: number }>(db, `SELECT
+    h.amount_paise + coalesce((SELECT sum(amount_paise) FROM register_rows WHERE paid_with_row_id = h.id), 0) AS gross,
+    coalesce((SELECT sum(amount_paise) FROM register_payments WHERE register_row_id = h.id), 0) AS paid,
+    h.discount_paise - h.tip_paise AS disc,
+    (SELECT count(*) FROM register_rows WHERE paid_with_row_id = h.id) AS members,
+    coalesce((SELECT sum(discount_paise + tip_paise) FROM register_rows WHERE paid_with_row_id = h.id), 0) AS memberDisc
+    FROM register_rows h WHERE h.id = ? AND h.business_id = ? AND h.paid_with_row_id IS NULL`, headId, businessId);
+  return g && g.members > 0 && g.memberDisc === 0 ? [headId, { gap: g.gross - g.paid, disc: g.disc }] : null;
+}
+
+/** The rows of the groups a save touched, as the page has them, so the screen updates without loading the page again. */
+async function rowsAfter(db: DB, businessId: string, ids: (string | null | undefined)[]) {
+  const list = [...new Set(ids.filter((x): x is string => !!x))];
+  if (!list.length) return [];
+  const q = list.map(() => '?').join(',');
+  const rows = await all<{ id: string }>(db, `SELECT id, upload_id AS uploadId, line_no AS lineNo, bill_no AS billNo, bill_type AS billType, amount_paise AS amountPaise,
+    discount_paise - tip_paise AS discountPaise, paid_with_row_id AS paidWithRowId, remarks, status, ocr_original AS ocrOriginal, edited_at AS editedAt
+    FROM register_rows WHERE business_id = ? AND (id IN (${q}) OR paid_with_row_id IN (${q}))`, businessId, ...list, ...list);
+  const pays = rows.length ? await all<{ registerRowId: string }>(db, `SELECT id, register_row_id AS registerRowId, mode, column_label AS columnLabel, amount_paise AS amountPaise
+    FROM register_payments WHERE register_row_id IN (${rows.map(() => '?').join(',')}) ORDER BY created_at, id`, ...rows.map((r) => r.id)) : [];
+  return rows.map((r) => ({ ...r, payments: pays.filter((p) => p.registerRowId === r.id) }));
+}
+
 /**
  * A group's discount filled by itself after a line changes (approved 13 Nov 2026), when the group looks complete: less
  * was paid than billed, by no more than the large-discount limit, and no row is at ₹0 or has an amount not read. It
@@ -601,7 +666,9 @@ captureRoutes.post('/businesses/:businessId/register-rows/:rowId/split', require
  * is never touched. A filled one that no longer fits (the bills or payment changed) is worked out again, or taken off
  * when the group no longer qualifies: more paid than billed, a row at ₹0, or too large a gap stay with a person.
  */
-async function autoGroupDiscount(db: DB, businessId: string, heads: (string | null | undefined)[], user: string) {
+async function autoGroupDiscount(db: DB, businessId: string, heads: (string | null | undefined)[], user: string,
+  before: Map<string, { gap: number; disc: number }> = new Map()) {
+  const notes: { rowId: string; fromPaise: number; toPaise: number; words: string }[] = [];
   for (const headId of [...new Set(heads.filter((x): x is string => !!x))]) {
     const rows = await all<{ id: string; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; status: string; ocr_original: string | null }>(db,
       'SELECT id, amount_paise, discount_paise, tip_paise, paid_with_row_id, status, ocr_original FROM register_rows WHERE business_id = ? AND (id = ? OR paid_with_row_id = ?)', businessId, headId, headId);
@@ -610,13 +677,28 @@ async function autoGroupDiscount(db: DB, businessId: string, heads: (string | nu
     const ocrOf = (r: { ocr_original: string | null }) => { try { return (r.ocr_original ? JSON.parse(r.ocr_original) : {}) as Record<string, unknown> & { inferred?: string[]; resolved?: string[]; unclear?: string[]; autoGroupDiscount?: boolean }; } catch { return {}; } };
     const o = ocrOf(head);
     const typed = (r: (typeof rows)[number]) => { const x = ocrOf(r); return (x.resolved ?? []).includes('discount') || ((r.discount_paise || r.tip_paise) > 0 && !stillInferred(r.ocr_original, 'discount')); };
-    if (rows.some(typed)) continue;
     if (rows.some((r) => r.id !== headId && (r.discount_paise || r.tip_paise))) continue;
     const paid = (await one<{ n: number }>(db, 'SELECT coalesce(sum(amount_paise), 0) AS n FROM register_payments WHERE register_row_id = ?', headId))!.n;
     const gross = rows.reduce((t, r) => t + r.amount_paise, 0);
     const unread = (r: (typeof rows)[number]) => { const x = ocrOf(r); return (x.unclear ?? []).includes('amount') && !(x.resolved ?? []).includes('amount'); };
     const gap = gross - paid;
     const fits = paid > 0 && gap > 0 && gap * 100 <= LARGE_DISCOUNT_PCT * gross && rows.every((r) => r.amount_paise > 0 && !unread(r));
+    if (rows.some(typed)) {
+      // A discount read or typed that was exactly the group's gap (bills less paid) moves with the gap when a bill or the
+      // payment changes (17 Nov 2026), if the new gap still fits. Anything else typed stays as it is.
+      const b = before.get(headId);
+      const disc = head.discount_paise - head.tip_paise;
+      if (b && b.gap > 0 && b.disc === b.gap && disc === b.gap && fits && gap !== disc) {
+        const words = `Discount ${rupees(disc)} → ${rupees(gap)}: it was the gap between the bills and the payment, which changed (${rupees(gross)} of bills, ${rupees(paid)} paid)`;
+        const t = now();
+        await db.batch([
+          stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = 0, edited_by = ?, edited_at = ? WHERE id = ?', gap, user, t, headId),
+          stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'register.auto_discount', 'register_rows', ?, ?, ?, ?)`,
+            businessId, user, headId, JSON.stringify({ discountPaise: head.discount_paise, tipPaise: head.tip_paise }), JSON.stringify({ discountPaise: gap, grossPaise: gross, paidPaise: paid, changes: words }), t),
+        ]).then(() => notes.push({ rowId: headId, fromPaise: disc, toPaise: gap, words })).catch((e) => { if (!isShiftConfirmed(e)) throw e; });
+      }
+      continue;
+    }
     const want = fits ? gap : 0;
     if (!fits && !o.autoGroupDiscount) continue;           // nothing filled here before: a person decides
     if (head.discount_paise === want && head.tip_paise === 0 && !!o.autoGroupDiscount === fits) continue;
@@ -631,8 +713,9 @@ async function autoGroupDiscount(db: DB, businessId: string, heads: (string | nu
       stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = 0, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?', want, JSON.stringify(next), user, t, headId),
       stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'register.auto_discount', 'register_rows', ?, ?, ?, ?)`,
         businessId, user, headId, JSON.stringify({ discountPaise: head.discount_paise, tipPaise: head.tip_paise }), JSON.stringify({ discountPaise: want, grossPaise: gross, paidPaise: paid, changes: words }), t),
-    ]).catch((e) => { if (!isShiftConfirmed(e)) throw e; });
+    ]).then(() => notes.push({ rowId: headId, fromPaise: head.discount_paise - head.tip_paise, toPaise: want, words })).catch((e) => { if (!isShiftConfirmed(e)) throw e; });
   }
+  return notes;
 }
 
 captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
@@ -643,7 +726,10 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   const old = await one<{ shift_day: string; bill_no: string; bill_type: string | null; amount_paise: number; discount_paise: number; tip_paise: number; paid_with_row_id: string | null; remarks: string | null; status: string; ocr_original: string | null }>(db,
     'SELECT shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, paid_with_row_id, remarks, status, ocr_original FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
-  const data = await body(c);
+  const oldPays = await all<{ mode: string; amount_paise: number; column_label: string | null }>(db,
+    'SELECT mode, amount_paise, column_label FROM register_payments WHERE register_row_id = ? ORDER BY created_at, id', rowId);
+  const raw = await body(c);
+  const data = Array.isArray(raw.only) ? mergeEdit(raw, rowAsInput(old, oldPays)) : raw;
   const r = registerInput(data);
   // Fields a person confirmed as they are (e.g. the bill number picked from the software list, the same as read).
   const confirmed = (Array.isArray(data.confirm) ? data.confirm : []).filter((f): f is string => typeof f === 'string' && ['bill_no', 'amount'].includes(f));
@@ -653,8 +739,6 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
   // A field a person changes counts as resolved: its "Needs input" mark goes, the others stay until the row is checked.
   // The original reading and its "unclear" list are kept as they were.
   let ocr = old.ocr_original;
-  const oldPays = await all<{ mode: string; amount_paise: number; column_label: string | null }>(db,
-    'SELECT mode, amount_paise, column_label FROM register_payments WHERE register_row_id = ? ORDER BY created_at, id', rowId);
   const key = (ps: { mode: string; amount: number; label: string | null }[]) => JSON.stringify(ps.map((p) => [p.mode, p.amount, p.label ?? '']).sort());
   // An amount the reader could not read was drafted as ₹0 (13 Nov 2026): the row cannot be ticked at ₹0 until a person
   // types the amount, or says the bill really is ₹0.
@@ -681,6 +765,11 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
       ocr = JSON.stringify(o);
     }
   }
+  // The groups' gaps before this save, so a discount that was the gap can move with it. Not the row's own discount
+  // when this save changes it: that is a person's figure.
+  const discChanged = old.discount_paise !== r.discountPaise || old.tip_paise !== r.tipPaise;
+  const before = new Map((await Promise.all([r.paidWithRowId, old.paid_with_row_id, discChanged ? null : rowId]
+    .map((h) => groupBefore(db, bid, h)))).filter((x) => !!x) as [string, { gap: number; disc: number }][]);
   try {
     await db.batch([
       stmt(db, `UPDATE register_rows SET bill_no = ?, bill_type = ?, amount_paise = ?, discount_paise = ?, tip_paise = ?, paid_with_row_id = ?, remarks = ?, status = ?, edited_by = ?, edited_at = ?, ocr_original = ?
@@ -695,9 +784,10 @@ captureRoutes.put('/businesses/:businessId/register-rows/:rowId', requireRole('r
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
-  await autoGroupDiscount(db, bid, [r.paidWithRowId ?? rowId, old.paid_with_row_id], c.get('user').id);
+  const heads = [r.paidWithRowId ?? rowId, old.paid_with_row_id];
+  const notes = await autoGroupDiscount(db, bid, heads, c.get('user').id, before);
   await refreshComparisons(db, bid, old.shift_day, c.get('user').id);
-  return c.json({ ok: true });
+  return c.json({ ok: true, rows: await rowsAfter(db, bid, [rowId, ...heads]), notes });
 });
 
 const rupees = (p: number) => `₹${p < 0 ? '-' : ''}${Math.trunc(Math.abs(p) / 100).toLocaleString('en-IN')}${Math.abs(p) % 100 ? `.${String(Math.abs(p) % 100).padStart(2, '0')}` : ''}`;
@@ -882,6 +972,7 @@ captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole
     'SELECT shift_day, upload_id, line_no, bill_no, amount_paise, discount_paise, paid_with_row_id FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
   if (!old) fail(404, 'Row not found.');
   if (old.paid_with_row_id) await checkHeadDiscount(db, bid, old.paid_with_row_id, rowId, 0);
+  const groupWas = await groupBefore(db, bid, old.paid_with_row_id);
   // Why the line went: the page's totals still include it, so Review explains the difference with it.
   const data = await body(c).catch(() => ({} as Record<string, unknown>));
   const reason = typeof data.reason === 'string' && DELETE_REASONS.includes(data.reason) ? data.reason : 'other';
@@ -900,9 +991,9 @@ captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole
     if (isShiftConfirmed(e)) fail(409, CONFIRMED);
     throw e;
   }
-  await autoGroupDiscount(db, bid, [old.paid_with_row_id], c.get('user').id);
+  const notes = await autoGroupDiscount(db, bid, [old.paid_with_row_id], c.get('user').id, new Map(groupWas ? [groupWas] : []));
   await refreshComparisons(db, bid, old.shift_day, c.get('user').id);
-  return c.json({ ok: true });
+  return c.json({ ok: true, rows: await rowsAfter(db, bid, [old.paid_with_row_id]), notes });
 });
 
 // ---- Expense list rows: draft expense rows paid from Cash, approved by Owner or Accountant
