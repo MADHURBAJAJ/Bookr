@@ -18,7 +18,7 @@ const whole = (v: unknown, label: string, min = 1, max = 10_000_000): number => 
 };
 
 async function store(db: DB, bid: string, id: unknown, label = 'Store') {
-  const s = await one<{ id: string; name: string }>(db, 'SELECT id, name FROM stock_stores WHERE id = ? AND business_id = ?', id, bid);
+  const s = await one<{ id: string; name: string; kind: string }>(db, 'SELECT id, name, kind FROM stock_stores WHERE id = ? AND business_id = ?', id, bid);
   if (!s) fail(400, `${label} not found.`);
   return s;
 }
@@ -247,10 +247,24 @@ stockRoutes.get(`${B}/stock/report`, requireAction('stock.edit'), async (c) => {
       coalesce(sum(CASE WHEN m.shift_day BETWEEN ? AND ? AND m.kind = 'count' THEN m.qty END), 0) AS count
     FROM stock_items i LEFT JOIN stock_moves m ON m.item_id = i.id AND m.store_id = ? AND m.shift_day <= ?
     WHERE i.business_id = ? GROUP BY i.id ORDER BY i.name`, from, from, to, from, to, from, to, from, to, from, to, from, to, s.id, to, bid);
-  return c.json({ from, to, store: s, items: rows.map((r) => {
+  const items = rows.map((r) => {
     const closing = r.opening + r.purchase + r.transfer_in + r.transfer_out + r.sale + r.waste + r.count;
     const v = (q: number) => Math.round((q * r.cost_per_pack_paise) / r.pack_size);
     return { id: r.id, name: r.name, unit: r.unit, opening: r.opening, received: r.purchase, transferIn: r.transfer_in, transferOut: -r.transfer_out, sold: -r.sale,
-      waste: -r.waste, variance: r.count, closing, closingValuePaise: v(Math.max(0, closing)), varianceValuePaise: v(r.count), wasteValuePaise: v(-r.waste) };
-  }).filter((x) => x.opening || x.received || x.transferIn || x.transferOut || x.sold || x.waste || x.variance || x.closing) });
+      waste: -r.waste, variance: r.count, closing, closingValuePaise: v(Math.max(0, closing)), varianceValuePaise: v(r.count), wasteValuePaise: v(-r.waste),
+      soldValuePaise: v(-r.sale) };
+  }).filter((x) => x.opening || x.received || x.transferIn || x.transferOut || x.sold || x.waste || x.variance || x.closing);
+  // Cost against sales, for a bar or kitchen store: what its station's dishes sold for (before bill discounts and GST, void bills
+  // left out), against the cost of what the recipes used (expected) and of what actually went (recipes + breakage + count shortfall).
+  // Costs are at the last price paid.
+  let cost = null;
+  if (s.kind === 'bar' || s.kind === 'kitchen') {
+    const sales = await one<{ p: number }>(db, `SELECT coalesce(sum(l.amount_paise), 0) AS p FROM bill_lines l JOIN bills b ON b.id = l.bill_id
+      JOIN menu_items m ON m.id = l.item_id WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND m.station = ?`, bid, from, to, s.kind);
+    const sum = (k: 'soldValuePaise' | 'wasteValuePaise' | 'varianceValuePaise') => items.reduce((t, i) => t + i[k], 0);
+    const expected = sum('soldValuePaise');
+    const actual = expected + sum('wasteValuePaise') - sum('varianceValuePaise');
+    cost = { salesPaise: sales!.p, expectedCostPaise: expected, wastePaise: sum('wasteValuePaise'), missingPaise: -sum('varianceValuePaise'), actualCostPaise: actual };
+  }
+  return c.json({ from, to, store: s, items, cost });
 });

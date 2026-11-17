@@ -370,6 +370,10 @@ describe('bar stock', () => {
     const r = (await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${bar}`))).items;
     expect(r.find((x: any) => x.name === 'Sample Whisky')).toMatchObject({ opening: 0, transferIn: 1500, sold: 90, waste: 30, variance: -30, closing: 1350 });
     expect(r.find((x: any) => x.name === 'Sample Beer 650 ml')).toMatchObject({ transferIn: 12, sold: 2, closing: 10 });
+    // Bar cost: 3 pegs (₹660) + 2 beers (₹640) sold; recipes used 90 ml whisky (₹216) + 2 beers (₹300); 30 ml spilt and 30 ml missing (₹72 each).
+    const cost = (await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${bar}`))).cost;
+    expect(cost).toEqual({ salesPaise: 130000, expectedCostPaise: 51600, wastePaise: 7200, missingPaise: 7200, actualCostPaise: 66000 });
+    expect((await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${main}`))).cost).toBeNull();
     const onHand = (await ok(s.owner.get(`${B}/stock`))).items.find((x: any) => x.name === 'Sample Whisky');
     expect(onHand).toMatchObject({ total: 1350, low: false, valuePaise: 324000 });
     const kinds = (await s.owner.get(`${B}/events?day=${day}`)).json.events.map((e: any) => e.kind);

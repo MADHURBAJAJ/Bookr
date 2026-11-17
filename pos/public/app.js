@@ -985,7 +985,15 @@ async function stockScreen(tab = 'hand') {
       const r = ui.report;
       body = html`<section class="panel"><form class="row" style="align-items:end">${storeSel('rStore', 'Store')}<label class="f">From<input class="in" type="date" data-model="rFrom" value="${ui.rFrom}"></label>
           <label class="f">To<input class="in" type="date" data-model="rTo" value="${ui.rTo}"></label><button class="btn" type="submit" data-act="stReport" data-submit>Show</button></form>
-        ${r ? html`<h2>${r.store.name} · ${r.from === r.to ? r.from : `${r.from} to ${r.to}`}</h2><div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Opening</th><th class="num">Received</th><th class="num">In</th><th class="num">Out</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Variance</th><th class="num">Closing</th></tr></thead><tbody>
+        ${r ? html`<h2>${r.store.name} · ${r.from === r.to ? r.from : `${r.from} to ${r.to}`}</h2>
+          ${r.cost ? html`<div class="sums">
+            <div><span>${r.store.kind === 'bar' ? 'Bar' : 'Kitchen'} sales (before discounts and GST)</span><span>${rs(r.cost.salesPaise)}</span></div>
+            <div><span>Cost of what recipes used (expected)</span><span>${rs(r.cost.expectedCostPaise)} · ${pct(r.cost.expectedCostPaise, r.cost.salesPaise) || '–'}</span></div>
+            <div><span>+ Breakage</span><span>${rs(r.cost.wastePaise)}</span></div>
+            <div><span style="${r.cost.missingPaise > 0 ? 'color:var(--bad)' : ''}">+ Missing at count</span><span style="${r.cost.missingPaise > 0 ? 'color:var(--bad)' : ''}">${rs(r.cost.missingPaise)}</span></div>
+            <div class="big"><span>Actual cost · cost %</span><span>${rs(r.cost.actualCostPaise)} · ${pct(r.cost.actualCostPaise, r.cost.salesPaise) || '–'}</span></div></div>
+            <p class="small quiet">Costs are at the last price paid. The gap between expected and actual cost % is what leaked: breakage plus stock missing at the count. Count often (daily for the bar) so missing stock shows up the same week.</p>` : ''}
+          <div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Opening</th><th class="num">Received</th><th class="num">In</th><th class="num">Out</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Variance</th><th class="num">Closing</th></tr></thead><tbody>
           ${r.items.map((i) => html`<tr><td>${i.name} <span class="small quiet">${i.unit}</span></td><td class="num">${i.opening}</td><td class="num">${i.received}</td><td class="num">${i.transferIn}</td><td class="num">${i.transferOut}</td><td class="num">${i.sold}</td>
             <td class="num">${i.waste}${i.waste ? html`<div class="small quiet">${rs(i.wasteValuePaise)}</div>` : ''}</td><td class="num" style="${i.variance ? 'color:var(--bad)' : ''}">${i.variance}${i.variance ? html`<div class="small">${rs(i.varianceValuePaise)}</div>` : ''}</td>
             <td class="num"><strong>${i.closing}</strong><div class="small quiet">${rs(i.closingValuePaise)}</div></td></tr>`)}</tbody></table></div>
