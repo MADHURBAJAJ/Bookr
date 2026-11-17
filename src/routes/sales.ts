@@ -882,7 +882,9 @@ salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.v
   let from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
   if (from > to) fail(400, 'From must be on or before To.');
   if (from < addDays(to, -366)) from = addDays(to, -366);
-  return c.json({ from, to, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });
+  // The last shift with bills, where the day view opens (17 Nov 2026).
+  const last = await one<{ day: string | null }>(c.env.DB, 'SELECT max(shift_day) AS day FROM bill_comparisons WHERE business_id = ? AND shift_day <= ?', c.get('businessId'), istDay(Date.now()));
+  return c.json({ from, to, lastDay: last?.day ?? null, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });
 });
 
 salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRole('sales.decide'), async (c) => {

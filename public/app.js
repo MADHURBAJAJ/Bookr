@@ -955,12 +955,15 @@ function complimentaryReport(biz, cp) {
 /** Reports: discounts over the limit, for a person to look through. They need no decision on Compare sales. */
 async function reportsView(biz, query) {
   const q = new URLSearchParams(query);
+  // One day by default (17 Nov 2026); a range when From and To are given.
+  if (!q.get('from') && !q.get('to')) return reportDayView(biz, q.get('day'));
   const range = new URLSearchParams({ from: q.get('from') ?? '', to: q.get('to') ?? '' });
   const [r, m, cp] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`), api('GET', `/businesses/${biz.id}/reports/missed?${range}`),
     api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`)]);
   const total = r.lines.reduce((t, l) => t + l.discountPaise, 0);
   render(shell(biz, 'reports', 'Reports', '', html`
     ${reportTabs(biz, 'checks')}
+    ${reportModeHtml(biz, 'range', r.to)}
     ${missedReport(biz, m)}
     <section class="card" style="gap:10px">
       <h2>Large discounts</h2>
@@ -987,6 +990,116 @@ async function reportsView(biz, query) {
     e.preventDefault();
     const d = new FormData(e.target);
     location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: d.get('from'), to: d.get('to') })}`;
+  }));
+}
+
+/** Day or Range, for the bills to look at. */
+function reportModeHtml(biz, mode, day) {
+  const d = day ?? currentShiftDay();
+  return html`<div class="seg" role="tablist" aria-label="Day or range" style="margin:0 0 10px;width:max-content;display:inline-flex">
+    <a role="tab" href="#/b/${biz.id}/reports?day=${d}" class="${mode === 'day' ? 'on' : ''}" aria-selected="${mode === 'day'}">Day</a>
+    <a role="tab" href="#/b/${biz.id}/reports?${new URLSearchParams({ from: addDaysIso(d, -30), to: d })}" class="${mode === 'range' ? 'on' : ''}" aria-selected="${mode === 'range'}">Range</a></div>`;
+}
+const timeOf = (ms) => (ms == null ? '' : new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms)).toLowerCase());
+
+/**
+ * Bills to look at for one day (approved 17 Nov 2026): bills missed in the register or the software, money with no bill,
+ * and payments not received in red. Paid or not is Reconcile's own picture (bank credits, the card machine and matches
+ * made by hand), so it says the same as Reconcile. Bills in both that match are left out, except one whose money is
+ * not in: it is listed at the top.
+ */
+async function reportDayView(biz, dayIn) {
+  let day = /^\d{4}-\d{2}-\d{2}$/.test(dayIn ?? '') ? dayIn : null;
+  if (!day) day = (await api('GET', `/businesses/${biz.id}/reports/missed?${new URLSearchParams({ to: currentShiftDay() })}`)).lastDay ?? currentShiftDay();
+  const range = new URLSearchParams({ from: day, to: day });
+  const canBank = biz.actions.includes('bank.link');
+  const [m, d, cp, rc] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/missed?${range}`), api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`),
+    api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`), canBank ? api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).catch(() => null) : null]);
+  const bankIn = !!rc?.coverage?.covered;
+  const cardsIn = !!rc?.cards?.covered;
+  // Payments not received: UPI bills with no credit, card bills with no machine payment (once the card report is in).
+  const noUpi = (rc?.noCredit ?? []).filter((k) => k.kind === 'no_upi_credit').map((k) => ({ billNo: k.billNos.join(' + '), amountPaise: k.amountPaise ?? null, paidAt: k.paidAt ?? null, mode: 'upi',
+    why: k.evidence?.[0] ?? k.title }));
+  const noCard = cardsIn ? (rc?.cards?.noSwipe ?? []).map((x) => ({ billNo: x.billNo ?? (x.billNos ?? []).join(' + '), amountPaise: x.amountPaise ?? null, paidAt: x.paidAt ?? null, mode: 'card',
+    why: 'No card machine payment of this amount' })) : [];
+  const unpaid = [...noUpi, ...noCard].sort((a, b) => (a.paidAt ?? 0) - (b.paidAt ?? 0));
+  const unpaidNos = new Set(unpaid.flatMap((x) => x.billNo.split(' + ')));
+  const sum = (xs) => xs.reduce((t, x) => t + (x.amountPaise ?? 0), 0);
+  // A missed bill added to the register since now matches: left out here.
+  const inReg = m.notInRegister.filter((x) => x.status !== 'added');
+  const payCell = (x) => {
+    if (unpaidNos.has(x.billNo)) return html`<td class="rd-bad">Not received</td>`;
+    if (x.status === 'left_out') return html`<td class="note">Not expected</td>`;
+    if (x.mode === 'cash') return html`<td class="note">In the cash count</td>`;
+    if (x.mode === 'upi') return bankIn ? html`<td class="rd-ok">✓ Received</td>` : html`<td class="note">Bank not in yet</td>`;
+    if (x.mode === 'mixed') return bankIn ? html`<td class="rd-ok">✓ UPI part received</td>` : html`<td class="note">Bank not in yet</td>`;
+    if (x.mode === 'card') return cardsIn ? html`<td class="rd-ok">✓ Received</td>` : html`<td class="note">Card report not in yet</td>`;
+    return html`<td class="note">Not known</td>`;
+  };
+  const decided = (x) => { const [, l] = MISSED_STATUS[x.status] ?? ['', x.status]; return html`${l}${x.otherDay ? ` (${dayLabel(x.otherDay)})` : ''}${x.note ? html` · <span class="note">${x.note}</span>` : ''}`; };
+  const rows = (xs, timed) => xs.map((x) => html`<tr class="${unpaidNos.has(x.billNo) ? 'rd-red' : ''}"><td class="mono">${x.billNo}</td>${timed ? html`<td>${timeOf(x.paidAt)}</td>` : ''}
+    <td class="amount">${rs(x.amountPaise ?? 0)}</td><td>${MODE_LABELS[x.mode] ?? x.mode ?? 'Not known'}</td>${payCell(x)}<td>${decided(x)}</td></tr>`);
+  const head = (timed) => html`<thead><tr><th>Bill</th>${timed ? html`<th>Time</th>` : ''}<th style="text-align:right">₹</th><th>Mode</th><th>Payment</th><th>Decided</th></tr></thead>`;
+  const tile = (label, big, small, red) => html`<div class="rd-tile ${red ? 'red' : ''}"><div class="rd-l">${label}</div><div class="rd-big">${big}</div><div class="rd-s">${small}</div></div>`;
+  const status = rc ? (rc.confirmed ? 'Shift saved' : 'Shift not saved yet') : '';
+  const largeTotal = d.lines.reduce((t, l) => t + l.discountPaise, 0);
+  render(shell(biz, 'reports', 'Reports', '', html`
+    ${reportTabs(biz, 'checks')}
+    ${reportModeHtml(biz, 'day', day)}
+    <section class="card" style="gap:12px" id="dayreport">
+      <div class="form-row" style="align-items:center;gap:8px;flex-wrap:wrap">
+        <a class="btn plain" href="#/b/${biz.id}/reports?day=${addDaysIso(day, -1)}" aria-label="Previous day">‹</a>
+        <h2 style="margin:0">${dayLabel(day)}</h2>
+        <a class="btn plain" href="#/b/${biz.id}/reports?day=${addDaysIso(day, 1)}" aria-label="Next day">›</a>
+        <input type="date" id="rdday" value="${day}" aria-label="Choose a day" style="max-width:160px">
+        ${status ? html`<span class="chip">${status}</span>` : ''}
+        <span style="flex:1"></span>
+        <a href="#/b/${biz.id}/compare/${day}">Compare sales</a>${canBank ? html` · <a href="#/b/${biz.id}/reconcile/${day}">Reconcile</a>` : ''}
+      </div>
+      <div class="rd-tiles">
+        ${tile('Missed in the register', inReg.length ? `${inReg.length} bill${inReg.length > 1 ? 's' : ''}` : 'None', inReg.length ? `₹ ${rs(sum(inReg))}` : '', false)}
+        ${tile('Missed in the software', m.notInSoftware.length ? `${m.notInSoftware.length} bill${m.notInSoftware.length > 1 ? 's' : ''}` : 'None',
+          m.notInSoftware.length ? `₹ ${rs(sum(m.notInSoftware))}` : m.oldPos?.count ? `${m.oldPos.count} old POS bills not counted` : '', false)}
+        ${canBank ? tile('Payment not received', unpaid.length ? `₹ ${rs(sum(unpaid))}` : bankIn ? 'None' : '–',
+          unpaid.length ? `${unpaid.length} bill${unpaid.length > 1 ? 's' : ''}` : bankIn ? 'all received' : 'bank not in yet', unpaid.length > 0) : ''}
+        ${tile('Money with no bill', m.inNeither.length ? `${m.inNeither.length} credit${m.inNeither.length > 1 ? 's' : ''}` : 'None', m.inNeither.length ? `₹ ${rs(sum(m.inNeither))}` : '', false)}
+      </div>
+      ${unpaid.length ? html`<div class="rd-box red">
+        <h3>Payment not received</h3>
+        <div class="scroll"><table style="min-width:560px"><thead><tr><th>Bill</th><th>Time</th><th style="text-align:right">₹</th><th>Mode</th><th>What was looked at</th></tr></thead>
+          <tbody>${unpaid.map((x) => html`<tr class="rd-red"><td class="mono">${x.billNo}</td><td>${timeOf(x.paidAt)}</td><td class="amount">${x.amountPaise == null ? '' : rs(x.amountPaise)}</td>
+            <td>${MODE_LABELS[x.mode] ?? x.mode}</td><td class="rd-bad">${x.why}</td></tr>`)}</tbody></table></div>
+        <div class="note">Paid or not is as on Reconcile: bank credits, the card machine and matches made there.</div></div>` : ''}
+      <div class="rd-box">
+        <h3>Missed in the register <span class="note">· in the software, not written in the register</span></h3>
+        ${inReg.length ? html`<div class="scroll"><table style="min-width:600px">${head(true)}<tbody>${rows(inReg, true)}</tbody></table></div>` : html`<div class="ok-msg">None on this day.</div>`}
+      </div>
+      <div class="rd-box">
+        <h3>Missed in the software <span class="note">· written in the register, not in the software</span></h3>
+        ${m.notInSoftware.length ? html`<div class="scroll"><table style="min-width:560px">${head(false)}<tbody>${rows(m.notInSoftware, false)}</tbody></table></div>` : html`<div class="ok-msg">None on this day.</div>`}
+        ${m.oldPos?.count ? html`<div class="note">${m.oldPos.count > 1 ? `${m.oldPos.count} old POS bills (₹ ${rs(m.oldPos.paise)}) are` : `1 old POS bill (₹ ${rs(m.oldPos.paise)}) is`} never in the software report, so not counted here.${unpaid.length ? ' Any whose money is not in is listed above.' : ''}</div>` : ''}
+      </div>
+      <div class="rd-box">
+        <h3>Money with no bill <span class="note">· not in the software or the register</span></h3>
+        ${m.inNeither.length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Time</th><th style="text-align:right">₹</th><th>From</th><th>Now</th></tr></thead>
+          <tbody>${m.inNeither.map((x) => html`<tr><td>${timeOf(x.postedAt)}</td><td class="amount">${rs(x.amountPaise)}</td>
+            <td class="note">${[x.vpa, x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? x.remark : null].filter(Boolean).join(' · ')}</td>
+            <td>${x.status === 'booked' ? html`Booked <span class="note">${x.headName ?? ''}${x.note ? ` · ${x.note}` : ''}</span>` : 'Not matched'}</td></tr>`)}</tbody></table></div>`
+          : html`<div class="ok-msg">None on this day.</div>`}
+      </div>
+      <details class="rd-more"><summary>Large discounts · ${d.lines.length ? `${d.lines.length} · ₹ ${rs(largeTotal)}` : 'none'}</summary>
+        ${d.lines.length ? html`<div class="scroll"><table style="min-width:640px"><thead><tr><th>Bills</th><th style="text-align:right">Bills ₹</th><th style="text-align:right">Discount ₹</th><th style="text-align:right">%</th><th style="text-align:right">Paid ₹</th><th>Remarks</th></tr></thead>
+          <tbody>${d.lines.map((l) => html`<tr><td class="mono" style="white-space:normal">${biz.actions.includes('rows.edit') ? html`<a href="#/b/${biz.id}/review/${l.uploadId}/${l.rowId}">${l.billNos.join(' + ')}</a>` : l.billNos.join(' + ')}</td>
+            <td class="amount">${rs(l.billsPaise)}</td><td class="amount">${rs(l.discountPaise)}</td><td class="amount">${l.pct}</td><td class="amount">${rs(l.paidPaise)}</td><td class="note">${l.remarks ?? ''}</td></tr>`)}</tbody></table></div>` : ''}
+      </details>
+      <details class="rd-more"><summary>Complimentary · ${cp.count ? `${cp.count} · ₹ ${rs(cp.valuePaise)}` : 'none'}</summary>${cp.count ? complimentaryReport(biz, cp) : ''}</details>
+    </section>`));
+  wireShell();
+  document.getElementById('rdday')?.addEventListener('change', (e) => { if (e.target.value) location.hash = `#/b/${biz.id}/reports?day=${e.target.value}`; });
+  document.querySelectorAll('#comps .repdates').forEach((f) => f.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    location.hash = `#/b/${biz.id}/reports?${new URLSearchParams({ from: fd.get('from'), to: fd.get('to') })}`;
   }));
 }
 

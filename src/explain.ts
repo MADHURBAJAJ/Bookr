@@ -17,7 +17,9 @@ export interface Action { label: string; method?: 'POST' | 'PUT' | 'DELETE'; pat
   credits?: string[]; sales?: string[] }
 /** What each of the three says, and which one is wrong (shown struck out). */
 export interface Witnesses { software: string | null; register: string | null; bank: string; odd: 'software' | 'register' | 'bank' | null }
-export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[]; witnesses?: Witnesses }
+export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[]; witnesses?: Witnesses;
+  /** A bill's amount and time, for the cards about one bill (Reports, 17 Nov 2026). */
+  amountPaise?: number; paidAt?: number | null }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rupees = (p: number) => (p / 100).toFixed(2);
@@ -284,7 +286,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
       const cashFits = cash.differencePaise != null && cash.differencePaise === x.net;
       const twin = takenNear.find((c) => c.amount === x.net && (x.paidAt == null || mins(c.postedAt, x.paidAt) <= 180));
       kept.push({
-        key: `mode:${x.id}`, kind: 'no_upi_credit', billNos: [x.billNo ?? ''],
+        key: `mode:${x.id}`, kind: 'no_upi_credit', billNos: [x.billNo ?? ''], amountPaise: x.net, paidAt: x.paidAt,
         title: twin ? `Bill ${x.billNo} (${rs(x.net)}): the one UPI payment of this amount went to bill ${twin.bills}` : `Bill ${x.billNo} (${rs(x.net)}): no UPI payment of this amount in the bank`,
         evidence: [
           twin ? `A credit of ${rs(x.net)} came at ${hm(twin.postedAt)} and is matched to bill ${twin.bills}. Check which bill it paid; the other was paid another way, or its money is still to come.`

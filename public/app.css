@@ -539,3 +539,20 @@ details.menu[open] { z-index: 40; }
 .todo-copy-acts { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .todo-other { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
 @media (max-width: 560px) { .todo-body { padding-left: 0; } }
+
+/* Reports, one day (17 Nov 2026): tiles, boxes, payments not received in red. */
+.rd-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.rd-tile { background: var(--bg-soft, #f6f6f3); border-radius: 8px; padding: 10px 12px; }
+.rd-tile .rd-l { font-size: 12px; color: var(--muted, #6b6b66); }
+.rd-tile .rd-big { font-size: 20px; font-weight: 600; }
+.rd-tile .rd-s { font-size: 12px; color: var(--muted, #6b6b66); }
+.rd-tile.red { background: #FCEBEB; }
+.rd-tile.red .rd-l, .rd-tile.red .rd-big, .rd-tile.red .rd-s { color: #A32D2D; }
+.rd-box { border: 1px solid var(--line-soft, #e6e6e1); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.rd-box h3 { margin: 0; font-size: 15px; }
+.rd-box.red { border-color: #F09595; }
+.rd-box.red h3 { color: #A32D2D; }
+tr.rd-red td { background: #FCEBEB; }
+.rd-bad { color: #A32D2D; font-weight: 600; }
+.rd-ok { color: var(--ok, #1D7A4F); }
+.rd-more summary { cursor: pointer; padding: 4px 0; }

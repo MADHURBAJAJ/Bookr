@@ -331,7 +331,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       const rowId = b.c.register?.rowId as string | undefined;
       const onePay = rowId && paysOf(rowId).length === 1 && b.c.register?.mode === 'upi';
       const open = rowId ? `#/b/${businessId}/review/${b.c.register!.uploadId}/${rowId}` : `#/b/${businessId}/compare/${day}`;
-      noCredit.push({ key: `trial-mode:${b.c.id}`, kind: 'no_upi_credit', billNos: [b.c.billNo], title: `Bill ${b.c.billNo} (${rs(b.amount)}): no UPI payment of this amount in the bank`,
+      noCredit.push({ key: `trial-mode:${b.c.id}`, kind: 'no_upi_credit', billNos: [b.c.billNo], amountPaise: b.amount, paidAt: b.c.paidAt ?? null, title: `Bill ${b.c.billNo} (${rs(b.amount)}): no UPI payment of this amount in the bank`,
         evidence: [`No credit of ${rs(b.amount)} in any account around ${b.c.paidAt ? hm(b.c.paidAt) : 'this shift'}.`,
           cashFits ? `The shift's cash is ${rs(b.amount)} more than expected: exactly this bill. It was probably paid in cash.` : 'If it was paid by cash or card, change it. The credit may also still be on its way.'],
         score: cashFits ? 70 : 30, uses: [`cmp:${b.c.id}`],
