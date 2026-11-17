@@ -494,3 +494,24 @@ details.menu[open] { z-index: 40; }
 .lo-t { text-align: center; padding-top: 10px; color: var(--muted); }
 .lo-row .um-line { border: 0; }
 @media (max-width: 560px) { .lo-grid { grid-template-columns: minmax(0,1fr) 48px minmax(0,1fr); gap: 4px; } }
+/* Not matched yet (17 Nov 2026): one line per bill or credit; the note is short, its ⋯ holds the rest. */
+.lo-row { align-items: center; padding: 0; }
+.lo-row .lo-t { padding-top: 0; }
+.lo-cell { display: flex; align-items: center; gap: 6px; min-height: 36px; min-width: 0; }
+.lo-cell input[type=checkbox] { width: 18px; height: 18px; min-height: 0; flex: none; margin: 0; }
+.lo-tick { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex: none; }
+.lo-fill { flex: 1; }
+.lo-cell .amount { white-space: nowrap; flex: none; }
+.lo-hint { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; text-align: left; }
+.lo-hint.lo-warn { color: #92400E; }
+.lo-tag { font-size: 11px; color: var(--muted); background: var(--line-soft); border-radius: 4px; padding: 1px 6px; white-space: nowrap; flex: none; }
+.lo-menu { flex: none; }
+.lo-menu > summary.lo-dots { min-width: 32px; min-height: 28px; padding: 0 6px; font-size: 16px; line-height: 1; }
+.lo-pop { align-items: flex-start; min-width: 280px; max-width: min(380px, 86vw); white-space: normal; }
+.lo-pop .btn { width: auto; }
+.lo-pop .nb-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.lo-fix { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.lo-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lo-chips button { min-height: 32px; font-size: 13px; }
+.lo-row[hidden] { display: none; }
+@media (max-width: 560px) { .lo-tag { display: none; } .lo-cell { gap: 4px; } }
