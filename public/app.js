@@ -3071,6 +3071,18 @@ function wireWaiting(biz, root, act) {
  * colour; then what could explain it, worked out from the bills that touch cash; then the bills, those that differ first.
  * Each bill opens its register line with the photo (Edit). Accept and shortage act on the final figure only.
  */
+// Keep it as short (17 Nov 2026): the choices fold away on this device; the bill stays counted.
+const CASH_KEPT_KEY = 'bookr.cash.kept';
+const cashKept = () => { try { return JSON.parse(localStorage.getItem(CASH_KEPT_KEY) ?? '[]'); } catch { return []; } };
+document.addEventListener('click', (e) => {
+  const b = e.target.closest?.('[data-cashkeep], [data-cashunkeep]');
+  if (!b) return;
+  const id = b.dataset.cashkeep ?? b.dataset.cashunkeep, keep = !!b.dataset.cashkeep;
+  try { localStorage.setItem(CASH_KEPT_KEY, JSON.stringify([...cashKept().filter((x) => x !== id), ...(keep ? [id] : [])].slice(-200))); } catch { /* this device only */ }
+  const box = b.closest('[data-keepbox]');
+  box.querySelector('[data-keepchoices]').hidden = keep;
+  box.querySelector('[data-keptline]').hidden = !keep;
+});
 function cashPanelHtml(biz, k, opts = {}) {
   const draft = !k.confirmed;
   const shouldBe = draft ? k.draft?.shouldBePaise ?? null : k.shouldBePaise;
@@ -3119,6 +3131,23 @@ function cashPanelHtml(biz, k, opts = {}) {
     const wit = b.witness ? (b.witness.found ? html`<div class="tiny" style="color:var(--teal)">✓ ${b.witness.found}: ${MODE_LABELS[b.witness.mode] ?? b.witness.mode} ₹ ${money(b.witness.amountPaise)} was received</div>`
       : html`<div class="tiny" style="color:#92400E">No ${b.witness.mode === 'upi' ? 'UPI credit in the bank or UPI on the card machine' : 'card-machine payment'} of ₹ ${money(b.witness.amountPaise)} near this bill</div>`) : '';
     const same = gap ? (b.rgCashPaise === null && b.decision === 'use_software' && sw === gap) || effects.some(([, v]) => v === gap) || Math.abs(sw - rg) === gap : false;
+    // Only in the register and counted from it (an old POS bill, or Use register): already in the sum, so it does not
+    // explain the difference (17 Nov 2026). Old POS bills are decided in To do's old POS block.
+    if (!same && b.swAmountPaise == null && b.rgCashPaise != null && b.state !== 'complimentary' && b.state !== 'left_out'
+      && (opts.oldPos?.has(b.comparisonId) || b.decision === 'use_register')) continue;
+    // Cash in the software, not in the register, of the difference's amount (17 Nov 2026): three plain choices.
+    if (same && b.rgCashPaise === null && (b.decision === 'use_software' || b.state === 'undecided') && draft && biz.actions.includes('sales.decide')) {
+      const kept = cashKept().includes(b.comparisonId);
+      items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #F3B4B4;border-radius:8px;padding:10px 12px" data-keepbox="${b.comparisonId}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>This explains the ${diff < 0 ? 'short' : 'difference'}</strong><span class="chip bad">Same amount</span></div>
+        <div>Bill <span class="mono">${b.billNo}</span> · ₹ ${money(sw)} cash in the software, not in the register.</div>
+        <div class="form-row" style="gap:6px;margin-top:4px" data-keepchoices ${kept ? 'hidden' : ''}>
+          <button type="button" class="btn plain dchip" data-leaveunk="${b.comparisonId}" data-bill="${b.billNo}" title="Asks why. The bill is not counted, so the cash agrees.">Not paid: leave it out</button>
+          <button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}" title="Opens the bill: write the cash on its register line">Paid, add to the register</button>
+          <button type="button" class="btn plain dchip" data-cashkeep="${b.comparisonId}" title="Counted as a sale; the drawer stays short. Book the shortage after saving.">Keep it as short</button></div>
+        <div class="tiny note" data-keptline ${kept ? '' : 'hidden'}>Kept as short: counted as a sale, the drawer is short by it. <button type="button" class="linkbtn tiny" data-cashunkeep="${b.comparisonId}">Show the choices</button></div></div>` });
+      continue;
+    }
     // One line per bill (approved 14 Nov 2026): what differs, then the two sides as choices with the cash after each;
     // Edit and Make complimentary under ⋯.
     const more = html`<details class="menu"><summary class="btn plain dchip" aria-label="More for bill ${b.billNo}">⋯</summary><div class="menu-pop" style="min-width:200px;gap:6px">
@@ -3136,35 +3165,34 @@ function cashPanelHtml(biz, k, opts = {}) {
   const rounded = bills.filter((b) => b.roundedPaise);
   const off = rounded.filter((b) => b.roundedPaise > 0).reduce((t, b) => t + b.roundedPaise, 0);
   const extra = -rounded.filter((b) => b.roundedPaise < 0).reduce((t, b) => t + b.roundedPaise, 0);
-  const roundedLine = rounded.length ? html`<details class="tiny note"><summary>${rounded.length} bill${rounded.length === 1 ? '' : 's'} paid rounded${off ? ` · ₹ ${money(off)} off` : ''}${extra ? ` · ₹ ${money(extra)} extra` : ''} · already counted</summary>
-    ${rounded.map((b) => html`<div><span class="mono">${b.billNo}</span> software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)}</div>`)}</details>` : '';
+  // Discount at the till (17 Nov 2026): one line in the working, its bills listed on a click.
+  const tillLine = (list, word, paise) => (list.length ? html`<tr><td></td><td class="note" colspan="3"><details><summary style="cursor:pointer">${word} on <u>${list.length} bill${list.length === 1 ? '' : 's'}</u> · ₹ ${money(paise)}</summary>
+    ${list.map((b) => html`<div class="tiny"><span class="mono">${b.billNo}</span> · software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)} · ${b.roundedPaise > 0 ? 'discount' : 'extra'} ₹ ${money(Math.abs(b.roundedPaise))}</div>`)}</details></td></tr>` : '');
+  const roundedRows = html`${tillLine(rounded.filter((b) => b.roundedPaise > 0), 'Discount at the till', off)}${tillLine(rounded.filter((b) => b.roundedPaise < 0), 'Paid more than the bill', extra)}`;
   if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'} ₹ ${money(k.expensesWaitingPaise)}, not taken off yet.</div>
     <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review">Review</a></div></div>` });
-  items.sort((a, b) => Number(b.same) - Number(a.same));
+  items.sort((a, b) => Number(!!b.top) - Number(!!a.top) || Number(b.same) - Number(a.same));
+  const tops = items.filter((x) => x.top), rest = items.filter((x) => !x.top);
   const tint = (b) => (b.rgCashPaise === null || (b.state === 'undecided' && b.swCashPaise !== null && b.rgCashPaise !== null && !b.rgCashPaise) ? 'cash-bad' : b.differs ? 'cash-warn' : '');
   const counted = (b) => (b.state === 'match' ? 'Matches' : b.state === 'left_out' ? 'Left out' : b.state === 'complimentary' ? 'Complimentary' : b.state === 'undecided' ? 'Not decided'
     : b.decision === 'use_software' ? 'Use software' : b.decision === 'use_register' ? 'Use register' : DECISION_LABELS[b.decision] ?? '');
   return html`<section class="card" id="cashpanel" style="gap:12px">
     <style>#cashpanel .cash-bad{background:#FDECEC;color:#7F1D1D}#cashpanel .cash-warn{background:#FFF6E0;color:#6B4A00}#cashpanel tr.cash-bad td,#cashpanel tr.cash-warn td{color:inherit}
-      #cashpanel .cash-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:stretch}
-      #cashpanel .cash-strip>div{padding:8px 12px;border-radius:8px}#cashpanel .cash-big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}</style>
+      #cashpanel .cash-strip{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+      #cashpanel .cash-strip>div{padding:8px 12px;border-radius:8px;flex:1 1 140px}#cashpanel .cash-strip>.cash-op{flex:0 0 auto;padding:0;font-size:22px;color:var(--muted)}#cashpanel .cash-big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}</style>
     <div class="cash-strip">
       <div><div class="note">Should be in hand</div><div class="cash-big">${shouldBe == null ? '—' : `₹ ${money(shouldBe)}`}</div>${k.openingPaise == null ? html`<div class="tiny note">No opening cash yet</div>` : ''}</div>
+      <span class="cash-op" aria-hidden="true">−</span>
       <div><div class="note">Counted (cash page)</div><div class="cash-big">${k.countedPaise == null ? '—' : `₹ ${money(k.countedPaise)}`}</div>
         ${k.countedPaise == null ? html`<a class="tiny" href="#/b/${biz.id}/bringin">Not in yet: bring it in</a>` : ''}</div>
+      <span class="cash-op" aria-hidden="true">=</span>
       <div class="${tone}" title="${draft ? 'Draft: changes as you decide and correct bills, final after Save' : 'Final: booked when the shift was saved'}"><div style="font-size:13px">${stateWord}${draft ? ' · draft' : ''}</div><div class="cash-big">${diff == null ? '—' : diff === 0 ? '₹ 0' : `₹ ${money(Math.abs(diff))}`}</div></div>
     </div>
-    ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px"><strong>What could explain it</strong>
-      ${items.length ? html`${items.slice(0, 2).map((x) => x.html)}${items.length > 2 ? html`<details><summary class="btn plain dchip" style="display:inline-flex">Show ${items.length - 2} more</summary>${items.slice(2).map((x) => x.html)}</details>` : ''}`
-        : html`<div class="note">No bill explains it. Check the count on the cash page.</div>`}
-      ${roundedLine}
-      ${k.pair ? html`<div class="ent-line"><span class="chip">Paid late?</span> ₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.
-        ${!draft && biz.actions.includes('sales.decide') ? html`<button class="btn plain dchip" type="button" id="cashpair" data-other="${k.pair.day}">Settle both as paid late</button>` : html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${k.pair.day}">Open ${dayLabel(k.pair.day)}</a>`}</div>` : ''}
-    </div>` : ''}
-    <details><summary class="note">How it's worked out</summary><div class="scroll"><table style="min-width:560px">
+    <details><summary class="note">How ${shouldBe == null ? 'it' : `₹ ${money(shouldBe)}`} is worked out</summary><div class="scroll"><table style="min-width:560px">
       ${row('Opening cash', k.openingFrom === 'previous' ? 'previous day\'s cash in hand' : k.openingFrom === 'page' ? 'opening written on this day\'s cash page' : 'no cash summary for the previous day', k.openingPaise, k.openingPaise == null ? '' : tag(true))}
       ${row('+ Cash sales', draft ? 'what Save would book now' : 'booked for this shift', sales, tag(!draft))}
       ${k.notInRegisterBookedPaise ? row('', 'of which not in the register (Use software)', k.notInRegisterBookedPaise) : ''}
+      ${roundedRows}
       ${row('− Cash expenses', 'approved lines', k.expensesPaise, tag(true))}
       ${k.expensesWaiting ? html`<tr style="color:var(--muted)"><td></td><td>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval (not taken off)</td><td class="amount">${money(k.expensesWaitingPaise ?? 0)}</td><td><a href="#/b/${biz.id}/review">Review</a></td></tr>` : ''}
       ${k.shortagePaise ? row('− Cash shortage', 'booked by an Owner', k.shortagePaise) : ''}
@@ -3174,12 +3202,18 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${row('Counted', 'cash in hand on this day\'s cash summary page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/bringin">Bring it in</a>`)}
       ${diff !== null ? row('Difference', diff < 0 ? 'short' : diff > 0 ? 'over' : '', diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
     </table></div></details>
+    ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px">${tops.map((x) => x.html)}
+      ${rest.length ? html`<strong>${tops.length ? 'Could also explain it' : 'What could explain it'}</strong>${rest.map((x) => x.html)}`
+        : tops.length ? '' : html`<div class="note">No bill explains it. Check the count on the cash page.</div>`}
+      ${k.pair ? html`<div class="ent-line"><span class="chip">Paid late?</span> ₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.
+        ${!draft && biz.actions.includes('sales.decide') ? html`<button class="btn plain dchip" type="button" id="cashpair" data-other="${k.pair.day}">Settle both as paid late</button>` : html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${k.pair.day}">Open ${dayLabel(k.pair.day)}</a>`}</div>` : ''}
+    </div>` : ''}
     ${bills.length ? html`<details><summary style="display:inline-flex;gap:8px;align-items:center"><strong>Cash bills · ${bills.length} · ₹ ${money(bills.reduce((t, b) => t + (b.countedPaise ?? 0), 0))}</strong><span class="note">${differ.length ? `${differ.length} differ` : 'all agree'}</span></summary>
       ${differ.length ? html`<label class="note" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="cashonly" checked> Only those that differ</label>` : ''}
     <div class="scroll"><table style="min-width:600px" id="cashbills">
       <thead><tr><th>Bill</th><th style="text-align:right">Software cash</th><th style="text-align:right">Register cash</th><th>Counted as</th><th style="text-align:right">Counted ₹</th><th></th></tr></thead>
       <tbody>${bills.map((b) => html`<tr class="${tint(b)}" data-differs="${b.differs ? '1' : ''}" ${differ.length && !b.differs ? 'hidden' : ''}>
-        <td class="mono">${b.billNo}${b.groupSize > 1 ? html` <span class="tiny">group of ${b.groupSize}</span>` : ''}</td>
+        <td class="mono">${b.billNo}${b.groupSize > 1 ? html` <span class="tiny">group of ${b.groupSize}</span>` : ''}${opts.oldPos?.has(b.comparisonId) ? html` <span class="chip">old POS</span>` : ''}</td>
         <td class="amount">${b.swCashPaise == null ? (b.swMode ? `${MODE_LABELS[b.swMode] ?? b.swMode} ${money(b.swAmountPaise ?? 0)}` : '—') : money(b.swCashPaise)}</td>
         <td class="amount">${b.rgCashPaise == null ? '—' : b.rgCashPaise ? money(b.rgCashPaise) : other(b) || '0.00'}</td>
         <td>${counted(b)}</td><td class="amount">${b.countedPaise ? money(b.countedPaise) : ''}</td><td>${edit(b)}</td></tr>`)}</tbody>
@@ -5222,8 +5256,7 @@ async function reconcileView(biz, dayArg) {
     <div data-rtop="pay" ${top === 'pay' ? '' : 'hidden'}>
     <div data-rpanel="cash" ${tab === 'cash' ? '' : 'hidden'}>
       ${cashOnCardHtml}
-      ${cashPanelHtml(biz, cash, { decide: true })}
-      ${entriesHtml(biz, day, ent.cash, 'cash', cv)}
+      ${cashPanelHtml(biz, cash, { decide: true, oldPos: new Set(cv.comparisons.filter((c) => c.oldPos).map((c) => c.id)) })}
     </div>
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
       ${paidLaterHtml(biz, r, 'card')}
