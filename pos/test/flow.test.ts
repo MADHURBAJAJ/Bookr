@@ -531,3 +531,34 @@ describe('daily check and GSTR-1', () => {
     expect(e.creditNotes).toMatchObject({ total: 1, cancelled: 0 });
   });
 });
+
+describe('bar handovers', () => {
+  it('shows each bar count with what went missing since the one before, and who billed bar items in between', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    const bar = (await ok(owner.post(`${B}/stock/stores`, { name: 'Bar', kind: 'bar' }))).id;
+    const whisky = (await ok(owner.post(`${B}/stock/items`, { name: 'Sample Whisky', unit: 'ml', packName: 'bottle', packSize: 750, costPerPack: '1500' }))).id; // ₹2 a ml
+    const peg = (await ok(owner.post(`${B}/menu`, { name: 'Whisky 30 ml', price: '200', station: 'bar' }))).id;
+    s.items['Whisky 30 ml'] = peg;
+    await ok(owner.put(`${B}/stock/recipes/${peg}`, { lines: [{ stockItemId: whisky, qty: 30 }] }));
+    await ok(owner.post(`${B}/stock/purchases`, { storeId: bar, vendor: 'Sample Wines', lines: [{ itemId: whisky, packs: 1 }] }));
+
+    // Opening count agrees; the cashier then sells 3 pegs; 30 ml is spilt; the closing count finds 30 ml more missing.
+    await ok(owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: whisky, counted: 750 }] }));
+    const { bill } = await billed(s, [['Whisky 30 ml', 3]]);
+    await ok(counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: rupees(bill.totalPaise) }] }));
+    await ok(owner.post(`${B}/stock/waste`, { storeId: bar, itemId: whisky, qty: 30, reason: 'Spilt' }));
+    await ok(owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: whisky, counted: 600 }] })); // book 630
+
+    const day = bill.shiftDay;
+    const h = (await ok(owner.get(`${B}/stock/handovers?from=${day}&to=${day}&storeId=${bar}`))).counts;
+    expect(h).toHaveLength(2);
+    expect(h[0]).toMatchObject({ missingPaise: 6000, extraPaise: 0, wastePaise: 6000, detail: '1 item counted, 1 differ' });
+    expect(h[0].billedBy).toEqual([{ name: expect.any(String), paise: 60000 }]);
+    expect(h[1]).toMatchObject({ missingPaise: 0, detail: '1 item counted, all agree', sinceAt: null });
+
+    const d = (await ok(owner.get(`${B}/reports/daily-check?day=${day}`)));
+    expect(d.bar).toEqual({ counts: 2, missingPaise: 6000, extraPaise: 0, breakagePaise: 6000 });
+    expect(d.events.stock_count).toEqual({ n: 1, paise: -6000 }); // the summaries are not counted as exceptions
+  });
+});

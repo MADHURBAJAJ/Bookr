@@ -321,8 +321,48 @@ stockRoutes.post(`${B}/stock/counts`, requireAction('stock.edit'), async (c) => 
       event(db, bid, 'stock_count', `${i.name} · ${s.name}`, Math.round((diff * i.cost_per_pack_paise) / i.pack_size), null,
         `Book ${book} ${i.unit}, counted ${counted} ${i.unit} (${diff > 0 ? '+' : ''}${diff})`, c.get('staff').id, shiftDay));
   }
-  if (statements.length) await db.batch(statements);
+  // One summary line per count, even when everything agrees: it marks the handover time (Stock, Bar handover).
+  const differ = result.filter((l) => l.variance !== 0);
+  statements.push(event(db, bid, 'stock_count', `Count · ${s.name}`, differ.reduce((t, l) => t + l.valuePaise, 0), 'Count',
+    `${result.length} item${result.length === 1 ? '' : 's'} counted, ${differ.length ? `${differ.length} differ` : 'all agree'}`, c.get('staff').id, shiftDay));
+  await db.batch(statements);
   return c.json({ lines: result }, 201);
+});
+
+// Each count of a store, as a handover: what was missing (or extra) at that count, the breakage since the count before,
+// and who billed that store's station items in between, so missing stock can be put to the shift it went missing in.
+stockRoutes.get(`${B}/stock/handovers`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const from = date({ d: c.req.query('from') ?? '' }, 'd', 'From');
+  const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
+  if (from > to) fail(400, 'From must be on or before To.');
+  const s = await store(db, bid, c.req.query('storeId'));
+  const counts = await all<{ at: number; by_name: string | null; detail: string; shift_day: string }>(db, `SELECT e.at, st.name AS by_name, e.detail, e.shift_day FROM pos_events e
+    LEFT JOIN staff st ON st.id = e.by_staff WHERE e.business_id = ? AND e.kind = 'stock_count' AND e.reason = 'Count' AND e.ref = ? AND e.shift_day <= ? ORDER BY e.at`,
+    bid, `Count · ${s.name}`, to);
+  const out = [];
+  for (let n = 0; n < counts.length; n++) {
+    const k = counts[n];
+    if (k.shift_day < from) continue;
+    const since = n > 0 ? counts[n - 1].at : 0;
+    const [diff, waste, sales] = await Promise.all([
+      one<{ missing: number; extra: number }>(db, `SELECT
+          coalesce(sum(CASE WHEN m.qty < 0 THEN -m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size END), 0) AS missing,
+          coalesce(sum(CASE WHEN m.qty > 0 THEN m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size END), 0) AS extra
+        FROM stock_moves m JOIN stock_items i ON i.id = m.item_id WHERE m.business_id = ? AND m.store_id = ? AND m.kind = 'count' AND m.at > ? AND m.at <= ?`, bid, s.id, since, k.at),
+      one<{ v: number }>(db, `SELECT coalesce(sum(-m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size), 0) AS v FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
+        WHERE m.business_id = ? AND m.store_id = ? AND m.kind = 'waste' AND m.at > ? AND m.at <= ?`, bid, s.id, since, k.at),
+      s.kind === 'bar' || s.kind === 'kitchen' ? all<{ name: string | null; paise: number }>(db, `SELECT st.name, sum(l.amount_paise) AS paise FROM bill_lines l
+          JOIN bills b ON b.id = l.bill_id JOIN menu_items mi ON mi.id = l.item_id LEFT JOIN staff st ON st.id = b.printed_by
+          WHERE b.business_id = ? AND b.status <> 'void' AND b.printed_at > ? AND b.printed_at <= ? AND mi.station = ? GROUP BY b.printed_by ORDER BY paise DESC`,
+        bid, since, k.at, s.kind) : Promise.resolve([]),
+    ]);
+    out.push({ at: k.at, shiftDay: k.shift_day, byName: k.by_name, detail: k.detail, sinceAt: since || null,
+      missingPaise: Math.round(diff!.missing), extraPaise: Math.round(diff!.extra), wastePaise: Math.round(waste!.v),
+      billedBy: sales.map((x) => ({ name: x.name ?? 'Unknown', paise: x.paise })) });
+  }
+  return c.json({ store: s, from, to, counts: out.reverse() });
 });
 
 // For shifts from..to and one store: per item, opening, received, transfers, sold, breakage, count variance and closing.

@@ -102,14 +102,15 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
   const day = date({ d: c.req.query('day') ?? '' }, 'd', 'Shift');
   const { t } = clock(b);
   const fy = fyOf(day, b.fy_start_month);
-  const [sales, byMode, events, diffs, unpaid, series, cnSeries, close] = await Promise.all([
+  const [sales, byMode, events, diffs, unpaid, series, cnSeries, close, bar] = await Promise.all([
     one<{ bills: number; net: number; total: number; voids: number }>(db, `SELECT sum(status <> 'void') AS bills,
         coalesce(sum(CASE WHEN status <> 'void' THEN taxable_paise END), 0) AS net, coalesce(sum(CASE WHEN status <> 'void' THEN total_paise END), 0) AS total,
         sum(status = 'void') AS voids FROM bills WHERE business_id = ? AND shift_day = ?`, bid, day),
     all(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise FROM payments p JOIN settlements s ON s.id = p.settlement_id
       WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'bills' GROUP BY p.mode ORDER BY paise DESC`, bid, day),
+    // Count summaries (reason 'Count') mark handovers; they are not exceptions themselves.
     all<{ kind: string; n: number; paise: number }>(db, `SELECT kind, count(*) AS n, coalesce(sum(amount_paise), 0) AS paise FROM pos_events
-      WHERE business_id = ? AND shift_day = ? GROUP BY kind`, bid, day),
+      WHERE business_id = ? AND shift_day = ? AND NOT (kind = 'stock_count' AND coalesce(reason, '') = 'Count') GROUP BY kind`, bid, day),
     all<{ kind: string; n: number; paise: number }>(db, `SELECT kind, count(*) AS n, sum(amount_paise) AS paise FROM settle_differences
       WHERE business_id = ? AND shift_day = ? GROUP BY kind`, bid, day),
     // Every order still holding food or drink the kitchen or bar was sent, with no paid bill: open, kept as a tab, or billed and unpaid.
@@ -125,6 +126,15 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
       FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.fy = ? GROUP BY e.id`, bid, fy),
     one<{ difference_paise: number; difference_reason: string | null; closed_at: number }>(db,
       'SELECT difference_paise, difference_reason, closed_at FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, day),
+    // The bar: how many counts were taken this shift, and what they found missing or extra, at cost.
+    one<{ counts: number; missing: number; extra: number; waste: number }>(db, `SELECT
+        (SELECT count(*) FROM pos_events e WHERE e.business_id = ?1 AND e.shift_day = ?2 AND e.kind = 'stock_count' AND e.reason = 'Count'
+          AND e.ref IN (SELECT 'Count · ' || name FROM stock_stores WHERE business_id = ?1 AND kind = 'bar')) AS counts,
+        coalesce(sum(CASE WHEN m.kind = 'count' AND m.qty < 0 THEN -m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size END), 0) AS missing,
+        coalesce(sum(CASE WHEN m.kind = 'count' AND m.qty > 0 THEN m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size END), 0) AS extra,
+        coalesce(sum(CASE WHEN m.kind = 'waste' THEN -m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size END), 0) AS waste
+      FROM stock_moves m JOIN stock_items i ON i.id = m.item_id JOIN stock_stores ss ON ss.id = m.store_id
+      WHERE m.business_id = ?1 AND m.shift_day = ?2 AND ss.kind = 'bar' AND m.kind IN ('count', 'waste')`, bid, day),
   ]);
   // A series is unbroken when its numbers run 1, 2, 3 … with none missing (void bills keep their number, so they count).
   const gaps = (seqs: string) => {
@@ -148,6 +158,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     })),
     series: series.map((x) => ({ name: x.name, prefix: x.prefix, ...gaps(x.seqs) })),
     creditNoteSeries: cnSeries.map((x) => ({ name: x.name, ...gaps(x.seqs) })),
+    bar: { counts: bar!.counts, missingPaise: Math.round(bar!.missing), extraPaise: Math.round(bar!.extra), breakagePaise: Math.round(bar!.waste) },
     shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at } : null,
   });
 });

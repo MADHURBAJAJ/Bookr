@@ -993,13 +993,15 @@ async function stockScreen(tab = 'hand') {
   const st = await api('GET', `${B()}/stock`);
   await load('menu');
   ui.st = st;
-  const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['report', 'Report'], ['items', 'Items and recipes']];
+  const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['handover', 'Bar handover'], ['report', 'Report'], ['items', 'Items and recipes']];
   const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip link" href="#/stock/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
   const items = st.items.filter((i) => i.active);
   const storeSel = (model, label) => html`<label class="f">${label}<select class="in" data-model="${model}"><option value="">Choose</option>${st.stores.map((x) => html`<option value="${x.id}" ${ui[model] === x.id ? 'selected' : ''}>${x.name}</option>`)}</select></label>`;
   const itemSel = (model) => html`<label class="f">Item<select class="in" data-model="${model}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${ui[model] === i.id ? 'selected' : ''}>${i.name} (${i.unit})</option>`)}</select></label>`;
   const qtyText = (q, i) => i.unit === 'ml' || i.unit === 'g' ? `${q} ${i.unit}${i.packSize > 1 && Math.abs(q) >= i.packSize ? ` (${(q / i.packSize).toFixed(1)} ${i.packName})` : ''}` : `${q} ${i.unit}`;
   if (tab === 'report') { ui.rFrom ??= me.business.shiftDay; ui.rTo ??= me.business.shiftDay; ui.rStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
+  if (tab === 'handover') { ui.hFrom ??= me.business.shiftDay; ui.hTo ??= me.business.shiftDay; ui.hStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
+  if (tab === 'handover' && ui.hStore) ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`);
   if (tab === 'report' && ui.rStore) ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`);
   rerender = () => {
     let body = '';
@@ -1055,6 +1057,18 @@ async function stockScreen(tab = 'hand') {
           ${items.map((i) => html`<tr><td>${i.name}</td><td class="num">${qtyText(i.byStore[sid] ?? 0, i)}</td><td><input class="in" inputmode="numeric" style="max-width:160px" data-model="ct_${i.id}" value="${ui['ct_' + i.id] ?? ''}" aria-label="Counted ${i.name}"></td></tr>`)}</tbody></table></div>
           <div><button class="btn pri" type="submit" data-act="stCount" data-submit>Save count</button></div>` : ''}
         ${ui.countResult ? html`<div class="sums">${ui.countResult.map((l) => html`<div><span>${l.name}: book ${l.book}, counted ${l.counted} ${l.unit}</span><span style="color:${l.variance ? 'var(--bad)' : 'var(--accent)'}">${l.variance ? `${l.variance > 0 ? '+' : ''}${l.variance} ${l.unit} · ${rs(l.valuePaise)}` : 'agrees'}</span></div>`)}</div>` : ''}</form>`;
+    } else if (tab === 'handover') {
+      const h = ui.handovers;
+      body = html`<section class="panel"><form class="row" style="align-items:end">${storeSel('hStore', 'Store')}<label class="f">From<input class="in" type="date" data-model="hFrom" value="${ui.hFrom}"></label>
+          <label class="f">To<input class="in" type="date" data-model="hTo" value="${ui.hTo}"></label><button class="btn" type="submit" data-act="stHandover" data-submit>Show</button></form>
+        <p class="small quiet">Count the bar on <a href="#/stock/count">Count</a> at every bartender change. Each count shows here with what went missing since the count before, and who billed bar drinks in that time, so a shortage belongs to a shift. Values are at cost (last price paid).</p>
+        ${h && h.counts.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Count</th><th>Since</th><th class="num">Missing</th><th class="num">Extra</th><th class="num">Breakage</th><th>Billed in between</th></tr></thead><tbody>
+          ${h.counts.map((k) => html`<tr><td>${dateTime(k.at)}<div class="small quiet">by ${k.byName ?? ''} · ${k.detail}</div></td>
+            <td>${k.sinceAt ? dateTime(k.sinceAt) : html`<span class="quiet">first count</span>`}</td>
+            <td class="num" style="${k.missingPaise ? 'color:var(--bad);font-weight:700' : ''}">${k.missingPaise ? rs(k.missingPaise) : 'none'}</td>
+            <td class="num">${k.extraPaise ? rs(k.extraPaise) : ''}</td><td class="num">${k.wastePaise ? rs(k.wastePaise) : ''}</td>
+            <td>${k.billedBy.length ? k.billedBy.map((b) => html`<div>${b.name} · ${rs(b.paise)}</div>`) : html`<span class="quiet">no bar bills</span>`}</td></tr>`)}</tbody></table></div>`
+          : html`<p class="quiet">No counts of this store in these dates.</p>`}</section>`;
     } else if (tab === 'report') {
       const r = ui.report;
       body = html`<section class="panel"><form class="row" style="align-items:end">${storeSel('rStore', 'Store')}<label class="f">From<input class="in" type="date" data-model="rFrom" value="${ui.rFrom}"></label>
@@ -1095,6 +1109,7 @@ async function stockScreen(tab = 'hand') {
   rerender();
 }
 const int = (v) => (/^\d+$/.test(String(v ?? '').trim()) ? Number(v) : NaN);
+actions.stHandover = async () => { ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`); rerender(); };
 actions.stReceive = async () => {
   const lines = ui.rcLines.map((l) => ({ itemId: ui[`rcl${l.k}item`], packs: int(ui[`rcl${l.k}packs`]), costPerPack: (ui[`rcl${l.k}cost`] ?? '').trim() || undefined }));
   if (!lines.length) throw new Error('Add what was received.');
@@ -1183,7 +1198,9 @@ async function exceptionsScreen(day = me.business.shiftDay) {
         <div class="sums">${flag(ev('void').n, 'Void bills', ev('void').paise)}${flag(ev('discount').n + df('discount').n, 'Discounts', ev('discount').paise + df('discount').paise)}
           ${flag(ev('comp').n, 'Complimentary', ev('comp').paise)}${flag(ev('kot_cancel').n, 'Cancelled after KOT')}${flag(ev('reprint').n, 'Reprints')}
           ${flag(ev('credit_note').n, 'Credit notes', ev('credit_note').paise)}${flag(df('tip').n, 'Tips', df('tip').paise)}
-          ${flag(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise)}${flag(ev('stock_count').n, 'Stock count differences')}${flag(ev('limit_warning').n, 'Billing name limit warnings')}</div>
+          ${flag(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise)}${flag(ev('stock_count').n, 'Stock count differences')}
+          <div><span style="${d.bar.missingPaise ? 'color:var(--bad);font-weight:700' : d.bar.counts ? '' : 'color:var(--warn)'}">Bar: missing at count</span>
+            <span>${d.bar.counts ? `${d.bar.missingPaise ? rs(d.bar.missingPaise) : 'none'} · ${d.bar.counts} count${d.bar.counts === 1 ? '' : 's'}` : 'bar not counted'}</span></div>${flag(ev('limit_warning').n, 'Billing name limit warnings')}</div>
         <h2>Sent to kitchen, not paid (right now)</h2>
         <p class="small quiet">Every order holding food or drinks already sent to the kitchen or bar, with no paid bill. Old ones (tabs past ${me.business.tab_age_days ?? 3} days, others past 6 hours) are in red.</p>
         ${d.unpaid.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Where</th><th>State</th><th class="num">Sent</th><th class="num">Open for</th></tr></thead><tbody>
