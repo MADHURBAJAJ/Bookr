@@ -43,10 +43,11 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
       FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
       ORDER BY 2`, businessId, day, businessId, day),
-    one<{ approved: number; waiting: number; waitingPaise: number }>(db, `SELECT
+    one<{ approved: number; waiting: number; waitingPaise: number; waitingUpload: string | null }>(db, `SELECT
         coalesce(sum(CASE WHEN status = 'approved' THEN amount_paise END), 0) AS approved,
         count(CASE WHEN status <> 'approved' THEN 1 END) AS waiting,
-        coalesce(sum(CASE WHEN status <> 'approved' THEN amount_paise END), 0) AS waitingPaise
+        coalesce(sum(CASE WHEN status <> 'approved' THEN amount_paise END), 0) AS waitingPaise,
+        min(CASE WHEN status <> 'approved' THEN upload_id END) AS waitingUpload
       FROM transactions WHERE business_id = ? AND day = ? AND source = 'cash_photo' AND type = 'expense'`, businessId, day),
     all<{ id: string; amount_paise: number; narration: string | null; ocr_original: string | null }>(db, `SELECT id, amount_paise, narration, ocr_original FROM transactions
       WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage' ORDER BY created_at`, businessId, day),
@@ -100,6 +101,8 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     expensesPaise: expenses!.approved,
     expensesWaiting: expenses!.waiting,
     expensesWaitingPaise: expenses!.waitingPaise,
+    // The day's own expense page, so its Review link opens it (18 Nov 2026), not the list of every day.
+    expensesWaitingUploadId: expenses!.waitingUpload,
     shortagePaise: shortageTotal,
     // Each shortage booked on this shift, and the bill it was booked for (18 Nov 2026).
     shortages: shortages.map((x) => { let o: { comparisonId?: string; billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }

@@ -1821,7 +1821,11 @@ async function reviewListView(biz, find) {
     <div id="rlmsg"></div>
     <div class="form-row" style="align-items:center">${backButton()}${findBillBox()}</div>
     <div id="findresults"></div>
-    ${notices.map((n) => html`<div class="demo-band">${n.text.replace(n.day, dayLabel(n.day))}</div>`)}
+    ${notices.length > 2 ? html`<div class="demo-band">Cash summaries that cannot be checked until their expense rows are approved: ${notices.map((n, i) => {
+      const page = uploads.find((u) => u.kind === 'expense_list' && u.day === n.day && u.open);
+      const label = `${dayLabel(n.day)} (${n.text.match(/: (\d+) expense/)?.[1] ?? '?'})`;
+      return html`${i ? ', ' : ''}${page ? html`<a href="#/b/${biz.id}/review/${page.id}">${label}</a>` : label}`; })}</div>`
+      : notices.map((n) => html`<div class="demo-band">${n.text.replace(n.day, dayLabel(n.day))}</div>`)}
     <section class="card" style="gap:4px">
       <h2 style="margin-bottom:8px">Software sales reports</h2>
       ${csvs.length ? csvs.map((u) => { const r = u.report; return html`
@@ -2443,7 +2447,7 @@ function registerPanel(biz, u) {
       ${u.fromSoftware ? '' : html`<div class="strip" id="strip"><canvas></canvas><span class="band"></span>
         <span class="strip-tools"><span class="tiny" id="striphint"></span><button type="button" class="iconbtn" id="striprot" title="Turn the photo" aria-label="Turn the photo">⟳</button><button type="button" class="btn plain" id="photoside" style="min-height:28px;padding:0 10px;font-size:12px">Whole page</button></span></div>`}
       <div class="scroll"><table id="regtable" class="regtable ${regFilter === 'needs' ? 'only-needs' : ''}">
-        <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:84px"></colgroup>
+        <colgroup><col style="width:34px"><col style="width:112px"><col style="width:88px"><col style="width:76px"><col style="width:78px"><col style="width:78px"><col style="width:78px"><col style="width:70px"><col style="width:70px"><col style="width:130px"><col><col style="width:44px"><col style="width:104px"></colgroup>
         <thead><tr><th>#</th><th>Bill no</th><th style="text-align:right">Amount</th><th>Type</th>${PAY_COLS.map(([, l]) => html`<th style="text-align:right">${l}</th>`)}<th style="text-align:right" title="Discount. A tip is negative.">Disc</th><th>Remarks</th><th>Issue</th><th title="Looks right">✓</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => regRowHtml(r, locked))}</tbody>
         <tfoot id="regfoot">${regFootHtml(u, locked)}</tfoot>
@@ -3626,7 +3630,7 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${k.notInRegisterBookedPaise ? row('', billsOpen('of which not in the register (Use software)', notInReg), k.notInRegisterBookedPaise) : ''}
       ${roundedRows}
       ${row('− Cash expenses', 'approved lines', k.expensesPaise, tag(true))}
-      ${k.expensesWaiting ? html`<tr style="color:var(--muted)"><td></td><td>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval (not taken off)</td><td class="amount">${money(k.expensesWaitingPaise ?? 0)}</td><td><a href="#/b/${biz.id}/review">Review</a></td></tr>` : ''}
+      ${k.expensesWaiting ? html`<tr style="color:var(--muted)"><td></td><td>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval (not taken off)</td><td class="amount">${money(k.expensesWaitingPaise ?? 0)}</td><td><a href="#/b/${biz.id}/review${k.expensesWaitingUploadId ? `/${k.expensesWaitingUploadId}` : `?day=${k.day}`}">Review</a></td></tr>` : ''}
       ${k.shortagePaise ? row('− Cash shortage', 'booked by an Owner', k.shortagePaise) : ''}
       ${k.depositedPaise ? row('− Cash deposited to bank', 'from the bank statement', k.depositedPaise) : ''}
       ${k.drawnPaise ? row('+ Cash from bank', 'taken out for the drawer', k.drawnPaise) : ''}
@@ -5191,13 +5195,18 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
           } else if (t.kind === 'gap' || t.kind === 'big') undos.push(await writeBankOnRow(biz, b, [p.credits[0]], { fix: pick.get(p) === 'fix', mode }));
         }
         // "Bill was ₹ X" on a bill the software has at another amount: the payment proves the register (11 Nov 2026).
-        const fixed = ready.filter((p) => pick.get(p) === 'fix' && p.bills[0].rowId);
+        // A tip or discount written on the row does the same when the software has the bill at what was paid
+        // (18 Nov 2026): the register now differs from it, and the bill takes the payment only as Use register.
+        const fixed = ready.filter((p) => p.bills[0].rowId && (pick.get(p) === 'fix' || ['gap', 'big', 'parts'].includes(tOf(p).kind)));
         if (fixed.length) {
           const cmps = (await api('GET', `/businesses/${biz.id}/shifts/${day}`)).comparisons;
           for (const p of fixed) {
             const c = cmps.find((x) => x.id === p.bills[0].id);
             if (!c || c.difference === 'match' || c.difference === 'complimentary' || c.decision === 'use_register') continue;
-            await apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: 'use_register', note: `${card ? 'Card machine' : 'Bank'} ₹ ${money(p.credits[0].amountPaise)} at ${hhmm(p.credits[0].postedAt)}: the bill was ₹ ${money(p.credits[0].amountPaise)}` });
+            const got = p.credits.reduce((a, x) => a + x.amountPaise, 0);
+            const d = tOf(p).diff ?? 0;
+            const why = pick.get(p) === 'fix' ? `the bill was ₹ ${money(got)}` : d > 0 ? `₹ ${money(d)} tip` : d < 0 ? `₹ ${money(-d)} discount` : 'paid in parts';
+            await apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: 'use_register', note: `${card ? 'Card machine' : 'Bank'} ₹ ${money(got)} at ${hhmm(p.credits[0].postedAt)}: ${why}` });
             undos.push(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: c.decision ?? null, note: c.note ?? undefined }));
           }
         }
@@ -5212,6 +5221,7 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
       } catch (err) {
         for (const u of undos.reverse()) await u().catch(() => {});
         btn.disabled = false; showError(q('msg'), err);
+        q('msg').scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     });
   };
@@ -7661,7 +7671,8 @@ async function drawerEditor(biz, d, r0, billNo, day) {
     ${member ? html`<div class="note">Paid with another bill's payment: change the payment on that bill.</div>` : ''}
     ${!locked && !member && drawerCash?.day === u.day ? html`<div class="tiny note" data-dcash></div>` : ''}
     ${locked ? '' : html`<div class="form-row" style="gap:6px"><button class="btn" type="button" data-dsave>Save the row</button>
-      <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${u.id}/${r.id}">Open on Review</a></div>`}
+      <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review/${u.id}/${r.id}">Open on Review</a>
+      <span style="flex:1"></span><button class="btn plain danger" type="button" data-ddel>Delete row</button></div>`}
     <div class="form-msg"></div>`.__html;
   (d.querySelector('[data-dactions]') ?? d.children[0]).after(box);
   // The photo draws when it is first opened (a folded canvas has no size).
@@ -7691,6 +7702,21 @@ async function drawerEditor(biz, d, r0, billNo, day) {
       await apiFull('POST', `/businesses/${biz.id}/shifts/${u.day}/reopen`, { reason });
       await (drawerReload ?? route)();
       await openBillDrawer(biz, billNo, day);
+    } catch (err) { btn.disabled = false; showError(box.querySelector('.form-msg'), err); }
+  });
+  // Delete the line from here too (18 Nov 2026), with its reason and one Undo, as on Review.
+  box.querySelector('[data-ddel]')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    try {
+      const why = await askDeleteReason(r);
+      if (!why) return;
+      btn.disabled = true;
+      const back = rowInputOf(r);
+      await apiFull('DELETE', `/businesses/${biz.id}/register-rows/${r.id}`, why);
+      await (drawerReload ?? route)();
+      document.getElementById('billdrawer')?.remove();
+      doneToast(`Bill ${r.billNo}: register line deleted (${deleteReasonLabel(why.reason)}).`,
+        () => apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/register-rows`, back), async () => { await (drawerReload ?? route)(); });
     } catch (err) { btn.disabled = false; showError(box.querySelector('.form-msg'), err); }
   });
   const before = rowInputOf(r);
