@@ -210,12 +210,15 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   const entityId = text(data, 'entityId', 'Billing name')!;
   const { t, shiftDay, fy } = clock(b);
   // Everything the bill needs, read in one go: the order, its lines, the billing name and its year so far.
-  const [o, allLines, e, yearRow] = await Promise.all([
+  const [o, allLines, e, yearRow, noTax] = await Promise.all([
     order(c, bid, c.req.param('id'), true),
     lines(c.env.DB, c.req.param('id')),
     one<Entity>(c.env.DB, 'SELECT id, name, gst_rate_bp, series_prefix, offered, active, warn1_paise, warn2_paise, stop_paise FROM billing_entities WHERE id = ? AND business_id = ?', entityId, bid),
     one<{ s: number }>(c.env.DB, "SELECT coalesce(sum(total_paise), 0) AS s FROM bills WHERE entity_id = ? AND fy = ? AND status <> 'void'", entityId, fy),
+    // Which dishes are outside GST (liquor), from the menu as it is now.
+    all<{ id: string }>(c.env.DB, "SELECT m.id FROM menu_items m JOIN order_lines l ON l.item_id = m.id WHERE l.order_id = ? AND m.tax = 'none'", c.req.param('id')),
   ]);
+  const untaxed = new Set(noTax.map((m) => m.id));
   const ls = allLines.filter((l) => l.qty > 0);
   if (!ls.length) fail(409, 'The order has no items.');
   if (ls.some((l) => l.qty > l.sent_qty)) fail(409, 'Send the new items to the kitchen first.');
@@ -231,7 +234,7 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     discount = { kind: 'amount', paise: d.paise };
   } else if (d.kind !== 'none') fail(400, 'Discount must be none, a percentage or an amount.');
   let totals;
-  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
+  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, taxed: !untaxed.has(l.item_id) })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
   const discountReason = totals.discountPaise > 0 ? await reasonLabel(c.env.DB, bid, 'discount', d.reasonId, 'A reason for the discount') : null;
 
   const year = yearRow!.s;
@@ -247,14 +250,14 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     await c.env.DB.batch([
       stmt(c.env.DB, 'INSERT OR IGNORE INTO bill_series (entity_id, fy, next_no) VALUES (?, ?, 1)', e.id, fy),
       stmt(c.env.DB, `INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise,
-          discount_reason, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name)
-        SELECT ?, ?, ?, ?, ?, next_no, ? || '-' || ? || '-' || printf('%05d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name)
+        SELECT ?, ?, ?, ?, ?, next_no, ? || '-' || ? || '-' || printf('%05d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM bill_series WHERE entity_id = ? AND fy = ?`,
         id, bid, o.id, e.id, fy, e.series_prefix, short, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
-        totals.taxablePaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, e.id, fy),
+        totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
-      ...ls.map((l) => stmt(c.env.DB, 'INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise)),
+      ...ls.map((l) => stmt(c.env.DB, 'INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise, untaxed.has(l.item_id) ? 0 : 1)),
       stmt(c.env.DB, "UPDATE orders SET status = 'billed' WHERE id = ?", o.id),
       // The exceptions report, in the same batch: the discount takes its bill number from the row just written.
       ...(totals.discountPaise > 0 ? [stmt(c.env.DB, `INSERT INTO pos_events (business_id, kind, ref, amount_paise, reason, detail, by_staff, shift_day, at)
@@ -272,14 +275,14 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
 export async function billOut(db: D1Database, bid: string, id: string) {
   const b = await one<Record<string, unknown> & { entity_id: string }>(db, `SELECT b.id, b.bill_no AS billNo, b.order_id AS orderId, b.shift_day AS shiftDay, b.printed_at AS printedAt,
       b.gross_paise AS grossPaise, b.discount_paise AS discountPaise, b.discount_reason AS discountReason, b.taxable_paise AS taxablePaise,
-      b.gst_rate_bp AS gstRateBp, b.cgst_paise AS cgstPaise, b.sgst_paise AS sgstPaise, b.round_off_paise AS roundOffPaise, b.total_paise AS totalPaise,
+      b.nongst_paise AS nonGstPaise, b.gst_rate_bp AS gstRateBp, b.cgst_paise AS cgstPaise, b.sgst_paise AS sgstPaise, b.round_off_paise AS roundOffPaise, b.total_paise AS totalPaise,
       b.guest_name AS guestName, b.status, b.print_count AS printCount, b.void_reason AS voidReason, b.entity_id,
       e.name AS entityName, e.gst_registered AS gstRegistered, e.gstin, o.place, st.name AS printedBy
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
   const [items, creditNotes, pays, differences] = await Promise.all([
-    all(db, 'SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise FROM bill_lines WHERE bill_id = ? ORDER BY rowid', id),
+    all(db, 'SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, taxed FROM bill_lines WHERE bill_id = ? ORDER BY rowid', id),
     all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id),
     all(db, `SELECT p.mode, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
       d.name AS debtorAccount, p.comp_guest AS compGuest, p.comp_reason AS compReason, p.tendered_paise AS tenderedPaise

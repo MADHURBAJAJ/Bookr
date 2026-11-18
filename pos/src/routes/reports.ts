@@ -22,7 +22,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
   const days = await all(db, `SELECT shift_day AS day, count(*) AS bills, sum(total_paise) AS totalPaise FROM bills
     WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND status <> 'void' GROUP BY shift_day ORDER BY shift_day`, bid, from, to);
   const byEntity = await all(db, `SELECT e.name, e.gst_registered AS gstRegistered, e.gstin, count(*) AS bills, sum(b.gross_paise) AS grossPaise,
-      sum(b.discount_paise) AS discountPaise, sum(b.taxable_paise) AS taxablePaise, sum(b.cgst_paise) AS cgstPaise, sum(b.sgst_paise) AS sgstPaise,
+      sum(b.discount_paise) AS discountPaise, sum(b.taxable_paise) AS taxablePaise, sum(b.nongst_paise) AS nonGstPaise, sum(b.cgst_paise) AS cgstPaise, sum(b.sgst_paise) AS sgstPaise,
       sum(b.round_off_paise) AS roundOffPaise, sum(b.total_paise) AS totalPaise, min(b.bill_no) AS firstBill, max(b.bill_no) AS lastBill
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id
     WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, from, to);
@@ -40,7 +40,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
     WHERE d.business_id = ? AND d.shift_day BETWEEN ? AND ? AND d.kind = 'tip' GROUP BY p.mode`, bid, from, to);
   const paymentDiscounts = await all(db, `SELECT d.reason, count(*) AS n, sum(d.amount_paise) AS paise FROM settle_differences d
     WHERE d.business_id = ? AND d.shift_day BETWEEN ? AND ? AND d.kind = 'discount' GROUP BY d.reason`, bid, from, to);
-  const creditNotes = await all(db, `SELECT e.name, count(*) AS n, sum(n.taxable_paise) AS taxablePaise, sum(n.cgst_paise) AS cgstPaise, sum(n.sgst_paise) AS sgstPaise,
+  const creditNotes = await all(db, `SELECT e.name, count(*) AS n, sum(n.taxable_paise) AS taxablePaise, sum(n.nongst_paise) AS nonGstPaise, sum(n.cgst_paise) AS cgstPaise, sum(n.sgst_paise) AS sgstPaise,
       sum(n.total_paise) AS totalPaise, min(n.cn_no) AS first, max(n.cn_no) AS last
     FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, from, to);
   const creditNoteList = await all(db, `SELECT n.cn_no AS cnNo, b.bill_no AS billNo, n.total_paise AS totalPaise, n.reason, n.refund_mode AS refundMode, n.shift_day AS day
@@ -49,7 +49,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
 });
 
 // When, where and by whom the money came in, and what sold: for shifts from..to, void bills left out.
-// Money is net sales (after bill discounts, before GST); item and category values are before bill discounts.
+// Money is net sales (after bill discounts, before GST; liquor, which has no GST, included); item and category values are before bill discounts.
 // Hours are India time, from when each KOT was printed: what the kitchen and bar were sent, and when.
 reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (c) => {
   const bid = c.get('businessId');
@@ -73,11 +73,11 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
     all(db, `SELECT ((first + 19800000) / 3600000) % 24 AS hour, sum(covers) AS covers FROM (
         SELECT min(k.printed_at) AS first, max(coalesce(o.covers, 0)) AS covers FROM kots k JOIN orders o ON o.id = k.order_id
         WHERE k.business_id = ? AND k.printed_at >= ? AND k.printed_at < ? GROUP BY k.order_id) GROUP BY hour`, bid, fromMs, toMs),
-    all(db, `SELECT o.kind, count(*) AS bills, sum(b.taxable_paise) AS netPaise, sum(coalesce(o.covers, 0)) AS covers,
-        sum(CASE WHEN o.covers > 0 THEN b.taxable_paise ELSE 0 END) AS coveredNetPaise, count(DISTINCT lower(o.place) || b.shift_day) AS placeDays
+    all(db, `SELECT o.kind, count(*) AS bills, sum(b.taxable_paise + b.nongst_paise) AS netPaise, sum(coalesce(o.covers, 0)) AS covers,
+        sum(CASE WHEN o.covers > 0 THEN b.taxable_paise + b.nongst_paise ELSE 0 END) AS coveredNetPaise, count(DISTINCT lower(o.place) || b.shift_day) AS placeDays
       FROM bills b JOIN orders o ON o.id = b.order_id WHERE ${live} GROUP BY o.kind ORDER BY netPaise DESC`, bid, from, to),
     all(db, `SELECT coalesce(st.name, 'Unknown') AS name, st.role,
-        sum(b.status <> 'void') AS bills, sum(CASE WHEN b.status <> 'void' THEN b.taxable_paise ELSE 0 END) AS netPaise,
+        sum(b.status <> 'void') AS bills, sum(CASE WHEN b.status <> 'void' THEN b.taxable_paise + b.nongst_paise ELSE 0 END) AS netPaise,
         sum(b.status <> 'void' AND b.discount_paise > 0) AS discountBills, sum(CASE WHEN b.status <> 'void' THEN b.discount_paise ELSE 0 END) AS discountPaise,
         sum(b.status = 'void') AS voids
       FROM bills b JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = o.opened_by
@@ -104,7 +104,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
   const fy = fyOf(day, b.fy_start_month);
   const [sales, byMode, events, diffs, unpaid, series, cnSeries, close, bar] = await Promise.all([
     one<{ bills: number; net: number; total: number; voids: number }>(db, `SELECT sum(status <> 'void') AS bills,
-        coalesce(sum(CASE WHEN status <> 'void' THEN taxable_paise END), 0) AS net, coalesce(sum(CASE WHEN status <> 'void' THEN total_paise END), 0) AS total,
+        coalesce(sum(CASE WHEN status <> 'void' THEN taxable_paise + nongst_paise END), 0) AS net, coalesce(sum(CASE WHEN status <> 'void' THEN total_paise END), 0) AS total,
         sum(status = 'void') AS voids FROM bills WHERE business_id = ? AND shift_day = ?`, bid, day),
     all(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise FROM payments p JOIN settlements s ON s.id = p.settlement_id
       WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'bills' GROUP BY p.mode ORDER BY paise DESC`, bid, day),
@@ -178,14 +178,14 @@ reportRoutes.get(`${B}/reports/gstr1`, requireAction('reports.view'), async (c) 
   const [entities, bills, lines, notes] = await Promise.all([
     all<{ id: string; name: string; gstin: string | null; gst_registered: number }>(db,
       'SELECT id, name, gstin, gst_registered FROM billing_entities WHERE business_id = ? ORDER BY is_default DESC, name', bid),
-    all<{ id: string; entity_id: string; bill_no: string; seq: number; status: string; gst_rate_bp: number; taxable_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number }>(db,
-      `SELECT id, entity_id, bill_no, seq, status, gst_rate_bp, taxable_paise, cgst_paise, sgst_paise, total_paise FROM bills
+    all<{ id: string; entity_id: string; bill_no: string; seq: number; status: string; gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number }>(db,
+      `SELECT id, entity_id, bill_no, seq, status, gst_rate_bp, taxable_paise, nongst_paise, cgst_paise, sgst_paise, total_paise FROM bills
        WHERE business_id = ? AND printed_at >= ? AND printed_at < ? ORDER BY entity_id, seq`, bid, start, end),
     all<{ bill_id: string; sac: string; qty: number; amount_paise: number }>(db,
       `SELECT l.bill_id, l.sac, l.qty, l.amount_paise FROM bill_lines l JOIN bills b ON b.id = l.bill_id
-       WHERE b.business_id = ? AND b.printed_at >= ? AND b.printed_at < ? AND b.status <> 'void'`, bid, start, end),
-    all<{ entity_id: string; cn_no: string; seq: number; gst_rate_bp: number; taxable_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number; lines: string }>(db,
-      `SELECT n.entity_id, n.cn_no, n.seq, b.gst_rate_bp, n.taxable_paise, n.cgst_paise, n.sgst_paise, n.total_paise, n.lines FROM credit_notes n JOIN bills b ON b.id = n.bill_id
+       WHERE b.business_id = ? AND b.printed_at >= ? AND b.printed_at < ? AND b.status <> 'void' AND l.taxed = 1`, bid, start, end),
+    all<{ entity_id: string; cn_no: string; seq: number; gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number; lines: string }>(db,
+      `SELECT n.entity_id, n.cn_no, n.seq, b.gst_rate_bp, n.taxable_paise, n.nongst_paise, n.cgst_paise, n.sgst_paise, n.total_paise, n.lines FROM credit_notes n JOIN bills b ON b.id = n.bill_id
        WHERE n.business_id = ? AND n.at >= ? AND n.at < ? ORDER BY n.entity_id, n.seq`, bid, start, end),
   ]);
   const out = entities.map((e) => {
@@ -199,8 +199,9 @@ reportRoutes.get(`${B}/reports/gstr1`, requireAction('reports.view'), async (c) 
       r.taxable += k * x.taxable_paise; r.cgst += k * x.cgst_paise; r.sgst += k * x.sgst_paise;
       rates.set(rate, r);
     };
-    for (const x of live) add(x.gst_rate_bp, 1, x);
-    for (const n of en) add(n.gst_rate_bp, -1, n);
+    // Bills whose lines are all liquor have no taxable value: they belong only in Table 8.
+    for (const x of live) if (x.taxable_paise || x.cgst_paise) add(x.gst_rate_bp, 1, x);
+    for (const n of en) if (n.taxable_paise || n.cgst_paise) add(n.gst_rate_bp, -1, n);
     // SAC summary: each bill's taxable value and tax shared over its SACs by line value (one SAC per bill in practice).
     const sac = new Map<string, { qty: number; taxable: number; cgst: number; sgst: number }>();
     for (const x of live) {
@@ -218,9 +219,11 @@ reportRoutes.get(`${B}/reports/gstr1`, requireAction('reports.view'), async (c) 
     return {
       name: e.name, gstin: e.gstin, registered: !!e.gst_registered,
       b2cs: [...rates].sort((x, y) => x[0] - y[0]).map(([rate, r]) => ({ ratePct: rate / 100, taxablePaise: r.taxable, cgstPaise: r.cgst, sgstPaise: r.sgst })),
-      sac: [...sac].map(([code, r]) => ({ sac: code, qty: r.qty, taxablePaise: Math.round(r.taxable), cgstPaise: Math.round(r.cgst), sgstPaise: Math.round(r.sgst) })),
+      sac: [...sac].filter(([, r]) => r.taxable || r.qty).map(([code, r]) => ({ sac: code, qty: r.qty, taxablePaise: Math.round(r.taxable), cgstPaise: Math.round(r.cgst), sgstPaise: Math.round(r.sgst) })),
       invoices: doc(eb.map((x) => ({ no: x.bill_no, seq: x.seq, cancelled: x.status === 'void' }))),
       creditNotes: doc(en.map((n) => ({ no: n.cn_no, seq: n.seq, cancelled: false }))),
+      // Table 8: liquor, outside GST (non-GST supplies), net of credit notes.
+      nonGstPaise: live.reduce((t, x) => t + x.nongst_paise, 0) - en.reduce((t, n) => t + n.nongst_paise, 0),
       totalPaise: live.reduce((t, x) => t + x.total_paise, 0) - en.reduce((t, n) => t + n.total_paise, 0),
     };
   }).filter((e) => e.invoices || e.creditNotes);

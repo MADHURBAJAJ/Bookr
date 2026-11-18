@@ -30,7 +30,7 @@ describe('bill totals', () => {
   const lines = [{ qty: 2, pricePaise: 18000 }, { qty: 1, pricePaise: 6000 }]; // ₹420
   it('adds 5% GST as CGST and SGST halves and rounds to the rupee', () => {
     expect(billTotals(lines, { kind: 'none' }, 500)).toEqual({
-      grossPaise: 42000, discountPaise: 0, taxablePaise: 42000, cgstPaise: 1050, sgstPaise: 1050, roundOffPaise: 0, totalPaise: 44100,
+      grossPaise: 42000, discountPaise: 0, taxablePaise: 42000, nonGstPaise: 0, cgstPaise: 1050, sgstPaise: 1050, roundOffPaise: 0, totalPaise: 44100,
     });
   });
   it('charges GST after the discount', () => {
@@ -49,6 +49,14 @@ describe('bill totals', () => {
   it('charges no GST for a billing name not registered', () => {
     const t = billTotals(lines, { kind: 'amount', paise: 2000 }, 0);
     expect(t).toMatchObject({ discountPaise: 2000, taxablePaise: 40000, cgstPaise: 0, sgstPaise: 0, totalPaise: 40000 });
+  });
+  it('charges no GST on liquor lines, sharing the discount by value', () => {
+    // ₹420 of food + ₹640 of beer (no GST); 10% off: food 378 taxed at 5% (18.90), beer 576 untaxed.
+    const t = billTotals([...lines, { qty: 2, pricePaise: 32000, taxed: false }], { kind: 'pct', bp: 1000 }, 500);
+    expect(t).toMatchObject({ grossPaise: 106000, discountPaise: 10600, taxablePaise: 37800, nonGstPaise: 57600, cgstPaise: 945, sgstPaise: 945 });
+    expect(t.totalPaise).toBe(97300); // 378 + 576 + 18.90 = 972.90 → 973
+    // A bill of only liquor has no GST at all.
+    expect(billTotals([{ qty: 1, pricePaise: 22000, taxed: false }], { kind: 'none' }, 500)).toMatchObject({ taxablePaise: 0, nonGstPaise: 22000, cgstPaise: 0, totalPaise: 22000 });
   });
   it('refuses a discount larger than the bill', () => {
     expect(() => billTotals(lines, { kind: 'amount', paise: 50000 }, 500)).toThrow();

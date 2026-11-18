@@ -562,3 +562,32 @@ describe('bar handovers', () => {
     expect(d.events.stock_count).toEqual({ n: 1, paise: -6000 }); // the summaries are not counted as exceptions
   });
 });
+
+describe('liquor without GST', () => {
+  it('bills liquor on the same bill with no GST, keeps it apart in credit notes, and puts it in GSTR-1 Table 8', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    await ok(owner.put(`${B}/menu/${s.items['Beer 650 ml']}`, { name: 'Beer 650 ml', price: '320', station: 'bar', tax: 'none' }));
+    expect((await owner.put(`${B}/menu/${s.items['Beer 650 ml']}`, { name: 'Beer 650 ml', price: '320', station: 'bar', tax: 'vat' })).status).toBe(400);
+
+    const { bill } = await billed(s, [['Masala Dosa', 2], ['Beer 650 ml', 1]]);
+    // Food ₹360 + 5% = ₹378; beer ₹320 with no tax: ₹698.
+    expect(bill).toMatchObject({ grossPaise: 68000, taxablePaise: 36000, nonGstPaise: 32000, cgstPaise: 900, sgstPaise: 900, totalPaise: 69800 });
+    expect(bill.items.find((i: any) => i.name === 'Beer 650 ml').taxed).toBe(0);
+    await ok(counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: rupees(bill.totalPaise) }] }));
+
+    const month = new Date(bill.printedAt + 19_800_000).toISOString().slice(0, 7);
+    const g = (await ok(owner.get(`${B}/reports/gstr1?month=${month}`))).entities[0];
+    expect(g.b2cs).toEqual([{ ratePct: 5, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
+    expect(g.sac).toEqual([{ sac: '996332', qty: 2, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
+    expect(g.nonGstPaise).toBe(32000);
+    const day = (await ok(owner.get(`${B}/reports/daily-check?day=${bill.shiftDay}`))).sales;
+    expect(day.netPaise).toBe(68000); // net sales include liquor
+
+    // Money back on the beer: no GST in the credit note.
+    const beer = bill.items.find((i: any) => i.name === 'Beer 650 ml');
+    const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: beer.id, qty: 1 }], reason: 'Flat beer', refundMode: 'cash' }))).creditNote;
+    expect(cn).toMatchObject({ taxablePaise: 0, nonGstPaise: 32000, cgstPaise: 0, totalPaise: 32000 });
+    await expect(q('UPDATE bills SET nongst_paise = 0 WHERE id = ?', bill.id)).rejects.toThrow(/bill_frozen/);
+  });
+});

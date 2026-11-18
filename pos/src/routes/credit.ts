@@ -16,7 +16,7 @@ export const creditRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
 creditRoutes.use(`${B}/*`, requireStaff);
 
-const ZERO: Totals = { grossPaise: 0, discountPaise: 0, taxablePaise: 0, cgstPaise: 0, sgstPaise: 0, roundOffPaise: 0, totalPaise: 0 };
+const ZERO: Totals = { grossPaise: 0, discountPaise: 0, taxablePaise: 0, nonGstPaise: 0, cgstPaise: 0, sgstPaise: 0, roundOffPaise: 0, totalPaise: 0 };
 
 creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), async (c) => {
   const bid = c.get('businessId');
@@ -24,8 +24,8 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   const billId = c.req.param('id');
   if (!isUuid(billId)) fail(404, 'Bill not found.');
   const bill = await one<{ bill_no: string; entity_id: string; status: string; gross_paise: number; discount_paise: number; taxable_paise: number; cgst_paise: number;
-    sgst_paise: number; round_off_paise: number; total_paise: number; gst_rate_bp: number; series_prefix: string }>(db, `SELECT b.bill_no, b.entity_id, b.status,
-      b.gross_paise, b.discount_paise, b.taxable_paise, b.cgst_paise, b.sgst_paise, b.round_off_paise, b.total_paise, b.gst_rate_bp, e.series_prefix
+    sgst_paise: number; round_off_paise: number; total_paise: number; gst_rate_bp: number; series_prefix: string; nongst_paise: number }>(db, `SELECT b.bill_no, b.entity_id, b.status,
+      b.gross_paise, b.discount_paise, b.taxable_paise, b.nongst_paise, b.cgst_paise, b.sgst_paise, b.round_off_paise, b.total_paise, b.gst_rate_bp, e.series_prefix
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id WHERE b.id = ? AND b.business_id = ?`, billId, bid);
   if (!bill) fail(404, 'Bill not found.');
   if (bill.status !== 'settled') fail(409, bill.status === 'printed' ? 'This bill is not paid yet. Void it instead.' : 'A void bill has nothing to give back.');
@@ -33,9 +33,9 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   const reason = text(data, 'reason', 'A reason for the credit note', { max: 120 })!;
 
   // What is credited: every line still left on the bill, or chosen quantities.
-  const lines = await all<{ id: string; name: string; qty: number; rate_paise: number }>(db, 'SELECT id, name, qty, rate_paise FROM bill_lines WHERE bill_id = ? ORDER BY rowid', billId);
-  const prior = await all<{ lines: string; gross_paise: number; discount_paise: number; taxable_paise: number; cgst_paise: number; sgst_paise: number; round_off_paise: number; total_paise: number }>(db,
-    'SELECT lines, gross_paise, discount_paise, taxable_paise, cgst_paise, sgst_paise, round_off_paise, total_paise FROM credit_notes WHERE bill_id = ?', billId);
+  const lines = await all<{ id: string; name: string; qty: number; rate_paise: number; taxed: number }>(db, 'SELECT id, name, qty, rate_paise, taxed FROM bill_lines WHERE bill_id = ? ORDER BY rowid', billId);
+  const prior = await all<{ lines: string; gross_paise: number; discount_paise: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; round_off_paise: number; total_paise: number }>(db,
+    'SELECT lines, gross_paise, discount_paise, taxable_paise, nongst_paise, cgst_paise, sgst_paise, round_off_paise, total_paise FROM credit_notes WHERE bill_id = ?', billId);
   const creditedQty = new Map<string, number>();
   for (const p of prior) for (const l of JSON.parse(p.lines) as { lineId: string; qty: number }[]) creditedQty.set(l.lineId, (creditedQty.get(l.lineId) ?? 0) + l.qty);
   const left = lines.map((l) => ({ ...l, left: l.qty - (creditedQty.get(l.id) ?? 0) }));
@@ -54,11 +54,12 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   }
   if (!chosen.length) fail(409, 'Everything on this bill has already been given back.');
   const lastOne = left.every((l) => l.left === (chosen.find((x) => x.lineId === l.id)?.qty ?? 0));
-  const already = prior.reduce<Totals>((t, p) => ({ grossPaise: t.grossPaise + p.gross_paise, discountPaise: t.discountPaise + p.discount_paise, taxablePaise: t.taxablePaise + p.taxable_paise,
+  const already = prior.reduce<Totals>((t, p) => ({ grossPaise: t.grossPaise + p.gross_paise, discountPaise: t.discountPaise + p.discount_paise, taxablePaise: t.taxablePaise + p.taxable_paise, nonGstPaise: t.nonGstPaise + p.nongst_paise,
     cgstPaise: t.cgstPaise + p.cgst_paise, sgstPaise: t.sgstPaise + p.sgst_paise, roundOffPaise: t.roundOffPaise + p.round_off_paise, totalPaise: t.totalPaise + p.total_paise }), ZERO);
-  const totals = creditTotals({ grossPaise: bill.gross_paise, discountPaise: bill.discount_paise, taxablePaise: bill.taxable_paise, cgstPaise: bill.cgst_paise,
-    sgstPaise: bill.sgst_paise, roundOffPaise: bill.round_off_paise, totalPaise: bill.total_paise, gstRateBp: bill.gst_rate_bp },
-    already, chosen.reduce((s, l) => s + l.amountPaise, 0), lastOne);
+  const taxedIds = new Set(lines.filter((l) => l.taxed).map((l) => l.id));
+  const totals = creditTotals({ grossPaise: bill.gross_paise, discountPaise: bill.discount_paise, taxablePaise: bill.taxable_paise, nonGstPaise: bill.nongst_paise,
+    cgstPaise: bill.cgst_paise, sgstPaise: bill.sgst_paise, roundOffPaise: bill.round_off_paise, totalPaise: bill.total_paise, gstRateBp: bill.gst_rate_bp },
+    already, chosen.reduce((s, l) => s + l.amountPaise, 0), lastOne, chosen.filter((l) => taxedIds.has(l.lineId)).reduce((s, l) => s + l.amountPaise, 0));
   if (totals.totalPaise <= 0) fail(409, 'Nothing is left to give back on this bill.');
 
   // How the money goes back.
@@ -88,11 +89,11 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
     await db.batch([
       stmt(db, 'INSERT OR IGNORE INTO credit_note_series (entity_id, fy, next_no) VALUES (?, ?, 1)', bill.entity_id, fy),
       stmt(db, `INSERT INTO credit_notes (id, business_id, bill_id, entity_id, fy, seq, cn_no, shift_day, reason, lines, gross_paise, discount_paise, taxable_paise,
-          cgst_paise, sgst_paise, round_off_paise, total_paise, refund_mode, pay_account_id, debtor_account_id, by_staff, at)
-        SELECT ?, ?, ?, ?, ?, next_no, ? || '-CN' || ? || '-' || printf('%04d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          nongst_paise, cgst_paise, sgst_paise, round_off_paise, total_paise, refund_mode, pay_account_id, debtor_account_id, by_staff, at)
+        SELECT ?, ?, ?, ?, ?, next_no, ? || '-CN' || ? || '-' || printf('%04d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM credit_note_series WHERE entity_id = ? AND fy = ?`,
         id, bid, billId, bill.entity_id, fy, bill.series_prefix, short, shiftDay, reason, JSON.stringify(chosen), totals.grossPaise, totals.discountPaise,
-        totals.taxablePaise, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, mode, payAccount, debtor?.id ?? null, staff.id, t, bill.entity_id, fy),
+        totals.taxablePaise, totals.nonGstPaise, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, mode, payAccount, debtor?.id ?? null, staff.id, t, bill.entity_id, fy),
       stmt(db, 'UPDATE credit_note_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', bill.entity_id, fy),
       ...(debtor ? [stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, bill_id, by_staff, at) VALUES (?, ?, ?, 'credit_note', ?, ?, ?, ?)",
         newId(), bid, debtor.id, -totals.totalPaise, billId, staff.id, t)] : []),

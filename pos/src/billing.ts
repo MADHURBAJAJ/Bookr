@@ -25,13 +25,16 @@ export function billNo(prefix: string, fy: string, seq: number): string {
   return out;
 }
 
-export interface Line { qty: number; pricePaise: number }
+/** A bill line. `taxed: false` = outside GST (liquor): no CGST/SGST on it, and its value is kept apart from the taxable value. */
+export interface Line { qty: number; pricePaise: number; taxed?: boolean }
 export type Discount = { kind: 'none' } | { kind: 'pct'; bp: number } | { kind: 'amount'; paise: number };
 
 export interface Totals {
   grossPaise: number;
   discountPaise: number;
   taxablePaise: number;
+  /** Untaxed lines (liquor) after their share of the discount: outside GST, in the total, never in the taxable value. */
+  nonGstPaise: number;
   cgstPaise: number;
   sgstPaise: number;
   roundOffPaise: number;
@@ -42,20 +45,25 @@ export interface Totals {
 const roundDiv = (n: number, d: number) => Math.floor((n * 2 + d) / (2 * d));
 
 /**
- * Bill totals. Prices are taken as before tax; GST (CGST + SGST, half each) is charged on the value after discount,
- * and the total is rounded to the rupee with the round-off shown. A business not registered for GST passes rate 0.
+ * Bill totals. Prices are taken as before tax; GST (CGST + SGST, half each) is charged on the taxed lines' value after
+ * their share of the discount. Untaxed lines (liquor) carry no GST. The total is rounded to the rupee with the round-off
+ * shown. A business not registered for GST passes rate 0.
  */
 export function billTotals(lines: Line[], discount: Discount, gstRateBp: number): Totals {
   const gross = lines.reduce((s, l) => s + l.qty * l.pricePaise, 0);
+  const taxedGross = lines.filter((l) => l.taxed !== false).reduce((s, l) => s + l.qty * l.pricePaise, 0);
   let disc = 0;
   if (discount.kind === 'pct') disc = roundDiv(gross * discount.bp, 10000);
   if (discount.kind === 'amount') disc = discount.paise;
   if (disc < 0 || disc > gross) throw new Error('bad_discount');
-  const taxable = gross - disc;
+  // The discount is shared over taxed and untaxed lines by value.
+  const taxedDisc = gross ? roundDiv(taxedGross * disc, gross) : 0;
+  const taxable = taxedGross - taxedDisc;
+  const nonGst = gross - taxedGross - (disc - taxedDisc);
   const half = roundDiv(taxable * gstRateBp, 20000);
-  const raw = taxable + 2 * half;
+  const raw = taxable + nonGst + 2 * half;
   const total = roundDiv(raw, 100) * 100;
-  return { grossPaise: gross, discountPaise: disc, taxablePaise: taxable, cgstPaise: half, sgstPaise: half, roundOffPaise: total - raw, totalPaise: total };
+  return { grossPaise: gross, discountPaise: disc, taxablePaise: taxable, nonGstPaise: nonGst, cgstPaise: half, sgstPaise: half, roundOffPaise: total - raw, totalPaise: total };
 }
 
 /**
@@ -137,16 +145,20 @@ export interface BillAmounts extends Totals { gstRateBp: number }
  * paisa (no rupee rounding). When this note credits everything still left on the bill, it takes exactly what is left,
  * so a bill and its credit notes always come to zero together.
  */
-export function creditTotals(bill: BillAmounts, already: Totals, linesGross: number, lastOne: boolean): Totals {
+export function creditTotals(bill: BillAmounts, already: Totals, linesGross: number, lastOne: boolean, taxedLinesGross = linesGross): Totals {
   if (lastOne) {
     const left = (k: keyof Totals) => bill[k] - already[k];
-    return { grossPaise: left('grossPaise'), discountPaise: left('discountPaise'), taxablePaise: left('taxablePaise'), cgstPaise: left('cgstPaise'),
-      sgstPaise: left('sgstPaise'), roundOffPaise: left('roundOffPaise'), totalPaise: left('totalPaise') };
+    return { grossPaise: left('grossPaise'), discountPaise: left('discountPaise'), taxablePaise: left('taxablePaise'), nonGstPaise: left('nonGstPaise'),
+      cgstPaise: left('cgstPaise'), sgstPaise: left('sgstPaise'), roundOffPaise: left('roundOffPaise'), totalPaise: left('totalPaise') };
   }
-  const disc = bill.grossPaise ? roundDiv(linesGross * bill.discountPaise, bill.grossPaise) : 0;
-  const taxable = linesGross - disc;
+  const share = (v: number) => (bill.grossPaise ? roundDiv(v * bill.discountPaise, bill.grossPaise) : 0);
+  const disc = share(linesGross);
+  const taxedDisc = share(taxedLinesGross);
+  const taxable = taxedLinesGross - taxedDisc;
+  const nonGst = linesGross - taxedLinesGross - (disc - taxedDisc);
   const half = roundDiv(taxable * bill.gstRateBp, 20000);
-  return { grossPaise: linesGross, discountPaise: disc, taxablePaise: taxable, cgstPaise: half, sgstPaise: half, roundOffPaise: 0, totalPaise: taxable + 2 * half };
+  return { grossPaise: linesGross, discountPaise: disc, taxablePaise: taxable, nonGstPaise: nonGst, cgstPaise: half, sgstPaise: half, roundOffPaise: 0,
+    totalPaise: taxable + nonGst + 2 * half };
 }
 
 export { IST_OFFSET_MS };

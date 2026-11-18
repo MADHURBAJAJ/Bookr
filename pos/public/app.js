@@ -374,7 +374,7 @@ actions.dropOrder = async () => { await saved(); await api('POST', `${B()}/order
 
 async function billScreen(orderId) {
   await saved();
-  const [{ order }] = await Promise.all([api('GET', `${B()}/orders/${orderId}`), load('entities', 'reasons')]);
+  const [{ order }] = await Promise.all([api('GET', `${B()}/orders/${orderId}`), load('entities', 'reasons', 'menu')]);
   ui.order = order;
   const ents = counterEntities();
   ui.entityId = (ents.find((e) => e.is_default) ?? ents[0])?.id;
@@ -382,11 +382,16 @@ async function billScreen(orderId) {
   rerender = () => {
     const o = ui.order;
     const e = ents.find((x) => x.id === ui.entityId);
+    // The same sums as the server: liquor (menu tax "none") carries no GST and shares the discount by value.
+    const noTax = (l) => cache.menu.find((m) => m.id === l.itemId)?.tax === 'none';
     const gross = o.lines.reduce((s, l) => s + l.qty * l.pricePaise, 0);
+    const taxedGross = o.lines.filter((l) => !noTax(l)).reduce((s, l) => s + l.qty * l.pricePaise, 0);
     const disc = Math.floor((gross * ui.disc * 2 + 100) / 200);
-    const taxable = gross - disc;
+    const taxedDisc = gross ? Math.floor((taxedGross * disc * 2 + gross) / (2 * gross)) : 0;
+    const taxable = taxedGross - taxedDisc;
+    const nonGst = gross - taxedGross - (disc - taxedDisc);
     const half = e ? Math.floor((taxable * e.gst_rate_bp * 2 + 20000) / 40000) : 0;
-    const raw = taxable + 2 * half;
+    const raw = taxable + nonGst + 2 * half;
     const total = Math.floor((raw * 2 + 100) / 200) * 100;
     const near = e && e.warn1_paise !== null && e.year_paise + total >= e.warn1_paise;
     paint(shell('#/', html`<div class="settle">
@@ -399,8 +404,9 @@ async function billScreen(orderId) {
           <div class="chips">${[0, 5, 10, 15].map((p) => html`<button type="button" class="chip" aria-pressed="${ui.disc === p}" data-act="disc" data-p="${p}">${p ? p + '%' : 'None'}</button>`)}</div>
           ${ui.disc ? html`<p class="small quiet" style="margin:10px 0 6px;font-weight:600">Reason (required)</p><div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.discReason === r.id}" data-act="discWhy" data-id="${r.id}">${r.label}</button>`)}</div>` : ''}</div>
         <label class="f">Guest name on the bill (optional)<input class="in" data-model="guestName" value="${ui.guestName ?? o.guestName ?? ''}"></label>
-        <div class="sums">${o.lines.map((l) => html`<div><span>${l.qty} × ${l.name}</span><span>${rs(l.qty * l.pricePaise)}</span></div>`)}
+        <div class="sums">${o.lines.map((l) => html`<div><span>${l.qty} × ${l.name}${noTax(l) ? html` <span class="small quiet">no GST</span>` : ''}</span><span>${rs(l.qty * l.pricePaise)}</span></div>`)}
           ${disc ? html`<div><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-disc)}</span></div>` : ''}
+          ${nonGst ? html`<div><span class="quiet">Liquor, no GST</span><span>${rs(nonGst)}</span></div>` : ''}
           ${half ? html`<div><span class="quiet">CGST ${e.gst_rate_bp / 200}%</span><span>${rs(half)}</span></div><div><span class="quiet">SGST ${e.gst_rate_bp / 200}%</span><span>${rs(half)}</span></div>` : ''}
           ${total !== raw ? html`<div><span class="quiet">Round off</span><span>${rs(total - raw)}</span></div>` : ''}
           <div class="big"><span>Total</span><span>${rs(total)}</span></div></div>
@@ -442,6 +448,7 @@ async function settleScreen(billId) {
         <p class="small quiet">${ui.bill.entityName}${ui.bill.gstRegistered ? '' : ' · no GST'}</p>
         <div class="sums">${ui.bill.items.map((l) => html`<div><span>${l.qty} × ${l.name}</span><span>${rs(l.amountPaise)}</span></div>`)}
           ${ui.bill.discountPaise ? html`<div><span class="quiet">Discount · ${ui.bill.discountReason}</span><span>${rs(-ui.bill.discountPaise)}</span></div>` : ''}
+          ${ui.bill.nonGstPaise ? html`<div><span class="quiet">Liquor, no GST</span><span>${rs(ui.bill.nonGstPaise)}</span></div>` : ''}
           ${ui.bill.cgstPaise ? html`<div><span class="quiet">CGST + SGST</span><span>${rs(ui.bill.cgstPaise + ui.bill.sgstPaise)}</span></div>` : ''}
           <div class="big"><span>This bill</span><span>${rs(ui.bill.totalPaise)}</span></div></div>
         ${ui.others.length ? html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">Paid together with</p>
@@ -648,10 +655,11 @@ function receipt(b) {
     <div class="rl"><span>${b.place}</span><span>${b.printedBy ?? ''}</span></div>
     ${b.guestName ? html`<div>Guest: ${b.guestName}</div>` : ''}
     ${b.printCount > 1 ? html`<div class="c">COPY ${b.printCount - 1}</div>` : ''}
-    <hr>${b.items.map((l) => html`<div class="rl"><span>${l.qty} × ${l.name}</span><span>${rs(l.amountPaise)}</span></div>`)}<hr>
+    <hr>${b.items.map((l) => html`<div class="rl"><span>${l.qty} × ${l.name}${l.taxed === 0 ? ' *' : ''}</span><span>${rs(l.amountPaise)}</span></div>`)}<hr>
     <div class="rl"><span>Items</span><span>${rs(b.grossPaise)}</span></div>
     ${b.discountPaise ? html`<div class="rl"><span>Discount</span><span>${rs(-b.discountPaise)}</span></div>` : ''}
-    ${b.gstRegistered ? html`<div class="rl"><span>CGST ${b.gstRateBp / 200}% (SAC ${b.items[0]?.sac ?? ''})</span><span>${rs(b.cgstPaise)}</span></div><div class="rl"><span>SGST ${b.gstRateBp / 200}%</span><span>${rs(b.sgstPaise)}</span></div>` : ''}
+    ${b.nonGstPaise ? html`<div class="rl"><span>Taxable value</span><span>${rs(b.taxablePaise)}</span></div><div class="rl"><span>* Liquor, no GST</span><span>${rs(b.nonGstPaise)}</span></div>` : ''}
+    ${b.gstRegistered && (b.cgstPaise || !b.nonGstPaise) ? html`<div class="rl"><span>CGST ${b.gstRateBp / 200}% (SAC ${b.items[0]?.sac ?? ''})</span><span>${rs(b.cgstPaise)}</span></div><div class="rl"><span>SGST ${b.gstRateBp / 200}%</span><span>${rs(b.sgstPaise)}</span></div>` : ''}
     ${b.roundOffPaise ? html`<div class="rl"><span>Round off</span><span>${rs(b.roundOffPaise)}</span></div>` : ''}
     <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(b.totalPaise)}</span></div>
     ${b.payments?.length ? html`<hr>${b.payments.map((p) => html`<div class="rl"><span>${{ cash: 'Cash', upi: 'UPI', card: 'Card', room: 'To room', credit: 'On credit', comp: 'Complimentary', advance: 'Advance' }[p.mode]}${p.cardLast4 ? ' ****' + p.cardLast4 : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}` : ''}
@@ -887,6 +895,8 @@ async function gstTab(head, month) {
         <div class="scroll"><table class="t"><thead><tr><th>SAC</th><th class="num">Quantity</th><th class="num">Taxable value (₹)</th><th class="num">CGST (₹)</th><th class="num">SGST (₹)</th></tr></thead><tbody>
           ${e.sac.map((x) => html`<tr><td>${x.sac}</td><td class="num">${x.qty}</td><td class="num">${money(x.taxablePaise)}</td><td class="num">${money(x.cgstPaise)}</td><td class="num">${money(x.sgstPaise)}</td></tr>`)}</tbody></table></div>`
         : html`<p class="small quiet">Not registered for GST: no GSTR-1. Turnover this month ${rs(e.totalPaise)}; watch the ₹20 lakh registration limit on the Billing names screen.</p>`}
+      ${e.registered && e.nonGstPaise ? html`<h3>Non-GST supplies: liquor (Table 8)</h3>
+        <div class="sums"><div><span>Liquor sold, no GST (net of credit notes)</span><span>${money(e.nonGstPaise)}</span></div></div>` : ''}
       <h3>Documents issued (Table 13)</h3>
       <div class="scroll"><table class="t"><thead><tr><th>Document</th><th>From</th><th>To</th><th class="num">Total</th><th class="num">Cancelled</th><th class="num">Net issued</th></tr></thead><tbody>
         ${[['Invoices', e.invoices], ['Credit notes', e.creditNotes]].filter(([, x]) => x).map(([name, x]) => html`<tr><td>${name}</td><td>${x.from}</td><td>${x.to}</td><td class="num">${x.total}</td><td class="num">${x.cancelled}</td><td class="num">${x.total - x.cancelled}</td></tr>`)}</tbody></table></div>
@@ -903,6 +913,7 @@ actions.gstCsv = () => {
     if (e.registered) {
       for (const x of e.b2cs) rows.push([r.month, e.name, e.gstin, 'B2C small', `${x.ratePct}%`, '', rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise)]);
       for (const x of e.sac) rows.push([r.month, e.name, e.gstin, 'SAC summary', x.sac, x.qty, rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise)]);
+      if (e.nonGstPaise) rows.push([r.month, e.name, e.gstin, 'Non-GST supplies (liquor)', '', '', rupees(e.nonGstPaise), '', '']);
     }
     if (e.invoices) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: invoices', 'Invoices', e.invoices.from, e.invoices.to, e.invoices.total, e.invoices.cancelled]);
     if (e.creditNotes) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: credit notes', 'Credit notes', e.creditNotes.from, e.creditNotes.to, e.creditNotes.total, e.creditNotes.cancelled]);
@@ -953,14 +964,14 @@ async function reportsScreen(tab = 'sales', range = '') {
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   rerender = () => paint(shell('#/reports', html`${head}
     <section class="panel"><h2>Sales ${from === to ? from : `${from} to ${to}`}</h2>
-      <div class="scroll"><table class="t"><thead><tr><th>Name on bill</th><th>Bills</th><th class="num">Items</th><th class="num">Discount</th><th class="num">Taxable</th><th class="num">CGST</th><th class="num">SGST</th><th class="num">Total</th></tr></thead><tbody>
+      <div class="scroll"><table class="t"><thead><tr><th>Name on bill</th><th>Bills</th><th class="num">Items</th><th class="num">Discount</th><th class="num">Taxable</th><th class="num">Liquor, no GST</th><th class="num">CGST</th><th class="num">SGST</th><th class="num">Total</th></tr></thead><tbody>
         ${r.byEntity.map((e) => html`<tr><td>${e.name}<div class="small quiet">${e.gstRegistered ? 'GSTIN ' + e.gstin : 'Not registered for GST'}</div></td><td>${e.bills}<div class="small quiet">${e.firstBill} to ${e.lastBill}</div></td>
-          <td class="num">${rs(e.grossPaise)}</td><td class="num">${rs(e.discountPaise)}</td><td class="num">${rs(e.taxablePaise)}</td><td class="num">${rs(e.cgstPaise)}</td><td class="num">${rs(e.sgstPaise)}</td><td class="num"><strong>${rs(e.totalPaise)}</strong></td></tr>`)}
-        <tr><td><strong>Total</strong></td><td>${sum('bills')}</td><td class="num">${rs(sum('grossPaise'))}</td><td class="num">${rs(sum('discountPaise'))}</td><td class="num">${rs(sum('taxablePaise'))}</td>
+          <td class="num">${rs(e.grossPaise)}</td><td class="num">${rs(e.discountPaise)}</td><td class="num">${rs(e.taxablePaise)}</td><td class="num">${rs(e.nonGstPaise)}</td><td class="num">${rs(e.cgstPaise)}</td><td class="num">${rs(e.sgstPaise)}</td><td class="num"><strong>${rs(e.totalPaise)}</strong></td></tr>`)}
+        <tr><td><strong>Total</strong></td><td>${sum('bills')}</td><td class="num">${rs(sum('grossPaise'))}</td><td class="num">${rs(sum('discountPaise'))}</td><td class="num">${rs(sum('taxablePaise'))}</td><td class="num">${rs(sum('nonGstPaise'))}</td>
           <td class="num">${rs(sum('cgstPaise'))}</td><td class="num">${rs(sum('sgstPaise'))}</td><td class="num"><strong>${rs(sum('totalPaise'))}</strong></td></tr>
         ${r.creditNotes.map((n) => html`<tr><td>Less credit notes · ${n.name}<div class="small quiet">${n.first} to ${n.last}</div></td><td>${n.n}</td><td></td><td></td>
-          <td class="num">${rs(-n.taxablePaise)}</td><td class="num">${rs(-n.cgstPaise)}</td><td class="num">${rs(-n.sgstPaise)}</td><td class="num">${rs(-n.totalPaise)}</td></tr>`)}
-        ${r.creditNotes.length ? html`<tr><td><strong>Net</strong></td><td></td><td></td><td></td><td class="num">${rs(sum('taxablePaise') - r.creditNotes.reduce((t, n) => t + n.taxablePaise, 0))}</td>
+          <td class="num">${rs(-n.taxablePaise)}</td><td class="num">${rs(-n.nonGstPaise)}</td><td class="num">${rs(-n.cgstPaise)}</td><td class="num">${rs(-n.sgstPaise)}</td><td class="num">${rs(-n.totalPaise)}</td></tr>`)}
+        ${r.creditNotes.length ? html`<tr><td><strong>Net</strong></td><td></td><td></td><td></td><td class="num">${rs(sum('taxablePaise') - r.creditNotes.reduce((t, n) => t + n.taxablePaise, 0))}</td><td class="num">${rs(sum('nonGstPaise') - r.creditNotes.reduce((t, n) => t + n.nonGstPaise, 0))}</td>
           <td class="num">${rs(sum('cgstPaise') - r.creditNotes.reduce((t, n) => t + n.cgstPaise, 0))}</td><td class="num">${rs(sum('sgstPaise') - r.creditNotes.reduce((t, n) => t + n.sgstPaise, 0))}</td>
           <td class="num"><strong>${rs(sum('totalPaise') - r.creditNotes.reduce((t, n) => t + n.totalPaise, 0))}</strong></td></tr>` : ''}</tbody></table></div></section>
     <div class="grid2" style="margin-top:16px;align-items:start">
@@ -1243,12 +1254,13 @@ async function settingsScreen(tab = 'menu') {
   rerender = () => {
     let body = '';
     if (tab === 'menu') body = html`<section class="panel"><h2>Menu</h2>${errorBox()}
-      <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Category</th><th>Station</th><th class="num">Price (before GST)</th><th></th></tr></thead><tbody>
-        ${cache.menu.map((m) => html`<tr><td>${m.name}</td><td>${m.category}</td><td>${m.station}</td><td class="num">${rs(m.pricePaise)}</td>
+      <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Category</th><th>Station</th><th>Tax</th><th class="num">Price (before GST)</th><th></th></tr></thead><tbody>
+        ${cache.menu.map((m) => html`<tr><td>${m.name}</td><td>${m.category}</td><td>${m.station}</td><td>${m.tax === 'none' ? 'No GST (liquor)' : 'GST'}</td><td class="num">${rs(m.pricePaise)}</td>
           <td><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}"></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
         <label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>
         <label class="f">Station<select class="in" data-model="iStation"><option value="kitchen">Kitchen</option><option value="bar" ${ui.iStation === 'bar' ? 'selected' : ''}>Bar</option></select></label>
+        <label class="f">Tax<select class="in" data-model="iTax"><option value="gst">GST</option><option value="none" ${ui.iTax === 'none' ? 'selected' : ''}>Liquor: no GST</option></select></label>
         <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="addItem" data-submit>${ui.editItem ? 'Save item' : 'Add item'}</button>${ui.editItem ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></div></form></section>`;
     if (tab === 'tables') body = html`<section class="panel"><h2>Tables</h2>
       <p class="quiet small">The tables the counter shows as a grid, in this order. Leave the list empty to show the tables used in the last 60 days instead.</p>${errorBox()}
@@ -1315,14 +1327,14 @@ const entityBody = (e, change) => ({
   yearlyLimit: e.yearly_limit_paise ? rupees(e.yearly_limit_paise) : '', warn1: e.warn1_paise ? rupees(e.warn1_paise) : '', warn2: e.warn2_paise ? rupees(e.warn2_paise) : '',
   stopAt: e.stop_paise ? rupees(e.stop_paise) : '', isDefault: !!e.is_default, offered: !!e.offered, active: !!e.active, ...change,
 });
-actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await api('PUT', `${B()}/menu/${m.id}`, { name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, station: m.station, active: !m.active }); route(); };
+actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await api('PUT', `${B()}/menu/${m.id}`, { name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, station: m.station, tax: m.tax ?? 'gst', active: !m.active }); route(); };
 actions.addItem = async () => {
-  const body = { name: ui.iName, category: ui.iCat, price: ui.iPrice ?? '', station: ui.iStation ?? 'kitchen' };
+  const body = { name: ui.iName, category: ui.iCat, price: ui.iPrice ?? '', station: ui.iStation ?? 'kitchen', tax: ui.iTax ?? 'gst' };
   if (ui.editItem) { const m = cache.menu.find((x) => x.id === ui.editItem); await api('PUT', `${B()}/menu/${m.id}`, { ...body, sac: m.sac, active: !!m.active }); }
   else await api('POST', B() + '/menu', body);
   flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.` }; route();
 };
-actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStation: m.station }); rerender(); };
+actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStation: m.station, iTax: m.tax ?? 'gst' }); rerender(); };
 actions.editCancel = () => route();
 actions.retire = async (d) => { await api('POST', `${B()}/reasons/${d.id}/retire`); route(); };
 actions.addReason = async () => { await api('POST', B() + '/reasons', { kind: ui.rKind ?? 'discount', label: ui.rLabel }); route(); };

@@ -260,7 +260,7 @@ settingsRoutes.put(`${B}/pay-accounts/:id`, requireAction('entities.edit'), asyn
 // ---------- menu
 
 settingsRoutes.get(`${B}/menu`, requireAction('pos.view'), async (c) => {
-  return c.json({ items: await all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, active
+  return c.json({ items: await all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, tax, active
     FROM menu_items WHERE business_id = ? ORDER BY category, name`, c.get('businessId')) });
 });
 
@@ -269,9 +269,11 @@ function itemFields(data: Record<string, unknown>) {
   if (station !== 'kitchen' && station !== 'bar') fail(400, 'Station must be kitchen or bar.');
   const sac = text(data, 'sac', 'SAC', { optional: true, max: 8 }) ?? '996332';
   if (!/^\d{4,8}$/.test(sac)) fail(400, 'SAC must be 4 to 8 digits.');
+  const tax = data.tax ?? 'gst';
+  if (tax !== 'gst' && tax !== 'none') fail(400, 'Tax must be gst, or none for liquor.');
   const price = paise(data, 'price', 'Price');
   if (price < 0) fail(400, 'Price cannot be negative.');
-  return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station, active: data.active === false ? 0 : 1 };
+  return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station, tax, active: data.active === false ? 0 : 1 };
 }
 
 settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
@@ -279,8 +281,8 @@ settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
   const f = itemFields(await body(c));
   const id = newId();
   await c.env.DB.batch([
-    stmt(c.env.DB, 'INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.active, now()),
+    stmt(c.env.DB, 'INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax, f.active, now()),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.create', 'menu_items', id, null, f),
   ]);
   return c.json({ id }, 201);
@@ -289,12 +291,12 @@ settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
 settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one(c.env.DB, 'SELECT name, category, price_paise, sac, station, active FROM menu_items WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one(c.env.DB, 'SELECT name, category, price_paise, sac, station, tax, active FROM menu_items WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Item not found.');
   const f = itemFields(await body(c));
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, active = ? WHERE id = ?',
-      f.name, f.category, f.price_paise, f.sac, f.station, f.active, id),
+    stmt(c.env.DB, 'UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, tax = ?, active = ? WHERE id = ?',
+      f.name, f.category, f.price_paise, f.sac, f.station, f.tax, f.active, id),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.update', 'menu_items', id, before, f),
   ]);
   return c.json({ ok: true });

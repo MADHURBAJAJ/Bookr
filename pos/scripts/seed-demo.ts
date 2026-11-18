@@ -81,7 +81,8 @@ const MENU: [string, string, number, 'kitchen' | 'bar'][] = [
 const menuIds: Record<string, string> = {};
 for (const [name, category, rupees, station] of MENU) {
   menuIds[name] = id();
-  insert('menu_items', { id: menuIds[name], business_id: B, name, category, price_paise: rupees * 100, sac: '996332', station, active: 1, created_at: t });
+  // Liquor at the bar is outside GST (billed without tax).
+  insert('menu_items', { id: menuIds[name], business_id: B, name, category, price_paise: rupees * 100, sac: '996332', station, tax: station === 'bar' ? 'none' : 'gst', active: 1, created_at: t });
 }
 
 // Bar stock: a main store and a bar, a whisky and a beer, recipes, and opening stock received and moved to the bar.
