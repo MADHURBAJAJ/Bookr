@@ -219,7 +219,7 @@ describe('cash for a shift', () => {
     expect(k).toMatchObject({ confirmed: true, openingPaise: 840000, openingFrom: 'page', cashSalesPaise: 465650, expensesPaise: 0,
       shouldBePaise: 1305650, countedPaise: 1270350, differencePaise: -35300, settled: false, notInRegisterBookedPaise: 35300 });
     expect(k.notInRegister).toEqual([{ id: expect.any(String), billNo: '2610319', amountPaise: 35300, decision: 'use_software', billType: 'fnb', note: 'Added to the register from the software report',
-      paidAt: null, closeNote: null }]);
+      paidAt: null, closeNote: null, late: null }]);
   });
 
   it('a difference is accepted with a note, and only that exact difference', async () => {

@@ -31,12 +31,15 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     summaryFor(db, businessId, addDays(day, -1)),
     one<{ total: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS total FROM transactions
       WHERE business_id = ? AND shift_day = ? AND source = 'software_report' AND type = 'income' AND payment_mode = 'cash'`, businessId, day),
-    all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number; close_note: string | null }>(db, `
-      SELECT c.id, c.bill_no, c.sw_amount_paise, c.decision, c.bill_type, c.note, sb.paid_at, 0 AS typed, c.close_note FROM bill_comparisons c
+    all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number; close_note: string | null; late: string | null }>(db, `
+      SELECT c.id, c.bill_no, c.sw_amount_paise, c.decision, c.bill_type, c.note, sb.paid_at, 0 AS typed, c.close_note,
+        -- Written late: the same bill on a later day's register, linked to this one (its day and written amount).
+        (SELECT x.shift_day || '|' || coalesce(x.rg_amount_paise, '') FROM bill_comparisons x WHERE x.business_id = c.business_id AND x.linked_to_id = c.id
+          ORDER BY x.shift_day LIMIT 1) AS late FROM bill_comparisons c
       LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.sw_mode = 'cash'
       UNION ALL
-      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1, NULL
+      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1, NULL, NULL
       FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
       ORDER BY 2`, businessId, day, businessId, day),
@@ -66,7 +69,8 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
   const difference = shouldBe !== null && counted !== null ? counted - shouldBe : null;
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
   const notInRegisterRows = notInRegister.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note,
-    paidAt: c.paid_at, closeNote: c.close_note }));
+    paidAt: c.paid_at, closeNote: c.close_note,
+    late: c.late ? { day: c.late.split('|')[0], amountPaise: c.late.split('|')[1] ? Number(c.late.split('|')[1]) : null } : null }));
 
   // A short count is first explained by the cash bills the register does not have (Stage 3, approved 10 Nov 2026):
   // counted from the software, so they raise "should be in hand", but the cash may never have reached the drawer.
@@ -115,19 +119,30 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
 
 /**
  * A short day next to an over day by the same amount (Stage 3, approved 10 Nov 2026): most likely cash counted a day
- * late. Offered on both days; settling it accepts both differences with one note.
+ * late. Offered on both days; settling it accepts both differences with one note. Also (18 Nov 2026) the day a cash
+ * bill of this day was written late in the register, or the day this day's late line belongs to, and up to
+ * PAIR_SLACK_PAISE apart (a bill of ₹385 written as ₹380): the gap is shown and goes into the note.
  */
+export const PAIR_SLACK_PAISE = 1000;
 export async function cashPairOf(db: DB, businessId: string, day: string, k?: Awaited<ReturnType<typeof cashCheck>>) {
   const me = k ?? await cashCheck(db, businessId, day);
   if (me.differencePaise === null || me.differencePaise === 0 || me.settled) return null;
-  for (const other of [addDays(day, 1), addDays(day, -1)]) {
+  const linked = await all<{ d: string }>(db, `SELECT DISTINCT x.shift_day AS d FROM bill_comparisons x JOIN bill_comparisons c ON c.id = x.linked_to_id
+      WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash'
+    UNION SELECT DISTINCT c.shift_day AS d FROM bill_comparisons x JOIN bill_comparisons c ON c.id = x.linked_to_id
+      WHERE x.business_id = ? AND x.shift_day = ? AND c.sw_mode = 'cash'`, businessId, day, businessId, day);
+  const days = [...new Set([addDays(day, 1), addDays(day, -1), ...linked.map((x) => x.d)])].filter((d) => d !== day);
+  let best: { day: string; differencePaise: number; shortDay: string; overDay: string; amountPaise: number; gapPaise: number } | null = null;
+  for (const other of days) {
     const o = await cashCheck(db, businessId, other);
-    if (o.differencePaise === -me.differencePaise && !o.settled) {
-      const [shortDay, overDay] = me.differencePaise < 0 ? [day, other] : [other, day];
-      return { day: other, differencePaise: o.differencePaise, shortDay, overDay, amountPaise: Math.abs(me.differencePaise) };
-    }
+    if (o.differencePaise === null || o.settled || Math.sign(o.differencePaise) === Math.sign(me.differencePaise)) continue;
+    const gap = Math.abs(o.differencePaise + me.differencePaise);
+    if (gap > PAIR_SLACK_PAISE || (gap && !linked.some((x) => x.d === other))) continue; // a gap only with a late line between them
+    if (best && best.gapPaise <= gap) continue;
+    const [shortDay, overDay] = me.differencePaise < 0 ? [day, other] : [other, day];
+    best = { day: other, differencePaise: o.differencePaise, shortDay, overDay, amountPaise: Math.abs(me.differencePaise), gapPaise: gap };
   }
-  return null;
+  return best;
 }
 
 /**

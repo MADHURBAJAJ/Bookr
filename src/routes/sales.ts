@@ -715,7 +715,10 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/cash/pair', requireRole('s
   const pair = await cashPairOf(db, bid, day);
   if (!pair || pair.day !== otherDay) fail(409, 'These two days no longer differ by the same amount.');
   const extra = text(b, 'note', 'Note', { max: 300, optional: true });
-  const note = `Paid late: ₹ ${(pair!.amountPaise / 100).toLocaleString('en-IN')} short on ${pair!.shortDay}, over on ${pair!.overDay}${extra ? ` · ${extra}` : ''}`;
+  const rupees = (p: number) => `₹ ${(p / 100).toLocaleString('en-IN')}`;
+  const shortBy = pair!.shortDay === day ? pair!.amountPaise : Math.abs(pair!.differencePaise);
+  const overBy = pair!.overDay === day ? pair!.amountPaise : Math.abs(pair!.differencePaise);
+  const note = `Paid late: ${rupees(shortBy)} short on ${pair!.shortDay}, ${pair!.gapPaise ? `${rupees(overBy)} ` : ''}over on ${pair!.overDay}${pair!.gapPaise ? ` (${rupees(pair!.gapPaise)} differs)` : ''}${extra ? ` · ${extra}` : ''}`;
   const t = now();
   const user = c.get('user').id;
   const statements: D1PreparedStatement[] = [];

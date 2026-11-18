@@ -1105,7 +1105,8 @@ async function reportDayView(biz, dayIn) {
   const payCell = (x) => {
     if (unpaidNos.has(x.billNo)) return html`<td class="rd-bad">Not received</td>`;
     if (x.status === 'left_out') return html`<td class="note">Not expected</td>`;
-    if (x.mode === 'cash') { const w = split.cashWait.find((y) => y.billNo === x.billNo); return w ? html`<td class="rd-wait">Waiting, day ${Math.max(1, w.age)} of ${CASH_WATCH_DAYS}</td>` : html`<td class="note">In the cash count</td>`; }
+    if (x.mode === 'cash') { const w = split.cashWait.find((y) => y.billNo === x.billNo); const lt = split.paperwork.find((y) => y.billNo === x.billNo && y.late); const nr = split.notReceived.find((y) => y.billNo === x.billNo);
+      return w ? html`<td class="rd-wait">Waiting, day ${Math.max(1, w.age)} of ${CASH_WATCH_DAYS}</td>` : lt ? html`<td class="note">Written late: ${dayLabel(lt.late.day)} register${lt.late.amountPaise != null ? ` · ₹ ${rs(lt.late.amountPaise)}` : ''}</td>` : nr ? html`<td class="rd-bad">Not received</td>` : html`<td class="note">In the cash count</td>`; }
     if (x.mode === 'upi') return bankIn ? html`<td class="rd-ok">✓ Received</td>` : html`<td class="note">Bank not in yet</td>`;
     if (x.mode === 'mixed') return bankIn ? html`<td class="rd-ok">✓ UPI part received</td>` : html`<td class="note">Bank not in yet</td>`;
     if (x.mode === 'card') return cardsIn ? html`<td class="rd-ok">✓ Received</td>` : html`<td class="note">Card report not in yet</td>`;
@@ -3391,8 +3392,9 @@ function waitSplit({ day, rc, cash, oneSided }) {
     const x = { comparisonId: b.id, billNo: b.billNo, amountPaise: b.amountPaise, paidAt: b.paidAt ?? null, mode: 'cash' };
     listed.add(b.billNo);
     if (b.closeNote) { out.closed.push({ ...x, why: b.closeNote }); continue; }
-    const o = late.get(b.id);
-    if (o) { out.paperwork.push({ ...x, why: `Written late on the ${dayLabel(o.day)} register${cash?.pair ? `; the ${dayLabel(cash.pair.day)} cash is ${cash.pair.differencePaise > 0 ? 'over' : 'short'} by the same: settle them together on the Cash tab` : ''}` }); continue; }
+    // Written late (18 Nov 2026): the server links the later day's line; the comparisons' own link counts too.
+    const o = b.late ?? late.get(b.id);
+    if (o) { out.paperwork.push({ ...x, late: o, why: `Written late in the ${dayLabel(o.day)} register${o.amountPaise != null && o.amountPaise !== b.amountPaise ? ` as ₹ ${rs(o.amountPaise)}` : ''}${cash?.pair ? `; the ${dayLabel(cash.pair.day)} cash is ${cash.pair.differencePaise > 0 ? 'over' : 'short'} by ₹ ${rs(Math.abs(cash.pair.differencePaise))}: settle them together on the Cash tab` : ''}` }); continue; }
     if (diff == null) { out.cashWait.push({ ...x, why: 'Not in the register; the cash count is not in yet', age: shiftAge(day) }); continue; }
     if (left <= 0) { out.paperwork.push({ ...x, why: 'Paid in cash: the cash count backs it, only the register line is missing' }); continue; }
     const part = Math.min(left, b.amountPaise);
@@ -3542,6 +3544,19 @@ function cashPanelHtml(biz, k, opts = {}) {
     // Cash in the software, not in the register, of the difference's amount: it waits (18 Nov 2026). It is counted as a
     // sale of its day and usually written in the next day's register; nothing is asked at saving. After 2 days with no
     // late line it is not received, and its choices show.
+    // Written late in a later day's register (18 Nov 2026): paid, only the paperwork was late. The cash most likely went
+    // into that day's count, so the two days are settled together (the pair line below) rather than chased.
+    const lt = (k.notInRegister ?? []).find((x) => x.id === b.comparisonId)?.late;
+    if (same && b.rgCashPaise === null && lt) {
+      const gapTxt = lt.amountPaise != null && lt.amountPaise !== sw ? ` as ₹ ${money(lt.amountPaise)} (₹ ${money(Math.abs(sw - lt.amountPaise))} less than billed)` : '';
+      items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #CBD5E1;border-radius:8px;padding:10px 12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Written late · paid</strong>
+          <span class="chip">${dayLabel(lt.day)} register</span></div>
+        <div>Bill <span class="mono">${b.billNo}</span> · ₹ ${money(sw)} cash in the software, written in the ${dayLabel(lt.day)} register${gapTxt}.</div>
+        <div class="tiny note">${k.pair ? `The ${dayLabel(k.pair.day)} cash is ${k.pair.differencePaise > 0 ? 'over' : 'short'} by ₹ ${money(Math.abs(k.pair.differencePaise))}: settle the two days together below.`
+          : `The cash most likely went into the ${dayLabel(lt.day)} count. Once both days are saved and counted, they can be settled together here.`}</div></div>` });
+      continue;
+    }
     if (same && b.rgCashPaise === null && (b.decision === 'use_software' || b.state === 'undecided')) {
       const age = shiftAge(k.day);
       const red = age > CASH_WATCH_DAYS;
@@ -3625,7 +3640,9 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${k.reverse ? html`<div class="ent-line"><span class="chip">Came late?</span> Over by ₹ ${money(k.reverse.amountPaise)}: a shortage of the same was booked on ${dayLabel(k.reverse.day)}${k.reverse.billNo ? ` for bill ${k.reverse.billNo}` : ''}.
         ${biz.actions.includes('cash.writeoff') ? html`<button class="btn plain dchip" type="button" id="cashreverse" data-tx="${k.reverse.id}" data-day="${k.reverse.day}">Reverse that shortage</button>` : ''}
         <div class="tiny note">Takes the shortage out of the books; then settle the two days together as paid late.</div></div>` : ''}
-      ${k.pair ? html`<div class="ent-line"><span class="chip">Paid late?</span> ₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.
+      ${k.pair ? html`<div class="ent-line"><span class="chip">Paid late?</span> ${k.pair.gapPaise
+        ? `₹ ${money(k.pair.shortDay === k.day ? k.pair.amountPaise : Math.abs(k.pair.differencePaise))} short on ${dayLabel(k.pair.shortDay)}, ₹ ${money(k.pair.overDay === k.day ? k.pair.amountPaise : Math.abs(k.pair.differencePaise))} over on ${dayLabel(k.pair.overDay)}: ₹ ${money(k.pair.gapPaise)} differs, accepted with them.`
+        : `₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.`}
         ${!draft && biz.actions.includes('sales.decide') ? html`<button class="btn plain dchip" type="button" id="cashpair" data-other="${k.pair.day}">Settle both as paid late</button>` : html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${k.pair.day}">Open ${dayLabel(k.pair.day)}</a>`}</div>` : ''}
     </div>` : ''}
     ${bills.length ? html`<details><summary style="display:inline-flex;gap:8px;align-items:center"><strong>Cash bills · ${bills.length} · ₹ ${money(bills.reduce((t, b) => t + (b.countedPaise ?? 0), 0))}</strong><span class="note">${differ.length ? `${differ.length} differ` : 'all agree'}</span></summary>
