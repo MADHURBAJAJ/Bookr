@@ -20,7 +20,7 @@ import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shif
 import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
-import { cardHere, paidOtherwise, settledHere } from '../settledHere';
+import { cardHere, paidOtherwise, settledHere, upiHere } from '../settledHere';
 import { unsettleStatements } from '../cards';
 import { cashMoveOf } from '../cash';
 import { paidByUpi } from '../paidByUpi';
@@ -329,15 +329,18 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
     if (row.kind !== 'upi_in' || row.direction !== 'CR' || row.status !== 'unmatched') fail(409, 'Choose an open UPI credit.');
     const found = await all<{ id: string; bill_no: string | null }>(db, `SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND id IN (${cids.map(() => '?').join(',')})`, bid, day, ...cids);
     // A card bill of an earlier saved shift settled here (approved 11 Nov 2026), by its sale's id.
-    const later = cardHere(await settledHere(db, bid, day)).filter((x) => cids.includes(x.txId) && !found.some((f) => f.id === x.txId));
-    found.push(...later.map((x) => ({ id: x.txId, bill_no: x.billNo })));
+    // A UPI bill of an earlier saved shift paid later here (18 Nov 2026), by its sale's id.
+    const here = await settledHere(db, bid, day);
+    const later = cardHere(here).filter((x) => cids.includes(x.txId) && !found.some((f) => f.id === x.txId));
+    const laterUpi = upiHere(here).filter((x) => cids.includes(x.txId) && !found.some((f) => f.id === x.txId));
+    found.push(...[...later, ...laterUpi].map((x) => ({ id: x.txId, bill_no: x.billNo })));
     if (found.length !== cids.length) fail(404, 'A bill was not found in this shift.');
     const named = found.map((f) => f.bill_no).filter(Boolean).join(' + ');
     if (existing.some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save.`);
     if (existing.some((k) => k.bankRowId === rowId)) fail(409, 'This credit is already matched on save.');
     if (cids.some((x) => machineChosen.has(x))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save to the card machine.`);
     for (const id of cids) if (await planTaken(db, bid, '', id)) fail(409, 'A bill is already chosen to be one sale with a booked credit.');
-    const upi = await plannedUpiPaise(db, bid, day, cids);
+    const upi = await plannedUpiPaise(db, bid, day, cids) + laterUpi.reduce((t, x) => t + x.amountPaise, 0);
     if (upi !== row.amount_paise) fail(409, upi ? `The credit is not what ${named ? `bill ${named} takes` : 'these bills take'} by UPI.` : `${named ? `Bill ${named} has` : 'These bills have'} no UPI payment: decide or correct ${named ? 'it' : 'them'} first.`);
     const id = newId();
     ids.push(id);

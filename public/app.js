@@ -3398,6 +3398,14 @@ function waitSplit({ day, rc, cash, oneSided }) {
     if (b.closeNote) { out.closed.push({ ...x, why: b.closeNote }); continue; }
     // Written late (18 Nov 2026): the server links the later day's line; the comparisons' own link counts too.
     const o = b.late ?? late.get(b.id);
+    // Written late as card or UPI (18 Nov 2026): paid on that day, not into this drawer. Found when its payment is there.
+    if (o && (o.mode === 'card' || o.mode === 'upi')) {
+      const ev = b.paidLater?.evidence; const word = o.mode === 'card' ? 'card' : 'UPI';
+      const why = `Written in the ${dayLabel(o.day)} register as ${word}: paid later by ${word}. Choose "Paid later by ${word}" on the Cash tab`;
+      if (ev) out.found.push({ ...x, late: o, why, offer: { amountPaise: ev.amountPaise, at: ev.at, label: ev.label } });
+      else out.paperwork.push({ ...x, late: o, why });
+      continue;
+    }
     if (o) { out.paperwork.push({ ...x, late: o, why: `Written late in the ${dayLabel(o.day)} register${o.amountPaise != null && o.amountPaise !== b.amountPaise ? ` as ₹ ${rs(o.amountPaise)}` : ''}${cash?.pair ? `; the ${dayLabel(cash.pair.day)} cash is ${cash.pair.differencePaise > 0 ? 'over' : 'short'} by ₹ ${rs(Math.abs(cash.pair.differencePaise))}: settle them together on the Cash tab` : ''}` }); continue; }
     if (diff == null) { out.cashWait.push({ ...x, why: 'Not in the register; the cash count is not in yet', age: shiftAge(day) }); continue; }
     if (left <= 0) { out.paperwork.push({ ...x, why: 'Paid in cash: the cash count backs it, only the register line is missing' }); continue; }
@@ -3550,7 +3558,26 @@ function cashPanelHtml(biz, k, opts = {}) {
     // late line it is not received, and its choices show.
     // Written late in a later day's register (18 Nov 2026): paid, only the paperwork was late. The cash most likely went
     // into that day's count, so the two days are settled together (the pair line below) rather than chased.
-    const lt = (k.notInRegister ?? []).find((x) => x.id === b.comparisonId)?.late;
+    const nirRow = (k.notInRegister ?? []).find((x) => x.id === b.comparisonId);
+    const lt = nirRow?.late;
+    // Written late as card or UPI (18 Nov 2026): the money came on that day, on the machine or into the bank, not into
+    // this drawer. "Paid later by card" counts it as a card (UPI) sale here, so the cash no longer waits for it.
+    if (same && b.rgCashPaise === null && lt && (lt.mode === 'card' || lt.mode === 'upi')) {
+      const pl = nirRow.paidLater;
+      const word = lt.mode === 'card' ? 'card' : 'UPI';
+      const ev = pl?.evidence;
+      const can = !k.confirmed && biz.actions.includes('sales.decide') && lt.amountPaise === sw;
+      items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #FCD34D;border-radius:8px;padding:10px 12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Paid later by ${word}?</strong>
+          <span class="chip">${dayLabel(lt.day)} register</span></div>
+        <div>Bill <span class="mono">${b.billNo}</span> · ₹ ${money(sw)} cash in the software, written in the ${dayLabel(lt.day)} register as ${word}${lt.amountPaise != null && lt.amountPaise !== sw ? ` ₹ ${money(lt.amountPaise)}` : ''}.</div>
+        ${ev ? html`<div class="tiny" style="color:var(--teal-ink)">✓ ${ev.label} ₹ ${money(ev.amountPaise)} at ${when(ev.at)}${ev.with.length ? html` = this bill + ${ev.with.map((x) => html`<span class="mono">${x.billNo}</span> ₹ ${money(x.amountPaise)}`).reduce((a, x) => html`${a}${a ? ' + ' : ''}${x}`, '')} (the line${ev.with.length > 1 ? 's' : ''} beside it)` : ' = this bill'}</div>`
+          : html`<div class="tiny note">No open ${lt.mode === 'card' ? 'card machine payment' : 'UPI credit'} of this amount on ${dayLabel(lt.day)} yet${lt.mode === 'card' ? '' : ' (or it came with other bills)'}.</div>`}
+        ${lt.amountPaise !== sw ? html`<div class="tiny note">The ${dayLabel(lt.day)} line has another amount: correct it first.</div>` : ''}
+        ${can ? html`<div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-paidlater2="${b.comparisonId}" data-bill="${b.billNo}" data-word="${word}">Paid later by ${word}</button></div>
+          <div class="tiny">Counts it here as a ${word} sale, not cash in the drawer. The ${dayLabel(lt.day)} ${lt.mode === 'card' ? 'payment' : 'credit'} pays it once this shift is saved. One Undo.</div>` : ''}<div class="form-msg"></div></div>` });
+      continue;
+    }
     if (same && b.rgCashPaise === null && lt) {
       const gapTxt = lt.amountPaise != null && lt.amountPaise !== sw ? ` as ₹ ${money(lt.amountPaise)} (₹ ${money(Math.abs(sw - lt.amountPaise))} less than billed)` : '';
       items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #CBD5E1;border-radius:8px;padding:10px 12px">
@@ -5080,7 +5107,7 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
         : html`<div class="note">Nothing open on the shifts either side.</div>`.__html;
     } catch (err) { box.innerHTML = ''; showError(box, err); }
   });
-  const billLine = (b) => html`<div><span class="mono">${b.billNo ?? '—'}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}<div class="tiny">₹ ${money(b.amountPaise)} · ${b.paidAt ? when(b.paidAt) : 'register only'}${!b.rowId && !b.grouped ? ' · not in the register' : ''}</div></div>`;
+  const billLine = (b) => html`<div><span class="mono">${b.billNo ?? '—'}</span>${b.grouped ? html` <span class="chip">paid together</span>` : ''}<div class="tiny">₹ ${money(b.amountPaise)} · ${b.fromDay ? `${dayLabel(b.fromDay)} bill, paid later here` : b.paidAt ? when(b.paidAt) : 'register only'}${!b.rowId && !b.grouped ? ' · not in the register' : ''}</div></div>`;
   const crLine = (c) => html`<div>${noun} ${when(c.postedAt)}<div class="tiny">₹ ${money(c.amountPaise)}${c.shiftDay && c.shiftDay !== day ? ` · ${dayLabel(c.shiftDay)} shift` : ''}${c.accountName ? ` · ${c.accountName}` : ''}</div></div>`;
   // What saving a ready pair writes on the register first, in words; null when it only matches.
   const edit = (p, t) => {
@@ -5686,7 +5713,7 @@ async function reconcileView(biz, dayArg) {
     const card = onCardLine(b);
     const hint = typo ? loHint(`= register ${typo.c.billNo}?`) : own ? loHint(`→ ${own.f.billNo}?`) : slips.length ? loHint(`written as ${slips[0].writtenAs}?`, 'warn')
       : card ? loHint('card machine?', 'warn') : '';
-    const tags = [b.grouped && 'paid together', !b.paidAt && 'register only'].filter(Boolean).map((t) => html`<span class="lo-tag">${t}</span>`);
+    const tags = [b.grouped && 'paid together', b.fromDay ? `${dayLabel(b.fromDay)} bill` : !b.paidAt && 'register only'].filter(Boolean).map((t) => html`<span class="lo-tag">${t}</span>`);
     const body = html`<div class="tiny"><strong class="mono">${b.billNo ?? '—'}</strong> · ₹ ${money(b.amountPaise)} · ${b.paidAt ? when(b.paidAt) : 'register only, no bill time'}</div>
       ${typo ? html`<div class="lo-fix"><div class="tiny" style="white-space:normal">Register line <span class="mono">${typo.c.billNo}</span> (₹ ${money(typo.c.register.amountPaise ?? 0)}) is probably this bill: ${numberFlagText(typo.f)}</div>${renumberBtn(typo.c, b.billNo, `Same bill: change ${typo.c.billNo} to ${b.billNo}`)}</div>` : ''}
       ${own ? html`<div class="lo-fix"><div class="tiny" style="white-space:normal">${numberFlagText(own.f)}</div>${renumberBtn(own.c, own.f.billNo, `Change the number to ${own.f.billNo}`)}</div>` : ''}
@@ -5713,7 +5740,8 @@ async function reconcileView(biz, dayArg) {
       ${slipCreditLine(x)}
       ${byUpiOffer(o, true)}
       ${(nb?.otherSide ?? []).length ? html`<div class="cmp-warn" style="margin:0"><strong>Check first:</strong> ${nb.otherSide.map((q) => html`<div>The software said ₹ ${money(q.softwarePaise)} for bill <span class="mono">${q.billNo ?? ''}</span>, the register ₹ ${money(q.registerPaise)}; you chose the ${q.chose}'s ₹ ${money(q.chose === 'register' ? q.registerPaise : q.softwarePaise)}. If the ${q.chose === 'register' ? 'software' : 'register'} was right, this ₹ ${money(x.amountPaise)} is that bill's payment.</div>`)}</div>` : ''}
-      ${nb ? html`<div class="nb-check" data-nbcheck="${x.id}"></div><div class="tiny"><strong>Book it</strong>: a sale not written down, or money that is not a sale.</div>${nbActs(nb, false)}` : ''}`;
+      ${nb ? html`<div class="nb-check" data-nbcheck="${x.id}"></div><div class="tiny"><strong>Book it</strong>: a sale not written down, or money that is not a sale.</div>${nbActs(nb, false)}
+        <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/review?day=${day}">Add a bill on Review</a></div>` : ''}`;
     return html`<div class="lo-grid lo-row" data-side="cr"><div></div><div class="tiny lo-t">${hhmm(x.postedAt)}</div>
       <div class="lo-cell"><input type="checkbox" data-tside="cr" data-amt="${x.amountPaise}" data-id="${x.id}" aria-label="Tick credit ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">${hint}<span class="lo-fill"></span><strong class="amount">₹ ${money(x.amountPaise)}</strong>${loMenu(`Choices for the credit of ₹ ${money(x.amountPaise)}`, body)}</div></div>`;
   };
@@ -5731,8 +5759,11 @@ async function reconcileView(biz, dayArg) {
     <label class="tiny" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" data-tray="nearOn" style="width:16px;height:16px;min-height:0"> Show credits from the shifts either side</label><div data-tray="near"></div></section>` : '';
   // Is this the same? (approved 17 Nov 2026): Bookr's guesses, a bill and a credit that look like one payment, and the
   // register slips and Same sale cards, each told once here and not again on the list.
+  const listedCredit = new Set([...loCredits, ...(r.open?.credits ?? [])].map((c) => `cr:${c.id}`));
   const isSameCards = r.confirmed || !r.open ? [] : [...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)),
-    ...noCredit.filter((k) => !(k.billNos ?? []).some((b) => loBills.some((x) => x.billNo === b)))];
+    ...noCredit.filter((k) => !(k.billNos ?? []).some((b) => loBills.some((x) => x.billNo === b)))]
+    // A credit with no bill is a line of the list below, with its choices in its ⋯ (18 Nov 2026): not a card too.
+    .filter((k) => !(k.kind === 'no_bill' && (k.uses ?? []).some((u) => listedCredit.has(u))));
   const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
       <div class="scroll"><table style="min-width:620px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th><th></th></tr></thead><tbody>
         ${r.done.map((x) => html`<tr><td class="mono">${x.bills.join(' + ')}</td><td class="amount">${money(x.creditPaise ?? x.billsPaise)}</td><td>${when(x.postedAt)}<div class="tiny">${x.accountName}</div></td>
@@ -7759,7 +7790,7 @@ const HISTORY_LABELS = {
   'bank.match': 'Matched to a bank credit', 'bank.match_set': 'Matched by hand', 'bank.match_adjust_bills': 'Matched; register corrected to the bank amount', 'bank.fix_bill': 'Bill fixed from the bank',
   'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened', 'transaction.remove_on_reopen': 'Sale taken off (shift reopened)',
   'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
-  'register.edit': 'Register line changed', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
+  'register.edit': 'Register line changed', 'register.paid_later': 'Paid later by card or UPI', 'register.paid_later_undone': 'Paid later undone', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };
 const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
 // Complimentary (approved 14 Nov 2026), from any page: data-makecomp="comparisonId" asks the guest's name;
@@ -7769,17 +7800,23 @@ document.addEventListener('click', async (e) => {
   const pb = e.target.closest?.('[data-paidby]');
   const lo = e.target.closest?.('[data-leaveunk]');
   const sw = e.target.closest?.('[data-cashswitch]');
-  if (!mk && !pb && !lo && !sw) return;
+  const pl = e.target.closest?.('[data-paidlater2]');
+  if (!mk && !pb && !lo && !sw && !pl) return;
   e.preventDefault(); e.stopPropagation();
   // One click at a time (17 Nov 2026): the button stays off until the change is saved, so it is never sent twice.
-  const btn = mk ?? pb ?? lo ?? sw;
+  const btn = mk ?? pb ?? lo ?? sw ?? pl;
   if (btn.dataset.busy) return;
   btn.dataset.busy = '1'; btn.disabled = true;
   const bizId = currentBizId();
   const reload = async () => { await (drawerReload ?? route)(); if (document.getElementById('billdrawer') && drawerReopen) await drawerReopen(); };
   const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
   try {
-    if (sw) {
+    if (pl) {
+      const id = pl.dataset.paidlater2;
+      await apiFull('POST', `/businesses/${bizId}/comparisons/${id}/paid-later`, {});
+      await reload();
+      doneToast(`Bill ${pl.dataset.bill}: paid later by ${pl.dataset.word}, counted as a ${pl.dataset.word} sale, not cash.`, async () => { await apiFull('POST', `/businesses/${bizId}/comparisons/${id}/paid-later/undo`, {}); }, reload);
+    } else if (sw) {
       const id = sw.dataset.cashswitch;
       await apiFull('PUT', `/businesses/${bizId}/comparisons/${id}`, { decision: sw.dataset.d });
       await reload();

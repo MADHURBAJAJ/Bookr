@@ -13,6 +13,7 @@ import { shiftSlips } from '../slips';
 import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { waitingPicture } from '../waiting';
+import { paidLaterLines } from '../paidLater';
 import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
 import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
@@ -636,6 +637,89 @@ salesRoutes.post('/businesses/:businessId/comparisons/:id/add-paid', requireRole
     ]);
   }
   return c.json({ ok: true, rowId, uploadId: page.id });
+});
+
+/**
+ * Paid later by card or UPI (approved 18 Nov 2026): a bill counted here from the software whose register line is on a
+ * later day, written as card or UPI. The bill is written on this day's "Added from software report" page in that mode,
+ * at the bill's amount, and decided Use register, so this day counts a card (or UPI) sale and not cash in the drawer.
+ * The later day's line stays left out ("Already counted"); its payment pays the sale once this day is saved. Undo below.
+ */
+salesRoutes.post('/businesses/:businessId/comparisons/:id/paid-later', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const cmp = await one<{ shift_day: string; bill_no: string; difference: string; sw_mode: string | null; sw_amount_paise: number | null; register_row_id: string | null; bill_type: string | null }>(db,
+    'SELECT shift_day, bill_no, difference, sw_mode, sw_amount_paise, register_row_id, bill_type FROM bill_comparisons WHERE id = ? AND business_id = ?', id, bid);
+  if (!cmp) fail(404, 'Not found.');
+  if (cmp.difference !== 'missing_in_register' || cmp.register_row_id || !cmp.sw_amount_paise) fail(400, `Bill ${cmp.bill_no} is not a bill only in the software report.`);
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day);
+  if (shift?.status === 'confirmed') fail(409, CONFIRMED);
+  const line = (await paidLaterLines(db, bid, cmp.shift_day)).find((l) => l.comparisonId === id);
+  if (!line) fail(409, `Bill ${cmp.bill_no} is not written as card or UPI in a later day's register.`);
+  if (line.amountPaise !== cmp.sw_amount_paise) fail(409, `The ${line.day} register has bill ${cmp.bill_no} at another amount: correct that line first.`);
+  if (line.mode === cmp.sw_mode) fail(409, `Bill ${cmp.bill_no} is already counted as ${line.mode === 'card' ? 'card' : 'UPI'} here.`);
+  const billType = cmp.bill_type ?? 'fnb';
+  const t = now();
+  const user = c.get('user').id;
+  const word = line.mode === 'card' ? 'card' : 'UPI';
+  const note = `Paid later by ${word}: written in the ${line.day} register as ${word}`;
+  const page = await softwarePage(db, bid, cmp.shift_day, user, t);
+  const n = (await one<{ n: number }>(db, 'SELECT coalesce(max(line_no), 0) + 1 AS n FROM register_rows WHERE upload_id = ?', page.id))?.n ?? 1;
+  const rowId = newId();
+  try {
+    await db.batch([
+      ...page.statements,
+      stmt(db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise, remarks, status, ocr_original, edited_by, edited_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 'checked', ?, ?, ?, ?)`, rowId, bid, page.id, n, cmp.shift_day, cmp.bill_no, billType, cmp.sw_amount_paise,
+        `Added from software report: ${note}`, JSON.stringify({ source: 'software_report', typed: 'paid_later', addedBy: user, comparisonId: id, lateLineId: line.lineId, lateDay: line.day }), user, t, t),
+      stmt(db, 'INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        newId(), bid, rowId, line.mode, line.mode === 'card' ? 'Card' : 'UPI', cmp.sw_amount_paise, t),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.paid_later', 'register_rows', ?, NULL, ?, ?)`, bid, user, rowId,
+        JSON.stringify({ billNo: cmp.bill_no, comparisonId: id, mode: line.mode, amountPaise: cmp.sw_amount_paise, lateDay: line.day, from: cmp.sw_mode, note }), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, cmp.shift_day, user);
+  const now2 = await one<{ id: string; difference: string; decision: string | null }>(db, 'SELECT id, difference, decision FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
+  if (now2 && NEEDS_DECISION.includes(now2.difference as never) && !now2.decision) {
+    await db.batch([
+      stmt(db, 'UPDATE bill_comparisons SET decision = \'use_register\', decided_by = ?, decided_at = ?, note = ?, linked_to_id = NULL WHERE id = ?', user, t, note, now2.id),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, NULL, ?, ?)`, bid, user, now2.id, JSON.stringify({ decision: 'use_register', note }), t),
+    ]);
+  }
+  // The later day's line was unlinked by the change: it is decided again there ("Already counted").
+  await refreshComparisons(db, bid, line.day, user);
+  return c.json({ ok: true, rowId });
+});
+
+salesRoutes.post('/businesses/:businessId/comparisons/:id/paid-later/undo', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const row = await one<{ id: string; shift_day: string; late: string | null; bill_no: string }>(db, `SELECT id, shift_day, json_extract(ocr_original, '$.lateDay') AS late, bill_no FROM register_rows
+    WHERE business_id = ? AND json_extract(ocr_original, '$.typed') = 'paid_later' AND json_extract(ocr_original, '$.comparisonId') = ?`, bid, id);
+  if (!row) fail(404, 'Not found, or already undone.');
+  const user = c.get('user').id;
+  try {
+    await db.batch([
+      stmt(db, 'DELETE FROM register_rows WHERE id = ? AND business_id = ?', row.id, bid),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.paid_later_undone', 'register_rows', ?, ?, NULL, ?)`, bid, user, row.id, JSON.stringify({ billNo: row.bill_no, comparisonId: id }), now()),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, row.shift_day, user);
+  if (row.late) await refreshComparisons(db, bid, row.late, user);
+  return c.json({ ok: true });
 });
 
 salesRoutes.post('/businesses/:businessId/shifts/:day/confirm', requireRole('sales.decide'), async (c) => {

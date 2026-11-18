@@ -4,6 +4,7 @@
 
 import { all, one, type DB, SUMMARY_IN_USE } from './db';
 import { addDays } from './time';
+import { paidLaterLines } from './paidLater';
 
 export const SHORTAGE_HEAD = { name: 'Cash shortage', tally: 'Cash Shortage' };
 
@@ -34,7 +35,7 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number; close_note: string | null; late: string | null }>(db, `
       SELECT c.id, c.bill_no, c.sw_amount_paise, c.decision, c.bill_type, c.note, sb.paid_at, 0 AS typed, c.close_note,
         -- Written late: the same bill on a later day's register, linked to this one (its day and written amount).
-        (SELECT x.shift_day || '|' || coalesce(x.rg_amount_paise, '') FROM bill_comparisons x WHERE x.business_id = c.business_id AND x.linked_to_id = c.id
+        (SELECT x.shift_day || '|' || coalesce(x.rg_amount_paise, '') || '|' || coalesce(x.rg_mode, '') FROM bill_comparisons x WHERE x.business_id = c.business_id AND x.linked_to_id = c.id
           ORDER BY x.shift_day LIMIT 1) AS late FROM bill_comparisons c
       LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.sw_mode = 'cash'
@@ -71,7 +72,13 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
   const notInRegisterRows = notInRegister.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note,
     paidAt: c.paid_at, closeNote: c.close_note,
-    late: c.late ? { day: c.late.split('|')[0], amountPaise: c.late.split('|')[1] ? Number(c.late.split('|')[1]) : null } : null }));
+    late: c.late ? { day: c.late.split('|')[0], amountPaise: c.late.split('|')[1] ? Number(c.late.split('|')[1]) : null, mode: c.late.split('|')[2] || null } : null,
+    // Written late as card or UPI (18 Nov 2026): the money came on that day, not into this drawer.
+    paidLater: null as Awaited<ReturnType<typeof paidLaterLines>>[number] | null }));
+  if (!confirmed && notInRegisterRows.some((c) => c.late?.mode === 'card' || c.late?.mode === 'upi')) {
+    const lines = await paidLaterLines(db, businessId, day);
+    for (const r of notInRegisterRows) r.paidLater = lines.find((l) => l.comparisonId === r.id) ?? null;
+  }
 
   // A short count is first explained by the cash bills the register does not have (Stage 3, approved 10 Nov 2026):
   // counted from the software, so they raise "should be in hand", but the cash may never have reached the drawer.
@@ -131,9 +138,9 @@ export async function cashPairOf(db: DB, businessId: string, day: string, k?: Aw
   const me = k ?? await cashCheck(db, businessId, day);
   if (me.differencePaise === null || me.differencePaise === 0 || me.settled) return null;
   const linked = await all<{ d: string }>(db, `SELECT DISTINCT x.shift_day AS d FROM bill_comparisons x JOIN bill_comparisons c ON c.id = x.linked_to_id
-      WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash'
+      WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND coalesce(x.rg_mode, 'cash') = 'cash'
     UNION SELECT DISTINCT c.shift_day AS d FROM bill_comparisons x JOIN bill_comparisons c ON c.id = x.linked_to_id
-      WHERE x.business_id = ? AND x.shift_day = ? AND c.sw_mode = 'cash'`, businessId, day, businessId, day);
+      WHERE x.business_id = ? AND x.shift_day = ? AND c.sw_mode = 'cash' AND coalesce(x.rg_mode, 'cash') = 'cash'`, businessId, day, businessId, day);
   const days = [...new Set([addDays(day, 1), addDays(day, -1), ...linked.map((x) => x.d)])].filter((d) => d !== day);
   let best: { day: string; differencePaise: number; shortDay: string; overDay: string; amountPaise: number; gapPaise: number } | null = null;
   for (const other of days) {

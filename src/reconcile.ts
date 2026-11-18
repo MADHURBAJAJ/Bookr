@@ -4,6 +4,7 @@
 // credits with no bill). Every action is an existing, recorded and reversible one; nothing happens by itself.
 
 import { all, type DB } from './db';
+import { settledHere, upiHere } from './settledHere';
 import { bankIn, nearGroup } from './bankEvidence';
 import { suggestionsFor } from './bank';
 import { cashCheck } from './cash';
@@ -351,6 +352,12 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   noCredit.sort((a, b) => b.score - a.score);
 
   const openBills = left.filter((b) => !planned.has(b.c.id)).map((b) => ({ id: b.c.id, billNo: b.c.billNo, amountPaise: b.amount, paidAt: b.c.paidAt, grouped: b.grouped, group: b.grouped ? groupOf(b.c.register?.rowId) : null, rowId: b.c.register?.rowId ?? null, uploadId: b.c.register?.uploadId ?? null }));
+  // UPI bills of an earlier saved shift paid later here (18 Nov 2026): listed by their sale's id, with their day, so a
+  // credit of this shift can be paired with them; they have no bill time here.
+  for (const x of upiHere(await settledHere(db, businessId, day))) {
+    if (chosen.has(x.txId)) continue;
+    openBills.push({ id: x.txId, billNo: x.billNo, amountPaise: x.amountPaise, paidAt: null as unknown as typeof openBills[number]['paidAt'], grouped: false, group: null, rowId: x.rowId, uploadId: x.uploadId, fromDay: x.fromDay } as typeof openBills[number]);
+  }
   // The same credits Compare counts as not matched yet; noBill marks those no bill of that amount could be.
   const noBillIds = new Set((view.bank?.noBill ?? []).map((n) => n.id));
   // A credit the pairing gave a bill that a person matched to another credit (11 Nov 2026): free again. Extra when no

@@ -31,7 +31,7 @@ describe('a cash bill written late', () => {
     const acc = h.clients.accountant;
     const k = (await acc.get(`/businesses/${h.bid}/shifts/2026-10-31/cash`)).json;
     expect(k.differencePaise).toBe(-5000);
-    expect(k.notInRegister.find((x: any) => x.billNo === '2610311').late).toEqual({ day: '2026-11-02', amountPaise: 4500 });
+    expect(k.notInRegister.find((x: any) => x.billNo === '2610311').late).toEqual({ day: '2026-11-02', amountPaise: 4500, mode: 'cash' });
     expect(k.pair).toMatchObject({ day: '2026-11-02', shortDay: '2026-10-31', overDay: '2026-11-02', amountPaise: 5000, gapPaise: 500 });
     expect((await acc.get(`/businesses/${h.bid}/shifts/2026-11-02/cash`)).json.pair).toMatchObject({ day: '2026-10-31', gapPaise: 500 });
     const res = await acc.post(`/businesses/${h.bid}/shifts/2026-10-31/cash/pair`, { otherDay: '2026-11-02' });

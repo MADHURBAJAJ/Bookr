@@ -45,3 +45,7 @@ export const paidOtherwise = (list: SettledHere[]) => list.filter((x) => x.open 
 
 /** Card sales of an earlier shift whose register line is here: this shift's card payments may pay them. */
 export const cardHere = (list: SettledHere[]) => list.filter((x) => x.open && x.txMode === 'card' && x.rowMode === 'card');
+
+/** UPI sales of an earlier shift whose register line here says UPI (paid later by UPI, 18 Nov 2026): this shift's
+ *  credits may pay them, chosen on the UPI tab like its own bills. */
+export const upiHere = (list: SettledHere[]) => list.filter((x) => x.open && x.txMode === 'upi' && x.rowMode === 'upi');

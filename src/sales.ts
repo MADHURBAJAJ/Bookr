@@ -1011,7 +1011,14 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   const chosen = new Set<string>();
   const skipped: string[] = [];
   for (const k of choices) {
-    const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && k.comparisonIds.includes(x.r.c.id));
+    // UPI bills of an earlier saved shift paid later here (18 Nov 2026): their sales already exist.
+    const ownIds = new Set(rows.map((r) => r.c.id));
+    const earlierIds = k.comparisonIds.filter((id) => !ownIds.has(id));
+    const earlier = earlierIds.length ? (await all<{ id: string; amount_paise: number }>(db, `SELECT id, amount_paise FROM transactions WHERE business_id = ? AND type = 'income'
+      AND payment_mode = 'upi' AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL
+      AND id IN (${earlierIds.map(() => '?').join(',')})`, businessId, ...earlierIds)).map((x) => ({ id: x.id, amount: x.amount_paise })) : [];
+    if (earlierIds.length !== earlier.length) { skipped.push(k.billNos.join(' + ')); continue; }
+    const upi = [...rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && k.comparisonIds.includes(x.r.c.id)), ...earlier];
     if (k.open && upi.length && upi.reduce((a, x) => a + x.amount, 0) === k.amountPaise) {
       statements.push(...confirmMatchStatements(db, businessId, k.bankRowId, upi.map(({ id, amount }) => ({ id, amount })), userId, t + 1 + matched));
       matched += 1;
