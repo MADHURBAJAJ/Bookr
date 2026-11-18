@@ -29,6 +29,18 @@ function toPaise(t) {
 }
 const time = (ms) => new Date(ms).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
 const dateTime = (ms) => new Date(ms).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
+/** '2026-11-17' → '17 Nov'. */
+const dayName = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d ?? '') ? new Date(`${d}T12:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' }) : d ?? '');
+/** '2026-11-17' plus n days, as 'YYYY-MM-DD'. */
+const addDays = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+/** How long ago, short: '12 min', '2 h 5 min', '3 d'. */
+function since(ms) {
+  const m = Math.max(0, Math.floor((Date.now() - ms) / 60000));
+  if (m < 60) return `${m} min`;
+  if (m < 24 * 60) return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
+  return `${Math.floor(m / 1440)} d`;
+}
+const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
 async function api(method, path, body) {
@@ -74,13 +86,23 @@ const counterEntities = () => (cache.entities ?? []).filter((e) => e.active && e
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
-  return html`<header class="top">
-    <div class="row"><span class="brand">${me.business.name}</span>
-      <nav aria-label="Main">${links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`)}</nav></div>
-    <div class="who"><span>Shift ${me.business.shiftDay} · ${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
-  </header>
-  <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status">${flash.text}${flash.link ? html` <a href="${flash.link[0]}">${flash.link[1]}</a>` : ''}</div>` : ''}${body}</main>`;
+  const navLinks = links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`);
+  const current = links.find(([h]) => h === active)?.[1] ?? 'Menu';
+  return html`<header class="top"><div class="top-in">
+    <a class="brand" href="#/" title="${me.business.name}">${me.business.name}</a>
+    <nav class="mainnav" aria-label="Main">${navLinks}</nav>
+    ${links.length > 1 ? html`<details class="navmenu"><summary aria-label="Go to: ${current}">${current} <span aria-hidden="true">▾</span></summary><nav aria-label="Main">${navLinks}</nav></details>` : ''}
+    <div class="who"><span class="shiftchip" title="A shift runs 8 am to 8 am">Shift ${dayName(me.business.shiftDay)}</span>
+      <span class="person">${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
+  </div></header>
+  <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span>${flash.link ? html`<a href="${flash.link[0]}">${flash.link[1]}</a>` : ''}</div>` : ''}${body}</main>`;
 }
+/** A page title with an optional line under it and controls on the right. */
+const pageHead = (title, sub, right) => html`<div class="phead"><div><h1>${title}</h1>${sub ? html`<p class="sub">${sub}</p>` : ''}</div>${right ?? ''}</div>`;
+/** Tabs that are links (each tab has its own address). */
+const tabsNav = (label, items, current) => html`<nav class="tabs" aria-label="${label}">${items.map(([href, text, key]) => html`<a href="${href}" ${key === current ? html`aria-current="page"` : ''}>${text}</a>`)}</nav>`;
+/** A headline number. tone: '', 'good', 'warn' or 'bad'. */
+const kpi = (k, v, n, tone = '') => html`<div class="kpi ${tone}"><span class="k">${k}</span><span class="v">${v}</span>${n ? html`<span class="n">${n}</span>` : ''}</div>`;
 
 function paint(view) { root.innerHTML = asHtml(view); flash = null; const f = root.querySelector('[autofocus]'); if (f) f.focus(); }
 const errorBox = () => (ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : '');
@@ -153,28 +175,33 @@ async function signIn() {
   const d = await api('GET', '/device');
   ui.device = d.device; ui.people = d.people ?? []; ui.pin = ''; ui.who = null;
   rerender = () => {
+    const initials = (n) => String(n).replace(/\(.*?\)/g, '').trim().split(/\s+/).map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase();
     if (ui.device && !ui.passwordMode) {
       const person = ui.people.find((p) => p.id === ui.who);
-      paint(html`<main><div class="signin panel">
-        <h1>${ui.device.businessName}</h1><p class="quiet">${ui.device.name}${ui.device.locked ? ' · PIN sign-in is locked for a few minutes' : ''}</p>
+      ui.pinPad = !!person;
+      paint(html`<div class="signwrap"><main class="signin panel" style="padding:24px">
+        <div><p class="brandline">${ui.device.businessName}</p><h1>${person ? `PIN for ${person.name}` : 'Who is signing in?'}</h1>
+          <p class="quiet small">${ui.device.name}${ui.device.locked ? ' · PIN sign-in is locked for a few minutes' : ''}</p></div>
         ${errorBox()}
-        ${person ? html`<p>PIN for <strong>${person.name}</strong></p>
-          <div class="dots" aria-live="polite">${'•'.repeat(ui.pin.length)}</div>
+        ${person ? html`
+          <div class="dots" role="img" aria-label="${plural(ui.pin.length, 'digit')} typed">${[...Array(Math.max(4, ui.pin.length))].map((_, i) => html`<span class="${i < ui.pin.length ? 'on' : ''}"></span>`)}</div>
           <div class="pad">${['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((k) => html`<button type="button" data-act="pinKey" data-k="${k}">${k}</button>`)}
-            <button type="button" data-act="pinBack" aria-label="Delete">⌫</button><button type="button" data-act="pinKey" data-k="0">0</button>
-            <button type="button" data-act="pinGo" class="pri" style="background:var(--accent);color:#fff;border-color:var(--accent)">OK</button></div>
-          <button class="btn" type="button" data-act="pinWho" data-id="">Someone else</button>`
-        : html`<p>Who is signing in?</p><div class="chips">${ui.people.map((p) => html`<button type="button" class="chip" data-act="pinWho" data-id="${p.id}">${p.name}</button>`)}</div>
-          <button class="btn" type="button" data-act="pwMode">Owner or manager: sign in with email</button>`}
-      </div></main>`);
+            <button type="button" data-act="pinBack" aria-label="Delete last digit">⌫</button><button type="button" data-act="pinKey" data-k="0">0</button>
+            <button type="button" data-act="pinGo" class="ok">Sign in</button></div>
+          <p class="quiet tiny" style="text-align:center">On a keyboard, type the PIN and press Enter.</p>
+          <button class="btn" type="button" data-act="pinWho" data-id="">Not ${person.name}? Choose someone else</button>`
+        : html`<div class="people">${ui.people.map((p) => html`<button type="button" class="person-btn" data-act="pinWho" data-id="${p.id}"><span class="avatar" aria-hidden="true">${initials(p.name)}</span><span>${p.name}</span></button>`)}</div>
+          <button class="btn ghost" type="button" data-act="pwMode">Owner or manager: sign in with email</button>`}
+      </main></div>`);
     } else {
-      paint(html`<main><form class="signin panel">
-        <h1>Sign in</h1>${errorBox()}
+      ui.pinPad = false;
+      paint(html`<div class="signwrap"><main class="signin"><form class="panel" style="padding:24px">
+        <div>${ui.device ? html`<p class="brandline">${ui.device.businessName}</p>` : ''}<h1>Sign in</h1><p class="quiet small">Owner and manager sign in with email.</p></div>${errorBox()}
         <label class="f">Email<input class="in" type="email" autocomplete="username" data-model="email" value="${ui.email ?? ''}" autofocus></label>
         <label class="f">Password<input class="in" type="password" autocomplete="current-password" data-model="password"></label>
-        <button class="btn pri" type="submit" data-act="login" data-submit>Sign in</button>
-        ${ui.device ? html`<button class="btn" type="button" data-act="pwMode">Back to PIN sign-in</button>` : html`<p class="quiet small">Counter staff sign in with a PIN on a counter device. An Owner sets up a device from Settings.</p>`}
-      </form></main>`);
+        <button class="btn pri big" type="submit" data-act="login" data-submit>Sign in</button>
+        ${ui.device ? html`<button class="btn" type="button" data-act="pwMode">Back to PIN sign-in</button>` : html`<p class="quiet small">Counter staff sign in with a PIN on a counter device. An Owner sets up a device from Settings, This device.</p>`}
+      </form></main></div>`);
     }
   };
   rerender();
@@ -186,35 +213,71 @@ actions.pinGo = async () => {
   try { await api('POST', '/auth/pin', { staffId: ui.who, pin: ui.pin }); } catch (e) { ui.pin = ''; throw e; }
   me = null; go('#/');
 };
+// A counter PC has a keyboard: digits, Backspace and Enter work on the PIN pad.
+document.addEventListener('keydown', (ev) => {
+  if (!ui.pinPad || ev.ctrlKey || ev.metaKey || ev.altKey || ev.target.matches?.('input, textarea, select')) return;
+  if (/^\d$/.test(ev.key)) { ev.preventDefault(); actions.pinKey({ k: ev.key }); }
+  else if (ev.key === 'Backspace') { ev.preventDefault(); actions.pinBack(); }
+  else if (ev.key === 'Enter' && !ev.target.closest?.('button')) { ev.preventDefault(); root.querySelector('[data-act="pinGo"]')?.click(); }
+});
 actions.pwMode = () => { ui.passwordMode = !ui.passwordMode; ui.error = null; rerender(); };
 actions.login = async () => { await api('POST', '/auth/login', { email: ui.email ?? '', password: ui.password ?? '' }); me = null; go('#/'); };
 actions.logout = async () => { await api('POST', '/auth/logout'); me = null; cache = {}; go('#/signin'); };
 
 // ---------- tables
 
+/** Where an order stands, as the counter needs to see it. */
+function orderState(o) {
+  if (o.status === 'billed') return 'billed';
+  if (o.status === 'tab') return 'tab';
+  return o.lines.some((l) => l.qty > l.sentQty) ? 'new' : 'open';
+}
+const STATE_TEXT = { billed: 'Bill printed · to pay', tab: 'Tab', new: 'Not sent to kitchen', open: 'With kitchen' };
+const STATE_SHORT = { billed: 'To pay', tab: 'Tab', new: 'Not sent', open: 'With kitchen' };
+const orderHref = (o) => (o.status === 'billed' ? `#/settle/${o.bill.id}` : `#/order/${o.id}`);
+const KIND_TEXT = { table: 'Table', room: 'Room service', takeaway: 'Takeaway' };
+
 async function tablesScreen() {
   const [{ orders, tables, tablesFixed }] = await Promise.all([api('GET', B() + '/orders'), load('stays')]);
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed;
   rerender = () => {
-    const tile = (o) => {
-      const st = o.status === 'billed' ? html`<span class="st billed">Bill ${o.bill?.billNo} · ${rs(o.bill?.totalPaise ?? 0)} to pay</span>`
-        : o.status === 'tab' ? html`<span class="st tab">Tab since ${o.openedShiftDay}</span>`
-        : html`<span class="st open">Order open · ${o.lines.length} items</span>`;
-      const href = o.status === 'billed' ? `#/settle/${o.bill.id}` : `#/order/${o.id}`;
-      return html`<a class="tile" href="${href}" style="color:inherit;text-decoration:none"><span class="name">${o.place}</span>${st}
-        <span class="small quiet">${o.guestName ? o.guestName + ' · ' : ''}${rs(o.itemsPaise)} · opened ${time(o.openedAt)}</span></a>`;
+    const showGrid = can('orders.edit') && ui.tables.length > 0;
+    // Orders that need the cashier first: bills waiting for money, then dishes not yet sent, then the rest.
+    const rank = { billed: 0, new: 1, open: 2, tab: 3 };
+    const rest = ui.orders.filter((o) => !(showGrid && o.kind === 'table')).sort((a, b) => rank[orderState(a)] - rank[orderState(b)] || a.openedAt - b.openedAt);
+    const n = (s) => ui.orders.filter((o) => orderState(o) === s).length;
+    const onFloor = ui.orders.filter((o) => o.status !== 'billed').reduce((t, o) => t + o.itemsPaise, 0);
+    const card = (o) => {
+      const s = orderState(o);
+      return html`<a class="ocard ${s}" href="${orderHref(o)}">
+        <div class="top-l"><div><div class="kind">${KIND_TEXT[o.kind] ?? o.kind}</div><div class="pl">${o.place}</div></div>
+          <span class="amt">${rs(o.status === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span></div>
+        <div class="row" style="gap:6px"><span class="badge ${s}">${s === 'billed' ? `Bill ${o.bill?.billNo} · to pay` : s === 'tab' ? `Tab since ${dayName(o.openedShiftDay)}` : STATE_TEXT[s]}</span></div>
+        <span class="small quiet">${o.guestName ? o.guestName + ' · ' : ''}${plural(o.lines.reduce((t, l) => t + l.qty, 0), 'item')} · opened ${time(o.openedAt)} (${since(o.openedAt)})</span></a>`;
     };
-    paint(shell('#/', html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><h1>Tables and orders</h1>
-        ${can('orders.edit') ? html`<div class="row"><button class="btn pri" type="button" data-act="newOrder" data-kind="table">New table order</button>
-          <button class="btn" type="button" data-act="newOrder" data-kind="room">Room service</button>
-          <button class="btn" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button></div>` : ''}</div>
+    paint(shell('#/', html`
+      <div class="floorbar">
+        <div><h1>Tables and orders</h1><p class="sub quiet" style="margin-top:4px">Tap a free table to start an order. Tap a busy one to add dishes or take payment.</p></div>
+        ${can('orders.edit') ? html`<div class="startbar" role="group" aria-label="Start an order">
+          <button class="btn ${ui.picking === 'table' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="table">New table order</button>
+          <button class="btn ${ui.picking === 'room' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="room">Room service</button>
+          <button class="btn ${ui.picking === 'takeaway' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button></div>` : ''}
+      </div>
       ${errorBox()}
-      ${can('bills.print') ? html`<form class="row" style="margin-bottom:16px"><input class="in" style="max-width:260px" data-model="findNo" placeholder="Find a bill: number or its end" value="${ui.findNo ?? ''}">
-        <button class="btn" type="submit" data-act="findBill" data-submit>Find</button>
-        ${ui.found ? (ui.found.length ? ui.found.map((b) => html`<a class="chip link" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`) : ''}</form>` : ''}
       ${ui.picking ? newOrderForm() : ''}
-      ${can('orders.edit') && ui.tables.length ? tableGrid() : ''}
-      ${ui.orders.length ? html`<div class="tiles">${ui.orders.map(tile)}</div>` : html`<p class="quiet">No open orders. Start one above.</p>`}`));
+      <div class="row between" style="margin-bottom:14px;align-items:center">
+        <div class="counts" style="margin:0">
+          <span class="badge billed">${n('billed')} to pay</span><span class="badge new">${n('new')} not sent</span>
+          <span class="badge open">${n('open')} with kitchen</span><span class="badge tab">${plural(n('tab'), 'tab')}</span>
+          <span class="small quiet" style="align-self:center">Running total ${rs(onFloor)}</span></div>
+        ${can('bills.print') ? html`<form class="findbill" role="search"><label class="vh" for="findNo">Find a bill</label><input class="in" id="findNo" data-model="findNo" placeholder="Find a bill: number or its end" value="${ui.findNo ?? ''}" inputmode="search">
+          <button class="btn" type="submit" data-act="findBill" data-submit>Find bill</button></form>` : ''}
+      </div>
+      ${ui.found ? html`<div class="found" role="status">${ui.found.length ? ui.found.map((b) => html`<a class="chip" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`}</div>` : ''}
+      ${showGrid ? tableGrid() : ''}
+      <div class="sect"><h2>${showGrid ? 'Room service, takeaway and tabs' : 'Open orders'}</h2>
+        ${rest.length ? html`<span class="small quiet">Bills to pay first, then oldest</span>` : ''}</div>
+      ${rest.length ? html`<div class="olist">${rest.map(card)}</div>` : html`<p class="empty">${showGrid ? 'No room service, takeaway or tab open.' : 'No open orders. Start one above.'}</p>`}`));
   };
   rerender();
 }
@@ -224,23 +287,27 @@ function tableGrid() {
   // An open order at a table that is not in the list (typed by hand) still shows, at the end.
   const listed = new Set(ui.tables.map((t) => t.toLowerCase()));
   const cells = [...ui.tables, ...[...busy.values()].filter((o) => !listed.has(o.place.toLowerCase())).map((o) => o.place)];
-  return html`<div style="margin-bottom:18px"><p class="small quiet" style="font-weight:600;margin-bottom:6px">Tables · tap a free one to start${ui.tablesFixed ? '' : ' (tables used lately; set your own list in Settings, Tables)'}</p>
+  const free = cells.filter((t) => !busy.has(t.toLowerCase())).length;
+  return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${cells.length}</span></h2>
+      <div class="legend" aria-hidden="true"><span><i class="free"></i>Free</span><span><i class="new"></i>Not sent</span><span><i class="open"></i>With kitchen</span><span><i class="billed"></i>To pay</span><span><i class="tab"></i>Tab</span></div></div>
+    ${ui.tablesFixed ? '' : html`<p class="small quiet" style="margin:-4px 0 10px">Showing tables used lately. Set your own list in Settings, Tables.</p>`}
     <div class="tgrid">${cells.map((t) => {
       const o = busy.get(t.toLowerCase());
-      if (!o) return html`<button type="button" class="tcell free" data-act="quickTable" data-place="${t}">${t}</button>`;
-      const href = o.status === 'billed' ? `#/settle/${o.bill.id}` : `#/order/${o.id}`;
-      return html`<a class="tcell ${o.status}" href="${href}">${t}<span>${o.status === 'billed' ? 'bill out' : rs(o.itemsPaise)}</span></a>`;
-    })}</div></div>`;
+      if (!o) return html`<button type="button" class="tcell free" data-act="quickTable" data-place="${t}" aria-label="${t}, free: start an order"><span class="tn">${t}</span><span class="ts">Free</span></button>`;
+      const s = orderState(o);
+      return html`<a class="tcell ${s}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${t}</span>
+        <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
+    })}</div>`;
 }
 actions.quickTable = async (d) => { const r = await api('POST', B() + '/orders', { kind: 'table', place: d.place }); go(`#/order/${r.id}`); };
 function newOrderForm() {
   const k = ui.picking;
-  return html`<form class="panel" style="margin-bottom:16px;max-width:560px">
+  return html`<form class="panel" style="margin-bottom:18px;max-width:640px">
     <h2>${k === 'table' ? 'New table order' : k === 'room' ? 'Room service' : 'Takeaway'}</h2>
     ${k === 'table' ? html`<div class="grid2"><label class="f">Table<input class="in" data-model="place" autofocus placeholder="e.g. T4"></label>
       <label class="f">Guests<input class="in" inputmode="numeric" data-model="covers"></label></div>
       <label class="f">Guest name (for a tab, optional)<input class="in" data-model="guestName"></label>` : ''}
-    ${k === 'room' ? (cache.stays.length ? html`<div class="chips">${cache.stays.map((s) => html`<button type="button" class="chip" aria-pressed="${ui.stayId === s.id}" data-act="pickStay" data-id="${s.id}">Room ${s.room} · ${s.guestName}</button>`)}</div>`
+    ${k === 'room' ? (cache.stays.length ? html`<div class="f">Which room<div class="chips">${cache.stays.map((s) => html`<button type="button" class="chip" aria-pressed="${ui.stayId === s.id}" data-act="pickStay" data-id="${s.id}">Room ${s.room} · ${s.guestName}</button>`)}</div></div>`
       : html`<p class="quiet">No room has an open stay. Open one on Rooms and credit.</p>`) : ''}
     ${k === 'takeaway' ? html`<label class="f">Guest name (optional)<input class="in" data-model="guestName" autofocus></label>` : ''}
     <div class="row"><button class="btn pri" type="submit" data-act="openOrder" data-submit>Start order</button><button class="btn" type="button" data-act="newOrder" data-kind="">Cancel</button></div>
@@ -251,7 +318,9 @@ actions.newOrder = (d) => { ui.picking = d.kind || null; ui.stayId = null; ui.er
 actions.pickStay = (d) => { ui.stayId = d.id; rerender(); };
 actions.openOrder = async () => {
   const covers = Number(ui.covers);
-  const r = await api('POST', B() + '/orders', { kind: ui.picking, place: ui.place, stayId: ui.stayId, guestName: ui.guestName, covers: Number.isInteger(covers) && covers > 0 ? covers : undefined });
+  // The server asks for a place on every order; for room service it is the chosen room (the server then names it from the stay).
+  const stay = ui.picking === 'room' ? cache.stays.find((s) => s.id === ui.stayId) : null;
+  const r = await api('POST', B() + '/orders', { kind: ui.picking, place: stay ? `Room ${stay.room}` : ui.place, stayId: ui.stayId, guestName: ui.guestName, covers: Number.isInteger(covers) && covers > 0 ? covers : undefined });
   go(`#/order/${r.id}`);
 };
 
@@ -263,54 +332,76 @@ async function orderScreen(id) {
   ui.cat = 'All'; ui.q = '';
   rerender = () => {
     const o = ui.order;
-    if (o.status === 'billed' || o.status === 'closed') { paint(shell('#/', html`<p>This order is already billed. <a href="#/">Back to tables</a></p>`)); return; }
+    if (o.status === 'billed' || o.status === 'closed') { paint(shell('#/', html`<p class="empty">This order is already billed. <a href="#/">Back to tables</a></p>`)); return; }
     const menu = cache.menu.filter((m) => m.active);
     const cats = ['All', ...new Set(menu.map((m) => m.category))];
     const qty = (itemId) => o.lines.find((l) => l.itemId === itemId)?.qty ?? 0;
     const unsent = o.lines.some((l) => l.qty > l.sentQty);
+    const newCount = o.lines.reduce((t, l) => t + Math.max(0, l.qty - l.sentQty), 0);
+    const count = o.lines.reduce((n, l) => n + l.qty, 0);
+    const total = o.lines.reduce((t, l) => t + l.qty * l.pricePaise, 0);
+    const q = ui.q.trim().toLowerCase();
+    const shown = menu.filter((m) => (q ? m.name.toLowerCase().includes(q) || m.category.toLowerCase().includes(q) : ui.cat === 'All' || m.category === ui.cat));
+    const line = (l) => html`<div>
+      <div class="line"><div class="grow"><div class="nm">${l.name}</div>
+          <div class="sub">${rs(l.pricePaise)} each${l.sentQty && l.qty > l.sentQty ? ` · ${l.sentQty} sent, ${l.qty - l.sentQty} new` : ''}</div></div>
+        <button class="sq" type="button" data-act="less" data-id="${l.itemId}" aria-label="One less ${l.name}">−</button>
+        <span class="qty" aria-label="${l.qty} of ${l.name}">${l.qty}</span>
+        <button class="sq" type="button" data-act="add" data-id="${l.itemId}" aria-label="One more ${l.name}">+</button>
+        <span class="lt">${rs(l.qty * l.pricePaise)}</span></div>
+      ${ui.asking === l.itemId ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>Already sent to the kitchen.</strong> Why cancel one?</p>
+        <div class="chips">${reasonsOf('kot_cancel').map((r) => html`<button type="button" class="chip" data-act="lessWhy" data-id="${l.itemId}" data-r="${r.id}">${r.label}</button>`)}
+        <button type="button" class="chip" data-act="lessNo">Keep it</button></div></div>` : ''}</div>`;
+    const fresh = o.lines.filter((l) => l.qty > l.sentQty);
+    const sent = o.lines.filter((l) => l.qty <= l.sentQty);
     paint(shell('#/', html`<div class="order">
       <section class="menu" aria-label="Menu">
-        <input class="in" type="search" data-model="q" data-live placeholder="Search the menu" value="${ui.q}" aria-label="Search the menu" autocomplete="off">
-        ${ui.q ? '' : html`<div class="chips">${cats.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.cat === c}" data-act="cat" data-c="${c}">${c}</button>`)}</div>`}
-        <div class="items">${menu.filter((m) => (ui.q ? m.name.toLowerCase().includes(ui.q.trim().toLowerCase()) : ui.cat === 'All' || m.category === ui.cat)).map((m) => html`<button type="button" class="item" data-act="add" data-id="${m.id}">
-          <strong>${m.name}</strong><span class="quiet small">${rs(m.pricePaise)}</span>${qty(m.id) ? html`<span class="q">${qty(m.id)}</span>` : ''}</button>`)}</div>
+        <form class="menu-search" role="search"><input class="in" type="search" data-model="q" data-live placeholder="Search dishes and drinks" value="${ui.q}" aria-label="Search the menu" autocomplete="off" enterkeyhint="done">
+          ${q && shown.length ? html`<button class="vh" type="submit" data-act="addFirst" data-id="${shown[0].id}" data-submit tabindex="-1">Add ${shown[0].name}</button>` : ''}</form>
+        ${q ? html`<p class="small quiet">${shown.length ? html`${plural(shown.length, 'match', 'matches')}. Press Enter to add <strong>${shown[0].name}</strong>.` : 'Nothing on the menu matches.'}</p>` : ''}
+        <div class="menu-body">
+          ${q ? html`<div></div>` : html`<nav class="cats" aria-label="Menu categories">${cats.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.cat === c}" data-act="cat" data-c="${c}">${c}<span class="c">${c === 'All' ? menu.length : menu.filter((m) => m.category === c).length}</span></button>`)}</nav>`}
+          <div class="items">${shown.map((m) => html`<button type="button" class="item ${qty(m.id) ? 'has' : ''}" data-act="add" data-id="${m.id}" data-station="${m.station}" aria-label="Add ${m.name}, ${rs(m.pricePaise)}${qty(m.id) ? `, ${qty(m.id)} on the order` : ''}">
+            <strong>${m.name}</strong><span class="p">${rs(m.pricePaise)}${m.station === 'bar' ? ' · Bar' : ''}</span>${qty(m.id) ? html`<span class="q" aria-hidden="true">${qty(m.id)}</span>` : ''}</button>`)}</div>
+        </div>
       </section>
       <section class="ticket panel" aria-label="Order" id="ticket">
-        <div class="row" style="justify-content:space-between"><div><h2>${o.place}</h2><p class="quiet small">${o.guestName ?? ''}${o.status === 'tab' ? ' · tab since ' + o.openedShiftDay : ''}</p></div>
-          <a class="btn" href="#/">Back</a></div>
-        ${errorBox()}
-        ${ui.kotDone ? html`<div class="msg ok" role="status">${ui.kotDone}</div>` : ''}
-        <div>${o.lines.length ? o.lines.map((l) => html`<div>
-            <div class="line"><div class="grow"><div><strong>${l.name}</strong></div>
-              <div class="sent ${l.qty > l.sentQty ? 'new' : ''}">${l.sentQty === 0 ? 'Not sent to kitchen' : l.qty > l.sentQty ? `${l.sentQty} sent · ${l.qty - l.sentQty} new` : 'Sent to kitchen'}</div></div>
-              <button class="sq" type="button" data-act="less" data-id="${l.itemId}" aria-label="One less ${l.name}">−</button>
-              <span style="width:22px;text-align:center;font-weight:700">${l.qty}</span>
-              <button class="sq" type="button" data-act="add" data-id="${l.itemId}" aria-label="One more ${l.name}">+</button>
-              <span class="num" style="width:76px;font-weight:600">${rs(l.qty * l.pricePaise)}</span></div>
-            ${ui.asking === l.itemId ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Already sent to the kitchen.</strong> Why cancel one?</p>
-              <div class="chips">${reasonsOf('kot_cancel').map((r) => html`<button type="button" class="chip" data-act="lessWhy" data-id="${l.itemId}" data-r="${r.id}">${r.label}</button>`)}
-              <button type="button" class="chip" data-act="lessNo">Keep it</button></div></div>` : ''}
-          </div>`) : html`<p class="quiet">Tap dishes to add them.</p>`}</div>
-        <div class="sums"><div class="big"><span>Items</span><span>${rs(o.lines.reduce((s, l) => s + l.qty * l.pricePaise, 0))}</span></div></div>
-        <div class="row"><button class="btn grow" type="button" data-act="kot" ${unsent ? '' : 'disabled'}>Send KOT</button>
-          ${can('bills.print') ? html`<button class="btn pri grow" type="button" data-act="toBill" ${!o.lines.length || unsent ? 'disabled' : ''}>Bill</button>` : ''}</div>
-        ${ui.splitting ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Split bill:</strong> choose what moves to a new bill at this table. Each bill gets its own number and GST.</p>
-          ${o.lines.map((l) => html`<div class="line"><span class="grow">${l.name} <span class="quiet small">(${l.qty} on this bill)</span></span>
-            <button class="sq" type="button" data-act="splitLess" data-id="${l.itemId}" aria-label="Move one less ${l.name}">−</button>
-            <span style="width:22px;text-align:center;font-weight:700">${ui.split[l.itemId] ?? 0}</span>
-            <button class="sq" type="button" data-act="splitMore" data-id="${l.itemId}" aria-label="Move one more ${l.name}">+</button></div>`)}
-          <div class="row" style="margin-top:10px"><button class="btn pri" type="button" data-act="splitGo">Move to a new bill</button><button class="btn" type="button" data-act="splitNo">Cancel</button></div></div>` : ''}
-        <div class="row">${o.lines.reduce((n, l) => n + l.qty, 0) > 1 && !ui.splitting ? html`<button class="btn grow" type="button" data-act="splitAsk">Split bill</button>` : ''}
-          ${o.status === 'open' ? html`<button class="btn grow" type="button" data-act="keepTab">Keep open as a tab</button>` : ''}
-          ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>` : ''}</div>
-        ${ui.tabAsk ? html`<form class="msg warn"><label class="f">Guest name for the tab<input class="in" data-model="tabGuest" value="${o.guestName ?? ''}" autofocus></label>
-          <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
+        <div class="tk-head"><div><p class="tiny quiet" style="font-weight:700">${KIND_TEXT[o.kind] ?? o.kind}${o.status === 'tab' ? ` · tab since ${dayName(o.openedShiftDay)}` : ''}</p><h2>${o.place}</h2>
+            <p class="quiet small">${o.guestName ? o.guestName + ' · ' : ''}opened ${time(o.openedAt)}</p></div>
+          <a class="btn" href="#/">Tables</a></div>
+        <div class="tk-body">
+          ${errorBox()}
+          ${ui.kotDone ? html`<div class="msg ok" role="status">${ui.kotDone}</div>` : ''}
+          ${o.lines.length ? '' : html`<p class="empty" style="margin-top:12px">Tap dishes on the menu to add them.</p>`}
+          ${fresh.length ? html`<div class="tk-group new"><p class="label"><span>New · not sent yet</span><span>${newCount}</span></p>${fresh.map(line)}</div>` : ''}
+          ${sent.length ? html`<div class="tk-group"><p class="label"><span>Sent to kitchen or bar</span><span>${sent.reduce((t, l) => t + l.qty, 0)}</span></p>${sent.map(line)}</div>` : ''}
+          ${ui.splitting ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Split bill:</strong> choose what moves to a new bill at this table. Each bill gets its own number and GST.</p>
+            ${o.lines.map((l) => html`<div class="line"><span class="grow">${l.name} <span class="quiet small">(${l.qty} on this bill)</span></span>
+              <button class="sq" type="button" data-act="splitLess" data-id="${l.itemId}" aria-label="Move one less ${l.name}">−</button>
+              <span class="qty">${ui.split[l.itemId] ?? 0}</span>
+              <button class="sq" type="button" data-act="splitMore" data-id="${l.itemId}" aria-label="Move one more ${l.name}">+</button></div>`)}
+            <div class="row" style="margin-top:10px"><button class="btn pri" type="button" data-act="splitGo">Move to a new bill</button><button class="btn" type="button" data-act="splitNo">Cancel</button></div></div>` : ''}
+          ${ui.tabAsk ? html`<form class="msg warn"><label class="f">Guest name for the tab<input class="in" data-model="tabGuest" value="${o.guestName ?? ''}" autofocus></label>
+            <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
+        </div>
+        <div class="tk-foot">
+          <div class="tk-total"><span>${plural(count, 'item')}</span><strong>${rs(total)}</strong></div>
+          <div class="tk-main ${can('bills.print') ? '' : 'one'}">
+            <button class="btn ${unsent ? 'pri' : ''}" type="button" data-act="kot" ${unsent ? '' : 'disabled'}>Send KOT${unsent ? ` · ${newCount} new` : ''}</button>
+            ${can('bills.print') ? html`<button class="btn ${o.lines.length && !unsent ? 'go' : ''}" type="button" data-act="toBill" ${!o.lines.length || unsent ? 'disabled' : ''}>Bill</button>` : ''}</div>
+          ${unsent && can('bills.print') ? html`<p class="hint">Send the new dishes to the kitchen before billing.</p>` : ''}
+          <div class="tk-more">${count > 1 && !ui.splitting ? html`<button class="btn" type="button" data-act="splitAsk">Split bill</button>` : ''}
+            ${o.status === 'open' ? html`<button class="btn" type="button" data-act="keepTab">Keep as a tab</button>` : ''}
+            ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>` : ''}</div>
+        </div>
       </section></div>
-      <div class="orderbar"><span>${o.place} · ${o.lines.reduce((n, l) => n + l.qty, 0)} items · ${rs(o.lines.reduce((t, l) => t + l.qty * l.pricePaise, 0))}${unsent ? ' · not sent' : ''}</span>
-        <button class="btn" type="button" data-act="toTicket" style="min-height:40px">View order</button></div>`));
+      <div class="orderbar"><div class="ob-t">${o.place} · ${rs(total)}<span class="small" role="status">${ui.kotDone && !unsent ? 'KOT sent ✓' : `${plural(count, 'item')}${unsent ? ` · ${newCount} not sent` : ''}`}</span></div>
+        <div class="row" style="gap:8px;flex-wrap:nowrap">${unsent ? html`<button class="btn pri" type="button" data-act="kot">Send KOT</button>` : ''}
+          <button class="btn" type="button" data-act="toTicket">${unsent ? 'Order' : 'View order'}</button></div></div>`));
   };
   rerender();
 }
+actions.addFirst = (d) => { ui.q = ''; change(d.id, 1); root.querySelector('[data-model="q"]')?.focus(); };
 actions.toTicket = () => document.getElementById('ticket')?.scrollIntoView({ behavior: 'smooth' });
 actions.cat = (d) => { ui.cat = d.c; rerender(); };
 // Dish taps show at once and are saved one after another behind the screen. Sending the KOT, billing or leaving waits for them.
@@ -394,23 +485,33 @@ async function billScreen(orderId) {
     const raw = taxable + nonGst + 2 * half;
     const total = Math.floor((raw * 2 + 100) / 200) * 100;
     const near = e && e.warn1_paise !== null && e.year_paise + total >= e.warn1_paise;
-    paint(shell('#/', html`<div class="settle">
-      <section class="panel"><div class="row" style="justify-content:space-between"><h2>${o.place} · bill</h2><a class="btn" href="#/order/${o.id}">Back</a></div>
-        ${errorBox()}
-        ${ents.length > 1 ? html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">Bill in the name of</p>
-          <div class="chips">${ents.map((x) => html`<button type="button" class="chip" aria-pressed="${ui.entityId === x.id}" data-act="ent" data-id="${x.id}">${x.name}${x.gst_registered ? ` (GST ${x.gst_rate_bp / 100}%)` : ' (no GST)'}</button>`)}</div></div>` : ''}
+    const ready = e && !(ui.disc && !ui.discReason);
+    paint(shell('#/', html`
+      ${pageHead(html`Bill for ${o.place}`, 'Check the name on the bill and any discount, then print. A printed bill cannot be edited.', html`<a class="btn" href="#/order/${o.id}">Back to the order</a>`)}
+      ${errorBox()}
+      <div class="two rev">
+      <section class="panel">
+        ${ents.length > 1 ? html`<div><p class="label">Bill in the name of</p>
+          <div class="choice">${ents.map((x) => html`<button type="button" class="chip" aria-pressed="${ui.entityId === x.id}" data-act="ent" data-id="${x.id}"><span>${x.name}</span><span class="s">${x.gst_registered ? `GST ${x.gst_rate_bp / 100}%` : 'No GST'}${x.is_default ? ' · usual' : ''}</span></button>`)}</div></div>` : ''}
         ${near ? html`<div class="msg warn">${e.name} has ${rs(e.year_paise)} billed this year${e.stop_paise ? `; it stops at ${rs(e.stop_paise)}` : ''}.</div>` : ''}
-        <div><p class="small quiet" style="font-weight:600;margin-bottom:6px">Discount</p>
+        <div><p class="label">Discount</p>
           <div class="chips">${[0, 5, 10, 15].map((p) => html`<button type="button" class="chip" aria-pressed="${ui.disc === p}" data-act="disc" data-p="${p}">${p ? p + '%' : 'None'}</button>`)}</div>
-          ${ui.disc ? html`<p class="small quiet" style="margin:10px 0 6px;font-weight:600">Reason (required)</p><div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.discReason === r.id}" data-act="discWhy" data-id="${r.id}">${r.label}</button>`)}</div>` : ''}</div>
+          ${ui.disc ? html`<p class="label" style="margin-top:14px">Reason for the discount (required)</p><div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.discReason === r.id}" data-act="discWhy" data-id="${r.id}">${r.label}</button>`)}</div>` : ''}</div>
         <label class="f">Guest name on the bill (optional)<input class="in" data-model="guestName" value="${ui.guestName ?? o.guestName ?? ''}"></label>
-        <div class="sums">${o.lines.map((l) => html`<div><span>${l.qty} × ${l.name}${noTax(l) ? html` <span class="small quiet">no GST</span>` : ''}</span><span>${rs(l.qty * l.pricePaise)}</span></div>`)}
-          ${disc ? html`<div><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-disc)}</span></div>` : ''}
-          ${nonGst ? html`<div><span class="quiet">Liquor, no GST</span><span>${rs(nonGst)}</span></div>` : ''}
-          ${half ? html`<div><span class="quiet">CGST ${e.gst_rate_bp / 200}%</span><span>${rs(half)}</span></div><div><span class="quiet">SGST ${e.gst_rate_bp / 200}%</span><span>${rs(half)}</span></div>` : ''}
-          ${total !== raw ? html`<div><span class="quiet">Round off</span><span>${rs(total - raw)}</span></div>` : ''}
-          <div class="big"><span>Total</span><span>${rs(total)}</span></div></div>
-        <button class="btn pri" type="button" data-act="printBill" ${!e || (ui.disc && !ui.discReason) ? 'disabled' : ''}>Print bill</button>
+      </section>
+      <section class="panel">
+        <div class="preview" aria-label="Bill preview">
+          <div class="pl"><strong>${e?.name ?? 'Choose a billing name'}</strong><span class="quiet">${o.place}</span></div><hr>
+          ${o.lines.map((l) => html`<div class="pl"><span>${l.qty} × ${l.name}${noTax(l) ? html` <span class="small quiet">no GST</span>` : ''}</span><span>${rs(l.qty * l.pricePaise)}</span></div>`)}<hr>
+          <div class="pl"><span class="quiet">Items</span><span>${rs(gross)}</span></div>
+          ${disc ? html`<div class="pl"><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-disc)}</span></div>` : ''}
+          ${nonGst ? html`<div class="pl"><span class="quiet">Liquor, no GST</span><span>${rs(nonGst)}</span></div>` : ''}
+          ${half ? html`<div class="pl"><span class="quiet">CGST ${e.gst_rate_bp / 200}%</span><span>${rs(half)}</span></div><div class="pl"><span class="quiet">SGST ${e.gst_rate_bp / 200}%</span><span>${rs(half)}</span></div>` : ''}
+          ${total !== raw ? html`<div class="pl"><span class="quiet">Round off</span><span>${rs(total - raw)}</span></div>` : ''}
+          <hr><div class="pl tot"><span>Total</span><span>${rs(total)}</span></div>
+        </div>
+        <button class="btn go big wide" type="button" data-act="printBill" ${ready ? '' : 'disabled'}>Print bill · ${rs(total)}</button>
+        ${ui.disc && !ui.discReason ? html`<p class="hint">Choose a reason for the discount to print.</p>` : ''}
       </section></div>`));
   };
   rerender();
@@ -443,33 +544,45 @@ async function settleScreen(billId) {
     const amountField = ['cash', 'upi', 'card', 'advance'].includes(m);
     const advanceAccts = [...cache.stays.map((s) => ({ id: s.accountId, name: `Room ${s.room} · ${s.guestName}`, bal: s.balancePaise })), ...cache.credit.map((c) => ({ id: c.id, name: c.name, bal: c.balancePaise }))].filter((a) => a.bal < 0);
     const modes = [['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card'], ['room', 'Post to room'], ['credit', 'Credit account'], ['comp', 'Complimentary'], ['advance', 'Use advance']];
-    paint(shell('#/', html`<div class="settle">
-      <section class="panel"><div class="row" style="justify-content:space-between"><h2>${ui.bill.place} · ${ui.bill.billNo}</h2><a class="btn" href="#/">Tables</a></div>
-        <p class="small quiet">${ui.bill.entityName}${ui.bill.gstRegistered ? '' : ' · no GST'}</p>
-        <div class="sums">${ui.bill.items.map((l) => html`<div><span>${l.qty} × ${l.name}</span><span>${rs(l.amountPaise)}</span></div>`)}
-          ${ui.bill.discountPaise ? html`<div><span class="quiet">Discount · ${ui.bill.discountReason}</span><span>${rs(-ui.bill.discountPaise)}</span></div>` : ''}
-          ${ui.bill.nonGstPaise ? html`<div><span class="quiet">Liquor, no GST</span><span>${rs(ui.bill.nonGstPaise)}</span></div>` : ''}
-          ${ui.bill.cgstPaise ? html`<div><span class="quiet">CGST + SGST</span><span>${rs(ui.bill.cgstPaise + ui.bill.sgstPaise)}</span></div>` : ''}
-          <div class="big"><span>This bill</span><span>${rs(ui.bill.totalPaise)}</span></div></div>
-        ${ui.others.length ? html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">Paid together with</p>
+    const done = left === 0 || diffOk(left);
+    // Cash: the note handed over, and the change, worked out as it is typed or tapped.
+    const thisAmt = left > 0 ? (ui.amount !== undefined ? toPaise(ui.amount) : shareOf(due, left)) : null;
+    const given = ui.tendered ? toPaise(ui.tendered) : null;
+    const notes = thisAmt ? [...new Set([Math.ceil(thisAmt / 10000) * 10000, Math.ceil(thisAmt / 50000) * 50000, Math.ceil(thisAmt / 100000) * 100000, Math.ceil(thisAmt / 200000) * 200000])].filter((n) => n > thisAmt).slice(0, 4) : [];
+    paint(shell('#/', html`
+      ${pageHead(html`Take payment · ${ui.bill.place}`, `Bill ${ui.bill.billNo} · ${ui.bill.entityName}${ui.bill.gstRegistered ? '' : ' · no GST'}`, html`<a class="btn" href="#/">Tables</a>`)}
+      <div class="two">
+      <section class="panel">
+        <div class="preview">
+          ${ui.bill.items.map((l) => html`<div class="pl"><span>${l.qty} × ${l.name}</span><span>${rs(l.amountPaise)}</span></div>`)}<hr>
+          ${ui.bill.discountPaise ? html`<div class="pl"><span class="quiet">Discount · ${ui.bill.discountReason}</span><span>${rs(-ui.bill.discountPaise)}</span></div>` : ''}
+          ${ui.bill.nonGstPaise ? html`<div class="pl"><span class="quiet">Liquor, no GST</span><span>${rs(ui.bill.nonGstPaise)}</span></div>` : ''}
+          ${ui.bill.cgstPaise ? html`<div class="pl"><span class="quiet">CGST + SGST</span><span>${rs(ui.bill.cgstPaise + ui.bill.sgstPaise)}</span></div>` : ''}
+          <div class="pl tot"><span>This bill</span><span>${rs(ui.bill.totalPaise)}</span></div></div>
+        ${ui.others.length ? html`<div><p class="label">Paid together with (one payment for several bills)</p>
           <div class="chips">${ui.others.map((o) => html`<button type="button" class="chip" aria-pressed="${ui.together.includes(o.bill.id)}" data-act="together" data-id="${o.bill.id}">${o.place} · ${o.bill.billNo} · ${rs(o.bill.totalPaise)}</button>`)}</div></div>` : ''}
-        <div class="sums"><div class="big"><span>To pay</span><span>${rs(due)}</span></div></div>
-        <div class="row">${can('bills.void') ? html`<button class="btn danger" type="button" data-act="voidAsk">Void bill</button>` : ''}<button class="btn" type="button" data-act="reprint">Reprint</button></div>
+        <div class="row"><button class="btn" type="button" data-act="reprint">Reprint bill</button>${can('bills.void') ? html`<button class="btn danger" type="button" data-act="voidAsk">Void bill</button>` : ''}</div>
         ${can('bills.void') ? '' : html`<p class="small quiet">Voiding a bill needs a manager: they sign in with their PIN on this device.</p>`}
-        ${ui.voidAsk ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Void ${ui.bill.billNo}?</strong> The number stays used, and the order opens again to be billed afresh.</p>
+        ${ui.voidAsk ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>Void ${ui.bill.billNo}?</strong> The number stays used, and the order opens again to be billed afresh.</p>
           <div class="chips">${reasonsOf('void').map((r) => html`<button type="button" class="chip" data-act="voidGo" data-r="${r.id}">${r.label}</button>`)}<button type="button" class="chip" data-act="voidAsk">Keep the bill</button></div></div>` : ''}
       </section>
-      <section class="panel"><h2>How was it paid?</h2>
-        ${!ui.pays.length && !ui.shares ? html`<div class="quick"><span class="small quiet" style="width:100%">Paid in full, one tap:</span>
-          <button class="btn pri" type="button" data-act="quick" data-m="cash">Cash ${rs(due)}</button>
-          ${cache.payAccounts.filter((a) => a.active).map((a) => html`<button class="btn" type="button" data-act="quick" data-m="upi" data-id="${a.id}">UPI · ${a.name}</button>`)}</div>
-          <p class="small quiet">Or below: card, room, credit, complimentary, part payments, change.</p>` : ''}
-        <div class="chips">${modes.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${m === k}" data-act="mode" data-m="${k}">${t}</button>`)}</div>
-        <div class="row small"><span class="quiet">Split equally between</span>${[2, 3, 4, 5, 6].map((n) => html`<button type="button" class="chip" style="min-height:36px" aria-pressed="${ui.shares === n}" data-act="shares" data-n="${n}">${n}</button>`)}
-          ${ui.shares ? html`<span>Share ${Math.min(ui.pays.length + 1, ui.shares)} of ${ui.shares}</span>` : ''}</div>
+      <section class="panel">
+        <div class="due"><div><span class="k">${ui.together.length ? `To pay · ${ui.together.length + 1} bills` : 'To pay'}</span><div class="v">${rs(due)}</div></div>
+          ${ui.pays.length ? html`<div style="text-align:right"><span class="k">${left > 0 ? 'Still to pay' : left < 0 ? 'Paid over' : 'Paid'}</span><div class="v" style="font-size:24px;color:${left > 0 ? 'var(--warn)' : 'var(--go-dark)'}">${rs(Math.abs(left) || paid)}</div></div>` : ''}</div>
+        ${errorBox()}
+        ${!ui.pays.length && !ui.shares ? html`<div><p class="label">Paid in full · one tap settles</p><div class="quick">
+          <button class="btn go" type="button" data-act="quick" data-m="cash"><span>Cash</span><span class="s">${rs(due)} exact</span></button>
+          ${cache.payAccounts.filter((a) => a.active).map((a) => html`<button class="btn pri" type="button" data-act="quick" data-m="upi" data-id="${a.id}"><span>UPI</span><span class="s">${a.name}</span></button>`)}</div></div>
+          <p class="divider">Or card, room, credit, complimentary, change, part payments</p>` : ''}
+        <div><p class="label">${ui.pays.length ? 'Next payment' : 'Payment by'}</p>
+          <div class="chips">${modes.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${m === k}" data-act="mode" data-m="${k}">${t}</button>`)}</div></div>
+        <div class="row small"><span class="quiet" style="font-weight:650">Split equally between</span>${[2, 3, 4, 5, 6].map((n) => html`<button type="button" class="chip" aria-pressed="${ui.shares === n}" data-act="shares" data-n="${n}" aria-label="Split equally between ${n}">${n}</button>`)}
+          ${ui.shares ? html`<span class="badge open">Share ${Math.min(ui.pays.length + 1, ui.shares)} of ${ui.shares}</span>` : ''}</div>
         <form class="grid2">
-          ${amountField ? html`<label class="f">${m === 'cash' ? 'Amount for this bill (₹)' : 'Amount (₹)'}<input class="in" inputmode="decimal" data-model="amount" value="${ui.amount ?? (left > 0 ? rupees(shareOf(due, left)) : '')}"></label>` : ''}
-          ${m === 'cash' ? html`<label class="f">Cash given (₹, optional)<input class="in" inputmode="decimal" data-model="tendered" value="${ui.tendered ?? ''}"></label>` : ''}
+          ${amountField ? html`<label class="f">${m === 'cash' ? 'Amount for this bill (₹)' : 'Amount (₹)'}<input class="in" inputmode="decimal" data-model="amount" data-live value="${ui.amount ?? (left > 0 ? rupees(shareOf(due, left)) : '')}"></label>` : ''}
+          ${m === 'cash' ? html`<label class="f">Cash given (₹, optional)<input class="in" inputmode="decimal" data-model="tendered" data-live value="${ui.tendered ?? ''}"></label>
+            ${notes.length ? html`<div class="f" style="grid-column:1/-1">Note handed over<div class="chips">${notes.map((n) => html`<button type="button" class="chip" aria-pressed="${given === n}" data-act="tender" data-p="${n}">${rs(n)}</button>`)}</div></div>` : ''}
+            ${given && thisAmt && given > thisAmt ? html`<p class="change" role="status" style="grid-column:1/-1">Give change: ${rs(given - thisAmt)}</p>` : ''}` : ''}
           ${m === 'upi' ? html`<div class="f" style="grid-column:1/-1">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
           ${m === 'card' ? html`<label class="f">Approval code (from the slip)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="6" autocomplete="off"></label>
             <label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" value="${ui.cardLast4 ?? ''}" maxlength="4" autocomplete="off"></label>` : ''}
@@ -481,22 +594,22 @@ async function settleScreen(billId) {
             <div class="f">Reason (required)<div class="chips">${reasonsOf('comp').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.compReason === r.id}" data-act="pick" data-k="compReason" data-id="${r.id}">${r.label}</button>`)}</div></div>` : ''}
           ${m === 'advance' ? html`<div class="f" style="grid-column:1/-1">Whose advance${advanceAccts.length ? html`<div class="chips">${advanceAccts.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === a.id}" data-act="pick" data-k="debtorAccountId" data-id="${a.id}">${a.name} · ${rs(-a.bal)} left</button>`)}</div>` : html`<span>Nobody has an advance.</span>`}</div>` : ''}
         </form>
-        ${errorBox()}
+        <div><button class="btn ${left > 0 ? 'pri' : ''}" type="button" data-act="addPay" ${left > 0 ? '' : 'disabled'}>Add this payment</button></div>
         ${ui.pays.length && left > 0 ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>${rs(left)} still to pay.</strong> Take another payment, or mark it as a discount (the printed bill stays as it is):</p>
           <div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.diff?.kind === 'discount' && ui.diff.reasonId === r.id}" data-act="diffDisc" data-id="${r.id}">${r.label}</button>`)}</div></div>` : ''}
         ${left < 0 ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Paid ${rs(-left)} more than the bill.</strong> Mark it as a tip for staff, or remove the payment and enter cash given so change is worked out.</p>
           <button type="button" class="chip" aria-pressed="${ui.diff?.kind === 'tip'}" data-act="diffTip">Mark ${rs(-left)} as a tip</button></div>` : ''}
-        ${ui.mismatch ? html`<div class="msg warn"><p style="margin-bottom:8px">${ui.mismatch}</p><button class="btn" type="button" data-act="settle" data-confirm="1">Settle anyway</button></div>` : ''}
-        <div><button class="btn" type="button" data-act="addPay" ${left > 0 ? '' : 'disabled'}>Add this payment</button></div>
-        <div><p class="small quiet" style="font-weight:600">Payments</p>
-          ${ui.pays.length ? ui.pays.map((p, i) => html`<div class="line"><strong style="width:130px">${p.label}</strong><span class="grow quiet small">${p.detail}</span><span class="num">${rs(p.amountPaise)}</span>
-            <button class="btn" type="button" data-act="dropPay" data-i="${i}">Remove</button></div>`) : html`<p class="quiet small">None yet. The bill closes only when payments add up to the total.</p>`}</div>
-        <div class="row" style="justify-content:space-between"><strong style="font-size:17px;color:${left === 0 || diffOk(left) ? 'var(--accent)' : 'inherit'}">${left === 0 ? 'Paid in full' : diffOk(left) ? (left > 0 ? `Paid, with ${rs(left)} discount` : `Paid, with ${rs(-left)} tip`) : left > 0 ? 'Left to pay ' + rs(left) : 'Over by ' + rs(-left)}</strong>
-          <button class="btn pri" type="button" data-act="settle" ${(left === 0 || diffOk(left)) && ui.pays.length ? '' : 'disabled'}>Settle</button></div>
+        ${ui.mismatch ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px">${ui.mismatch}</p><button class="btn" type="button" data-act="settle" data-confirm="1">Settle anyway</button></div>` : ''}
+        <div class="paylist"><p class="label">Payments taken</p>
+          ${ui.pays.length ? ui.pays.map((p, i) => html`<div class="line"><strong style="min-width:96px">${p.label}</strong><span class="grow quiet small">${p.detail}</span><span class="num" style="font-weight:700">${rs(p.amountPaise)}</span>
+            <button class="btn ghost" type="button" data-act="dropPay" data-i="${i}" aria-label="Remove ${p.label} ${rs(p.amountPaise)}">Remove</button></div>`) : html`<p class="quiet small">None yet. The bill closes only when payments add up to the total.</p>`}</div>
+        <div class="paybar"><span class="st ${done ? 'ok' : ''}" role="status">${left === 0 ? 'Paid in full' : diffOk(left) ? (left > 0 ? `Paid, with ${rs(left)} discount` : `Paid, with ${rs(-left)} tip`) : left > 0 ? 'Left to pay ' + rs(left) : 'Over by ' + rs(-left)}</span>
+          <button class="btn go" type="button" data-act="settle" ${done && ui.pays.length ? '' : 'disabled'}>Settle bill</button></div>
       </section></div>`));
   };
   rerender();
 }
+actions.tender = (d) => { ui.tendered = rupees(Number(d.p)); rerender(); };
 /** With "split equally", each payment is an equal share; the last share takes what is left (the odd paise). */
 function shareOf(due, left) {
   if (!ui.shares) return left;
@@ -595,26 +708,29 @@ async function doneScreen(billId) {
   rerender = () => {
     const cn = ui.cn;
     const anyLeft = bill.items.some((i) => leftOf(i) > 0);
-    paint(shell('#/', html`<div class="settle">
-    <section class="panel" style="align-items:center">${receipt(bill)}</section>
-    <section class="panel"><h1>${bill.status === 'settled' ? 'Settled' : bill.status === 'void' ? 'Void' : 'Printed, not paid'}</h1>
-      <p>${bill.billNo} · ${bill.place} · ${rs(bill.totalPaise)}</p>
+    const st = bill.status === 'settled' ? ['', '✓', 'Paid and settled'] : bill.status === 'void' ? ['void', '×', 'Void'] : ['wait', '!', 'Printed, not paid'];
+    paint(shell('#/', html`<div class="two rev">
+    <section class="panel">
+      <div class="done-head"><span class="tick ${st[0]}" aria-hidden="true">${st[1]}</span><div><h1>${st[2]}</h1>
+        <p class="quiet">Bill ${bill.billNo} · ${bill.place} · <strong class="money" style="color:var(--ink)">${rs(bill.totalPaise)}</strong></p></div></div>
+      ${bill.status === 'printed' && can('bills.settle') ? html`<a class="btn go big" href="#/settle/${bill.id}">Take payment</a>` : ''}
       ${bill.creditNotes.length ? html`<div class="sums"><div><strong>Money given back</strong></div>${bill.creditNotes.map((n) => html`<div><span>${n.cnNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
       <p class="quiet">The printed bill cannot be edited. Before payment a mistake is voided and billed again; after payment, money given back is a credit note.</p>
       ${errorBox()}
-      <div class="row"><button class="btn pri" type="button" data-act="printDone">Print receipt</button><a class="btn" href="#/">Next order</a>
+      <div class="row"><a class="btn pri big" href="#/">Next order</a><button class="btn" type="button" data-act="printDone">Print receipt</button>
         ${can('bills.refund') && bill.status === 'settled' && anyLeft && !cn ? html`<button class="btn danger" type="button" data-act="cnAsk">Give money back</button>` : ''}</div>
       ${cn ? html`<form class="msg warn" style="display:flex;flex-direction:column;gap:10px"><strong>Credit note on ${bill.billNo}</strong>
         <div class="chips"><button type="button" class="chip" aria-pressed="${cn.full}" data-act="cnFull">Whole bill (what is left)</button><button type="button" class="chip" aria-pressed="${!cn.full}" data-act="cnPart">Chosen items</button></div>
         ${cn.full ? '' : bill.items.filter((i) => leftOf(i) > 0).map((i) => html`<div class="line"><span class="grow">${i.name} <span class="small quiet">(${leftOf(i)} left)</span></span>
-          <button class="sq" type="button" data-act="cnLess" data-id="${i.id}" aria-label="One less ${i.name}">−</button><span style="width:22px;text-align:center;font-weight:700">${cn.qty[i.id] ?? 0}</span>
+          <button class="sq" type="button" data-act="cnLess" data-id="${i.id}" aria-label="One less ${i.name}">−</button><span class="qty" style="width:26px;text-align:center;font-weight:800">${cn.qty[i.id] ?? 0}</span>
           <button class="sq" type="button" data-act="cnMore" data-id="${i.id}" data-max="${leftOf(i)}" aria-label="One more ${i.name}">+</button></div>`)}
         <label class="f">Reason (required)<input class="in" data-model="cnReason" value="${ui.cnReason ?? ''}" placeholder="e.g. Cold food, wrong order"></label>
         <div class="f">Money goes back by<div class="chips">${[['cash', 'Cash from the drawer'], ['upi', 'UPI'], ['card', 'Card machine reversal'], ['account', 'Credit to folio or account'], ['none', 'Nothing (not paid in money)']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${cn.mode === k}" data-act="cnMode" data-m="${k}">${t}</button>`)}</div></div>
         ${cn.mode === 'upi' ? html`<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${cn.payAccountId === a.id}" data-act="cnPick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
         ${cn.mode === 'account' ? html`<div class="chips">${[...cache.stays.map((x) => ({ id: x.accountId, name: `Room ${x.room} · ${x.guestName}` })), ...cache.credit.map((x) => ({ id: x.id, name: x.name }))].map((a) => html`<button type="button" class="chip" aria-pressed="${cn.debtorAccountId === a.id}" data-act="cnPick" data-k="debtorAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
         <div class="row"><button class="btn danger" type="submit" data-act="cnGo" data-submit>Make credit note</button><button class="btn" type="button" data-act="cnNo">Cancel</button></div></form>` : ''}
-    </section></div>`));
+    </section>
+    <section class="panel" style="align-items:center"><p class="label" style="align-self:flex-start">Receipt</p>${receipt(bill)}</section></div>`));
   };
   rerender();
 }
@@ -678,11 +794,26 @@ function printKots(kots) {
 
 async function roomsScreen() {
   await load('stays', 'credit', 'payAccounts');
-  rerender = () => paint(shell('#/rooms', html`<div class="grid2" style="align-items:start">
-    <section class="panel"><h2>In-house rooms</h2>${errorBox()}
-      <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
-        ${cache.stays.map((s) => html`<tr><td>${s.room}</td><td>${s.guestName}</td><td>${s.checkIn}</td><td class="num">${rs(s.balancePaise)}</td>
-          <td><div class="row"><button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}">Take payment</button>
+  rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms and credit', 'In-house guests and credit accounts: what each owes, payments, advances and refunds.')}
+    ${ui.refund ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Refund advance to ${ui.refund.name}</h2>${errorBox()}
+      <p class="quiet small">${rs(ui.refund.max)} of advance is held.</p>
+      <div class="chips">${[['cash', 'Cash from the drawer'], ['upi', 'UPI']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.refundMode ?? 'cash') === k}" data-act="pick" data-k="refundMode" data-id="${k}">${t}</button>`)}</div>
+      <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="refundAmount" value="${ui.refundAmount ?? rupees(ui.refund.max)}" autofocus></label>
+        <label class="f">Note (optional)<input class="in" data-model="refundNote"></label></div>
+      <div class="row"><button class="btn pri" type="submit" data-act="refundGo" data-submit>Refund</button><button class="btn" type="button" data-act="refundNo">Cancel</button></div></form>` : ''}
+    ${ui.recv ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Payment from ${ui.recv.name}</h2>${errorBox()}
+      <div class="chips"><button type="button" class="chip" aria-pressed="${ui.recvKind !== 'advance'}" data-act="pick" data-k="recvKind" data-id="receipt">Against what is owed</button>
+        <button type="button" class="chip" aria-pressed="${ui.recvKind === 'advance'}" data-act="pick" data-k="recvKind" data-id="advance">Advance</button></div>
+      <div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
+      <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="recvAmount" value="${ui.recvAmount ?? ''}" autofocus></label>
+        ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
+        ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
+      <div class="row"><button class="btn pri" type="submit" data-act="recvGo" data-submit>Take payment</button><button class="btn" type="button" data-act="recvNo">Cancel</button></div></form>` : ''}
+  <div class="grid2" style="align-items:start">
+    <section class="panel"><h2>In-house rooms</h2>${ui.recv || ui.refund ? '' : errorBox()}
+      <div class="scroll"><table class="t cards"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
+        ${cache.stays.map((s) => html`<tr><td data-label="Room"><strong>${s.room}</strong></td><td data-label="Guest">${s.guestName}</td><td data-label="Since">${s.checkIn}</td><td class="num" data-label="Owes">${rs(s.balancePaise)}</td>
+          <td class="act"><div class="row"><button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}">Take payment</button>
           ${s.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-max="${-s.balancePaise}">Refund advance</button>` : ''}
           <button class="btn" type="button" data-act="checkOut" data-id="${s.id}">Check out</button></div></td></tr>`)}
       </tbody></table></div>
@@ -690,32 +821,18 @@ async function roomsScreen() {
         <button class="btn pri" type="submit" data-act="openStay" data-submit>Open stay</button></form>` : ''}
     </section>
     <section class="panel"><h2>Credit accounts</h2>
-      <div class="scroll"><table class="t"><thead><tr><th>Name</th><th class="num">Owes</th><th class="num">Limit</th><th></th></tr></thead><tbody>
-        ${cache.credit.map((a) => html`<tr><td>${a.name}${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num">${rs(a.balancePaise)}</td>
-          <td class="num">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td><td><div class="row"><button class="btn" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button>
+      <div class="scroll"><table class="t cards"><thead><tr><th>Name</th><th class="num">Owes</th><th class="num">Limit</th><th></th></tr></thead><tbody>
+        ${cache.credit.map((a) => html`<tr><td data-label="Name"><strong>${a.name}</strong>${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num" data-label="Owes">${rs(a.balancePaise)}</td>
+          <td class="num" data-label="Limit">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td><td class="act"><div class="row"><button class="btn" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button>
           ${a.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${a.id}" data-n="${a.name}" data-max="${-a.balancePaise}">Refund advance</button>` : ''}</div></td></tr>`)}
       </tbody></table></div><p class="small quiet">New credit accounts are made at the settle screen. A negative amount owed is an advance.</p>
     </section>
-    ${ui.refund ? html`<form class="panel" style="grid-column:1/-1;max-width:640px"><h2>Refund advance to ${ui.refund.name}</h2>
-      <p class="quiet small">${rs(ui.refund.max)} of advance is held.</p>
-      <div class="chips">${[['cash', 'Cash from the drawer'], ['upi', 'UPI']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.refundMode ?? 'cash') === k}" data-act="pick" data-k="refundMode" data-id="${k}">${t}</button>`)}</div>
-      <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="refundAmount" value="${ui.refundAmount ?? rupees(ui.refund.max)}"></label>
-        <label class="f">Note (optional)<input class="in" data-model="refundNote"></label></div>
-      <div class="row"><button class="btn pri" type="submit" data-act="refundGo" data-submit>Refund</button><button class="btn" type="button" data-act="refundNo">Cancel</button></div></form>` : ''}
-    ${ui.recv ? html`<form class="panel" style="grid-column:1/-1;max-width:640px"><h2>Payment from ${ui.recv.name}</h2>
-      <div class="chips"><button type="button" class="chip" aria-pressed="${ui.recvKind !== 'advance'}" data-act="pick" data-k="recvKind" data-id="receipt">Against what is owed</button>
-        <button type="button" class="chip" aria-pressed="${ui.recvKind === 'advance'}" data-act="pick" data-k="recvKind" data-id="advance">Advance</button></div>
-      <div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
-      <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="recvAmount" value="${ui.recvAmount ?? ''}"></label>
-        ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
-        ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
-      <div class="row"><button class="btn pri" type="submit" data-act="recvGo" data-submit>Take payment</button><button class="btn" type="button" data-act="recvNo">Cancel</button></div></form>` : ''}
   </div>`));
   rerender();
 }
 actions.openStay = async () => { await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest }); flash = { kind: 'ok', text: `Stay opened for room ${ui.room}.` }; route(); };
 actions.checkOut = async (d) => { await api('POST', `${B()}/stays/${d.id}/check-out`); flash = { kind: 'ok', text: 'Checked out.' }; route(); };
-actions.recv = (d) => { ui.recv = { id: d.id, name: d.n }; ui.recvMode = 'cash'; ui.recvKind = 'receipt'; ui.error = null; rerender(); };
+actions.recv = (d) => { ui.recv = { id: d.id, name: d.n }; ui.refund = null; ui.recvMode = 'cash'; ui.recvKind = 'receipt'; ui.error = null; rerender(); };
 actions.recvNo = () => { ui.recv = null; rerender(); };
 actions.refundAsk = (d) => { ui.refund = { id: d.id, name: d.n, max: Number(d.max) }; ui.recv = null; ui.refundAmount = undefined; ui.refundMode = 'cash'; ui.error = null; rerender(); };
 actions.refundNo = () => { ui.refund = null; rerender(); };
@@ -743,8 +860,12 @@ async function shiftScreen() {
     const expected = float + s.cashInPaise - s.cashOutPaise;
     const diff = counted - expected;
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
-    paint(shell('#/shift', html`<div class="settle">
-      <section class="panel"><h2>Shift ${s.shiftDay}</h2>
+    paint(shell('#/shift', html`${pageHead(`Shift close · ${dayName(s.shiftDay)}`, 'A shift runs 8 am to 8 am. Check the takings, count the drawer, then close.')}
+      <div class="kpis">${kpi('Should be in the drawer', rs(expected), 'Float plus cash in, less cash out')}${kpi('Counted', rs(counted))}
+        ${kpi(diff === 0 ? 'Drawer agrees' : diff < 0 ? 'Drawer short' : 'Drawer over', rs(Math.abs(diff)), ui.closed ? 'Shift closed' : 'Before closing', diff === 0 ? 'good' : 'bad')}
+        ${s.openOrders.length || s.unpaidBills.length ? kpi('Still open', String(s.openOrders.length + s.unpaidBills.length), 'Orders or bills to finish first', 'warn') : ''}</div>
+      <div class="two rev">
+      <section class="panel"><h2>Takings</h2>
         ${ui.closed ? html`<div class="msg ok">Closed at ${dateTime(ui.closed.closedAt)} · counted ${rs(ui.closed.countedPaise)} · difference ${rs(ui.closed.differencePaise)}</div>` : ''}
         <div class="sums">${s.byMode.map((m) => html`<div><span>${modeName[m.mode]} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}
           ${s.byAccount.map((a) => html`<div><span class="quiet">UPI: ${a.name}</span><span>${rs(a.paise)}</span></div>`)}
@@ -767,7 +888,7 @@ async function shiftScreen() {
         <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="c${n}" data-note="${n}" value="${ui.counts[n] ?? ''}"></label>`)}
           <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="loose" data-live value="${ui.loose ?? ''}"></label></div>
         <div class="sums"><div><span>Should be in the drawer</span><span>${rs(expected)}</span></div><div><span>Counted</span><span>${rs(counted)}</span></div>
-          <div class="big" style="color:${diff ? 'var(--bad)' : 'var(--accent)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div></div>
+          <div class="big" style="color:${diff ? 'var(--bad)' : 'var(--go-dark)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div></div>
         ${diff ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}"></label>` : ''}
         <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift</button></form>`}
     </div>`));
@@ -932,12 +1053,16 @@ async function reportsScreen(tab = 'sales', range = '') {
   ui.from = from; ui.to = to; ui.repTab = tab;
   ui.gstMonth = /^\d{4}-\d{2}$/.test(qf ?? '') ? qf : me.business.shiftDay.slice(0, 7);
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
-  const head = html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><div class="chips">
-      ${[['sales', 'Sales'], ['when', 'When and where'], ['mix', 'Menu mix'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => html`<a class="chip link" href="#/reports/${k}/${from}_${to}" aria-pressed="${tab === k}">${t}</a>`)}</div>
-    ${tab === 'gst' ? html`<form class="row"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
-      <div class="f">&nbsp;<button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></div></form>`
-    : tab !== 'owed' ? html`<form class="row"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
-      <div class="f">&nbsp;<button class="btn" type="submit" data-act="repGo" data-submit>Show</button></div></form>` : ''}</div>`;
+  const today = me.business.shiftDay;
+  const ranges = [['This shift', today, today], ['Last shift', addDays(today, -1), addDays(today, -1)], ['Last 7 shifts', addDays(today, -6), today], ['This month', today.slice(0, 8) + '01', today]];
+  const head = html`${pageHead('Reports', tab === 'owed' ? 'Rooms and credit accounts: what is owed right now.' : tab === 'gst' ? `GSTR-1 working for ${ui.gstMonth}` : `Shift ${from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`} · a shift runs 8 am to 8 am`)}
+    ${tabsNav('Reports', [['sales', 'Sales'], ['when', 'When and where'], ['mix', 'Menu mix'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
+    ${tab === 'gst' ? html`<form class="row" style="align-items:end;margin-bottom:16px"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
+      <button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></form>`
+    : tab !== 'owed' ? html`<div class="row" style="align-items:end;margin-bottom:16px;justify-content:space-between">
+      <div class="ranges" role="group" aria-label="Quick dates">${ranges.map(([t, a, b]) => html`<a class="chip" href="#/reports/${tab}/${a}_${b}" aria-pressed="${from === a && to === b}">${t}</a>`)}</div>
+      <form class="row" style="align-items:end"><label class="f">From<input class="in" type="date" data-model="from" value="${from}"></label><label class="f">To<input class="in" type="date" data-model="to" value="${to}"></label>
+      <button class="btn" type="submit" data-act="repGo" data-submit>Show</button></form></div>` : ''}`;
   if (tab === 'owed') {
     const { accounts } = await api('GET', `${B()}/reports/debtors`);
     ui.statement = null;
@@ -962,8 +1087,15 @@ async function reportsScreen(tab = 'sales', range = '') {
   if (tab === 'gst') { await gstTab(head, ui.gstMonth); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
+  const cnTotal = r.creditNotes.reduce((t, n) => t + n.totalPaise, 0);
+  const salesBills = sum('bills');
   rerender = () => paint(shell('#/reports', html`${head}
-    <section class="panel"><h2>Sales ${from === to ? from : `${from} to ${to}`}</h2>
+    <div class="kpis">${kpi('Sales with GST', rs(sum('totalPaise') - cnTotal), cnTotal ? `After ${rs(cnTotal)} of credit notes` : 'What guests paid for')}
+      ${kpi('Net sales', rs(sum('taxablePaise') + sum('nonGstPaise')), 'After discounts, before GST; liquor included')}
+      ${kpi('Bills', String(salesBills), salesBills ? `Average ${rs(Math.round((sum('taxablePaise') + sum('nonGstPaise')) / salesBills))} before GST` : '')}
+      ${kpi('Discounts', rs(sum('discountPaise')), sum('grossPaise') ? `${pct(sum('discountPaise'), sum('grossPaise'))} of items` : '', sum('discountPaise') ? 'warn' : '')}
+      ${r.voids.length ? kpi('Void bills', String(r.voids.length), rs(r.voids.reduce((t, v) => t + v.totalPaise, 0)), 'bad') : ''}</div>
+    <section class="panel"><h2>Sales by name on the bill</h2>
       <div class="scroll"><table class="t"><thead><tr><th>Name on bill</th><th>Bills</th><th class="num">Items</th><th class="num">Discount</th><th class="num">Taxable</th><th class="num">Liquor, no GST</th><th class="num">CGST</th><th class="num">SGST</th><th class="num">Total</th></tr></thead><tbody>
         ${r.byEntity.map((e) => html`<tr><td>${e.name}<div class="small quiet">${e.gstRegistered ? 'GSTIN ' + e.gstin : 'Not registered for GST'}</div></td><td>${e.bills}<div class="small quiet">${e.firstBill} to ${e.lastBill}</div></td>
           <td class="num">${rs(e.grossPaise)}</td><td class="num">${rs(e.discountPaise)}</td><td class="num">${rs(e.taxablePaise)}</td><td class="num">${rs(e.nonGstPaise)}</td><td class="num">${rs(e.cgstPaise)}</td><td class="num">${rs(e.sgstPaise)}</td><td class="num"><strong>${rs(e.totalPaise)}</strong></td></tr>`)}
@@ -1005,7 +1137,8 @@ async function stockScreen(tab = 'hand') {
   await load('menu');
   ui.st = st;
   const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['handover', 'Bar handover'], ['report', 'Report'], ['items', 'Items and recipes']];
-  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip link" href="#/stock/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
+  const low = st.items.filter((i) => i.active && i.low).length;
+  const head = html`${pageHead('Stock', `Bar and kitchen stores${low ? ` · ${plural(low, 'item')} below reorder level` : ''}`)}${tabsNav('Stock', tabs.map(([k, t]) => [`#/stock/${k}`, t, k]), tab)}`;
   const items = st.items.filter((i) => i.active);
   const storeSel = (model, label) => html`<label class="f">${label}<select class="in" data-model="${model}"><option value="">Choose</option>${st.stores.map((x) => html`<option value="${x.id}" ${ui[model] === x.id ? 'selected' : ''}>${x.name}</option>`)}</select></label>`;
   const itemSel = (model) => html`<label class="f">Item<select class="in" data-model="${model}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${ui[model] === i.id ? 'selected' : ''}>${i.name} (${i.unit})</option>`)}</select></label>`;
@@ -1028,7 +1161,7 @@ async function stockScreen(tab = 'hand') {
       const billTotal = ui.rcTotal != null ? Math.round(ui.rcTotal * 100) : null;
       body = html`<section class="panel"><h2>Supplier bill</h2>
         <p class="small quiet">Take a photo of the bill, or choose one. Claude reads it into the lines below; you check every line before anything is received. You can also type the bill in without a photo.</p>
-        <div class="row"><label class="btn pri" style="${ui.rcReading ? 'pointer-events:none;opacity:.6' : ''}">${ui.rcReading ? 'Reading the bill…' : ui.rcBillId ? 'Take another photo' : 'Take or choose photo'}<input type="file" accept="image/*" data-bill-photo style="display:none"></label>
+        <div class="row"><label class="btn pri" style="${ui.rcReading ? 'pointer-events:none;opacity:.6' : ''}">${ui.rcReading ? 'Reading the bill…' : ui.rcBillId ? 'Take another photo' : 'Take or choose photo'}<input type="file" accept="image/*" data-bill-photo class="vh"></label>
           ${ui.rcBillId ? html`<a class="btn" href="/api${B()}/stock/bills/${ui.rcBillId}/photo" target="_blank" rel="noopener">See the photo</a>` : ''}</div>
         ${ui.rcReading ? html`<p class="small quiet">This can take up to a minute.</p>` : ''}
         ${ui.rcError ? html`<div class="msg warn">${ui.rcError}</div>` : ''}
@@ -1042,7 +1175,7 @@ async function stockScreen(tab = 'hand') {
             const amt = (int(ui[`rcl${l.k}packs`]) || 0) * (toPaise(ui[`rcl${l.k}cost`] ?? '') ?? 0);
             return html`<tr><td><select class="in" data-model="rcl${l.k}item" aria-label="Stock item" style="${it ? '' : 'border-color:var(--warn-line)'}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${it?.id === i.id ? 'selected' : ''}>${i.name} (${i.packName} of ${i.packSize} ${i.unit})</option>`)}</select>
                 ${l.desc ? html`<div class="small quiet">On the bill: ${l.desc}</div>` : ''}</td>
-              <td class="num"><input class="in" style="max-width:90px" inputmode="numeric" data-live data-model="rcl${l.k}packs" value="${ui[`rcl${l.k}packs`] ?? ''}" aria-label="Packs">${it ? html`<div class="small quiet">${it.packName}s</div>` : ''}</td>
+              <td class="num"><input class="in" style="max-width:90px;min-width:60px" inputmode="numeric" data-live data-model="rcl${l.k}packs" value="${ui[`rcl${l.k}packs`] ?? ''}" aria-label="Packs">${it ? html`<div class="small quiet">${it.packName}s</div>` : ''}</td>
               <td class="num"><input class="in" style="max-width:120px" inputmode="decimal" data-live data-model="rcl${l.k}cost" value="${ui[`rcl${l.k}cost`] ?? ''}" aria-label="Price per pack"></td>
               <td class="num">${amt ? rs(amt) : ''}</td>
               <td><button class="btn" type="button" data-act="rcDrop" data-k="${l.k}" aria-label="Remove this line">Remove</button></td></tr>`;
@@ -1067,7 +1200,7 @@ async function stockScreen(tab = 'hand') {
           <div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Book</th><th>Counted</th></tr></thead><tbody>
           ${items.map((i) => html`<tr><td>${i.name}</td><td class="num">${qtyText(i.byStore[sid] ?? 0, i)}</td><td><input class="in" inputmode="numeric" style="max-width:160px" data-model="ct_${i.id}" value="${ui['ct_' + i.id] ?? ''}" aria-label="Counted ${i.name}"></td></tr>`)}</tbody></table></div>
           <div><button class="btn pri" type="submit" data-act="stCount" data-submit>Save count</button></div>` : ''}
-        ${ui.countResult ? html`<div class="sums">${ui.countResult.map((l) => html`<div><span>${l.name}: book ${l.book}, counted ${l.counted} ${l.unit}</span><span style="color:${l.variance ? 'var(--bad)' : 'var(--accent)'}">${l.variance ? `${l.variance > 0 ? '+' : ''}${l.variance} ${l.unit} · ${rs(l.valuePaise)}` : 'agrees'}</span></div>`)}</div>` : ''}</form>`;
+        ${ui.countResult ? html`<div class="sums">${ui.countResult.map((l) => html`<div><span>${l.name}: book ${l.book}, counted ${l.counted} ${l.unit}</span><span style="color:${l.variance ? 'var(--bad)' : 'var(--go-dark)'}">${l.variance ? `${l.variance > 0 ? '+' : ''}${l.variance} ${l.unit} · ${rs(l.valuePaise)}` : 'agrees'}</span></div>`)}</div>` : ''}</form>`;
     } else if (tab === 'handover') {
       const h = ui.handovers;
       body = html`<section class="panel"><form class="row" style="align-items:end">${storeSel('hStore', 'Store')}<label class="f">From<input class="in" type="date" data-model="hFrom" value="${ui.hFrom}"></label>
@@ -1191,11 +1324,19 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   const flag = (n, text, money) => html`<div><span style="${n ? 'color:var(--warn)' : ''}">${text}</span><span>${n ? `${n}${money !== undefined ? ' · ' + rs(money) : ''}` : 'none'}</span></div>`;
   const broken = d.series.filter((x) => x.missing.length).concat(d.creditNoteSeries.filter((x) => x.missing.length));
   const statusName = { open: 'Open order', tab: 'Tab', billed: 'Bill printed, not paid' };
-  rerender = () => paint(shell('#/exceptions', html`<div class="row" style="justify-content:space-between;margin-bottom:16px"><h1>Daily check · shift ${day}</h1>
-      <form class="row"><input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"><button class="btn" type="submit" data-act="exDay" data-submit>Show</button></form></div>
+  const exCount = ['void', 'discount', 'comp', 'kot_cancel', 'reprint', 'credit_note', 'stock_waste', 'stock_count', 'limit_warning'].reduce((t, k) => t + ev(k).n, 0) + df('discount').n;
+  const oldUnpaid = d.unpaid.filter((o) => o.old).length;
+  rerender = () => paint(shell('#/exceptions', html`${pageHead(`Daily check · shift ${dayName(day)}`, 'The owner\'s morning page: money, the cash close, bill numbers and anything unusual.',
+      html`<form class="row" style="align-items:end"><label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label><button class="btn" type="submit" data-act="exDay" data-submit>Show</button></form>`)}
+    <div class="kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), `${rs(d.sales.totalPaise)} with GST`)}
+      ${d.shiftClose ? kpi('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
+        : kpi('Cash close', 'Not closed', 'The shift is not closed yet', 'warn')}
+      ${kpi('Bill numbers', broken.length ? 'Gaps found' : 'Unbroken', broken.length ? 'See below' : `Financial year ${d.fy}`, broken.length ? 'bad' : 'good')}
+      ${kpi('Exceptions', String(exCount), 'Voids, discounts, comps, cancels, reprints and more', exCount ? 'warn' : 'good')}
+      ${kpi('Sent, not paid', String(d.unpaid.length), oldUnpaid ? `${oldUnpaid} overdue` : 'Right now', oldUnpaid ? 'bad' : d.unpaid.length ? 'warn' : 'good')}</div>
     <div class="grid2" style="align-items:start">
       <section class="panel"><h2>Money</h2>
-        <div class="sums"><div class="big"><span>Net sales · ${d.sales.bills} bills</span><span>${rs(d.sales.netPaise)}</span></div>
+        <div class="sums"><div class="big"><span>Net sales · ${plural(d.sales.bills, 'bill')}</span><span>${rs(d.sales.netPaise)}</span></div>
           <div><span class="quiet">With GST</span><span>${rs(d.sales.totalPaise)}</span></div>
           ${d.byMode.map((m) => html`<div><span>${modeName[m.mode] ?? m.mode} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
         <h2>Shift close</h2>
@@ -1249,15 +1390,15 @@ async function settingsScreen(tab = 'menu') {
   if (tab === 'staff') ui.staff = (await api('GET', B() + '/staff')).staff;
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
   if (tab === 'tables') { ui.tableList = (await api('GET', B() + '/tables')).tables; ui.tableText = ui.tableList.join(', '); }
-  const head = html`<div class="chips" style="margin-bottom:16px">${tabs.map(([k, t]) => html`<a class="chip link" href="#/settings/${k}" aria-pressed="${k === tab}">${t}</a>`)}</div>`;
+  const head = html`${pageHead('Settings', 'Changes here reach every counter device at once.')}${tabsNav('Settings', tabs.map(([k, t]) => [`#/settings/${k}`, t, k]), tab)}`;
   const kinds = { discount: 'Discount', comp: 'Complimentary', void: 'Void', kot_cancel: 'Cancelled KOT line' };
   rerender = () => {
     let body = '';
     if (tab === 'menu') body = html`<section class="panel"><h2>Menu</h2>${errorBox()}
-      <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Category</th><th>Station</th><th>Tax</th><th class="num">Price (before GST)</th><th></th></tr></thead><tbody>
-        ${cache.menu.map((m) => html`<tr><td>${m.name}</td><td>${m.category}</td><td>${m.station}</td><td>${m.tax === 'none' ? 'No GST (liquor)' : 'GST'}</td><td class="num">${rs(m.pricePaise)}</td>
-          <td><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
-      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}"></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
+      <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
+        ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}</td><td data-label="Price (before GST)" class="num">${rs(m.pricePaise)}</td><td data-label="Category">${m.category}</td><td data-label="Station">${m.station}</td><td data-label="Tax">${m.tax === 'none' ? 'No GST (liquor)' : 'GST'}</td>
+          <td class="act"><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
+      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
         <label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>
         <label class="f">Station<select class="in" data-model="iStation"><option value="kitchen">Kitchen</option><option value="bar" ${ui.iStation === 'bar' ? 'selected' : ''}>Bar</option></select></label>
         <label class="f">Tax<select class="in" data-model="iTax"><option value="gst">GST</option><option value="none" ${ui.iTax === 'none' ? 'selected' : ''}>Liquor: no GST</option></select></label>
@@ -1274,7 +1415,7 @@ async function settingsScreen(tab = 'menu') {
         <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tablesSave" data-submit>Save tables</button>
           ${ui.tableList.length ? html`<button class="btn" type="button" data-act="tablesClear">Clear the list (show recent tables)</button>` : ''}</div></form></section>`;
     if (tab === 'reasons') body = html`<section class="panel"><h2>Reasons</h2>${errorBox()}
-      ${Object.entries(kinds).map(([k, t]) => html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">${t}</p><div class="chips">${reasonsOf(k).map((r) => html`<span class="chip" style="display:inline-flex;align-items:center;gap:8px">${r.label}<button class="btn" style="min-height:32px;padding:0 8px" type="button" data-act="retire" data-id="${r.id}" aria-label="Remove ${r.label}">×</button></span>`)}</div></div>`)}
+      ${Object.entries(kinds).map(([k, t]) => html`<div><p class="small quiet" style="font-weight:600;margin-bottom:6px">${t}</p><div class="chips">${reasonsOf(k).map((r) => html`<span class="chip" style="display:inline-flex;align-items:center;gap:8px">${r.label}<button class="btn ghost" style="padding:0 12px;margin-right:-10px" type="button" data-act="retire" data-id="${r.id}" aria-label="Remove ${r.label}">×</button></span>`)}</div></div>`)}
       <form class="grid3"><label class="f">For<select class="in" data-model="rKind">${Object.entries(kinds).map(([k, t]) => html`<option value="${k}" ${ui.rKind === k ? 'selected' : ''}>${t}</option>`)}</select></label>
         <label class="f">Reason<input class="in" data-model="rLabel"></label><div class="f">&nbsp;<button class="btn pri" type="submit" data-act="addReason" data-submit>Add reason</button></div></form></section>`;
     if (tab === 'entities') body = html`<section class="panel"><h2>Billing names</h2><p class="quiet small">With one name, the counter never asks. With more, the cashier picks one on each bill; the default is preselected.</p>${errorBox()}
@@ -1286,7 +1427,7 @@ async function settingsScreen(tab = 'menu') {
             ${e.is_default ? '' : html`<button class="btn" type="button" data-act="entFlag" data-id="${e.id}" data-f="is_default">Make default</button>`}
             <button class="btn" type="button" data-act="entEdit" data-id="${e.id}">Edit</button></div></td></tr>`)}</tbody></table></div>
       <form class="panel" style="padding:0;border:0"><h2>${ui.editEntity ? 'Edit billing name' : 'Add a billing name'}</h2>
-        <div class="grid3"><label class="f">Name as printed<input class="in" data-model="eName" value="${ui.eName ?? ''}"></label>
+        <div class="grid3"><label class="f">Name as printed<input class="in" data-model="eName" value="${ui.eName ?? ''}" ${ui.editEntity ? 'autofocus' : ''}></label>
           <label class="f">Kind<select class="in" data-model="eKind">${['company', 'llp', 'partnership', 'proprietor', 'huf', 'other'].map((k) => html`<option value="${k}" ${ui.eKind === k ? 'selected' : ''}>${k.toUpperCase() === 'HUF' || k === 'llp' ? k.toUpperCase() : k[0].toUpperCase() + k.slice(1)}</option>`)}</select></label>
           <label class="f">Bill series prefix<input class="in" data-model="ePrefix" maxlength="4" value="${ui.ePrefix ?? ''}"></label>
           <label class="f">Registered under GST?<select class="in" data-model="eGst"><option value="no">No</option><option value="yes" ${ui.eGst === 'yes' ? 'selected' : ''}>Yes</option></select></label>
@@ -1299,7 +1440,7 @@ async function settingsScreen(tab = 'menu') {
       <div class="scroll"><table class="t"><thead><tr><th>Account</th><th>Belongs to</th><th>Bookr account id</th></tr></thead><tbody>
         ${cache.payAccounts.map((a) => html`<tr><td>${a.name}${a.active ? '' : ' (not used)'}</td><td>${a.entityName}</td><td class="small">${a.bookrAccountId ?? ''}</td>
           <td><button class="btn" type="button" data-act="acctEdit" data-id="${a.id}">Edit</button></td></tr>`)}</tbody></table></div>
-      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editAcct ? 'Edit account' : 'Add account'}</h2><label class="f">Account name<input class="in" data-model="aName" value="${ui.aName ?? ''}"></label>
+      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editAcct ? 'Edit account' : 'Add account'}</h2><label class="f">Account name<input class="in" data-model="aName" value="${ui.aName ?? ''}" ${ui.editAcct ? 'autofocus' : ''}></label>
         <label class="f">Belongs to<select class="in" data-model="aEntity"><option value="">Choose</option>${cache.entities.map((e) => html`<option value="${e.id}" ${ui.aEntity === e.id ? 'selected' : ''}>${e.name}</option>`)}</select></label>
         <label class="f">Bookr account id (optional)<input class="in" data-model="aBookr" value="${ui.aBookr ?? ''}"></label>
         ${ui.editAcct ? html`<label class="f">Status<select class="in" data-model="aActive"><option value="yes">In use</option><option value="no" ${ui.aActive === 'no' ? 'selected' : ''}>Not used</option></select></label>` : ''}
@@ -1308,7 +1449,7 @@ async function settingsScreen(tab = 'menu') {
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
         ${ui.staff.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
           <td><button class="btn" type="button" data-act="staffEdit" data-id="${s.id}">Edit</button></td></tr>`)}</tbody></table></div>
-      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editStaff ? 'Edit person (leave PIN and password empty to keep them)' : 'Add person'}</h2><label class="f">Name<input class="in" data-model="sName" value="${ui.sName ?? ''}"></label>
+      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editStaff ? 'Edit person (leave PIN and password empty to keep them)' : 'Add person'}</h2><label class="f">Name<input class="in" data-model="sName" value="${ui.sName ?? ''}" ${ui.editStaff ? 'autofocus' : ''}></label>
         <label class="f">Role<select class="in" data-model="sRole">${['cashier', 'captain', 'manager', 'owner'].map((r) => html`<option value="${r}" ${ui.sRole === r ? 'selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`)}</select></label>
         <label class="f">PIN (4–6 digits)<input class="in" inputmode="numeric" data-model="sPin" maxlength="6" autocomplete="off"></label>
         ${['manager', 'owner'].includes(ui.sRole) ? html`<label class="f">Email<input class="in" type="email" data-model="sEmail" value="${ui.sEmail ?? ''}"></label><label class="f">Password (12+ characters)<input class="in" type="password" data-model="sPassword" autocomplete="new-password"></label>` : ''}
