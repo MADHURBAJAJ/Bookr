@@ -75,7 +75,7 @@ describe('dashboard', () => {
     await sql`INSERT INTO shifts (id, business_id, shift_day, status, created_at) VALUES (${crypto.randomUUID()}, ${h.bid}, ${open}, 'open', 0)`;
     await sql`INSERT INTO shifts (id, business_id, shift_day, status, created_at) VALUES (${crypto.randomUUID()}, ${h.bid}, ${done}, 'confirmed', 0)`;
     const r = (await h.home()).json;
-    expect(r.shifts).toEqual({ count: 1, list: [{ day: open, status: 'open', toCheck: 0, toDecide: 0, bank: { billsLeft: 0, creditsLeft: 0, cardsLeft: 0 } }] });
+    expect(r.shifts).toEqual({ count: 1, list: [{ day: open, status: 'open', toCheck: 0, toDecide: 0, bank: { billsLeft: 0, creditsLeft: 0, cardsLeft: 0 }, register: { pages: 0, unread: 0, failed: 0 } }] });
     // The confirmed shift has no cash count yet.
     expect(r.cash).toEqual([{ day: done, differencePaise: null, counted: false }]);
   });

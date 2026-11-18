@@ -40,7 +40,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
   const since0 = addDays(today, -SHIFT_DAYS);
   const byDay = (rows: Count[]) => new Map(rows.map((r) => [r.day, r.n]));
 
-  const [start, shifts0, toCheck, toDecide, upiBills0, upiCredits0, waiting0, uploads] = await Promise.all([
+  const [start, shifts0, toCheck, toDecide, upiBills0, upiCredits0, waiting0, uploads, regPages] = await Promise.all([
     booksStart(db, businessId),
     all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ? AND shift_day >= ? ORDER BY shift_day', businessId, since0),
     all<Count>(db, `SELECT shift_day AS day, count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day >= ? AND status <> 'checked' GROUP BY shift_day`, businessId, since0),
@@ -52,6 +52,11 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
       WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched' GROUP BY ${SHIFT_OF}`, businessId) : [],
     waitingPicture(db, businessId, today),
     all<{ kind: string; day: string | null }>(db, `SELECT kind, max(business_day) AS day FROM uploads WHERE business_id = ? AND kind IN ('bill_register', 'software_sales_csv') GROUP BY kind`, businessId),
+    // Register pages of each shift, and how many have no rows yet (not read, or reading failed) (18 Nov 2026).
+    all<{ day: string; pages: number; unread: number; failed: number }>(db, `SELECT u.business_day AS day, count(*) AS pages,
+        sum(CASE WHEN NOT EXISTS (SELECT 1 FROM register_rows r WHERE r.upload_id = u.id) THEN 1 ELSE 0 END) AS unread,
+        sum(CASE WHEN u.status = 'failed' THEN 1 ELSE 0 END) AS failed
+      FROM uploads u WHERE u.business_id = ? AND u.kind = 'bill_register' AND u.business_day >= ? GROUP BY u.business_day`, businessId, since0),
   ]);
 
   const since = [since0, start].sort()[1];
@@ -68,6 +73,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     const cardsLeft = bank && s.status === 'confirmed' ? (await shiftCards(db, businessId, s.day, null)).left : 0;
     return {
       day: s.day, status: s.status, toCheck: check.get(s.day) ?? 0, toDecide: decideN.get(s.day) ?? 0,
+      register: (() => { const g = regPages.find((x) => x.day === s.day); return { pages: g?.pages ?? 0, unread: g?.unread ?? 0, failed: g?.failed ?? 0 }; })(),
       bank: bank ? { billsLeft: bills.get(s.day) ?? 0, creditsLeft: credits.get(s.day) ?? 0, cardsLeft } : null,
     };
   }));

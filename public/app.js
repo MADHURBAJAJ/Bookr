@@ -498,13 +498,14 @@ async function dashboardView(biz) {
     html`<span>Sales report <b class="${behind(f.reportDay) ? 'td-amber' : ''}">${short(f.reportDay)}</b></span>`,
     f.cards?.folder ? html`<span>Card <b class="${stale(f.cards.lastAt) ? 'td-amber' : ''}">${f.cards.lastAt ? short(istDayOf(f.cards.lastAt)) : 'none'}</b></span>` : ''];
   // What each shift needs, in the order it is done.
+  // A shift with no register pages, or pages not read yet, is never ready to save (18 Nov 2026).
   const stage = (s) => (s.status === 'confirmed' ? 'saved'
-    : f.reportDay && s.day > f.reportDay ? 'report' : f.registerDay && s.day > f.registerDay ? 'register'
+    : f.reportDay && s.day > f.reportDay ? 'report' : !s.register?.pages ? 'register' : s.register.unread ? 'unread'
     : s.toCheck || s.toDecide ? 'work' : 'ready');
   const list = (h.shifts?.list ?? []).map((s) => ({ ...s, stage: stage(s) }));
   if (h.bringIn && !list.some((s) => s.day === h.bringIn.day)) list.push({ day: h.bringIn.day, stage: 'none', toCheck: 0, toDecide: 0 });
   list.sort((x, y) => x.day.localeCompare(y.day));
-  const STAGES = { ready: ['td-g', 'Ready to save'], work: ['td-a', 'To check or decide'], report: ['td-n', 'Waiting for the sales report'], register: ['td-n', 'Waiting for the register'],
+  const STAGES = { ready: ['td-g', 'Ready to save'], work: ['td-a', 'To check or decide'], unread: ['td-a', 'Register photos not read yet'], report: ['td-n', 'Waiting for the sales report'], register: ['td-n', 'No register photos'],
     none: ['td-u', 'Nothing brought in yet'], saved: ['td-s', 'Saved, money still to match'] };
   const daysText = (xs) => {
     // Runs of days in a row are told as one range: 3–8 Nov.
@@ -516,15 +517,19 @@ async function dashboardView(biz) {
   const legend = Object.entries(STAGES).map(([k, [cls, label]]) => {
     const xs = list.filter((s) => s.stage === k);
     if (!xs.length) return '';
-    const detail = k === 'work' ? xs.map((s) => `${short(s.day)}${s.toCheck ? ` · ${s.toCheck} row${s.toCheck === 1 ? '' : 's'} to check` : ''}${s.toDecide ? ` · ${s.toDecide} to decide` : ''}`).join('; ') : daysText(xs.map((s) => s.day));
-    const act = k === 'none' && can('rows.upload') ? html`<a href="${screenHref(biz, 'bringin', xs[0].day)}">Bring in ›</a>` : '';
+    const detail = k === 'unread' ? xs.map((s) => `${short(s.day)} (${s.register.unread} page${s.register.unread === 1 ? '' : 's'}${s.register.failed ? `, ${s.register.failed} failed` : ''})`).join(', ')
+      : k === 'work' ? xs.map((s) => `${short(s.day)}${s.toCheck ? ` · ${s.toCheck} row${s.toCheck === 1 ? '' : 's'} to check` : ''}${s.toDecide ? ` · ${s.toDecide} to decide` : ''}`).join('; ') : daysText(xs.map((s) => s.day));
+    const act = (k === 'none' || k === 'register') && can('rows.upload') ? html`<a href="${screenHref(biz, 'bringin', xs[0].day)}">Bring in ›</a>`
+      : k === 'unread' && can('rows.edit') ? html`<a href="${screenHref(biz, 'review', xs[0].day)}">Read on Register ›</a>` : '';
     return html`<div class="td-lg"><span class="td-dot ${cls}"></span><span style="flex:1">${label} · ${detail}</span>${act || html`<span class="note">${xs.length} shift${xs.length === 1 ? '' : 's'}</span>`}</div>`;
   });
-  const hrefOf = (s) => (s.stage === 'none' ? screenHref(biz, 'bringin', s.day) : s.toCheck && can('rows.edit') ? screenHref(biz, 'review', s.day) : screenHref(biz, 'reconcile', s.day));
+  const hrefOf = (s) => (s.stage === 'none' || s.stage === 'register' ? screenHref(biz, 'bringin', s.day) : s.stage === 'unread' ? screenHref(biz, 'review', s.day) : s.toCheck && can('rows.edit') ? screenHref(biz, 'review', s.day) : screenHref(biz, 'reconcile', s.day));
   // The one next step: Bring in for the last shift, else the oldest shift ready to save, else the oldest with work.
   const firstReady = list.find((s) => s.stage === 'ready');
+  const firstUnread = list.find((s) => s.stage === 'unread');
   const firstWork = list.find((s) => s.stage === 'work');
   const next = h.bringIn && can('rows.upload') ? { title: `Bring in the ${dayLabel(h.bringIn.day)} shift`, why: [!h.bringIn.software && 'sales report', !h.bringIn.registerPages && 'register photos'].filter(Boolean).join(' and ') + ' not in yet', href: screenHref(biz, 'bringin', h.bringIn.day), label: 'Bring in' }
+    : firstUnread && can('rows.edit') && (!firstReady || firstUnread.day < firstReady.day) ? { title: `Read the ${dayLabel(firstUnread.day)} register`, why: `${firstUnread.register.unread} page${firstUnread.register.unread === 1 ? '' : 's'} uploaded, not read yet${list.filter((s) => s.stage === 'unread').length > 1 ? ` · ${list.filter((s) => s.stage === 'unread').length} shifts like this` : ''}`, href: screenHref(biz, 'review', firstUnread.day), label: 'Open Register' }
     : firstReady && can('sales.decide') ? { title: `Save the ${dayLabel(firstReady.day)} shift`, why: 'Every row checked, nothing to decide', href: screenHref(biz, 'reconcile', firstReady.day), label: `Open ${short(firstReady.day)}` }
     : firstWork ? { title: `Finish the ${dayLabel(firstWork.day)} shift`, why: [firstWork.toCheck && `${firstWork.toCheck} rows to check`, firstWork.toDecide && `${firstWork.toDecide} bills to decide`].filter(Boolean).join(' · '), href: hrefOf(firstWork), label: `Open ${short(firstWork.day)}` }
     : items[0] ? { title: items[0].text, why: '', href: items[0].href, label: items[0].label } : null;
@@ -1140,6 +1145,9 @@ async function reportDayView(biz, dayIn) {
           <tbody>${unpaid.map((x) => html`<tr class="rd-red"><td class="mono">${x.billNo}</td><td>${timeOf(x.paidAt)}</td><td class="amount">${x.amountPaise == null ? '' : rs(x.amountPaise)}</td>
             <td>${MODE_LABELS[x.mode] ?? x.mode}</td><td class="rd-bad">${x.why}</td></tr>`)}</tbody></table></div>
         <div class="note">Paid or not is as on Reconcile: bank credits, the card machine and matches made there.</div></div>` : ''}
+      ${(rc?.columnHints ?? []).length ? html`<div class="rd-box"><h3>Paid into another account than written <span class="note">· ${rc.columnHints.length} bill${rc.columnHints.length > 1 ? 's' : ''}</span></h3>
+        ${rc.columnHints.map((h) => html`<div class="list-row"><span><span class="mono">${h.billNo ?? ''}</span> · ₹ ${money(h.amountPaise)} written under ${h.fromLabel}, came into ${h.accountName} at ${timeOf(h.postedAt)}</span></div>`)}
+        <div class="note">Change the column or match as written on <a href="#/b/${biz.id}/reconcile/${day}">Reconcile</a>, UPI tab.</div></div>` : ''}
       ${split.found.length ? html`<div class="rd-box"><h3>Payment found, to match <span class="note">· money of about its amount came in, not matched yet</span></h3>
         ${split.found.map((x) => html`<div class="list-row"><span><span class="mono">${x.billNo}</span> · ${MODE_LABELS[x.mode] ?? x.mode} ${timeOf(x.paidAt)} · ₹ ${money(x.offer.amountPaise)} at ${timeOf(x.offer.at)}</span><span class="amount">${rs(x.amountPaise)}</span></div>`)}</div>` : ''}
       <div class="rd-box">
@@ -1588,11 +1596,14 @@ const MAX_FILES = 10;
 
 /**
  * Reads uploaded pages with Claude, a few at a time (the server's limit), waiting and trying again when it is busy.
- * Runs in this browser: a page closed before its turn stays "not read" and can be read later.
+ * The pages are first put in the server's reading queue (18 Nov 2026): whatever this browser does not finish (the page
+ * closed, the phone asleep, the server busy) is read on the server within a few minutes.
  */
 async function readPages(biz, items) {
   const status = await api('GET', `/businesses/${biz.id}/ocr`).catch(() => null);
   if (!status?.configured) { items.forEach((x) => x.set('Uploaded', 'Not read: reading is not set up. Type the rows in on Review.')); return; }
+  const queued = await api('POST', `/businesses/${biz.id}/ocr/queue`, { uploadIds: items.map((x) => x.id) }).then(() => true).catch(() => false);
+  const later = 'Waiting: the server will read it in a few minutes';
   const queue = [...items];
   const worker = async () => {
     for (let x = queue.shift(); x; x = queue.shift()) {
@@ -1603,8 +1614,10 @@ async function readPages(biz, items) {
           x.set(x.kind === 'cash_summary' ? 'Read' : `Read: ${r.rows} row${r.rows === 1 ? '' : 's'}${r.unclearCells ? `, ${r.unclearCells} to check` : ''}${r.totalMatches === false ? ', total differs' : ''}`);
           break;
         } catch (err) {
+          const busy = /being read already|already being read|Claude is busy|Try again|reach Claude/.test(err.message);
           if (/being read already|already being read/.test(err.message) && attempt < 5) { x.set('Waiting to read…'); await new Promise((res) => setTimeout(res, 15000)); continue; }
-          x.set('Uploaded', `Not read: ${err.message}`);
+          if (busy && queued) x.set(later);
+          else x.set('Uploaded', `Not read: ${err.message}`);
           break;
         }
       }
@@ -3336,57 +3349,7 @@ function oddNumbersHtml(biz, w, canDecide) {
   </section>`;
 }
 
-/** What a grey line waits for, in words. */
-const WAIT_FOR = { register: (d) => `until the ${dayLabel(d)} register is in`, software: (d) => `until the software report covers the ${dayLabel(d)} shift`,
-  bank: (d) => `until bank sync (${dayLabel(d)} shift)`, card: (d) => `until the card report (${dayLabel(d)} shift)`, count: (d) => `until the ${dayLabel(d)} cash count is in`,
-  carry: (d) => `carried forward from the ${dayLabel(d)} shift` };
-/** One grey line: an unsaved shift is told as the shift (Waiting starts at save, 10 Nov 2026); the rest as "N bills: until …". */
-const greyText = (g) => (g.waitFor === 'unsaved'
-  ? `${dayLabel(g.day)} shift not saved yet${g.n ? ` (${g.n} bill${g.n === 1 ? '' : 's'} on one side only)` : ''}: finish it on Reconcile`
-  : g.waitFor === 'chosen' ? `${g.n} saved bill${g.n === 1 ? '' : 's'} of ${dayLabel(g.day)} chosen on a later shift: matched when that shift is saved`
-  : `${g.n} bill${g.n === 1 ? '' : 's'}: ${(WAIT_FOR[g.waitFor] ?? ((d) => dayLabel(d)))(g.day)}`);
 
-/**
- * Waiting = needs a look (Stage 2, approved 10 Nov 2026). The /waiting picture: bills where something should have
- * turned up and has not (counted), and grey lines for bills waiting only for a file or a save (shown, not counted).
- */
-function waitingPanelHtml(biz, w, canDecide) {
-  if (!w) return html`<section class="card"><div class="note">Waiting could not be loaded.</div></section>`;
-  const look = w.look ?? [];
-  const greys = new Map();
-  // Saved bills chosen on a later shift not saved yet (12 Nov 2026): each told on its own line.
-  const chosen = (w.grey ?? []).filter((x) => x.waitFor === 'chosen');
-  for (const x of (w.grey ?? []).filter((y) => y.waitFor !== 'chosen')) { const k = `${x.waitFor}|${x.day}`; greys.set(k, { waitFor: x.waitFor, day: x.day, n: (greys.get(k)?.n ?? 0) + (x.count ?? 1) }); }
-  const late = look.filter((x) => x.unresolved).length;
-  const offerHtml = (x) => (x.offers ?? []).map((o) => html`<div class="tiny" style="color:var(--teal-ink)">${o.kind === 'credit' ? 'Credit' : 'Machine payment'} ₹ ${money(o.amountPaise)} at ${when(o.at)}${o.label ? ` (${o.label})` : ''}${o.shiftDay !== x.day ? `, ${dayLabel(o.shiftDay)} shift` : ''}${o.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(o.amountPaise - x.amountPaise))} ${o.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}
-      <a href="#/b/${biz.id}/reconcile/${x.day}">Match on the ${dayLabel(x.day)} shift ›</a></div>`);
-  return html`${oddNumbersHtml(biz, w, canDecide)}
-    <section class="card" id="waiting" style="gap:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2>Needs a look (${look.length})</h2>
-        ${late ? html`<span class="chip bad">${late} over ${w.watchDays} days</span>` : html`<span class="note">Watched for ${w.watchDays} days</span>`}</div>
-      <div class="note">Bills from any shift where something should have turned up and has not. A bill is never counted twice: when its other side turns up on another day, that day offers to match it.</div>
-      ${look.length ? html`<div class="scroll"><table style="min-width:640px">
-        <thead><tr><th>Bill</th><th>Shift</th><th style="text-align:right">Amount</th><th>Why</th><th>Waiting</th><th></th></tr></thead>
-        <tbody>${look.map((x) => html`<tr>
-          <td class="mono">${x.billNo}${drawerBtn(x.billNo, x.day)}</td><td><a href="#/b/${biz.id}/reconcile/${x.day}">${dayLabel(x.day)}</a>${x.confirmed ? html` <span class="note">saved</span>` : ''}</td>
-          <td class="amount">${money(x.amountPaise ?? 0)}${x.mode ? html` <span class="note">${MODE_LABELS[x.mode] ?? x.mode}</span>` : ''}</td>
-          <td style="white-space:normal"><div>${x.reason}</div>${offerHtml(x)}${x.watchNote ? html`<div class="tiny">Kept waiting: ${x.watchNote}</div>` : ''}</td>
-          <td>${x.unresolved ? html`<span class="chip bad">${x.daysWaiting} days</span>` : html`<span class="note">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</span>`}</td>
-          <td>${x.reversalId && canDecide ? html`<button class="btn plain dchip" type="button" data-reversed="${x.reversalId}" data-bill="${x.billNo}">Bill unpaid again</button>` : ''}
-            ${canDecide && x.side === 'both' && x.mode === 'upi' && x.key.startsWith('t:') ? html`<button class="btn plain dchip" type="button" data-owedtx="${x.key.slice(2)}" data-bill="${x.billNo}">Owed by guest/company</button>` : ''}
-            ${x.unresolved && canDecide && x.comparisonId && x.side !== 'both' ? html`<div style="display:flex;flex-direction:column;gap:4px">
-            ${x.side === 'register' ? html`<button class="btn plain dchip" type="button" data-closeas="${x.comparisonId}" data-note="Not billed in software">Not billed in software</button>` : ''}
-            <button class="btn plain dchip" type="button" data-closebill="${x.comparisonId}" data-bill="${x.billNo}">Close with a reason</button>
-            <button class="btn plain dchip" type="button" data-keepwait="${x.comparisonId}" data-bill="${x.billNo}">Keep waiting ${w.watchDays} more days</button></div>` : ''}</td>
-        </tr>`)}</tbody></table></div>` : html`<div class="ok-msg">Nothing needs a look.</div>`}
-    </section>
-    ${greys.size || chosen.length ? html`<section class="card" style="gap:6px"><h2 style="font-size:16px">Not counted yet</h2>
-      <div class="note">Nothing is wrong with these yet. A shift's bills start waiting when it is saved; until then, finish them on its own tabs. The rest wait for a file to come in.</div>
-      ${chosen.map((x) => html`<div class="list-row" style="color:var(--muted)"><span><span class="mono">${x.billNo}</span> · ${dayLabel(x.day)} bill, ₹ ${money(x.amountPaise)} ${MODE_LABELS[x.mode] ?? x.mode}: chosen on the ${dayLabel(x.chosenOn)} shift (${x.chosenWith}). Matched when you save that shift.</span>
-        <a class="note" href="#/b/${biz.id}/reconcile/${x.chosenOn}">Open ›</a></div>`)}
-      ${[...greys.values()].map((g) => html`<div class="list-row" style="color:var(--muted)"><span>${greyText(g)}</span>
-        <a class="note" href="#/b/${biz.id}/reconcile/${g.day}">Open ›</a></div>`)}</section>` : ''}`;
-}
 
 
 /** Days from a shift to the shift being worked today (8 am to 8 am). */
@@ -3475,14 +3438,14 @@ function waitCardHtml(biz, day, sp, waitPic, opts) {
   return html`<section class="card wc" style="gap:6px">
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Waiting · ${n ? `${n} bill${n === 1 ? '' : 's'}` : 'nothing'}</h2>
       <span class="note">${opts.confirmed ? 'Saved' : 'Before saving: what will wait when saved'}</span></div>
-    ${group('red', 'Payment not received', sp.notReceived, sp.notReceived.map((x) => html`${line(x)}${x.mode === 'cash' ? cashActs(x, true) : x.mode === 'upi' && !opts.confirmed ? html`<div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:upi">Fix on the UPI tab ›</button></div>` : savedActs(x)}`))}
-    ${group('teal', 'Payment found, to match', sp.found, sp.found.map((x) => html`${line(x, html`<div class="tiny" style="color:var(--teal-ink)">${x.mode === 'card' ? 'Machine payment' : 'Credit'} ₹ ${money(x.offer.amountPaise)} at ${timeOf(x.offer.at)}${x.offer.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(x.offer.amountPaise - x.amountPaise))} ${x.offer.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}</div>`)}
-      <div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:${x.mode === 'card' ? 'card' : 'upi'}">Match on the ${x.mode === 'card' ? 'Card' : 'UPI'} tab ›</button></div>`))}
+    ${group('red', 'Payment not received', sp.notReceived, sp.notReceived.map((x) => html`${line(x)}${x.mode === 'cash' ? cashActs(x, true) : opts.readOnly ? '' : x.mode === 'upi' && !opts.confirmed ? html`<div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:upi">Fix on the UPI tab ›</button></div>` : savedActs(x)}`))}
+    ${group('teal', 'Payment found, to match', sp.found, sp.found.map((x) => html`${line(x, x.offer ? html`<div class="tiny" style="color:var(--teal-ink)">${x.mode === 'card' ? 'Machine payment' : 'Credit'} ₹ ${money(x.offer.amountPaise)} at ${timeOf(x.offer.at)}${x.offer.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(x.offer.amountPaise - x.amountPaise))} ${x.offer.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}</div>` : '')}
+      ${opts.readOnly ? '' : html`<div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:${x.mode === 'card' ? 'card' : 'upi'}">Match on the ${x.mode === 'card' ? 'Card' : 'UPI'} tab ›</button></div>`}`))}
     ${group('amb', 'Cash bill not in the register', sp.cashWait, sp.cashWait.map((x) => html`${line(x, html` <span class="chip wait">day ${Math.max(1, x.age)} of ${CASH_WATCH_DAYS}</span><div class="tiny">Counted as a ${dayLabel(day)} sale. Closes by itself when a later register writes it.</div>`)}${cashActs(x, false)}`))}
     ${group('', 'Paid, bill missing', sp.paperwork, sp.paperwork.map((x) => line(x)))}
     ${sp.closed.length ? html`<div class="wc-g"><div class="wc-gh note">Closed</div>${sp.closed.map((x) => line(x))}</div>` : ''}
     ${n && empty.length ? html`<div class="note">None: ${empty.join(' · ')}.</div>` : ''}
-    ${opts.others ? html`<div class="note">${opts.others} more bill${opts.others === 1 ? '' : 's'} wait${opts.others === 1 ? 's' : ''} on other saved shifts: <a href="#/b/${biz.id}/dashboard">Today ›</a></div>` : ''}
+    ${opts.others ? html`<div class="note">${opts.others} more bill${opts.others === 1 ? '' : 's'} wait${opts.others === 1 ? 's' : ''} on other saved shifts${biz.actions.includes('reports.view') ? html`: <a href="#/b/${biz.id}/dashboard">Today ›</a>` : '.'}</div>` : ''}
   </section>`;
 }
 
@@ -5448,13 +5411,29 @@ async function reconcileReadOnly(biz, day) {
   const P = compareParts(biz, day, cv, shifts, { reload, back: `#/b/${biz.id}/reconcile/${day}`, onReconcile: true });
   const top = recKeep?.day === day && recKeep.top === 'wait' ? 'wait' : 'all';
   recKeep = null;
+  // The same Waiting card as To do (18 Nov 2026), without buttons. These roles get no bank data: UPI and card bills not
+  // received come from the saved shift's Waiting; before saving only the cash is told.
+  const oneSided = cv.comparisons.filter((c) => ['missing_in_register', 'missing_in_software'].includes(c.difference) && c.decision !== 'leave_out')
+    .map((c) => ({ comparisonId: c.id, billNo: c.billNo, amountPaise: c.software?.amountPaise ?? c.register?.amountPaise ?? 0, mode: c.software?.mode ?? c.register?.mode ?? null,
+      side: c.difference === 'missing_in_register' ? 'software' : 'register', otherDay: c.otherDay, oldPos: !!c.oldPos || /^1[45]\d{4}$/.test(c.billNo ?? ''), paidAt: c.paidAt ?? null }));
+  const split = waitSplit({ day, rc: null, cash, oneSided });
+  const listed = new Set([...split.notReceived, ...split.cashWait, ...split.closed].map((x) => x.billNo));
+  for (const w of (waiting?.look ?? []).filter((x) => x.day === day && !listed.has(x.billNo))) {
+    const x = { billNo: w.billNo, amountPaise: w.amountPaise, paidAt: null, mode: w.mode, why: w.reason };
+    if (w.kind === 'not_received') split.notReceived.push(x);
+    else if (w.kind === 'found') split.found.push({ ...x, offer: null });
+    else if (w.kind === 'paperwork' && !split.paperwork.some((y) => y.billNo === w.billNo)) split.paperwork.push(x);
+  }
+  const waitCard = waitCardHtml(biz, day, split, null, { canDecide: false, confirmed: cv.status === 'confirmed', canWriteoff: false,
+    others: (waiting?.look ?? []).filter((x) => x.day !== day).length, readOnly: true });
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
     ${shiftBar(biz, day, 'reconcile')}
     <div class="note">You can look at this shift's bills here. Only an Owner or Accountant can decide differences and save the shift.</div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
       <button type="button" role="tab" data-rtopbtn="all" class="${top === 'all' ? 'on' : ''}">All bills</button><button type="button" role="tab" data-rtopbtn="wait" class="${top === 'wait' ? 'on' : ''}">Waiting</button></div>
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>${P.bar}<div id="allmsg"></div>${P.banners}${P.warningsHtml}${P.shiftPane}</div>
-    <div data-rtop="wait" ${top === 'wait' ? '' : 'hidden'}>${waitingPanelHtml(biz, waiting, false)}</div>`));
+    <div data-rtop="wait" ${top === 'wait' ? '' : 'hidden'}>${waitCard}
+      ${cv.status === 'confirmed' ? '' : html`<div class="note">Payments are checked against the bank by an Owner or Accountant; UPI and card bills show here once the shift is saved.</div>`}</div>`));
   wireShell();
   wireShiftBar(biz);
   P.wire(app.querySelector('[data-rtop="all"]'), document.getElementById('allmsg'));
@@ -5752,7 +5731,8 @@ async function reconcileView(biz, dayArg) {
   const oneSided = cv.comparisons.filter((c) => ['missing_in_register', 'missing_in_software'].includes(c.difference) && c.decision !== 'leave_out')
     .map((c) => ({ comparisonId: c.id, billNo: c.billNo, amountPaise: c.software?.amountPaise ?? c.register?.amountPaise ?? 0, mode: c.software?.mode ?? c.register?.mode ?? null,
       side: c.difference === 'missing_in_register' ? 'software' : 'register', otherDay: c.otherDay, oldPos: !!c.oldPos || /^1[45]\d{4}$/.test(c.billNo ?? ''), paidAt: c.paidAt ?? null }));
-  const split = waitSplit({ day, rc: r, cash, oneSided });
+  const noRegister = !cv.registerRows;
+  const split = noRegister ? { notReceived: [], found: [], paperwork: [], cashWait: [], closed: [] } : waitSplit({ day, rc: r, cash, oneSided });
   const splitN = split.notReceived.length + split.found.length + split.cashWait.length;
   const othersN = (waitPic?.look ?? []).filter((x) => x.day !== day).length;
   const waitN = splitN + (waitPic?.oddNumbers?.length ?? 0);
@@ -5848,7 +5828,10 @@ async function reconcileView(biz, dayArg) {
         <span class="todo-n">${x.left ? i + 1 : '✓'}</span><span class="todo-t"><strong>${x.title}</strong> <span class="note">· ${x.left ? (x.sub ?? `${x.left} left`) : x.sub ?? 'done'}</span></span>
         ${x.link ?? (x.body && x.left ? html`<span class="todo-car">${openStep === x.key ? '▾' : '▸'}</span>` : '')}</div>
       ${x.body && x.left ? html`<div class="todo-body" ${openStep === x.key ? '' : 'hidden'}>${x.body}</div>` : ''}</section>`)}
-    <div data-rsec="wait"><div id="waitmsg"></div>${waitCardHtml(biz, day, split, waitPic, { canDecide, confirmed: r.confirmed, canWriteoff: biz.actions.includes('cash.writeoff'), others: othersN })}
+    ${(r.columnHints ?? []).length >= 3 ? html`<section class="card"><div class="note"><strong>${r.columnHints.length} UPI payments are written under the wrong account's column</strong> this shift
+      (the money came into another account). Staff may be using the wrong UPI column: worth a word. Each one is on the UPI tab to change.</div></section>` : ''}
+    <div data-rsec="wait"><div id="waitmsg"></div>${noRegister ? html`<section class="card"><div class="note"><strong>No register rows for this shift.</strong> Read its photos on <a href="${screenHref(biz, 'review', day)}">Register</a>, or bring them in if they are not uploaded. Until then every bill looks missing in the register, so nothing is shown as waiting.</div></section>`
+      : waitCardHtml(biz, day, split, waitPic, { canDecide, confirmed: r.confirmed, canWriteoff: biz.actions.includes('cash.writeoff'), others: othersN })}
       ${oddNumbersHtml(biz, waitPic, canDecide)}</div>
     <div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
       ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`;
@@ -7276,7 +7259,9 @@ async function bringInView(biz, dayArg) {
   const regs = pagesOf('bill_register');
   const softwareOk = v.software.reports > 0 && !v.software.gaps.length;
   const bankOk = !v.bank || v.bank.covered;
-  const pagesOk = regs.length > 0 && regs.every((p) => ['ready', 'approved'].includes(p.status)) && pagesOf('cash_summary').length > 0;
+  // A page is saved as 'ready' when it arrives, so 'not read' is told by no reading and nothing typed in (18 Nov 2026).
+  const notRead = (p) => p.status === 'failed' || p.status === 'uploaded' || (p.status === 'ready' && !p.ocrEngine && !(p.kind === 'cash_summary' ? p.reviewed : p.rows));
+  const pagesOk = regs.length > 0 && regs.every((p) => ['ready', 'approved'].includes(p.status) && !notRead(p)) && pagesOf('cash_summary').length > 0;
   const allOk = softwareOk && bankOk && pagesOk;
   const nowStep = !softwareOk ? 'sales' : !bankOk ? 'bank' : !pagesOk ? 'pages' : 'ready';
   const steps = [['sales', 'Sales report', softwareOk, v.software.reports > 0], ...(v.bank ? [['bank', 'Bank', bankOk, false]] : []), ['pages', 'Pages', pagesOk, regs.length > 0], ['ready', 'Ready', allOk, false]];
@@ -7288,7 +7273,10 @@ async function bringInView(biz, dayArg) {
     <span class="big">${icon}</span><strong>${title}</strong><span class="tiny">${sub}</span>
     <input type="file" data-dropinput="${id}" accept="${accept}" multiple hidden></label>`;
   const what = (p) => p.kind === 'cash_summary' ? 'Figures read' : `${p.rows ?? 0} ${p.kind === 'expense_list' ? 'line' : 'row'}${p.rows === 1 ? '' : 's'}`;
-  const pageState = (p, n) => ['ready', 'approved'].includes(p.status) ? html`<span class="okdot" style="${p.unclear ? 'background:#F59E0B' : ''}"></span><span class="nm">Page ${n} · ${what(p)}</span>`
+  const pageState = (p, n) => p.status === 'reading' ? html`<span class="spinner"></span><span class="nm">Page ${n} · reading…</span>`
+    : notRead(p) && p.queued ? html`<span class="greydot"></span><span class="nm">Page ${n} · waiting to be read${p.status === 'failed' ? ' (trying again)' : ''}</span><button class="linkbtn" type="button" data-readnow="${p.id}" data-kind="${p.kind}">Read now</button>`
+    : notRead(p) ? html`<span class="greydot" style="${p.status === 'failed' ? 'background:#F59E0B' : ''}"></span><span class="nm">Page ${n} · ${p.status === 'failed' ? 'reading failed' : 'not read yet'}</span><button class="linkbtn" type="button" data-readnow="${p.id}" data-kind="${p.kind}">Read now</button>`
+    : ['ready', 'approved'].includes(p.status) ? html`<span class="okdot" style="${p.unclear ? 'background:#F59E0B' : ''}"></span><span class="nm">Page ${n} · ${what(p)}</span>`
     : p.status === 'reading' ? html`<span class="spinner"></span><span class="nm">Page ${n} · reading…</span>`
     : p.status === 'retake' ? html`<span class="greydot" style="background:#F59E0B"></span><span class="nm">Page ${n} · photo unclear: retake</span>`
     : html`<span class="greydot"></span><span class="nm">Page ${n} · not read yet</span><button class="linkbtn" type="button" data-readnow="${p.id}" data-kind="${p.kind}">Read now</button>`;

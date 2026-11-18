@@ -21,8 +21,9 @@ dayRoutes.get('/businesses/:businessId/shifts/:day/inputs', requireRole('rows.up
   const [cov, bills, pages, shift] = await Promise.all([
     coverage(db, bid, day),
     one<{ n: number }>(db, 'SELECT count(*) AS n FROM software_bills WHERE business_id = ? AND shift_day = ?', bid, day),
-    all<{ id: string; kind: string; status: string; createdAt: number; uploadedBy: string; fromSoftware: number; rows: number; unclear: number; reviewed: number }>(db, `
-      SELECT u.id, u.kind, u.status, u.created_at AS createdAt, u.uploaded_by AS uploadedBy, u.storage_key LIKE 'software-added/%' AS fromSoftware,
+    all<{ id: string; kind: string; status: string; ocrEngine: string | null; queued: number; createdAt: number; uploadedBy: string; fromSoftware: number; rows: number; unclear: number; reviewed: number }>(db, `
+      SELECT u.id, u.kind, u.status, u.ocr_engine AS ocrEngine, u.created_at AS createdAt,
+        EXISTS (SELECT 1 FROM audit_log q WHERE q.business_id = u.business_id AND q.action = 'ocr.queue' AND q.row_id = u.id AND q.after IS NULL) AS queued, u.uploaded_by AS uploadedBy, u.storage_key LIKE 'software-added/%' AS fromSoftware,
         CASE u.kind WHEN 'bill_register' THEN (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id)
           WHEN 'expense_list' THEN (SELECT count(*) FROM transactions t WHERE t.upload_id = u.id) ELSE NULL END AS rows,
         -- Still to review: register rows not ticked, expense lines not approved, a cash summary not approved.
@@ -102,6 +103,6 @@ dayRoutes.get('/businesses/:businessId/bills/:billNo', requireRole('sales.view')
   const history = ids.length ? await all(db, `SELECT a.action, a.created_at AS at, u.name AS user, a.after FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
     WHERE a.business_id = ? AND (a.row_id IN (${ids.map(() => '?').join(',')})
       ${cmpIds.length ? `OR (a.action = 'transaction.remove_on_reopen' AND json_extract(a.before, '$.comparison_id') IN (${cmpIds.map(() => '?').join(',')}))` : ''})
-      AND a.action NOT IN ('ocr.read') ORDER BY a.id DESC LIMIT 40`, bid, ...ids, ...cmpIds) : [];
+      AND a.action NOT IN ('ocr.read', 'ocr.queue') ORDER BY a.id DESC LIMIT 40`, bid, ...ids, ...cmpIds) : [];
   return c.json({ billNo, comparisons, register: register.map((r) => ({ ...r, payments: JSON.parse(r.payments as string) })), sales, money, history });
 });

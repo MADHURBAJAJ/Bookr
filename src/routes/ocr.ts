@@ -3,6 +3,7 @@ import type { AppEnv, Env } from '../types';
 import { requireRole } from '../auth';
 import { all, isShiftConfirmed, now, one, stmt, type DB } from '../db';
 import { fail, isUuid } from '../http';
+import { HTTPException } from 'hono/http-exception';
 import { istDay, istToMs } from '../time';
 import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../claude';
 import { asReading, columnTotals, type ColumnTotals, draftRegisterRows, TOTALS_INSTRUCTIONS, TotalsReading, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
@@ -62,11 +63,36 @@ ocrRoutes.get('/businesses/:businessId/ocr', requireRole('rows.upload'), async (
 });
 
 ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('rows.upload'), async (c) => {
-  const db = c.env.DB;
-  const bid = c.get('businessId');
-  const user = c.get('user').id;
   const id = c.req.param('uploadId');
   if (!isUuid(id)) fail(404, 'Upload not found.');
+  const r = await readUpload(c.env, c.get('businessId'), c.get('user').id, id);
+  return c.json(r.body, r.status);
+});
+
+type ReadResult = { status: 200 | 400 | 409 | 422 | 429 | 502 | 503; body: Record<string, unknown> };
+
+/**
+ * Reads one uploaded page with Claude and writes its draft rows. Used by the Read button (the browser) and by the
+ * server queue (every minute). A check that refuses the read (confirmed shift, rows already checked) throws; a read
+ * that fails is answered with its error. Either way the page's place in the queue is settled here.
+ */
+export async function readUpload(env: Env, bid: string, user: string, id: string): Promise<ReadResult> {
+  try {
+    const r = await readOnce(env, bid, user, id);
+    if (r.status === 200 || r.status === 422 || !(await retryLeft(env.DB, id, r.body.retry === true))) {
+      await settleQueue(env.DB, id, r.status === 200 ? { ok: true } : { ok: false, error: r.body.error });
+    }
+    delete r.body.retry;
+    return r;
+  } catch (e) {
+    // Refused before reading (or the page is gone): nothing the queue can fix. Busy (429) stays queued.
+    if (e instanceof HTTPException && e.status !== 429) await settleQueue(env.DB, id, { ok: false, error: e.message });
+    throw e;
+  }
+}
+
+async function readOnce(env: Env, bid: string, user: string, id: string): Promise<ReadResult> {
+  const db = env.DB;
   const u = await one<{ id: string; kind: string; business_day: string; storage_key: string }>(db,
     'SELECT id, kind, business_day, storage_key FROM uploads WHERE id = ? AND business_id = ?', id, bid);
   if (!u) fail(404, 'Upload not found.');
@@ -88,7 +114,7 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
   if (kind === 'cash_summary' && (await one(db, "SELECT 1 AS ok FROM cash_summaries WHERE upload_id = ? AND status = 'approved'", u.id))) {
     fail(409, 'This cash summary is approved.');
   }
-  if (!c.env.ANTHROPIC_API_KEY) fail(503, 'Reading pages is not set up: the ANTHROPIC_API_KEY secret is missing on the server. You can still type the rows in.');
+  if (!env.ANTHROPIC_API_KEY) fail(503, 'Reading pages is not set up: the ANTHROPIC_API_KEY secret is missing on the server. You can still type the rows in.');
 
   let cashAccount: string | null = null;
   if (kind === 'expense_list') {
@@ -97,22 +123,22 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
     if (!cashAccount) fail(400, 'This business has no cash account. Add one on Accounts.');
   }
 
-  const l = limits(c.env);
-  const auditId = await reserveRead(db, c.env, bid, user, u.id, { kind, model: l.model });
+  const l = limits(env);
+  const auditId = await reserveRead(db, env, bid, user, u.id, { kind, model: l.model });
   const finish = (after: Record<string, unknown>) =>
     stmt(db, 'UPDATE audit_log SET after = ? WHERE id = ?', JSON.stringify({ ...after, finishedAt: now() }), auditId);
   await stmt(db, "UPDATE uploads SET status = 'reading' WHERE id = ?", u.id).run();
 
   try {
-    const obj = await c.env.UPLOADS.get(u.storage_key);
+    const obj = await env.UPLOADS.get(u.storage_key);
     if (!obj) throw new OcrError(502, 'The stored file is missing. Delete this upload and upload the page again.');
     const page: PageImage = { bytes: new Uint8Array(await obj.arrayBuffer()), mediaType: (obj.httpMetadata?.contentType ?? 'image/jpeg') as PageImage['mediaType'] };
-    const { data, model } = await readWithClaude(c.env, page, INSTRUCTIONS[kind], SCHEMAS[kind]);
+    const { data, model } = await readWithClaude(env, page, INSTRUCTIONS[kind], SCHEMAS[kind]);
     const ctx = { db, businessId: bid, uploadId: u.id, day: u.business_day, model };
 
     if (!data.legible) {
       await db.batch([stmt(db, "UPDATE uploads SET status = 'retake' WHERE id = ?", u.id), finish({ ok: true, legible: false, model })]);
-      return c.json({ error: 'The page is too unclear to read. Take the photo again in good light, flat and in focus, or type the rows in.' }, 422);
+      return { status: 422, body: { error: 'The page is too unclear to read. Take the photo again in good light, flat and in focus, or type the rows in.' } };
     }
 
     let written: number | null = null;
@@ -147,11 +173,11 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
       ? await one<{ s: number }>(db, 'SELECT coalesce(sum(amount_paise), 0) AS s FROM register_rows WHERE upload_id = ?', u.id)
       : kind === 'expense_list' ? await one<{ s: number }>(db, 'SELECT coalesce(sum(amount_paise), 0) AS s FROM transactions WHERE upload_id = ?', u.id) : null;
     const unclear = await countUnclear(db, kind, u.id);
-    return c.json({
+    return { status: 200, body: {
       rows, model, orientation: data.orientation, unclearCells: unclear,
       writtenTotalPaise: written, rowsTotalPaise: total?.s ?? null,
       totalMatches: written === null || total === null ? null : written === total.s,
-    });
+    } };
   } catch (e) {
     const err = e instanceof OcrError ? e : null;
     await db.batch([
@@ -159,10 +185,14 @@ ocrRoutes.post('/businesses/:businessId/uploads/:uploadId/read', requireRole('ro
       finish({ ok: false, error: err?.message ?? 'unexpected', ...(err?.free ? { free: true } : {}), ...(err?.detail ? { detail: err.detail } : {}) }),
     ]);
     if (isShiftConfirmed(e)) fail(409, 'This shift is confirmed. An Owner must reopen it first.');
-    if (err) return c.json({ error: err.message }, err.status);
+    // Worth trying again later: Claude busy or unreachable, or failed on its side. Not: unclear, too large, refused.
+    const retry = !err || err.free || /Try again|reach Claude|failed on Claude/.test(err.message);
+    if (err) return { status: err.status, body: { error: err.message, retry } };
+    if (await retryLeft(db, id, true)) throw e;
+    await settleQueue(db, id, { ok: false, error: 'unexpected' });
     throw e;
   }
-});
+}
 
 async function countUnclear(db: DB, kind: ReadableKind, uploadId: string): Promise<number> {
   const rows = kind === 'bill_register'
@@ -286,3 +316,81 @@ ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('bu
     throw e;
   }
 });
+
+// ---------- The reading queue (18 Nov 2026)
+// Pages brought in are queued on the server (audit_log action 'ocr.queue', after NULL while waiting). The browser
+// still reads them at once while it is open; whatever it leaves (closed, asleep, the server busy) is read by the
+// minute job below. A page that fails for a reason worth retrying (Claude busy or unreachable) is tried up to
+// MAX_TRIES times; one refused (confirmed shift, unclear photo) leaves the queue with its reason.
+const MAX_TRIES = 3;
+const RETRY_GAP_MS = 60 * 1000; // after a try, wait this long before the next (also lets the browser go first)
+const QUEUE_DAYS = 3; // a page still waiting after this leaves the queue (Read now still works)
+
+async function settleQueue(db: DB, uploadId: string, after: Record<string, unknown>) {
+  await stmt(db, "UPDATE audit_log SET after = ? WHERE action = 'ocr.queue' AND row_table = 'uploads' AND row_id = ? AND after IS NULL",
+    JSON.stringify({ ...after, settledAt: now() }), uploadId).run();
+}
+
+/** Whether a failed page should stay queued: the failure was worth retrying and it has not used up its tries. */
+async function retryLeft(db: DB, uploadId: string, retryable: boolean): Promise<boolean> {
+  if (!retryable) return false;
+  const q = await one<{ created_at: number }>(db, "SELECT created_at FROM audit_log WHERE action = 'ocr.queue' AND row_table = 'uploads' AND row_id = ? AND after IS NULL", uploadId);
+  if (!q) return false;
+  const tries = await one<{ n: number }>(db, `SELECT count(*) AS n FROM audit_log WHERE action = 'ocr.read' AND row_table = 'uploads' AND row_id = ?
+    AND created_at >= ? AND json_extract(after, '$.ok') = 0`, uploadId, q.created_at);
+  return (tries?.n ?? 0) < MAX_TRIES;
+}
+
+/** Puts pages in the queue (those of this business that can be read and are not queued already). Returns how many. */
+export async function enqueueReads(db: DB, bid: string, user: string, ids: string[]): Promise<number> {
+  const ok = ids.filter((x) => isUuid(x)).slice(0, 200);
+  if (!ok.length) return 0;
+  const t = now();
+  const res = await db.batch(ok.map((id) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    SELECT ?, ?, 'ocr.queue', 'uploads', u.id, json_object('day', u.business_day, 'kind', u.kind), NULL, ?
+    FROM uploads u WHERE u.id = ? AND u.business_id = ? AND u.kind IN ('bill_register', 'expense_list', 'cash_summary')
+      AND NOT EXISTS (SELECT 1 FROM audit_log q WHERE q.business_id = ? AND q.action = 'ocr.queue' AND q.row_id = u.id AND q.after IS NULL)`,
+    bid, user, t, id, bid, bid)));
+  return res.reduce((n, r) => n + (r.meta.changes ?? 0), 0);
+}
+
+ocrRoutes.post('/businesses/:businessId/ocr/queue', requireRole('rows.upload'), async (c) => {
+  const b = await c.req.json().catch(() => ({})) as { uploadIds?: unknown };
+  if (!Array.isArray(b.uploadIds)) fail(400, 'uploadIds must be a list.');
+  const queued = await enqueueReads(c.env.DB, c.get('businessId'), c.get('user').id, b.uploadIds.map(String));
+  return c.json({ queued });
+});
+
+/** The minute job: for each business, reads its oldest waiting pages, as many as its free reading places allow. */
+export async function runReadQueue(env: Env): Promise<{ started: number }> {
+  if (!env.ANTHROPIC_API_KEY) return { started: 0 };
+  const db = env.DB;
+  const t = now();
+  const l = limits(env);
+  const businesses = await all<{ id: string }>(db, 'SELECT id FROM businesses');
+  const jobs: Promise<unknown>[] = [];
+  for (const b of businesses) {
+    const waiting = await all<{ row_id: string; user_id: string; created_at: number }>(db, `SELECT q.row_id, q.user_id, q.created_at FROM audit_log q
+      WHERE q.business_id = ? AND q.action = 'ocr.queue' AND q.after IS NULL ORDER BY q.created_at LIMIT 50`, b.id);
+    if (!waiting.length) continue;
+    const u = await usage(db, b.id, t);
+    let free = Math.max(0, l.parallel - u.running);
+    if (u.used >= l.daily) free = 0;
+    for (const q of waiting) {
+      if (q.created_at < t - QUEUE_DAYS * 86400_000) { await settleQueue(db, q.row_id, { ok: false, error: 'Waited too long; use Read now.' }); continue; }
+      if (!free) continue;
+      // Not while a read of it is running, nor within a minute of its last try (the browser may be on it).
+      const last = await one<{ at: number }>(db, `SELECT max(created_at) AS at FROM audit_log WHERE business_id = ? AND action = 'ocr.read' AND row_id = ?`, b.id, q.row_id);
+      if (Math.max(last?.at ?? 0, q.created_at) > t - RETRY_GAP_MS) continue;
+      // Never over rows someone has typed in or a read that already landed.
+      const has = await one<{ engine: string | null; n: number }>(db, `SELECT u.ocr_engine AS engine,
+          (SELECT count(*) FROM register_rows r WHERE r.upload_id = u.id) + (SELECT count(*) FROM transactions x WHERE x.upload_id = u.id) AS n
+        FROM uploads u WHERE u.id = ?`, q.row_id);
+      if (has && (has.engine || has.n)) { await settleQueue(db, q.row_id, { ok: true, note: 'Already has rows' }); continue; }
+      free -= 1;
+      jobs.push(readUpload(env, b.id, q.user_id, q.row_id).catch(() => null));
+    }
+  }
+  await Promise.all(jobs);
+  return { started: jobs.length };
+}

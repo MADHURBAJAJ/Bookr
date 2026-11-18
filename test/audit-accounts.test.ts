@@ -31,6 +31,8 @@ describe('credits in another bank account', () => {
     const [a2a] = [(await sql`SELECT id FROM bank_rows WHERE amount_paise = 52500`)[0].id];
     const [a1b, a2b, a3b, a4] = await h.credits([['31 12:05', 515], ['31 13:05', 525], ['31 14:08', 400], ['31 16:00', 535], ['1 09:00', 2]], 'HUF B');
     const a3a = (await sql`SELECT id FROM bank_rows WHERE amount_paise = 60000`)[0].id;
+    // HUF A's statement runs past the shift (18 Nov 2026: another account's credit is offered only then).
+    await h.credits([['1 09:00', 3]], 'HUF A');
 
     let v = await h.view();
     // A1: the credit in the written account pays it, though the other account's is closer; no column change offered.

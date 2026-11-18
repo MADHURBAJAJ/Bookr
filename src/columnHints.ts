@@ -26,8 +26,12 @@ const norm = (v: string | null | undefined) => (v ?? '').toLowerCase().replace(/
  * left without one is then offered a credit of the same amount in another account. A payment with no software time
  * takes a credit only when it is the only one in the shift.
  */
-export function wrongColumn(pays: HintPay[], credits: HintCredit[], window: { from: number; to: number }, accountLabels: string[]): ColumnHint[] {
+export function wrongColumn(pays: HintPay[], credits: HintCredit[], window: { from: number; to: number }, accountLabels: string[],
+  statementTo?: Map<string, number | null>): ColumnHint[] {
   const labels = new Set(accountLabels.map(norm).filter(Boolean));
+  // Only once the written account's statement runs past the bill (18 Nov 2026): until then its own credit may still
+  // come, and pairing with another account's money could take someone else's payment.
+  const writtenIn = (p: HintPay) => !statementTo || (statementTo.get(norm(p.label)) ?? 0) >= (p.paidAt != null ? p.paidAt + NEAR_MIN * 60000 : window.to);
   const near = (p: HintPay, c: HintCredit) => p.paidAt != null
     ? Math.abs(c.postedAt - p.paidAt) <= NEAR_MIN * 60000
     : c.postedAt >= window.from - 3600e3 && c.postedAt < window.to + 3600e3;
@@ -51,7 +55,7 @@ export function wrongColumn(pays: HintPay[], credits: HintCredit[], window: { fr
   assign((p, c) => labelFits(p.label, c.label), () => {});
   // Then: a payment written under one account's column, and a credit in another account.
   const out: ColumnHint[] = [];
-  assign((p, c) => labels.has(norm(p.label)) && !!c.label && labels.has(norm(c.label)) && norm(c.label) !== norm(p.label),
+  assign((p, c) => labels.has(norm(p.label)) && writtenIn(p) && !!c.label && labels.has(norm(c.label)) && norm(c.label) !== norm(p.label),
     (p, c) => out.push({ paymentId: p.paymentId, rowId: p.rowId, uploadId: p.uploadId, billNo: p.billNo, amountPaise: p.amount,
       fromLabel: p.label!, toLabel: c.label!, accountName: c.accountName, creditId: c.id, postedAt: c.postedAt, minutes: minutes(p, c) }));
   return out;
@@ -61,14 +65,24 @@ export function wrongColumn(pays: HintPay[], credits: HintCredit[], window: { fr
 export const accountLabels = async (db: DB, businessId: string) =>
   (await all<{ label: string }>(db, 'SELECT receives_upi_label AS label FROM bank_sources WHERE business_id = ? AND receives_upi_label IS NOT NULL', businessId)).map((x) => x.label);
 
+/** How far each UPI account's statement runs (its latest line), by label. */
+async function statementEnds(db: DB, businessId: string) {
+  const rows = await all<{ label: string; at: number | null }>(db, `SELECT s.receives_upi_label AS label, (SELECT max(r.posted_at) FROM bank_rows r WHERE r.account_id = s.account_id) AS at
+    FROM bank_sources s WHERE s.business_id = ? AND s.receives_upi_label IS NOT NULL`, businessId);
+  const out = new Map<string, number | null>();
+  for (const r of rows) out.set(norm(r.label), Math.max(out.get(norm(r.label)) ?? 0, r.at ?? 0) || null);
+  return out;
+}
+
 /**
  * Hints for one shift. Before it is confirmed, every UPI payment counts. After, only payments whose sales still wait
  * for the bank, with those sales' ids so the change and the match can be made together.
  */
 export async function columnHints(db: DB, businessId: string, day: string): Promise<ColumnHint[]> {
   const w = shiftWindow(day);
-  const [labels, pays, credits, waiting, status] = await Promise.all([
+  const [labels, ends, pays, credits, waiting, status] = await Promise.all([
     accountLabels(db, businessId),
+    statementEnds(db, businessId),
     all<HintPay>(db, `SELECT p.id AS paymentId, r.id AS rowId, r.upload_id AS uploadId, r.bill_no AS billNo, p.amount_paise AS amount, p.column_label AS label,
         (SELECT max(sb.paid_at) FROM register_rows m JOIN software_bills sb ON sb.business_id = m.business_id AND sb.shift_day = m.shift_day AND sb.bill_no = m.bill_no
           WHERE m.id = r.id OR m.paid_with_row_id = r.id) AS paidAt
@@ -85,7 +99,7 @@ export async function columnHints(db: DB, businessId: string, day: string): Prom
     all<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
   ]);
   if (!labels.length) return [];
-  if (status[0]?.status !== 'confirmed') return wrongColumn(pays, credits, w, labels);
+  if (status[0]?.status !== 'confirmed') return wrongColumn(pays, credits, w, labels, ends);
   // Confirmed: the payment's sales are its row's (or, for bills paid together, the group's) UPI sales still waiting.
   const salesOf = (p: HintPay) => {
     const mine = waiting.filter((t) => t.head === p.rowId);
@@ -95,5 +109,5 @@ export async function columnHints(db: DB, businessId: string, day: string): Prom
   };
   const open = pays.map((p) => ({ p, ids: salesOf(p) })).filter((x) => x.ids);
   const idsOf = new Map(open.map((x) => [x.p.paymentId, x.ids!]));
-  return wrongColumn(open.map((x) => x.p), credits, w, labels).map((h) => ({ ...h, transactionIds: idsOf.get(h.paymentId) }));
+  return wrongColumn(open.map((x) => x.p), credits, w, labels, ends).map((h) => ({ ...h, transactionIds: idsOf.get(h.paymentId) }));
 }

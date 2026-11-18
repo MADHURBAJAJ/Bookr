@@ -69,6 +69,7 @@ describe('stage 6', () => {
     await h.software([['2610311', '31 19:00', 'UPI', '640']]);
     await h.register([{ no: '2610311', amount: '640', pays: [['upi', '640']] }]);
     const [cr] = await h.credits([['31 19:03', 640]], 'HUF B');
+    await h.credits([['1 09:00', 3]], 'HUF A'); // HUF A's statement runs past the bill
     const v = await h.view();
     const hint = (v.json.columnHints ?? []).find((x: any) => x.billNo === '2610311');
     expect(hint, JSON.stringify(v.json.columnHints)).toBeTruthy();
