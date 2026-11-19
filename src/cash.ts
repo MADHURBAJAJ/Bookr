@@ -43,6 +43,8 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
       SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1, NULL, NULL
       FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
+        -- Only those written in as cash (18 Nov 2026): one added as UPI or card is not a cash sale of this drawer.
+        AND EXISTS (SELECT 1 FROM register_payments p WHERE p.register_row_id = r.id AND p.mode = 'cash')
       ORDER BY 2`, businessId, day, businessId, day),
     one<{ approved: number; waiting: number; waitingPaise: number; waitingUpload: string | null }>(db, `SELECT
         coalesce(sum(CASE WHEN status = 'approved' THEN amount_paise END), 0) AS approved,
@@ -62,6 +64,15 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
       WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'transfer' AND a.kind = 'cash'`, businessId, day),
   ]);
 
+  // Cash in the software, counted as cash (Use software), but the register wrote it another way and has no cash on it
+  // (18 Nov 2026): to the drawer the same as a bill not in the register, so it explains a short count too.
+  const notCash = await all<{ id: string; bill_no: string; sw_amount_paise: number; paid_at: number | null; close_note: string | null; rg_mode: string | null; rg_paise: number | null }>(db, `
+    SELECT c.id, c.bill_no, c.sw_amount_paise, sb.paid_at, c.close_note, c.rg_mode, c.rg_amount_paise AS rg_paise FROM bill_comparisons c
+    LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
+    WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND c.decision = 'use_software' AND c.register_row_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM register_payments p WHERE p.register_row_id = c.register_row_id AND p.mode = 'cash')
+      AND coalesce(json_extract((SELECT ocr_original FROM register_rows r WHERE r.id = c.register_row_id), '$.source'), '') <> 'software_report'
+    ORDER BY c.bill_no`, businessId, day);
   const confirmed = shift?.status === 'confirmed';
   const opening = yesterday?.cash_in_hand_paise ?? today?.opening_paise ?? null;
   const openingFrom = yesterday?.cash_in_hand_paise != null ? 'previous' : today?.opening_paise != null ? 'page' : null;
@@ -83,12 +94,24 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
   // A short count is first explained by the cash bills the register does not have (Stage 3, approved 10 Nov 2026):
   // counted from the software, so they raise "should be in hand", but the cash may never have reached the drawer.
   // Taken in time order; the last one may explain only part of the shortage.
+  // Changed after saving (18 Nov 2026): a cash bill of this saved shift found paid by card or UPI on a later day. The
+  // day's cash sales drop by it, so the difference moves; told with who, when and what it was when saved.
+  const changedLater = confirmed ? (await all<{ after: string; created_at: number; who: string | null }>(db, `SELECT a.after, a.created_at, u.name AS who FROM audit_log a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = ? AND a.action = 'sale.repaid' AND json_extract(a.after, '$.shiftDay') = ? AND json_extract(a.after, '$.settledLater') = 1
+        AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'sale.repay_undone' AND x.row_id = CAST(a.id AS TEXT))
+      ORDER BY a.id`, businessId, day)).map((a) => {
+      const o = JSON.parse(a.after) as { from: string; mode: string; bills: string[]; amountPaise: number; paidOn?: string | null; shortage?: { fromPaise: number; toPaise: number } | null };
+      return { bills: o.bills, amountPaise: o.amountPaise, from: o.from, mode: o.mode, paidOn: o.paidOn ?? null, by: a.who, at: a.created_at,
+        shortage: o.shortage ? { fromPaise: o.shortage.fromPaise, toPaise: o.shortage.toPaise } : null };
+    }) : [];
   const settled = difference === 0 || (acc !== null && difference !== null && acc.differencePaise === difference);
   let explained: { bills: { id: string; billNo: string; amountPaise: number; partPaise: number }[]; explainedPaise: number; unexplainedPaise: number } | null = null;
   if (difference !== null && difference < 0 && !settled) {
     let left = -difference;
     const bills = [];
-    for (const c of notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note).sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
+    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note), ...notCash.filter((x) => !x.close_note)];
+    for (const c of waiting.sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
       if (left <= 0) break;
       const part = Math.min(left, c.sw_amount_paise);
       bills.push({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, partPaise: part });
@@ -105,6 +128,8 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     cashSalesPaise: confirmed ? sales!.total : null,
     notInRegister: notInRegisterRows,
     notInRegisterBookedPaise: notInRegisterRows.filter((c) => c.decision === 'use_software').reduce((t, c) => t + c.amountPaise, 0),
+    registerNotCash: notCash.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, rgMode: c.rg_mode, rgPaise: c.rg_paise, closeNote: c.close_note })),
+    changedLater,
     expensesPaise: expenses!.approved,
     expensesWaiting: expenses!.waiting,
     expensesWaitingPaise: expenses!.waitingPaise,

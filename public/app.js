@@ -562,8 +562,16 @@ async function dashboardView(biz) {
     ${h.photos?.count ? html`<section class="card td-row"><div><h2 style="margin:0">Approve · ${nOf(h.photos.count, 'expense line')} · ₹ ${rs(h.photos.paise)}</h2>
       <div class="note">${nOf(h.photos.pages.length, 'cash page')}: ${daysText([...new Set(h.photos.pages.map((p) => p.day))].sort())}</div></div>
       <a class="btn plain" href="#/b/${biz.id}/review/${h.photos.pages[0]?.uploadId ?? ''}">Approve ›</a></section>` : ''}
-    ${(h.cash ?? []).length ? html`<section class="card" style="gap:4px"><h2>Cash</h2>${h.cash.map((k) => html`<a class="today-row" href="#/b/${biz.id}/reconcile/${k.day}?tab=cash">
-      <span><strong>${dayLabel(k.day)}</strong> · ${!k.counted ? 'cash in hand not entered' : k.differencePaise < 0 ? `₹ ${rs(-k.differencePaise)} short` : `₹ ${rs(k.differencePaise)} over`}</span><span class="btn plain dchip">Cash ›</span></a>`)}</section>` : ''}
+    ${(h.cash ?? []).length ? (() => {
+      // Open cash shorts (18 Nov 2026): each saved day still short or over, what explains it, and the shorts' total. A day
+      // leaves when its bill turns up, a shortage is booked or the difference is accepted.
+      const shortSum = h.cash.filter((k) => k.differencePaise < 0).reduce((t, k) => t - k.differencePaise, 0);
+      return html`<section class="card" style="gap:4px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>${shortSum ? 'Open cash shorts' : 'Cash'}</h2>
+        ${shortSum ? html`<strong class="amount" style="color:#991B1B">₹ ${rs(shortSum)}</strong>` : ''}</div>
+      ${h.cash.map((k) => html`<a class="today-row" href="#/b/${biz.id}/reconcile/${k.day}?tab=cash">
+      <span><strong>${dayLabel(k.day)}</strong> · ${!k.counted ? 'cash in hand not entered' : k.differencePaise < 0 ? `₹ ${rs(-k.differencePaise)} short` : `₹ ${rs(k.differencePaise)} over`}
+        ${k.differencePaise < 0 && k.bills?.length ? html`<span class="tiny note"> · ${k.bills.map((b) => `${b.billNo} ₹ ${rs(b.amountPaise)}`).join(', ')} not in the register as cash${k.unexplainedPaise ? `, ₹ ${rs(k.unexplainedPaise)} unexplained` : ''}</span>` : ''}</span><span class="btn plain dchip">Cash ›</span></a>`)}
+      ${shortSum ? html`<div class="tiny note">A day leaves this list when its bill turns up, a shortage is booked or the difference is accepted.</div>` : ''}</section>`; })() : ''}
     ${done.length ? html`<div class="note">✓ ${done.join(' · ')}</div>` : ''}
     <details class="card cmp-fold"><summary><h2>Opening balances and set-up</h2></summary>
       ${accounts.map((a) => html`<div class="list-row"><span>${a.name}</span><span class="amount">₹ ${money(a.openingBalancePaise)}</span></div>`)}
@@ -3390,7 +3398,9 @@ function waitSplit({ day, rc, cash, oneSided }) {
   // Cash bills the register does not have: the short count is explained by them, oldest first.
   const diff = cash ? (cash.confirmed ? (cash.settled ? 0 : cash.differencePaise) : cash.draft?.differencePaise ?? null) : null;
   const late = new Map(oneSided.filter((o) => o.otherDay && !o.otherDay.closed).map((o) => [o.comparisonId, o.otherDay]));
-  const cashBills = (cash?.notInRegister ?? []).filter((x) => x.decision === 'use_software' && !/^Added to the register/.test(x.note ?? ''));
+  const cashBills = [...(cash?.notInRegister ?? []).filter((x) => x.decision === 'use_software' && !/^Added to the register/.test(x.note ?? '')),
+    // Counted as cash but the register wrote UPI or card (18 Nov 2026): to the drawer the same as not in the register.
+    ...(cash?.registerNotCash ?? []).map((x) => ({ ...x, decision: 'use_software', paidAt: null }))];
   let left = diff != null && diff < 0 ? -diff : 0;
   for (const b of [...cashBills].sort((a, b2) => (a.paidAt ?? 0) - (b2.paidAt ?? 0))) {
     const x = { comparisonId: b.id, billNo: b.billNo, amountPaise: b.amountPaise, paidAt: b.paidAt ?? null, mode: 'cash' };
@@ -3398,21 +3408,16 @@ function waitSplit({ day, rc, cash, oneSided }) {
     if (b.closeNote) { out.closed.push({ ...x, why: b.closeNote }); continue; }
     // Written late (18 Nov 2026): the server links the later day's line; the comparisons' own link counts too.
     const o = b.late ?? late.get(b.id);
-    // Written late as card or UPI (18 Nov 2026): paid on that day, not into this drawer. Found when its payment is there.
-    if (o && (o.mode === 'card' || o.mode === 'upi')) {
-      const ev = b.paidLater?.evidence; const word = o.mode === 'card' ? 'card' : 'UPI';
-      const why = `Written in the ${dayLabel(o.day)} register as ${word}: paid later by ${word}. Choose "Paid later by ${word}" on the Cash tab`;
-      if (ev) out.found.push({ ...x, late: o, why, offer: { amountPaise: ev.amountPaise, at: ev.at, label: ev.label } });
-      else out.paperwork.push({ ...x, late: o, why });
-      continue;
-    }
-    if (o) { out.paperwork.push({ ...x, late: o, why: `Written late in the ${dayLabel(o.day)} register${o.amountPaise != null && o.amountPaise !== b.amountPaise ? ` as ₹ ${rs(o.amountPaise)}` : ''}${cash?.pair ? `; the ${dayLabel(cash.pair.day)} cash is ${cash.pair.differencePaise > 0 ? 'over' : 'short'} by ₹ ${rs(Math.abs(cash.pair.differencePaise))}: settle them together on the Cash tab` : ''}` }); continue; }
+    // Written late as card or UPI (18 Nov 2026): left short on its own day, as on a daily reconcile the next day is not in
+    // yet. It waits like any cash bill; the later day's Card (UPI) tab changes it once this shift is saved.
+    const paidLaterNote = o && (o.mode === 'card' || o.mode === 'upi') ? `; written in the ${dayLabel(o.day)} register as ${o.mode === 'card' ? 'card' : 'UPI'}: change it on ${dayLabel(o.day)}'s ${o.mode === 'card' ? 'Card' : 'UPI'} tab once this shift is saved` : '';
+    if (o && !paidLaterNote) { out.paperwork.push({ ...x, late: o, why: `Written late in the ${dayLabel(o.day)} register${o.amountPaise != null && o.amountPaise !== b.amountPaise ? ` as ₹ ${rs(o.amountPaise)}` : ''}${cash?.pair ? `; the ${dayLabel(cash.pair.day)} cash is ${cash.pair.differencePaise > 0 ? 'over' : 'short'} by ₹ ${rs(Math.abs(cash.pair.differencePaise))}: settle them together on the Cash tab` : ''}` }); continue; }
     if (diff == null) { out.cashWait.push({ ...x, why: 'Not in the register; the cash count is not in yet', age: shiftAge(day) }); continue; }
     if (left <= 0) { out.paperwork.push({ ...x, why: 'Paid in cash: the cash count backs it, only the register line is missing' }); continue; }
     const part = Math.min(left, b.amountPaise);
     left -= part;
-    const why = `Not in the register, and the cash is short by ₹ ${rs(-diff)}${part < b.amountPaise ? ` (explains ₹ ${rs(part)})` : ''}`;
-    if (shiftAge(day) > CASH_WATCH_DAYS) out.notReceived.push({ ...x, why: `${why}: not written in any register since` });
+    const why = `${b.rgMode ? `The register wrote ${MODE_LABELS[b.rgMode] ?? b.rgMode}${b.rgPaise != null ? ` ₹ ${rs(b.rgPaise)}` : ''}, counted as cash` : 'Not in the register'}, and the cash is short by ₹ ${rs(-diff)}${part < b.amountPaise ? ` (explains ₹ ${rs(part)})` : ''}${paidLaterNote}`;
+    if (shiftAge(day) > CASH_WATCH_DAYS && !paidLaterNote) out.notReceived.push({ ...x, why: b.rgMode ? why : `${why}: not written in any register since` });
     else out.cashWait.push({ ...x, why, age: shiftAge(day) });
   }
   // The rest on one side only: money in, only the paperwork differs.
@@ -3501,6 +3506,17 @@ function cashUpiFix(b, w, canAct) {
   return html`<div data-cashupibox style="margin-top:4px"><div class="tiny" style="color:var(--teal-ink);white-space:normal">The bank got a UPI credit of ₹ ${money(w.byUpi.amountPaise)} at ${when(w.byUpi.postedAt)}${w.byUpi.label ? ` (${w.byUpi.label})` : ''}: probably paid by UPI, not cash.</div>
     <div class="form-row" style="gap:6px;margin-top:4px">${types.map((t) => html`<button type="button" class="btn plain dchip" data-cashupi2="${w.comparisonId}" data-credit="${w.byUpi.creditId}" data-type="${t}" data-bill="${b.billNo}">Paid by UPI: add to the register as UPI${types.length > 1 ? ` · ${t === 'room' ? 'Room' : 'F&B'}` : ''}</button>`)}</div><div class="form-msg"></div></div>`;
 }
+/** Bills of an earlier saved shift written here as card or UPI (18 Nov 2026): told on Cash and To do, changed on the
+ *  Card (UPI) tab, where the payment and the earlier day's short are shown. */
+function paidHereNotice(list, go = true) {
+  if (!list?.length) return '';
+  const byMode = ['card', 'upi'].map((m) => [m, list.filter((x) => x.mode === m)]).filter(([, xs]) => xs.length);
+  return html`${byMode.map(([m, xs]) => { const days = [...new Set(xs.map((x) => x.fromDay))];
+    return html`<div class="ent-line" style="border:1px solid #FCD34D;background:#FFF6E0;border-radius:8px;padding:10px 12px">
+      <strong>${xs.length} bill${xs.length === 1 ? '' : 's'} from ${days.map(dayLabel).join(', ')} paid here by ${MODE_WORD[m]}: check</strong>
+      <div class="tiny">${xs.map((x) => `${x.billNo} · ₹ ${money(x.amountPaise)} · counted as cash on ${dayLabel(x.fromDay)} (short there). The register here says ${MODE_WORD[m]}.`).join(' ')}</div>
+      ${go ? html`<div class="form-row" style="gap:6px;margin-top:4px"><button type="button" class="btn plain dchip" data-goto="pay:${m}">Open on the ${m === 'card' ? 'Card' : 'UPI'} tab ›</button></div>` : ''}</div>`; })}`;
+}
 function cashPanelHtml(biz, k, opts = {}) {
   const draft = !k.confirmed;
   const shouldBe = draft ? k.draft?.shouldBePaise ?? null : k.shouldBePaise;
@@ -3545,9 +3561,25 @@ function cashPanelHtml(biz, k, opts = {}) {
     const word = (d) => (d == null ? '' : d === 0 ? 'cash agrees' : d < 0 ? `short ₹ ${money(-d)}` : `₹ ${money(d)} over`);
     const sideName = (which) => (which === 'use_software' ? `${MODE_LABELS[b.swMode] ?? b.swMode ?? 'no mode'} ₹ ${money(b.swAmountPaise ?? 0)}`
       : [...(b.rgCashPaise ? [`Cash ${money(b.rgCashPaise)}`] : []), ...b.rgOther.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${money(p.amountPaise)}`)].join(' + ') || 'no payment');
-    const switches = both ? [['use_software', sw], ['use_register', rg]].map(([d, v]) => ({ d, v, on: b.decision === d, text: `${d === 'use_software' ? 'Use software' : 'Use register'} (${sideName(d)})`, then: word(after(v)) })) : [];
+    // Cash in the software, UPI or card in the register with no payment of its own (18 Nov 2026): the cashier says which.
+    // "Cashier says cash" keeps it counted as cash, so the short stands and is named; "It was UPI" counts the register.
+    const otherOnly = b.swCashPaise != null && b.rgOther.length && !rg;
+    const asked = otherOnly && !b.witness?.found;
+    const otherWord = otherOnly ? (MODE_LABELS[b.rgOther[0].mode] ?? b.rgOther[0].mode) : '';
+    const switches = both ? [['use_software', sw], ['use_register', rg]].map(([d, v]) => ({ d, v, on: b.decision === d,
+      text: asked ? (d === 'use_software' ? 'Cashier says cash' : `It was ${otherWord}`) : `${d === 'use_software' ? 'Use software' : 'Use register'} (${sideName(d)})`,
+      label: asked ? (d === 'use_software' ? `Cashier says cash ${money(sw)}` : `It was ${otherWord} ${other(b)}`) : null,
+      note: asked && d === 'use_software' ? `Cashier says cash; the register wrote ${other(b)}` : '', then: word(after(v)) })) : [];
+    if (otherOnly && b.decision === 'use_software') text = html`software Cash ₹ ${money(sw)}, register ${other(b)}: counted as cash`;
     const wit = b.witness ? (b.witness.found ? html`<div class="tiny" style="color:var(--teal)">✓ ${b.witness.found}: ${MODE_LABELS[b.witness.mode] ?? b.witness.mode} ₹ ${money(b.witness.amountPaise)} was received</div>`
+      : b.witness.takenBy ? html`<div class="tiny" style="color:#92400E">No UPI credit of its own. The ₹ ${money(b.witness.amountPaise)} credit at ${when(b.witness.takenBy.at)} is bill <span class="mono">${b.witness.takenBy.billNo}</span>'s.</div>`
       : html`<div class="tiny" style="color:#92400E">No ${b.witness.mode === 'upi' ? 'UPI credit in the bank or UPI on the card machine' : 'card-machine payment'} of ₹ ${money(b.witness.amountPaise)} near this bill</div>`) : '';
+    // Counted as UPI or card with its payment found (2610302, 18 Nov 2026): settled, told quietly, not a choice.
+    if (otherOnly && b.decision === 'use_register' && b.witness?.found && !(b.countedPaise ?? 0)) {
+      items.push({ same: false, quiet: true, html: html`<div class="ent-line" style="color:var(--muted)"><div><span class="mono">${b.billNo}</span> · software Cash ₹ ${money(sw)}, register ${other(b)} · ${b.witness.found}</div>
+        <div class="tiny">Counted as ${otherWord}, not in the cash sum.</div></div>` });
+      continue;
+    }
     const same = gap ? (b.rgCashPaise === null && b.decision === 'use_software' && sw === gap) || effects.some(([, v]) => v === gap) || Math.abs(sw - rg) === gap : false;
     // Only in the register and counted from it (an old POS bill, or Use register): already in the sum, so it does not
     // explain the difference (17 Nov 2026). Old POS bills are decided in To do's old POS block.
@@ -3560,25 +3592,10 @@ function cashPanelHtml(biz, k, opts = {}) {
     // into that day's count, so the two days are settled together (the pair line below) rather than chased.
     const nirRow = (k.notInRegister ?? []).find((x) => x.id === b.comparisonId);
     const lt = nirRow?.late;
-    // Written late as card or UPI (18 Nov 2026): the money came on that day, on the machine or into the bank, not into
-    // this drawer. "Paid later by card" counts it as a card (UPI) sale here, so the cash no longer waits for it.
-    if (same && b.rgCashPaise === null && lt && (lt.mode === 'card' || lt.mode === 'upi')) {
-      const pl = nirRow.paidLater;
-      const word = lt.mode === 'card' ? 'card' : 'UPI';
-      const ev = pl?.evidence;
-      const can = !k.confirmed && biz.actions.includes('sales.decide') && lt.amountPaise === sw;
-      items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #FCD34D;border-radius:8px;padding:10px 12px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Paid later by ${word}?</strong>
-          <span class="chip">${dayLabel(lt.day)} register</span></div>
-        <div>Bill <span class="mono">${b.billNo}</span> · ₹ ${money(sw)} cash in the software, written in the ${dayLabel(lt.day)} register as ${word}${lt.amountPaise != null && lt.amountPaise !== sw ? ` ₹ ${money(lt.amountPaise)}` : ''}.</div>
-        ${ev ? html`<div class="tiny" style="color:var(--teal-ink)">✓ ${ev.label} ₹ ${money(ev.amountPaise)} at ${when(ev.at)}${ev.with.length ? html` = this bill + ${ev.with.map((x) => html`<span class="mono">${x.billNo}</span> ₹ ${money(x.amountPaise)}`).reduce((a, x) => html`${a}${a ? ' + ' : ''}${x}`, '')} (the line${ev.with.length > 1 ? 's' : ''} beside it)` : ' = this bill'}</div>`
-          : html`<div class="tiny note">No open ${lt.mode === 'card' ? 'card machine payment' : 'UPI credit'} of this amount on ${dayLabel(lt.day)} yet${lt.mode === 'card' ? '' : ' (or it came with other bills)'}.</div>`}
-        ${lt.amountPaise !== sw ? html`<div class="tiny note">The ${dayLabel(lt.day)} line has another amount: correct it first.</div>` : ''}
-        ${can ? html`<div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-paidlater2="${b.comparisonId}" data-bill="${b.billNo}" data-word="${word}">Paid later by ${word}</button></div>
-          <div class="tiny">Counts it here as a ${word} sale, not cash in the drawer. The ${dayLabel(lt.day)} ${lt.mode === 'card' ? 'payment' : 'credit'} pays it once this shift is saved. One Undo.</div>` : ''}<div class="form-msg"></div></div>` });
-      continue;
-    }
-    if (same && b.rgCashPaise === null && lt) {
+    // Written late as card or UPI (18 Nov 2026): left short here, as on a daily reconcile the next day is not in yet. It
+    // waits like any cash bill below; the later day's Card (UPI) tab changes it once this shift is saved.
+    const ltPay = lt && (lt.mode === 'card' || lt.mode === 'upi') ? lt : null;
+    if (same && b.rgCashPaise === null && lt && !ltPay) {
       const gapTxt = lt.amountPaise != null && lt.amountPaise !== sw ? ` as ₹ ${money(lt.amountPaise)} (₹ ${money(Math.abs(sw - lt.amountPaise))} less than billed)` : '';
       items.push({ same, top: true, html: html`<div class="ent-line" style="border:1px solid #CBD5E1;border-radius:8px;padding:10px 12px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Written late · paid</strong>
@@ -3590,7 +3607,7 @@ function cashPanelHtml(biz, k, opts = {}) {
     }
     if (same && b.rgCashPaise === null && (b.decision === 'use_software' || b.state === 'undecided')) {
       const age = shiftAge(k.day);
-      const red = age > CASH_WATCH_DAYS;
+      const red = age > CASH_WATCH_DAYS && !ltPay;
       const decideIt = biz.actions.includes('sales.decide');
       const writeoff = !draft && biz.actions.includes('cash.writeoff') && diff < 0;
       const acts = html`<button type="button" class="btn plain dchip" data-leaveunk="${b.comparisonId}" data-bill="${b.billNo}" title="Asks why. The bill is not counted, so the cash agrees.">Not paid: leave it out</button>
@@ -3600,6 +3617,7 @@ function cashPanelHtml(biz, k, opts = {}) {
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>${red ? 'Payment not received' : 'Explained by a bill not in the register · waiting'}</strong>
           <span class="chip ${red ? 'bad' : 'wait'}">${red ? `${age} days` : `day ${Math.max(1, age)} of ${CASH_WATCH_DAYS}`}</span></div>
         <div>Bill <span class="mono">${b.billNo}</span> · ₹ ${money(sw)} cash in the software, not in the register.</div>
+        ${ltPay ? html`<div class="tiny" style="color:var(--teal-ink)">Written in the ${dayLabel(ltPay.day)} register as ${ltPay.mode === 'card' ? 'card' : 'UPI'}. Once this shift is saved, change it on ${dayLabel(ltPay.day)}'s ${ltPay.mode === 'card' ? 'Card' : 'UPI'} tab: this day's short then drops by ₹ ${money(sw)}.</div>` : ''}
         ${cashUpiFix(b, opts.byUpi?.get(b.comparisonId), true)}
         <div class="tiny note">${red ? `Not written in any register in ${CASH_WATCH_DAYS} days, and the cash is short by the same.` : `Counted as a ${dayLabel(k.day)} sale. Usually written in the next day's register: it closes by itself then. Saving is not blocked.`}</div>
         ${decideIt ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">${red ? '' : html`<span class="note">Already know?</span>`}${acts}</div>` : ''}</div>` });
@@ -3615,7 +3633,7 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${wit}
       ${b.rgCashPaise === null && draft && biz.actions.includes('sales.decide') ? cashUpiFix(b, opts.byUpi?.get(b.comparisonId), true) : ''}
       ${switches.length ? html`<div class="form-row" style="gap:6px;margin-top:4px">${switches.map((x) => html`<button type="button" class="btn ${x.on ? 'ghost' : 'plain'} dchip" ${x.on ? 'disabled style="font-weight:600;background:#E3F1EF"' : ''}
-          data-cashswitch="${b.comparisonId}" data-d="${x.d}" data-was="${b.decision ?? ''}" data-bill="${b.billNo}" data-label="${x.text}" title="${x.text}">${x.on ? '✓ ' : ''}${sideName(x.d)} · ${x.on ? word(diff) : x.then}</button>`)}</div>`
+          data-cashswitch="${b.comparisonId}" data-d="${x.d}" data-was="${b.decision ?? ''}" data-bill="${b.billNo}" data-label="${x.text}" data-note="${x.note}" title="${x.text}">${x.on ? '✓ ' : ''}${x.label ?? sideName(x.d)} · ${x.on ? word(diff) : x.then}</button>`)}</div>`
         : effects.length ? html`<div class="tiny note">${effects.map(([l, v]) => `${l}: ${v ? `+₹ ${money(v)}` : '₹ 0'}`).join(' · ')}</div>` : ''}
       ${b.state === 'undecided' && !switches.length ? html`<div class="form-row" style="gap:6px;margin-top:4px">${decide}</div>` : ''}</div>` });
   }
@@ -3625,7 +3643,18 @@ function cashPanelHtml(biz, k, opts = {}) {
   const extra = -rounded.filter((b) => b.roundedPaise < 0).reduce((t, b) => t + b.roundedPaise, 0);
   // The bills behind a line of the working, on a click (17 Nov 2026).
   const counting = bills.filter((b) => b.countedPaise);
-  const notInReg = counting.filter((b) => b.rgCashPaise === null);
+  // Counted as cash but the register doesn't show it as cash (18 Nov 2026): not in the register, or written as UPI or card.
+  const notInReg = counting.filter((b) => b.rgCashPaise === null || (!b.rgCashPaise && b.rgOther.length));
+  const lateOf = (b) => (k.notInRegister ?? []).find((x) => x.id === b.comparisonId)?.late ?? null;
+  const notCashWhy = (b) => { if (b.rgCashPaise !== null) return `register wrote ${other(b)}`;
+    const lt = lateOf(b); return `not in the ${dayLabel(k.day)} register${lt ? ` (${dayLabel(lt.day)}: ${MODE_LABELS[lt.mode] ?? lt.mode ?? 'written'})` : ''}`; };
+  const notCashOpen = html`<details><summary style="cursor:pointer">of which the register doesn't show as cash · <u>${notInReg.length} bill${notInReg.length === 1 ? '' : 's'}</u></summary>
+    ${notInReg.map((b) => html`<div class="tiny"><button type="button" class="linkbtn tiny mono" data-bill-drawer="${b.billNo}|${k.day}">${b.billNo}</button> · ₹ ${money(b.countedPaise)} · ${notCashWhy(b)}</div>`)}</details>`;
+  const notCashPaise = notInReg.reduce((t, b) => t + b.countedPaise, 0);
+  // Changed after saving (18 Nov 2026): a cash bill of this day paid by card or UPI on a later day.
+  const later = k.changedLater ?? [];
+  const wasDiff = diff == null || !later.length ? null
+    : diff - later.filter((x) => x.from === 'cash').reduce((t, x) => t + x.amountPaise, 0) + later.reduce((t, x) => t + (x.shortage ? x.shortage.fromPaise - x.shortage.toPaise : 0), 0);
   const billsOpen = (label, list) => (list.length ? html`<details><summary style="cursor:pointer">${label} · <u>${list.length} bill${list.length === 1 ? '' : 's'}</u></summary>
     ${list.map((b) => html`<div class="tiny"><button type="button" class="linkbtn tiny mono" data-bill-drawer="${b.billNo}|${k.day}">${b.billNo}</button> · ₹ ${money(b.countedPaise)}${b.groupSize > 1 ? ` · group of ${b.groupSize}` : ''}${b.state === 'decided' ? ` · ${b.decision === 'use_software' ? 'Use software' : b.decision === 'use_register' ? 'Use register' : DECISION_LABELS[b.decision] ?? ''}` : b.state === 'undecided' ? ' · not decided' : ''}</div>`)}</details>` : label);
   // Discount at the till (17 Nov 2026): one line in the working, its bills listed on a click.
@@ -3651,10 +3680,13 @@ function cashPanelHtml(biz, k, opts = {}) {
       <span class="cash-op" aria-hidden="true">=</span>
       <div class="${tone}" title="${draft ? 'Draft: changes as you decide and correct bills, final after Save' : 'Final: booked when the shift was saved'}"><div style="font-size:13px">${stateWord}${draft ? ' · draft' : ''}</div><div class="cash-big">${diff == null ? '—' : diff === 0 ? '₹ 0' : `₹ ${money(Math.abs(diff))}`}</div></div>
     </div>
+    ${paidHereNotice(k.paidHere, !!opts.decide)}
     <details><summary class="note">How ${shouldBe == null ? 'it' : `₹ ${money(shouldBe)}`} is worked out</summary><div class="scroll"><table style="min-width:560px">
       ${row('Opening cash', k.openingFrom === 'previous' ? 'previous day\'s cash in hand' : k.openingFrom === 'page' ? 'opening written on this day\'s cash page' : 'no cash summary for the previous day', k.openingPaise, k.openingPaise == null ? '' : tag(true))}
+      ${k.previous ? html`<tr style="color:var(--muted)"><td></td><td colspan="3">${dayLabel(k.previous.day)} was short ₹ ${money(-k.previous.differencePaise)}${k.previous.bills.length ? ` (${k.previous.bills.join(', ')} waiting)` : ''}. Not carried in: this day starts from the counted ₹ ${money(k.openingPaise ?? 0)}.</td></tr>` : ''}
       ${row('+ Cash sales', billsOpen(draft ? 'what Save would book now' : 'booked for this shift', counting), sales, tag(!draft))}
-      ${k.notInRegisterBookedPaise ? row('', billsOpen('of which not in the register (Use software)', notInReg), k.notInRegisterBookedPaise) : ''}
+      ${notCashPaise ? row('', notCashOpen, notCashPaise, '', false, 'cash-warn') : ''}
+      ${later.map((x) => html`<tr style="color:var(--muted)"><td></td><td>Changed after saving: ${x.bills.join(', ')} ₹ ${money(x.amountPaise)} ${MODE_WORD[x.from] ?? x.from} → ${MODE_WORD[x.mode] ?? x.mode}${x.paidOn ? html`, paid on ${dayLabel(x.paidOn)}` : ''} (${x.by ?? 'someone'}, ${when(x.at)})${x.paidOn ? html` · <a href="#/b/${biz.id}/reconcile/${x.paidOn}?tab=card">Open ${dayLabel(x.paidOn)}</a>` : ''}${x.shortage ? ` · shortage ₹ ${money(x.shortage.fromPaise)} → ₹ ${money(x.shortage.toPaise)}` : ''}</td><td class="amount">${x.from === 'cash' ? `−${money(x.amountPaise)}` : ''}</td><td></td></tr>`)}
       ${roundedRows}
       ${row('− Cash expenses', 'approved lines', k.expensesPaise, tag(true))}
       ${k.expensesWaiting ? html`<tr style="color:var(--muted)"><td></td><td>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval (not taken off)</td><td class="amount">${money(k.expensesWaitingPaise ?? 0)}</td><td><a href="#/b/${biz.id}/review${k.expensesWaitingUploadId ? `/${k.expensesWaitingUploadId}` : `?day=${k.day}`}">Review</a></td></tr>` : ''}
@@ -3663,7 +3695,7 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${k.drawnPaise ? row('+ Cash from bank', 'taken out for the drawer', k.drawnPaise) : ''}
       ${row('= Should be in hand', '', shouldBe, '', true)}
       ${row('Counted', 'cash in hand on this day\'s cash summary page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/bringin">Bring it in</a>`)}
-      ${diff !== null ? row('Difference', diff < 0 ? 'short' : diff > 0 ? 'over' : '', diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
+      ${diff !== null ? row('Difference', `${diff < 0 ? 'short' : diff > 0 ? 'over' : ''}${wasDiff != null && wasDiff !== diff ? ` · was ${wasDiff < 0 ? `₹ ${money(-wasDiff)} short` : wasDiff > 0 ? `₹ ${money(wasDiff)} over` : '₹ 0'} when saved` : ''}`, diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
     </table></div></details>
     ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px">${tops.map((x) => x.html)}
       ${rest.length ? html`<strong>${tops.length ? 'Could also explain it' : 'What could explain it'}</strong>${rest.map((x) => x.html)}`
@@ -3686,7 +3718,8 @@ function cashPanelHtml(biz, k, opts = {}) {
         <td class="amount">${b.rgCashPaise == null ? '—' : b.rgCashPaise ? money(b.rgCashPaise) : other(b) || '0.00'}</td>
         <td>${counted(b)}</td><td class="amount">${b.countedPaise ? money(b.countedPaise) : ''}</td><td>${edit(b)}</td></tr>`)}</tbody>
     </table></div></details>` : ''}
-    ${!draft && k.explained ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}${k.explained.bills.length ? html`, explained by ${k.explained.bills.length} bill${k.explained.bills.length === 1 ? '' : 's'} waiting (not in the register): ${k.explained.bills.map((b) => `${b.billNo} ₹ ${money(b.partPaise)}${b.partPaise < b.amountPaise ? ` of ₹ ${money(b.amountPaise)}` : ''}`).join(', ')}` : ''}${k.explained.unexplainedPaise ? html`${k.explained.bills.length ? ' / ' : ': '}<strong>unexplained ₹ ${money(k.explained.unexplainedPaise)}</strong>` : ''}.</div>` : ''}
+    ${draft && diff < 0 && notCashPaise ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}: the register doesn't show ${notInReg.length} bill${notInReg.length === 1 ? '' : 's'} as cash: ${notInReg.map((b) => `${b.billNo} ₹ ${money(b.countedPaise)}`).join(', ')}. ${-diff > notCashPaise ? html`<strong>Unexplained ₹ ${money(-diff - notCashPaise)}</strong>.` : 'Unexplained ₹ 0.'}</div>` : ''}
+    ${!draft && k.explained ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}${k.explained.bills.length ? html`, explained by ${k.explained.bills.length} bill${k.explained.bills.length === 1 ? '' : 's'} the register doesn't show as cash: ${k.explained.bills.map((b) => `${b.billNo} ₹ ${money(b.partPaise)}${b.partPaise < b.amountPaise ? ` of ₹ ${money(b.amountPaise)}` : ''}`).join(', ')}` : ''}${k.explained.unexplainedPaise ? html`${k.explained.bills.length ? ' / ' : ': '}<strong>unexplained ₹ ${money(k.explained.unexplainedPaise)}</strong>` : ''}.</div>` : ''}
     ${k.accepted ? html`<div class="note">Accepted with a note: ${k.accepted}</div>` : ''}
     ${!draft && diff !== null && diff !== 0 && !k.settled ? html`<form id="cashact" class="inset">
       <div class="field"><label for="cashnote">Note (what happened)</label><input id="cashnote" name="note" required placeholder="e.g. Bill 26103136 cash received, not written in the register"></div>
@@ -5881,6 +5914,7 @@ async function reconcileView(biz, dayArg) {
       ${canDecide ? html`<button class="btn" type="button" id="savereconcile" ${r.save?.canSave ? '' : 'disabled'}>Save reconcile</button>` : html`<span class="note">Owner or Accountant saves.</span>`}
       <div class="form-msg" id="savemsg" style="flex-basis:100%"></div></section>`}
     ${P.conflictsHtml}
+    ${paidHereNotice((r.paidLater ?? []).map((x) => ({ billNo: x.billNo, amountPaise: x.amountPaise, fromDay: x.fromDay, mode: x.rowMode })))}
     ${steps.map((x, i) => html`<section class="card todo-step${x.left ? '' : ' done'}" data-step="${x.key}">
       <div class="todo-sh" ${x.body && x.left ? html`data-todostep="${x.key}" role="button" tabindex="0" aria-expanded="${openStep === x.key}"` : ''}>
         <span class="todo-n">${x.left ? i + 1 : '✓'}</span><span class="todo-t"><strong>${x.title}</strong> <span class="note">· ${x.left ? (x.sub ?? `${x.left} left`) : x.sub ?? 'done'}</span></span>
@@ -6447,9 +6481,12 @@ function paidLaterHtml(biz, r, mode) {
   return html`<section class="card" style="gap:8px">
     <div class="lane-h"><strong>Settled here, counted on an earlier day</strong>${todo.length ? html`<span class="tchip warn">${todo.length} to check</span>` : ''}</div>
     ${todo.map((x) => html`<div class="ent-line" data-plrow><div><span class="mono"><strong>${x.billNo}</strong></span> · ₹ ${money(x.amountPaise)} · ${dayLabel(x.fromDay)} bill ${row(x)}
-      <div class="tiny">Counted as <strong>${MODE_WORD[x.txMode] ?? x.txMode}</strong> on ${dayLabel(x.fromDay)} (saved). The register here says it was paid by <strong>${MODE_WORD[x.rowMode]}</strong>.${x.txMode === 'cash' ? ` If ${dayLabel(x.fromDay)}'s cash was short by ₹ ${money(x.amountPaise)}, this is why.` : ''}</div>
+      <div class="tiny">Counted as <strong>${MODE_WORD[x.txMode] ?? x.txMode}</strong> on ${dayLabel(x.fromDay)} (saved). The register here says it was paid by <strong>${MODE_WORD[x.rowMode]}</strong>.${x.txMode === 'cash' ? (x.fromCash?.differencePaise < 0 ? ` ${dayLabel(x.fromDay)}'s cash is short ₹ ${money(-x.fromCash.differencePaise)}: this takes ₹ ${money(x.amountPaise)} off it.` : ` If ${dayLabel(x.fromDay)}'s cash was short by ₹ ${money(x.amountPaise)}, this is why.`) : ''}</div>
+      ${x.evidence ? html`<div class="tiny" style="color:var(--teal-ink)">✓ ${x.evidence.label} ₹ ${money(x.evidence.amountPaise)} at ${when(x.evidence.at)}${x.evidence.with.length ? html` = this bill + ${x.evidence.with.map((w) => `${w.billNo} ₹ ${money(w.amountPaise)}`).join(' + ')} (the line${x.evidence.with.length > 1 ? 's' : ''} beside it)` : ' = this bill'}</div>` : ''}
+      ${x.txMode === 'cash' && x.fromCash?.shortagePaise > 0 && biz.actions.includes('cash.writeoff') ? html`<label class="tiny" style="display:flex;gap:6px;align-items:center;margin-top:4px;padding:6px 8px;border-radius:6px;background:#F1F5F9">
+        <input type="checkbox" data-plshort checked> ${dayLabel(x.fromDay)} has a cash shortage of ₹ ${money(x.fromCash.shortagePaise)} booked: also reduce it by ₹ ${money(Math.min(x.amountPaise, x.fromCash.shortagePaise))}</label>` : ''}
       <div class="form-msg"></div></div>
-      <button class="btn" type="button" style="min-height:36px" data-paidlater="${x.txId}" data-mode="${x.rowMode}" data-bill="${x.billNo}" data-day="${x.fromDay}">Paid by ${MODE_WORD[x.rowMode]} here</button></div>`)}
+      <button class="btn" type="button" style="min-height:36px" data-paidlater="${x.txId}" data-mode="${x.rowMode}" data-bill="${x.billNo}" data-day="${x.fromDay}" data-amt="${x.amountPaise}" data-short="${x.txMode === 'cash' && x.fromCash?.differencePaise < 0 ? -x.fromCash.differencePaise : ''}">Paid by ${MODE_WORD[x.rowMode]} here</button></div>`)}
     ${done.map((x) => html`<div class="ent-line"><div><span class="mono">${x.billNo}</span> · ₹ ${money(x.amountPaise)} · ${dayLabel(x.fromDay)} bill: changed from ${MODE_WORD[x.from] ?? x.from} to ${MODE_WORD[x.rowMode]}, paid here.${mode === 'card' ? ' Match it to its card payment below.' : ''}<div class="form-msg"></div></div>
       <button class="btn plain dchip" type="button" data-paidlaterundo="${x.auditId}">Undo</button></div>`)}
   </section>`;
@@ -6458,10 +6495,12 @@ function wirePaidLater(biz, reload) {
   app.querySelectorAll('[data-paidlater]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
     try {
+      const cut = !!b.closest('[data-plrow]')?.querySelector('[data-plshort]')?.checked;
       const { auditId } = await apiFull('POST', `/businesses/${biz.id}/sales/repay`, { transactionIds: [b.dataset.paidlater], mode: b.dataset.mode,
-        note: `Settled the next day: paid by ${MODE_WORD[b.dataset.mode]} (Reconcile)` });
+        note: `Settled the next day: paid by ${MODE_WORD[b.dataset.mode]} (Reconcile)`, ...(cut ? { reduceShortage: true } : {}) });
       await reload();
-      doneToast(`Bill ${b.dataset.bill}: ${dayLabel(b.dataset.day)} now counts it as ${MODE_WORD[b.dataset.mode]}, paid here.`, () => apiFull('POST', `/businesses/${biz.id}/sales/repay/${auditId}/undo`, {}), reload);
+      const sh = Number(b.dataset.short || 0), amt = Number(b.dataset.amt || 0);
+      doneToast(`Bill ${b.dataset.bill}: ${dayLabel(b.dataset.day)} now counts it as ${MODE_WORD[b.dataset.mode]}, paid here.${sh && !cut ? ` ${dayLabel(b.dataset.day)} short ₹ ${money(sh)} → ₹ ${money(Math.max(0, sh - amt))}.` : ''}`, () => apiFull('POST', `/businesses/${biz.id}/sales/repay/${auditId}/undo`, {}), reload);
     } catch (err) { b.disabled = false; showError(b.closest('.ent-line').querySelector('.form-msg'), err); }
   }));
   app.querySelectorAll('[data-paidlaterundo]').forEach((b) => b.addEventListener('click', async () => {
@@ -7790,7 +7829,7 @@ const HISTORY_LABELS = {
   'bank.match': 'Matched to a bank credit', 'bank.match_set': 'Matched by hand', 'bank.match_adjust_bills': 'Matched; register corrected to the bank amount', 'bank.fix_bill': 'Bill fixed from the bank',
   'bank.unmatch': 'Unmatched (changes put back)', 'sale.repaid': 'Changed to cash or card', 'sale.repay_undone': 'Put back to UPI', 'shift.confirm': 'Shift confirmed', 'shift.reopen': 'Shift reopened', 'transaction.remove_on_reopen': 'Sale taken off (shift reopened)',
   'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
-  'register.edit': 'Register line changed', 'register.paid_later': 'Paid later by card or UPI', 'register.paid_later_undone': 'Paid later undone', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
+  'register.edit': 'Register line changed', 'cash.shortage_reduced': 'Cash shortage reduced (bill paid on a later day)', 'cash.shortage_restored': 'Cash shortage put back', 'register.paid_later': 'Paid later by card or UPI', 'register.paid_later_undone': 'Paid later undone', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };
 const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
 // Complimentary (approved 14 Nov 2026), from any page: data-makecomp="comparisonId" asks the guest's name;
@@ -7818,7 +7857,7 @@ document.addEventListener('click', async (e) => {
       doneToast(`Bill ${pl.dataset.bill}: paid later by ${pl.dataset.word}, counted as a ${pl.dataset.word} sale, not cash.`, async () => { await apiFull('POST', `/businesses/${bizId}/comparisons/${id}/paid-later/undo`, {}); }, reload);
     } else if (sw) {
       const id = sw.dataset.cashswitch;
-      await apiFull('PUT', `/businesses/${bizId}/comparisons/${id}`, { decision: sw.dataset.d });
+      await apiFull('PUT', `/businesses/${bizId}/comparisons/${id}`, { decision: sw.dataset.d, ...(sw.dataset.note ? { note: sw.dataset.note } : {}) });
       await reload();
       doneToast(`Bill ${sw.dataset.bill}: ${sw.dataset.label}.`, async () => { await apiFull('PUT', `/businesses/${bizId}/comparisons/${id}`, { decision: sw.dataset.was || null }); }, reload);
     } else if (lo) {

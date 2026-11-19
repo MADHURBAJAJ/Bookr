@@ -77,7 +77,7 @@ describe('dashboard', () => {
     const r = (await h.home()).json;
     expect(r.shifts).toEqual({ count: 1, list: [{ day: open, status: 'open', toCheck: 0, toDecide: 0, bank: { billsLeft: 0, creditsLeft: 0, cardsLeft: 0 }, register: { pages: 0, unread: 0, failed: 0 } }] });
     // The confirmed shift has no cash count yet.
-    expect(r.cash).toEqual([{ day: done, differencePaise: null, counted: false }]);
+    expect(r.cash).toEqual([{ day: done, differencePaise: null, counted: false, bills: [], unexplainedPaise: null }]);
   });
 
   it('shows each role only its part: Viewer gets no bank, cash or photos; Entry staff keep Bring in', async () => {

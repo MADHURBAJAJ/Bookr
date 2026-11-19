@@ -6,6 +6,7 @@ import { body, fail, isUuid, text } from '../http';
 import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
 import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
+import { paidOtherwise, settledHere } from '../settledHere';
 import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
@@ -785,8 +786,15 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/cash', requireRole('sales.v
     ? k.openingPaise + cb.plannedCashPaise! - k.expensesPaise - k.shortagePaise - k.depositedPaise + k.drawnPaise : null;
   const draft = k.confirmed ? null : { cashSalesPaise: cb.plannedCashPaise, shouldBePaise: draftShould,
     differencePaise: draftShould !== null && k.countedPaise !== null ? k.countedPaise - draftShould : null };
-  const [pair, reverse] = await Promise.all([cashPairOf(db, bid, day, k), shortageToReverse(db, bid, day, k)]);
-  return c.json({ ...k, draft, bills: cb.bills, pair, reverse, reasons: LEAVE_OUT_REASONS });
+  const [pair, reverse, prevK, here] = await Promise.all([cashPairOf(db, bid, day, k), shortageToReverse(db, bid, day, k), cashCheck(db, bid, addDays(day, -1)),
+    settledHere(db, bid, day)]);
+  // The day before, when its count was short and not settled (18 Nov 2026): told, never carried in, as this day opens on
+  // the cash counted then.
+  const previous = prevK.differencePaise != null && prevK.differencePaise < 0 && !prevK.settled
+    ? { day: prevK.day, differencePaise: prevK.differencePaise, bills: prevK.explained?.bills.map((b) => b.billNo) ?? [], shortagePaise: prevK.shortagePaise } : null;
+  // Bills of an earlier saved shift paid here another way, to change there (the Card or UPI tab; 18 Nov 2026).
+  const paidHere = paidOtherwise(here).map((x) => ({ billNo: x.billNo, amountPaise: x.amountPaise, fromDay: x.fromDay, mode: x.rowMode }));
+  return c.json({ ...k, draft, bills: cb.bills, pair, reverse, previous, paidHere, reasons: LEAVE_OUT_REASONS });
 });
 
 // A short day and an over day by the same amount, settled together: the cash was counted a day late. Owner or Accountant.

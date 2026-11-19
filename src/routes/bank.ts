@@ -10,7 +10,8 @@ import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, 
 import { byName, headFromItem, inText, loadHistory, loadItemHistory, loadParties, pickHead, resolveVendor } from '../parties';
 import { adjustStatements } from '../bankadjust';
 import { fixBillStatements, undoAll } from '../billfix';
-import { repaidFor, repayStatements, undoRepayStatements } from '../repay';
+import { repaidFor, repayStatements, undoRepayStatements, type ShortageCut } from '../repay';
+import { can } from '../permissions';
 import { cashOver, isMachineUpi, machineLabel, shiftCards, unsettledDays } from '../cards';
 import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
@@ -22,7 +23,8 @@ import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
 import { cardHere, paidOtherwise, settledHere, upiHere } from '../settledHere';
 import { unsettleStatements } from '../cards';
-import { cashMoveOf } from '../cash';
+import { cashCheck, cashMoveOf } from '../cash';
+import { evidenceFor } from '../paidLater';
 import { paidByUpi } from '../paidByUpi';
 import { ADVANCE_TAG, creditChecks, HELD, heldKindOf, heldList, isHeldDone, OWED_PREFIX, type HeldKind } from '../extra';
 import { cardReportsStatus, syncCardFolder } from '../cardDrive';
@@ -280,7 +282,20 @@ bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'),
   if (!ids.length) fail(400, 'Choose the bill.');
   const mode = data.mode === 'cash' || data.mode === 'card' || data.mode === 'upi' ? data.mode : fail(400, 'Choose cash, card or UPI.');
   const note = text(data, 'note', 'Reason', { max: 300 })!;
-  const r = await repayStatements(db, bid, ids, mode, note, c.get('user').id, now());
+  // Settled on a later day, with the earlier day's booked shortage made smaller by the bill (18 Nov 2026): Owner or Accountant.
+  let shortage: ShortageCut | null = null;
+  if (data.reduceShortage === true) {
+    if (!can(c.get('role'), 'cash.writeoff')) fail(403, 'Only an Owner or Accountant can change a booked shortage.');
+    const tx = await all<{ shift_day: string; amount_paise: number; payment_mode: string }>(db, `SELECT shift_day, amount_paise, payment_mode FROM transactions
+      WHERE business_id = ? AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids);
+    const total = tx.reduce((t, x) => t + x.amount_paise, 0);
+    const row = tx.length && tx.every((x) => x.payment_mode === 'cash' && x.shift_day === tx[0].shift_day)
+      ? await one<Record<string, unknown> & { id: string; amount_paise: number }>(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND shift_day = ?
+          ORDER BY amount_paise DESC LIMIT 1`, bid, tx[0].shift_day) : null;
+    if (!row) fail(409, 'No cash shortage is booked on that day any more.');
+    shortage = { row: row!, fromPaise: row!.amount_paise, toPaise: Math.max(0, row!.amount_paise - total) };
+  }
+  const r = await repayStatements(db, bid, ids, mode, note, c.get('user').id, now(), { shortage });
   const done = await db.batch(r.statements);
   // The audit entry is the last statement; its id is what Undo puts back from.
   return c.json({ ok: true, bills: r.bills, amountPaise: r.amountPaise, auditId: done.at(-1)?.meta.last_row_id ?? null });
@@ -539,7 +554,17 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   const byUpi = byUpiP ? await byUpiP : [];
   // Bills of an earlier saved shift settled here, counted there in another mode (approved 11 Nov 2026).
   const here = await hereP;
-  const paidLater = paidOtherwise(here);
+  // With the payment that fits and the earlier day's cash short and booked shortage (18 Nov 2026), so the person sees
+  // what the change does to that day.
+  const fromChecks = new Map<string, Awaited<ReturnType<typeof cashCheck>>>();
+  const paidLater = await Promise.all(paidOtherwise(here).map(async (x) => {
+    if (!fromChecks.has(x.fromDay)) fromChecks.set(x.fromDay, await cashCheck(db, bid, x.fromDay));
+    const k = fromChecks.get(x.fromDay)!;
+    const ln = x.rowId ? await one<{ line_no: number | null }>(db, 'SELECT line_no FROM register_rows WHERE id = ?', x.rowId) : null;
+    const evidence = x.rowMode === 'card' || x.rowMode === 'upi'
+      ? await evidenceFor(db, bid, { mode: x.rowMode, day, amountPaise: x.amountPaise, uploadId: x.uploadId, rowId: x.rowId }, ln?.line_no ?? null) : null;
+    return { ...x, evidence, fromCash: { differencePaise: k.settled ? 0 : k.differencePaise, shortagePaise: k.shortagePaise } };
+  }));
   // Changed already (the earlier sale now has the line's mode): told with its Undo until its money is matched.
   const changed = here.filter((x) => x.txMode === x.rowMode && x.open);
   const audits = changed.length ? await all<{ id: number; after: string }>(db, `SELECT a.id, a.after FROM audit_log a WHERE a.business_id = ? AND a.action = 'sale.repaid'

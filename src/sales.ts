@@ -1548,14 +1548,15 @@ export async function cashBills(db: DB, businessId: string, day: string) {
     const side = b.rgOther.length === 1 && !b.rgCashPaise ? b.rgOther[0] : b.swCashPaise === null && (b.swMode === 'upi' || b.swMode === 'card') ? { mode: b.swMode, amountPaise: b.swAmountPaise ?? 0 } : null;
     return side && side.amountPaise && (side.mode === 'upi' || side.mode === 'card') ? [{ b, side }] : [];
   });
-  const witness = new Map<string, { mode: string; amountPaise: number; found: string | null }>();
+  const witness = new Map<string, { mode: string; amountPaise: number; found: string | null; takenBy?: { billNo: string; at: number } }>();
   if (want.length && !confirmed) {
     const times = new Map((await all<{ id: string; paid_at: number | null }>(db, `SELECT c.id, s.paid_at FROM bill_comparisons c LEFT JOIN software_bills s ON s.id = c.software_bill_id
       WHERE c.business_id = ? AND c.shift_day = ?`, businessId, day)).map((x) => [x.id, x.paid_at]));
     const w = shiftWindow(day);
     const [credits, machine] = await Promise.all([
-      all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched'
-        AND posted_at >= ? AND posted_at < ?`, businessId, w.from - 3 * 3600e3, w.to + 3 * 3600e3),
+      all<{ id: string; amount_paise: number; posted_at: number; held: string | null }>(db, `SELECT r.id, r.amount_paise, r.posted_at,
+          (SELECT k.comparison_ids FROM shift_choices k WHERE k.bank_row_id = r.id LIMIT 1) AS held FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched'
+        AND r.posted_at >= ? AND r.posted_at < ?`, businessId, w.from - 3 * 3600e3, w.to + 3 * 3600e3),
       all<{ amount_paise: number; paid_at: number; scheme: string | null }>(db, `SELECT s.amount_paise, s.paid_at, s.scheme FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
         AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, w.from - 3600e3, w.to + 3600e3),
     ]);
@@ -1563,10 +1564,22 @@ export async function cashBills(db: DB, businessId: string, day: string) {
     for (const { b, side } of want) {
       const at = times.get(b.comparisonId) ?? null;
       const near = (t: number, min: number) => (at == null ? t >= w.from && t < w.to : Math.abs(t - at) <= min * 60000);
-      const cr = side.mode === 'upi' ? credits.find((c) => c.amount_paise === side.amountPaise && near(c.posted_at, 180)) : undefined;
+      // A credit another bill owns is not this bill's (18 Nov 2026): held by a saved choice for other bills, or another
+      // bill of the shift says UPI of the same amount and was billed nearer the credit (the tray pairs it with that one).
+      const ownerOf = (c: (typeof credits)[number]) => {
+        if (c.held) { let ids: string[] = []; try { ids = JSON.parse(c.held) as string[]; } catch { /* none */ } if (!ids.includes(b.comparisonId)) { const o = comps.find((x) => ids.includes(x.id)); if (o) return { billNo: o.bill_no, at: c.posted_at }; } }
+        const mine = at == null ? Infinity : Math.abs(c.posted_at - at);
+        const rival = comps.filter((x) => x.id !== b.comparisonId && ((x.sw_mode === 'upi' && x.sw_amount_paise === c.amount_paise) || (x.rg_mode === 'upi' && x.rg_amount_paise === c.amount_paise)))
+          .map((x) => ({ x, d: times.get(x.id) == null ? Infinity : Math.abs(c.posted_at - times.get(x.id)!) })).filter((y) => y.d < mine).sort((p, q) => p.d - q.d)[0];
+        return rival ? { billNo: rival.x.bill_no, at: c.posted_at } : null;
+      };
+      const near2 = side.mode === 'upi' ? credits.filter((c) => c.amount_paise === side.amountPaise && near(c.posted_at, 180)) : [];
+      const cr = near2.find((c) => !ownerOf(c));
+      const takenBy = !cr && near2.length ? ownerOf(near2[0]) ?? undefined : undefined;
       const mp = machine.find((m) => m.amount_paise === side.amountPaise && near(m.paid_at, 60) && (side.mode === 'card' || (m.scheme ?? '').toUpperCase() === 'UPI'));
       witness.set(b.comparisonId, { mode: side.mode, amountPaise: side.amountPaise,
-        found: cr ? `Bank UPI credit at ${hhmm(cr.posted_at)}` : mp ? `Card machine ${side.mode === 'upi' ? 'UPI' : 'payment'} at ${hhmm(mp.paid_at)}` : null });
+        found: cr ? `Bank UPI credit at ${hhmm(cr.posted_at)}` : mp ? `Card machine ${side.mode === 'upi' ? 'UPI' : 'payment'} at ${hhmm(mp.paid_at)}` : null,
+        ...(takenBy && !mp ? { takenBy } : {}) });
     }
   }
   return { confirmed, plannedCashPaise: confirmed ? null : plannedCash, bills: bills.map((b) => ({ ...b, witness: witness.get(b.comparisonId) ?? null })) };

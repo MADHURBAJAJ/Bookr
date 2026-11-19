@@ -10,7 +10,11 @@ import { all, one, stmt, type DB } from './db';
 import { fail } from './http';
 import { cashAccountId } from './sales';
 
-export async function repayStatements(db: DB, businessId: string, txIds: string[], mode: 'cash' | 'card' | 'upi', note: string, userId: string, t: number) {
+/** A booked cash shortage of the sale's day made smaller with it (18 Nov 2026): kept whole so Undo can put it back. */
+export interface ShortageCut { row: Record<string, unknown>; fromPaise: number; toPaise: number }
+
+export async function repayStatements(db: DB, businessId: string, txIds: string[], mode: 'cash' | 'card' | 'upi', note: string, userId: string, t: number,
+  opts: { shortage?: ShortageCut | null } = {}) {
   const tx = await all<Record<string, unknown> & { id: string; amount_paise: number; payment_mode: string; match_status: string | null; matched_bank_row: string | null;
     comparison_id: string | null; shift_day: string; bill_no: string | null }>(db,
     `SELECT * FROM transactions WHERE business_id = ? AND type = 'income' AND source = 'software_report' AND id IN (${txIds.map(() => '?').join(',')})`, businessId, ...txIds);
@@ -30,7 +34,7 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
   // Settled the next day (approved 11 Nov 2026): a bill counted from the software alone whose register line is on a later
   // shift, left out there, and says it was paid this way. Only that sale changes; the later line already says so.
   if (!regs.length) {
-    const later = await all<{ linked_to_id: string; rg_mode: string | null }>(db, `SELECT linked_to_id, rg_mode FROM bill_comparisons
+    const later = await all<{ linked_to_id: string; rg_mode: string | null; shift_day: string }>(db, `SELECT linked_to_id, rg_mode, shift_day FROM bill_comparisons
       WHERE business_id = ? AND decision = 'leave_out' AND difference = 'missing_in_software' AND linked_to_id IN (${tx.map(() => '?').join(',')})`,
       businessId, ...tx.map((x) => x.comparison_id ?? ''));
     if (!tx.every((x) => later.some((l) => l.linked_to_id === x.comparison_id && l.rg_mode === mode))) fail(400, 'A bill chosen is not in the register. Correct it on Compare sales.');
@@ -38,14 +42,26 @@ export async function repayStatements(db: DB, businessId: string, txIds: string[
     if (shift?.status !== 'confirmed') fail(400, 'This shift is not confirmed yet: change the payment on its register page.');
     const cash = mode === 'cash' ? await cashAccountId(db, businessId) : null;
     const total = tx.reduce((s, x) => s + x.amount_paise, 0);
+    const paidOn = later.find((l) => l.linked_to_id === tx[0].comparison_id)?.shift_day ?? null;
+    const cut = opts.shortage ?? null;
     return {
       statements: [
+        ...(cut ? [
+          cut.toPaise > 0
+            ? stmt(db, 'UPDATE transactions SET amount_paise = ? WHERE id = ? AND business_id = ? AND amount_paise = ?', cut.toPaise, cut.row.id as string, businessId, cut.fromPaise)
+            : stmt(db, 'DELETE FROM transactions WHERE id = ? AND business_id = ?', cut.row.id as string, businessId),
+          stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+            VALUES (?, ?, 'cash.shortage_reduced', 'transactions', ?, ?, ?, ?)`, businessId, userId, cut.row.id as string,
+            JSON.stringify({ day: tx[0].shift_day, amountPaise: cut.fromPaise }),
+            JSON.stringify({ day: tx[0].shift_day, amountPaise: cut.toPaise, bills: tx.map((x) => x.bill_no), paidOn, mode }), t),
+        ] : []),
         ...tx.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ? AND match_status IS ?',
           mode, cash, mode === 'card' ? 'awaiting_card_settlement' : mode === 'upi' ? 'awaiting_bank_match' : null, x.id, x.match_status)),
         stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
           VALUES (?, ?, 'sale.repaid', 'transactions', ?, ?, ?, ?)`, businessId, userId, tx[0].id,
           JSON.stringify({ payment: null, sales: tx, comparisons: [] }),
-          JSON.stringify({ from, mode, note, shiftDay: tx[0].shift_day, bills: tx.map((x) => x.bill_no), amountPaise: total, transactionIds: txIds, settledLater: true }), t),
+          JSON.stringify({ from, mode, note, shiftDay: tx[0].shift_day, bills: tx.map((x) => x.bill_no), amountPaise: total, transactionIds: txIds, settledLater: true,
+            paidOn, shortage: cut }), t),
       ],
       bills: tx.map((x) => x.bill_no), amountPaise: total,
     };
@@ -97,7 +113,16 @@ export async function undoRepayStatements(db: DB, businessId: string, auditId: n
     fail(409, 'This sale is matched to a card payment now: unmatch it first.');
   }
   if (now.length !== b.sales.length || now.some((x) => x.matched_bank_row)) fail(409, 'These sales have changed since (e.g. matched). Put them back by hand on the register page.');
+  // The shortage made smaller with it is put back too (18 Nov 2026).
+  const cut = (JSON.parse(a.after) as { shortage?: ShortageCut | null }).shortage ?? null;
+  const r0 = cut?.row;
   return [
+    ...(cut && r0 ? [cut.toPaise > 0
+      ? stmt(db, 'UPDATE transactions SET amount_paise = ? WHERE id = ? AND business_id = ?', cut.fromPaise, r0.id as string, businessId)
+      : stmt(db, `INSERT INTO transactions (${Object.keys(r0).join(', ')}) VALUES (${Object.keys(r0).map(() => '?').join(', ')})`, ...Object.values(r0) as (string | number | null)[]),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'cash.shortage_restored', 'transactions', ?, ?, ?, ?)`, businessId, userId, r0.id as string,
+        JSON.stringify({ amountPaise: cut.toPaise }), JSON.stringify({ day: r0.shift_day, amountPaise: cut.fromPaise }), t)] : []),
     ...(b.payment ? [stmt(db, 'UPDATE register_payments SET mode = ?, column_label = ? WHERE id = ?', b.payment.mode as string, (b.payment.column_label as string) ?? null, b.payment.id as string)] : []),
     ...b.sales.map((x) => stmt(db, 'UPDATE transactions SET payment_mode = ?, account_id = ?, match_status = ? WHERE id = ?',
       x.payment_mode as string, (x.account_id as string) ?? null, (x.match_status as string) ?? null, x.id as string)),

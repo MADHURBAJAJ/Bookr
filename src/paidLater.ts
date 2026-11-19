@@ -46,14 +46,17 @@ export async function paidLaterLines(db: DB, businessId: string, day: string): P
     if (out.some((o) => o.comparisonId === r.cid)) continue;
     const line: LateLine = { comparisonId: r.cid, billNo: r.bill_no, swPaise: r.sw, swMode: r.sw_mode, lineId: r.line, day: r.d, amountPaise: r.rg, mode: r.mode,
       rowId: r.row_id, uploadId: r.upload_id, done: !!r.done, evidence: null };
-    if (!line.done && r.mode !== r.sw_mode && r.rg === r.sw) line.evidence = await evidenceFor(db, businessId, line, r.line_no);
+    if (!line.done && r.mode !== r.sw_mode && r.rg === r.sw) line.evidence = await evidenceFor(db, businessId, { mode: r.mode, day: r.d, amountPaise: r.sw, uploadId: r.upload_id, rowId: r.row_id }, r.line_no);
     out.push(line);
   }
   return out;
 }
 
-/** The later day's open payment of the bill's amount, or of the bill and up to two neighbouring lines paid the same way. */
-async function evidenceFor(db: DB, businessId: string, l: LateLine, lineNo: number | null): Promise<LateEvidence | null> {
+/** The later day's open payment of the bill's amount, or of the bill and up to two neighbouring lines paid the same way.
+ *  Also used on the later day itself, for a bill of a saved earlier shift settled there (18 Nov 2026). */
+export async function evidenceFor(db: DB, businessId: string, line: { mode: 'card' | 'upi'; day: string; amountPaise: number; uploadId: string | null; rowId: string | null },
+  lineNo: number | null): Promise<LateEvidence | null> {
+  const l = { ...line, swPaise: line.amountPaise };
   const w = shiftWindow(l.day);
   const pays = l.mode === 'card'
     ? (await all<{ id: string; amount_paise: number; paid_at: number; txn_type: string; pay_mode: string | null; scheme: string | null; card_last4: string | null }>(db, `

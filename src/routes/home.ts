@@ -150,7 +150,9 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     const days = shifts.filter((s) => s.status === 'confirmed' && s.day >= addDays(today, -CASH_DAYS));
     const checks = await Promise.all(days.map((s) => cashCheck(db, businessId, s.day)));
     result.cash = checks.filter((k) => !k.settled && (k.countedPaise == null || k.differencePaise != null))
-      .map((k) => ({ day: k.day, differencePaise: k.differencePaise, counted: k.countedPaise != null }));
+      .map((k) => ({ day: k.day, differencePaise: k.differencePaise, counted: k.countedPaise != null,
+        // What explains a short count (18 Nov 2026): the bills waiting, and what is left unexplained.
+        bills: k.explained?.bills.map((b) => ({ billNo: b.billNo, amountPaise: b.partPaise })) ?? [], unexplainedPaise: k.explained?.unexplainedPaise ?? null }));
   }
   })();
   const approveP = (async () => {
