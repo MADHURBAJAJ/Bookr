@@ -3,7 +3,7 @@
 import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
-import { body, fail, isEmail, optionalPaise, paise, text } from '../../../src/http';
+import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
@@ -469,6 +469,67 @@ settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
     audit(c.env.DB, bid, c.get('staff').id, 'menu.update', 'menu_items', id, before, f),
   ]);
   return c.json({ ok: true });
+});
+
+/**
+ * One change to many items at once, from the Menu screen's ticked rows: take off or put back on the menu, delete, move
+ * to a category, send to a station (or No KOT, or as the category says), or set the tax. All or nothing, one audit entry.
+ * Delete removes an item only if it was never ordered; one that was is taken off the menu instead, so every past bill,
+ * KOT and report still shows it.
+ */
+settingsRoutes.post(`${B}/menu/bulk`, requireAction('menu.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  const ids = data.ids;
+  if (!Array.isArray(ids) || !ids.length || ids.length > 2000 || !ids.every((x) => typeof x === 'string' && isUuid(x))) fail(400, 'Choose at least one item.');
+  const uniq = [...new Set(ids as string[])];
+  const json = JSON.stringify(uniq);
+  const before = await all<{ id: string; name: string; category: string; active: number; station_id: string | null; kot: number | null; tax_mode: string | null; gst_bp: number | null; used: number }>(db,
+    `SELECT id, name, category, active, station_id, kot, tax_mode, gst_bp,
+       EXISTS (SELECT 1 FROM order_lines l WHERE l.item_id = m.id) OR EXISTS (SELECT 1 FROM bill_lines l WHERE l.item_id = m.id) AS used
+     FROM menu_items m WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))`, bid, json);
+  if (before.length !== uniq.length) fail(404, 'An item was not found. Reload the page and try again.');
+  const IN = 'business_id = ? AND id IN (SELECT value FROM json_each(?))';
+  const action = data.action;
+  const s: D1PreparedStatement[] = [];
+  let result: Record<string, unknown> = { changed: uniq.length };
+  if (action === 'off' || action === 'on') {
+    s.push(stmt(db, `UPDATE menu_items SET active = ? WHERE ${IN}`, action === 'on' ? 1 : 0, bid, json));
+  } else if (action === 'delete') {
+    const used = before.filter((m) => m.used).map((m) => m.id);
+    const unused = before.filter((m) => !m.used).map((m) => m.id);
+    if (unused.length) s.push(stmt(db, `DELETE FROM menu_items WHERE ${IN}`, bid, JSON.stringify(unused)));
+    if (used.length) s.push(stmt(db, `UPDATE menu_items SET active = 0 WHERE ${IN}`, bid, JSON.stringify(used)));
+    result = { deleted: unused.length, takenOff: used.length };
+  } else if (action === 'category') {
+    const name = text(data, 'value', 'Category', { max: 40 })!;
+    const sts = await stationList(db, bid);
+    const first = sts.find((x) => x.active && !x.isBar) ?? sts.find((x) => x.active) ?? sts[0];
+    s.push(stmt(db, 'INSERT OR IGNORE INTO menu_categories (id, business_id, name, station_id, created_at) VALUES (?, ?, ?, ?, ?)', newId(), bid, name, first?.id ?? null, now()));
+    s.push(stmt(db, `UPDATE menu_items SET category = coalesce((SELECT c.name FROM menu_categories c WHERE c.business_id = ?1 AND lower(c.name) = lower(?3)), ?3)
+      WHERE business_id = ?1 AND id IN (SELECT value FROM json_each(?2))`, bid, json, name));
+  } else if (action === 'station') {
+    const v = data.value;
+    if (v === 'category') s.push(stmt(db, `UPDATE menu_items SET station_id = NULL, kot = NULL WHERE ${IN}`, bid, json));
+    else if (v === 'none') s.push(stmt(db, `UPDATE menu_items SET station_id = NULL, kot = 0 WHERE ${IN}`, bid, json));
+    else {
+      if (typeof v !== 'string' || !(await stationList(db, bid)).some((x) => x.id === v && x.active)) fail(400, 'That station was not found.');
+      // A station chosen means a KOT: kept as the category says when the category prints one, else this item prints its own.
+      s.push(stmt(db, `UPDATE menu_items SET station_id = ?1, kot = CASE WHEN coalesce((SELECT c.kot FROM menu_categories c WHERE c.business_id = menu_items.business_id
+        AND lower(c.name) = lower(menu_items.category)), 1) = 1 THEN NULL ELSE 1 END WHERE business_id = ?2 AND id IN (SELECT value FROM json_each(?3))`, v, bid, json));
+    }
+  } else if (action === 'tax') {
+    const f = taxFields((data.value ?? {}) as Record<string, unknown>, true);
+    s.push(stmt(db, `UPDATE menu_items SET tax_mode = ?, gst_bp = ? WHERE ${IN}`, f.tax_mode, f.gst_bp, bid, json));
+  } else fail(400, 'Unknown change.');
+  await db.batch([
+    ...s,
+    syncItemStations(db, bid),
+    audit(db, bid, c.get('staff').id, `menu.bulk.${action}`, 'menu_items', `${uniq.length} items`,
+      before.map(({ used, ...m }) => m), { ids: uniq, value: data.value ?? null, ...result }),
+  ]);
+  return c.json({ ok: true, ...result });
 });
 
 // A category's tax, which its items take unless they say otherwise.

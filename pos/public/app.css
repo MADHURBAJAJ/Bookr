@@ -545,3 +545,26 @@ label.btn:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 .rowform { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); text-align: left; }
 .badtext { color: var(--bad); }
 @media (max-width: 1439px) { .switcher { max-width: 190px; } }
+
+/* Icon buttons for row actions; ticked rows and the bar of changes for them */
+.irow { display: flex; gap: 6px; justify-content: flex-end; }
+.ibtn { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; padding: 0; }
+.ibtn svg { width: 20px; height: 20px; }
+.ibtn:hover { background: var(--bg); }
+.ibtn.danger { color: var(--bad); }
+.ibtn.danger:hover { background: var(--bad-tint); border-color: var(--bad-line); }
+.selcol { width: 44px; }
+input.sel { width: 22px; height: 22px; cursor: pointer; accent-color: var(--pri); }
+tr.picked td { background: var(--bg); }
+.bulkbar { position: sticky; top: 64px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; margin: 8px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+.bulkbar select.in { flex: 0 1 190px; width: auto; }
+@media (max-width: 760px) {
+  table.t.cards td.selcol { grid-column: 1 / -1; }
+  table.t.cards .irow { justify-content: flex-start; }
+  table.t.cards tr.picked td { background: none; }
+  table.t.cards tr.picked { box-shadow: inset 4px 0 0 var(--pri); padding-left: 12px; }
+  .bulkbar { position: static; display: grid; grid-template-columns: 1fr 1fr; box-shadow: none; }
+  .bulkbar strong { grid-column: 1 / -1; }
+  .bulkbar select.in { width: 100%; }
+  .bulkbar select[data-do="tax"] { grid-column: 1 / -1; }
+}

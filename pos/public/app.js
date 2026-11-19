@@ -102,6 +102,15 @@ const THEME_ICON = {
 };
 const themeButton = () => html`<button type="button" class="themebtn" data-act="theme" title="Colours: Auto switches to night at 7 pm and back at 7 am" aria-label="Colours: ${THEME_NAMES[themeMode()]}. Change">${THEME_ICON[themeMode()]}<span>${THEME_NAMES[themeMode()]}</span></button>`;
 
+// Row actions as icons: the label is the tooltip and what a screen reader says.
+const ICON = {
+  edit: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`,
+  trash: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>`,
+  off: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.9 17.9A10 10 0 0 1 12 20C5 20 1 12 1 12a18 18 0 0 1 5.1-5.9M9.9 4.2A9 9 0 0 1 12 4c7 0 11 8 11 8a18 18 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2"/><path d="M1 1l22 22"/></svg>`,
+  on: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+};
+const iconBtn = (act, id, icon, label, cls = '') => html`<button class="ibtn ${cls}" type="button" data-act="${act}" data-id="${id}" title="${label}" aria-label="${label}">${ICON[icon]}</button>`;
+
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
@@ -759,7 +768,7 @@ async function settleScreen(billId) {
         ${ui.mismatch ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px">${ui.mismatch}</p><button class="btn" type="button" data-act="settle" data-confirm="1">Settle anyway</button></div>` : ''}
         <div class="paylist"><p class="label">Payments taken</p>
           ${ui.pays.length ? ui.pays.map((p, i) => html`<div class="line"><strong style="min-width:96px">${p.label}</strong><span class="grow quiet small">${p.detail}</span><span class="num" style="font-weight:700">${rs(p.amountPaise)}</span>
-            <button class="btn ghost" type="button" data-act="dropPay" data-i="${i}" aria-label="Remove ${p.label} ${rs(p.amountPaise)}">Remove</button></div>`) : html`<p class="quiet small">None yet. The bill closes only when payments add up to the total.</p>`}</div>
+            <button class="ibtn danger" type="button" data-act="dropPay" data-i="${i}" title="Remove this payment" aria-label="Remove ${p.label} ${rs(p.amountPaise)}">${ICON.trash}</button></div>`) : html`<p class="quiet small">None yet. The bill closes only when payments add up to the total.</p>`}</div>
         <div class="paybar"><span class="st ${done ? 'ok' : ''}" role="status">${left === 0 ? 'Paid in full' : diffOk(left) ? (left > 0 ? `Paid, with ${rs(left)} discount` : `Paid, with ${rs(-left)} tip`) : left > 0 ? 'Left to pay ' + rs(left) : 'Over by ' + rs(-left)}</span>
           <button class="btn go" type="button" data-act="settle" ${done && ui.pays.length ? '' : 'disabled'}>Settle bill</button></div>
       </section></div>`));
@@ -1347,7 +1356,7 @@ async function stockScreen(tab = 'hand') {
               <td class="num"><input class="in" style="max-width:90px;min-width:60px" inputmode="numeric" data-live data-model="rcl${l.k}packs" value="${ui[`rcl${l.k}packs`] ?? ''}" aria-label="Packs">${it ? html`<div class="small quiet">${it.packName}s</div>` : ''}</td>
               <td class="num"><input class="in" style="max-width:120px" inputmode="decimal" data-live data-model="rcl${l.k}cost" value="${ui[`rcl${l.k}cost`] ?? ''}" aria-label="Price per pack"></td>
               <td class="num">${amt ? rs(amt) : ''}</td>
-              <td><button class="btn" type="button" data-act="rcDrop" data-k="${l.k}" aria-label="Remove this line">Remove</button></td></tr>`;
+              <td><button class="ibtn danger" type="button" data-act="rcDrop" data-k="${l.k}" title="Remove this line" aria-label="Remove this line">${ICON.trash}</button></td></tr>`;
           })}</tbody></table></div>
         <div class="row" style="justify-content:space-between"><button class="btn" type="button" data-act="rcAdd">Add a line</button>
           <div class="sums" style="min-width:260px"><div><span>Lines total</span><span>${rs(lineTotal)}</span></div>
@@ -1575,12 +1584,13 @@ async function settingsScreen(tab = 'menu') {
         <span class="small quiet">${menuShown.length === cache.menu.length ? plural(cache.menu.length, 'item') : `${menuShown.length} of ${cache.menu.length} items`}</span>
         <button class="btn" type="button" data-act="mNew">+ Add item</button></div>
       ${menuShown.length ? '' : html`<p class="quiet">No item matches${ui.mQ ? ` “${ui.mQ}”` : ''}${ui.mCat ? ` in ${ui.mCat}` : ''}.</p>`}
-      <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
-        ${menuShown.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
+      ${menuBulkBar()}
+      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mSelAll" aria-label="Tick every item shown" ${menuShown.length && menuShown.every((m) => (ui.mSel ?? []).includes(m.id)) ? 'checked' : ''}></th><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
+        ${menuShown.map((m) => html`<tr class="${(ui.mSel ?? []).includes(m.id) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mSel" data-id="${m.id}" aria-label="Tick ${m.name}" ${(ui.mSel ?? []).includes(m.id) ? 'checked' : ''}></td><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
           ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
           <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
           <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}</td>
-          <td class="act"><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
+          <td class="act"><div class="irow">${iconBtn('itemEdit', m.id, 'edit', `Edit ${m.name}`)}${m.active ? iconBtn('itemToggle', m.id, 'off', `Take ${m.name} off the menu`) : iconBtn('itemToggle', m.id, 'on', `Put ${m.name} back on the menu`)}${iconBtn('itemDelete', m.id, 'trash', `Delete ${m.name}`, 'danger')}</div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
         <label class="f">Price at billing<select class="in" data-model="iOpen"><option value="no">No: fixed price</option><option value="yes" ${ui.iOpen === 'yes' ? 'selected' : ''}>Yes: typed when ordered (bottles, catch of the day)</option></select></label>
         ${ui.iOpen === 'yes' ? html`<label class="f">Lowest price allowed (₹, optional)<input class="in" inputmode="decimal" data-model="iMin" value="${ui.iMin ?? ''}"></label>`
@@ -1622,7 +1632,7 @@ async function settingsScreen(tab = 'menu') {
           <td>${e.yearly_limit_paise ? `${rs(e.yearly_limit_paise)} · stops at ${rs(e.stop_paise)}` : '—'}</td>
           <td><div class="row"><button class="btn" type="button" data-act="entFlag" data-id="${e.id}" data-f="offered">${e.offered ? 'Offered' : 'Not offered'}</button>
             ${e.is_default ? '' : html`<button class="btn" type="button" data-act="entFlag" data-id="${e.id}" data-f="is_default">Make default</button>`}
-            <button class="btn" type="button" data-act="entEdit" data-id="${e.id}">Edit</button></div></td></tr>`)}</tbody></table></div>
+            ${iconBtn('entEdit', e.id, 'edit', `Edit ${e.name}`)}</div></td></tr>`)}</tbody></table></div>
       <form class="panel" style="padding:0;border:0"><h2>${ui.editEntity ? 'Edit billing name' : 'Add a billing name'}</h2>
         <div class="grid3"><label class="f">Name as printed<input class="in" data-model="eName" value="${ui.eName ?? ''}" ${ui.editEntity ? 'autofocus' : ''}></label>
           <label class="f">Kind<select class="in" data-model="eKind">${['company', 'llp', 'partnership', 'proprietor', 'huf', 'other'].map((k) => html`<option value="${k}" ${ui.eKind === k ? 'selected' : ''}>${k.toUpperCase() === 'HUF' || k === 'llp' ? k.toUpperCase() : k[0].toUpperCase() + k.slice(1)}</option>`)}</select></label>
@@ -1636,7 +1646,7 @@ async function settingsScreen(tab = 'menu') {
     if (tab === 'accounts') body = html`<section class="panel"><h2>UPI accounts</h2><p class="quiet small">Each QR's bank account belongs to one billing name. A bill paid into another name's account is asked about at the counter.</p>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Account</th><th>Belongs to</th><th>Bookr account id</th></tr></thead><tbody>
         ${cache.payAccounts.map((a) => html`<tr><td>${a.name}${a.active ? '' : ' (not used)'}</td><td>${a.entityName}</td><td class="small">${a.bookrAccountId ?? ''}</td>
-          <td><button class="btn" type="button" data-act="acctEdit" data-id="${a.id}">Edit</button></td></tr>`)}</tbody></table></div>
+          <td class="act">${iconBtn('acctEdit', a.id, 'edit', `Edit ${a.name}`)}</td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editAcct ? 'Edit account' : 'Add account'}</h2><label class="f">Account name<input class="in" data-model="aName" value="${ui.aName ?? ''}" ${ui.editAcct ? 'autofocus' : ''}></label>
         <label class="f">Belongs to<select class="in" data-model="aEntity"><option value="">Choose</option>${cache.entities.map((e) => html`<option value="${e.id}" ${ui.aEntity === e.id ? 'selected' : ''}>${e.name}</option>`)}</select></label>
         <label class="f">Bookr account id (optional)<input class="in" data-model="aBookr" value="${ui.aBookr ?? ''}"></label>
@@ -1645,7 +1655,7 @@ async function settingsScreen(tab = 'menu') {
     if (tab === 'staff') body = html`<section class="panel"><h2>Staff and PINs</h2>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
         ${ui.staff.filter((s) => !s.support).map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
-          <td><button class="btn" type="button" data-act="staffEdit" data-id="${s.id}">Edit</button></td></tr>`)}</tbody></table></div>
+          <td class="act">${iconBtn('staffEdit', s.id, 'edit', `Edit ${s.name}`)}</td></tr>`)}</tbody></table></div>
       ${ui.supportInfo ? supportPanel() : ''}
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editStaff ? 'Edit person (leave PIN and password empty to keep them)' : 'Add person'}</h2><label class="f">Name<input class="in" data-model="sName" value="${ui.sName ?? ''}" ${ui.editStaff ? 'autofocus' : ''}></label>
         <label class="f">Role<select class="in" data-model="sRole">${['cashier', 'captain', 'manager', 'owner'].map((r) => html`<option value="${r}" ${ui.sRole === r ? 'selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`)}</select></label>
@@ -1655,7 +1665,7 @@ async function settingsScreen(tab = 'menu') {
         <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
     if (tab === 'device') body = html`<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Device</th><th>Added</th><th></th></tr></thead><tbody>
-        ${ui.devices.map((d) => html`<tr><td>${d.name}</td><td>${dateTime(d.createdAt)}</td><td>${d.revokedAt ? 'Removed' : html`<button class="btn danger" type="button" data-act="revoke" data-id="${d.id}">Remove</button>`}</td></tr>`)}</tbody></table></div>
+        ${ui.devices.map((d) => html`<tr><td>${d.name}</td><td>${dateTime(d.createdAt)}</td><td>${d.revokedAt ? 'Removed' : iconBtn('revoke', d.id, 'trash', `Remove ${d.name}`, 'danger')}</td></tr>`)}</tbody></table></div>
       <form class="row"><label class="f grow">Name for this device<input class="in" data-model="dName" placeholder="Billing counter"></label><button class="btn pri" type="submit" data-act="addDevice" data-submit>Make this a counter device</button></form></section>`;
     paint(shell('#/settings', html`${head}${body}`));
   };
@@ -2198,7 +2208,7 @@ function stationsTab() {
       <p class="small quiet" style="margin:0">${uses(x.id).length ? `Categories: ${uses(x.id).join(', ')}` : 'No category sends KOTs here yet. Choose it in Categories.'}</p>
       <div class="row">${can('staff.manage') && x.active ? html`<button class="btn" type="button" data-act="stDevice" data-id="${x.id}">Make this browser ${x.name}'s device</button>` : ''}
         ${ui.stRen === x.id ? html`<input class="in" style="max-width:180px" data-model="stRenName" value="${ui.stRenName ?? ''}" aria-label="New name"><button class="btn pri" type="button" data-act="stRenameGo" data-id="${x.id}">Save</button>`
-          : html`<button class="btn ghost" type="button" data-act="stRename" data-id="${x.id}">Rename</button>`}
+          : iconBtn('stRename', x.id, 'edit', `Rename ${x.name}`)}
         <button class="btn ghost" type="button" data-act="stActive" data-id="${x.id}">${x.active ? 'Stop using' : 'Use again'}</button></div></div>`)}</div>
     <details style="margin-top:6px"><summary>Setting up a station's device</summary><ol class="small">
       <li>On the tablet or PC at the station, open this POS and sign in as the Owner.</li>
@@ -2299,7 +2309,48 @@ const taxBody = (v) => (v?.startsWith('rate:') ? { taxMode: 'rate', gstRate: Num
 const itemBody = (m) => ({ name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, stationId: m.stationId ?? '', kot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', ...taxBody(taxValue(m)),
   openPrice: !!m.openPrice, minPrice: m.minPricePaise != null ? rupees(m.minPricePaise) : '', active: !!m.active,
   addonGroups: (m.addonGroups ?? []).map((id) => ({ id, prices: m.addonPrices?.[id] ? Object.fromEntries(Object.entries(m.addonPrices[id]).map(([k, v]) => [k, rupees(v)])) : null })) });
-actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await api('PUT', `${B()}/menu/${m.id}`, { ...itemBody(m), active: !m.active }); route(); };
+actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await menuBulk([m.id], m.active ? 'off' : 'on'); };
+actions.itemDelete = async (d) => {
+  const m = cache.menu.find((x) => x.id === d.id);
+  if (!confirm(`Delete ${m.name}?\n\nIf it has ever been ordered, it is taken off the menu instead, so past bills still show it.`)) return;
+  await menuBulk([m.id], 'delete');
+};
+// Ticked rows on the Menu screen, and one change to all of them.
+actions.mSel = (d, el) => { const s = new Set(ui.mSel ?? []); if (el.checked) s.add(d.id); else s.delete(d.id); ui.mSel = [...s]; rerender(); };
+actions.mSelAll = (_d, el) => { const s = new Set(ui.mSel ?? []); for (const m of menuFilter()) { if (el.checked) s.add(m.id); else s.delete(m.id); } ui.mSel = [...s]; rerender(); };
+actions.mSelClear = () => { ui.mSel = []; rerender(); };
+actions.mBulk = async (d) => {
+  const n = plural(ui.mSel.length, 'item');
+  if (d.do === 'delete' && !confirm(`Delete ${n}?\n\nItems that have ever been ordered are taken off the menu instead, so past bills still show them.`)) return;
+  await menuBulk(ui.mSel, d.do);
+};
+actions.mBulkPick = async (d, el) => {
+  let v = el.value;
+  if (!v) return;
+  if (d.do === 'category' && v === '__new') { v = (prompt('Name of the new category') ?? '').trim(); if (!v) { el.value = ''; return; } }
+  await menuBulk(ui.mSel, d.do, d.do === 'tax' ? taxBody(v) : v);
+};
+async function menuBulk(ids, action, value) {
+  const r = await api('POST', `${B()}/menu/bulk`, { ids, action, value });
+  const n = plural(ids.length, 'item');
+  flash = { kind: 'ok', text: action === 'delete'
+    ? [r.deleted ? `${plural(r.deleted, 'item')} deleted.` : '', r.takenOff ? `${plural(r.takenOff, 'item')} ${r.takenOff === 1 ? 'was' : 'were'} ordered before, so taken off the menu instead.` : ''].filter(Boolean).join(' ')
+    : { off: `${n} taken off the menu.`, on: `${n} put back on the menu.`, category: `${n} moved to ${value}.`, station: `${n}: station changed.`, tax: `${n}: tax changed.` }[action] };
+  route();
+}
+function menuBulkBar() {
+  const sel = ui.mSel ?? [];
+  if (!sel.length) return '';
+  const cats = [...new Set(cache.menu.map((m) => m.category))].sort();
+  return html`<div class="bulkbar" role="region" aria-label="Change ticked items"><strong>${plural(sel.length, 'item')} ticked</strong>
+    <button class="btn" type="button" data-act="mBulk" data-do="off">Take off menu</button>
+    <button class="btn" type="button" data-act="mBulk" data-do="on">Put back</button>
+    <select class="in" data-act-change="mBulkPick" data-do="category" aria-label="Move ticked items to a category"><option value="">Category…</option>${cats.map((c) => html`<option>${c}</option>`)}<option value="__new">New category…</option></select>
+    <select class="in" data-act-change="mBulkPick" data-do="station" aria-label="Station for ticked items"><option value="">Station…</option><option value="category">As its category says</option>${activeStations().map((x) => html`<option value="${x.id}">${x.name}</option>`)}<option value="none">No KOT</option></select>
+    <select class="in" data-act-change="mBulkPick" data-do="tax" aria-label="Tax for ticked items"><option value="">Tax…</option>${taxChoices(true).map(([v, t]) => html`<option value="${v}">${t}</option>`)}</select>
+    <button class="btn danger" type="button" data-act="mBulk" data-do="delete">Delete</button>
+    <button class="btn ghost" type="button" data-act="mSelClear">Clear ticks</button></div>`;
+}
 actions.catTax = async (d, el) => {
   await api('PUT', `${B()}/menu-categories/${d.id}`, taxBody(el.value));
   const c = cache.menuCats.find((x) => x.id === d.id); Object.assign(c, el.value.startsWith('rate:') ? { taxMode: 'rate', gstBp: Number(el.value.slice(5)) * 100 } : { taxMode: el.value, gstBp: null });
@@ -2363,6 +2414,10 @@ actions.addStaff = async () => {
 };
 actions.staffEdit = (d) => { const p = ui.staff.find((x) => x.id === d.id); Object.assign(ui, { editStaff: p.id, sName: p.name, sRole: p.role, sEmail: p.email ?? '', sActive: p.active ? 'yes' : 'no', sPin: '', sPassword: '' }); rerender(); };
 actions.addDevice = async () => { await api('POST', B() + '/devices', { name: ui.dName || 'Billing counter' }); flash = { kind: 'ok', text: 'This browser is now a counter device. Staff can sign in here with their PIN.' }; route(); };
-actions.revoke = async (d) => { await api('POST', `${B()}/devices/${d.id}/revoke`); route(); };
+actions.revoke = async (d) => {
+  const dev = ui.devices.find((x) => x.id === d.id);
+  if (!confirm(`Remove ${dev?.name ?? 'this device'}? Staff can no longer sign in with a PIN on it until an Owner sets it up again.`)) return;
+  await api('POST', `${B()}/devices/${d.id}/revoke`); route();
+};
 
 route();
