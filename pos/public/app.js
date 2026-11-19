@@ -198,9 +198,15 @@ root.addEventListener('submit', (ev) => { ev.preventDefault(); const b = ev.targ
 let rerender = () => {};
 /** Repaints while typing without losing the field being typed in. */
 function refocus(model, paintNow) {
+  const was = root.querySelector(`[data-model="${model}"]`);
+  let at = null;
+  try { at = was ? [was.selectionStart, was.selectionEnd] : null; } catch { /* boxes without a cursor position */ }
   paintNow();
   const el = root.querySelector(`[data-model="${model}"]`);
-  if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch { /* number-like inputs */ } }
+  if (!el) return;
+  el.focus();
+  const n = el.value.length;
+  try { el.setSelectionRange(at?.[0] ?? n, at?.[1] ?? n); } catch { /* email and number boxes */ }
 }
 
 // ---------- sign-in
@@ -1715,7 +1721,7 @@ async function adminScreen() {
         <tbody>${ui.rests.length ? ui.rests.map(row) : html`<tr><td colspan="6" class="quiet">No restaurants yet. Add the first one below.</td></tr>`}</tbody></table></div></section>
       <section class="panel"><form class="grid3"><h2 style="grid-column:1/-1">Add a restaurant</h2>
         <label class="f">Restaurant name<input class="in" data-model="rName" value="${ui.rName ?? ''}"></label>
-        <label class="f">Owner's email<input class="in" type="email" data-model="rOwnerEmail" data-live value="${ui.rOwnerEmail ?? ''}"></label>
+        <label class="f">Owner's email<input class="in" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" data-model="rOwnerEmail" data-live value="${ui.rOwnerEmail ?? ''}"></label>
         ${known ? html`<p class="small quiet" style="grid-column:1/-1">This owner already has a Bookr POS login: the new restaurant is added to it and they keep their password.</p>
           <label class="f">Copy the menu from (optional)<select class="in" data-model="rCopy"><option value="">Start with an empty menu</option>${copyChoices.map((r) => html`<option value="${r.id}" ${ui.rCopy === r.id ? 'selected' : ''}>${r.name}</option>`)}</select></label>`
         : html`<label class="f">Owner's name<input class="in" data-model="rOwnerName" value="${ui.rOwnerName ?? ''}"></label>
