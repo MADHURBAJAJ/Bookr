@@ -174,3 +174,25 @@ describe('menu upload', () => {
     expect((await s.owner.post(`${s.B}/menu/upload/apply`, { csv: 'Item,Category,Price,Tax,Station\nA,Food,10,GST 5%,Kitchen\n', planHash: r.planHash })).status).toBe(409);
   });
 });
+
+describe('add-on offered on many items', () => {
+  it('sets the items from the add-on, keeps their other add-ons, and only for menu editors', async () => {
+    const s = await setupBusiness();
+    const items = (await s.owner.get(`${s.B}/menu`)).json.items;
+    const [a, b, c] = items;
+    const cheese = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Extra Cheese', kind: 'any', options: [{ name: 'Extra Cheese', price: '50' }] }))).id;
+    const size = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Half or Full', kind: 'one', options: [{ name: 'Half', price: '0' }, { name: 'Full', price: '150' }] }))).id;
+    await s.ok(s.owner.put(`${s.B}/addon-groups/${size}/items`, { itemIds: [a.id] }));
+    await s.ok(s.owner.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: [a.id, b.id] }));
+    let m = (await s.owner.get(`${s.B}/menu`)).json.items;
+    const groupsOf = (id: string) => m.find((i: any) => i.id === id).addonGroups;
+    expect(groupsOf(a.id)).toEqual([size, cheese]);
+    expect(groupsOf(b.id)).toEqual([cheese]);
+    await s.ok(s.owner.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: [b.id, c.id] }));
+    m = (await s.owner.get(`${s.B}/menu`)).json.items;
+    expect([groupsOf(a.id), groupsOf(b.id), groupsOf(c.id)]).toEqual([[size], [cheese], [cheese]]);
+    expect((await s.owner.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: ['nope'] })).status).toBe(400);
+    expect((await s.counter.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: [] })).status).toBe(403);
+    expect((await s.owner.put(`${s.B}/addon-groups/not-a-group/items`, { itemIds: [] })).status).toBe(404);
+  });
+});

@@ -1497,8 +1497,9 @@ async function settingsScreen(tab = 'menu') {
     let body = '';
     if (tab === 'menu') body = html`${menuSheetPanel()}<section class="panel"><h2>Menu</h2>${ui.upName ? '' : errorBox()}
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
-        ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
-          <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : rs(m.pricePaise)}</td><td data-label="Category">${m.category}</td><td data-label="Station">${m.station}</td>
+        ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
+          ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
+          <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${m.station}</td>
           <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}</td>
           <td class="act"><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
@@ -1507,25 +1508,14 @@ async function settingsScreen(tab = 'menu') {
           : html`<label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
         <label class="f">Station<select class="in" data-model="iStation"><option value="kitchen">Kitchen</option><option value="bar" ${ui.iStation === 'bar' ? 'selected' : ''}>Bar</option></select></label>
         <label class="f">Tax<select class="in" data-model="iTax">${taxChoices(true).map(([v, t]) => html`<option value="${v}" ${(ui.iTax ?? 'category') === v ? 'selected' : ''}>${t}</option>`)}</select></label>
-        ${cache.addonGroups.length ? html`<div class="f" style="grid-column:1/-1">Add-ons offered with this item<div class="chips">${cache.addonGroups.map((g) => html`<button type="button" class="chip" aria-pressed="${(ui.iGroups ?? []).includes(g.id)}" data-act="iGroup" data-id="${g.id}">${g.name}<span class="s">${g.kind === 'one' ? 'pick one' : 'add any'}</span></button>`)}</div></div>` : ''}
+        <div style="grid-column:1/-1">${itemAddons()}</div>
         <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="addItem" data-submit>${ui.editItem ? 'Save item' : 'Add item'}</button>${ui.editItem ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></div></form></section>`;
     if (tab === 'categories') body = html`<section class="panel"><h2>Categories and GST</h2>
       <p class="quiet small">Each item takes its GST from its own setting if it has one, else from its category here, else from the billing name on the bill. A billing name not registered for GST charges none. Check rates with your CA.</p>${errorBox()}
       <div class="scroll"><table class="t cards"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th></tr></thead><tbody>
         ${cache.menuCats.map((c) => html`<tr><td data-label="Category"><strong>${c.name}</strong></td><td data-label="Items" class="num">${cache.menu.filter((m) => m.active && m.category.toLowerCase() === c.name.toLowerCase()).length}</td>
           <td data-label="GST"><select class="in" data-act-change="catTax" data-id="${c.id}" aria-label="GST for ${c.name}">${taxChoices(false).map(([v, t]) => html`<option value="${v}" ${taxValue(c) === v ? 'selected' : ''}>${t}</option>`)}</select></td></tr>`)}</tbody></table></div></section>`;
-    if (tab === 'addons') body = html`<section class="panel"><h2>Add-ons and choices</h2>
-      <p class="quiet small">"Pick one" is a choice the order must make (Half or Full). "Add any" is an extra (Peri Peri Fries, Extra Cheese). Turn them on per item in the Menu tab. Old orders keep the names and prices they were taken with.</p>${errorBox()}
-      <div class="scroll"><table class="t cards"><thead><tr><th>Add-on</th><th>Kind</th><th>Options</th><th class="num">Items</th><th></th></tr></thead><tbody>
-        ${cache.addonGroups.map((g) => html`<tr><td data-label="Add-on"><strong>${g.name}</strong></td><td data-label="Kind">${g.kind === 'one' ? 'Pick one' : 'Add any'}</td>
-          <td data-label="Options">${g.options.map((o) => `${o.name}${o.addPaise ? ` +${rs(o.addPaise)}` : ''}`).join(' · ')}</td>
-          <td data-label="Items" class="num">${cache.menu.filter((m) => (m.addonGroups ?? []).includes(g.id)).length}</td>
-          <td class="act"><button class="btn" type="button" data-act="groupEdit" data-id="${g.id}">Edit</button></td></tr>`)}</tbody></table></div>
-      <form class="grid3"><h2 style="grid-column:1/-1">${ui.editGroup ? 'Edit add-on' : 'Add an add-on'}</h2>
-        <label class="f">Name<input class="in" data-model="gName" value="${ui.gName ?? ''}" placeholder="Extra Cheese"></label>
-        <label class="f">Kind<select class="in" data-model="gKind"><option value="any">Add any (extras)</option><option value="one" ${ui.gKind === 'one' ? 'selected' : ''}>Pick one (Half / Full)</option></select></label>
-        <label class="f" style="grid-column:1/-1">Options, one per line: name, then the extra price in ₹ (0 or blank for none)<textarea class="in" rows="4" data-model="gOpts" placeholder="Half, 0&#10;Full, 150">${ui.gOpts ?? ''}</textarea></label>
-        <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="groupSave" data-submit>Save add-on</button>${ui.editGroup ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
+    if (tab === 'addons') body = addonsTab();
     if (tab === 'tables') body = html`<section class="panel"><h2>Tables</h2>
       <p class="quiet small">The tables the counter shows as a grid, in this order. Leave the list empty to show the tables used in the last 60 days instead.</p>${errorBox()}
       ${ui.tableList.length ? html`<div class="tgrid">${ui.tableList.map((t) => html`<span class="tcell free">${t}</span>`)}</div>` : html`<p class="quiet">No list yet: the counter shows recent tables.</p>`}
@@ -1763,6 +1753,107 @@ actions.upApply = async () => {
   route();
 };
 
+// ---------- add-ons and choices in Settings: tick boxes on the item, a new one made in place, many items ticked at once
+const optLine = (g) => g.kind === 'one' ? g.options.map((o) => `${o.name}${o.addPaise ? ' +' + rs(o.addPaise) : ''}`).join(' / ')
+  : g.options.map((o) => (o.name.toLowerCase() === g.name.toLowerCase() ? '' : o.name + ' ') + (o.addPaise ? '+' + rs(o.addPaise) : 'free')).join(' / ');
+const kindTag = (g) => html`<span class="${g.kind === 'one' ? 'tag-one' : 'tag-any'}">${g.kind === 'one' ? 'Pick one' : 'Add any'}</span>`;
+/** The new-or-edit box for an add-on: kind, name, one row per option. State in ui.gd. */
+function groupBox(title, createLabel) {
+  const d = ui.gd;
+  return html`<div class="gbox" role="group" aria-label="${title}"><p class="gbox-h">${title}</p>
+    <div class="seg" role="radiogroup" aria-label="Kind">
+      <label><input type="radio" name="gdKind" value="any" data-act-change="gdKind" ${d.kind === 'any' ? 'checked' : ''}><b>Add any</b><span>Extras the guest may add: cheese, fries.</span></label>
+      <label><input type="radio" name="gdKind" value="one" data-act-change="gdKind" ${d.kind === 'one' ? 'checked' : ''}><b>Pick one</b><span>The guest must choose: Half / Full, Steamed / Fried.</span></label></div>
+    <label class="f">Name<input class="in" data-gd="name" value="${d.name}" placeholder="${d.kind === 'one' ? 'Half or Full' : 'Extra Cheese'}"></label>
+    <div class="f">Options${d.kind === 'one' ? ' (the first is the item’s own price, usually +₹0)' : ''}
+      ${d.options.map((o, i) => html`<div class="optrow"><input class="in" data-gdo="${i}" data-k="name" value="${o.name}" placeholder="${d.kind === 'one' ? (i ? 'Full' : 'Half') : 'Extra Cheese'}" aria-label="Option ${i + 1} name">
+        <span class="money"><i>+₹</i><input class="in" data-gdo="${i}" data-k="price" inputmode="decimal" value="${o.price}" aria-label="Option ${i + 1} extra price"></span>
+        <button class="btn" type="button" data-act="gdOptX" data-i="${i}" aria-label="Remove option ${i + 1}" ${d.options.length < 2 ? 'disabled' : ''}>×</button></div>`)}
+      <div><button class="btn ghost" type="button" data-act="gdOptAdd">+ another option</button></div></div>
+    <div class="row"><button class="btn pri" type="button" data-act="gdSave">${createLabel}</button><button class="btn" type="button" data-act="gdCancel">Cancel</button></div></div>`;
+}
+const gdBody = () => ({ name: ui.gd.name.trim() || ui.gd.options.map((o) => o.name.trim()).filter(Boolean).join(' or '), kind: ui.gd.kind,
+  options: ui.gd.options.filter((o) => o.name.trim()).map((o) => ({ name: o.name.trim(), price: String(o.price ?? '').trim() })) });
+const gdOf = (g) => ({ id: g.id, kind: g.kind, name: g.name, options: g.options.map((o) => ({ name: o.name, price: o.addPaise ? rupees(o.addPaise).replace(/\.00$/, '') : '0' })) });
+const newGd = (kind = 'one') => ({ id: null, kind, name: '', options: kind === 'one' ? [{ name: '', price: '0' }, { name: '', price: '' }] : [{ name: '', price: '' }] });
+async function reloadMenu() { const d = await api('GET', `${B()}/menu`); cache.menu = d.items; cache.menuCats = d.categories ?? []; cache.addonGroups = d.addonGroups ?? []; }
+
+function itemAddons() {
+  const on = ui.iGroups ?? [];
+  const price = toPaise(ui.iPrice ?? '');
+  return html`<div class="ticks" role="group" aria-labelledby="ia-h"><div class="ticks-h"><span id="ia-h">Add-ons and choices for this item</span><span class="quiet small">${on.length ? `${on.length} ticked` : 'none ticked'}</span></div>
+    ${cache.addonGroups.length ? '' : html`<p class="small quiet" style="padding:10px 14px;margin:0">No add-ons yet. Make the first one below.</p>`}
+    ${cache.addonGroups.map((g) => html`<label class="atick ${on.includes(g.id) ? 'on' : ''}"><input type="checkbox" data-act-change="iGroupTick" data-id="${g.id}" ${on.includes(g.id) ? 'checked' : ''}>
+      <span class="nm">${g.name}</span>${kindTag(g)}<span class="opts">${optLine(g)}</span>
+      ${g.kind === 'one' && on.includes(g.id) && ui.iOpen !== 'yes' ? html`<span class="hint">The price above${price !== null ? ` (${rs(price)})` : ''} is for <b>${g.options[0]?.name}</b>.
+        ${g.options.slice(1).map((o) => (o.addPaise ? `${o.name} adds ${rs(o.addPaise)}${price !== null ? ` (${rs(price + o.addPaise)})` : ''}` : `${o.name} costs the same`)).join('; ')}.</span>` : ''}</label>`)}
+  </div>
+  ${ui.gd && ui.gdFor === 'item' ? groupBox('New add-on or choice', 'Create and tick') : html`<button class="btn ghost" type="button" data-act="gdNewItem" style="margin-top:6px">+ New add-on or choice</button>`}`;
+}
+actions.iGroupTick = (d, el) => { const g = ui.iGroups ?? []; ui.iGroups = el.checked ? [...g, d.id] : g.filter((x) => x !== d.id); rerender(); };
+actions.gdNewItem = () => { ui.gd = newGd('one'); ui.gdFor = 'item'; ui.error = null; rerender(); root.querySelector('[data-gd="name"]')?.focus(); };
+actions.gdKind = (d, el) => { ui.gd.kind = el.value; if (el.value === 'one' && ui.gd.options.length < 2) ui.gd.options.push({ name: '', price: '' }); rerender(); };
+actions.gdOptAdd = () => { ui.gd.options.push({ name: '', price: '' }); rerender(); root.querySelectorAll('[data-gdo][data-k="name"]')[ui.gd.options.length - 1]?.focus(); };
+actions.gdOptX = (d) => { ui.gd.options.splice(Number(d.i), 1); rerender(); };
+actions.gdCancel = () => { ui.gd = null; ui.error = null; if (ui.gdFor === 'tab' && !ui.gSel) ui.gSel = cache.addonGroups[0]?.id ?? null; rerender(); };
+actions.gdSave = async () => {
+  const body = gdBody();
+  if (ui.gd.id) await api('PUT', `${B()}/addon-groups/${ui.gd.id}`, body);
+  const id = ui.gd.id ?? (await api('POST', `${B()}/addon-groups`, body)).id;
+  await reloadMenu();
+  if (ui.gdFor === 'item') ui.iGroups = [...new Set([...(ui.iGroups ?? []), id])];
+  if (ui.gdFor === 'tab') { ui.gSel = id; ui.gItems = cache.menu.filter((m) => (m.addonGroups ?? []).includes(id)).map((m) => m.id); }
+  flash = { kind: 'ok', text: `${body.name} ${ui.gd.id ? 'saved' : ui.gdFor === 'item' ? 'created and ticked' : 'created. Tick the items that offer it.'}.` };
+  ui.gd = null; ui.error = null; rerender();
+};
+root.addEventListener('input', (ev) => {
+  const el = ev.target;
+  if (!ui.gd) return;
+  if (el.dataset?.gd === 'name') ui.gd.name = el.value;
+  if (el.dataset?.gdo !== undefined) ui.gd.options[Number(el.dataset.gdo)][el.dataset.k] = el.value;
+});
+
+/** Settings → Add-ons: the list on the left; the chosen one's options and the items that offer it on the right. */
+function addonsTab() {
+  const gs = cache.addonGroups;
+  if (ui.gSel === undefined) { ui.gSel = gs[0]?.id ?? null; ui.gItems = gs[0] ? cache.menu.filter((m) => (m.addonGroups ?? []).includes(gs[0].id)).map((m) => m.id) : []; }
+  const g = gs.find((x) => x.id === ui.gSel);
+  const count = (id) => cache.menu.filter((m) => m.active && (m.addonGroups ?? []).includes(id)).length;
+  const cats = [...new Set(cache.menu.filter((m) => m.active).map((m) => m.category))];
+  const on = new Set(ui.gItems ?? []);
+  const items = (c) => cache.menu.filter((m) => m.active && m.category === c);
+  return html`<section class="panel"><h2>Add-ons and choices</h2>
+    <p class="quiet small">"Pick one" is a choice the order must make (Half or Full). "Add any" is an extra (Peri Peri Fries, Extra Cheese). Choose one on the left, then tick the items that offer it. Old orders keep the names and prices they were taken with.</p>
+    ${errorBox()}
+    <div class="gsplit">
+      <div class="glist">${gs.map((x) => html`<button type="button" class="gcard" aria-pressed="${x.id === ui.gSel && !ui.gd}" data-act="gSel" data-id="${x.id}"><b>${x.name}</b>
+          <small>${x.kind === 'one' ? 'Pick one' : 'Add any'} · ${optLine(x)} · ${plural(count(x.id), 'item')}</small></button>`)}
+        <button class="btn ghost" type="button" data-act="gdNewTab" style="justify-self:start">+ New add-on or choice</button></div>
+      <div class="gmain">
+        ${ui.gd && ui.gdFor === 'tab' ? groupBox(ui.gd.id ? `Edit ${ui.gd.name}` : 'New add-on or choice', ui.gd.id ? 'Save add-on' : 'Create')
+          : g ? html`<div class="row" style="justify-content:space-between"><h3 style="margin:0">${g.name} ${kindTag(g)}</h3>
+              <div class="row"><span class="quiet small">${optLine(g)}</span><button class="btn" type="button" data-act="gdEdit">Change name or options</button></div></div>
+            <p class="gcount">Offered on ${plural(on.size, 'item')}</p>
+            ${cats.map((c) => { const its = items(c); const n = its.filter((m) => on.has(m.id)).length; return html`<div class="gcat"><div class="gcat-h">
+              <label><input type="checkbox" data-act-change="gTickCat" data-cat="${c}" ${n === its.length ? 'checked' : ''}>Tick all in ${c}</label><span class="small quiet">${n} of ${its.length}</span></div>
+              <div class="gitems">${its.map((m) => html`<label><input type="checkbox" data-act-change="gTickItem" data-id="${m.id}" ${on.has(m.id) ? 'checked' : ''}><span>${m.name}</span><span class="quiet">${m.openPrice ? 'typed' : rs(m.pricePaise)}</span></label>`)}</div></div>`; })}
+            <div class="row"><button class="btn pri" type="button" data-act="gSaveItems">Save · ${plural(on.size, 'item')}</button></div>`
+          : html`<p class="quiet">No add-ons yet. Make the first one with "New add-on or choice".</p>`}
+      </div></div></section>`;
+}
+actions.gSel = (d) => { ui.gd = null; ui.gSel = d.id; ui.gItems = cache.menu.filter((m) => (m.addonGroups ?? []).includes(d.id)).map((m) => m.id); ui.error = null; rerender(); };
+actions.gdNewTab = () => { ui.gd = newGd('any'); ui.gdFor = 'tab'; ui.error = null; rerender(); root.querySelector('[data-gd="name"]')?.focus(); };
+actions.gdEdit = () => { ui.gd = gdOf(cache.addonGroups.find((x) => x.id === ui.gSel)); ui.gdFor = 'tab'; rerender(); };
+actions.gTickItem = (d, el) => { const s2 = new Set(ui.gItems); el.checked ? s2.add(d.id) : s2.delete(d.id); ui.gItems = [...s2]; rerender(); };
+actions.gTickCat = (d, el) => { const s2 = new Set(ui.gItems); for (const m of cache.menu.filter((x) => x.active && x.category === d.cat)) el.checked ? s2.add(m.id) : s2.delete(m.id); ui.gItems = [...s2]; rerender(); };
+actions.gSaveItems = async () => {
+  // Items off the menu keep the add-on they had; only the items shown are changed.
+  const off = cache.menu.filter((m) => !m.active && (m.addonGroups ?? []).includes(ui.gSel)).map((m) => m.id);
+  await api('PUT', `${B()}/addon-groups/${ui.gSel}/items`, { itemIds: [...ui.gItems, ...off] });
+  await reloadMenu();
+  flash = { kind: 'ok', text: `${cache.addonGroups.find((x) => x.id === ui.gSel).name}: offered on ${plural(ui.gItems.length, 'item')}.` }; rerender();
+};
+
 // Tax choices: an item can follow its category; a category can follow the billing name.
 const RATES = [5, 12, 18, 28, 40, 0];
 const taxChoices = (forItem) => [...(forItem ? [['category', 'From its category']] : []), ['billing', 'Billing name rate (food)'],
@@ -1775,18 +1866,10 @@ const taxBody = (v) => (v?.startsWith('rate:') ? { taxMode: 'rate', gstRate: Num
 const itemBody = (m) => ({ name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, station: m.station, ...taxBody(taxValue(m)),
   openPrice: !!m.openPrice, minPrice: m.minPricePaise != null ? rupees(m.minPricePaise) : '', addonGroups: m.addonGroups ?? [], active: !!m.active });
 actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await api('PUT', `${B()}/menu/${m.id}`, { ...itemBody(m), active: !m.active }); route(); };
-actions.iGroup = (d) => { const g = ui.iGroups ?? []; ui.iGroups = g.includes(d.id) ? g.filter((x) => x !== d.id) : [...g, d.id]; rerender(); };
 actions.catTax = async (d, el) => {
   await api('PUT', `${B()}/menu-categories/${d.id}`, taxBody(el.value));
   const c = cache.menuCats.find((x) => x.id === d.id); Object.assign(c, el.value.startsWith('rate:') ? { taxMode: 'rate', gstBp: Number(el.value.slice(5)) * 100 } : { taxMode: el.value, gstBp: null });
   flash = { kind: 'ok', text: `${c.name}: ${taxName(c)}.` }; route();
-};
-actions.groupEdit = (d) => { const g = cache.addonGroups.find((x) => x.id === d.id); Object.assign(ui, { editGroup: g.id, gName: g.name, gKind: g.kind, gOpts: g.options.map((o) => `${o.name}, ${o.addPaise ? rupees(o.addPaise).replace(/\.00$/, '') : '0'}`).join('\n') }); rerender(); };
-actions.groupSave = async () => {
-  const options = String(ui.gOpts ?? '').split('\n').map((x) => x.trim()).filter(Boolean).map((x) => { const i = x.lastIndexOf(','); return i < 0 ? { name: x, price: '' } : { name: x.slice(0, i).trim(), price: x.slice(i + 1).trim() }; });
-  const body = { name: ui.gName, kind: ui.gKind ?? 'any', options };
-  if (ui.editGroup) await api('PUT', `${B()}/addon-groups/${ui.editGroup}`, body); else await api('POST', B() + '/addon-groups', body);
-  flash = { kind: 'ok', text: `${ui.gName} saved.` }; route();
 };
 actions.addItem = async () => {
   const open = ui.iOpen === 'yes';

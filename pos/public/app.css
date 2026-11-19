@@ -392,3 +392,44 @@ label.btn:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 .stepper button { width: 48px; height: 48px; border: 0; background: none; color: var(--ink); font-size: 22px; font-weight: 700; cursor: pointer; }
 .stepper span { min-width: 28px; text-align: center; font-weight: 800; }
 @media (prefers-reduced-motion: no-preference) { .sheet.opening { animation: sheet-up .16s ease-out; } @keyframes sheet-up { from { transform: translateY(16px); opacity: .6; } } }
+
+/* Settings: add-ons as tick boxes, the new-or-edit box, and "offered on" lists. */
+.tag-one, .tag-any { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 1px 8px; white-space: nowrap; vertical-align: 1px; }
+.tag-one { color: var(--warn); background: var(--warn-tint); border: 1px solid var(--warn-line); }
+.tag-any { color: var(--pri); background: var(--pri-tint); border: 1px solid var(--pri-line); }
+.ticks { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.ticks-h { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 10px 14px; background: var(--bg); border-bottom: 1px solid var(--line); font-weight: 700; font-size: 14px; color: var(--ink); }
+.atick { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--rule); cursor: pointer; color: var(--ink); font-weight: 400; }
+.atick:last-child { border-bottom: 0; }
+.atick input, .gcat input, .gitems input { width: 20px; height: 20px; accent-color: var(--pri); margin: 0; }
+.atick .nm { font-weight: 650; }
+.atick .opts { grid-column: 2 / -1; font-size: 13px; color: var(--quiet); }
+.atick.on { background: var(--pri-tint); }
+.atick .hint { grid-column: 2 / -1; font-size: 13px; background: var(--panel); border: 1px dashed var(--pri-line); border-radius: 8px; padding: 6px 10px; }
+.gbox { border: 1px solid var(--warn-line); background: var(--warn-tint); border-radius: 10px; padding: 14px; display: grid; gap: 12px; margin-top: 8px; color: var(--ink); }
+.gbox-h { margin: 0; font-size: 12px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--warn); }
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 560px) { .seg { grid-template-columns: 1fr; } }
+.seg label { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel); display: grid; grid-template-columns: 20px 1fr; gap: 2px 10px; cursor: pointer; font-size: 14px; font-weight: 400; color: var(--ink); }
+.seg label b { font-size: 15px; }
+.seg label span { grid-column: 2; color: var(--quiet); font-size: 13px; }
+.seg input { accent-color: var(--pri); margin: 3px 0 0; }
+.seg label:has(input:checked) { border-color: var(--pri); box-shadow: inset 0 0 0 1px var(--pri); }
+.optrow { display: grid; grid-template-columns: minmax(0, 1fr) 130px 48px; gap: 8px; align-items: center; margin-top: 6px; }
+.optrow .money { position: relative; display: block; }
+.optrow .money i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); font-style: normal; color: var(--quiet); font-size: 14px; }
+.optrow .money .in { padding-left: 34px; width: 100%; }
+.gsplit { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .gsplit { grid-template-columns: 1fr; } }
+.glist { display: grid; gap: 8px; }
+.gcard { text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel); color: var(--ink); cursor: pointer; display: grid; gap: 2px; font: inherit; }
+.gcard[aria-pressed="true"] { border-color: var(--pri); background: var(--pri-tint); box-shadow: inset 0 0 0 1px var(--pri); }
+.gcard small { color: var(--quiet); }
+.gmain { display: grid; gap: 12px; min-width: 0; }
+.gcount { margin: 0; font-weight: 700; color: var(--pri); }
+.gcat { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.gcat-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.gcat-h label { display: flex; gap: 8px; align-items: center; font-weight: 700; cursor: pointer; }
+.gitems { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.gitems label { display: flex; gap: 10px; align-items: center; padding: 9px 12px; border-bottom: 1px solid var(--rule); cursor: pointer; font-size: 14px; }
+.gitems label span:last-child { margin-left: auto; font-variant-numeric: tabular-nums; }

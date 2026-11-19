@@ -401,6 +401,30 @@ async function saveGroup(c: Context<AppEnv>, id: string | null) {
 }
 settingsRoutes.post(`${B}/addon-groups`, requireAction('menu.edit'), (c) => saveGroup(c, null));
 settingsRoutes.put(`${B}/addon-groups/:id`, requireAction('menu.edit'), (c) => saveGroup(c, c.req.param('id')));
+// Which items offer an add-on, set from the add-on's side (tick many items at once). Items keep their other add-ons;
+// an item newly ticked gets this one after the ones it has.
+settingsRoutes.put(`${B}/addon-groups/:id/items`, requireAction('menu.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  const g = await one<{ name: string }>(c.env.DB, 'SELECT name FROM addon_groups WHERE id = ? AND business_id = ?', id, bid);
+  if (!g) fail(404, 'Add-on not found.');
+  const data = await body(c);
+  const ids = data.itemIds;
+  if (!Array.isArray(ids) || ids.length > 3000 || ids.some((x) => typeof x !== 'string')) fail(400, 'Items must be a list.');
+  const want = [...new Set(ids as string[])];
+  if (want.length) {
+    const known = await all<{ n: number }>(c.env.DB, 'SELECT count(*) AS n FROM menu_items WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))', bid, JSON.stringify(want));
+    if (known[0].n !== want.length) fail(400, 'An item was not found.');
+  }
+  const before = await all<{ item_id: string }>(c.env.DB, 'SELECT item_id FROM menu_item_addons WHERE group_id = ?', id);
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'DELETE FROM menu_item_addons WHERE group_id = ? AND item_id NOT IN (SELECT value FROM json_each(?))', id, JSON.stringify(want)),
+    stmt(c.env.DB, `INSERT OR IGNORE INTO menu_item_addons (item_id, group_id, business_id, sort)
+      SELECT j.value, ?, ?, (SELECT coalesce(max(sort), -1) + 1 FROM menu_item_addons m WHERE m.item_id = j.value) FROM json_each(?) j`, id, bid, JSON.stringify(want)),
+    audit(c.env.DB, bid, c.get('staff').id, 'addons.items', 'addon_groups', id, { items: before.length }, { name: g.name, items: want.length }),
+  ]);
+  return c.json({ ok: true, items: want.length });
+});
 
 // ---------- reasons
 
