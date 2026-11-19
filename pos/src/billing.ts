@@ -16,14 +16,17 @@ export function fyOf(day: string, startMonth: number): string {
   return `${start}-${String((start + 1) % 100).padStart(2, '0')}`;
 }
 
-/** Bill number: PREFIX-YYYY-NNNNN using the FY's two short years ('C', '2026-27', 418 → 'C-2627-00418'). At most 16 characters. */
-export function billNo(prefix: string, fy: string, seq: number): string {
-  const short = fy.length === 7 ? fy.slice(2, 4) + fy.slice(5, 7) : fy.slice(2);
-  const n = String(seq).padStart(5, '0');
-  const out = `${prefix}-${short}-${n}`;
+/**
+ * Bill number by print date (from 19 Nov 2026): the billing name's letter, the date printed as YYMMDD (India time) and
+ * the number within that day, at least 3 digits ('C', '2026-11-19', 1 → 'C261119001'). At most 16 characters (GST).
+ */
+export function billNo(prefix: string, printDay: string, n: number): string {
+  const out = `${prefix}${printDay.slice(2, 4)}${printDay.slice(5, 7)}${printDay.slice(8, 10)}${String(n).padStart(3, '0')}`;
   if (out.length > 16) throw new Error('bill_no_too_long');
   return out;
 }
+/** Credit note number the same way, with CN after the letter ('C', '2026-11-19', 1 → 'CCN261119001'). */
+export const creditNoteNo = (prefix: string, printDay: string, n: number) => billNo(`${prefix}CN`, printDay, n);
 
 /**
  * How a line is taxed: GST at a rate (bp: 500 = 5%; 0 for a billing name not registered), liquor (outside GST), or exempt
@@ -164,14 +167,6 @@ export function rs(p: number): string {
   const r = Math.floor(a / 100).toLocaleString('en-IN');
   const ps = a % 100;
   return `${neg ? '-' : ''}₹${r}${ps ? '.' + String(ps).padStart(2, '0') : ''}`;
-}
-
-/** Credit note number: PREFIX-CNYYYY-NNNN ('C', '2026-27', 1 → 'C-CN2627-0001'). At most 16 characters. */
-export function creditNoteNo(prefix: string, fy: string, seq: number): string {
-  const short = fy.length === 7 ? fy.slice(2, 4) + fy.slice(5, 7) : fy.slice(2);
-  const out = `${prefix}-CN${short}-${String(seq).padStart(4, '0')}`;
-  if (out.length > 16) throw new Error('cn_no_too_long');
-  return out;
 }
 
 export interface BillAmounts extends Totals { gstRateBp: number; taxes?: TaxRow[] }

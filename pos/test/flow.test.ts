@@ -1,6 +1,9 @@
 // The counter end to end on a real local D1: sign-in, roles, orders and KOT, bills and numbering, settle with every payment
 // mode, paid together, folios, credit, advances, void, limits, tabs and shift close. All data is invented.
 import { afterAll, describe, expect, it } from 'vitest';
+import { istDay } from '../../src/time';
+/** Today's date as printed in bill numbers (YYMMDD, India time). */
+const ymd = () => istDay(Date.now()).slice(2).replace(/-/g, '');
 import { billed, Client, dispose, q, setupBusiness } from './helpers';
 
 afterAll(dispose);
@@ -62,11 +65,11 @@ describe('orders, KOT and bills', () => {
 
     const b1 = (await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.company })).json.bill;
     expect(b1).toMatchObject({ grossPaise: 68000, cgstPaise: 1700, sgstPaise: 1700, totalPaise: 71400, entityName: 'Sample Hotels Pvt Ltd' });
-    expect(b1.billNo).toMatch(/^C-\d{4}-00001$/);
+    expect(b1.billNo).toBe(`C${ymd()}001`);
     const b2 = (await billed(s, [['Masala Chai', 1]])).bill;
-    expect(b2.billNo).toMatch(/^C-\d{4}-00002$/);
+    expect(b2.billNo).toBe(`C${ymd()}002`);
     const h = (await billed(s, [['Masala Chai', 2]], { entityId: s.huf })).bill;
-    expect(h.billNo).toMatch(/^H1-\d{4}-00001$/);
+    expect(h.billNo).toBe(`H1${ymd()}001`);
     expect(h).toMatchObject({ cgstPaise: 0, totalPaise: 8000 });
 
     await expect(q('UPDATE bills SET total_paise = 1 WHERE id = ?', b1.id)).rejects.toThrow(/bill_frozen/);
@@ -97,7 +100,7 @@ describe('orders, KOT and bills', () => {
     expect((await s.owner.post(`${s.B}/bills/${bill.id}/void`, {})).status).toBe(400);
     expect((await s.owner.post(`${s.B}/bills/${bill.id}/void`, { reasonId: s.reasons.void })).status).toBe(200);
     const again = (await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.huf })).json.bill;
-    expect(again.billNo).toMatch(/^H1-/);
+    expect(again.billNo).toMatch(/^H1\d{9}$/);
     const rows = await q('SELECT bill_no, status FROM bills WHERE order_id = ? ORDER BY printed_at', order);
     expect(rows.map((r) => r.status)).toEqual(['void', 'printed']);
     expect((await q("SELECT kind FROM outbox WHERE business_id = ? AND kind = 'bill_void'", s.businessId)).length).toBe(1);
@@ -312,10 +315,10 @@ describe('credit notes', () => {
     expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], refundMode: 'cash' })).status).toBe(400); // reason
     const one = (await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' })).json.creditNote;
     // 180 less its 10% share = 162, GST 8.10 → 170.10, exact to the paisa
-    expect(one).toMatchObject({ cnNo: expect.stringMatching(/^C-CN\d{4}-0001$/), taxablePaise: 16200, cgstPaise: 405, totalPaise: 17010 });
+    expect(one).toMatchObject({ cnNo: `CCN${ymd()}001`, taxablePaise: 16200, cgstPaise: 405, totalPaise: 17010 });
     expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 3 }], reason: 'x', refundMode: 'cash' })).json.error).toMatch(/more than is left/);
     const rest = (await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { full: true, reason: 'Guest left', refundMode: 'none' })).json;
-    expect(rest.creditNote.cnNo).toMatch(/-0002$/);
+    expect(rest.creditNote.cnNo).toBe(`CCN${ymd()}002`);
     expect(rest.creditNote.totalPaise + one.totalPaise).toBe(58600); // the bill and its notes come to zero
     expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { full: true, reason: 'again', refundMode: 'none' })).json.error).toMatch(/already been given back/);
 
@@ -499,14 +502,15 @@ describe('daily check and GSTR-1', () => {
     expect(r.sales).toMatchObject({ bills: 1, netPaise: 36000, voids: 1 });
     expect(r.events.void).toEqual({ n: 1, paise: voided.totalPaise });
     expect(r.unpaid.map((o: any) => [o.place, o.sentPaise, o.voided])).toEqual([['T7', 6000, true], ['T8', 32000, false]]);
-    expect(r.series).toEqual([{ name: expect.any(String), prefix: expect.any(String), count: 2, last: 2, missing: [] }]);
+    expect(r.series).toEqual([{ name: expect.any(String), prefix: 'C', count: 2, last: 2, lastNo: `C${ymd()}002`, missing: [] }]);
     expect(r.shiftClose).toBeNull();
 
     // A bill number that skips one shows as missing.
-    await q(`INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, status)
-      SELECT 'gap-bill', business_id, order_id, entity_id, fy, 4, bill_no || '-X', shift_day, printed_at, printed_by, gross_paise, 0, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, 'settled' FROM bills WHERE id = ?`, paid.id);
+    await q(`INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, status, print_day, day_seq)
+      SELECT 'gap-bill', business_id, order_id, entity_id, fy, 4, 'C' || ? || '004', shift_day, printed_at, printed_by, gross_paise, 0, taxable_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, 'settled', print_day, 4 FROM bills WHERE id = ?`, ymd(), paid.id);
     r = (await owner.get(`${B}/reports/daily-check?day=${day}`)).json;
-    expect(r.series[0]).toMatchObject({ count: 3, last: 4, missing: [3] });
+    // Named as it would have been printed: the day's third bill, and the year's third.
+    expect(r.series[0]).toMatchObject({ count: 3, last: 4, lastNo: `C${ymd()}004`, missing: [`C${ymd()}003`, `bill 3 of ${r.fy}`] });
   });
 
   it('gives B2C sales by rate net of credit notes, the SAC summary and the document summary for the month', async () => {

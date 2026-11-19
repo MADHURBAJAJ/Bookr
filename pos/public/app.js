@@ -1488,9 +1488,9 @@ async function exceptionsScreen(day = me.business.shiftDay) {
         ${d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
           : html`<p style="color:var(--warn)">Not closed yet.</p>`}
         <h2>Bill numbers (${d.fy})</h2>
-        ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: number${x.missing.length > 1 ? 's' : ''} ${x.missing.join(', ')} missing</div>`)}</div>`
+        ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: ${x.missing.join(', ')} missing</div>`)}</div>`
           : html`<p>${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</p>`}
-        <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span>${x.count} bills, last no. ${x.last}</span></div>`)}</div></section>
+        <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span>${x.count} bills, last ${x.lastNo ?? x.last}</span></div>`)}</div></section>
       <section class="panel"><h2>Exceptions</h2>
         <div class="sums">${flag(ev('void').n, 'Void bills', ev('void').paise)}${flag(ev('discount').n + df('discount').n, 'Discounts', ev('discount').paise + df('discount').paise)}
           ${flag(ev('comp').n, 'Complimentary', ev('comp').paise)}${flag(ev('kot_cancel').n, 'Cancelled after KOT')}${flag(ev('reprint').n, 'Reprints')}

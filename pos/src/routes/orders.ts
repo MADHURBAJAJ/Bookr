@@ -10,6 +10,7 @@ import { requireAction, requireStaff } from '../auth';
 import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
 import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel, tableList } from '../util';
 import { sendSoon } from '../sync';
+import { istDay } from '../../../src/time';
 import type { AppEnv } from '../types';
 
 export const orderRoutes = new Hono<AppEnv>();
@@ -343,18 +344,22 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   if (will === 'stop') fail(409, `${e.name} would pass its stop point for ${fy} (${rs(year)} billed so far). Choose another billing name.`);
 
   const id = newId();
-  const short = fy.length === 7 ? fy.slice(2, 4) + fy.slice(5, 7) : fy.slice(2);
+  const printDay = istDay(t);
+  const yymmdd = printDay.slice(2).replace(/-/g, '');
   const guest = text(data, 'guestName', 'Guest name', { optional: true, max: 80 }) ?? o.guest_name;
   const staffId = c.get('staff').id;
   try {
     await c.env.DB.batch([
       stmt(c.env.DB, 'INSERT OR IGNORE INTO bill_series (entity_id, fy, next_no) VALUES (?, ?, 1)', e.id, fy),
+      // Its number: the billing name's letter, the date printed (YYMMDD, India time) and the next number of that day
+      // (C261119001); the yearly running number (seq) is taken too. All in this one batch, so no number is skipped.
       stmt(c.env.DB, `INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise,
-          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name)
-        SELECT ?, ?, ?, ?, ?, next_no, ? || '-' || ? || '-' || printf('%05d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        FROM bill_series WHERE entity_id = ? AND fy = ?`,
-        id, bid, o.id, e.id, fy, e.series_prefix, short, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
-        totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, e.id, fy),
+          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq)
+        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n
+        FROM bill_series s, (SELECT coalesce(max(day_seq), 0) + 1 AS n FROM bills WHERE entity_id = ? AND print_day = ?) d WHERE s.entity_id = ? AND s.fy = ?`,
+        id, bid, o.id, e.id, fy, e.series_prefix, yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
+        totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, printDay,
+        e.id, printDay, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
       ...ls.map((l) => {
         const tx = lineTax(l.id);

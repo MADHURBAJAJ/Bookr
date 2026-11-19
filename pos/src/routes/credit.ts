@@ -2,6 +2,7 @@
 // bill or chosen items, at the bill's own discount share and GST rate, with a reason, and records how the money went back
 // (cash from the drawer, UPI, a reversal on the card machine, credit on a folio or credit account, or none). It is numbered
 // in its own series per billing name and financial year, goes on the exceptions report, and goes to Bookr.
+import { istDay } from '../../../src/time';
 import { Hono } from 'hono';
 import { all, newId, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
@@ -92,7 +93,9 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
 
   const b = bizOf(c);
   const { t, shiftDay, fy } = clock(b);
-  const short = fy.length === 7 ? fy.slice(2, 4) + fy.slice(5, 7) : fy.slice(2);
+  // Its number: the billing name's letter, CN, the date (YYMMDD, India time) and the next number of that day (CCN261119001).
+  const printDay = istDay(t);
+  const yymmdd = printDay.slice(2).replace(/-/g, '');
   const id = newId();
   const staff = c.get('staff');
   const pa = payAccount ? await one<{ name: string; bookr_account_id: string | null }>(db, 'SELECT name, bookr_account_id FROM pay_accounts WHERE id = ?', payAccount) : null;
@@ -103,11 +106,12 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
     await db.batch([
       stmt(db, 'INSERT OR IGNORE INTO credit_note_series (entity_id, fy, next_no) VALUES (?, ?, 1)', bill.entity_id, fy),
       stmt(db, `INSERT INTO credit_notes (id, business_id, bill_id, entity_id, fy, seq, cn_no, shift_day, reason, lines, gross_paise, discount_paise, taxable_paise,
-          nongst_paise, cgst_paise, sgst_paise, round_off_paise, total_paise, refund_mode, pay_account_id, debtor_account_id, by_staff, at)
-        SELECT ?, ?, ?, ?, ?, next_no, ? || '-CN' || ? || '-' || printf('%04d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        FROM credit_note_series WHERE entity_id = ? AND fy = ?`,
-        id, bid, billId, bill.entity_id, fy, bill.series_prefix, short, shiftDay, reason, JSON.stringify(chosen), totals.grossPaise, totals.discountPaise,
-        totals.taxablePaise, totals.nonGstPaise, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, mode, payAccount, debtor?.id ?? null, staff.id, t, bill.entity_id, fy),
+          nongst_paise, cgst_paise, sgst_paise, round_off_paise, total_paise, refund_mode, pay_account_id, debtor_account_id, by_staff, at, print_day, day_seq)
+        SELECT ?, ?, ?, ?, ?, s.next_no, ? || 'CN' || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n
+        FROM credit_note_series s, (SELECT coalesce(max(day_seq), 0) + 1 AS n FROM credit_notes WHERE entity_id = ? AND print_day = ?) d WHERE s.entity_id = ? AND s.fy = ?`,
+        id, bid, billId, bill.entity_id, fy, bill.series_prefix, yymmdd, shiftDay, reason, JSON.stringify(chosen), totals.grossPaise, totals.discountPaise,
+        totals.taxablePaise, totals.nonGstPaise, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, mode, payAccount, debtor?.id ?? null, staff.id, t,
+        printDay, bill.entity_id, printDay, bill.entity_id, fy),
       stmt(db, 'UPDATE credit_note_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', bill.entity_id, fy),
       ...noteRows.map((x) => stmt(db, 'INSERT INTO credit_note_taxes (credit_note_id, business_id, kind, gst_bp, value_paise, cgst_paise, sgst_paise) VALUES (?, ?, ?, ?, ?, ?, ?)',
         id, bid, x.kind, x.bp, x.valuePaise, x.cgstPaise, x.sgstPaise)),

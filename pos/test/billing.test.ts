@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocate, billNo, billTotals, fyOf, limitState, rs, shiftDayAt } from '../src/billing';
+import { allocate, billNo, creditNoteNo, billTotals, fyOf, limitState, rs, shiftDayAt } from '../src/billing';
 import { istToMs } from '../../src/time';
 
 describe('shift day and financial year', () => {
@@ -18,11 +18,13 @@ describe('shift day and financial year', () => {
 });
 
 describe('bill numbers', () => {
-  it('uses prefix, short year and a 5-digit running number, within 16 characters', () => {
-    expect(billNo('C', '2026-27', 418)).toBe('C-2627-00418');
-    expect(billNo('H3', '2026-27', 7)).toBe('H3-2627-00007');
-    expect(billNo('ABCD', '2026-27', 123456)).toBe('ABCD-2627-123456');
-    expect(billNo('ABCD', '2026-27', 123456).length).toBeLessThanOrEqual(16);
+  it('uses the letter, the print date as YYMMDD and at least 3 digits for the day, within 16 characters', () => {
+    expect(billNo('C', '2026-11-19', 1)).toBe('C261119001');
+    expect(billNo('H3', '2027-01-05', 42)).toBe('H3270105042');
+    expect(billNo('C', '2026-11-19', 1234)).toBe('C2611191234');
+    expect(creditNoteNo('C', '2026-11-19', 2)).toBe('CCN261119002');
+    expect(billNo('ABCD', '2026-11-19', 999999).length).toBeLessThanOrEqual(16);
+    expect(() => billNo('ABCD', '2026-11-19', 1234567)).toThrow();
   });
 });
 

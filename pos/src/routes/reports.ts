@@ -5,7 +5,7 @@ import { all, one } from '../../../src/db';
 import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { clock, bizOf, loadBusiness } from '../util';
-import { billTaxRows, fyOf, type TaxRow } from '../billing';
+import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
 
 export const reportRoutes = new Hono<AppEnv>();
@@ -122,9 +122,12 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
         (SELECT bill_no FROM bills x WHERE x.order_id = o.id AND x.status = 'printed') AS bill_no,
         (SELECT count(*) FROM bills x WHERE x.order_id = o.id AND x.status = 'void') AS voids
       FROM orders o WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY o.opened_at`, bid),
-    all<{ entity_id: string; name: string; prefix: string; seqs: string }>(db, `SELECT e.id AS entity_id, e.name, e.series_prefix AS prefix, group_concat(b.seq) AS seqs
-      FROM bills b JOIN billing_entities e ON e.id = b.entity_id WHERE b.business_id = ? AND b.fy = ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, fy),
-    all<{ entity_id: string; name: string; seqs: string }>(db, `SELECT e.id AS entity_id, e.name, group_concat(n.seq) AS seqs
+    all<{ entity_id: string; name: string; prefix: string; seqs: string; days: string | null; last_no: string }>(db, `SELECT e.id AS entity_id, e.name, e.series_prefix AS prefix,
+        group_concat(b.seq) AS seqs, group_concat(b.print_day || ':' || b.day_seq) AS days,
+        (SELECT x.bill_no FROM bills x WHERE x.entity_id = e.id AND x.fy = ? ORDER BY x.seq DESC LIMIT 1) AS last_no
+      FROM bills b JOIN billing_entities e ON e.id = b.entity_id WHERE b.business_id = ? AND b.fy = ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, fy, bid, fy),
+    all<{ entity_id: string; name: string; prefix: string; seqs: string; days: string | null }>(db, `SELECT e.id AS entity_id, e.name, e.series_prefix AS prefix,
+        group_concat(n.seq) AS seqs, group_concat(n.print_day || ':' || n.day_seq) AS days
       FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.fy = ? GROUP BY e.id`, bid, fy),
     one<{ difference_paise: number; difference_reason: string | null; closed_at: number }>(db,
       'SELECT difference_paise, difference_reason, closed_at FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, day),
@@ -150,6 +153,15 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     for (let i = 1; i <= nums[nums.length - 1] && missing.length < 20; i++) if (!have.has(i)) missing.push(i);
     return { count: nums.length, last: nums[nums.length - 1], missing };
   };
+  // Numbers by print date (from 19 Nov 2026): each day of each billing name runs 001, 002, 003 … with none missing.
+  // A missing one is named as it would have been printed (C261119004).
+  const dayGaps = (days: string | null, numberOf: (day: string, n: number) => string) => {
+    const by = new Map<string, Set<number>>();
+    for (const x of (days ?? '').split(',').filter(Boolean)) { const [d, n] = x.split(':'); by.set(d, (by.get(d) ?? new Set()).add(Number(n))); }
+    const out: string[] = [];
+    for (const [d, ns] of [...by].sort()) for (let i = 1; i <= Math.max(...ns) && out.length < 20; i++) if (!ns.has(i)) out.push(numberOf(d, i));
+    return out;
+  };
   const HOUR = 3_600_000;
   return c.json({
     day, fy,
@@ -162,8 +174,11 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
       // Old: a tab past the business's limit, or anything else open for more than 6 hours.
       old: o.status === 'tab' ? (t - o.opened_at) / 86_400_000 > b.tab_age_days : t - o.opened_at > 6 * HOUR,
     })),
-    series: series.map((x) => ({ name: x.name, prefix: x.prefix, ...gaps(x.seqs) })),
-    creditNoteSeries: cnSeries.map((x) => ({ name: x.name, ...gaps(x.seqs) })),
+    // Missing: bill numbers missing within a day, then any gap in the year's running count (which no printed number shows).
+    series: series.map((x) => { const g = gaps(x.seqs); return { name: x.name, prefix: x.prefix, count: g.count, last: g.last, lastNo: x.last_no,
+      missing: [...dayGaps(x.days, (d, n) => billNo(x.prefix, d, n)), ...g.missing.map((n) => `bill ${n} of ${fy}`)] }; }),
+    creditNoteSeries: cnSeries.map((x) => { const g = gaps(x.seqs); return { name: x.name, count: g.count, last: g.last,
+      missing: [...dayGaps(x.days, (d, n) => creditNoteNo(x.prefix, d, n)), ...g.missing.map((n) => `credit note ${n} of ${fy}`)] }; }),
     typedPrices: typed,
     bar: { counts: bar!.counts, missingPaise: Math.round(bar!.missing), extraPaise: Math.round(bar!.extra), breakagePaise: Math.round(bar!.waste) },
     shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at } : null,
