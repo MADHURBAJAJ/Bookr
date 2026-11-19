@@ -75,7 +75,7 @@ const MENU: [string, string, number, 'kitchen' | 'bar'][] = [
   ['Onion Pakora', 'Starters', 140, 'kitchen'], ['Paneer Tikka', 'Starters', 320, 'kitchen'], ['Chicken 65', 'Starters', 340, 'kitchen'],
   ['Tandoori Chicken', 'Starters', 300, 'kitchen'], ['Veg Burger', 'Snacks', 160, 'kitchen'], ['Cheese Sandwich', 'Snacks', 150, 'kitchen'],
   ['Masala Dosa', 'Mains', 180, 'kitchen'], ['Veg Thali', 'Mains', 280, 'kitchen'], ['Dal Makhani', 'Mains', 240, 'kitchen'],
-  ['Chicken Biryani', 'Mains', 360, 'kitchen'], ['Butter Naan', 'Breads', 60, 'kitchen'], ['Tandoori Roti', 'Breads', 30, 'kitchen'],
+  ['Chicken Biryani', 'Mains', 199, 'kitchen'], ['Butter Naan', 'Breads', 60, 'kitchen'], ['Tandoori Roti', 'Breads', 30, 'kitchen'],
   ['Masala Chai', 'Drinks', 40, 'kitchen'], ['Fresh Lime Soda', 'Drinks', 90, 'kitchen'], ['Sweet Lassi', 'Drinks', 110, 'kitchen'],
   ['Gulab Jamun', 'Desserts', 110, 'kitchen'], ['Beer 650 ml', 'Bar', 320, 'bar'], ['Whisky 30 ml', 'Bar', 220, 'bar'], ['Whisky bottle 750 ml', 'Bar', 0, 'bar'],
   ['Laundry (per piece)', 'Hotel', 50, 'kitchen'], ['Dental kit', 'Hotel', 60, 'kitchen'],
@@ -94,18 +94,18 @@ for (const [name, category, rupees, station] of MENU) {
   insert('menu_items', { id: menuIds[name], business_id: B, name, category, price_paise: rupees * 100, sac: '996332', station,
     tax_mode: name === 'Dental kit' ? 'none' : null, gst_bp: null, open_price: bottle ? 1 : 0, min_price_paise: bottle ? 4000_00 : null, active: 1, created_at: t });
 }
-// Add-ons: a choice the order must make, and extras.
-const ADDONS: [string, 'one' | 'any', [string, number][], string[]][] = [
-  ['Tandoori Chicken size', 'one', [['Half', 0], ['Full', 150]], ['Tandoori Chicken']],
-  ['Peri Peri Fries', 'any', [['Peri Peri Fries', 30]], ['Veg Burger', 'Cheese Sandwich']],
-  ['Extra Cheese', 'any', [['Extra Cheese', 50]], ['Veg Burger', 'Masala Dosa']],
-  ['Butter', 'any', [['Butter', 30]], ['Masala Dosa']],
+// Add-ons: a choice the order must make (each dish with its own prices), and extras (a usual price; a dish may differ).
+const ADDONS: [string, 'one' | 'any', [string, number][], [string, Record<string, number> | null][]][] = [
+  ['Half or Full', 'one', [['Half', 0], ['Full', 0]], [['Tandoori Chicken', { half: 300_00, full: 450_00 }], ['Chicken Biryani', { half: 199_00, full: 360_00 }]]],
+  ['Peri Peri Fries', 'any', [['Peri Peri Fries', 30]], [['Veg Burger', null], ['Cheese Sandwich', null]]],
+  ['Extra Cheese', 'any', [['Extra Cheese', 50]], [['Veg Burger', null], ['Masala Dosa', { 'extra cheese': 40_00 }]]],
+  ['Butter', 'any', [['Butter', 30]], [['Masala Dosa', null]]],
 ];
 for (const [n, [name, kind, options, dishes]] of ADDONS.entries()) {
   const g = id();
   insert('addon_groups', { id: g, business_id: B, name, kind, created_at: t });
   options.forEach(([o, rupees], i) => insert('addon_options', { id: id(), business_id: B, group_id: g, name: o, add_paise: rupees * 100, sort: i, active: 1 }));
-  for (const d of dishes) insert('menu_item_addons', { item_id: menuIds[d], group_id: g, business_id: B, sort: n });
+  for (const [d, prices] of dishes) insert('menu_item_addons', { item_id: menuIds[d], group_id: g, business_id: B, sort: n, prices: prices ? JSON.stringify(prices) : null });
 }
 
 // Bar stock: a main store and a bar, a whisky and a beer, recipes, and opening stock received and moved to the bar.

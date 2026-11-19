@@ -6,6 +6,7 @@ import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, optionalPaise, paise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { isRole } from '../permissions';
+import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { audit, clock, bizOf, loadBusiness, tableList } from '../util';
 import type { AppEnv } from '../types';
 
@@ -264,14 +265,18 @@ settingsRoutes.get(`${B}/menu`, requireAction('pos.view'), async (c) => {
   const [items, links, categories, groups, options] = await Promise.all([
     all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, active, tax_mode AS taxMode, gst_bp AS gstBp,
       open_price AS openPrice, min_price_paise AS minPricePaise FROM menu_items WHERE business_id = ? ORDER BY category, name`, bid),
-    all<{ item_id: string; group_id: string }>(c.env.DB, 'SELECT item_id, group_id FROM menu_item_addons WHERE business_id = ? ORDER BY sort', bid),
+    all<{ item_id: string; group_id: string; prices: string | null }>(c.env.DB, 'SELECT item_id, group_id, prices FROM menu_item_addons WHERE business_id = ? ORDER BY sort', bid),
     all(c.env.DB, 'SELECT id, name, tax_mode AS taxMode, gst_bp AS gstBp FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
     all<{ id: string; name: string; kind: string }>(c.env.DB, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ? ORDER BY name', bid),
     all<{ id: string; group_id: string; name: string; add_paise: number }>(c.env.DB,
       'SELECT id, group_id, name, add_paise FROM addon_options WHERE business_id = ? AND active = 1 ORDER BY sort, name', bid),
   ]);
   return c.json({
-    items: items.map((i) => ({ ...i, openPrice: !!i.openPrice, addonGroups: links.filter((l) => l.item_id === i.id).map((l) => l.group_id) })),
+    items: items.map((i) => {
+      const mine = links.filter((l) => l.item_id === i.id);
+      return { ...i, openPrice: !!i.openPrice, addonGroups: mine.map((l) => l.group_id),
+        addonPrices: Object.fromEntries(mine.filter((l) => readPrices(l.prices)).map((l) => [l.group_id, readPrices(l.prices)])) };
+    }),
     categories,
     addonGroups: groups.map((g) => ({ ...g, options: options.filter((o) => o.group_id === g.id).map((o) => ({ id: o.id, name: o.name, addPaise: o.add_paise })) })),
   });
@@ -297,24 +302,67 @@ function itemFields(data: Record<string, unknown>) {
   const sac = text(data, 'sac', 'SAC', { optional: true, max: 8 }) ?? '996332';
   if (!/^\d{4,8}$/.test(sac)) fail(400, 'SAC must be 4 to 8 digits.');
   const open = data.openPrice === true;
-  const price = open ? (optionalPaise(data, 'price', 'Price') ?? 0) : paise(data, 'price', 'Price');
-  if (price < 0) fail(400, 'Price cannot be negative.');
-  const groups = data.addonGroups ?? [];
-  if (!Array.isArray(groups) || groups.some((g) => typeof g !== 'string') || groups.length > 10) fail(400, 'Add-ons must be a list of add-on groups.');
+  // The price may be left out when a "pick one" sets it (the first option's price on this dish); checked in itemExtras.
+  const price = optionalPaise(data, 'price', 'Price');
+  if (price !== null && price < 0) fail(400, 'Price cannot be negative.');
+  // Add-ons: a group id, or { id, prices: { option name: rupees } } for this dish's own prices.
+  const raw = data.addonGroups ?? [];
+  if (!Array.isArray(raw) || raw.length > 10) fail(400, 'Add-ons must be a list of add-on groups.');
+  const groups = raw.map((g) => {
+    if (typeof g === 'string') return { id: g, prices: null as Record<string, unknown> | null };
+    const x = (g ?? {}) as Record<string, unknown>;
+    if (typeof x.id !== 'string' || (x.prices !== undefined && x.prices !== null && (typeof x.prices !== 'object' || Array.isArray(x.prices)))) fail(400, 'Add-ons must be a list of add-on groups.');
+    return { id: x.id, prices: (x.prices ?? null) as Record<string, unknown> | null };
+  });
+  if (new Set(groups.map((g) => g.id)).size !== groups.length) fail(400, 'Each add-on once.');
   return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station,
     ...taxFields(data, true), open_price: open ? 1 : 0, min_price_paise: open ? optionalPaise(data, 'minPrice', 'Lowest price') : null,
-    addon_groups: [...new Set(groups as string[])], active: data.active === false ? 0 : 1 };
+    addon_groups: groups, active: data.active === false ? 0 : 1 };
 }
 
-/** Statements that set a dish's add-on groups (each must be the business's own) and make sure its category exists. */
-async function itemExtras(c: { env: { DB: D1Database } }, bid: string, id: string, f: ReturnType<typeof itemFields>) {
-  if (f.addon_groups.length) {
-    const known = await all<{ id: string }>(c.env.DB, `SELECT id FROM addon_groups WHERE business_id = ? AND id IN (${f.addon_groups.map(() => '?').join(',')})`, bid, ...f.addon_groups);
-    if (known.length !== f.addon_groups.length) fail(400, 'An add-on group was not found.');
+/**
+ * A dish's own prices for one add-on, from a form ({ "Half": "300", "Full": "450" }) to paise by option name.
+ * A "pick one" is priced for all its options or none; an "add any" may price any of its options.
+ */
+function dishPrices(raw: Record<string, unknown> | null, g: { name: string; kind: string; options: { name: string }[] }, item: string): Prices | null {
+  if (!raw) return null;
+  const known = new Map(g.options.map((o) => [priceKey(o.name), o.name]));
+  const out: Prices = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === '' || v === null || v === undefined) continue;
+    if (!known.has(priceKey(k))) fail(400, `${g.name} has no option called ${k}.`);
+    const p = paise({ v: typeof v === 'number' ? String(v) : v }, 'v', `${item}: price of ${known.get(priceKey(k))}`);
+    if (p < 0) fail(400, `${item}: a price cannot be negative.`);
+    out[priceKey(k)] = p;
   }
+  const n = Object.keys(out).length;
+  if (!n) return null;
+  if (g.kind === 'one' && n !== g.options.length) fail(400, `${item}: type a price for each of ${g.options.map((o) => o.name).join(', ')}, or none.`);
+  return out;
+}
+async function groupsWithOptions(db: D1Database, bid: string, ids: string[]) {
+  if (!ids.length) return [];
+  const [gs, os] = await Promise.all([
+    all<{ id: string; name: string; kind: string }>(db, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))', bid, JSON.stringify(ids)),
+    all<{ group_id: string; name: string; add_paise: number }>(db, 'SELECT group_id, name, add_paise FROM addon_options WHERE business_id = ? AND active = 1 AND group_id IN (SELECT value FROM json_each(?)) ORDER BY sort, name', bid, JSON.stringify(ids)),
+  ]);
+  return gs.map((g) => ({ ...g, options: os.filter((o) => o.group_id === g.id).map((o) => ({ name: o.name, addPaise: o.add_paise })) }));
+}
+
+/**
+ * Statements that set a dish's add-ons with its own prices (each add-on must be the business's own) and make sure its
+ * category exists. Fills in the dish's price from a priced "pick one" (its first option), which then wins over a typed one.
+ */
+async function itemExtras(c: { env: { DB: D1Database } }, bid: string, id: string, f: ReturnType<typeof itemFields>) {
+  const gs = await groupsWithOptions(c.env.DB, bid, f.addon_groups.map((g) => g.id));
+  if (gs.length !== f.addon_groups.length) fail(400, 'An add-on group was not found.');
+  const links = f.addon_groups.map((x) => { const g = gs.find((y) => y.id === x.id)!; return { ...g, prices: dishPrices(x.prices, g, f.name) }; });
+  const base = f.open_price ? null : basePrice(links);
+  if (base !== null) f.price_paise = base;
+  if (f.price_paise === null) { if (f.open_price) f.price_paise = 0; else fail(400, 'Type the price.'); }
   return [
     stmt(c.env.DB, 'DELETE FROM menu_item_addons WHERE item_id = ?', id),
-    ...f.addon_groups.map((g, i) => stmt(c.env.DB, 'INSERT INTO menu_item_addons (item_id, group_id, business_id, sort) VALUES (?, ?, ?, ?)', id, g, bid, i)),
+    ...links.map((g, i) => stmt(c.env.DB, 'INSERT INTO menu_item_addons (item_id, group_id, business_id, sort, prices) VALUES (?, ?, ?, ?, ?)', id, g.id, bid, i, g.prices ? JSON.stringify(g.prices) : null)),
     stmt(c.env.DB, 'INSERT OR IGNORE INTO menu_categories (id, business_id, name, created_at) VALUES (?, ?, ?, ?)', newId(), bid, f.category, now()),
   ];
 }
@@ -401,29 +449,42 @@ async function saveGroup(c: Context<AppEnv>, id: string | null) {
 }
 settingsRoutes.post(`${B}/addon-groups`, requireAction('menu.edit'), (c) => saveGroup(c, null));
 settingsRoutes.put(`${B}/addon-groups/:id`, requireAction('menu.edit'), (c) => saveGroup(c, c.req.param('id')));
-// Which items offer an add-on, set from the add-on's side (tick many items at once). Items keep their other add-ons;
-// an item newly ticked gets this one after the ones it has.
+// Which items offer an add-on, set from the add-on's side (tick many items at once), each with its own prices if given.
+// Items keep their other add-ons; an item newly ticked gets this one after the ones it has. A priced "pick one" also
+// sets the dish's price to its first option's price (not for price-at-billing dishes).
 settingsRoutes.put(`${B}/addon-groups/:id/items`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const g = await one<{ name: string }>(c.env.DB, 'SELECT name FROM addon_groups WHERE id = ? AND business_id = ?', id, bid);
+  const [g] = await groupsWithOptions(c.env.DB, bid, [id]);
   if (!g) fail(404, 'Add-on not found.');
   const data = await body(c);
-  const ids = data.itemIds;
-  if (!Array.isArray(ids) || ids.length > 3000 || ids.some((x) => typeof x !== 'string')) fail(400, 'Items must be a list.');
-  const want = [...new Set(ids as string[])];
-  if (want.length) {
-    const known = await all<{ n: number }>(c.env.DB, 'SELECT count(*) AS n FROM menu_items WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))', bid, JSON.stringify(want));
-    if (known[0].n !== want.length) fail(400, 'An item was not found.');
-  }
+  // { items: [{ id, prices? }] }, or { itemIds: [...] } (no prices of their own).
+  const raw = Array.isArray(data.items) ? data.items : Array.isArray(data.itemIds) ? (data.itemIds as unknown[]).map((x) => ({ id: x })) : null;
+  if (!raw || raw.length > 3000) fail(400, 'Items must be a list.');
+  const list = raw.map((x) => {
+    const r = (x ?? {}) as Record<string, unknown>;
+    if (typeof r.id !== 'string' || (r.prices !== undefined && r.prices !== null && (typeof r.prices !== 'object' || Array.isArray(r.prices)))) fail(400, 'Items must be a list.');
+    return { id: r.id, prices: (r.prices ?? null) as Record<string, unknown> | null };
+  });
+  if (new Set(list.map((x) => x.id)).size !== list.length) fail(400, 'Each item once.');
+  const known = list.length ? await all<{ id: string; name: string; open_price: number }>(c.env.DB,
+    'SELECT id, name, open_price FROM menu_items WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))', bid, JSON.stringify(list.map((x) => x.id))) : [];
+  if (known.length !== list.length) fail(400, 'An item was not found.');
+  const rows = list.map((x) => { const it = known.find((k) => k.id === x.id)!; return { ...x, open: !!it.open_price, prices: dishPrices(x.prices, g, it.name) }; });
+  const want = JSON.stringify(rows.map((x) => x.id));
   const before = await all<{ item_id: string }>(c.env.DB, 'SELECT item_id FROM menu_item_addons WHERE group_id = ?', id);
   await c.env.DB.batch([
-    stmt(c.env.DB, 'DELETE FROM menu_item_addons WHERE group_id = ? AND item_id NOT IN (SELECT value FROM json_each(?))', id, JSON.stringify(want)),
+    stmt(c.env.DB, 'DELETE FROM menu_item_addons WHERE group_id = ? AND item_id NOT IN (SELECT value FROM json_each(?))', id, want),
     stmt(c.env.DB, `INSERT OR IGNORE INTO menu_item_addons (item_id, group_id, business_id, sort)
-      SELECT j.value, ?, ?, (SELECT coalesce(max(sort), -1) + 1 FROM menu_item_addons m WHERE m.item_id = j.value) FROM json_each(?) j`, id, bid, JSON.stringify(want)),
-    audit(c.env.DB, bid, c.get('staff').id, 'addons.items', 'addon_groups', id, { items: before.length }, { name: g.name, items: want.length }),
+      SELECT j.value, ?, ?, (SELECT coalesce(max(sort), -1) + 1 FROM menu_item_addons m WHERE m.item_id = j.value) FROM json_each(?) j`, id, bid, want),
+    stmt(c.env.DB, `UPDATE menu_item_addons SET prices = json_extract(j.value, '$.prices') FROM json_each(?) j
+      WHERE menu_item_addons.group_id = ? AND menu_item_addons.item_id = json_extract(j.value, '$.id')`,
+      JSON.stringify(rows.map((x) => ({ id: x.id, prices: x.prices ? JSON.stringify(x.prices) : null }))), id),
+    ...(g.kind === 'one' ? rows.filter((x) => x.prices && !x.open).map((x) =>
+      stmt(c.env.DB, 'UPDATE menu_items SET price_paise = ? WHERE id = ? AND business_id = ?', basePrice([{ ...g, prices: x.prices }]), x.id, bid)) : []),
+    audit(c.env.DB, bid, c.get('staff').id, 'addons.items', 'addon_groups', id, { items: before.length }, { name: g.name, items: rows.length, priced: rows.filter((x) => x.prices).length }),
   ]);
-  return c.json({ ok: true, items: want.length });
+  return c.json({ ok: true, items: rows.length });
 });
 
 // ---------- reasons

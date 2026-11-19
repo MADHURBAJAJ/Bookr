@@ -1,6 +1,7 @@
 // Orders, KOTs, tabs and bills. A bill is printed once from an order whose lines have all gone to the kitchen; its number
 // comes from its billing name's series in the same batch, so numbers have no gaps. A printed bill never changes: a mistake
 // is voided with a reason (the order opens again) and billed again, perhaps under another billing name.
+import { optionAdd, readPrices } from '../addons';
 import { Hono } from 'hono';
 import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
@@ -110,8 +111,8 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
         'SELECT id, name, price_paise, open_price, min_price_paise FROM menu_items WHERE id = ? AND business_id = ? AND active = 1', data.itemId, bid)
       : Promise.resolve(null),
     data.lineId === undefined && delta > 0
-      ? all<{ group_id: string; group_name: string; kind: string; option_id: string; option_name: string; add_paise: number }>(db, `SELECT g.id AS group_id, g.name AS group_name, g.kind,
-          o.id AS option_id, o.name AS option_name, o.add_paise FROM menu_item_addons a JOIN addon_groups g ON g.id = a.group_id
+      ? all<{ group_id: string; group_name: string; kind: string; option_id: string; option_name: string; add_paise: number; prices: string | null }>(db, `SELECT g.id AS group_id, g.name AS group_name, g.kind,
+          o.id AS option_id, o.name AS option_name, o.add_paise, a.prices FROM menu_item_addons a JOIN addon_groups g ON g.id = a.group_id
           JOIN addon_options o ON o.group_id = g.id AND o.active = 1 WHERE a.item_id = ? AND a.business_id = ? ORDER BY a.sort, g.name, o.sort, o.name`, data.itemId, bid)
       : Promise.resolve([]),
   ]);
@@ -126,7 +127,11 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
       const n = groups.filter((x) => x.group_id === g && picked.includes(x.option_id)).length;
       if (n !== 1) fail(400, `Choose one ${groups.find((x) => x.group_id === g)!.group_name} for ${item.name}.`);
     }
-    const chosen: Chosen = groups.filter((g) => picked.includes(g.option_id)).map((g) => ({ group: g.group_name, name: g.option_name, addPaise: g.add_paise }));
+    // Each choice costs what this dish says (its own Half / Full prices, its own price for an extra), else the add-on's own.
+    const chosen: Chosen = groups.filter((g) => picked.includes(g.option_id)).map((g) => {
+      const opts = groups.filter((x) => x.group_id === g.group_id).map((x) => ({ name: x.option_name, addPaise: x.add_paise }));
+      return { group: g.group_name, name: g.option_name, addPaise: optionAdd(g.kind, opts, { name: g.option_name, addPaise: g.add_paise }, readPrices(g.prices)) };
+    });
     // Price at billing: typed now, never below the lowest price; who typed it is kept.
     let base = item.price_paise;
     let priceBy: string | null = null;
@@ -136,7 +141,7 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
       if (item.min_price_paise !== null && base < item.min_price_paise) fail(400, `${item.name} cannot be less than ${rs(item.min_price_paise)}.`);
       priceBy = c.get('staff').id;
     }
-    const unit = base + chosen.reduce((s, x) => s + x.addPaise, 0);
+    const unit = Math.max(0, base + chosen.reduce((s, x) => s + x.addPaise, 0));
     const variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
     await stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, created_at, variant, options, price_by)
         SELECT ?, ?, ?, id, name, ?, sac, station, ?, ?, ?, ?, ? FROM menu_items WHERE id = ?

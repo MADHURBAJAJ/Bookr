@@ -7,12 +7,17 @@
 // Matching (approved 19 Nov 2026): a row updates the item with the same name in the same category (capitals and spaces
 // ignored), or else the one item with that name anywhere; its recipes and history stay. Other rows are new items. Items
 // on the menu that the file does not have are taken off it (kept for old bills).
+import { basePrice, priceKey, type Prices } from './addons';
 
 export type TaxMode = 'billing' | 'rate' | 'liquor' | 'none';
 export interface Tax { mode: TaxMode; bp: number | null }
 export interface Group { name: string; kind: 'one' | 'any'; options: { name: string; addPaise: number }[] }
 /** A group named on a row: its full form, or only its name (an add-on already set up). */
-type GroupRef = { name: string; def: Group | null };
+/**
+ * An add-on named on a row: its full form, or only its name (an add-on already set up). `loose`: the row gives this
+ * dish's own prices (Half ₹300 / Full ₹450), so its form only names the options; `prices` are those prices.
+ */
+type GroupRef = { name: string; def: Group | null; loose?: boolean; prices?: Prices | null };
 export interface Row {
   line: number; name: string; category: string; pricePaise: number; openPrice: boolean; station: 'kitchen' | 'bar';
   tax: Tax; groups: GroupRef[];
@@ -84,17 +89,21 @@ const OPEN_WORDS = /^(mrp|as per mrp|market price|mp|at actual|at actuals|as per
 export const taxText = (t: Tax) => (t.mode === 'billing' ? 'Billing name' : t.mode === 'rate' ? `GST ${t.bp! / 100}%` : t.mode === 'liquor' ? 'No GST (liquor)' : 'No GST');
 const taxKey = (t: Tax) => `${t.mode}:${t.bp ?? ''}`;
 
+/** "Full +₹150" (adds 150 on every dish), "Full ₹450" (this dish's own price), or "Full". */
 const opt = (o: string) => {
-  const m = /^(.*?)\s*(?:\+\s*(?:₹|Rs\.?)\s*([\d.,]+))?$/i.exec(o.trim())!;
-  return { name: m[1].trim(), addPaise: m[2] ? money(m[2]) : 0 };
+  const m = /^(.*?)\s*(?:(\+)\s*)?(?:(?:₹|Rs\.?)\s*([\d.,]+))?$/i.exec(o.trim())!;
+  const amount = m[3] ? money(m[3]) : undefined;
+  return { name: m[1].trim(), plus: !!m[2] && !!m[3], amount, bad: amount === null };
 };
 /**
  * The "Add-ons & choices" column, groups split by ";":
- *   Extra Cheese +₹50                       an extra of its own
- *   Choose one: Half / Full +₹150           a choice (named "Half or Full")
- *   Tandoori size: Half / Full +₹150        a choice with its own name
- *   Toppings (any): Olives +₹20 / Corn +₹20 extras under one name
- *   Tandoori size                           an add-on already set up, as it is
+ *   Extra Cheese +₹50                         an extra, ₹50 on every dish
+ *   Extra Cheese ₹80                          an extra at this dish's own price
+ *   Choose one: Half ₹300 / Full ₹450         a choice (named "Half or Full") with this dish's own prices
+ *   Choose one: Half / Full +₹150             a choice; Full adds ₹150 on every dish
+ *   Tandoori size: Half ₹300 / Full ₹450      a choice with its own name
+ *   Toppings (any): Olives +₹20 / Corn +₹20   extras under one name
+ *   Tandoori size                             an add-on already set up, as it is
  */
 export function readGroups(t: string): GroupRef[] | string {
   const out: GroupRef[] = [];
@@ -104,20 +113,34 @@ export function readGroups(t: string): GroupRef[] | string {
       const any = /\(any\)$/i.test(head[1]);
       const label = head[1].replace(/\(any\)$/i, '').trim();
       const options = head[2].split('/').map(opt);
-      if (options.some((o) => !o.name || o.addPaise === null)) return `"${x}": each choice needs a name and, if it costs more, +₹ and the amount`;
+      if (options.some((o) => !o.name || o.bad)) return `"${x}": each option needs a name and, if it has one, a price like ₹300 or +₹50`;
       if (!any && options.length < 2) return `"${x}": a choice needs two or more options`;
+      const plus = options.some((o) => o.plus), own = options.some((o) => !o.plus && o.amount !== undefined);
+      if (plus && own) return `"${x}": write either prices for this dish (₹300) or amounts added on every dish (+₹150), not both`;
+      if (own && !any && options.some((o) => o.amount === undefined)) return `"${x}": give a price for each choice`;
       const name = /^choose one$/i.test(label) ? options.map((o) => o.name).join(' or ') : label;
-      out.push({ name, def: { name, kind: any ? 'any' : 'one', options: options as Group['options'] } });
+      const def: Group = { name, kind: any ? 'any' : 'one', options: options.map((o) => ({ name: o.name, addPaise: o.plus || (own && any) ? o.amount ?? 0 : 0 })) };
+      out.push(own ? { name, def, loose: true, prices: Object.fromEntries(options.filter((o) => o.amount !== undefined).map((o) => [priceKey(o.name), o.amount!])) } : { name, def });
       continue;
     }
     const o = opt(x);
-    if (!o.name || o.addPaise === null) return `"${x}" should look like "Extra Cheese +₹50"`;
-    out.push(/\+/.test(x) ? { name: o.name, def: { name: o.name, kind: 'any', options: [o as Group['options'][number]] } } : { name: o.name, def: null });
+    if (!o.name || o.bad) return `"${x}" should look like "Extra Cheese +₹50"`;
+    if (o.amount === undefined) out.push({ name: o.name, def: null });
+    else {
+      const def: Group = { name: o.name, kind: 'any', options: [{ name: o.name, addPaise: o.amount! }] };
+      out.push(o.plus ? { name: o.name, def } : { name: o.name, def, loose: true, prices: { [priceKey(o.name)]: o.amount! } });
+    }
   }
   return out;
 }
 /** How a group is written in the sheet (the reverse of readGroups). */
-export function groupText(g: Group): string {
+export function groupText(g: Group, prices?: Prices | null): string {
+  if (prices && Object.keys(prices).length) {
+    const own = (x: Group['options'][number]) => `${x.name} ${rs(prices[priceKey(x.name)] ?? x.addPaise)}`;
+    if (g.kind === 'any' && g.options.length === 1 && norm(g.options[0].name) === norm(g.name)) return own(g.options[0]);
+    const label = g.kind === 'one' && norm(g.name) === norm(g.options.map((x) => x.name).join(' or ')) ? 'Choose one' : `${g.name}${g.kind === 'any' ? ' (any)' : ''}`;
+    return `${label}: ${g.options.map(own).join(' / ')}`;
+  }
   const o = (x: Group['options'][number]) => `${x.name}${x.addPaise ? ` +${rs(x.addPaise)}` : ''}`;
   if (g.kind === 'any' && g.options.length === 1 && norm(g.options[0].name) === norm(g.name) && g.options[0].addPaise) return o(g.options[0]);
   if (g.kind === 'one' && norm(g.name) === norm(g.options.map((x) => x.name).join(' or '))) return `Choose one: ${g.options.map(o).join(' / ')}`;
@@ -207,9 +230,14 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
     const key = `${norm(name)}|${norm(category)}`;
     if (seen.has(key)) return bad(`the same item and category as row ${seen.get(key)}.`);
     seen.set(key, line);
+    const groups = readGroups(get(c.addons));
+    if (typeof groups === 'string') return bad(groups);
+    if (groups.length > 10) return bad('at most 10 add-ons on one item.');
     const priceCell = get(c.price).replace(/\/-$/, '').trim();
     const openPrice = YES.test(get(c.open)) || OPEN_WORDS.test(priceCell);
-    const p = priceCell && !OPEN_WORDS.test(priceCell) ? money(priceCell) : openPrice ? 0 : null;
+    // A dish whose choice carries its prices (Half ₹300 / Full ₹450) takes its price from the first choice.
+    const choicePriced = groups.some((g) => g.def?.kind === 'one' && g.prices);
+    const p = priceCell && !OPEN_WORDS.test(priceCell) ? money(priceCell) : openPrice || choicePriced ? 0 : null;
     if (p === null) return bad(priceCell ? `"${get(c.price)}" is not a price.` : 'no price, and not price at billing.');
     let minPricePaise: number | null | undefined;
     if (c.min >= 0) {
@@ -232,9 +260,6 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
     }
     const sac = c.sac >= 0 && get(c.sac) ? get(c.sac) : undefined;
     if (sac !== undefined && !/^\d{4,8}$/.test(sac)) return bad('SAC must be 4 to 8 digits.');
-    const groups = readGroups(get(c.addons));
-    if (typeof groups === 'string') return bad(groups);
-    if (groups.length > 10) return bad('at most 10 add-ons on one item.');
     out.push({ line, name, category, pricePaise: p, openPrice, station: st, tax, groups, minPricePaise, sac });
   });
   return { ...base, rows: out, errors, needs: [...needs.values()] };
@@ -245,9 +270,10 @@ export function sampleSheet(): string {
   return toCsv([HEADER,
     ['Paneer Tikka', 'Starters', '280', '', '', 'Billing name', 'Kitchen', '996332', ''],
     ['Veg Burger', 'Snacks', '160', '', '', 'Billing name', 'Kitchen', '', 'Peri Peri Fries +₹30; Extra Cheese +₹50'],
-    ['Tandoori Chicken', 'Tandoor', '300', '', '', 'Billing name', 'Kitchen', '', 'Choose one: Half / Full +₹150'],
+    ['Tandoori Chicken', 'Tandoor', '', '', '', 'Billing name', 'Kitchen', '', 'Choose one: Half ₹300 / Full ₹450'],
+    ['Chicken Biryani', 'Indian', '', '', '', 'Billing name', 'Kitchen', '', 'Choose one: Half ₹199 / Full ₹349'],
     ['Masala Dosa', 'South Indian', '150', '', '', 'Billing name', 'Kitchen', '', 'Butter +₹30; Extra Cheese +₹50'],
-    ['Pizza', 'Snacks', '320', '', '', 'Billing name', 'Kitchen', '', 'Size: Regular / Large +₹120; Toppings (any): Olives +₹40 / Jalapeno +₹40'],
+    ['Pizza', 'Snacks', '', '', '', 'Billing name', 'Kitchen', '', 'Size: Regular ₹320 / Large ₹440; Toppings (any): Olives +₹40 / Jalapeno +₹40; Extra Cheese ₹80'],
     ['Beer 650 ml', 'Bar', '320', '', '', 'No GST (liquor)', 'Bar', '', ''],
     ['Whisky bottle 750 ml', 'Bar', '', 'Yes', '3500', 'No GST (liquor)', 'Bar', '', ''],
     ['Fresh Lime Soda', 'Bar', '90', '', '', 'Billing name', 'Bar', '', ''],
@@ -261,12 +287,14 @@ export function sampleSheet(): string {
 export interface ExistingItem {
   id: string; name: string; category: string; pricePaise: number; station: string; sac: string; taxMode: TaxMode | null; gstBp: number | null;
   openPrice: boolean; minPricePaise: number | null; active: boolean; groups: string[]; createdAt: number;
+  /** This dish's own prices for each of its add-ons (same order as groups), or null. */
+  groupPrices?: (Prices | null)[];
 }
 export interface Existing { items: ExistingItem[]; categories: { name: string; taxMode: TaxMode; gstBp: number | null }[]; groups: (Group & { id: string })[] }
 
 export interface PlanItem {
   id: string | null; name: string; category: string; pricePaise: number; station: string; sac: string; tax: Tax | null;
-  openPrice: boolean; minPricePaise: number | null; groups: string[];
+  openPrice: boolean; minPricePaise: number | null; groups: string[]; groupPrices: (Prices | null)[];
 }
 export interface Plan {
   items: PlanItem[];
@@ -284,19 +312,30 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
   const errors = [...sheet.errors];
   for (const n of sheet.needs ?? []) errors.push(`${n.category}: choose ${[n.tax && 'the GST', n.station && 'the station'].filter(Boolean).join(' and ')} for its ${n.items} item${n.items === 1 ? '' : 's'} without one.`);
   const rows = sheet.rows;
-  // Add-ons: a full form sets the group (the same everywhere it is written); a bare name must already exist.
+  // Add-ons: a full form sets the group (the same everywhere it is written); a bare name must already exist. A form with
+  // this dish's own prices only names the options: they must match the add-on, which it sets up only if it is new.
   const defs = new Map<string, Group>();
+  const loose = new Map<string, { def: Group; line: number; name: string }>();
   for (const r of rows) for (const g of r.groups) {
     if (!g.def) continue;
+    if (g.loose) { if (!loose.has(norm(g.name))) loose.set(norm(g.name), { def: g.def, line: r.line, name: r.name }); continue; }
     const had = defs.get(norm(g.name));
     if (had && JSON.stringify(had) !== JSON.stringify(g.def)) errors.push(`Row ${r.line} (${r.name}): add-on "${g.name}" is written differently on another row.`);
     defs.set(norm(g.name), g.def);
   }
   const oldGroups = new Map(now.groups.map((g) => [norm(g.name), g]));
+  const shape = (g: Group) => `${g.kind}:${g.options.map((o) => norm(o.name)).join('/')}`;
+  for (const r of rows) for (const g of r.groups) {
+    if (!g.loose || !g.def) continue;
+    const known = defs.get(norm(g.name)) ?? oldGroups.get(norm(g.name)) ?? loose.get(norm(g.name))!.def;
+    if (shape(known) !== shape(g.def)) errors.push(`Row ${r.line} (${r.name}): add-on "${g.name}" has ${known.kind === 'one' ? 'the choices' : 'the options'} ${known.options.map((o) => o.name).join(' / ')}; this row has ${g.def.options.map((o) => o.name).join(' / ')}.`);
+  }
+  for (const [k, l] of loose) if (!defs.has(k) && !oldGroups.has(k)) defs.set(k, l.def);
   for (const r of rows) for (const g of r.groups) {
     if (!g.def && !defs.has(norm(g.name)) && !oldGroups.has(norm(g.name))) errors.push(`Row ${r.line} (${r.name}): there is no add-on called "${g.name}". Write it in full, like "Extra Cheese +₹50".`);
   }
   const groupName = (n: string) => defs.get(norm(n))?.name ?? oldGroups.get(norm(n))?.name ?? n;
+  const groupOf = (n: string): Group | undefined => defs.get(norm(n)) ?? oldGroups.get(norm(n));
 
   // Category GST: what most of its items have; the other items keep their own.
   const notes: string[] = [];
@@ -331,23 +370,30 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
   const items: PlanItem[] = rows.map((r) => {
     const x = match.get(r.line);
     const tax = taxKey(r.tax) === taxKey(catTax.get(norm(r.category))!) ? null : r.tax;
-    const p: PlanItem = { id: x?.id ?? null, name: r.name, category: r.category, pricePaise: r.pricePaise, station: r.station,
+    const groupPrices = r.groups.map((g) => g.prices ?? null);
+    const base = r.openPrice ? null : basePrice(r.groups.map((g, i) => ({ kind: groupOf(g.name)?.kind ?? 'any', options: groupOf(g.name)?.options ?? [], prices: groupPrices[i] })));
+    const p: PlanItem = { id: x?.id ?? null, name: r.name, category: r.category, pricePaise: base ?? r.pricePaise, station: r.station,
       sac: r.sac ?? x?.sac ?? (/^room tariff$/i.test(r.name) ? '996311' : '996332'), tax, openPrice: r.openPrice,
-      minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: r.groups.map((g) => groupName(g.name)) };
+      minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: r.groups.map((g) => groupName(g.name)), groupPrices };
     if (!x) { added.push(r.name); return p; }
     if (!x.active) back.push(r.name);
-    if (!r.openPrice && x.pricePaise !== r.pricePaise) priceChanges.push({ name: r.name, from: x.pricePaise, to: r.pricePaise });
+    if (!r.openPrice && x.pricePaise !== p.pricePaise) priceChanges.push({ name: r.name, from: x.pricePaise, to: p.pricePaise });
     const what: string[] = [];
     if (x.name !== r.name) what.push(`name "${x.name}" → "${r.name}"`);
     if (x.category !== r.category) what.push(`category ${x.category} → ${r.category}`);
     if (x.station !== r.station) what.push(`station ${x.station} → ${r.station}`);
     const was = effective(x, oldCat.get(norm(x.category)));
     if (taxKey(was) !== taxKey(r.tax)) what.push(`tax ${taxText(was)} → ${taxText(r.tax)}`);
-    if (x.openPrice !== r.openPrice) what.push(r.openPrice ? 'price now typed at billing' : `fixed price ${rs(r.pricePaise)}`);
+    if (x.openPrice !== r.openPrice) what.push(r.openPrice ? 'price now typed at billing' : `fixed price ${rs(p.pricePaise)}`);
     if (r.openPrice && x.minPricePaise !== p.minPricePaise) what.push(`lowest price ${x.minPricePaise === null ? 'none' : rs(x.minPricePaise)} → ${p.minPricePaise === null ? 'none' : rs(p.minPricePaise)}`);
     if (x.sac !== p.sac) what.push(`SAC ${x.sac} → ${p.sac}`);
     const g0 = x.groups.join(', '), g1 = p.groups.join(', ');
     if (norm(g0) !== norm(g1)) what.push(`add-ons ${g0 || 'none'} → ${g1 || 'none'}`);
+    else {
+      const pricesOf = (gs: string[], ps: (Prices | null)[] | undefined) => JSON.stringify(gs.map((n, i) => [norm(n), ps?.[i] ?? null]));
+      const changed = p.groups.filter((n, i) => pricesOf([n], [groupPrices[i]]) !== pricesOf([x.groups[i]], [x.groupPrices?.[i] ?? null]));
+      if (changed.length) what.push(`own prices for ${changed.join(', ')}`);
+    }
     if (what.length) otherChanges.push({ name: r.name, what });
     return p;
   });
@@ -369,5 +415,5 @@ export function sheetOf(now: Existing): string {
   items.sort((a, b) => (order.indexOf(norm(a.category)) + 1 || 1e9) - (order.indexOf(norm(b.category)) + 1 || 1e9) || a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   return toCsv([HEADER, ...items.map((i) => [i.name, i.category, i.openPrice ? '' : (i.pricePaise / 100).toFixed(2).replace(/\.00$/, ''), i.openPrice ? 'Yes' : '',
     i.openPrice && i.minPricePaise !== null ? (i.minPricePaise / 100).toFixed(2).replace(/\.00$/, '') : '', taxText(effective(i, cat.get(norm(i.category)))),
-    i.station === 'bar' ? 'Bar' : 'Kitchen', i.sac, i.groups.map((n) => { const g = gs.get(norm(n)); return g ? groupText(g) : n; }).join('; ')])]);
+    i.station === 'bar' ? 'Bar' : 'Kitchen', i.sac, i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')])]);
 }

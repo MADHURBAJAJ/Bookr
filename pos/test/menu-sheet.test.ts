@@ -130,7 +130,7 @@ describe('menu upload', () => {
     expect(sample.status).toBe(200);
     const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: sample.text }));
     expect(r).toMatchObject({ ok: true, exactHeadings: true, needs: [] });
-    expect(r.items).toBe(10);
+    expect(r.items).toBe(11);
 
     const other = 'Dish,Price INR,Section\nMasala Tea,40,Drinks\nLassi,90,Drinks\n';
     const a = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: other }));
@@ -194,5 +194,81 @@ describe('add-on offered on many items', () => {
     expect((await s.owner.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: ['nope'] })).status).toBe(400);
     expect((await s.counter.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: [] })).status).toBe(403);
     expect((await s.owner.put(`${s.B}/addon-groups/not-a-group/items`, { itemIds: [] })).status).toBe(404);
+  });
+});
+
+describe('add-on prices per dish', () => {
+  it('works out what a choice adds from the dish\'s own prices', async () => {
+    const { optionAdd, basePrice } = await import('../src/addons');
+    const opts = [{ name: 'Half', addPaise: 0 }, { name: 'Full', addPaise: 15000 }];
+    expect(optionAdd('one', opts, opts[1], null)).toBe(15000);
+    expect(optionAdd('one', opts, opts[1], { half: 19900, full: 34900 })).toBe(15000);
+    expect(optionAdd('one', opts, opts[1], { half: 30000, full: 47500 })).toBe(17500);
+    expect(optionAdd('one', opts, opts[0], { half: 30000, full: 47500 })).toBe(0);
+    expect(optionAdd('any', [{ name: 'Extra Cheese', addPaise: 5000 }], { name: 'Extra Cheese', addPaise: 5000 }, { 'extra cheese': 8000 })).toBe(8000);
+    expect(basePrice([{ kind: 'any', options: [], prices: null }, { kind: 'one', options: opts, prices: { half: 19900, full: 34900 } }])).toBe(19900);
+  });
+
+  it('one Half or Full, two dishes, each with its own prices: set on the item, from the add-on, and charged on the order', async () => {
+    const s = await setupBusiness();
+    const size = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Half or Full', kind: 'one', options: [{ name: 'Half', price: '' }, { name: 'Full', price: '' }] }))).id;
+    const cheese = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Extra Cheese', kind: 'any', options: [{ name: 'Extra Cheese', price: '50' }] }))).id;
+    // On the item: no price typed; the Half price becomes the dish's price.
+    const chicken = (await s.ok(s.owner.post(`${s.B}/menu`, { name: 'Test Tandoori Chicken', category: 'Tandoor', price: '',
+      addonGroups: [{ id: size, prices: { Half: '300', Full: '450' } }, { id: cheese, prices: { 'Extra Cheese': '80' } }] }))).id;
+    const biryani = (await s.ok(s.owner.post(`${s.B}/menu`, { name: 'Test Biryani', category: 'Indian', price: '250' }))).id;
+    // A half-priced choice is refused; a fixed-price dish with no prices needs its price.
+    expect((await s.owner.post(`${s.B}/menu`, { name: 'X', category: 'Y', price: '', addonGroups: [{ id: size, prices: { Half: '100' } }] })).status).toBe(400);
+    expect((await s.owner.post(`${s.B}/menu`, { name: 'X', category: 'Y', price: '' })).status).toBe(400);
+    // From the add-on's side: tick Biryani with its own prices; Chicken keeps its prices.
+    await s.ok(s.owner.put(`${s.B}/addon-groups/${size}/items`, { items: [{ id: chicken, prices: { half: '300', full: '450' } }, { id: biryani, prices: { half: '199', full: '349' } }] }));
+    const m = (await s.owner.get(`${s.B}/menu`)).json;
+    const item = (id: string) => m.items.find((i: any) => i.id === id);
+    expect(item(chicken)).toMatchObject({ pricePaise: 30000, addonPrices: { [size]: { half: 30000, full: 45000 }, [cheese]: { 'extra cheese': 8000 } } });
+    expect(item(biryani)).toMatchObject({ pricePaise: 19900, addonPrices: { [size]: { half: 19900, full: 34900 } } });
+    const opt = (g: string, n: string) => m.addonGroups.find((x: any) => x.id === g).options.find((o: any) => o.name === n).id;
+
+    const order = (await s.ok(s.counter.post(`${s.B}/orders`, { kind: 'table', place: 'Own prices' }))).id;
+    const add = (itemId: string, options: string[]) => s.ok(s.counter.post(`${s.B}/orders/${order}/items`, { itemId, delta: 1, options }));
+    await add(chicken, [opt(size, 'Full'), opt(cheese, 'Extra Cheese')]);
+    await add(biryani, [opt(size, 'Full')]);
+    const r = await add(biryani, [opt(size, 'Half')]);
+    const price = (name: string, o: string) => r.order.lines.find((l: any) => l.name === name && l.options.some((x: any) => x.name === o)).pricePaise;
+    expect(price('Test Tandoori Chicken', 'Full')).toBe(45000 + 8000);
+    expect(price('Test Biryani', 'Full')).toBe(34900);
+    expect(price('Test Biryani', 'Half')).toBe(19900);
+  });
+
+  it('reads and writes dish prices in the sheet, and refuses mixed or mismatched forms', async () => {
+    const s = await setupBusiness();
+    const keep = (await s.owner.get(`${s.B}/menu`)).json.items.filter((i: any) => i.active)
+      .map((i: any) => `${i.name},${i.category},${i.pricePaise / 100},,,Billing name,${i.station},`);
+    const head = 'Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,Add-ons & choices';
+    const csv = [head, ...keep,
+      'Sheet Chicken,Tandoor,,,,Billing name,Kitchen,Choose one: Half ₹300 / Full ₹450; Extra Cheese +₹50',
+      'Sheet Biryani,Indian,,,,Billing name,Kitchen,Choose one: Half ₹199 / Full ₹349',
+      'Sheet Pizza,Snacks,320,,,Billing name,Kitchen,Extra Cheese ₹80'].join('\n');
+    const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv }));
+    expect(r).toMatchObject({ ok: true, added: ['Sheet Chicken', 'Sheet Biryani', 'Sheet Pizza'] });
+    await s.ok(s.owner.post(`${s.B}/menu/upload/apply`, { csv, planHash: r.planHash }));
+    const m = (await s.owner.get(`${s.B}/menu`)).json;
+    const item = (n: string) => m.items.find((i: any) => i.name === n);
+    const g = (n: string) => m.addonGroups.find((x: any) => x.name === n);
+    expect(g('Half or Full').options.map((o: any) => [o.name, o.addPaise])).toEqual([['Half', 0], ['Full', 0]]);
+    expect(item('Sheet Chicken')).toMatchObject({ pricePaise: 30000, addonPrices: { [g('Half or Full').id]: { half: 30000, full: 45000 } } });
+    expect(item('Sheet Biryani')).toMatchObject({ pricePaise: 19900 });
+    expect(item('Sheet Pizza').addonPrices).toEqual({ [g('Extra Cheese').id]: { 'extra cheese': 8000 } });
+
+    // The download writes the dish prices back; uploading it again changes nothing.
+    const sheet = await download(s.owner, `${s.B}/menu/sheet`);
+    expect(sheet.text).toContain('Sheet Chicken,Tandoor,300,,,Billing name,Kitchen,996332,Choose one: Half ₹300 / Full ₹450; Extra Cheese +₹50');
+    expect(sheet.text).toContain('Sheet Pizza,Snacks,320,,,Billing name,Kitchen,996332,Extra Cheese ₹80');
+    const again = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: sheet.text }));
+    expect(again).toMatchObject({ ok: true, added: [], off: [], priceChanges: [], otherChanges: [] });
+
+    const bad = (cell: string) => s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: `${head}\nX,Y,100,,,Billing name,Kitchen,"${cell}"\n` })).then((x) => x.errors[0]);
+    expect(await bad('Choose one: Half ₹100 / Full +₹50')).toMatch(/not both/);
+    expect(await bad('Choose one: Half ₹100 / Full')).toMatch(/give a price for each choice/);
+    expect(await bad('Half or Full: Small ₹100 / Large ₹150')).toMatch(/has the choices Half \/ Full; this row has Small \/ Large/);
   });
 });

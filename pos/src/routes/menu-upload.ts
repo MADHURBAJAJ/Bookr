@@ -8,6 +8,7 @@ import { requireAction } from '../auth';
 import { z } from 'zod';
 import { OcrError, readWithClaude } from '../../../src/claude';
 import { FIELD_NAMES, FIELDS, HEADER, parseCsv, plan, readSheet, sampleSheet, sheetOf, toCsv, type Columns, type Defaults, type Existing, type Plan, type SheetResult, type TaxMode } from '../menu-sheet';
+import { readPrices } from '../addons';
 import { audit } from '../util';
 import type { AppEnv } from '../types';
 
@@ -21,14 +22,15 @@ async function existing(db: D1Database, bid: string): Promise<Existing> {
     all<{ id: string; name: string; category: string; price_paise: number; station: string; sac: string; tax_mode: TaxMode | null; gst_bp: number | null;
       open_price: number; min_price_paise: number | null; active: number; created_at: number }>(db,
       'SELECT id, name, category, price_paise, station, sac, tax_mode, gst_bp, open_price, min_price_paise, active, created_at FROM menu_items WHERE business_id = ?', bid),
-    all<{ item_id: string; name: string }>(db, 'SELECT l.item_id, g.name FROM menu_item_addons l JOIN addon_groups g ON g.id = l.group_id WHERE l.business_id = ? ORDER BY l.sort', bid),
+    all<{ item_id: string; name: string; prices: string | null }>(db, 'SELECT l.item_id, g.name, l.prices FROM menu_item_addons l JOIN addon_groups g ON g.id = l.group_id WHERE l.business_id = ? ORDER BY l.sort', bid),
     all<{ name: string; tax_mode: TaxMode; gst_bp: number | null }>(db, 'SELECT name, tax_mode, gst_bp FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
     all<{ id: string; name: string; kind: 'one' | 'any' }>(db, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ?', bid),
     all<{ group_id: string; name: string; add_paise: number }>(db, 'SELECT group_id, name, add_paise FROM addon_options WHERE business_id = ? AND active = 1 ORDER BY sort', bid),
   ]);
   return {
     items: items.map((i) => ({ id: i.id, name: i.name, category: i.category, pricePaise: i.price_paise, station: i.station, sac: i.sac, taxMode: i.tax_mode, gstBp: i.gst_bp,
-      openPrice: !!i.open_price, minPricePaise: i.min_price_paise, active: !!i.active, createdAt: i.created_at, groups: links.filter((l) => l.item_id === i.id).map((l) => l.name) })),
+      openPrice: !!i.open_price, minPricePaise: i.min_price_paise, active: !!i.active, createdAt: i.created_at,
+      groups: links.filter((l) => l.item_id === i.id).map((l) => l.name), groupPrices: links.filter((l) => l.item_id === i.id).map((l) => readPrices(l.prices)) })),
     categories: categories.map((c) => ({ name: c.name, taxMode: c.tax_mode, gstBp: c.gst_bp })),
     groups: groups.map((g) => ({ ...g, options: options.filter((o) => o.group_id === g.id).map((o) => ({ name: o.name, addPaise: o.add_paise })) })),
   };
@@ -127,8 +129,8 @@ menuUploadRoutes.post(`${B}/menu/upload/apply`, requireAction('menu.upload'), as
       .bind(bid, t, J(items.filter((i) => i.isNew).map(row))),
     db.prepare('UPDATE menu_items SET active = 0 WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))').bind(bid, J(p.off.map((o) => o.id))),
     db.prepare('DELETE FROM menu_item_addons WHERE business_id = ? AND item_id IN (SELECT value FROM json_each(?))').bind(bid, J(items.map((i) => i.id))),
-    db.prepare(`INSERT INTO menu_item_addons (item_id, group_id, business_id, sort) SELECT ${x('item')}, ${x('group')}, ?, ${x('sort')} FROM json_each(?) j`)
-      .bind(bid, J(items.flatMap((i) => i.groups.map((g, n) => ({ item: i.id, group: gid.get(norm(g)), sort: n }))))),
+    db.prepare(`INSERT INTO menu_item_addons (item_id, group_id, business_id, sort, prices) SELECT ${x('item')}, ${x('group')}, ?, ${x('sort')}, ${x('prices')} FROM json_each(?) j`)
+      .bind(bid, J(items.flatMap((i) => i.groups.map((g, n) => ({ item: i.id, group: gid.get(norm(g)), sort: n, prices: i.groupPrices[n] ? J(i.groupPrices[n]) : null }))))),
   ];
   // Keep the file first: a menu is never loaded without its copy.
   let key: string | null = null;
