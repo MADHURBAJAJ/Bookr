@@ -150,9 +150,17 @@ export function groupText(g: Group, prices?: Prices | null): string {
   return `${g.name}${g.kind === 'any' ? ' (any)' : ''}: ${g.options.map(o).join(' / ')}`;
 }
 
-export const HEADER = ['Item', 'Category', 'Price (₹)', 'Price at billing', 'Lowest price (₹)', 'Tax', 'Station', 'SAC', 'Add-ons & choices'];
-export const FIELDS = ['item', 'category', 'price', 'open', 'min', 'tax', 'station', 'sac', 'addons'] as const;
-export type Field = (typeof FIELDS)[number];
+/**
+ * Add-ons and choices in the sheet: off for now (owner, 19 Nov 2026). The upload neither reads nor writes them, and
+ * leaves the add-ons already on each dish as they are; they are set in Settings → Add-ons. The reading below stays for
+ * when they come back (readSheet with { addons: true }).
+ */
+export const SHEET_ADDONS = false;
+const ALL_FIELDS = ['item', 'category', 'price', 'open', 'min', 'tax', 'station', 'sac', 'addons'] as const;
+export type Field = (typeof ALL_FIELDS)[number];
+export const FIELDS: readonly Field[] = SHEET_ADDONS ? ALL_FIELDS : ALL_FIELDS.filter((f) => f !== 'addons');
+const ALL_HEADER = ['Item', 'Category', 'Price (₹)', 'Price at billing', 'Lowest price (₹)', 'Tax', 'Station', 'SAC', 'Add-ons & choices'];
+export const HEADER = SHEET_ADDONS ? ALL_HEADER : ALL_HEADER.slice(0, -1);
 export type Columns = Record<Field, number>;
 export const FIELD_NAMES: Record<Field, string> = { item: 'Item', category: 'Category', price: 'Price', open: 'Price at billing', min: 'Lowest price',
   tax: 'Tax (GST)', station: 'Station', sac: 'SAC', addons: 'Add-ons & choices' };
@@ -171,14 +179,14 @@ const KNOWN: Record<Field, string[]> = {
 };
 const squash = (h: string) => norm(h).replace(/[^a-z0-9%₹/&]+/g, ' ').trim();
 /** Which column is which, from the headings. -1: not in the file. */
-export function guessColumns(head: string[]): Columns {
-  const out = Object.fromEntries(FIELDS.map((f) => [f, -1])) as Columns;
+export function guessColumns(head: string[], fields: readonly Field[] = FIELDS): Columns {
+  const out = Object.fromEntries(ALL_FIELDS.map((f) => [f, -1])) as Columns;
   const taken = new Set<number>();
   const hs = head.map(squash);
   // Exact headings first, field by field, then the known other names, so "Price" and "Rate" in one file go where they belong.
-  for (const pass of [0, 1]) for (const f of FIELDS) {
+  for (const pass of [0, 1]) for (const f of fields) {
     if (out[f] >= 0) continue;
-    const names = pass === 0 ? [squash(HEADER[FIELDS.indexOf(f)]), squash(FIELD_NAMES[f])] : KNOWN[f].map(squash);
+    const names = pass === 0 ? [squash(ALL_HEADER[ALL_FIELDS.indexOf(f)]), squash(FIELD_NAMES[f])] : KNOWN[f].map(squash);
     for (const n of names) {
       const i = hs.findIndex((h, k) => !taken.has(k) && h === n);
       if (i >= 0) { out[f] = i; taken.add(i); break; }
@@ -192,6 +200,8 @@ export interface SheetResult {
   rows: Row[]; errors: string[]; headings: string[]; columns: Columns;
   /** Categories with rows that have no tax or no station: chosen once for the whole category. */
   needs: { category: string; tax: boolean; station: boolean; items: number }[];
+  /** Whether add-ons were read; when not, the upload keeps each dish's add-ons as they are. */
+  addons?: boolean;
 }
 
 /**
@@ -199,16 +209,20 @@ export interface SheetResult {
  * A blank or missing Tax or Station is taken from `defaults` for the row's category, or asked for; never guessed.
  * Every bad row is reported (row number as in the spreadsheet), not just the first.
  */
-export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; defaults?: Defaults } = {}): SheetResult {
-  const empty = Object.fromEntries(FIELDS.map((f) => [f, -1])) as Columns;
+export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; defaults?: Defaults; addons?: boolean } = {}): SheetResult {
+  const withAddons = opts.addons ?? SHEET_ADDONS;
+  const fields = withAddons ? ALL_FIELDS : FIELDS;
+  const empty = Object.fromEntries(ALL_FIELDS.map((f) => [f, -1])) as Columns;
   if (!rows.some((r) => r.some((v) => v.trim()))) return { rows: [], errors: ['The file is empty.'], headings: [], columns: empty, needs: [] };
   // The heading row: the first row that names an item column (a title line or a blank line above it is skipped).
-  let h = rows.slice(0, 10).findIndex((r) => guessColumns(r).item >= 0);
+  let h = rows.slice(0, 10).findIndex((r) => guessColumns(r, fields).item >= 0);
   if (h < 0) h = 0;
   const head = rows[h];
   const data = rows.slice(h + 1);
-  const c = { ...guessColumns(head), ...Object.fromEntries(Object.entries(opts.columns ?? {}).filter(([, v]) => typeof v === 'number' && v >= -1 && v < head.length)) } as Columns;
-  const base = { headings: head, columns: c, needs: [] as SheetResult['needs'] };
+  const c = { ...guessColumns(head, fields), ...Object.fromEntries(Object.entries(opts.columns ?? {})
+    .filter(([k, v]) => (fields as readonly string[]).includes(k) && typeof v === 'number' && v >= -1 && v < head.length)) } as Columns;
+  if (!withAddons) c.addons = -1;
+  const base = { headings: head, columns: c, needs: [] as SheetResult['needs'], addons: withAddons };
   const missing = (['item', 'price'] as const).filter((k) => c[k] < 0);
   if (missing.length) return { ...base, rows: [], errors: [`Choose which column is the ${missing.map((k) => FIELD_NAMES[k]).join(' and the ')}.`] };
   if (data.length > 2000) return { ...base, rows: [], errors: ['The file has more than 2,000 items.'] };
@@ -269,18 +283,17 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
 /** A small sheet with invented rows, showing every column and the forms each one takes. */
 export function sampleSheet(): string {
   return toCsv([HEADER,
-    ['Paneer Tikka', 'Starters', '280', '', '', 'Billing name', 'Kitchen', '996332', ''],
-    ['Veg Burger', 'Snacks', '160', '', '', 'Billing name', 'Kitchen', '', 'Peri Peri Fries +₹30; Extra Cheese +₹50'],
-    ['Tandoori Chicken', 'Tandoor', '', '', '', 'Billing name', 'Kitchen', '', 'Choose one: Half ₹300 / Full ₹450'],
-    ['Chicken Biryani', 'Indian', '', '', '', 'Billing name', 'Kitchen', '', 'Choose one: Half ₹199 / Full ₹349'],
-    ['Masala Dosa', 'South Indian', '150', '', '', 'Billing name', 'Kitchen', '', 'Butter +₹30; Extra Cheese +₹50'],
-    ['Pizza', 'Snacks', '', '', '', 'Billing name', 'Kitchen', '', 'Size: Regular ₹320 / Large ₹440; Toppings (any): Olives +₹40 / Jalapeno +₹40; Extra Cheese ₹80'],
-    ['Beer 650 ml', 'Bar', '320', '', '', 'No GST (liquor)', 'Bar', '', ''],
-    ['Whisky bottle 750 ml', 'Bar', '', 'Yes', '3500', 'No GST (liquor)', 'Bar', '', ''],
-    ['Fresh Lime Soda', 'Bar', '90', '', '', 'Billing name', 'Bar', '', ''],
-    ['Pool Table (per hour)', 'Games', '300', '', '', 'GST 18%', 'Kitchen', '999692', ''],
-    ['Locker deposit', 'Hotel', '200', '', '', 'No GST', 'Kitchen', '', ''],
-  ]);
+    ['Paneer Tikka', 'Starters', '280', '', '', 'Billing name', 'Kitchen', '996332'],
+    ['Veg Burger', 'Snacks', '160', '', '', 'Billing name', 'Kitchen', ''],
+    ['Tandoori Chicken', 'Tandoor', '300', '', '', 'Billing name', 'Kitchen', ''],
+    ['Masala Dosa', 'South Indian', '150', '', '', 'Billing name', 'Kitchen', ''],
+    ['Beer 650 ml', 'Bar', '320', '', '', 'No GST (liquor)', 'Bar', ''],
+    ['Whisky bottle 750 ml', 'Bar', '', 'Yes', '3500', 'No GST (liquor)', 'Bar', ''],
+    ['Fresh Lime Soda', 'Bar', '90', '', '', 'Billing name', 'Bar', ''],
+    ['Cigarette (single)', 'Cigarettes', '20', '', '', 'No GST', 'No KOT', ''],
+    ['Pool Table (per hour)', 'Games', '300', '', '', 'GST 18%', 'No KOT', '999692'],
+    ['Locker deposit', 'Hotel', '200', '', '', 'No GST', 'No KOT', ''],
+  ].map((r) => r.slice(0, HEADER.length)));
 }
 
 // ---------- the plan: what an upload would change, worked out against the menu as it is
@@ -319,7 +332,9 @@ export interface Plan {
 const effective = (t: { taxMode: TaxMode | null; gstBp: number | null }, cat: Tax | undefined): Tax =>
   t.taxMode ? { mode: t.taxMode, bp: t.gstBp } : cat ?? { mode: 'billing', bp: null };
 
-export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult['needs'] }, now: Existing): Plan {
+export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult['needs']; addons?: boolean }, now: Existing): Plan {
+  // Add-ons not in the sheet (for now): each dish keeps the add-ons and own prices it has; new dishes start with none.
+  const keepAddons = sheet.addons === false;
   const errors = [...sheet.errors];
   for (const n of sheet.needs ?? []) errors.push(`${n.category}: choose ${[n.tax && 'the GST', n.station && 'the station'].filter(Boolean).join(' and ')} for its ${n.items} item${n.items === 1 ? '' : 's'} without one.`);
   const rows = sheet.rows;
@@ -415,15 +430,17 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
   const items: PlanItem[] = rows.map((r) => {
     const x = match.get(r.line);
     const tax = taxKey(r.tax) === taxKey(catTax.get(norm(r.category))!) ? null : r.tax;
-    const groupPrices = r.groups.map((g) => g.prices ?? null);
-    const base = r.openPrice ? null : basePrice(r.groups.map((g, i) => ({ kind: groupOf(g.name)?.kind ?? 'any', options: groupOf(g.name)?.options ?? [], prices: groupPrices[i] })));
+    const gnames = keepAddons ? x?.groups ?? [] : r.groups.map((g) => g.name);
+    const groupPrices = keepAddons ? x?.groupPrices ?? gnames.map(() => null) : r.groups.map((g) => g.prices ?? null);
+    const base = r.openPrice ? null : basePrice(gnames.map((n, i) => ({ kind: groupOf(n)?.kind ?? 'any', options: groupOf(n)?.options ?? [], prices: groupPrices[i] ?? null })));
+    if (keepAddons && base !== null && base !== r.pricePaise && x) notes.push(`${r.name}: its price comes from its ${gnames.find((n) => groupOf(n)?.kind === 'one')} prices (${rs(base)}), set in Settings → Add-ons; the file's ${rs(r.pricePaise)} is not used.`);
     const route = rowRoute.get(r.line) ?? { kot: true, stationId: null };
     const cr = catRoute.get(norm(r.category))!;
     const bar = allStations.find((s2) => s2.id === (route.kot ? route.stationId : cr.stationId))?.isBar ?? false;
     const p: PlanItem = { id: x?.id ?? null, name: r.name, category: r.category, pricePaise: base ?? r.pricePaise, station: bar ? 'bar' : 'kitchen',
       ownKot: route.kot === cr.kot ? null : route.kot ? 1 : 0, ownStationId: route.kot && route.stationId !== cr.stationId ? route.stationId : null,
       sac: r.sac ?? x?.sac ?? (/^room tariff$/i.test(r.name) ? '996311' : '996332'), tax, openPrice: r.openPrice,
-      minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: r.groups.map((g) => groupName(g.name)), groupPrices };
+      minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: gnames.map((n) => groupName(n)), groupPrices };
     if (!x) { added.push(r.name); return p; }
     if (!x.active) back.push(r.name);
     if (!r.openPrice && x.pricePaise !== p.pricePaise) priceChanges.push({ name: r.name, from: x.pricePaise, to: p.pricePaise });
@@ -473,5 +490,5 @@ export function sheetOf(now: Existing): string {
   items.sort((a, b) => (order.indexOf(norm(a.category)) + 1 || 1e9) - (order.indexOf(norm(b.category)) + 1 || 1e9) || a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   return toCsv([HEADER, ...items.map((i) => [i.name, i.category, i.openPrice ? '' : (i.pricePaise / 100).toFixed(2).replace(/\.00$/, ''), i.openPrice ? 'Yes' : '',
     i.openPrice && i.minPricePaise !== null ? (i.minPricePaise / 100).toFixed(2).replace(/\.00$/, '') : '', taxText(effective(i, cat.get(norm(i.category)))),
-    route(i), i.sac, i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')])]);
+    route(i), i.sac, ...(SHEET_ADDONS ? [i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')] : [])])]);
 }

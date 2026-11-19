@@ -70,15 +70,18 @@ describe('menu upload', () => {
     expect(sheet).toMatchObject({ status: 200, type: 'text/csv; charset=utf-8' });
     expect((await s.counter.post(`${s.B}/menu/upload/check`, { csv: 'x' })).status).toBe(403);
     const csv = sheet.text;
-    expect(csv.split('\n')[0]).toContain('Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,SAC,Add-ons & choices');
+    expect(csv.split('\n')[0].trim().replace(/^\uFEFF/, '')).toBe('Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,SAC');
     const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv }));
     expect(r).toMatchObject({ ok: true, errors: [], added: [], off: [], back: [], priceChanges: [], otherChanges: [] });
   });
 
-  it('checks, then applies: keeps matched items, adds, takes off, sets category GST and add-ons, and keeps the file', async () => {
+  it('checks, then applies: keeps matched items and their add-ons, adds, takes off, sets category GST, and keeps the file', async () => {
     const s = await setupBusiness();
     const menu = (await s.owner.get(`${s.B}/menu`)).json.items.filter((i: any) => i.active);
     const [keep, drop] = menu;
+    // An add-on already on a dish stays when the menu is uploaded (add-ons are not in the sheet for now).
+    const cheese = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Extra Cheese', kind: 'any', options: [{ name: 'Extra Cheese', price: '50' }] }))).id;
+    await s.ok(s.owner.put(`${s.B}/addon-groups/${cheese}/items`, { itemIds: [keep.id] }));
     const csv = [
       'Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,Add-ons & choices',
       `${keep.name.toUpperCase()},${keep.category},999,,,Billing name,Kitchen,"Extra Cheese +₹50; Choose one: Half / Full +₹150"`,
@@ -109,8 +112,10 @@ describe('menu upload', () => {
     expect(byName(drop.name)).toMatchObject({ id: drop.id, active: 0 });
     expect(byName('Test Bottle')).toMatchObject({ openPrice: true, minPricePaise: 200000, taxMode: null });
     expect(byName('Test Soda')).toMatchObject({ taxMode: 'billing' });
-    expect(byName('Test Kit').addonGroups).toHaveLength(1);
-    expect(m.addonGroups.map((g: any) => g.name).sort()).toEqual(['Extra Cheese', 'Half or Full']);
+    // The add-on column is not read: no new add-ons; the dish keeps the one it had.
+    expect(byName('Test Kit').addonGroups).toEqual([]);
+    expect(m.addonGroups.map((g: any) => g.name)).toEqual(['Extra Cheese']);
+    expect(byName(keep.name.toUpperCase()).addonGroups).toEqual([cheese]);
     expect(m.categories.find((c: any) => c.name === 'Bar')).toMatchObject({ taxMode: 'liquor' });
 
     // The same file again changes nothing; the file is kept and can be downloaded.
@@ -130,7 +135,7 @@ describe('menu upload', () => {
     expect(sample.status).toBe(200);
     const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: sample.text }));
     expect(r).toMatchObject({ ok: true, exactHeadings: true, needs: [] });
-    expect(r.items).toBe(11);
+    expect(r.items).toBe(10);
 
     const other = 'Dish,Price INR,Section\nMasala Tea,40,Drinks\nLassi,90,Drinks\n';
     const a = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: other }));
@@ -154,7 +159,7 @@ describe('menu upload', () => {
     expect(photo.status).toBe(200);
     const read = await photo.json() as { csv: string; items: number };
     expect(read.items).toBe(2);
-    expect(read.csv).toContain('Red Wine bottle,Bar,,Yes,,,');
+    expect(read.csv).toContain('Red Wine bottle,Bar,,Yes,,\r\n');
     const c = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: read.csv }));
     expect(c.needs).toEqual([{ category: 'Snacks', tax: true, station: false, items: 1 }, { category: 'Bar', tax: true, station: true, items: 1 }]);
     // Only the Owner, and only pages.
@@ -168,9 +173,9 @@ describe('menu upload', () => {
 
   it('refuses a file with bad rows, and names them', async () => {
     const s = await setupBusiness();
-    const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: 'Item,Category,Price,Tax,Station,Add-ons\nA,Food,10,GST 5%,Kitchen,Nonexistent\n' }));
+    const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: 'Item,Category,Price,Tax,Station\nA,Food,10,GST 5%,Hall\n' }));
     expect(r.ok).toBe(false);
-    expect(r.errors).toEqual(['Row 2 (A): there is no add-on called "Nonexistent". Write it in full, like "Extra Cheese +₹50".']);
+    expect(r.errors).toEqual(['Row 2 (A): there is no station called "Hall". Use one of Kitchen, Bar or No KOT, or add it in Settings → Stations first.']);
     expect((await s.owner.post(`${s.B}/menu/upload/apply`, { csv: 'Item,Category,Price,Tax,Station\nA,Food,10,GST 5%,Kitchen\n', planHash: r.planHash })).status).toBe(409);
   });
 });
@@ -239,36 +244,27 @@ describe('add-on prices per dish', () => {
     expect(price('Test Biryani', 'Half')).toBe(19900);
   });
 
-  it('reads and writes dish prices in the sheet, and refuses mixed or mismatched forms', async () => {
+  it('keeps a dish\'s own Half / Full prices when the menu is uploaded, and reads add-ons only when asked to', async () => {
     const s = await setupBusiness();
-    const keep = (await s.owner.get(`${s.B}/menu`)).json.items.filter((i: any) => i.active)
-      .map((i: any) => `${i.name},${i.category},${i.pricePaise / 100},,,Billing name,${i.station},`);
-    const head = 'Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,Add-ons & choices';
-    const csv = [head, ...keep,
-      'Sheet Chicken,Tandoor,,,,Billing name,Kitchen,Choose one: Half ₹300 / Full ₹450; Extra Cheese +₹50',
-      'Sheet Biryani,Indian,,,,Billing name,Kitchen,Choose one: Half ₹199 / Full ₹349',
-      'Sheet Pizza,Snacks,320,,,Billing name,Kitchen,Extra Cheese ₹80'].join('\n');
+    const size = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Half or Full', kind: 'one', options: [{ name: 'Half', price: '' }, { name: 'Full', price: '' }] }))).id;
+    const chicken = (await s.ok(s.owner.post(`${s.B}/menu`, { name: 'Sheet Chicken', category: 'Tandoor', price: '', addonGroups: [{ id: size, prices: { Half: '300', Full: '450' } }] }))).id;
+    const sheet = await download(s.owner, `${s.B}/menu/sheet`);
+    expect(sheet.text).toContain('Sheet Chicken,Tandoor,300,,,Billing name,Kitchen,996332\r\n');
+    // The file says 320: the dish keeps its Half price (and is told why); its Half / Full stay.
+    const csv = sheet.text.replace('Sheet Chicken,Tandoor,300,', 'Sheet Chicken,Tandoor,320,');
     const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv }));
-    expect(r).toMatchObject({ ok: true, added: ['Sheet Chicken', 'Sheet Biryani', 'Sheet Pizza'] });
+    expect(r).toMatchObject({ ok: true, added: [], off: [], priceChanges: [], otherChanges: [] });
+    expect(r.notes).toContain('Sheet Chicken: its price comes from its Half or Full prices (₹300), set in Settings → Add-ons; the file\'s ₹320 is not used.');
     await s.ok(s.owner.post(`${s.B}/menu/upload/apply`, { csv, planHash: r.planHash }));
     const m = (await s.owner.get(`${s.B}/menu`)).json;
-    const item = (n: string) => m.items.find((i: any) => i.name === n);
-    const g = (n: string) => m.addonGroups.find((x: any) => x.name === n);
-    expect(g('Half or Full').options.map((o: any) => [o.name, o.addPaise])).toEqual([['Half', 0], ['Full', 0]]);
-    expect(item('Sheet Chicken')).toMatchObject({ pricePaise: 30000, addonPrices: { [g('Half or Full').id]: { half: 30000, full: 45000 } } });
-    expect(item('Sheet Biryani')).toMatchObject({ pricePaise: 19900 });
-    expect(item('Sheet Pizza').addonPrices).toEqual({ [g('Extra Cheese').id]: { 'extra cheese': 8000 } });
+    expect(m.items.find((i: any) => i.id === chicken)).toMatchObject({ pricePaise: 30000, addonGroups: [size], addonPrices: { [size]: { half: 30000, full: 45000 } } });
 
-    // The download writes the dish prices back; uploading it again changes nothing.
-    const sheet = await download(s.owner, `${s.B}/menu/sheet`);
-    expect(sheet.text).toContain('Sheet Chicken,Tandoor,300,,,Billing name,Kitchen,996332,Choose one: Half ₹300 / Full ₹450; Extra Cheese +₹50');
-    expect(sheet.text).toContain('Sheet Pizza,Snacks,320,,,Billing name,Kitchen,996332,Extra Cheese ₹80');
-    const again = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: sheet.text }));
-    expect(again).toMatchObject({ ok: true, added: [], off: [], priceChanges: [], otherChanges: [] });
-
-    const bad = (cell: string) => s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: `${head}\nX,Y,100,,,Billing name,Kitchen,"${cell}"\n` })).then((x) => x.errors[0]);
-    expect(await bad('Choose one: Half ₹100 / Full +₹50')).toMatch(/not both/);
-    expect(await bad('Choose one: Half ₹100 / Full')).toMatch(/give a price for each choice/);
-    expect(await bad('Half or Full: Small ₹100 / Large ₹150')).toMatch(/has the choices Half \/ Full; this row has Small \/ Large/);
+    // The reading itself is kept for later: with add-ons on, the forms are read and mixed ones refused.
+    const { readSheet, parseCsv } = await import('../src/menu-sheet');
+    const head = 'Item,Category,Price (₹),Tax,Station,Add-ons & choices';
+    const read = (cell: string) => readSheet(parseCsv(`${head}\nX,Y,,Billing name,Kitchen,"${cell}"\n`), { addons: true });
+    expect(read('Choose one: Half ₹300 / Full ₹450').rows[0].groups[0]).toMatchObject({ name: 'Half or Full', prices: { half: 30000, full: 45000 } });
+    expect(read('Choose one: Half ₹100 / Full +₹50').errors[0]).toMatch(/not both/);
+    expect(readSheet(parseCsv(`${head}\nX,Y,10,Billing name,Kitchen,Extra Cheese +₹50\n`)).rows[0].groups).toEqual([]);
   });
 });

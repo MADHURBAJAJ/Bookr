@@ -168,12 +168,12 @@ const MENU_READ = `This is a page of a restaurant and bar menu in India (a photo
 - name: the item as printed (fix only obvious spelling slips; keep sizes like "30 ml", "650 ml", "Half").
 - category: the heading the item is under, as printed (title case); null if there is none.
 - priceRupees: the price as a number. If an item shows two prices for sizes (Half / Full, Small / Large, 30 ml / 60 ml),
-  list it once with the first price and put the sizes in addons as: Choose one: Half / Full +₹<difference>.
+  list it once with the first (smaller) price; the other sizes are set up later in the app.
   If the menu says MRP, market price, at actuals or shows no price, use null and set priceAtBilling true.
 - priceAtBilling: true only as said above.
 - station: "Bar" for alcohol, cocktails, mocktails and cold drinks served at a bar when the menu shows a bar section;
   "Kitchen" for food; null when you cannot tell.
-- addons: extras printed with a price, e.g. "Extra cheese +₹50", as: Extra Cheese +₹50 (several separated by "; "); else null.
+- addons: always null (extras are set up later in the app).
 Do not guess GST or taxes: leave them out. Never invent an item or a price: use null for anything you cannot read.`;
 const MAX_READ = 10 * 1024 * 1024;
 const READS_PER_DAY = 20;
@@ -203,8 +203,8 @@ menuUploadRoutes.post(`${B}/menu/upload/read`, requireAction('menu.upload'), asy
   }
   await audit(db, bid, c.get('staff').id, 'menu.read', 'menu_items', bid, null, { file: key, items: read.items.length }).run();
   const rp = (n: number | null) => (n === null ? '' : String(Math.round(n * 100) / 100));
-  const csv = toCsv([['Item', 'Category', 'Price (₹)', 'Price at billing', 'Tax', 'Station', 'Add-ons & choices'],
-    ...read.items.map((i) => [i.name, i.category ?? '', rp(i.priceRupees), i.priceAtBilling || i.priceRupees === null ? 'Yes' : '', '', i.station ?? '', i.addons ?? ''])]);
+  const csv = toCsv([['Item', 'Category', 'Price (₹)', 'Price at billing', 'Tax', 'Station'],
+    ...read.items.map((i) => [i.name, i.category ?? '', rp(i.priceRupees), i.priceAtBilling || i.priceRupees === null ? 'Yes' : '', '', i.station ?? ''])]);
   return c.json({ csv, items: read.items.length });
 });
 

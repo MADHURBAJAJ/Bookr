@@ -1627,7 +1627,6 @@ const COLUMN_HELP = [
   ['Tax', 'Billing name (its rate, 5% for food), GST 5% / 12% / 18% / 28% / 40%, No GST (liquor), or No GST. Left empty: asked per category.'],
   ['Station', 'Where the KOT goes: a station\u2019s name (Kitchen, Bar, Tandoor…), or No KOT for things that never go to a station. Left empty: asked per category.'],
   ['SAC', 'Optional, 4 to 8 digits. Empty: kept, or 996332 for a new item.'],
-  ['Add-ons & choices', 'Extra Cheese +₹50 · Choose one: Half / Full +₹150 · Size: Small / Large +₹40 · Toppings (any): Olives +₹20 / Corn +₹15. Several: separate with ;'],
 ];
 function menuSheetPanel() {
   const r = ui.upCheck;
@@ -1649,7 +1648,7 @@ function menuSheetPanel() {
     <div class="row"><a class="btn" href="/api${B()}/menu/sheet" download="menu.csv">Download menu</a><a class="btn" href="/api${B()}/menu/sample" download="menu-sample.csv">Download a sample</a>
       ${can('menu.upload') ? html`<label class="btn pri">${ui.upReading ?? 'Upload menu'}<input type="file" multiple accept=".csv,text/csv,.xlsx,image/jpeg,image/png,application/pdf" data-menu-file class="vh"></label>` : ''}</div>
     <details style="margin-top:10px"><summary>What the columns mean</summary><div class="scroll"><table class="t"><tbody>${COLUMN_HELP.map(([k, v]) => html`<tr><th style="white-space:nowrap">${k}</th><td class="small">${v}</td></tr>`)}</tbody></table></div>
-      <p class="small quiet">Column order does not matter, and other columns are skipped. Other headings are understood too (Rate, MRP, Item Name, Group, Department, KOT, HSN…).</p></details>
+      <p class="small quiet">Column order does not matter, and other columns are skipped. Other headings are understood too (Rate, MRP, Item Name, Group, Department, KOT, HSN…). Add-ons and choices are not in the sheet for now: set them in the Add-ons tab; uploading keeps each dish's add-ons as they are.</p></details>
     ${ui.upRead ? html`<p class="small" style="margin-top:10px">${ui.upRead} <a href="#" data-act="upReadCsv">Download what was read</a> to correct it in a sheet if you prefer.</p>` : ''}
     ${r ? html`<div class="msg ${r.ok ? 'ok' : 'bad'}" style="margin-top:14px" role="status">
       ${r.ok ? html`<p><strong>${ui.upName}: ready to apply.</strong> Nothing has changed yet.</p>` : html`<p><strong>${ui.upName}: ${r.errorCount ? `${plural(r.errorCount, 'thing')} to fix` : 'not ready'}</strong> before it can be applied.</p>
