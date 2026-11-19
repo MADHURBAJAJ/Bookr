@@ -9,7 +9,7 @@ import { audit, clock, event, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 import { z } from 'zod';
 import { askClaude, OcrError, readWithClaude } from '../../../src/claude';
-import { cocktailInstructions, propose, type NewStock, type Pours, type Proposal, type StockLite } from '../bar-recipes';
+import { cocktailInstructions, kitchenInstructions, propose, type NewStock, type Pours, type Proposal, type StockLite } from '../bar-recipes';
 
 export const stockRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -148,9 +148,17 @@ const loadStock = async (db: DB, bid: string): Promise<StockLite[]> =>
     .map((x) => ({ id: x.id, name: x.name, unit: x.unit, packSize: x.pack_size }));
 const drinkKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-/** Claude's recipes for these drinks, into their proposals (matched by number, else by name). Throws OcrError. */
-async function fillWithClaude(env: AppEnv['Bindings'], ask: Proposal[], stock: StockLite[], pours: Pours, newItems: Map<string, NewStock>) {
-  const r = await askClaude(env, cocktailInstructions(ask.map((p) => ({ name: p.menuItem, category: p.category })), stock, pours), CocktailReading);
+type Detail = 'major' | 'all';
+const detailOf = (v: unknown): Detail => (v === 'all' ? 'all' : 'major');
+/** The question for Claude: cocktails in the bar's pours, or kitchen dishes at the chosen detail. */
+const promptFor = (kind: 'bar' | 'kitchen', ask: Proposal[], stock: StockLite[], pours: Pours, detail: Detail) => {
+  const list = ask.map((p) => ({ name: p.menuItem, category: p.category }));
+  return kind === 'kitchen' ? kitchenInstructions(list, stock, detail) : cocktailInstructions(list, stock, pours);
+};
+
+/** Claude's recipes for these items, into their proposals (matched by number, else by name). Throws OcrError. */
+async function fillWithClaude(env: AppEnv['Bindings'], ask: Proposal[], stock: StockLite[], prompt: string, newItems: Map<string, NewStock>) {
+  const r = await askClaude(env, prompt, CocktailReading);
   ask.forEach((p, i) => {
     const d = r.data.drinks.find((x) => x.n === i + 1 && drinkKey(x.menuItem) === drinkKey(p.menuItem))
       ?? r.data.drinks.find((x) => drinkKey(x.menuItem) === drinkKey(p.menuItem)) ?? r.data.drinks.find((x) => x.n === i + 1);
@@ -179,32 +187,61 @@ async function fillWithClaude(env: AppEnv['Bindings'], ask: Proposal[], stock: S
   });
 }
 
+// The menu sections with items still without a recipe, for the Make recipes screen: bar or kitchen by most of their items.
+stockRoutes.get(`${B}/stock/recipes/sections`, requireAction('stock.edit'), async (c) => {
+  const rows = await all<{ category: string; n: number; bar: number }>(c.env.DB, `SELECT category, count(*) AS n, sum(station = 'bar') AS bar FROM menu_items m
+    WHERE business_id = ? AND active = 1 AND NOT EXISTS (SELECT 1 FROM recipes r WHERE r.menu_item_id = m.id) GROUP BY category ORDER BY category`, c.get('businessId'));
+  return c.json({ sections: rows.map((r) => ({ category: r.category, n: r.n, bar: r.bar * 2 >= r.n })) });
+});
+
 stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
   const data = await body(c);
   const pours = pourSizes(data);
+  const detail = detailOf(data.detail);
+  // The menu sections chosen on the screen (all bar items when none are given, as before).
+  const cats = Array.isArray(data.categories) ? (data.categories as unknown[]).filter((x): x is string => typeof x === 'string').slice(0, 200) : null;
   const [menu, stock] = await Promise.all([
-    all<{ id: string; name: string; category: string; open_price: number }>(db, `SELECT id, name, category, open_price FROM menu_items m
-      WHERE business_id = ? AND active = 1 AND station = 'bar' AND NOT EXISTS (SELECT 1 FROM recipes r WHERE r.menu_item_id = m.id) ORDER BY category, name`, bid),
+    all<{ id: string; name: string; category: string; open_price: number; station: string }>(db, `SELECT id, name, category, open_price, station FROM menu_items m
+      WHERE business_id = ? AND active = 1 AND NOT EXISTS (SELECT 1 FROM recipes r WHERE r.menu_item_id = m.id)
+        AND ${cats ? 'category IN (SELECT value FROM json_each(?))' : "station = 'bar' AND ? IS NULL"} ORDER BY category, name`, bid, cats ? JSON.stringify(cats) : null),
     loadStock(db, bid),
   ]);
-  const { proposals, newItems } = propose(menu.map((m) => ({ id: m.id, name: m.name, category: m.category, openPrice: !!m.open_price })), stock, pours);
+  const bar = menu.filter((m) => m.station === 'bar');
+  const { proposals, newItems } = propose(bar.map((m) => ({ id: m.id, name: m.name, category: m.category, openPrice: !!m.open_price })), stock, pours);
+  // Kitchen dishes: no name rules; Claude estimates them (or they wait for a person).
+  const dishes: Proposal[] = menu.filter((m) => m.station !== 'bar').map((m) => ({ menuItemId: m.id, menuItem: m.name, category: m.category, kind: 'kitchen', source: 'none', lines: [], note: '', check: true }));
+  proposals.push(...dishes);
+  proposals.sort((a, b) => (a.category === b.category ? (a.menuItem < b.menuItem ? -1 : 1) : a.category < b.category ? -1 : 1));
 
-  // Cocktails and mocktails: Claude suggests, in this bar's pours, with its stock where it can.
   const cocktails = proposals.filter((p) => p.kind === 'cocktail');
-  let claudeNote: string | null = null;
-  if (cocktails.length && data.claude === true) {
-    const ask = cocktails.slice(0, MAX_COCKTAILS);
-    if (cocktails.length > MAX_COCKTAILS) claudeNote = `Claude suggested the first ${MAX_COCKTAILS} cocktails; press Make recipes again after approving them for the rest.`;
+  const notes: string[] = [];
+  const left: string[] = [];        // what Claude did not do, said once at the end
+  let failed: string | null = null;
+  const run = async (kind: 'bar' | 'kitchen', group: Proposal[], what: string) => {
+    if (!group.length) return;
+    if (data.claude !== true || failed) { left.push(what); return; }
+    const ask = group.slice(0, MAX_COCKTAILS);
+    if (group.length > MAX_COCKTAILS) notes.push(`Claude suggested the first ${MAX_COCKTAILS} ${what}; save those, then press Make recipes again for the rest.`);
     try {
-      await fillWithClaude(c.env, ask, stock, pours, newItems);
+      await fillWithClaude(c.env, ask, stock, promptFor(kind, ask, stock, pours, detail), newItems);
     } catch (e) {
       if (!(e instanceof OcrError)) throw e;
-      claudeNote = `${e.message} Cocktails are left for you to add by hand.`;
+      failed = e.message;
+      left.push(what);
     }
-  } else if (cocktails.length) claudeNote = 'Cocktails were not sent to Claude: add them by hand, or tick “Suggest cocktails with Claude”.';
+  };
+  await run('bar', cocktails, 'cocktails');
+  await run('kitchen', dishes, 'kitchen dishes');
+  if (left.length) {
+    const which = left.join(' and ');
+    notes.unshift(failed ? `${failed} The ${which} are left for you: add them by hand, or try Ask Claude later.`
+      : `The ${which} were not sent to Claude: add them by hand, use Ask Claude on one, or tick “Use Claude”.`);
+  }
+  const claudeNote = notes.join(' ') || null;
   for (const p of cocktails) if (!p.lines.length && !p.note) p.note = 'A cocktail: add its recipe by hand.';
+  for (const p of dishes) if (!p.lines.length && !p.note) p.note = 'A kitchen dish: add its recipe by hand, or Ask Claude.';
   // Only the new stock items some proposal still uses.
   const used = new Set(proposals.flatMap((p) => p.lines.map((l) => l.newKey)).filter(Boolean));
   return c.json({ pours, proposals, newItems: [...newItems.values()].filter((n) => used.has(n.key)), claudeNote });
@@ -216,11 +253,12 @@ stockRoutes.post(`${B}/stock/recipes/ask`, requireAction('stock.edit'), async (c
   const db = c.env.DB;
   const data = await body(c);
   const pours = pourSizes(data);
-  const m = await one<{ id: string; name: string; category: string; open_price: number }>(db,
-    "SELECT id, name, category, open_price FROM menu_items WHERE id = ? AND business_id = ? AND active = 1", data.menuItemId, bid);
+  const m = await one<{ id: string; name: string; category: string; open_price: number; station: string }>(db,
+    "SELECT id, name, category, open_price, station FROM menu_items WHERE id = ? AND business_id = ? AND active = 1", data.menuItemId, bid);
   if (!m) fail(404, 'Drink not found.');
   const stock = await loadStock(db, bid);
-  const p: Proposal = { menuItemId: m.id, menuItem: m.name, category: m.category, kind: 'cocktail', source: 'claude', lines: [], note: '', check: true };
+  const kitchen = m.station !== 'bar';
+  const p: Proposal = { menuItemId: m.id, menuItem: m.name, category: m.category, kind: kitchen ? 'kitchen' : 'cocktail', source: 'claude', lines: [], note: '', check: true };
   const newItems = new Map<string, NewStock>();
   // The screen's own new items, so an ingredient it already proposes is reused rather than proposed twice.
   if (Array.isArray(data.newItems)) for (const n of (data.newItems as Record<string, unknown>[]).slice(0, 500)) {
@@ -228,7 +266,7 @@ stockRoutes.post(`${B}/stock/recipes/ask`, requireAction('stock.edit'), async (c
   }
   const before = new Set(newItems.keys());
   try {
-    await fillWithClaude(c.env, [p], stock, pours, newItems);
+    await fillWithClaude(c.env, [p], stock, promptFor(kitchen ? 'kitchen' : 'bar', [p], stock, pours, detailOf(data.detail)), newItems);
   } catch (e) {
     if (!(e instanceof OcrError)) throw e;
     fail(e.status, e.message);

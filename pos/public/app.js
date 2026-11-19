@@ -1326,6 +1326,10 @@ async function stockScreen(tab = 'hand') {
   if (tab === 'report') { ui.rFrom ??= me.business.shiftDay; ui.rTo ??= me.business.shiftDay; ui.rStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
   if (tab === 'handover') { ui.hFrom ??= me.business.shiftDay; ui.hTo ??= me.business.shiftDay; ui.hStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
   if (tab === 'handover' && ui.hStore) ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`);
+  if (tab === 'auto') {
+    ui.mkSections = (await api('GET', `${B()}/stock/recipes/sections`)).sections;
+    ui.mkCats ??= ui.mkSections.filter((x) => x.bar).map((x) => x.category);
+  }
   if (tab === 'report' && ui.rStore) ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`);
   rerender = () => {
     let body = '';
@@ -1439,24 +1443,51 @@ const int = (v) => (/^\d+$/.test(String(v ?? '').trim()) ? Number(v) : NaN);
 // Nothing is saved until "Approve"; pour sizes are asked each time and remembered on this device only.
 const POUR_KEY = 'pos-pours';
 function savedPours() { try { return JSON.parse(localStorage.getItem(POUR_KEY) ?? 'null') ?? {}; } catch { return {}; } }
-const DRINK_KIND = { peg: 'Peg', bottle: 'Bottle', beer: 'Beer', wine: 'Wine', mixer: 'Mixer', cocktail: 'Cocktail', skip: 'Not a drink', unclear: 'Unclear' };
+const DRINK_KIND = { peg: 'Peg', bottle: 'Bottle', beer: 'Beer', wine: 'Wine', mixer: 'Mixer', cocktail: 'Cocktail', kitchen: 'Kitchen', skip: 'Not a drink', unclear: 'Unclear' };
 function makeRecipesTab() {
   const p = savedPours();
   ui.pPeg ??= String(p.peg ?? 30); ui.pLarge ??= String(p.large ?? 60); ui.pGlass ??= String(p.glass ?? 150); ui.pClaude ??= true;
-  const form = html`<section class="panel"><h2>Make recipes for bar drinks</h2>
-    <p class="small quiet">Works out what each bar drink without a recipe takes from stock, from its name: pegs, bottles, beer, wine and mixers. Cocktails can be suggested by Claude (only drink and stock item names are sent). Nothing is saved until you approve.</p>${ui.mk ? '' : errorBox()}
-    <form class="grid3"><label class="f">Peg (ml)<input class="in" inputmode="numeric" data-model="pPeg" value="${ui.pPeg}"></label>
+  ui.mkDetail ??= 'major';
+  const secs = ui.mkSections ?? [];
+  const chosen = secs.filter((x) => ui.mkCats.includes(x.category));
+  const anyKitchen = chosen.some((x) => !x.bar);
+  const group = (bar) => {
+    const list = secs.filter((x) => x.bar === bar);
+    if (!list.length) return '';
+    return html`<div class="grouphead"><h3>${bar ? 'Bar' : 'Kitchen'}</h3><div class="links"><button type="button" data-act="mkCatsAll" data-bar="${bar ? 1 : 0}">All</button><button type="button" data-act="mkCatsNone" data-bar="${bar ? 1 : 0}">None</button></div>
+        <span class="small quiet">${bar ? 'Worked out from the names; cocktails by Claude' : 'Estimated by Claude: every dish needs checking'}</span></div>
+      <div class="catgrid">${list.map((x) => html`<label><input type="checkbox" class="sel" data-act-change="mkCat" data-cat="${x.category}" ${ui.mkCats.includes(x.category) ? 'checked' : ''}> ${x.category} <span class="n">(${x.n})</span></label>`)}</div>`;
+  };
+  const form = html`<section class="panel"><h2>Make recipes</h2>
+    <p class="small quiet">Choose the menu sections to work out. Bar drinks are worked out from their names; cocktails and kitchen dishes can be suggested by Claude (only item and stock item names are sent). Nothing is saved until you approve.</p>${ui.mk ? '' : errorBox()}
+    ${secs.length ? html`${group(true)}${group(false)}` : html`<p class="quiet">Every menu item already has a recipe.</p>`}
+    ${anyKitchen ? html`<div class="choice"><strong>For kitchen dishes, list</strong>
+      <label><input type="radio" name="mkDetail" data-act-change="mkDetail" value="major" ${ui.mkDetail === 'major' ? 'checked' : ''}><span><strong>Major ingredients only</strong> (recommended): the 2 to 5 that cost the most or are worth counting, such as paneer, chicken, rice, oil, butter and cream. Leaves out salt, spices, garnish and water.</span></label>
+      <label><input type="radio" name="mkDetail" data-act-change="mkDetail" value="all" ${ui.mkDetail === 'all' ? 'checked' : ''}><span><strong>All ingredients</strong>: every item down to masalas and garnish. Many more stock items to set up and count; the small amounts are rough guesses.</span></label></div>` : ''}
+    <form class="grid3" style="margin-top:14px"><label class="f">Peg (ml)<input class="in" inputmode="numeric" data-model="pPeg" value="${ui.pPeg}"></label>
       <label class="f">Large peg (ml)<input class="in" inputmode="numeric" data-model="pLarge" value="${ui.pLarge}"></label>
       <label class="f">Glass of wine (ml)<input class="in" inputmode="numeric" data-model="pGlass" value="${ui.pGlass}"></label>
-      <label class="tickline" style="grid-column:1/-1"><input type="checkbox" class="sel" data-model="pClaude" ${ui.pClaude ? 'checked' : ''}> Suggest cocktails with Claude (costs a few rupees; always check them)</label>
-      <div><button class="btn pri" type="submit" data-act="mkRun" data-submit>Make recipes</button></div></form></section>`;
+      <label class="tickline" style="grid-column:1/-1"><input type="checkbox" class="sel" data-model="pClaude" ${ui.pClaude ? 'checked' : ''}> Use Claude for cocktails${anyKitchen ? ' and kitchen dishes' : ''} (a few rupees for up to 60 items; always check them)</label>
+      <div><button class="btn pri" type="submit" data-act="mkRun" data-submit ${chosen.length ? '' : 'disabled'}>${chosen.length ? `Make recipes for ${plural(chosen.length, 'section')} (${plural(chosen.reduce((t, x) => t + x.n, 0), 'item')})` : 'Choose a section'}</button></div></form></section>`;
   if (!ui.mk) return form;
   const r = ui.mk;
+  ui.mkShowCat ??= ''; ui.mkShowKind ??= '';
+  const shown = (x) => (!ui.mkShowCat || x.category === ui.mkShowCat) && (!ui.mkShowKind || (ui.mkShowKind === 'check' ? x.check : !x.check));
   const live = r.proposals.filter((x) => !x.skipped);
-  const ready = live.filter((x) => x.lines.length);
-  const rest = live.filter((x) => !x.lines.length);
+  const inTable = (x) => x.lines.length || x.edited;
+  const readyAll = live.filter(inTable);
+  const ready = readyAll.filter(shown);
+  const rest = live.filter((x) => !inTable(x) && shown(x));
+  const cats = [...new Set(live.map((x) => x.category))].sort();
   const skipped = r.proposals.filter((x) => x.skipped);
   const open = ready.filter((x) => !x.saved);
+  const choices = [...ui.st.items.filter((i) => i.active !== false).map((i) => [i.id, `${i.name} (${i.unit})`]), ...r.newItems.map((n) => [n.key, `${ui.mkNew[n.key]?.name ?? n.name} (${n.unit}, new)`])];
+  const addForm = (x) => html`<form class="mkadd"><select class="in" data-model="maChoice" aria-label="Ingredient to add to ${x.menuItem}"><option value="">Choose a stock item</option>${choices.map(([v, t]) => html`<option value="${v}" ${ui.maChoice === v ? 'selected' : ''}>${t}</option>`)}<option value="__new" ${ui.maChoice === '__new' ? 'selected' : ''}>New stock item…</option></select>
+      ${ui.maChoice === '__new' ? html`<input class="in" data-model="maName" value="${ui.maName ?? ''}" placeholder="Name, e.g. Paneer" aria-label="New stock item name">
+        <select class="in mkunit" data-model="maUnit" aria-label="Counted in">${['g', 'ml', 'pcs'].map((u) => html`<option ${ui.maUnit === u ? 'selected' : ''}>${u}</option>`)}</select>
+        <input class="in mkqty" inputmode="numeric" data-model="maPackSize" value="${ui.maPackSize ?? ''}" placeholder="in one pack" aria-label="Units in one pack (1000 for 1 kg)">` : ''}
+      <input class="in mkqty" inputmode="numeric" data-model="maQty" value="${ui.maQty ?? ''}" placeholder="amount" aria-label="Amount for one serving">
+      <button class="btn pri" type="submit" data-act="mkAddGo" data-id="${x.menuItemId}" data-submit>Add</button><button class="btn ghost" type="button" data-act="mkAddCancel">Cancel</button></form>`;
   const stockName = (l) => (l.newKey ? (ui.mkNew[l.newKey]?.name ?? r.newItems.find((n) => n.key === l.newKey)?.name) : ui.st.items.find((i) => i.id === l.stockItemId)?.name) ?? '?';
   const unitOf = (l) => (l.newKey ? r.newItems.find((n) => n.key === l.newKey)?.unit : ui.st.items.find((i) => i.id === l.stockItemId)?.unit) ?? '';
   const ticked = open.filter((x) => ui.mkSel.includes(x.menuItemId));
@@ -1468,36 +1499,41 @@ function makeRecipesTab() {
     : html`<tr class="${ui.mkSel.includes(x.menuItemId) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mkSel" data-id="${x.menuItemId}" aria-label="Tick ${x.menuItem}" ${ui.mkSel.includes(x.menuItemId) ? 'checked' : ''}></td>
         <td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
         <td data-label="Takes from stock">${x.lines.map((l, i) => html`<div class="mkline"><input class="in mkqty" inputmode="numeric" data-act-change="mkQty" data-id="${x.menuItemId}" data-i="${i}" value="${l.qty}" aria-label="${x.menuItem}: amount of ${stockName(l)}"><span class="small">${unitOf(l)}</span>
-          <span>${stockName(l)}</span>${l.newKey ? html`<span class="tag-new">new</span>` : ''}</div>`)}</td>
+          <span>${stockName(l)}</span>${l.newKey ? html`<span class="tag-new">new</span>` : ''}<button class="lnx" type="button" data-act="mkLineX" data-id="${x.menuItemId}" data-i="${i}" title="Remove this ingredient" aria-label="Remove ${stockName(l)} from ${x.menuItem}">×</button></div>`)}
+          ${x.lines.length ? '' : html`<p class="small quiet">No ingredients: add one, or skip this item.</p>`}
+          ${ui.mkAdd === x.menuItemId ? addForm(x) : html`<button class="btn ghost addln" type="button" data-act="mkAdd" data-id="${x.menuItemId}">+ Add ingredient</button>`}</td>
         <td data-label="How">${DRINK_KIND[x.kind]} · ${x.check ? html`<span class="tag-check">please check</span>` : html`<span class="small quiet">${x.source === 'claude' ? 'suggested by Claude' : 'from the name'}</span>`}${x.note ? html`<div class="small quiet">${x.note}</div>` : ''}</td>
-        <td class="act"><div class="irow">${iconBtn('mkSaveOne', x.menuItemId, 'check', `Save recipe for ${x.menuItem}`, 'ok')}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`;
+        <td class="act"><div class="irow">${x.lines.length ? iconBtn('mkSaveOne', x.menuItemId, 'check', `Save recipe for ${x.menuItem}`, 'ok') : ''}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`;
   return html`${form}
     <section class="panel">${errorBox()}${r.claudeNote ? html`<div class="msg warn" role="status">${r.claudeNote}</div>` : ''}
-      <h2>${plural(ready.length, 'drink')} with a proposed recipe${ready.length > open.length ? html` <span class="small quiet">· ${ready.length - open.length} saved</span>` : ''}</h2>
+      <h2>${plural(readyAll.length, 'item')} with a proposed recipe${readyAll.some((x) => x.saved) ? html` <span class="small quiet">· ${readyAll.filter((x) => x.saved).length} saved</span>` : ''}</h2>
+      <div class="filterbar"><label class="f" style="flex-direction:row;align-items:center;gap:8px">Show <select class="in" data-model="mkShowCat" aria-label="Show section"><option value="">All sections</option>${cats.map((c) => html`<option ${ui.mkShowCat === c ? 'selected' : ''}>${c}</option>`)}</select></label>
+        <select class="in" data-model="mkShowKind" aria-label="Show which"><option value="">Everything</option><option value="check" ${ui.mkShowKind === 'check' ? 'selected' : ''}>Please check only</option><option value="name" ${ui.mkShowKind === 'name' ? 'selected' : ''}>From the name only</option></select></div>
       ${ready.length ? html`<p class="small quiet">Change amounts, then save a drink with its tick button, or tick several and approve them together. “Please check” means Claude suggested it, or the name was not clear enough to be sure.</p>
-      <div class="bulkbar" style="position:static;box-shadow:none"><strong>${plural(ticked.length, 'drink')} ticked</strong>
+      <div class="bulkbar" style="position:static;box-shadow:none"><strong>${plural(ticked.length, 'item')} ticked</strong>
         <button class="btn pri" type="button" data-act="mkApply" ${ticked.length ? '' : 'disabled'}>Approve ticked recipes</button>
         ${tickedNew.length ? html`<span class="small quiet">Also makes ${plural(tickedNew.length, 'new stock item')} (below)</span>` : ''}</div>
       <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mkSelAll" aria-label="Tick every drink not saved yet" ${open.length && ticked.length === open.length ? 'checked' : ''}></th><th>Drink</th><th>Takes from stock (one serving)</th><th>How</th><th></th></tr></thead><tbody>
-        ${ready.map(row)}</tbody></table></div>` : html`<p class="quiet">No drink here has a proposed recipe.</p>`}
+        ${ready.map(row)}</tbody></table></div>` : html`<p class="quiet">Nothing here${ui.mkShowCat || ui.mkShowKind ? ' with these filters' : ''} has a proposed recipe.</p>`}
       ${usedNew.length ? html`<h2>New stock items to make</h2><p class="small quiet">Each is made when the first drink using it is saved. Check the name and how it is bought; the price is added when you receive it.</p>
         <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Counted in</th><th>Bought as</th><th class="num">Units in one</th></tr></thead><tbody>
           ${usedNew.map((n) => html`<tr><td><input class="in" data-act-change="mkNewName" data-key="${n.key}" value="${ui.mkNew[n.key]?.name ?? n.name}" aria-label="Name of new stock item ${n.name}"></td><td>${n.unit}</td><td>${n.packName}</td>
             <td class="num"><input class="in mkqty" inputmode="numeric" data-act-change="mkNewPack" data-key="${n.key}" value="${ui.mkNew[n.key]?.packSize ?? n.packSize}" aria-label="${n.name}: ${n.unit} in one ${n.packName}"></td></tr>`)}</tbody></table></div>` : ''}
-      ${rest.length ? html`<h2 style="margin-top:16px">${plural(rest.length, 'drink')} left for you</h2>
+      ${rest.length ? html`<h2 style="margin-top:16px">${plural(rest.length, 'item')} left for you</h2>
         <p class="small quiet">The name was not enough. Ask Claude for one (a fraction of a rupee, always check it), skip it, or add it by hand on <a href="#/stock/items">Items and recipes</a>.</p>
         <div class="scroll"><table class="t cards"><thead><tr><th>Drink</th><th>Why</th><th></th></tr></thead><tbody>
           ${rest.map((x) => html`<tr><td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td><td data-label="Why" class="small quiet">${x.note || DRINK_KIND[x.kind]}</td>
             <td class="act"><div class="row" style="justify-content:flex-end">${x.kind === 'skip' && x.note.startsWith('Not a drink') ? '' : html`<button class="btn" type="button" data-act="mkAsk" data-id="${x.menuItemId}">Ask Claude</button>`}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`)}</tbody></table></div>` : ''}
-      ${skipped.length ? html`<p class="small quiet" style="margin-top:12px">${plural(skipped.length, 'drink')} skipped for now: ${skipped.map((x) => x.menuItem).join(', ')}. <button class="btn ghost" type="button" data-act="mkUnskip">Show them again</button></p>` : ''}
+      ${skipped.length ? html`<p class="small quiet" style="margin-top:12px">${plural(skipped.length, 'item')} skipped for now: ${skipped.map((x) => x.menuItem).join(', ')}. <button class="btn ghost" type="button" data-act="mkUnskip">Show them again</button></p>` : ''}
     </section>`;
 }
 actions.mkRun = async () => {
   const pours = { peg: int(ui.pPeg), large: int(ui.pLarge), glass: int(ui.pGlass) };
   try { localStorage.setItem(POUR_KEY, JSON.stringify(pours)); } catch { /* this visit only */ }
   ui.error = null;
-  ui.mk = await api('POST', `${B()}/stock/recipes/suggest`, { ...pours, claude: !!ui.pClaude });
+  ui.mk = await api('POST', `${B()}/stock/recipes/suggest`, { ...pours, claude: !!ui.pClaude, categories: ui.mkCats, detail: ui.mkDetail });
   ui.mkPours = pours;
+  ui.mkShowCat = ''; ui.mkShowKind = ''; ui.mkAdd = null;
   ui.mkNew = {};
   // Ticked to start: worked out from the name with nothing to check. Claude's and doubtful ones wait for a person.
   ui.mkSel = ui.mk.proposals.filter((x) => x.lines.length && !x.check).map((x) => x.menuItemId);
@@ -1509,6 +1545,40 @@ actions.mkSelAll = (_d, el) => { ui.mkSel = el.checked ? ui.mk.proposals.filter(
 actions.mkQty = (d, el) => { mkFind(d.id).lines[Number(d.i)].qty = int(el.value); };
 actions.mkNewName = (d, el) => { ui.mkNew[d.key] = { ...ui.mkNew[d.key], name: el.value.trim() }; };
 actions.mkNewPack = (d, el) => { ui.mkNew[d.key] = { ...ui.mkNew[d.key], packSize: int(el.value) }; };
+actions.mkCat = (d, el) => { const s = new Set(ui.mkCats); if (el.checked) s.add(d.cat); else s.delete(d.cat); ui.mkCats = [...s]; rerender(); };
+actions.mkCatsAll = (d) => { const bar = d.bar === '1'; ui.mkCats = [...new Set([...ui.mkCats, ...ui.mkSections.filter((x) => x.bar === bar).map((x) => x.category)])]; rerender(); };
+actions.mkCatsNone = (d) => { const bar = d.bar === '1'; const drop = new Set(ui.mkSections.filter((x) => x.bar === bar).map((x) => x.category)); ui.mkCats = ui.mkCats.filter((c) => !drop.has(c)); rerender(); };
+actions.mkDetail = (_d, el) => { ui.mkDetail = el.value; rerender(); };
+// Ingredient lines: remove one, or add a stock item (existing, proposed, or new) to an item's recipe before saving.
+actions.mkLineX = (d) => { const p = mkFind(d.id); p.lines.splice(Number(d.i), 1); p.edited = true; if (!p.lines.length) ui.mkSel = ui.mkSel.filter((x) => x !== d.id); rerender(); };
+actions.mkAdd = (d) => { Object.assign(ui, { mkAdd: d.id, maChoice: '', maQty: '', maName: '', maUnit: 'g', maPackSize: '' }); ui.error = null; rerender(); };
+actions.mkAddCancel = () => { ui.mkAdd = null; rerender(); };
+actions.mkAddGo = (d) => {
+  const p = mkFind(d.id);
+  const qty = int(ui.maQty);
+  if (!ui.maChoice) throw new Error('Choose the stock item to add.');
+  if (!(qty > 0)) throw new Error('Type the amount for one serving: a whole number above zero.');
+  let line;
+  if (ui.maChoice === '__new') {
+    const name = (ui.maName ?? '').trim();
+    const unit = ui.maUnit || 'g';
+    const pack = int(ui.maPackSize);
+    if (!name) throw new Error('Type the new stock item’s name.');
+    if (!(pack > 0)) throw new Error(`Type how many ${unit} are in one pack (1000 for 1 kg or 1 litre, 1 for a single piece).`);
+    const have = ui.st.items.find((i) => i.name.toLowerCase() === name.toLowerCase());
+    if (have) line = { stockItemId: have.id };
+    else {
+      const key = ui.mk.newItems.find((n) => n.name.toLowerCase() === name.toLowerCase() && n.unit === unit)?.key ?? `new:${unit}:${name.toLowerCase()}`;
+      if (!ui.mk.newItems.some((n) => n.key === key)) ui.mk.newItems.push({ key, name, unit, packName: unit === 'pcs' ? 'piece' : unit === 'ml' ? 'litre' : 'kg', packSize: pack });
+      line = { newKey: key };
+    }
+  } else line = ui.maChoice.startsWith('new:') ? { newKey: ui.maChoice } : { stockItemId: ui.maChoice };
+  if (p.lines.some((l) => (line.newKey ? l.newKey === line.newKey : l.stockItemId === line.stockItemId))) throw new Error(`${p.menuItem} already has that ingredient: change its amount instead.`);
+  p.lines.push({ ...line, qty, label: String(qty) });
+  p.edited = true;
+  ui.mkAdd = null; ui.error = null;
+  rerender();
+};
 actions.mkSkip = (d) => { mkFind(d.id).skipped = true; ui.mkSel = ui.mkSel.filter((x) => x !== d.id); ui.error = null; rerender(); };
 actions.mkUnskip = () => { for (const x of ui.mk.proposals) x.skipped = false; rerender(); };
 /** Saves these drinks' recipes (with any new stock items they need) and marks them saved, without reloading the page. */
@@ -1535,7 +1605,7 @@ async function mkSave(chosen) {
 actions.mkSaveOne = (d) => mkSave([mkFind(d.id)]);
 actions.mkApply = () => mkSave(ui.mk.proposals.filter((x) => x.lines.length && !x.saved && !x.skipped && ui.mkSel.includes(x.menuItemId)));
 actions.mkAsk = async (d) => {
-  const r = await api('POST', `${B()}/stock/recipes/ask`, { menuItemId: d.id, ...(ui.mkPours ?? {}), newItems: ui.mk.newItems });
+  const r = await api('POST', `${B()}/stock/recipes/ask`, { menuItemId: d.id, ...(ui.mkPours ?? {}), detail: ui.mkDetail, newItems: ui.mk.newItems });
   const i = ui.mk.proposals.findIndex((x) => x.menuItemId === d.id);
   ui.mk.proposals[i] = r.proposal;
   ui.mk.newItems = [...ui.mk.newItems, ...r.newItems.filter((n) => !ui.mk.newItems.some((x) => x.key === n.key))];

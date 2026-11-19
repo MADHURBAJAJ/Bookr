@@ -580,3 +580,24 @@ input.in.mkqty { width: 84px; flex: 0 0 84px; text-align: right; }
 .ibtn.ok:hover { background: var(--go-tint); border-color: var(--go-line); }
 tr.mksaved td { color: var(--quiet); }
 .savedtag { display: inline-block; font-size: 13px; font-weight: 700; color: var(--go-dark); }
+/* Make recipes: sections and ingredient lines */
+.catgrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 18px; margin: 6px 0 4px; }
+.catgrid label { display: flex; align-items: center; gap: 10px; min-height: 40px; }
+.catgrid .n { color: var(--quiet); font-size: 13px; }
+.grouphead { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+.grouphead h3 { margin: 0; font-size: 15px; }
+.links { display: flex; gap: 4px; }
+.links button { background: none; border: 0; color: var(--pri); font-weight: 700; cursor: pointer; padding: 4px 6px; font-size: 14px; min-height: 36px; }
+.choice { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.choice label { display: flex; gap: 10px; align-items: flex-start; max-width: 900px; cursor: pointer; }
+.choice input { margin-top: 3px; width: 18px; height: 18px; accent-color: var(--pri); flex: none; }
+.filterbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.filterbar select.in { width: 260px; }
+.lnx { border: 0; background: none; color: var(--quiet); font-size: 20px; line-height: 1; width: 32px; height: 32px; border-radius: 8px; cursor: pointer; }
+.lnx:hover { background: var(--bad-tint); color: var(--bad); }
+.addln { padding: 0 8px; min-height: 36px; margin-top: 2px; }
+.mkadd { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.mkadd select.in { width: 220px; flex: 0 1 220px; }
+.mkadd input.in { width: 160px; flex: 0 1 160px; }
+.mkadd input.in.mkqty, .mkadd select.mkunit { width: 90px; flex: 0 0 90px; }
+@media (max-width: 760px) { .catgrid { grid-template-columns: 1fr; } .filterbar select.in { width: 100%; } }

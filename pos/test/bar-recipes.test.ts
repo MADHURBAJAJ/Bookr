@@ -124,4 +124,38 @@ describe('Make recipes', () => {
     expect((await counter.post(`${B}/stock/recipes/suggest`, {})).status).toBe(403);
     expect((await owner.post(`${B}/stock/recipes/ask`, { menuItemId: other.items['Beer 650 ml'] })).status).toBe(404);
   });
+
+  it('lists sections, and sends only the chosen kitchen sections to Claude at the chosen detail', async () => {
+    const s = await setupBusiness();
+    const { B, owner, ok } = s;
+    const tikka = (await ok(owner.post(`${B}/menu`, { name: 'Sample Paneer Tikka', category: 'Starters', price: '280' }))).id;
+    await ok(owner.post(`${B}/menu`, { name: 'Sample Gulab Jamun', category: 'Desserts', price: '120' }));
+    await ok(owner.post(`${B}/menu`, { name: 'Sample Rum 30 ml', category: 'Bar: Pegs', station: 'bar', price: '200' }));
+    const secs = (await ok(owner.get(`${B}/stock/recipes/sections`))).sections;
+    expect(secs.find((x: any) => x.category === 'Bar: Pegs')).toEqual({ category: 'Bar: Pegs', n: 1, bar: true });
+    expect(secs.find((x: any) => x.category === 'Starters')).toEqual({ category: 'Starters', n: 1, bar: false });
+
+    mocked.mockResolvedValue({ model: 'claude-opus-5-5', data: { drinks: [{ n: 1, menuItem: 'Sample Paneer Tikka', note: '', lines: [
+      { stock: 'Paneer', qty: 150, unit: 'g', isNew: true, packName: 'kg', packSize: 1000 },
+      { stock: 'Oil', qty: 15, unit: 'ml', isNew: true, packName: 'litre', packSize: 1000 },
+    ] }] } });
+    const r = await ok(owner.post(`${B}/stock/recipes/suggest`, { categories: ['Starters', 'Bar: Pegs'], claude: true, detail: 'major' }));
+    expect(mocked).toHaveBeenCalledTimes(1);
+    const prompt = String(mocked.mock.calls[0][1]);
+    expect(prompt).toContain('MAJOR ingredients');
+    expect(prompt).toContain('1. Sample Paneer Tikka — Starters');
+    expect(prompt).not.toContain('Gulab Jamun');                               // a section not chosen
+    expect(r.proposals.map((x: any) => x.menuItem).sort()).toEqual(['Sample Paneer Tikka', 'Sample Rum 30 ml']);
+    expect(r.proposals.find((x: any) => x.menuItemId === tikka)).toMatchObject({ kind: 'kitchen', source: 'claude', check: true,
+      lines: [{ newKey: 'new:g:paneer', qty: 150 }, { newKey: 'new:ml:oil', qty: 15 }] });
+
+    // "All ingredients" asks for everything; Ask Claude on a kitchen dish uses the kitchen question.
+    mocked.mockClear();
+    await ok(owner.post(`${B}/stock/recipes/ask`, { menuItemId: tikka, detail: 'all' }));
+    expect(String(mocked.mock.calls[0][1])).toContain('ALL ingredients');
+    // Without Claude, kitchen dishes wait for a person.
+    const plain = await ok(owner.post(`${B}/stock/recipes/suggest`, { categories: ['Starters'] }));
+    expect(plain.proposals[0]).toMatchObject({ kind: 'kitchen', lines: [] });
+    expect(plain.claudeNote).toContain('kitchen dishes were not sent to Claude');
+  });
 });
