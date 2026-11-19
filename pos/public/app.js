@@ -1521,9 +1521,15 @@ async function settingsScreen(tab = 'menu') {
   const kinds = { discount: 'Discount', comp: 'Complimentary', void: 'Void', kot_cancel: 'Cancelled KOT line' };
   rerender = () => {
     let body = '';
+    const menuShown = menuFilter();
     if (tab === 'menu') body = html`${menuSheetPanel()}<section class="panel"><h2>Menu</h2>${ui.upName ? '' : errorBox()}
+      <div class="gtools"><input class="in" type="search" data-model="mQ" data-live value="${ui.mQ ?? ''}" placeholder="Search items or categories" aria-label="Search items">
+        <select class="in" style="flex:0 1 220px" data-model="mCat" aria-label="Category"><option value="">All categories</option>${[...new Set(cache.menu.map((m) => m.category))].sort().map((c) => html`<option ${ui.mCat === c ? 'selected' : ''}>${c}</option>`)}</select>
+        <span class="small quiet">${menuShown.length === cache.menu.length ? plural(cache.menu.length, 'item') : `${menuShown.length} of ${cache.menu.length} items`}</span>
+        <button class="btn" type="button" data-act="mNew">+ Add item</button></div>
+      ${menuShown.length ? '' : html`<p class="quiet">No item matches${ui.mQ ? ` “${ui.mQ}”` : ''}${ui.mCat ? ` in ${ui.mCat}` : ''}.</p>`}
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
-        ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
+        ${menuShown.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
           ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
           <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
           <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}</td>
@@ -2144,6 +2150,13 @@ actions.addItem = async () => {
   else await api('POST', B() + '/menu', body);
   flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.` }; route();
 };
+/** Items the Menu tab shows: matching the search (name or category, any word order) and the chosen category. */
+function menuFilter() {
+  const words = String(ui.mQ ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  return cache.menu.filter((m) => (!ui.mCat || m.category === ui.mCat) && words.every((w) => m.name.toLowerCase().includes(w) || m.category.toLowerCase().includes(w)));
+}
+const toItemForm = () => setTimeout(() => root.querySelector('form.grid3')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0);
+actions.mNew = () => { Object.assign(ui, { editItem: null, iName: '', iCat: ui.mCat ?? '', iPrice: '', iStationId: '', iKot: 'category', iTax: 'category', iOpen: 'no', iMin: '', iGroups: [], iPrices: {} }); rerender(); toItemForm(); root.querySelector('[data-model="iName"]')?.focus({ preventScroll: true }); };
 actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStationId: m.stationId ?? '', iKot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', iTax: taxValue(m),
   iOpen: m.openPrice ? 'yes' : 'no', iMin: m.minPricePaise != null ? rupees(m.minPricePaise) : '', iGroups: [...(m.addonGroups ?? [])],
   iPrices: Object.fromEntries(Object.entries(m.addonPrices ?? {}).map(([g, ps]) => [g, Object.fromEntries(Object.entries(ps).map(([k, v]) => [k, rupeesShort(v)]))])) }); rerender(); };
