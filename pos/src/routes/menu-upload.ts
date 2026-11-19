@@ -5,7 +5,9 @@ import { Hono, type Context } from 'hono';
 import { all, newId, now } from '../../../src/db';
 import { body, fail } from '../../../src/http';
 import { requireAction } from '../auth';
-import { parseCsv, plan, readSheet, sheetOf, type Existing, type Plan, type TaxMode } from '../menu-sheet';
+import { z } from 'zod';
+import { OcrError, readWithClaude } from '../../../src/claude';
+import { FIELD_NAMES, FIELDS, HEADER, parseCsv, plan, readSheet, sampleSheet, sheetOf, toCsv, type Columns, type Defaults, type Existing, type Plan, type SheetResult, type TaxMode } from '../menu-sheet';
 import { audit } from '../util';
 import type { AppEnv } from '../types';
 
@@ -41,11 +43,32 @@ async function checked(c: Context<AppEnv>, bid: string) {
   const csv = data.csv;
   if (typeof csv !== 'string' || !csv.trim()) fail(400, 'Choose a CSV file.');
   if (csv.length > MAX) fail(400, 'The file is larger than 1 MB.');
+  const columns: Partial<Columns> = {};
+  if (data.columns !== undefined) {
+    if (!data.columns || typeof data.columns !== 'object') fail(400, 'Columns must be a list of choices.');
+    for (const [k, v] of Object.entries(data.columns as Record<string, unknown>)) {
+      if (!(FIELDS as readonly string[]).includes(k) || !Number.isInteger(v) || (v as number) < -1 || (v as number) > 200) fail(400, 'A column choice is not valid.');
+      columns[k as keyof Columns] = v as number;
+    }
+  }
+  const defaults: Defaults = {};
+  if (data.defaults !== undefined) {
+    const d = data.defaults as Record<string, unknown>;
+    if (!d || typeof d !== 'object' || Object.keys(d).length > 300) fail(400, 'Category choices are not valid.');
+    for (const [k, v] of Object.entries(d)) {
+      const x = (v ?? {}) as Record<string, unknown>;
+      if (k.length > 40 || [x.tax, x.station].some((y) => y !== undefined && (typeof y !== 'string' || y.length > 40))) fail(400, 'Category choices are not valid.');
+      defaults[k] = { tax: x.tax as string | undefined, station: x.station as string | undefined };
+    }
+  }
   const now0 = await existing(c.env.DB, bid);
-  const p = plan(readSheet(parseCsv(csv)), now0);
-  return { csv, now: now0, plan: p, hash: await sha(JSON.stringify(p)), data };
+  const sheet = readSheet(parseCsv(csv), { columns, defaults });
+  const p = plan(sheet, now0);
+  return { csv, now: now0, plan: p, sheet, hash: await sha(JSON.stringify({ p, columns: sheet.columns })), data };
 }
-const summary = (p: Plan, hash: string) => ({
+const summary = (p: Plan, hash: string, sheet: SheetResult) => ({
+  headings: sheet.headings, columns: sheet.columns, fields: FIELDS.map((f) => ({ key: f, name: FIELD_NAMES[f] })), needs: sheet.needs,
+  exactHeadings: FIELDS.every((f, i) => sheet.columns[f] < 0 || sheet.headings[sheet.columns[f]]?.trim().toLowerCase() === HEADER[i].toLowerCase()),
   ok: !p.errors.length, planHash: hash, errors: p.errors.slice(0, 100), errorCount: p.errors.length,
   items: p.items.length, added: p.added, back: p.back, off: p.off.map((o) => `${o.name} (${o.category})`), priceChanges: p.priceChanges, otherChanges: p.otherChanges,
   categories: p.categories, groups: p.groups.map((g) => ({ ...g, items: p.items.filter((i) => i.groups.some((n) => norm(n) === norm(g.name))).length })),
@@ -60,7 +83,7 @@ menuUploadRoutes.get(`${B}/menu/sheet`, requireAction('menu.edit'), async (c) =>
 
 menuUploadRoutes.post(`${B}/menu/upload/check`, requireAction('menu.upload'), async (c) => {
   const r = await checked(c, c.get('businessId'));
-  return c.json(summary(r.plan, r.hash));
+  return c.json(summary(r.plan, r.hash, r.sheet));
 });
 
 menuUploadRoutes.post(`${B}/menu/upload/apply`, requireAction('menu.upload'), async (c) => {
@@ -123,11 +146,67 @@ menuUploadRoutes.post(`${B}/menu/upload/apply`, requireAction('menu.upload'), as
   }
 });
 
+// A small sheet with invented rows showing every column, to fill in.
+menuUploadRoutes.get(`${B}/menu/sample`, requireAction('menu.edit'), (c) =>
+  c.body('\uFEFF' + sampleSheet(), 200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="menu-sample.csv"' }));
+
+// A photo or PDF of a printed menu, read by Claude into the sheet layout, then checked like any other upload. Claude
+// leaves GST empty (asked per category on screen) and the station when the menu does not make it plain. The page is kept.
+const MenuReading = z.object({
+  items: z.array(z.object({
+    name: z.string(), category: z.string().nullable(), priceRupees: z.number().nullable(), priceAtBilling: z.boolean(),
+    station: z.enum(['Kitchen', 'Bar']).nullable(), addons: z.string().nullable(),
+  })),
+});
+const MENU_READ = `This is a page of a restaurant and bar menu in India (a photo or a PDF). List every item on it, in order:
+- name: the item as printed (fix only obvious spelling slips; keep sizes like "30 ml", "650 ml", "Half").
+- category: the heading the item is under, as printed (title case); null if there is none.
+- priceRupees: the price as a number. If an item shows two prices for sizes (Half / Full, Small / Large, 30 ml / 60 ml),
+  list it once with the first price and put the sizes in addons as: Choose one: Half / Full +₹<difference>.
+  If the menu says MRP, market price, at actuals or shows no price, use null and set priceAtBilling true.
+- priceAtBilling: true only as said above.
+- station: "Bar" for alcohol, cocktails, mocktails and cold drinks served at a bar when the menu shows a bar section;
+  "Kitchen" for food; null when you cannot tell.
+- addons: extras printed with a price, e.g. "Extra cheese +₹50", as: Extra Cheese +₹50 (several separated by "; "); else null.
+Do not guess GST or taxes: leave them out. Never invent an item or a price: use null for anything you cannot read.`;
+const MAX_READ = 10 * 1024 * 1024;
+const READS_PER_DAY = 20;
+
+menuUploadRoutes.post(`${B}/menu/upload/read`, requireAction('menu.upload'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim();
+  if (type !== 'image/jpeg' && type !== 'image/png' && type !== 'application/pdf') fail(400, 'Send a JPEG or PNG photo, or a PDF, of the menu.');
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (!bytes.length) fail(400, 'The file is empty.');
+  if (bytes.length > MAX_READ) fail(400, 'The file is larger than 10 MB.');
+  const t = now();
+  const used = await all<{ n: number }>(db, "SELECT count(*) AS n FROM audit_log WHERE business_id = ? AND action = 'menu.read' AND created_at > ?", bid, t - 86_400_000);
+  if (used[0].n >= READS_PER_DAY) fail(429, `Today's ${READS_PER_DAY} menu readings are used up. Try again tomorrow, or fill in the sample sheet.`);
+  let key: string | null = null;
+  if (c.env.BILLS) {
+    key = `pos/${bid}/menus/read-${new Date(t).toISOString().replace(/[:.]/g, '-')}.${type === 'application/pdf' ? 'pdf' : type === 'image/png' ? 'png' : 'jpg'}`;
+    await c.env.BILLS.put(key, bytes, { httpMetadata: { contentType: type }, customMetadata: { by: c.get('staff').name } });
+  }
+  let read: z.infer<typeof MenuReading>;
+  try {
+    read = (await readWithClaude(c.env, { bytes, mediaType: type }, MENU_READ, MenuReading)).data;
+  } catch (e) {
+    if (e instanceof OcrError) fail(e.status, e.message.replace(/type the rows in/gi, 'fill in the sample sheet'));
+    throw e;
+  }
+  await audit(db, bid, c.get('staff').id, 'menu.read', 'menu_items', bid, null, { file: key, items: read.items.length }).run();
+  const rp = (n: number | null) => (n === null ? '' : String(Math.round(n * 100) / 100));
+  const csv = toCsv([['Item', 'Category', 'Price (₹)', 'Price at billing', 'Tax', 'Station', 'Add-ons & choices'],
+    ...read.items.map((i) => [i.name, i.category ?? '', rp(i.priceRupees), i.priceAtBilling || i.priceRupees === null ? 'Yes' : '', '', i.station ?? '', i.addons ?? ''])]);
+  return c.json({ csv, items: read.items.length });
+});
+
 // Files uploaded before, newest first, and each one as it was.
 menuUploadRoutes.get(`${B}/menu/uploads`, requireAction('menu.upload'), async (c) => {
   if (!c.env.BILLS) return c.json({ uploads: [] });
   const list = await c.env.BILLS.list({ prefix: `pos/${c.get('businessId')}/menus/`, include: ['customMetadata'] });
-  return c.json({ uploads: list.objects.map((o) => ({ name: o.key.split('/').pop(), at: o.uploaded.getTime(), by: o.customMetadata?.by ?? null, items: Number(o.customMetadata?.items ?? 0) }))
+  return c.json({ uploads: list.objects.filter((o) => o.key.endsWith('.csv') && !o.key.includes('/read-')).map((o) => ({ name: o.key.split('/').pop(), at: o.uploaded.getTime(), by: o.customMetadata?.by ?? null, items: Number(o.customMetadata?.items ?? 0) }))
     .sort((a, b) => b.at - a.at).slice(0, 30) });
 });
 menuUploadRoutes.get(`${B}/menu/uploads/:name`, requireAction('menu.upload'), async (c) => {

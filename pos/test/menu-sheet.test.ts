@@ -1,6 +1,13 @@
 // The menu as a sheet: download, check, apply. All rows invented.
-import { afterAll, describe, expect, it } from 'vitest';
-import { groupText, parseCsv, readGroups, readSheet, readTax } from '../src/menu-sheet';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../src/claude', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/claude')>();
+  return { ...real, readWithClaude: vi.fn() };
+});
+
+import { readWithClaude } from '../../src/claude';
+import { groupText, guessColumns, parseCsv, readGroups, readSheet, readStation, readTax } from '../src/menu-sheet';
 import { app } from '../src/app';
 import { Client, dispose, env, q, setupBusiness } from './helpers';
 
@@ -16,7 +23,13 @@ describe('reading the sheet', () => {
   it('reads taxes, add-ons and every bad row', () => {
     expect(readTax('GST 18%')).toEqual({ mode: 'rate', bp: 1800 });
     expect(readTax('No GST (not a sale)')).toEqual({ mode: 'none', bp: null });
-    expect(readTax('VAT')).toBeNull();
+    expect(readTax('abc')).toBeNull();
+    for (const [t, want] of [['5%', 'rate:500'], ['GST5', 'rate:500'], ['gst @ 18%', 'rate:1800'], ['18', 'rate:1800'], ['Nil', 'none:'], ['0%', 'none:'],
+      ['Billing name (5%)', 'billing:'], ['Liquor', 'liquor:'], ['Non-GST', 'liquor:'], ['VAT', 'liquor:']] as const) {
+      const x = readTax(t)!;
+      expect(`${x.mode}:${x.bp ?? ''}`, t).toBe(want);
+    }
+    expect([readStation('KOT'), readStation('Bar Counter'), readStation('Barbecue'), readStation('Main Kitchen')]).toEqual(['kitchen', 'bar', null, 'kitchen']);
     expect(readGroups('Choose one: Steamed / Fried +₹10')).toEqual([{ name: 'Steamed or Fried', def: { name: 'Steamed or Fried', kind: 'one', options: [{ name: 'Steamed', addPaise: 0 }, { name: 'Fried', addPaise: 1000 }] } }]);
     expect(readGroups('Toppings (any): Olives +₹20 / Corn +₹15; Size')).toEqual([
       { name: 'Toppings', def: { name: 'Toppings', kind: 'any', options: [{ name: 'Olives', addPaise: 2000 }, { name: 'Corn', addPaise: 1500 }] } }, { name: 'Size', def: null }]);
@@ -24,11 +37,29 @@ describe('reading the sheet', () => {
       const [g] = readGroups(t) as { def: any }[];
       expect(groupText(g.def)).toBe(t);
     }
-    const r = readSheet(parseCsv('Item,Category,Price,Tax,Station\nA,Food,abc,GST 5%,Kitchen\nB,Food,10,VAT,Kitchen\nC,Food,10,GST 5%,Hall\nD,Food,10,GST 5%,Kitchen\nd,food,12,GST 5%,Kitchen\n'));
+    const r = readSheet(parseCsv('Item,Category,Price,Tax,Station\nA,Food,abc,GST 5%,Kitchen\nB,Food,10,GST 7%,Kitchen\nC,Food,10,GST 5%,Hall\nD,Food,10,GST 5%,Kitchen\nd,food,12,GST 5%,Kitchen\n'));
     expect(r.errors).toEqual([
-      'Row 2 (A): "abc" is not a price.', 'Row 3 (B): tax "VAT" should be Billing name, GST 5% (or 12, 18, 28, 40, 0), No GST (liquor) or No GST.',
-      'Row 4 (C): station must be Kitchen or Bar.', 'Row 6 (d): the same item and category as row 5.']);
-    expect(readSheet(parseCsv('Name,Price\nA,1\n')).errors[0]).toMatch(/missing these columns: Category, Tax, Station/);
+      'Row 2 (A): "abc" is not a price.', 'Row 3 (B): tax "GST 7%" should be Billing name, GST 5% (or 12, 18, 28, 40), No GST (liquor) or No GST.',
+      'Row 4 (C): station "Hall" should be Kitchen or Bar.', 'Row 6 (d): the same item and category as row 5.']);
+    expect(readSheet(parseCsv('Dish,Notes\nA,x\n')).errors).toEqual(['Choose which column is the Price.']);
+  });
+
+  it('understands other layouts: other headings, a title line, section rows, MRP, and asks per category for GST and station', () => {
+    expect(guessColumns(['Sr No', 'Item Name', 'Group', 'Rate', 'GST %', 'KOT', 'Veg/NV', 'HSN'])).toEqual(
+      { item: 1, category: 2, price: 3, open: -1, min: -1, tax: 4, station: 5, sac: 7, addons: -1 });
+    // "Price" is the price even when an "MRP" column is also there.
+    expect(guessColumns(['Name', 'MRP', 'Price']).price).toBe(2);
+    const sheet = 'Sample Cafe menu 2026\n\nItem Name,Rate,KOT\nSTARTERS,,\nPaneer Tikka,280/-,Kitchen\nCrispy Corn,₹ 220,\nBAR,,\nBeer,320,Bar\nWhisky bottle,MRP,Bar\n';
+    const a = readSheet(parseCsv(sheet));
+    expect(a.errors).toEqual([]);
+    expect(a.needs).toEqual([{ category: 'STARTERS', tax: true, station: true, items: 2 }, { category: 'BAR', tax: true, station: false, items: 2 }]);
+    const b = readSheet(parseCsv(sheet), { defaults: { starters: { tax: 'Billing name', station: 'Kitchen' }, BAR: { tax: 'No GST (liquor)' } } });
+    expect(b.needs).toEqual([]);
+    expect(b.rows.map((r) => [r.line, r.name, r.category, r.pricePaise, r.openPrice, r.station, r.tax.mode])).toEqual([
+      [5, 'Paneer Tikka', 'STARTERS', 28000, false, 'kitchen', 'billing'], [6, 'Crispy Corn', 'STARTERS', 22000, false, 'kitchen', 'billing'],
+      [8, 'Beer', 'BAR', 32000, false, 'bar', 'liquor'], [9, 'Whisky bottle', 'BAR', 0, true, 'bar', 'liquor']]);
+    // A column chosen on screen wins over the guess.
+    expect(readSheet(parseCsv('A,B,C\nTea,Drinks,40\n'), { columns: { item: 0, category: 1, price: 2 } }).needs).toEqual([{ category: 'Drinks', tax: true, station: true, items: 1 }]);
   });
 });
 
@@ -91,6 +122,48 @@ describe('menu upload', () => {
     expect(file).toMatchObject({ status: 200, text: csv });
     expect((await download(s.owner, `${s.B}/menu/uploads/..%2Fx.csv`)).status).toBe(404);
     expect((await q("SELECT action FROM audit_log WHERE business_id = ? AND action = 'menu.upload'", s.businessId))).toHaveLength(1);
+  });
+
+  it('gives a sample that checks clean, takes column and category choices, and reads a menu photo with Claude', async () => {
+    const s = await setupBusiness();
+    const sample = await download(s.owner, `${s.B}/menu/sample`);
+    expect(sample.status).toBe(200);
+    const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: sample.text }));
+    expect(r).toMatchObject({ ok: true, exactHeadings: true, needs: [] });
+    expect(r.items).toBe(10);
+
+    const other = 'Dish,Price INR,Section\nMasala Tea,40,Drinks\nLassi,90,Drinks\n';
+    const a = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: other }));
+    expect(a).toMatchObject({ ok: false, exactHeadings: false, needs: [{ category: 'Drinks', tax: true, station: true, items: 2 }] });
+    expect(a.columns).toMatchObject({ item: 0, price: 1, category: 2, tax: -1 });
+    const defaults = { Drinks: { tax: 'Billing name', station: 'Kitchen' } };
+    const b = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: other, defaults }));
+    expect(b).toMatchObject({ ok: true, added: ['Masala Tea', 'Lassi'] });
+    // The hash covers the choices: applying with other choices is refused.
+    expect((await s.owner.post(`${s.B}/menu/upload/apply`, { csv: other, defaults: { Drinks: { tax: 'GST 18%', station: 'Kitchen' } }, planHash: b.planHash })).status).toBe(409);
+    expect((await s.owner.post(`${s.B}/menu/upload/check`, { csv: other, columns: { price: 99 } })).status).toBe(200);
+    expect((await s.owner.post(`${s.B}/menu/upload/check`, { csv: other, columns: { nope: 1 } })).status).toBe(400);
+
+    // A photo of a printed menu: Claude's rows come back as a sheet without GST, to check like any other.
+    vi.mocked(readWithClaude).mockResolvedValueOnce({ model: 'test', data: { items: [
+      { name: 'Veg Momos', category: 'Snacks', priceRupees: 120, priceAtBilling: false, station: 'Kitchen', addons: 'Choose one: Steamed / Fried +₹10' },
+      { name: 'Red Wine bottle', category: 'Bar', priceRupees: null, priceAtBilling: true, station: null, addons: null },
+    ] } });
+    const photo = await app.request(`/api${s.B}/menu/upload/read`, { method: 'POST', body: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      headers: { 'Content-Type': 'image/jpeg', Cookie: [...s.owner.cookies].map(([k, v]) => `${k}=${v}`).join('; ') } }, env);
+    expect(photo.status).toBe(200);
+    const read = await photo.json() as { csv: string; items: number };
+    expect(read.items).toBe(2);
+    expect(read.csv).toContain('Red Wine bottle,Bar,,Yes,,,');
+    const c = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv: read.csv }));
+    expect(c.needs).toEqual([{ category: 'Snacks', tax: true, station: false, items: 1 }, { category: 'Bar', tax: true, station: true, items: 1 }]);
+    // Only the Owner, and only pages.
+    const asCashier = await app.request(`/api${s.B}/menu/upload/read`, { method: 'POST', body: new Uint8Array([1]),
+      headers: { 'Content-Type': 'image/jpeg', Cookie: [...s.counter.cookies].map(([k, v]) => `${k}=${v}`).join('; ') } }, env);
+    expect(asCashier.status).toBe(403);
+    const asText = await app.request(`/api${s.B}/menu/upload/read`, { method: 'POST', body: 'x',
+      headers: { 'Content-Type': 'text/plain', Cookie: [...s.owner.cookies].map(([k, v]) => `${k}=${v}`).join('; ') } }, env);
+    expect(asText.status).toBe(415);
   });
 
   it('refuses a file with bad rows, and names them', async () => {

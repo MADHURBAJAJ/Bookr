@@ -37,12 +37,13 @@ export function parseCsv(text: string): string[][] {
     else if (ch === '\n' || ch === '\r') {
       if (ch === '\r' && t[i + 1] === '\n') i++;
       row.push(cell); cell = '';
-      if (row.some((c) => c.trim())) rows.push(row);
+      rows.push(row); // blank lines kept, so row numbers match the spreadsheet
       row = [];
     } else cell += ch;
   }
   row.push(cell);
-  if (row.some((c) => c.trim())) rows.push(row);
+  rows.push(row);
+  while (rows.length && rows[rows.length - 1].every((c) => !c.trim())) rows.pop();
   return rows;
 }
 
@@ -58,16 +59,28 @@ function money(t: string): number | null {
   return m ? Number(m[1]) * 100 + Number((m[2] ?? '').padEnd(2, '0')) : null;
 }
 
-/** "Billing name", "GST 18%", "No GST (liquor)", "No GST". */
+/** "Billing name", "GST 18%", "No GST (liquor)", "No GST"; also "5%", "GST5", "18", "Nil", "Exempt", "Liquor", "Non-GST". */
 export function readTax(t: string): Tax | null {
-  const s = norm(t);
-  if (s.startsWith('billing name')) return { mode: 'billing', bp: null };
-  if (s.includes('liquor')) return { mode: 'liquor', bp: null };
-  if (s.startsWith('no gst') || s === 'exempt') return { mode: 'none', bp: null };
-  const m = /^gst\s*(\d+)\s*%$/.exec(s);
-  if (m && [0, 5, 12, 18, 28, 40].includes(Number(m[1]))) return { mode: 'rate', bp: Number(m[1]) * 100 };
+  const s = norm(t).replace(/[@()]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  if (s.startsWith('billing name') || s === 'billing' || s === 'default' || s === 'as per billing name') return { mode: 'billing', bp: null };
+  if (/liquor|alcohol|non[- ]?gst|\bvat\b/.test(s)) return { mode: 'liquor', bp: null };
+  if (/^(no gst|no tax|nil|nil rated|exempt|exempted|none|-)$/.test(s) || s.startsWith('no gst')) return { mode: 'none', bp: null };
+  const m = /^(?:gst|igst|tax)?\s*(\d+(?:\.\d+)?)\s*%?$/.exec(s) ?? /^(\d+(?:\.\d+)?)\s*%?\s*gst$/.exec(s);
+  if (m && [0, 5, 12, 18, 28, 40].includes(Number(m[1]))) return Number(m[1]) === 0 ? { mode: 'none', bp: null } : { mode: 'rate', bp: Number(m[1]) * 100 };
   return null;
 }
+/** "Kitchen" or "Bar", and the usual other words for them. */
+export function readStation(t: string): 'kitchen' | 'bar' | null {
+  const s = norm(t);
+  if (/^(kitchen|k|kot|food|restaurant|tandoor|chinese|main kitchen|cafe|bakery)$/.test(s) || s.includes('kitchen')) return 'kitchen';
+  if (/^(bar|b|bot|bar counter|liquor|drinks|beverage bar)$/.test(s) || /\bbar\b/.test(s)) return 'bar';
+  return null;
+}
+const YES = /^(yes|y|true|1|open|typed|at billing)$/i;
+/** Price cells that mean "typed at billing": MRP, market price, at actuals. */
+const OPEN_WORDS = /^(mrp|as per mrp|market price|mp|at actual|at actuals|as per actual|variable|open|price at billing|on request)$/i;
+
 export const taxText = (t: Tax) => (t.mode === 'billing' ? 'Billing name' : t.mode === 'rate' ? `GST ${t.bp! / 100}%` : t.mode === 'liquor' ? 'No GST (liquor)' : 'No GST');
 const taxKey = (t: Tax) => `${t.mode}:${t.bp ?? ''}`;
 
@@ -112,45 +125,111 @@ export function groupText(g: Group): string {
 }
 
 export const HEADER = ['Item', 'Category', 'Price (₹)', 'Price at billing', 'Lowest price (₹)', 'Tax', 'Station', 'SAC', 'Add-ons & choices'];
+export const FIELDS = ['item', 'category', 'price', 'open', 'min', 'tax', 'station', 'sac', 'addons'] as const;
+export type Field = (typeof FIELDS)[number];
+export type Columns = Record<Field, number>;
+export const FIELD_NAMES: Record<Field, string> = { item: 'Item', category: 'Category', price: 'Price', open: 'Price at billing', min: 'Lowest price',
+  tax: 'Tax (GST)', station: 'Station', sac: 'SAC', addons: 'Add-ons & choices' };
+// The headings each column is known by, in other POS exports and hand-made sheets. Compared without capitals, spaces,
+// dots or symbols; the first heading that matches wins, so an exact heading is never taken by a looser one.
+const KNOWN: Record<Field, string[]> = {
+  item: ['item', 'name', 'item name', 'itemname', 'dish', 'dish name', 'product', 'product name', 'description', 'menu item', 'particulars'],
+  category: ['category', 'category name', 'group', 'group name', 'item group', 'section', 'department', 'dept', 'menu group', 'menu category', 'sub category'],
+  price: ['price', 'price (₹)', 'price (rs)', 'rate', 'rate (₹)', 'selling price', 'sale price', 'sp', 'mrp', 'amount', 'price inr', 'base price', 'dine in price', 'unit price'],
+  open: ['price at billing', 'open price', 'variable price', 'open rate', 'price typed', 'ask price'],
+  min: ['lowest price', 'lowest price (₹)', 'minimum price', 'min price', 'floor price'],
+  tax: ['tax', 'gst', 'gst %', 'gst rate', 'tax rate', 'tax %', 'tax slab', 'gst slab', 'tax type', 'tax category'],
+  station: ['station', 'kot', 'kitchen', 'printer', 'kot printer', 'counter', 'section printer', 'kitchen station', 'prep station'],
+  sac: ['sac', 'hsn', 'hsn/sac', 'hsn sac', 'sac code', 'hsn code'],
+  addons: ['add-ons & choices', 'add-ons', 'addons', 'add ons', 'modifiers', 'variants', 'options', 'extras', 'toppings'],
+};
+const squash = (h: string) => norm(h).replace(/[^a-z0-9%₹/&]+/g, ' ').trim();
+/** Which column is which, from the headings. -1: not in the file. */
+export function guessColumns(head: string[]): Columns {
+  const out = Object.fromEntries(FIELDS.map((f) => [f, -1])) as Columns;
+  const taken = new Set<number>();
+  const hs = head.map(squash);
+  // Exact headings first, field by field, then the known other names, so "Price" and "Rate" in one file go where they belong.
+  for (const pass of [0, 1]) for (const f of FIELDS) {
+    if (out[f] >= 0) continue;
+    const names = pass === 0 ? [squash(HEADER[FIELDS.indexOf(f)]), squash(FIELD_NAMES[f])] : KNOWN[f].map(squash);
+    for (const n of names) {
+      const i = hs.findIndex((h, k) => !taken.has(k) && h === n);
+      if (i >= 0) { out[f] = i; taken.add(i); break; }
+    }
+  }
+  return out;
+}
 
-/** Reads the sheet. Every bad row is reported (row number as in the spreadsheet), not just the first. */
-export function readSheet(rows: string[][]): { rows: Row[]; errors: string[] } {
-  if (!rows.length) return { rows: [], errors: ['The file is empty.'] };
-  const [head, ...data] = rows;
-  const find = (...names: string[]) => head.findIndex((h) => names.some((n) => norm(h) === norm(n)));
-  const c = { item: find('Item', 'Name'), cat: find('Category'), price: find('Price (₹)', 'Price (Rs)', 'Price'), open: find('Price at billing'),
-    min: find('Lowest price (₹)', 'Lowest price'), tax: find('Tax', 'GST'), station: find('Station'), sac: find('SAC'), addons: find('Add-ons & choices', 'Add-ons') };
-  const missing = (['item', 'cat', 'price', 'tax', 'station'] as const).filter((k) => c[k] < 0);
-  const label = { item: 'Item', cat: 'Category', price: 'Price (₹)', tax: 'Tax', station: 'Station' };
-  if (missing.length) return { rows: [], errors: [`The file is missing these columns: ${missing.map((k) => label[k]).join(', ')}. Download the menu to see the layout.`] };
-  if (data.length > 2000) return { rows: [], errors: ['The file has more than 2,000 items.'] };
+export interface Defaults { [category: string]: { tax?: string; station?: string } }
+export interface SheetResult {
+  rows: Row[]; errors: string[]; headings: string[]; columns: Columns;
+  /** Categories with rows that have no tax or no station: chosen once for the whole category. */
+  needs: { category: string; tax: boolean; station: boolean; items: number }[];
+}
+
+/**
+ * Reads the sheet. Columns are taken from `columns` when given (chosen on screen), else guessed from the headings.
+ * A blank or missing Tax or Station is taken from `defaults` for the row's category, or asked for; never guessed.
+ * Every bad row is reported (row number as in the spreadsheet), not just the first.
+ */
+export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; defaults?: Defaults } = {}): SheetResult {
+  const empty = Object.fromEntries(FIELDS.map((f) => [f, -1])) as Columns;
+  if (!rows.some((r) => r.some((v) => v.trim()))) return { rows: [], errors: ['The file is empty.'], headings: [], columns: empty, needs: [] };
+  // The heading row: the first row that names an item column (a title line or a blank line above it is skipped).
+  let h = rows.slice(0, 10).findIndex((r) => guessColumns(r).item >= 0);
+  if (h < 0) h = 0;
+  const head = rows[h];
+  const data = rows.slice(h + 1);
+  const c = { ...guessColumns(head), ...Object.fromEntries(Object.entries(opts.columns ?? {}).filter(([, v]) => typeof v === 'number' && v >= -1 && v < head.length)) } as Columns;
+  const base = { headings: head, columns: c, needs: [] as SheetResult['needs'] };
+  const missing = (['item', 'price'] as const).filter((k) => c[k] < 0);
+  if (missing.length) return { ...base, rows: [], errors: [`Choose which column is the ${missing.map((k) => FIELD_NAMES[k]).join(' and the ')}.`] };
+  if (data.length > 2000) return { ...base, rows: [], errors: ['The file has more than 2,000 items.'] };
+  const defaults = new Map(Object.entries(opts.defaults ?? {}).map(([k, v]) => [norm(k), v]));
   const errors: string[] = [];
   const out: Row[] = [];
   const seen = new Map<string, number>();
+  const needs = new Map<string, SheetResult['needs'][number]>();
+  let lastCategory = '';
   data.forEach((r, i) => {
-    const line = i + 2;
+    const line = h + i + 2;
     const get = (k: number) => (k < 0 ? '' : (r[k] ?? '').trim());
     const name = get(c.item).replace(/^'(?=[=+\-@])/, '');
+    // A row with a name but nothing else under a "category" layout (a heading row inside the list) sets the category.
+    if (name && c.category < 0 && r.every((v, k) => k === c.item || !v.trim())) { lastCategory = name; return; }
+    if (!name && r.every((v) => !v.trim())) return;
     const bad = (why: string) => errors.push(`Row ${line}${name ? ` (${name})` : ''}: ${why}`);
-    const category = get(c.cat);
+    const category = (c.category >= 0 ? get(c.category) : '') || lastCategory || 'Menu';
+    if (c.category >= 0 && get(c.category)) lastCategory = get(c.category);
     if (!name || name.length > 80) return bad('the item name must be 1 to 80 characters.');
-    if (!category || category.length > 40) return bad('the category must be 1 to 40 characters.');
+    if (category.length > 40) return bad('the category must be at most 40 characters.');
     const key = `${norm(name)}|${norm(category)}`;
     if (seen.has(key)) return bad(`the same item and category as row ${seen.get(key)}.`);
     seen.set(key, line);
-    const openPrice = /^(yes|y)$/i.test(get(c.open));
-    const p = get(c.price) ? money(get(c.price)) : openPrice ? 0 : null;
-    if (p === null) return bad(get(c.price) ? `"${get(c.price)}" is not a price.` : 'no price, and not price at billing.');
+    const priceCell = get(c.price).replace(/\/-$/, '').trim();
+    const openPrice = YES.test(get(c.open)) || OPEN_WORDS.test(priceCell);
+    const p = priceCell && !OPEN_WORDS.test(priceCell) ? money(priceCell) : openPrice ? 0 : null;
+    if (p === null) return bad(priceCell ? `"${get(c.price)}" is not a price.` : 'no price, and not price at billing.');
     let minPricePaise: number | null | undefined;
     if (c.min >= 0) {
       minPricePaise = get(c.min) ? money(get(c.min)) : null;
       if (get(c.min) && minPricePaise === null) return bad(`lowest price "${get(c.min)}" is not a price.`);
       if (!openPrice) minPricePaise = null;
     }
-    const tax = readTax(get(c.tax));
-    if (!tax) return bad(`tax "${get(c.tax)}" should be Billing name, GST 5% (or 12, 18, 28, 40, 0), No GST (liquor) or No GST.`);
-    const st = norm(get(c.station));
-    if (st !== 'kitchen' && st !== 'bar') return bad('station must be Kitchen or Bar.');
+    const d = defaults.get(norm(category)) ?? {};
+    const taxCell = get(c.tax);
+    const tax = readTax(taxCell || d.tax || '');
+    if (taxCell && !readTax(taxCell)) return bad(`tax "${taxCell}" should be Billing name, GST 5% (or 12, 18, 28, 40), No GST (liquor) or No GST.`);
+    const stCell = get(c.station);
+    const st = readStation(stCell || d.station || '');
+    if (stCell && !readStation(stCell)) return bad(`station "${stCell}" should be Kitchen or Bar.`);
+    if (!tax || !st) {
+      const n = needs.get(norm(category)) ?? { category, tax: false, station: false, items: 0 };
+      n.tax ||= !tax; n.station ||= !st; n.items++;
+      needs.set(norm(category), n);
+      return;
+    }
     const sac = c.sac >= 0 && get(c.sac) ? get(c.sac) : undefined;
     if (sac !== undefined && !/^\d{4,8}$/.test(sac)) return bad('SAC must be 4 to 8 digits.');
     const groups = readGroups(get(c.addons));
@@ -158,7 +237,23 @@ export function readSheet(rows: string[][]): { rows: Row[]; errors: string[] } {
     if (groups.length > 10) return bad('at most 10 add-ons on one item.');
     out.push({ line, name, category, pricePaise: p, openPrice, station: st, tax, groups, minPricePaise, sac });
   });
-  return { rows: out, errors };
+  return { ...base, rows: out, errors, needs: [...needs.values()] };
+}
+
+/** A small sheet with invented rows, showing every column and the forms each one takes. */
+export function sampleSheet(): string {
+  return toCsv([HEADER,
+    ['Paneer Tikka', 'Starters', '280', '', '', 'Billing name', 'Kitchen', '996332', ''],
+    ['Veg Burger', 'Snacks', '160', '', '', 'Billing name', 'Kitchen', '', 'Peri Peri Fries +₹30; Extra Cheese +₹50'],
+    ['Tandoori Chicken', 'Tandoor', '300', '', '', 'Billing name', 'Kitchen', '', 'Choose one: Half / Full +₹150'],
+    ['Masala Dosa', 'South Indian', '150', '', '', 'Billing name', 'Kitchen', '', 'Butter +₹30; Extra Cheese +₹50'],
+    ['Pizza', 'Snacks', '320', '', '', 'Billing name', 'Kitchen', '', 'Size: Regular / Large +₹120; Toppings (any): Olives +₹40 / Jalapeno +₹40'],
+    ['Beer 650 ml', 'Bar', '320', '', '', 'No GST (liquor)', 'Bar', '', ''],
+    ['Whisky bottle 750 ml', 'Bar', '', 'Yes', '3500', 'No GST (liquor)', 'Bar', '', ''],
+    ['Fresh Lime Soda', 'Bar', '90', '', '', 'Billing name', 'Bar', '', ''],
+    ['Pool Table (per hour)', 'Games', '300', '', '', 'GST 18%', 'Kitchen', '999692', ''],
+    ['Locker deposit', 'Hotel', '200', '', '', 'No GST', 'Kitchen', '', ''],
+  ]);
 }
 
 // ---------- the plan: what an upload would change, worked out against the menu as it is
@@ -185,8 +280,9 @@ export interface Plan {
 const effective = (t: { taxMode: TaxMode | null; gstBp: number | null }, cat: Tax | undefined): Tax =>
   t.taxMode ? { mode: t.taxMode, bp: t.gstBp } : cat ?? { mode: 'billing', bp: null };
 
-export function plan(sheet: { rows: Row[]; errors: string[] }, now: Existing): Plan {
+export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult['needs'] }, now: Existing): Plan {
   const errors = [...sheet.errors];
+  for (const n of sheet.needs ?? []) errors.push(`${n.category}: choose ${[n.tax && 'the GST', n.station && 'the station'].filter(Boolean).join(' and ')} for its ${n.items} item${n.items === 1 ? '' : 's'} without one.`);
   const rows = sheet.rows;
   // Add-ons: a full form sets the group (the same everywhere it is written); a bare name must already exist.
   const defs = new Map<string, Group>();
@@ -260,7 +356,7 @@ export function plan(sheet: { rows: Row[]; errors: string[] }, now: Existing): P
     const was = oldGroups.get(norm(def.name));
     return { name: def.name, def, was: was ? { name: was.name, kind: was.kind, options: was.options.map((o) => ({ name: o.name, addPaise: o.addPaise })) } : null };
   });
-  if (!rows.length && !errors.length) errors.push('The file has no items.');
+  if (!rows.length && !errors.length && !sheet.needs?.length) errors.push('The file has no items.');
   return { items, off, categories, groups, added, back, priceChanges, otherChanges, notes, errors };
 }
 

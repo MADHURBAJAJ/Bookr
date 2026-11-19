@@ -1495,7 +1495,7 @@ async function settingsScreen(tab = 'menu') {
   const kinds = { discount: 'Discount', comp: 'Complimentary', void: 'Void', kot_cancel: 'Cancelled KOT line' };
   rerender = () => {
     let body = '';
-    if (tab === 'menu') body = html`${menuSheetPanel()}<section class="panel"><h2>Menu</h2>${ui.upCheck ? '' : errorBox()}
+    if (tab === 'menu') body = html`${menuSheetPanel()}<section class="panel"><h2>Menu</h2>${ui.upName ? '' : errorBox()}
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
         ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
           <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : rs(m.pricePaise)}</td><td data-label="Category">${m.category}</td><td data-label="Station">${m.station}</td>
@@ -1592,18 +1592,48 @@ const entityBody = (e, change) => ({
   stopAt: e.stop_paise ? rupees(e.stop_paise) : '', isDefault: !!e.is_default, offered: !!e.offered, active: !!e.active, ...change,
 });
 // ---------- the menu as a sheet: download, change in Excel or Google Sheets, check, apply (Owner)
+// A file can be the sheet (CSV), an Excel file (.xlsx, read here in the browser), or photos or a PDF of a printed menu
+// (read by Claude on the server into the sheet layout). Columns are matched by their headings and can be changed on
+// screen; GST and the station are never guessed: when the file has none for a category, it is chosen here once.
 const TAX_TEXT = (t) => (t.mode === 'billing' ? 'Billing name rate' : t.mode === 'rate' ? `GST ${t.bp / 100}%` : t.mode === 'liquor' ? 'Liquor, outside GST' : 'No GST');
+const TAX_PICK = [['', 'Choose GST'], ['Billing name', 'Billing name rate (food)'], ['GST 5%', 'GST 5%'], ['GST 12%', 'GST 12%'], ['GST 18%', 'GST 18%'], ['GST 28%', 'GST 28%'], ['GST 40%', 'GST 40%'], ['No GST (liquor)', 'Liquor: outside GST'], ['No GST', 'No GST (exempt)']];
+const COLUMN_HELP = [
+  ['Item', 'The name as on the bill. Needed.'],
+  ['Category', 'The menu section (Starters, Bar…). GST is set per category; items that differ keep their own.'],
+  ['Price (₹)', 'Before GST: 250, 250.50, ₹1,250. Leave empty, or write MRP or Market price, for price at billing.'],
+  ['Price at billing', 'Yes for bottles and other items whose price is typed when ordered. Otherwise empty.'],
+  ['Lowest price (₹)', 'For price at billing only: the least that can be typed. Optional.'],
+  ['Tax', 'Billing name (its rate, 5% for food), GST 5% / 12% / 18% / 28% / 40%, No GST (liquor), or No GST. Left empty: asked per category.'],
+  ['Station', 'Kitchen or Bar: where the KOT goes. Left empty: asked per category.'],
+  ['SAC', 'Optional, 4 to 8 digits. Empty: kept, or 996332 for a new item.'],
+  ['Add-ons & choices', 'Extra Cheese +₹50 · Choose one: Half / Full +₹150 · Size: Small / Large +₹40 · Toppings (any): Olives +₹20 / Corn +₹15. Several: separate with ;'],
+];
 function menuSheetPanel() {
   const r = ui.upCheck;
-  const list = (title, items, show = (x) => x) => (items.length ? html`<details><summary>${title} (${items.length})</summary><ul class="small">${items.map((x) => html`<li>${show(x)}</li>`)}</ul></details>` : '');
+  const list = (title, items, show = (x) => x) => (items?.length ? html`<details><summary>${title} (${items.length})</summary><ul class="small">${items.map((x) => html`<li>${show(x)}</li>`)}</ul></details>` : '');
+  const colPick = r?.headings ? html`<details ${r.exactHeadings ? '' : 'open'} style="margin-top:12px"><summary>Columns in ${ui.upName} (${r.exactHeadings ? 'as in the sample' : 'matched by their headings: check them'})</summary>
+      <div class="scroll"><table class="t"><thead><tr><th>Used as</th><th>Column in the file</th></tr></thead><tbody>
+      ${r.fields.map((f) => html`<tr><td>${f.name}${['item', 'price'].includes(f.key) ? ' (needed)' : ''}</td><td><select class="in" data-act-change="upCol" data-f="${f.key}" aria-label="Column for ${f.name}">
+        <option value="-1">Not in the file</option>${r.headings.map((h, i) => html`<option value="${i}" ${r.columns[f.key] === i ? 'selected' : ''}>${h || `Column ${i + 1}`}</option>`)}</select></td></tr>`)}
+      </tbody></table></div></details>` : '';
+  const needs = r?.needs?.length ? html`<div class="msg warn" style="margin-top:12px"><p><strong>Choose for each category</strong> what the file leaves empty. GST is never guessed.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th><th>Station</th></tr></thead><tbody>
+      ${r.needs.map((n) => { const d = ui.upDefaults[n.category] ?? {}; return html`<tr><td>${n.category}</td><td class="num">${n.items}</td>
+        <td>${n.tax ? html`<select class="in" data-model-def="${n.category}" data-k="tax" aria-label="GST for ${n.category}">${TAX_PICK.map(([v, t]) => html`<option value="${v}" ${(d.tax ?? '') === v ? 'selected' : ''}>${t}</option>`)}</select>` : 'From the file'}</td>
+        <td>${n.station ? html`<select class="in" data-model-def="${n.category}" data-k="station" aria-label="Station for ${n.category}"><option value="">Choose</option>${['Kitchen', 'Bar'].map((v) => html`<option ${(d.station ?? '') === v ? 'selected' : ''}>${v}</option>`)}</select>` : 'From the file'}</td></tr>`; })}
+      </tbody></table></div><div class="row" style="margin-top:8px"><button class="btn pri" type="button" data-act="upRecheck">Check again</button></div></div>` : '';
   return html`<section class="panel" style="margin-bottom:16px"><h2>Menu sheet</h2>
-    <p class="quiet small">Download the menu, change it in Excel or Google Sheets, save it as CSV and upload it. You see every change before anything is changed.
-      Items are matched by name (and category); items not in the file are taken off the menu, and old bills keep them.</p>
-    <div class="row"><a class="btn" href="/api${B()}/menu/sheet" download="menu.csv">Download menu (CSV)</a>
-      ${can('menu.upload') ? html`<label class="btn pri">${ui.upReading ? 'Checking…' : 'Upload menu (CSV)'}<input type="file" accept=".csv,text/csv" data-menu-file class="vh"></label>` : ''}</div>
+    <p class="quiet small">Download the menu, change it in Excel or Google Sheets and upload it back. An Excel file, another system's export, or photos or a PDF of a printed menu also work.
+      You see every change before anything is changed. Items are matched by name (and category); items not in the file are taken off the menu, and old bills keep them.</p>
+    <div class="row"><a class="btn" href="/api${B()}/menu/sheet" download="menu.csv">Download menu</a><a class="btn" href="/api${B()}/menu/sample" download="menu-sample.csv">Download a sample</a>
+      ${can('menu.upload') ? html`<label class="btn pri">${ui.upReading ?? 'Upload menu'}<input type="file" multiple accept=".csv,text/csv,.xlsx,image/jpeg,image/png,application/pdf" data-menu-file class="vh"></label>` : ''}</div>
+    <details style="margin-top:10px"><summary>What the columns mean</summary><div class="scroll"><table class="t"><tbody>${COLUMN_HELP.map(([k, v]) => html`<tr><th style="white-space:nowrap">${k}</th><td class="small">${v}</td></tr>`)}</tbody></table></div>
+      <p class="small quiet">Column order does not matter, and other columns are skipped. Other headings are understood too (Rate, MRP, Item Name, Group, Department, KOT, HSN…).</p></details>
+    ${ui.upRead ? html`<p class="small" style="margin-top:10px">${ui.upRead} <a href="#" data-act="upReadCsv">Download what was read</a> to correct it in a sheet if you prefer.</p>` : ''}
     ${r ? html`<div class="msg ${r.ok ? 'ok' : 'bad'}" style="margin-top:14px" role="status">
-      ${r.ok ? html`<p><strong>${ui.upName}: ready to apply.</strong> Nothing has changed yet.</p>` : html`<p><strong>${ui.upName}: ${plural(r.errorCount, 'row')} to fix</strong> before it can be applied. Fix them in the sheet and upload it again.</p>
-        <ul class="small">${r.errors.map((e) => html`<li>${e}</li>`)}</ul>${r.errorCount > r.errors.length ? html`<p class="small">…and ${r.errorCount - r.errors.length} more.</p>` : ''}`}</div>
+      ${r.ok ? html`<p><strong>${ui.upName}: ready to apply.</strong> Nothing has changed yet.</p>` : html`<p><strong>${ui.upName}: ${r.errorCount ? `${plural(r.errorCount, 'thing')} to fix` : 'not ready'}</strong> before it can be applied.</p>
+        <ul class="small">${(r.errors ?? []).map((e) => html`<li>${e}</li>`)}</ul>${r.errorCount > (r.errors ?? []).length ? html`<p class="small">…and ${r.errorCount - r.errors.length} more.</p>` : ''}`}</div>
+      ${colPick}${needs}
       ${r.ok ? html`<div class="kpis" style="margin-top:12px">${kpi('Items on the menu', String(r.items), `${r.openPrice} with price at billing`)}${kpi('New', String(r.added.length), r.back.length ? `${r.back.length} back on the menu` : 'Not on the menu before')}
         ${kpi('Price changes', String(r.priceChanges.length), `${r.otherChanges.length} other changes`)}${kpi('Taken off', String(r.off.length), 'Kept for old bills', r.off.length ? 'warn' : 'good')}</div>
         ${errorBox()}
@@ -1613,28 +1643,122 @@ function menuSheetPanel() {
         ${list('GST by category', r.categories, (c) => `${c.name}: ${TAX_TEXT(c.tax)}${c.was && (c.was.mode !== c.tax.mode || c.was.bp !== c.tax.bp) ? ` (was ${TAX_TEXT(c.was)})` : c.was ? '' : ' (new category)'}`)}
         ${list('Items with their own GST', r.notes)}
         ${list('Add-ons', r.groups, (g) => `${g.name} (${g.def.kind === 'one' ? 'pick one' : 'add any'}): ${g.def.options.map((o) => `${o.name}${o.addPaise ? ' +' + rs(o.addPaise) : ''}`).join(' / ')} · ${plural(g.items, 'item')}${g.was ? '' : ' · new'}`)}
-        <div class="row" style="margin-top:12px"><button class="btn go" type="button" data-act="upApply">Apply this menu${r.off.length ? ` (${r.off.length} taken off)` : ''}</button><button class="btn" type="button" data-act="upCancel">Cancel</button></div>`
-      : html`<div class="row" style="margin-top:8px"><button class="btn" type="button" data-act="upCancel">Close</button></div>`}` : ''}
+        ${r.off.length > 20 && r.off.length * 2 > r.off.length + r.items - r.added.length ? html`<label class="msg warn" style="display:flex;gap:10px;align-items:center;margin-top:12px"><input type="checkbox" data-model="upSure" data-live ${ui.upSure ? 'checked' : ''}>
+          <span><strong>${plural(r.off.length, 'item')} will be taken off the menu</strong>: more than the file keeps. Tick if this file is meant to be the whole menu.</span></label>` : ''}
+        <div class="row" style="margin-top:12px"><button class="btn go" type="button" data-act="upApply" ${r.off.length > 20 && r.off.length * 2 > r.off.length + r.items - r.added.length && !ui.upSure ? 'disabled' : ''}>Apply this menu${r.off.length ? ` (${r.off.length} taken off)` : ''}</button><button class="btn" type="button" data-act="upCancel">Cancel</button></div>`
+      : html`${errorBox()}<div class="row" style="margin-top:8px"><button class="btn" type="button" data-act="upCancel">Close</button></div>`}` : ui.upName ? errorBox() : ''}
     ${can('menu.upload') && ui.uploads?.length ? html`<details style="margin-top:12px"><summary>Menus uploaded before (${ui.uploads.length})</summary><ul class="small">
       ${ui.uploads.map((u) => html`<li><a href="/api${B()}/menu/uploads/${u.name}" download>${dateTime(u.at)}</a> · ${u.by ?? ''} · ${plural(u.items, 'item')}</li>`)}</ul></details>` : ''}
   </section>`;
 }
+
+// Excel (.xlsx) in the browser: an .xlsx is a zip of XML files; the first sheet becomes CSV rows. No library needed.
+async function xlsxRows(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const dv = new DataView(buf.buffer);
+  let e = buf.length - 22;
+  while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('This Excel file could not be opened. Save it as CSV and upload that.');
+  const files = new Map();
+  let p = dv.getUint32(e + 16, true);
+  for (let n = dv.getUint16(e + 10, true); n > 0; n--) {
+    const method = dv.getUint16(p + 10, true), size = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true);
+    const name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nl));
+    const off = dv.getUint32(p + 42, true);
+    files.set(name, { method, size, off });
+    p += 46 + nl + xl + cl;
+  }
+  const read = async (name) => {
+    const f = files.get(name); if (!f) return null;
+    const start = f.off + 30 + dv.getUint16(f.off + 26, true) + dv.getUint16(f.off + 28, true);
+    const raw = buf.subarray(start, start + f.size);
+    if (f.method === 0) return new TextDecoder().decode(raw);
+    if (f.method !== 8) throw new Error('This Excel file could not be opened. Save it as CSV and upload that.');
+    return new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+  };
+  const xml = (t) => new DOMParser().parseFromString(t, 'application/xml');
+  const shared = [...xml((await read('xl/sharedStrings.xml')) ?? '<sst/>').getElementsByTagName('si')].map((si) => [...si.getElementsByTagName('t')].map((t) => t.textContent).join(''));
+  const wb = xml(await read('xl/workbook.xml'));
+  const rels = xml((await read('xl/_rels/workbook.xml.rels')) ?? '<Relationships/>');
+  const first = wb.getElementsByTagName('sheet')[0];
+  const rid = first?.getAttribute('r:id') ?? first?.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
+  const target = [...rels.getElementsByTagName('Relationship')].find((r) => r.getAttribute('Id') === rid)?.getAttribute('Target') ?? 'worksheets/sheet1.xml';
+  const sheet = xml(await read(target.startsWith('/') ? target.slice(1) : `xl/${target}`));
+  const col = (ref) => { let n = 0; for (const ch of ref.replace(/\d+/g, '')) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+  return [...sheet.getElementsByTagName('row')].map((row) => {
+    const out = [];
+    for (const c of row.getElementsByTagName('c')) {
+      const t = c.getAttribute('t'); const v = c.getElementsByTagName('v')[0]?.textContent ?? '';
+      let val = t === 's' ? shared[Number(v)] ?? '' : t === 'inlineStr' ? [...c.getElementsByTagName('t')].map((x) => x.textContent).join('') : t === 'b' ? (v === '1' ? 'TRUE' : 'FALSE') : v;
+      if (!t && /^-?\d+\.\d{3,}$/.test(val)) val = String(Math.round(Number(val) * 100) / 100);
+      out[col(c.getAttribute('r') ?? '')] = val;
+    }
+    return Array.from(out, (x) => x ?? '');
+  });
+}
+const csvOf = (rows) => rows.map((r) => r.map((v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }).join(',')).join('\n');
+
+/** Photos or a PDF of a printed menu: each read by Claude on the server; the rows joined into one sheet. */
+async function readMenuPages(files) {
+  const all = [];
+  for (const [i, f] of files.entries()) {
+    ui.upReading = `Reading page ${i + 1} of ${files.length}…`; rerender();
+    const r = await fetch(`/api${B()}/menu/upload/read`, { method: 'POST', headers: { 'Content-Type': f.type }, body: f, credentials: 'same-origin' });
+    const data = await r.json().catch(() => null);
+    if (!r.ok) throw new ApiError(data?.error ?? 'Could not read the menu.', r.status);
+    const rows = parseCsvRows(data.csv);
+    all.push(...(all.length ? rows.slice(1) : rows));
+  }
+  return all;
+}
+function parseCsvRows(t) {
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) { if (ch === '"' && t[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch; }
+    else if (ch === '"') q = true; else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && t[i + 1] === '\n') i++; row.push(cell); cell = ''; if (row.some((c) => c.trim())) rows.push(row); row = []; }
+    else cell += ch;
+  }
+  row.push(cell); if (row.some((c) => c.trim())) rows.push(row);
+  return rows;
+}
+
+async function upCheckNow() {
+  ui.upReading = 'Checking…'; rerender();
+  try {
+    ui.upCheck = await api('POST', `${B()}/menu/upload/check`, { csv: ui.upCsv, columns: ui.upCols ?? undefined, defaults: ui.upDefaults });
+  } finally { ui.upReading = null; rerender(); }
+}
 root.addEventListener('change', async (ev) => {
   const el = ev.target;
-  if (!el.matches?.('[data-menu-file]') || !el.files?.[0]) return;
-  const f = el.files[0];
-  ui.error = null; ui.upCheck = null;
-  if (f.size > 1024 * 1024) { ui.error = 'The file is larger than 1 MB.'; rerender(); return; }
-  if (/\.xlsx?$/i.test(f.name)) { ui.upCheck = { ok: false, errors: ['This is an Excel file. In Excel choose File → Save As → CSV, or in Google Sheets File → Download → CSV, and upload that.'], errorCount: 1 }; ui.upName = f.name; rerender(); return; }
-  ui.upReading = true; rerender();
+  if (el.dataset?.modelDef !== undefined) { (ui.upDefaults[el.dataset.modelDef] ??= {})[el.dataset.k] = el.value || undefined; return; }
+  if (!el.matches?.('[data-menu-file]') || !el.files?.length) return;
+  const files = [...el.files];
+  Object.assign(ui, { error: null, upCheck: null, upCols: null, upDefaults: {}, upRead: null, upSure: false, upName: files.map((f) => f.name).join(', ') });
   try {
-    ui.upCsv = await f.text(); ui.upName = f.name;
-    ui.upCheck = await api('POST', `${B()}/menu/upload/check`, { csv: ui.upCsv });
-  } catch (e) { ui.error = e.message; } finally { ui.upReading = false; rerender(); }
+    const pages = files.filter((f) => /^image\/(jpeg|png)$|^application\/pdf$/.test(f.type));
+    if (pages.length && pages.length !== files.length) throw new Error('Upload either one sheet, or photos and PDFs of a printed menu, not both at once.');
+    if (!pages.length && files.length > 1) throw new Error('Upload one sheet at a time.');
+    const f = files[0];
+    if (pages.length) {
+      if (pages.length > 10) throw new Error('At most 10 pages at a time.');
+      const rows = await readMenuPages(pages);
+      ui.upCsv = csvOf(rows);
+      ui.upRead = `Claude read ${plural(rows.length - 1, 'item')} from ${plural(pages.length, 'page')}. Check the prices against the menu before applying.`;
+    } else if (/\.xlsx$/i.test(f.name)) { if (f.size > 5 * 1024 * 1024) throw new Error('The file is larger than 5 MB.'); ui.upReading = 'Opening…'; rerender(); ui.upCsv = csvOf(await xlsxRows(f)); }
+    else if (/\.xls$/i.test(f.name)) throw new Error('This is an old Excel file (.xls). In Excel choose File → Save As → Excel Workbook (.xlsx) or CSV, and upload that.');
+    else { if (f.size > 1024 * 1024) throw new Error('The file is larger than 1 MB.'); ui.upCsv = await f.text(); }
+    if (ui.upCsv.length > 1024 * 1024) throw new Error('The menu is larger than 1 MB as a sheet.');
+    await upCheckNow();
+  } catch (e) { ui.error = e.message; ui.upReading = null; rerender(); } finally { el.value = ''; }
 });
-actions.upCancel = () => { ui.upCheck = null; ui.upCsv = null; ui.error = null; rerender(); };
+actions.upCol = async (d, el) => { ui.upCols = { ...(ui.upCols ?? ui.upCheck.columns), [d.f]: Number(el.value) }; await upCheckNow(); };
+actions.upRecheck = () => upCheckNow();
+actions.upReadCsv = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + ui.upCsv], { type: 'text/csv' })); a.download = 'menu-read.csv'; a.click(); };
+actions.upCancel = () => { Object.assign(ui, { upCheck: null, upCsv: null, upCols: null, upRead: null, upName: null, error: null }); rerender(); };
 actions.upApply = async () => {
-  const r = await api('POST', `${B()}/menu/upload/apply`, { csv: ui.upCsv, planHash: ui.upCheck.planHash });
+  const r = await api('POST', `${B()}/menu/upload/apply`, { csv: ui.upCsv, columns: ui.upCols ?? undefined, defaults: ui.upDefaults, planHash: ui.upCheck.planHash });
   flash = { kind: 'ok', text: `Menu applied: ${plural(r.items, 'item')}, ${r.added} new, ${r.priceChanges} price changes, ${r.off} taken off. The counter shows it at its next refresh.` };
   route();
 };

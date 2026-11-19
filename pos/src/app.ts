@@ -22,7 +22,9 @@ app.use('*', async (c, next) => {
     // JSON, or a raw photo body for a supplier bill. Neither can be sent cross-site without a preflight.
     const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
     const photo = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/stock\/bills$/.test(c.req.path);
-    if (type !== 'application/json' && !(photo && ['image/jpeg', 'image/png'].includes(type))) throw new HTTPException(415, { message: 'Send JSON.' });
+    const menuPage = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/menu\/upload\/read$/.test(c.req.path);
+    if (type !== 'application/json' && !(photo && ['image/jpeg', 'image/png'].includes(type))
+      && !(menuPage && ['image/jpeg', 'image/png', 'application/pdf'].includes(type))) throw new HTTPException(415, { message: 'Send JSON.' });
   }
   await next();
 });
