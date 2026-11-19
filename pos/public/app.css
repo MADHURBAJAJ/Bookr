@@ -501,3 +501,7 @@ label.btn:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 .kds-printed { background: #1b2028; border-radius: 12px; padding: 14px; }
 .kds-printed h2 { margin: 0 0 8px; }
 .kds-printed li { padding: 4px 0; font-size: 16px; }
+
+.gtools { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; position: sticky; top: 60px; z-index: 2; background: var(--panel); padding-block: 8px; }
+.gtools .in { flex: 1 1 240px; min-width: 0; }
+.gtools .gcount { margin: 0; }

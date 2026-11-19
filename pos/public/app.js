@@ -1916,9 +1916,11 @@ function addonsTab() {
   if (ui.gSel === undefined) gSelect(gs[0]?.id ?? null);
   const g = groupById(ui.gSel);
   const count = (id) => cache.menu.filter((m) => m.active && (m.addonGroups ?? []).includes(id)).length;
-  const cats = [...new Set(cache.menu.filter((m) => m.active).map((m) => m.category))];
   const on = new Set(ui.gItems ?? []);
-  const items = (c) => cache.menu.filter((m) => m.active && m.category === c);
+  const shown = gShown(on);
+  const cats = [...new Set(shown.map((m) => m.category))];
+  const items = (c) => shown.filter((m) => m.category === c);
+  const filtering = !!String(ui.gQ ?? '').trim() || ui.gOnly;
   return html`<section class="panel"><h2>Add-ons and choices</h2>
     <p class="quiet small">"Pick one" is a choice the order must make (Half or Full); each dish has its own prices for it. "Add any" is an extra (Peri Peri Fries, Extra Cheese) at its usual price unless a dish says otherwise. Choose one on the left, then tick the dishes that offer it. Old orders keep the names and prices they were taken with.</p>
     ${errorBox()}
@@ -1931,16 +1933,20 @@ function addonsTab() {
           : g ? html`<div class="row" style="justify-content:space-between"><h3 style="margin:0">${g.name} ${kindTag(g)}</h3>
               <button class="btn" type="button" data-act="gdEdit">Change name or options</button></div>
             <p class="small quiet" style="margin:0">${g.kind === 'one' ? `Tick the dishes that offer it and type each dish's full prices (${g.options.map((o) => o.name).join(', ')}).` : `Ticked dishes get the usual ${g.options.map((o) => rs(o.addPaise)).join(' / ')}; change it for a dish if needed.`}</p>
-            <p class="gcount">Offered on ${plural(on.size, 'dish', 'dishes')}</p>
+            <div class="gtools"><input class="in" type="search" data-model="gQ" data-live value="${ui.gQ ?? ''}" placeholder="Search dishes or categories" aria-label="Search dishes">
+              <button type="button" class="chip" aria-pressed="${!!ui.gOnly}" data-act="gOnly">Ticked only</button>
+              <span class="gcount">Offered on ${plural(on.size, 'dish', 'dishes')}</span>
+              <button class="btn pri" type="button" data-act="gSaveItems">Save</button></div>
+            ${shown.length ? '' : html`<p class="quiet">${ui.gOnly && !String(ui.gQ ?? '').trim() ? 'No dish is ticked yet.' : `No dish matches “${ui.gQ}”.`}</p>`}
             ${cats.map((c) => { const its = items(c); const n = its.filter((m) => on.has(m.id)).length; return html`<div class="gcat"><div class="gcat-h">
-              <label><input type="checkbox" data-act-change="gTickCat" data-cat="${c}" ${n === its.length ? 'checked' : ''}>Tick all in ${c}</label><span class="small quiet">${n} of ${its.length}</span></div>
+              <label><input type="checkbox" data-act-change="gTickCat" data-cat="${c}" ${n === its.length ? 'checked' : ''}>${filtering ? `Tick all ${its.length} shown in ${c}` : `Tick all in ${c}`}</label><span class="small quiet">${n} of ${its.length}</span></div>
               <div class="grows">${its.map((m) => html`<div class="grow-r"><label><input type="checkbox" data-act-change="gTickItem" data-id="${m.id}" ${on.has(m.id) ? 'checked' : ''}><span>${m.name}</span></label>
                 <span class="gps">${on.has(m.id) ? g.options.map((o) => priceBox(m.id, g, o, ui.gPrices?.[m.id]?.[pkey(o.name)] ?? '', g.kind === 'one' || g.options.length > 1 ? o.name : '')) : html`<span class="quiet small">${m.openPrice ? 'typed' : rs(m.pricePaise)}</span>`}</span></div>`)}</div></div>`; })}
             <div class="row"><button class="btn pri" type="button" data-act="gSaveItems">Save · ${plural(on.size, 'dish', 'dishes')}</button></div>`
           : html`<p class="quiet">No add-ons yet. Make the first one with "New add-on or choice".</p>`}
       </div></div></section>`;
 }
-actions.gSel = (d) => { ui.gd = null; gSelect(d.id); ui.error = null; rerender(); };
+actions.gSel = (d) => { ui.gd = null; gSelect(d.id); ui.error = null; ui.gOnly = false; rerender(); };
 actions.gdNewTab = () => { ui.gd = newGd('any'); ui.gdFor = 'tab'; ui.error = null; rerender(); root.querySelector('[data-gd="name"]')?.focus(); };
 actions.gdEdit = () => { ui.gd = gdOf(groupById(ui.gSel)); ui.gdFor = 'tab'; rerender(); };
 const gTick = (id, yes) => {
@@ -1950,7 +1956,15 @@ const gTick = (id, yes) => {
   ui.gItems = [...s2];
 };
 actions.gTickItem = (d, el) => { gTick(d.id, el.checked); rerender(); };
-actions.gTickCat = (d, el) => { for (const m of cache.menu.filter((x) => x.active && x.category === d.cat)) gTick(m.id, el.checked); rerender(); };
+// The dishes the list shows: matching the search (name or category, any word order) and, if asked, only those ticked.
+function gShown(on) {
+  const words = String(ui.gQ ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  return cache.menu.filter((m) => m.active && (!ui.gOnly || on.has(m.id))
+    && words.every((w) => m.name.toLowerCase().includes(w) || m.category.toLowerCase().includes(w)));
+}
+actions.gOnly = () => { ui.gOnly = !ui.gOnly; rerender(); };
+// "Tick all" ticks the dishes shown in that category (all of them when nothing is searched).
+actions.gTickCat = (d, el) => { for (const m of gShown(new Set(ui.gItems)).filter((x) => x.category === d.cat)) gTick(m.id, el.checked); rerender(); };
 actions.gSaveItems = async () => {
   const g = groupById(ui.gSel);
   // Dishes off the menu keep this add-on, with their own prices; only the dishes shown are changed.
