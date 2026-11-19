@@ -52,10 +52,10 @@ export const requireStaff: MiddlewareHandler<AppEnv> = async (c, next) => {
   const deviceToken = getCookie(c, DEVICE_COOKIE);
   // One trip: the session, the person, their business, and (for a PIN session) that it is on its own, unrevoked device.
   const row = await one<{ id: string; name: string; role: string; business_id: string; kind: string; device_id: string | null; sid: string; device_ok: number;
-    b_name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null }>(c.env.DB, `
+    b_name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null; b_status: string; support: number; login_id: string | null }>(c.env.DB, `
     SELECT st.id, st.name, st.role, st.business_id, s.kind, s.device_id, s.id AS sid,
       (s.kind <> 'pin' OR EXISTS (SELECT 1 FROM devices d WHERE d.id = s.device_id AND d.token_hash = ? AND d.revoked_at IS NULL)) AS device_ok,
-      b.name AS b_name, b.fy_start_month, b.shift_start_hour, b.tab_age_days, b.tables
+      b.name AS b_name, b.fy_start_month, b.shift_start_hour, b.tab_age_days, b.tables, b.status AS b_status, st.support, st.login_id
     FROM sessions s JOIN staff st ON st.id = s.staff_id JOIN businesses b ON b.id = st.business_id
     WHERE s.id = ? AND s.expires_at > ? AND st.active = 1`, deviceToken ? await sha256(deviceToken) : '', await sha256(token), now());
   if (!row || !isRole(row.role)) {
@@ -64,6 +64,10 @@ export const requireStaff: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
   // A PIN session lives only on the device it was made on, and ends when that device is revoked.
   if (!row.device_ok) fail(401, 'Please sign in.');
+  // A paused restaurant: nobody works in it until Bookr POS resumes it (its data is kept).
+  if (row.b_status !== 'active') fail(403, 'This restaurant is paused. Please contact Bookr POS.');
+  c.set('loginId', row.login_id);
+  c.set('support', !!row.support);
   c.set('staff', { id: row.id, name: row.name, role: row.role, businessId: row.business_id });
   c.set('business', { id: row.business_id, name: row.b_name, fy_start_month: row.fy_start_month, shift_start_hour: row.shift_start_hour, tab_age_days: row.tab_age_days, tables: row.tables });
   c.set('sessionId', row.sid);

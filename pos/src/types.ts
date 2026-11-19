@@ -33,6 +33,12 @@ export interface Vars {
   sessionId: string;
   deviceId: string | null;
   businessId: string;
+  /** The signed-in person's login (one per email; the same across the restaurants an admin gave them). */
+  loginId: string | null;
+  /** True when this is Bookr POS support, let in by the owner's support access. */
+  support: boolean;
+  /** A Bookr POS admin (admin routes only). */
+  admin: { id: string; name: string; email: string };
 }
 
 export type AppEnv = { Bindings: Env; Variables: Vars };

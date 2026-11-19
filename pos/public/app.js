@@ -43,15 +43,15 @@ function since(ms) {
 const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
-async function api(method, path, body) {
+async function api(method, path, body, extraHeaders = {}) {
   if (body === undefined && method !== 'GET') body = {};
   const res = await fetch(`/api${path}`, {
     method, credentials: 'same-origin',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+    headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => null);
-  if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path)) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401); }
+  if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401); }
   if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data?.code);
   return data;
 }
@@ -108,12 +108,15 @@ function shell(active, body) {
   const navLinks = links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`);
   const current = links.find(([h]) => h === active)?.[1] ?? 'Menu';
   return html`<header class="top"><div class="top-in">
-    <a class="brand" href="#/" title="${me.business.name}">${me.business.name}</a>
+    <div class="brandbox"><span class="product">Bookr POS</span>${(me.restaurants ?? []).length > 1
+      ? html`<select class="switcher" data-act-change="switchRestaurant" aria-label="Restaurant">${me.restaurants.map((r) => html`<option value="${r.id}" ${r.id === me.business.id ? 'selected' : ''}>${r.name}</option>`)}</select>`
+      : html`<a class="brand" href="#/" title="${me.business.name}">${me.business.name}</a>`}</div>
     <nav class="mainnav" aria-label="Main">${navLinks}</nav>
     ${links.length > 1 ? html`<details class="navmenu"><summary aria-label="Go to: ${current}">${current} <span aria-hidden="true">▾</span></summary><nav aria-label="Main">${navLinks}</nav></details>` : ''}
     <div class="who">${themeButton()}<span class="shiftchip" title="Shift of ${dayName(me.business.shiftDay)}: a shift runs 8 am to 8 am" aria-label="Shift ${dayName(me.business.shiftDay)}">${dayName(me.business.shiftDay)}</span>
       <span class="person">${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
   </div></header>
+  ${me.support ? html`<div class="supportbar" role="status">You are in ${me.business.name} as Bookr POS support. The owner can see this visit.</div>` : ''}
   <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span>${flash.link ? html`<a href="${flash.link[0]}">${flash.link[1]}</a>` : ''}</div>` : ''}${body}</main>`;
 }
 /** A page title with an optional line under it and controls on the right. */
@@ -128,10 +131,13 @@ const errorBox = () => (ui.error ? html`<div class="msg bad" role="alert">${ui.e
 
 async function route() {
   ui = {};
+  document.title = 'Bookr POS';
   stopStation();
   try {
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
+    // Bookr POS admin: its own sign-in, separate from every restaurant's.
+    if (location.hash.startsWith('#/admin')) return await adminScreen();
     if (!me) {
       try { me = await api('GET', '/me'); } catch { me = null; }
     }
@@ -209,7 +215,7 @@ async function signIn() {
       const person = ui.people.find((p) => p.id === ui.who);
       ui.pinPad = !!person;
       paint(html`<div class="signwrap"><main class="signin panel" style="padding:24px">
-        <div><p class="brandline">${ui.device.businessName}</p><h1>${person ? `PIN for ${person.name}` : 'Who is signing in?'}</h1>
+        <div><p class="brandline">${ui.device.businessName} · Bookr POS</p><h1>${person ? `PIN for ${person.name}` : 'Who is signing in?'}</h1>
           <p class="quiet small">${ui.device.name}${ui.device.locked ? ' · PIN sign-in is locked for a few minutes' : ''}</p></div>
         ${errorBox()}
         ${person ? html`
@@ -225,7 +231,7 @@ async function signIn() {
     } else {
       ui.pinPad = false;
       paint(html`<div class="signwrap"><main class="signin"><form class="panel" style="padding:24px">
-        <div>${ui.device ? html`<p class="brandline">${ui.device.businessName}</p>` : ''}<h1>Sign in</h1><p class="quiet small">Owner and manager sign in with email.</p></div>${errorBox()}
+        <div>${ui.device ? html`<p class="brandline">${ui.device.businessName}</p>` : ''}<p class="brandline">Bookr POS</p><h1>Sign in</h1><p class="quiet small">Owner and manager sign in with email.</p></div>${errorBox()}
         <label class="f">Email<input class="in" type="email" autocomplete="username" data-model="email" value="${ui.email ?? ''}" autofocus></label>
         <label class="f">Password<input class="in" type="password" autocomplete="current-password" data-model="password"></label>
         <button class="btn pri big" type="submit" data-act="login" data-submit>Sign in</button>
@@ -252,6 +258,11 @@ document.addEventListener('keydown', (ev) => {
 actions.pwMode = () => { ui.passwordMode = !ui.passwordMode; ui.error = null; rerender(); };
 actions.login = async () => { await api('POST', '/auth/login', { email: ui.email ?? '', password: ui.password ?? '' }); me = null; go('#/'); };
 actions.logout = async () => { await api('POST', '/auth/logout'); me = null; cache = {}; go('#/signin'); };
+// An owner of more than one restaurant moves between them; only their own appear in the list.
+actions.switchRestaurant = async (_d, el) => {
+  await api('POST', '/auth/switch', { businessId: el.value });
+  me = null; cache = {}; go('#/');
+};
 
 // ---------- tables
 
@@ -1536,7 +1547,7 @@ async function settingsScreen(tab = 'menu') {
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];
   await load('menu', 'reasons', 'entities', 'payAccounts');
-  if (tab === 'staff') ui.staff = (await api('GET', B() + '/staff')).staff;
+  if (tab === 'staff') { ui.staff = (await api('GET', B() + '/staff')).staff; if (!me.support) ui.supportInfo = await api('GET', B() + '/support'); }
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
   if (tab === 'menu' && can('menu.upload')) ui.uploads = (await api('GET', B() + '/menu/uploads')).uploads;
   if (tab === 'tables') { ui.tableList = (await api('GET', B() + '/tables')).tables; ui.tableText = ui.tableList.join(', '); }
@@ -1620,8 +1631,9 @@ async function settingsScreen(tab = 'menu') {
         <div class="row"><button class="btn pri" type="submit" data-act="addAccount" data-submit>${ui.editAcct ? 'Save account' : 'Add account'}</button>${ui.editAcct ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
     if (tab === 'staff') body = html`<section class="panel"><h2>Staff and PINs</h2>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
-        ${ui.staff.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
+        ${ui.staff.filter((s) => !s.support).map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
           <td><button class="btn" type="button" data-act="staffEdit" data-id="${s.id}">Edit</button></td></tr>`)}</tbody></table></div>
+      ${ui.supportInfo ? supportPanel() : ''}
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editStaff ? 'Edit person (leave PIN and password empty to keep them)' : 'Add person'}</h2><label class="f">Name<input class="in" data-model="sName" value="${ui.sName ?? ''}" ${ui.editStaff ? 'autofocus' : ''}></label>
         <label class="f">Role<select class="in" data-model="sRole">${['cashier', 'captain', 'manager', 'owner'].map((r) => html`<option value="${r}" ${ui.sRole === r ? 'selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`)}</select></label>
         <label class="f">PIN (4–6 digits)<input class="in" inputmode="numeric" data-model="sPin" maxlength="6" autocomplete="off"></label>
@@ -1636,6 +1648,123 @@ async function settingsScreen(tab = 'menu') {
   };
   rerender();
 }
+// Support access: off unless the owner turns it on; every visit by Bookr POS support is listed here.
+function supportPanel() {
+  const s = ui.supportInfo;
+  return html`<div class="supportbox"><h2>Bookr POS support access</h2>
+    <p class="quiet small">${s.on ? 'On: Bookr POS support can open this restaurant as a manager to help you. Turn it off when you are done; anyone from support is signed out at once.'
+      : 'Off: nobody from Bookr POS can open this restaurant. Turn it on only when you have asked for help.'}</p>
+    <div class="row"><button class="btn ${s.on ? 'danger' : 'pri'}" type="button" data-act="supportToggle">${s.on ? 'Turn support access off' : 'Turn support access on'}</button></div>
+    ${s.visits.length ? html`<details><summary class="small">Support visits (${s.visits.length})</summary><ul class="small">${s.visits.map((v) => html`<li>${dateTime(v.at)} · ${v.by}</li>`)}</ul></details>` : html`<p class="quiet small">No support visits yet.</p>`}</div>`;
+}
+actions.supportToggle = async () => {
+  const on = !ui.supportInfo.on;
+  await api('PUT', B() + '/support', { on });
+  flash = { kind: 'ok', text: on ? 'Support access is on.' : 'Support access is off. Anyone from support has been signed out.' }; route();
+};
+
+// ---------- Bookr POS admin (#/admin): restaurants and their owners; never a restaurant's bills, menus or sales
+async function adminScreen() {
+  try { ui.admin = (await api('GET', '/admin/me')).admin; } catch (e) { if (!(e instanceof ApiError && e.status === 401)) throw e; ui.admin = null; }
+  if (ui.admin) ui.rests = (await api('GET', '/admin/restaurants')).restaurants;
+  document.title = 'Bookr POS admin';
+  rerender = () => {
+    if (!ui.admin) {
+      paint(html`<div class="signwrap"><main class="signin"><form class="panel" style="padding:24px">
+        <div><p class="brandline">Bookr POS</p><h1>${ui.setupMode ? 'First admin' : 'Admin sign in'}</h1>
+          <p class="quiet small">${ui.setupMode ? 'Once only, with the setup token kept as a Worker secret. Use an email that is not a restaurant login.' : 'For the people who run Bookr POS. Restaurant owners sign in on the main page.'}</p></div>${errorBox()}
+        ${ui.setupMode ? html`<label class="f">Setup token<input class="in" type="password" data-model="xToken" autocomplete="off"></label>
+          <label class="f">Your name<input class="in" data-model="xName" value="${ui.xName ?? ''}"></label>` : ''}
+        <label class="f">Email<input class="in" type="email" autocomplete="username" data-model="xEmail" value="${ui.xEmail ?? ''}" autofocus></label>
+        <label class="f">Password${ui.setupMode ? ' (12+ characters)' : ''}<input class="in" type="password" autocomplete="${ui.setupMode ? 'new-password' : 'current-password'}" data-model="xPassword"></label>
+        <button class="btn pri big" type="submit" data-act="${ui.setupMode ? 'adminSetup' : 'adminLogin'}" data-submit>${ui.setupMode ? 'Create admin and sign in' : 'Sign in'}</button>
+        <button class="btn ghost" type="button" data-act="adminSetupMode">${ui.setupMode ? 'Back to sign in' : 'First time: create the first admin'}</button>
+      </form></main></div>`);
+      return;
+    }
+    const ownerEmails = (r) => r.owners.map((o) => o.email.toLowerCase());
+    const copyChoices = ui.rOwnerEmail ? ui.rests.filter((r) => ownerEmails(r).includes(ui.rOwnerEmail.trim().toLowerCase())) : [];
+    const known = copyChoices.length > 0;
+    const row = (r) => {
+      const open = ui.rowAct?.id === r.id ? ui.rowAct.kind : null;
+      return html`<tr><td data-label="Restaurant"><strong>${r.name}</strong><div class="small quiet">Added ${dateTime(r.createdAt)}</div></td>
+        <td data-label="Owners">${r.owners.map((o) => html`<div>${o.name} <span class="small quiet">${o.email}</span>${o.active ? '' : ' (inactive)'}</div>`)}</td>
+        <td data-label="Status">${r.status === 'active' ? 'Active' : html`<strong class="badtext">Paused</strong>`}${r.supportAccess ? html`<div class="small">Support access on</div>` : ''}</td>
+        <td data-label="Bills this month" class="num">${r.billsThisMonth}</td>
+        <td data-label="Last used">${r.lastUsedAt ? since(r.lastUsedAt) + ' ago' : html`<span class="quiet">Never</span>`}</td>
+        <td class="act"><div class="row">
+          <button class="btn" type="button" data-act="adminStatus" data-id="${r.id}" data-to="${r.status === 'active' ? 'paused' : 'active'}">${r.status === 'active' ? 'Pause' : 'Resume'}</button>
+          <button class="btn" type="button" data-act="adminRow" data-id="${r.id}" data-kind="owner">Add owner</button>
+          ${r.owners.length ? html`<button class="btn" type="button" data-act="adminRow" data-id="${r.id}" data-kind="password">Reset password</button>` : ''}
+          ${r.supportAccess && r.status === 'active' ? html`<button class="btn" type="button" data-act="adminVisit" data-id="${r.id}">Open for support</button>` : ''}</div>
+          ${open === 'owner' ? html`<form class="grid3 rowform"><label class="f">Owner's email<input class="in" type="email" data-model="oEmail" autofocus></label>
+            <label class="f">Name (new owner)<input class="in" data-model="oName"></label><label class="f">Temporary password (new owner)<input class="in" type="password" data-model="oPassword" autocomplete="new-password"></label>
+            <p class="small quiet" style="grid-column:1/-1">An owner who already has a Bookr POS login keeps their own password; name and password are then not needed.</p>
+            <div class="row"><button class="btn pri" type="submit" data-act="adminAddOwner" data-submit>Give access</button><button class="btn" type="button" data-act="adminRow">Cancel</button></div></form>` : ''}
+          ${open === 'password' ? html`<form class="grid3 rowform"><label class="f">Owner<select class="in" data-model="pOwner">${r.owners.map((o) => html`<option value="${o.id}">${o.name} (${o.email})</option>`)}</select></label>
+            <label class="f">New temporary password (12+)<input class="in" type="password" data-model="pPassword" autocomplete="new-password" autofocus></label>
+            <p class="small quiet" style="grid-column:1/-1">Works at every restaurant this owner has, and signs them out everywhere.</p>
+            <div class="row"><button class="btn pri" type="submit" data-act="adminPassword" data-submit>Set password</button><button class="btn" type="button" data-act="adminRow">Cancel</button></div></form>` : ''}
+        </td></tr>`;
+    };
+    paint(html`<header class="top"><div class="top-in"><span class="brand">Bookr POS admin</span><div class="who">${themeButton()}<span class="person">${ui.admin.name}</span><button type="button" data-act="adminLogout">Sign out</button></div></div></header>
+      <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span></div>` : ''}
+      ${pageHead('Restaurants', 'Each restaurant is separate: its owners see only the restaurants given to them. You see names, owners and use, never bills, menus or sales.')}
+      ${errorBox()}
+      <section class="panel"><div class="scroll"><table class="t cards"><thead><tr><th>Restaurant</th><th>Owners</th><th>Status</th><th class="num">Bills this month</th><th>Last used</th><th></th></tr></thead>
+        <tbody>${ui.rests.length ? ui.rests.map(row) : html`<tr><td colspan="6" class="quiet">No restaurants yet. Add the first one below.</td></tr>`}</tbody></table></div></section>
+      <section class="panel"><form class="grid3"><h2 style="grid-column:1/-1">Add a restaurant</h2>
+        <label class="f">Restaurant name<input class="in" data-model="rName" value="${ui.rName ?? ''}"></label>
+        <label class="f">Owner's email<input class="in" type="email" data-model="rOwnerEmail" data-live value="${ui.rOwnerEmail ?? ''}"></label>
+        ${known ? html`<p class="small quiet" style="grid-column:1/-1">This owner already has a Bookr POS login: the new restaurant is added to it and they keep their password.</p>
+          <label class="f">Copy the menu from (optional)<select class="in" data-model="rCopy"><option value="">Start with an empty menu</option>${copyChoices.map((r) => html`<option value="${r.id}" ${ui.rCopy === r.id ? 'selected' : ''}>${r.name}</option>`)}</select></label>`
+        : html`<label class="f">Owner's name<input class="in" data-model="rOwnerName" value="${ui.rOwnerName ?? ''}"></label>
+          <label class="f">Temporary password (12+ characters)<input class="in" type="password" data-model="rOwnerPassword" autocomplete="new-password"></label>`}
+        <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="adminAddRestaurant" data-submit>Add restaurant</button></div></form></section>
+      <section class="panel"><details ${ui.showAddAdmin ? 'open' : ''}><summary>Add another admin</summary><form class="grid3" style="margin-top:12px">
+        <label class="f">Name<input class="in" data-model="nName"></label><label class="f">Email<input class="in" type="email" data-model="nEmail"></label>
+        <label class="f">Password (12+ characters)<input class="in" type="password" data-model="nPassword" autocomplete="new-password"></label>
+        <div class="row"><button class="btn pri" type="submit" data-act="adminAddAdmin" data-submit>Add admin</button></div></form></details></section></main>`);
+  };
+  rerender();
+}
+actions.adminSetupMode = () => { ui.setupMode = !ui.setupMode; ui.error = null; rerender(); };
+actions.adminLogin = async () => { await api('POST', '/admin/login', { email: ui.xEmail ?? '', password: ui.xPassword ?? '' }); route(); };
+actions.adminSetup = async () => {
+  await api('POST', '/admin/setup', { name: ui.xName ?? '', email: ui.xEmail ?? '', password: ui.xPassword ?? '' }, { 'X-Setup-Token': ui.xToken ?? '' });
+  await actions.adminLogin();
+};
+actions.adminLogout = async () => { await api('POST', '/admin/logout'); route(); };
+actions.adminRow = (d) => { ui.rowAct = d.id ? { id: d.id, kind: d.kind } : null; ui.error = null; Object.assign(ui, { oEmail: '', oName: '', oPassword: '', pPassword: '', pOwner: null }); rerender(); };
+actions.adminStatus = async (d) => {
+  const r = ui.rests.find((x) => x.id === d.id);
+  if (d.to === 'paused' && !confirm(`Pause ${r.name}? Everyone there is signed out and cannot sign in until you resume it.`)) return;
+  await api('PUT', `/admin/restaurants/${d.id}`, { status: d.to });
+  flash = { kind: 'ok', text: `${r.name} ${d.to === 'paused' ? 'paused' : 'resumed'}.` }; route();
+};
+actions.adminAddOwner = async () => {
+  await api('POST', `/admin/restaurants/${ui.rowAct.id}/owners`, { ownerEmail: ui.oEmail ?? '', ownerName: ui.oName || undefined, ownerPassword: ui.oPassword || undefined });
+  flash = { kind: 'ok', text: `${ui.oEmail} can now open this restaurant.` }; route();
+};
+actions.adminPassword = async () => {
+  const r = ui.rests.find((x) => x.id === ui.rowAct.id);
+  const id = ui.pOwner || r.owners[0].id;
+  await api('POST', `/admin/owners/${id}/password`, { password: ui.pPassword ?? '' });
+  flash = { kind: 'ok', text: `Password set for ${r.owners.find((o) => o.id === id).name}. Share it with them privately.` }; route();
+};
+actions.adminVisit = async (d) => { await api('POST', `/admin/restaurants/${d.id}/visit`); me = null; cache = {}; go('#/'); };
+actions.adminAddRestaurant = async () => {
+  const email = (ui.rOwnerEmail ?? '').trim();
+  const known = ui.rests.some((r) => r.owners.some((o) => o.email.toLowerCase() === email.toLowerCase()));
+  await api('POST', '/admin/restaurants', known ? { name: ui.rName ?? '', ownerEmail: email, copyFrom: ui.rCopy || undefined }
+    : { name: ui.rName ?? '', ownerEmail: email, ownerName: ui.rOwnerName ?? '', ownerPassword: ui.rOwnerPassword ?? '' });
+  flash = { kind: 'ok', text: `${ui.rName} added. ${known ? 'The owner sees it in their restaurant list.' : 'Share the temporary password with the owner privately.'}` }; route();
+};
+actions.adminAddAdmin = async () => {
+  await api('POST', '/admin/admins', { name: ui.nName ?? '', email: ui.nEmail ?? '', password: ui.nPassword ?? '' });
+  flash = { kind: 'ok', text: `${ui.nName} can now sign in at #/admin.` }; route();
+};
+
 const entityBody = (e, change) => ({
   name: e.name, kind: e.kind, gstRegistered: !!e.gst_registered, gstin: e.gstin, gstRateBp: e.gst_rate_bp, seriesPrefix: e.series_prefix,
   yearlyLimit: e.yearly_limit_paise ? rupees(e.yearly_limit_paise) : '', warn1: e.warn1_paise ? rupees(e.warn1_paise) : '', warn2: e.warn2_paise ? rupees(e.warn2_paise) : '',

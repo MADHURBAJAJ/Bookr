@@ -14,7 +14,7 @@ async function stationDevice(c: Context<AppEnv>) {
   const d = await currentDevice(c);
   if (!d?.station_id) fail(401, 'This device is not set up for a station. The Owner sets it up in Settings → Stations.');
   const st = await one<{ id: string; name: string; how: string; copies: number; business: string }>(c.env.DB,
-    'SELECT s.id, s.name, s.how, s.copies, b.name AS business FROM stations s JOIN businesses b ON b.id = s.business_id WHERE s.id = ? AND s.active = 1', d.station_id);
+    "SELECT s.id, s.name, s.how, s.copies, b.name AS business FROM stations s JOIN businesses b ON b.id = s.business_id WHERE s.id = ? AND s.active = 1 AND b.status = 'active'", d.station_id);
   if (!st) fail(401, 'This station is no longer in use.');
   return { device: d, station: st };
 }

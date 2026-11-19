@@ -69,8 +69,33 @@ settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
 // ---------- staff
 
 settingsRoutes.get(`${B}/staff`, requireAction('staff.manage'), async (c) => {
-  return c.json({ staff: await all(c.env.DB, `SELECT id, name, role, email, pin_hash IS NOT NULL AS hasPin, active
-    FROM staff WHERE business_id = ? ORDER BY active DESC, name`, c.get('businessId')) });
+  return c.json({ staff: await all(c.env.DB, `SELECT id, name, role, email, pin_hash IS NOT NULL AS hasPin, active, support
+    FROM staff WHERE business_id = ? ORDER BY support, active DESC, name`, c.get('businessId')) });
+});
+
+// Bookr POS support: off unless the Owner turns it on. While on, a Bookr POS admin can open this restaurant (as a
+// manager) to help; every visit is listed here. Turning it off ends any support visit at once.
+settingsRoutes.get(`${B}/support`, requireAction('staff.manage'), async (c) => {
+  const bid = c.get('businessId');
+  const b = await one<{ support_access: number }>(c.env.DB, 'SELECT support_access FROM businesses WHERE id = ?', bid);
+  const visits = await all<{ after: string; created_at: number }>(c.env.DB,
+    "SELECT after, created_at FROM audit_log WHERE business_id = ? AND action = 'support.visit' ORDER BY created_at DESC LIMIT 30", bid);
+  return c.json({ on: !!b!.support_access, visits: visits.map((v) => ({ at: v.created_at, by: (JSON.parse(v.after ?? '{}') as { admin?: string }).admin ?? 'Bookr POS' })) });
+});
+settingsRoutes.put(`${B}/support`, requireAction('staff.manage'), async (c) => {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  if (typeof data.on !== 'boolean') fail(400, 'Support access must be on or off.');
+  if (c.get('support')) fail(403, 'Bookr POS support cannot change support access.');
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE businesses SET support_access = ? WHERE id = ?', data.on ? 1 : 0, bid),
+    ...(data.on ? [] : [
+      stmt(c.env.DB, 'DELETE FROM sessions WHERE staff_id IN (SELECT id FROM staff WHERE business_id = ? AND support = 1)', bid),
+      stmt(c.env.DB, 'UPDATE staff SET active = 0 WHERE business_id = ? AND support = 1', bid),
+    ]),
+    audit(c.env.DB, bid, c.get('staff').id, data.on ? 'support.on' : 'support.off', 'businesses', bid, null, null),
+  ]);
+  return c.json({ ok: true });
 });
 
 async function staffFields(data: Record<string, unknown>, needLogin: boolean) {
@@ -87,13 +112,25 @@ async function staffFields(data: Record<string, unknown>, needLogin: boolean) {
   return { role, name, email, password, pin };
 }
 
+/**
+ * An email belongs to one person (one login) across all of Bookr POS. A restaurant may not give its staff an email that
+ * someone else already signs in with, here or at another restaurant: that would let one restaurant reach another.
+ */
+async function emailFree(db: D1Database, email: string | null, exceptStaffId: string | null) {
+  if (!email) return;
+  const other = await one(db, 'SELECT 1 FROM staff WHERE lower(email) = lower(?) AND id IS NOT ? LIMIT 1', email, exceptStaffId);
+  const admin = await one(db, 'SELECT 1 FROM platform_admins WHERE lower(email) = lower(?)', email);
+  if (other || admin) fail(409, 'That email is already used. Use another email for this person.');
+}
+
 settingsRoutes.post(`${B}/staff`, requireAction('staff.manage'), async (c) => {
   const f = await staffFields(await body(c), true);
   if (!f.pin && f.role !== 'owner' && f.role !== 'manager') fail(400, 'Counter staff need a PIN.');
+  await emailFree(c.env.DB, f.email, null);
   const id = newId();
   try {
     await c.env.DB.batch([
-      stmt(c.env.DB, 'INSERT INTO staff (id, business_id, name, role, email, password_hash, pin_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      stmt(c.env.DB, 'INSERT INTO staff (id, business_id, name, role, email, password_hash, pin_hash, created_at, login_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CASE WHEN ?5 IS NULL THEN NULL ELSE ?1 END)',
         id, c.get('businessId'), f.name, f.role, f.email, f.password ? await hashPassword(f.password) : null, f.pin ? await hashPassword(f.pin) : null, now()),
       audit(c.env.DB, c.get('businessId'), c.get('staff').id, 'staff.create', 'staff', id, null, { name: f.name, role: f.role, email: f.email, pin: !!f.pin }),
     ]);
@@ -107,23 +144,35 @@ settingsRoutes.post(`${B}/staff`, requireAction('staff.manage'), async (c) => {
 settingsRoutes.put(`${B}/staff/:id`, requireAction('staff.manage'), async (c) => {
   const id = c.req.param('id');
   const bid = c.get('businessId');
-  const before = await one<{ name: string; role: string; email: string | null; active: number; password_hash: string | null }>(c.env.DB,
-    'SELECT name, role, email, active, password_hash FROM staff WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one<{ name: string; role: string; email: string | null; active: number; password_hash: string | null; login_id: string | null; support: number }>(c.env.DB,
+    'SELECT name, role, email, active, password_hash, login_id, support FROM staff WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Person not found.');
+  if (before.support) fail(409, 'This is Bookr POS support. Turn support access off to remove it.');
   const data = await body(c);
   const f = await staffFields(data, false);
+  // A changed email must be free; a person with places at other restaurants keeps their email (an admin changes it).
+  if ((f.email ?? '').toLowerCase() !== (before.email ?? '').toLowerCase()) {
+    const shared = before.login_id ? await one<{ n: number }>(c.env.DB, 'SELECT count(*) AS n FROM staff WHERE login_id = ?', before.login_id) : null;
+    if ((shared?.n ?? 0) > 1) fail(409, 'This person signs in at other restaurants too. Ask Bookr POS to change their email.');
+    await emailFree(c.env.DB, f.email, id);
+  }
   if ((f.role === 'owner' || f.role === 'manager') && !(f.email && (f.password || before.password_hash))) fail(400, 'An Owner or manager needs an email and a password.');
   const active = data.active === false ? 0 : 1;
   if (before.role === 'owner' && (f.role !== 'owner' || !active)) {
     const owners = await one<{ n: number }>(c.env.DB, "SELECT count(*) AS n FROM staff WHERE business_id = ? AND role = 'owner' AND active = 1", bid);
     if ((owners?.n ?? 0) <= 1) fail(409, 'A business always keeps one active Owner.');
   }
-  const sets = ['name = ?', 'role = ?', 'email = ?', 'active = ?'];
-  const vals: unknown[] = [f.name, f.role, f.email, active];
-  if (f.password) { sets.push('password_hash = ?'); vals.push(await hashPassword(f.password)); }
+  const sets = ['name = ?', 'role = ?', 'email = ?', 'active = ?', 'login_id = ?'];
+  const vals: unknown[] = [f.name, f.role, f.email, active, f.email ? before.login_id ?? id : null];
+  // A person with places at several restaurants has one password: only they change it, and it changes everywhere.
+  const sharedLogin = before.login_id ? ((await one<{ n: number }>(c.env.DB, 'SELECT count(*) AS n FROM staff WHERE login_id = ?', before.login_id))?.n ?? 0) > 1 : false;
+  if (f.password && sharedLogin && c.get('loginId') !== before.login_id) fail(409, 'This person signs in at other restaurants too: only they can change their password.');
+  const newHash = f.password ? await hashPassword(f.password) : null;
+  if (newHash && !sharedLogin) { sets.push('password_hash = ?'); vals.push(newHash); }
   if (f.pin) { sets.push('pin_hash = ?'); vals.push(await hashPassword(f.pin)); }
   await c.env.DB.batch([
     stmt(c.env.DB, `UPDATE staff SET ${sets.join(', ')} WHERE id = ? AND business_id = ?`, ...vals, id, bid),
+    ...(newHash && sharedLogin ? [stmt(c.env.DB, 'UPDATE staff SET password_hash = ? WHERE login_id = ?', newHash, before.login_id)] : []),
     ...(active ? [] : [stmt(c.env.DB, 'DELETE FROM sessions WHERE staff_id = ?', id)]),
     audit(c.env.DB, bid, c.get('staff').id, 'staff.update', 'staff', id,
       { name: before.name, role: before.role, email: before.email, active: before.active },

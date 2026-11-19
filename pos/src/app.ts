@@ -11,6 +11,7 @@ import { creditRoutes } from './routes/credit';
 import { stockRoutes } from './routes/stock';
 import { menuUploadRoutes } from './routes/menu-upload';
 import { stationRoutes } from './routes/station';
+import { adminRoutes } from './routes/admin';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -40,6 +41,7 @@ app.route('/', creditRoutes);
 app.route('/', stockRoutes);
 app.route('/', menuUploadRoutes);
 app.route('/', stationRoutes);
+app.route('/', adminRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

@@ -28,7 +28,7 @@ authRoutes.post('/setup', async (c) => {
   const t = now();
   await c.env.DB.batch([
     stmt(c.env.DB, 'INSERT INTO businesses (id, name, created_at) VALUES (?, ?, ?)', id, name, t),
-    stmt(c.env.DB, "INSERT INTO staff (id, business_id, name, role, email, password_hash, created_at) VALUES (?, ?, ?, 'owner', ?, ?, ?)",
+    stmt(c.env.DB, "INSERT INTO staff (id, business_id, name, role, email, password_hash, created_at, login_id) VALUES (?1, ?2, ?3, 'owner', ?4, ?5, ?6, ?1)",
       newId(), id, ownerName, email, await hashPassword(password), t),
     ...defaultStations(c.env.DB, id, t),
   ]);
@@ -39,11 +39,18 @@ authRoutes.post('/auth/login', async (c) => {
   const data = await body(c);
   const email = text(data, 'email', 'Email', { max: 254 })!;
   const password = typeof data.password === 'string' ? data.password : '';
-  const st = await one<{ id: string; password_hash: string | null }>(c.env.DB,
-    "SELECT id, password_hash FROM staff WHERE lower(email) = lower(?) AND active = 1 AND role IN ('owner', 'manager')", email);
-  const ok = await verifyPassword(password, st?.password_hash ?? DUMMY_HASH);
-  if (!st || !ok) fail(401, 'Email or password is incorrect.');
-  await startSession(c, c.env.DB, st.id, 'password', null);
+  // One email may have a place at several restaurants (given by a Bookr POS admin): the password opens the first active
+  // one it matches; the others are a switch away (/auth/switch). Paused restaurants are skipped.
+  const rows = await all<{ id: string; password_hash: string | null; status: string }>(c.env.DB,
+    `SELECT st.id, st.password_hash, b.status FROM staff st JOIN businesses b ON b.id = st.business_id
+     WHERE lower(st.email) = lower(?) AND st.active = 1 AND st.role IN ('owner', 'manager') AND st.support = 0 ORDER BY b.status = 'active' DESC, st.created_at`, email);
+  let hit: { id: string; status: string } | null = null;
+  for (const r of rows.length ? rows : [{ id: '', password_hash: DUMMY_HASH, status: '' }]) {
+    if (await verifyPassword(password, r.password_hash ?? DUMMY_HASH)) { hit = r.id ? r : null; break; }
+  }
+  if (!hit) fail(401, 'Email or password is incorrect.');
+  if (hit.status !== 'active') fail(403, 'This restaurant is paused. Please contact Bookr POS.');
+  await startSession(c, c.env.DB, hit.id, 'password', null);
   return c.json({ ok: true });
 });
 
@@ -62,6 +69,7 @@ authRoutes.get('/device', async (c) => {
 authRoutes.post('/auth/pin', async (c) => {
   const device = await currentDevice(c);
   if (!device || device.station_id) fail(403, 'PIN sign-in works only on a counter device an Owner has set up.');
+  if ((await one<{ status: string }>(c.env.DB, 'SELECT status FROM businesses WHERE id = ?', device.business_id))?.status !== 'active') fail(403, 'This restaurant is paused. Please contact Bookr POS.');
   const t = now();
   if (device.locked_until && device.locked_until > t) fail(429, 'Too many wrong PINs. Try again in a few minutes, or ask the Owner.');
   const data = await body(c);
@@ -91,7 +99,25 @@ authRoutes.get('/me', requireStaff, async (c) => {
   const b = await one<{ name: string; shift_start_hour: number; fy_start_month: number; tab_age_days: number }>(c.env.DB,
     'SELECT name, shift_start_hour, fy_start_month, tab_age_days FROM businesses WHERE id = ?', s.businessId);
   const actions = (Object.keys(PERMISSIONS) as Action[]).filter((a) => (PERMISSIONS[a] as readonly string[]).includes(s.role));
-  return c.json({ staff: s, business: { id: s.businessId, ...b, shiftDay: clock(bizOf(c)).shiftDay }, actions });
+  // The restaurants this person may switch to: only their own login's places (given by a Bookr POS admin), active ones.
+  const loginId = c.get('loginId');
+  const restaurants = loginId && !c.get('support') ? await all<{ id: string; name: string }>(c.env.DB,
+    `SELECT b.id, b.name FROM staff st JOIN businesses b ON b.id = st.business_id
+     WHERE st.login_id = ? AND st.active = 1 AND st.role IN ('owner', 'manager') AND b.status = 'active' ORDER BY b.name`, loginId) : [];
+  return c.json({ staff: s, business: { id: s.businessId, ...b, shiftDay: clock(bizOf(c)).shiftDay }, actions, restaurants, support: c.get('support') });
+});
+
+// Moves the signed-in person to another of their own restaurants (same login), without signing in again.
+authRoutes.post('/auth/switch', requireStaff, async (c) => {
+  const data = await body(c);
+  const loginId = c.get('loginId');
+  if (!loginId || c.get('support') || typeof data.businessId !== 'string') fail(404, 'Restaurant not found.');
+  const st = await one<{ id: string }>(c.env.DB, `SELECT st.id FROM staff st JOIN businesses b ON b.id = st.business_id
+    WHERE st.login_id = ? AND st.business_id = ? AND st.active = 1 AND st.role IN ('owner', 'manager') AND b.status = 'active'`, loginId, data.businessId);
+  if (!st) fail(404, 'Restaurant not found.');
+  await endSession(c, c.env.DB);
+  await startSession(c, c.env.DB, st.id, 'password', null);
+  return c.json({ ok: true });
 });
 
 // Makes this browser a counter device of the business (Owner, signed in with a password on that device).
