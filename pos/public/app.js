@@ -1316,7 +1316,9 @@ async function stockScreen(tab = 'hand') {
   const st = await api('GET', `${B()}/stock`);
   await load('menu');
   ui.st = st;
-  const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['handover', 'Bar handover'], ['report', 'Report'], ['items', 'Items and recipes'], ['auto', 'Make recipes']];
+  const tabs = [['hand', 'On hand'], ['receive', 'Receive'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'], ['handover', 'Bar handover'], ['report', 'Report'], ['items', 'Stock items'], ['recipes', 'Recipes']];
+  // The old Make recipes address opens Recipes with Make recipes showing.
+  if (tab === 'auto') { tab = 'recipes'; ui.mkOpen = true; }
   const low = st.items.filter((i) => i.active && i.low).length;
   const head = html`${pageHead('Stock', `Bar and kitchen stores${low ? ` · ${plural(low, 'item')} below reorder level` : ''}`)}${tabsNav('Stock', tabs.map(([k, t]) => [`#/stock/${k}`, t, k]), tab)}`;
   const items = st.items.filter((i) => i.active);
@@ -1326,15 +1328,17 @@ async function stockScreen(tab = 'hand') {
   if (tab === 'report') { ui.rFrom ??= me.business.shiftDay; ui.rTo ??= me.business.shiftDay; ui.rStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
   if (tab === 'handover') { ui.hFrom ??= me.business.shiftDay; ui.hTo ??= me.business.shiftDay; ui.hStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
   if (tab === 'handover' && ui.hStore) ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`);
-  if (tab === 'auto') {
+  if (tab === 'recipes') {
     ui.mkSections = (await api('GET', `${B()}/stock/recipes/sections`)).sections;
     ui.mkCats ??= ui.mkSections.filter((x) => x.bar).map((x) => x.category);
+    if (!st.recipes.length) ui.mkOpen = true;      // nothing yet: start with Make recipes
   }
   if (tab === 'report' && ui.rStore) ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`);
   rerender = () => {
     let body = '';
-    if (tab === 'auto') body = makeRecipesTab();
-    else if (!st.stores.length && tab !== 'items') body = html`<section class="panel"><p>No stores yet. Add them on <a href="#/stock/items">Items and recipes</a>.</p></section>`;
+    if (tab === 'recipes') body = recipesTab();
+    else if (tab === 'items') body = stockItemsTab();
+    else if (!st.stores.length) body = html`<section class="panel"><p>No stores yet. Add them on <a href="#/stock/items">Items and recipes</a>.</p></section>`;
     else if (tab === 'hand') body = html`<section class="panel"><h2>Stock on hand</h2>${errorBox()}<div class="scroll"><table class="t"><thead><tr><th>Item</th>${st.stores.map((x) => html`<th class="num">${x.name}</th>`)}<th class="num">Total</th><th class="num">Value</th></tr></thead><tbody>
       ${items.map((i) => html`<tr><td>${i.name}${i.low ? html`<div class="small" style="color:var(--bad)">Below reorder level (${qtyText(i.reorderLevel, i)})</div>` : ''}</td>
         ${st.stores.map((x) => html`<td class="num" style="${i.byStore[x.id] < 0 ? 'color:var(--bad)' : ''}">${qtyText(i.byStore[x.id], i)}</td>`)}<td class="num"><strong>${qtyText(i.total, i)}</strong></td><td class="num">${rs(i.valuePaise)}</td></tr>`)}
@@ -1415,39 +1419,224 @@ async function stockScreen(tab = 'hand') {
             <td class="num">${i.waste}${i.waste ? html`<div class="small quiet">${rs(i.wasteValuePaise)}</div>` : ''}</td><td class="num" style="${i.variance ? 'color:var(--bad)' : ''}">${i.variance}${i.variance ? html`<div class="small">${rs(i.varianceValuePaise)}</div>` : ''}</td>
             <td class="num"><strong>${i.closing}</strong><div class="small quiet">${rs(i.closingValuePaise)}</div></td></tr>`)}</tbody></table></div>
           <p class="small quiet">Sold comes from bills by recipe. Variance is what counts found against the book: a minus means stock went missing.</p>` : ''}</section>`;
-    } else if (tab === 'items') body = html`<div class="grid2" style="align-items:start">
-      <section class="panel"><h2>Stock items</h2>${errorBox()}
-        <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Unit</th><th>Pack</th><th class="num">Price per pack</th><th class="num">Reorder at</th></tr></thead><tbody>
-          ${st.items.map((i) => html`<tr><td>${i.name}${i.active ? '' : ' (not used)'}</td><td>${i.unit}</td><td>${i.packName} of ${i.packSize}</td><td class="num">${rs(i.costPerPackPaise)}</td><td class="num">${i.reorderLevel}</td></tr>`)}</tbody></table></div>
-        <form class="grid2"><label class="f">Name<input class="in" data-model="siName" placeholder="e.g. Sample Whisky"></label>
-          <label class="f">Counted in<select class="in" data-model="siUnit"><option value="ml">ml</option><option value="pcs" ${ui.siUnit === 'pcs' ? 'selected' : ''}>pieces</option><option value="g" ${ui.siUnit === 'g' ? 'selected' : ''}>g</option></select></label>
-          <label class="f">Bought as<input class="in" data-model="siPack" placeholder="bottle, case"></label><label class="f">Units in one (e.g. 750)<input class="in" inputmode="numeric" data-model="siSize"></label>
-          <label class="f">Price per pack (₹)<input class="in" inputmode="decimal" data-model="siCost"></label><label class="f">Reorder when total is at or below (units)<input class="in" inputmode="numeric" data-model="siReorder"></label>
-          <div><button class="btn pri" type="submit" data-act="stItem" data-submit>Add stock item</button></div></form>
-        <h2>Stores</h2><p>${st.stores.map((x) => x.name).join(', ') || 'None yet'}</p>
-        <form class="row" style="align-items:end"><label class="f">Store name<input class="in" data-model="sStoreName" placeholder="e.g. Bar"></label>
-          <label class="f">Kind<select class="in" data-model="sStoreKind"><option value="bar">Bar</option><option value="main" ${ui.sStoreKind === 'main' ? 'selected' : ''}>Main store</option><option value="kitchen" ${ui.sStoreKind === 'kitchen' ? 'selected' : ''}>Kitchen</option></select></label>
-          <button class="btn" type="submit" data-act="stStore" data-submit>Add store</button></form></section>
-      <section class="panel"><h2>Recipes</h2><p class="small quiet">What one portion of a menu item uses. Bar items take from the bar store; kitchen items from the kitchen store.</p>
-        <div class="sums">${cache.menu.filter((m) => st.recipes.some((r) => r.menuItemId === m.id)).map((m) => html`<div><span>${m.name}</span><span>${st.recipes.filter((r) => r.menuItemId === m.id).map((r) => { const i = st.items.find((x) => x.id === r.stockItemId); return `${r.qty} ${i?.unit ?? ''} ${i?.name ?? ''}`; }).join(' + ')}</span></div>`)}</div>
-        <form class="grid2"><label class="f">Menu item<select class="in" data-model="rcMenu"><option value="">Choose</option>${cache.menu.map((m) => html`<option value="${m.id}" ${ui.rcMenu === m.id ? 'selected' : ''}>${m.name}</option>`)}</select></label>
-          ${itemSel('rcStock')}<label class="f">Uses (${items.find((i) => i.id === ui.rcStock)?.unit ?? 'units'} per portion)<input class="in" inputmode="numeric" data-model="rcQty"></label>
-          <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="stRecipe" data-submit>Set recipe</button><button class="btn" type="button" data-act="stRecipeClear">Remove recipe</button></div></div></form></section></div>`;
+    }
     paint(shell('#/stock', html`${head}${body}`));
   };
   rerender();
 }
 const int = (v) => (/^\d+$/.test(String(v ?? '').trim()) ? Number(v) : NaN);
 
-// ---------- Make recipes (Stock): proposals for bar drinks without a recipe, from their names and, for cocktails, Claude.
-// Nothing is saved until "Approve"; pour sizes are asked each time and remembered on this device only.
+// ---------- Stock items (Stock): what is bought and counted, and the stores
+function stockItemsTab() {
+  const st = ui.st;
+  ui.siQ ??= ''; ui.siU ??= '';
+  const used = (id) => new Set(st.recipes.filter((r) => r.stockItemId === id).map((r) => r.menuItemId)).size;
+  const words = ui.siQ.toLowerCase().split(/\s+/).filter(Boolean);
+  const list = st.items.filter((i) => (!ui.siU || i.unit === ui.siU) && words.every((w) => i.name.toLowerCase().includes(w)));
+  const unitName = { ml: 'ml', g: 'g', pcs: 'pcs' };
+  const formOpen = ui.siOpen || ui.siEditId;
+  return html`${st.stores.some((x) => x.kind === 'bar') ? '' : html`<div class="msg warn" role="status">No Bar store yet: bar sales take stock out of the Bar store, so add one under Stores below first.</div>`}
+    <section class="panel"><h2>Stock items <span class="small quiet">· ${plural(st.items.filter((i) => i.active).length, 'item')}</span></h2>${errorBox()}
+      <div class="toolbar"><input class="in" type="search" data-model="siQ" data-live value="${ui.siQ}" placeholder="Search stock items" aria-label="Search stock items">
+        <select class="in" data-model="siU" aria-label="Counted in"><option value="">All units</option>${['ml', 'g', 'pcs'].map((u) => html`<option value="${u}" ${ui.siU === u ? 'selected' : ''}>Counted in ${u}</option>`)}</select>
+        <button class="btn" type="button" data-act="siNew" style="margin-left:auto">+ Add stock item</button></div>
+      ${formOpen ? html`<form class="grid3 rowform"><h2 style="grid-column:1/-1">${ui.siEditId ? 'Edit stock item' : 'Add stock item'}</h2>
+        <label class="f">Name<input class="in" data-model="siName" value="${ui.siName ?? ''}" placeholder="e.g. Sample Whisky" autofocus></label>
+        <label class="f">Counted in<select class="in" data-model="siUnit"><option value="ml">ml</option><option value="pcs" ${ui.siUnit === 'pcs' ? 'selected' : ''}>pieces</option><option value="g" ${ui.siUnit === 'g' ? 'selected' : ''}>g</option></select></label>
+        <label class="f">Bought as<input class="in" data-model="siPack" value="${ui.siPack ?? ''}" placeholder="bottle, case, kg"></label>
+        <label class="f">Units in one (e.g. 750)<input class="in" inputmode="numeric" data-model="siSize" value="${ui.siSize ?? ''}"></label>
+        <label class="f">Price per pack (₹)<input class="in" inputmode="decimal" data-model="siCost" value="${ui.siCost ?? ''}"></label>
+        <label class="f">Reorder when total is at or below (units)<input class="in" inputmode="numeric" data-model="siReorder" value="${ui.siReorder ?? ''}"></label>
+        <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="stItem" data-submit>${ui.siEditId ? 'Save stock item' : 'Add stock item'}</button><button class="btn ghost" type="button" data-act="siCancel">Cancel</button></div></form>` : ''}
+      ${list.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th>Counted in</th><th>Bought as</th><th class="num">Price per pack</th><th class="num">Reorder at</th><th>Used in</th><th></th></tr></thead><tbody>
+        ${list.map((i) => html`<tr class="${i.active ? '' : 'mksaved'}"><td data-label="Item"><strong>${i.name}</strong>${i.active ? '' : html` <span class="small quiet">(not used)</span>`}</td><td data-label="Counted in">${unitName[i.unit]}</td>
+          <td data-label="Bought as">${i.packName} of ${i.packSize.toLocaleString('en-IN')}${i.unit === 'pcs' ? '' : ` ${i.unit}`}</td>
+          <td data-label="Price per pack" class="num">${i.costPerPackPaise ? rs(i.costPerPackPaise) : html`<span class="quiet">add price</span>`}</td>
+          <td data-label="Reorder at" class="num">${i.reorderLevel ? `${i.reorderLevel.toLocaleString('en-IN')} ${i.unit}` : '—'}</td>
+          <td data-label="Used in" class="small">${used(i.id) ? plural(used(i.id), 'recipe') : html`<span class="quiet">none</span>`}</td>
+          <td class="act"><div class="irow">${iconBtn('siEdit', i.id, 'edit', `Edit ${i.name}`)}${i.active ? iconBtn('siDel', i.id, 'trash', `Remove ${i.name}`, 'danger') : ''}</div></td></tr>`)}</tbody></table></div>`
+        : html`<p class="quiet">${st.items.length ? 'No stock item matches.' : 'No stock items yet. Add them here, or let Make recipes (on Recipes) propose them.'}</p>`}</section>
+    <section class="panel"><h2>Stores</h2><p>${st.stores.map((x) => `${x.name} (${{ bar: 'bar', main: 'main store', kitchen: 'kitchen' }[x.kind]})`).join(', ') || 'None yet'}</p>
+      <form class="row" style="align-items:end"><label class="f">Store name<input class="in" data-model="sStoreName" placeholder="e.g. Bar"></label>
+        <label class="f">Kind<select class="in" data-model="sStoreKind"><option value="bar">Bar</option><option value="main" ${ui.sStoreKind === 'main' ? 'selected' : ''}>Main store</option><option value="kitchen" ${ui.sStoreKind === 'kitchen' ? 'selected' : ''}>Kitchen</option></select></label>
+        <button class="btn" type="submit" data-act="stStore" data-submit>Add store</button></form></section>`;
+}
+const siFields = () => ['siName', 'siUnit', 'siPack', 'siSize', 'siCost', 'siReorder'];
+actions.siNew = () => { ui.siOpen = true; ui.siEditId = null; for (const k of siFields()) ui[k] = ''; ui.siUnit = 'ml'; ui.error = null; rerender(); };
+actions.siCancel = () => { ui.siOpen = false; ui.siEditId = null; ui.error = null; rerender(); };
+actions.siEdit = (d) => {
+  const i = ui.st.items.find((x) => x.id === d.id);
+  Object.assign(ui, { siEditId: i.id, siOpen: true, siName: i.name, siUnit: i.unit, siPack: i.packName, siSize: String(i.packSize), siCost: i.costPerPackPaise ? rupeesShort(i.costPerPackPaise) : '', siReorder: i.reorderLevel ? String(i.reorderLevel) : '' });
+  ui.error = null; rerender(); window.scrollTo({ top: 0, behavior: 'smooth' });
+};
+actions.siDel = async (d) => {
+  const i = ui.st.items.find((x) => x.id === d.id);
+  if (!confirm(`Remove ${i.name}? If it has stock history it is hidden instead, so past reports still show it.`)) return;
+  const r = await api('DELETE', `${B()}/stock/items/${i.id}`);
+  flash = { kind: 'ok', text: r.hidden ? `${i.name} hidden: it has stock history, so reports keep it.` : `${i.name} removed.` };
+  route();
+};
+
+// ---------- Recipes (Stock): saved recipes with cost per serving, Add a recipe (with AI suggestion), and Make recipes
+// for many at once. One line editor serves all three: a "row" is { menuItemId, menuItem, category, lines: [{ stockItemId |
+// newKey, qty }] }; rows of Make recipes live in ui.mk.proposals, the one being added or edited is ui.rd (row id "rd").
+// New stock items (not made yet) are one pool, ui.newPool, made when the first recipe using them is saved.
 const POUR_KEY = 'pos-pours';
 function savedPours() { try { return JSON.parse(localStorage.getItem(POUR_KEY) ?? 'null') ?? {}; } catch { return {}; } }
 const DRINK_KIND = { peg: 'Peg', bottle: 'Bottle', beer: 'Beer', wine: 'Wine', mixer: 'Mixer', cocktail: 'Cocktail', kitchen: 'Kitchen', skip: 'Not a drink', unclear: 'Unclear' };
-function makeRecipesTab() {
+const rowOf = (id) => (id === 'rd' ? ui.rd : ui.mk?.proposals.find((x) => x.menuItemId === id));
+const newOf = (key) => ui.newPool.find((n) => n.key === key);
+const lineName = (l) => (l.newKey ? (ui.mkNew[l.newKey]?.name ?? newOf(l.newKey)?.name) : ui.st.items.find((i) => i.id === l.stockItemId)?.name) ?? '?';
+const lineUnit = (l) => (l.newKey ? newOf(l.newKey)?.unit : ui.st.items.find((i) => i.id === l.stockItemId)?.unit) ?? '';
+const currentPours = () => ({ peg: int(ui.pPeg), large: int(ui.pLarge), glass: int(ui.pGlass) });
+/** What one serving costs at the last price paid, and which ingredients have no price yet. */
+function servingCost(lines) {
+  let paise = 0; const missing = [];
+  for (const l of lines) {
+    const i = l.stockItemId ? ui.st.items.find((x) => x.id === l.stockItemId) : null;
+    if (!i || !i.costPerPackPaise) { missing.push(lineName(l)); continue; }
+    paise += (l.qty * i.costPerPackPaise) / i.packSize;
+  }
+  return { paise: Math.round(paise), missing };
+}
+function costText(lines, pricePaise) {
+  if (!lines.length) return html`<span class="quiet">—</span>`;
+  const c = servingCost(lines);
+  if (c.missing.length === lines.length) return html`<span class="quiet">add prices</span><div class="small quiet">No price yet for ${c.missing.join(', ')}</div>`;
+  const share = pricePaise ? `${Math.round((c.paise * 100) / pricePaise)}% of price${c.missing.length ? ' so far' : ''}` : '';
+  const why = [c.missing.length ? `${c.missing.join(', ')}: no price yet` : '', share].filter(Boolean).join(' · ');
+  return html`<span class="cost">${rs(c.paise)}${c.missing.length ? '+' : ''}</span><div class="small ${c.missing.length ? 'quiet' : 'margin'}">${why}</div>`;
+}
+/** The ingredient lines of a row, editable: amounts, remove (×), and add an ingredient. */
+function lineEditor(x, rowId) {
+  const choices = [...ui.st.items.filter((i) => i.active).map((i) => [i.id, `${i.name} (${i.unit})`]), ...ui.newPool.map((n) => [n.key, `${ui.mkNew[n.key]?.name ?? n.name} (${n.unit}, new)`])];
+  const addForm = html`<form class="mkadd"><select class="in" data-model="maChoice" aria-label="Ingredient to add to ${x.menuItem}"><option value="">Choose a stock item</option>${choices.map(([v, t]) => html`<option value="${v}" ${ui.maChoice === v ? 'selected' : ''}>${t}</option>`)}<option value="__new" ${ui.maChoice === '__new' ? 'selected' : ''}>New stock item…</option></select>
+      ${ui.maChoice === '__new' ? html`<input class="in" data-model="maName" value="${ui.maName ?? ''}" placeholder="Name, e.g. Paneer" aria-label="New stock item name">
+        <select class="in mkunit" data-model="maUnit" aria-label="Counted in">${['g', 'ml', 'pcs'].map((u) => html`<option ${ui.maUnit === u ? 'selected' : ''}>${u}</option>`)}</select>
+        <input class="in mkqty" inputmode="numeric" data-model="maPackSize" value="${ui.maPackSize ?? ''}" placeholder="in one pack" aria-label="Units in one pack (1000 for 1 kg)">` : ''}
+      <input class="in mkqty" inputmode="numeric" data-model="maQty" value="${ui.maQty ?? ''}" placeholder="amount" aria-label="Amount for one serving">
+      <button class="btn pri" type="submit" data-act="mkAddGo" data-id="${rowId}" data-submit>Add</button><button class="btn ghost" type="button" data-act="mkAddCancel">Cancel</button></form>`;
+  return html`${x.lines.map((l, i) => html`<div class="mkline"><input class="in mkqty" inputmode="numeric" data-act-change="mkQty" data-id="${rowId}" data-i="${i}" value="${l.qty}" aria-label="${x.menuItem}: amount of ${lineName(l)}"><span class="small">${lineUnit(l)}</span>
+      <span>${lineName(l)}</span>${l.newKey ? html`<span class="tag-new">new</span>` : ''}<button class="lnx" type="button" data-act="mkLineX" data-id="${rowId}" data-i="${i}" title="Remove this ingredient" aria-label="Remove ${lineName(l)} from ${x.menuItem}">×</button></div>`)}
+    ${x.lines.length ? '' : html`<p class="small quiet">No ingredients yet${rowId === 'rd' ? ': use AI suggestion, or add them yourself.' : ': add one, or skip this item.'}</p>`}
+    ${ui.mkAdd === rowId ? addForm : html`<button class="btn ghost addln" type="button" data-act="mkAdd" data-id="${rowId}">+ Add ingredient</button>`}`;
+}
+/** The AI suggestion box for one item being added or edited: kitchen dishes choose major or all ingredients. */
+function aiBox(x) {
+  const m = cache.menu.find((y) => y.id === x.menuItemId);
+  if (!m) return '';
+  const kitchen = m.station !== 'bar';
+  return x.ai
+    ? html`<div class="ai"><span class="tag-check">please check</span><span class="small">AI suggestion for one ${kitchen ? 'plate' : 'serving'}${kitchen ? `, ${ui.mkDetail === 'all' ? 'all' : 'major'} ingredients` : `, pegs of ${ui.pPeg} / ${ui.pLarge} ml`}. Change anything before saving.${x.note ? ` ${x.note}` : ''}</span>
+        <button class="btn" type="button" data-act="rdAsk" style="margin-left:auto">Suggest again</button></div>`
+    : html`<div class="ai"><button class="btn pri" type="button" data-act="rdAsk">✨ AI suggestion</button>
+        ${kitchen ? html`<div class="radio small"><label><input type="radio" name="rdDetail" data-act-change="mkDetail" value="major" ${ui.mkDetail !== 'all' ? 'checked' : ''}> Major ingredients</label><label><input type="radio" name="rdDetail" data-act-change="mkDetail" value="all" ${ui.mkDetail === 'all' ? 'checked' : ''}> All ingredients</label></div>`
+          : html`<span class="small">Pegs of ${ui.pPeg} / ${ui.pLarge} ml, glass of wine ${ui.pGlass} ml</span>`}
+        <span class="small quiet">A fraction of a rupee · always check it</span></div>`;
+}
+const newNote = (x) => {
+  const n = [...new Set(x.lines.filter((l) => l.newKey).map((l) => l.newKey))].map(newOf).filter(Boolean);
+  return n.length ? html`<p class="small quiet" style="margin-top:8px">“new” stock items are made when you save: ${n.map((y) => `${ui.mkNew[y.key]?.name ?? y.name} (${y.packName} of ${y.packSize}${y.unit === 'pcs' ? '' : ` ${y.unit}`})`).join(', ')}.</p>` : '';
+};
+
+function recipesTab() {
+  const st = ui.st;
   const p = savedPours();
   ui.pPeg ??= String(p.peg ?? 30); ui.pLarge ??= String(p.large ?? 60); ui.pGlass ??= String(p.glass ?? 150); ui.pClaude ??= true;
-  ui.mkDetail ??= 'major';
+  ui.mkDetail ??= 'major'; ui.newPool ??= []; ui.mkNew ??= {}; ui.mkSel ??= [];
+  const withRecipe = [...new Set(st.recipes.map((r) => r.menuItemId))];
+  const without = (ui.mkSections ?? []).reduce((t, x) => t + x.n, 0);
+  const top = html`<section class="panel"><div class="counts"><span class="big">${withRecipe.length}</span><span>${withRecipe.length === 1 ? 'item has' : 'items have'} a recipe</span><span class="quiet">·</span><span class="big">${without}</span><span>${without === 1 ? "doesn't" : "don't"} yet</span>
+      <span class="counts-act"><button class="btn ${ui.mkOpen ? '' : 'pri'}" type="button" data-act="rcMakeToggle" ${without ? '' : 'disabled'}>${ui.mkOpen ? 'Hide Make recipes' : `Make recipes for the ${without}…`}</button>
+      <button class="btn" type="button" data-act="rdNew" ${without ? '' : 'disabled'}>+ Add a recipe</button></span></div>
+    <p class="small quiet" style="margin-top:6px">Make recipes works out many at once: bar drinks from their names, cocktails and kitchen dishes by AI suggestion. Add a recipe does one item, by hand or with an AI suggestion. Only item and stock item names are sent to the AI (Claude).</p></section>`;
+  // Add a recipe (one item, not yet with a recipe)
+  let add = '';
+  if (ui.rd && ui.rd.mode === 'add') {
+    const x = ui.rd;
+    const open = cache.menu.filter((m) => m.active && !withRecipe.includes(m.id)).sort((a, b) => (a.category === b.category ? (a.name < b.name ? -1 : 1) : a.category < b.category ? -1 : 1));
+    const m = cache.menu.find((y) => y.id === x.menuItemId);
+    add = html`<section class="panel addpanel"><h2>Add a recipe</h2>${errorBox()}
+      <label class="f">Menu item<select class="in" data-act-change="rdPick" aria-label="Menu item"><option value="">Choose a menu item</option>${open.map((y) => html`<option value="${y.id}" ${x.menuItemId === y.id ? 'selected' : ''}>${y.name} — ${y.category}${y.openPrice ? '' : ` · sells at ${rs(y.pricePaise)}`}</option>`)}</select></label>
+      <p class="small quiet" style="margin-top:4px">Only items without a recipe are listed. Type to jump to a name.</p>
+      ${x.menuItemId ? html`${aiBox(x)}<div class="rdlines">${lineEditor(x, 'rd')}</div>${newNote(x)}
+        <div class="costline"><span class="quiet">Cost per serving</span>${costText(x.lines, m?.openPrice ? 0 : m?.pricePaise)}</div>` : ''}
+      <div class="row" style="margin-top:12px"><button class="btn pri" type="button" data-act="rdSave" ${x.menuItemId && x.lines.length ? '' : 'disabled'}>Save recipe</button><button class="btn ghost" type="button" data-act="rdCancel">Cancel</button></div></section>`;
+  }
+  // Saved recipes, by menu section, with cost per serving; one can be edited in its row.
+  ui.rsQ ??= ''; ui.rsCat ??= '';
+  const words = ui.rsQ.toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = withRecipe.map((id) => {
+    const m = cache.menu.find((y) => y.id === id);
+    const lines = st.recipes.filter((r) => r.menuItemId === id).map((r) => ({ stockItemId: r.stockItemId, qty: r.qty }));
+    return { id, name: m?.name ?? st.recipes.find((r) => r.menuItemId === id).menuItem, category: m?.category ?? 'Other', pricePaise: m && !m.openPrice ? m.pricePaise : 0, openPrice: !!m?.openPrice, lines };
+  }).filter((r) => (!ui.rsCat || r.category === ui.rsCat) && words.every((w) => r.name.toLowerCase().includes(w) || r.lines.some((l) => lineName(l).toLowerCase().includes(w))))
+    .sort((a, b) => (a.category === b.category ? (a.name < b.name ? -1 : 1) : a.category < b.category ? -1 : 1));
+  const cats = [...new Set(withRecipe.map((id) => cache.menu.find((y) => y.id === id)?.category ?? 'Other'))].sort();
+  let lastCat = null;
+  const saved = html`<section class="panel"><h2>Saved recipes</h2>${ui.rd?.mode === 'edit' ? errorBox() : ''}
+    ${withRecipe.length ? html`<div class="toolbar"><input class="in" type="search" data-model="rsQ" data-live value="${ui.rsQ}" placeholder="Search items or ingredients" aria-label="Search recipes">
+      <select class="in" data-model="rsCat" aria-label="Section"><option value="">All sections</option>${cats.map((c) => html`<option ${ui.rsCat === c ? 'selected' : ''}>${c}</option>`)}</select></div>
+    ${rows.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th>Takes from stock (one serving)</th><th class="num">Cost per serving</th><th></th></tr></thead><tbody>
+      ${rows.map((r) => {
+        const head = r.category !== lastCat ? html`<tr class="sechead"><td colspan="4">${r.category}</td></tr>` : '';
+        lastCat = r.category;
+        const sells = r.openPrice ? 'Priced at billing' : `Sells at ${rs(r.pricePaise)}`;
+        if (ui.rd?.mode === 'edit' && ui.rd.menuItemId === r.id) {
+          return html`${head}<tr class="editing"><td data-label="Item"><strong>${r.name}</strong><div class="small quiet">${sells} · editing</div></td>
+            <td data-label="Takes from stock">${aiBox(ui.rd)}${lineEditor(ui.rd, 'rd')}${newNote(ui.rd)}</td>
+            <td data-label="Cost per serving" class="num">${costText(ui.rd.lines, r.pricePaise)}</td>
+            <td class="act"><div class="row" style="justify-content:flex-end"><button class="btn pri" type="button" data-act="rdSave" ${ui.rd.lines.length ? '' : 'disabled'}>Save</button><button class="btn ghost" type="button" data-act="rdCancel">Cancel</button></div></td></tr>`;
+        }
+        return html`${head}<tr><td data-label="Item"><strong>${r.name}</strong><div class="small quiet">${sells}</div></td>
+          <td data-label="Takes from stock" class="ing">${r.lines.map((l) => html`<div>${l.qty} ${lineUnit(l)} ${lineName(l)}</div>`)}</td>
+          <td data-label="Cost per serving" class="num">${costText(r.lines, r.pricePaise)}</td>
+          <td class="act"><div class="irow">${iconBtn('rcEdit', r.id, 'edit', `Edit recipe for ${r.name}`)}${iconBtn('rcDel', r.id, 'trash', `Delete recipe for ${r.name}`, 'danger')}</div></td></tr>`;
+      })}</tbody></table></div>
+      <p class="small quiet">Cost is at the last price paid per pack. “+” means some ingredients have no price yet: it fills in when you receive them with a price.</p>`
+      : html`<p class="quiet">No saved recipe matches.</p>`}` : html`<p class="quiet">No recipes yet. Use Make recipes above to start, or Add a recipe for one item.</p>`}</section>`;
+  return html`${top}${add}${ui.mkOpen ? makePanel() : ''}${saved}`;
+}
+actions.rcMakeToggle = () => { ui.mkOpen = !ui.mkOpen; ui.error = null; rerender(); };
+actions.rdNew = () => { ui.rd = { mode: 'add', menuItemId: '', menuItem: '', category: '', lines: [] }; ui.mkAdd = null; ui.error = null; rerender(); };
+actions.rdPick = (_d, el) => {
+  const m = cache.menu.find((y) => y.id === el.value);
+  ui.rd = { mode: 'add', menuItemId: m?.id ?? '', menuItem: m?.name ?? '', category: m?.category ?? '', lines: [] };
+  ui.mkAdd = null; ui.error = null; rerender();
+};
+actions.rdCancel = () => { ui.rd = null; ui.mkAdd = null; ui.error = null; rerender(); };
+actions.rcEdit = (d) => {
+  const m = cache.menu.find((y) => y.id === d.id);
+  const lines = ui.st.recipes.filter((r) => r.menuItemId === d.id).map((r) => ({ stockItemId: r.stockItemId, qty: r.qty }));
+  ui.rd = { mode: 'edit', menuItemId: d.id, menuItem: m?.name ?? '', category: m?.category ?? '', lines };
+  ui.mkAdd = null; ui.error = null; rerender();
+};
+actions.rcDel = async (d) => {
+  const name = cache.menu.find((y) => y.id === d.id)?.name ?? 'this item';
+  if (!confirm(`Delete the recipe for ${name}? Its sales will no longer take stock out.`)) return;
+  await api('PUT', `${B()}/stock/recipes/${d.id}`, { lines: [] });
+  flash = { kind: 'ok', text: `Recipe for ${name} deleted.` };
+  await refreshRecipes();
+};
+actions.rdAsk = async () => {
+  const x = ui.rd;
+  const r = await api('POST', `${B()}/stock/recipes/ask`, { menuItemId: x.menuItemId, ...currentPours(), detail: ui.mkDetail, newItems: ui.newPool });
+  ui.newPool = [...ui.newPool, ...r.newItems.filter((n) => !ui.newPool.some((y) => y.key === n.key))];
+  if (!r.proposal.lines.length) throw new Error(`${x.menuItem}: ${r.proposal.note || 'the AI had no suggestion for this one.'} Add the ingredients yourself.`);
+  Object.assign(x, { lines: r.proposal.lines, ai: true, note: r.proposal.note });
+  ui.mkAdd = null; ui.error = null; rerender();
+};
+actions.rdSave = async () => { await mkSave([ui.rd]); };
+/** After saving or deleting a recipe: fresh recipes and counts, keeping what is open on the screen. */
+async function refreshRecipes() {
+  const [st, secs] = await Promise.all([api('GET', `${B()}/stock`), api('GET', `${B()}/stock/recipes/sections`)]);
+  Object.assign(ui.st, st);
+  ui.mkSections = secs.sections;
+  rerender();
+}
+
+// ---------- Make recipes (inside Recipes): many items at once, by menu section
+function makePanel() {
   const secs = ui.mkSections ?? [];
   const chosen = secs.filter((x) => ui.mkCats.includes(x.category));
   const anyKitchen = chosen.some((x) => !x.bar);
@@ -1455,11 +1644,11 @@ function makeRecipesTab() {
     const list = secs.filter((x) => x.bar === bar);
     if (!list.length) return '';
     return html`<div class="grouphead"><h3>${bar ? 'Bar' : 'Kitchen'}</h3><div class="links"><button type="button" data-act="mkCatsAll" data-bar="${bar ? 1 : 0}">All</button><button type="button" data-act="mkCatsNone" data-bar="${bar ? 1 : 0}">None</button></div>
-        <span class="small quiet">${bar ? 'Worked out from the names; cocktails by Claude' : 'Estimated by Claude: every dish needs checking'}</span></div>
+        <span class="small quiet">${bar ? 'Worked out from the names; cocktails by AI suggestion' : 'AI suggestion for every dish: each needs checking'}</span></div>
       <div class="catgrid">${list.map((x) => html`<label><input type="checkbox" class="sel" data-act-change="mkCat" data-cat="${x.category}" ${ui.mkCats.includes(x.category) ? 'checked' : ''}> ${x.category} <span class="n">(${x.n})</span></label>`)}</div>`;
   };
   const form = html`<section class="panel"><h2>Make recipes</h2>
-    <p class="small quiet">Choose the menu sections to work out. Bar drinks are worked out from their names; cocktails and kitchen dishes can be suggested by Claude (only item and stock item names are sent). Nothing is saved until you approve.</p>${ui.mk ? '' : errorBox()}
+    <p class="small quiet">Choose the menu sections to work out. Nothing is saved until you approve.</p>${ui.mk || ui.rd ? '' : errorBox()}
     ${secs.length ? html`${group(true)}${group(false)}` : html`<p class="quiet">Every menu item already has a recipe.</p>`}
     ${anyKitchen ? html`<div class="choice"><strong>For kitchen dishes, list</strong>
       <label><input type="radio" name="mkDetail" data-act-change="mkDetail" value="major" ${ui.mkDetail === 'major' ? 'checked' : ''}><span><strong>Major ingredients only</strong> (recommended): the 2 to 5 that cost the most or are worth counting, such as paneer, chicken, rice, oil, butter and cream. Leaves out salt, spices, garnish and water.</span></label>
@@ -1467,7 +1656,7 @@ function makeRecipesTab() {
     <form class="grid3" style="margin-top:14px"><label class="f">Peg (ml)<input class="in" inputmode="numeric" data-model="pPeg" value="${ui.pPeg}"></label>
       <label class="f">Large peg (ml)<input class="in" inputmode="numeric" data-model="pLarge" value="${ui.pLarge}"></label>
       <label class="f">Glass of wine (ml)<input class="in" inputmode="numeric" data-model="pGlass" value="${ui.pGlass}"></label>
-      <label class="tickline" style="grid-column:1/-1"><input type="checkbox" class="sel" data-model="pClaude" ${ui.pClaude ? 'checked' : ''}> Use Claude for cocktails${anyKitchen ? ' and kitchen dishes' : ''} (a few rupees for up to 60 items; always check them)</label>
+      <label class="tickline" style="grid-column:1/-1"><input type="checkbox" class="sel" data-model="pClaude" ${ui.pClaude ? 'checked' : ''}> Use AI suggestions for cocktails${anyKitchen ? ' and kitchen dishes' : ''} (a few rupees for up to 60 items; always check them)</label>
       <div><button class="btn pri" type="submit" data-act="mkRun" data-submit ${chosen.length ? '' : 'disabled'}>${chosen.length ? `Make recipes for ${plural(chosen.length, 'section')} (${plural(chosen.reduce((t, x) => t + x.n, 0), 'item')})` : 'Choose a section'}</button></div></form></section>`;
   if (!ui.mk) return form;
   const r = ui.mk;
@@ -1481,80 +1670,66 @@ function makeRecipesTab() {
   const cats = [...new Set(live.map((x) => x.category))].sort();
   const skipped = r.proposals.filter((x) => x.skipped);
   const open = ready.filter((x) => !x.saved);
-  const choices = [...ui.st.items.filter((i) => i.active !== false).map((i) => [i.id, `${i.name} (${i.unit})`]), ...r.newItems.map((n) => [n.key, `${ui.mkNew[n.key]?.name ?? n.name} (${n.unit}, new)`])];
-  const addForm = (x) => html`<form class="mkadd"><select class="in" data-model="maChoice" aria-label="Ingredient to add to ${x.menuItem}"><option value="">Choose a stock item</option>${choices.map(([v, t]) => html`<option value="${v}" ${ui.maChoice === v ? 'selected' : ''}>${t}</option>`)}<option value="__new" ${ui.maChoice === '__new' ? 'selected' : ''}>New stock item…</option></select>
-      ${ui.maChoice === '__new' ? html`<input class="in" data-model="maName" value="${ui.maName ?? ''}" placeholder="Name, e.g. Paneer" aria-label="New stock item name">
-        <select class="in mkunit" data-model="maUnit" aria-label="Counted in">${['g', 'ml', 'pcs'].map((u) => html`<option ${ui.maUnit === u ? 'selected' : ''}>${u}</option>`)}</select>
-        <input class="in mkqty" inputmode="numeric" data-model="maPackSize" value="${ui.maPackSize ?? ''}" placeholder="in one pack" aria-label="Units in one pack (1000 for 1 kg)">` : ''}
-      <input class="in mkqty" inputmode="numeric" data-model="maQty" value="${ui.maQty ?? ''}" placeholder="amount" aria-label="Amount for one serving">
-      <button class="btn pri" type="submit" data-act="mkAddGo" data-id="${x.menuItemId}" data-submit>Add</button><button class="btn ghost" type="button" data-act="mkAddCancel">Cancel</button></form>`;
-  const stockName = (l) => (l.newKey ? (ui.mkNew[l.newKey]?.name ?? r.newItems.find((n) => n.key === l.newKey)?.name) : ui.st.items.find((i) => i.id === l.stockItemId)?.name) ?? '?';
-  const unitOf = (l) => (l.newKey ? r.newItems.find((n) => n.key === l.newKey)?.unit : ui.st.items.find((i) => i.id === l.stockItemId)?.unit) ?? '';
   const ticked = open.filter((x) => ui.mkSel.includes(x.menuItemId));
-  const usedNew = r.newItems.filter((n) => open.some((x) => x.lines.some((l) => l.newKey === n.key)));
+  const usedNew = ui.newPool.filter((n) => open.some((x) => x.lines.some((l) => l.newKey === n.key)));
   const tickedNew = usedNew.filter((n) => ticked.some((x) => x.lines.some((l) => l.newKey === n.key)));
   const row = (x) => x.saved
-    ? html`<tr class="mksaved"><td class="selcol"></td><td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
-        <td data-label="Takes from stock">${x.lines.map((l) => html`<div>${l.qty} ${unitOf(l)} ${stockName(l)}</div>`)}</td><td data-label="How"><span class="savedtag">Saved ✓</span></td><td class="act"></td></tr>`
+    ? html`<tr class="mksaved"><td class="selcol"></td><td data-label="Item"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
+        <td data-label="Takes from stock">${x.lines.map((l) => html`<div>${l.qty} ${lineUnit(l)} ${lineName(l)}</div>`)}</td><td data-label="How"><span class="savedtag">Saved ✓</span></td><td class="act"></td></tr>`
     : html`<tr class="${ui.mkSel.includes(x.menuItemId) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mkSel" data-id="${x.menuItemId}" aria-label="Tick ${x.menuItem}" ${ui.mkSel.includes(x.menuItemId) ? 'checked' : ''}></td>
-        <td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
-        <td data-label="Takes from stock">${x.lines.map((l, i) => html`<div class="mkline"><input class="in mkqty" inputmode="numeric" data-act-change="mkQty" data-id="${x.menuItemId}" data-i="${i}" value="${l.qty}" aria-label="${x.menuItem}: amount of ${stockName(l)}"><span class="small">${unitOf(l)}</span>
-          <span>${stockName(l)}</span>${l.newKey ? html`<span class="tag-new">new</span>` : ''}<button class="lnx" type="button" data-act="mkLineX" data-id="${x.menuItemId}" data-i="${i}" title="Remove this ingredient" aria-label="Remove ${stockName(l)} from ${x.menuItem}">×</button></div>`)}
-          ${x.lines.length ? '' : html`<p class="small quiet">No ingredients: add one, or skip this item.</p>`}
-          ${ui.mkAdd === x.menuItemId ? addForm(x) : html`<button class="btn ghost addln" type="button" data-act="mkAdd" data-id="${x.menuItemId}">+ Add ingredient</button>`}</td>
-        <td data-label="How">${DRINK_KIND[x.kind]} · ${x.check ? html`<span class="tag-check">please check</span>` : html`<span class="small quiet">${x.source === 'claude' ? 'suggested by Claude' : 'from the name'}</span>`}${x.note ? html`<div class="small quiet">${x.note}</div>` : ''}</td>
+        <td data-label="Item"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
+        <td data-label="Takes from stock">${lineEditor(x, x.menuItemId)}</td>
+        <td data-label="How">${DRINK_KIND[x.kind]} · ${x.check ? html`<span class="tag-check">please check</span>` : html`<span class="small quiet">${x.source === 'claude' ? 'AI suggestion' : 'from the name'}</span>`}${x.note ? html`<div class="small quiet">${x.note}</div>` : ''}</td>
         <td class="act"><div class="irow">${x.lines.length ? iconBtn('mkSaveOne', x.menuItemId, 'check', `Save recipe for ${x.menuItem}`, 'ok') : ''}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`;
   return html`${form}
-    <section class="panel">${errorBox()}${r.claudeNote ? html`<div class="msg warn" role="status">${r.claudeNote}</div>` : ''}
+    <section class="panel">${ui.rd ? '' : errorBox()}${r.claudeNote ? html`<div class="msg warn" role="status">${r.claudeNote}</div>` : ''}
       <h2>${plural(readyAll.length, 'item')} with a proposed recipe${readyAll.some((x) => x.saved) ? html` <span class="small quiet">· ${readyAll.filter((x) => x.saved).length} saved</span>` : ''}</h2>
       <div class="filterbar"><label class="f" style="flex-direction:row;align-items:center;gap:8px">Show <select class="in" data-model="mkShowCat" aria-label="Show section"><option value="">All sections</option>${cats.map((c) => html`<option ${ui.mkShowCat === c ? 'selected' : ''}>${c}</option>`)}</select></label>
         <select class="in" data-model="mkShowKind" aria-label="Show which"><option value="">Everything</option><option value="check" ${ui.mkShowKind === 'check' ? 'selected' : ''}>Please check only</option><option value="name" ${ui.mkShowKind === 'name' ? 'selected' : ''}>From the name only</option></select></div>
-      ${ready.length ? html`<p class="small quiet">Change amounts, then save a drink with its tick button, or tick several and approve them together. “Please check” means Claude suggested it, or the name was not clear enough to be sure.</p>
+      ${ready.length ? html`<p class="small quiet">Change amounts, then save an item with its tick button, or tick several and approve them together. “Please check” means it is an AI suggestion, or the name was not clear enough to be sure.</p>
       <div class="bulkbar" style="position:static;box-shadow:none"><strong>${plural(ticked.length, 'item')} ticked</strong>
         <button class="btn pri" type="button" data-act="mkApply" ${ticked.length ? '' : 'disabled'}>Approve ticked recipes</button>
         ${tickedNew.length ? html`<span class="small quiet">Also makes ${plural(tickedNew.length, 'new stock item')} (below)</span>` : ''}</div>
-      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mkSelAll" aria-label="Tick every drink not saved yet" ${open.length && ticked.length === open.length ? 'checked' : ''}></th><th>Drink</th><th>Takes from stock (one serving)</th><th>How</th><th></th></tr></thead><tbody>
+      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mkSelAll" aria-label="Tick every item not saved yet" ${open.length && ticked.length === open.length ? 'checked' : ''}></th><th>Item</th><th>Takes from stock (one serving)</th><th>How</th><th></th></tr></thead><tbody>
         ${ready.map(row)}</tbody></table></div>` : html`<p class="quiet">Nothing here${ui.mkShowCat || ui.mkShowKind ? ' with these filters' : ''} has a proposed recipe.</p>`}
-      ${usedNew.length ? html`<h2>New stock items to make</h2><p class="small quiet">Each is made when the first drink using it is saved. Check the name and how it is bought; the price is added when you receive it.</p>
+      ${usedNew.length ? html`<h2>New stock items to make</h2><p class="small quiet">Each is made when the first item using it is saved. Check the name and how it is bought; the price is added when you receive it.</p>
         <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Counted in</th><th>Bought as</th><th class="num">Units in one</th></tr></thead><tbody>
           ${usedNew.map((n) => html`<tr><td><input class="in" data-act-change="mkNewName" data-key="${n.key}" value="${ui.mkNew[n.key]?.name ?? n.name}" aria-label="Name of new stock item ${n.name}"></td><td>${n.unit}</td><td>${n.packName}</td>
             <td class="num"><input class="in mkqty" inputmode="numeric" data-act-change="mkNewPack" data-key="${n.key}" value="${ui.mkNew[n.key]?.packSize ?? n.packSize}" aria-label="${n.name}: ${n.unit} in one ${n.packName}"></td></tr>`)}</tbody></table></div>` : ''}
       ${rest.length ? html`<h2 style="margin-top:16px">${plural(rest.length, 'item')} left for you</h2>
-        <p class="small quiet">The name was not enough. Ask Claude for one (a fraction of a rupee, always check it), skip it, or add it by hand on <a href="#/stock/items">Items and recipes</a>.</p>
-        <div class="scroll"><table class="t cards"><thead><tr><th>Drink</th><th>Why</th><th></th></tr></thead><tbody>
-          ${rest.map((x) => html`<tr><td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td><td data-label="Why" class="small quiet">${x.note || DRINK_KIND[x.kind]}</td>
-            <td class="act"><div class="row" style="justify-content:flex-end">${x.kind === 'skip' && x.note.startsWith('Not a drink') ? '' : html`<button class="btn" type="button" data-act="mkAsk" data-id="${x.menuItemId}">Ask Claude</button>`}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`)}</tbody></table></div>` : ''}
+        <p class="small quiet">The name was not enough. Get an AI suggestion for one (a fraction of a rupee, always check it), skip it, or use Add a recipe above.</p>
+        <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th>Why</th><th></th></tr></thead><tbody>
+          ${rest.map((x) => html`<tr><td data-label="Item"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td><td data-label="Why" class="small quiet">${x.note || DRINK_KIND[x.kind]}</td>
+            <td class="act"><div class="row" style="justify-content:flex-end">${x.kind === 'skip' && x.note.startsWith('Not a drink') ? '' : html`<button class="btn" type="button" data-act="mkAsk" data-id="${x.menuItemId}">✨ AI suggestion</button>`}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`)}</tbody></table></div>` : ''}
       ${skipped.length ? html`<p class="small quiet" style="margin-top:12px">${plural(skipped.length, 'item')} skipped for now: ${skipped.map((x) => x.menuItem).join(', ')}. <button class="btn ghost" type="button" data-act="mkUnskip">Show them again</button></p>` : ''}
     </section>`;
 }
 actions.mkRun = async () => {
-  const pours = { peg: int(ui.pPeg), large: int(ui.pLarge), glass: int(ui.pGlass) };
+  const pours = currentPours();
   try { localStorage.setItem(POUR_KEY, JSON.stringify(pours)); } catch { /* this visit only */ }
   ui.error = null;
   ui.mk = await api('POST', `${B()}/stock/recipes/suggest`, { ...pours, claude: !!ui.pClaude, categories: ui.mkCats, detail: ui.mkDetail });
-  ui.mkPours = pours;
+  ui.newPool = [...ui.newPool.filter((n) => !ui.mk.newItems.some((y) => y.key === n.key)), ...ui.mk.newItems];
   ui.mkShowCat = ''; ui.mkShowKind = ''; ui.mkAdd = null;
-  ui.mkNew = {};
-  // Ticked to start: worked out from the name with nothing to check. Claude's and doubtful ones wait for a person.
+  // Ticked to start: worked out from the name with nothing to check. AI suggestions and doubtful ones wait for a person.
   ui.mkSel = ui.mk.proposals.filter((x) => x.lines.length && !x.check).map((x) => x.menuItemId);
   rerender();
 };
-const mkFind = (id) => ui.mk.proposals.find((x) => x.menuItemId === id);
 actions.mkSel = (d, el) => { const s = new Set(ui.mkSel); if (el.checked) s.add(d.id); else s.delete(d.id); ui.mkSel = [...s]; rerender(); };
 actions.mkSelAll = (_d, el) => { ui.mkSel = el.checked ? ui.mk.proposals.filter((x) => x.lines.length && !x.saved && !x.skipped).map((x) => x.menuItemId) : []; rerender(); };
-actions.mkQty = (d, el) => { mkFind(d.id).lines[Number(d.i)].qty = int(el.value); };
+actions.mkQty = (d, el) => { rowOf(d.id).lines[Number(d.i)].qty = int(el.value); if (d.id === 'rd') rerender(); };
 actions.mkNewName = (d, el) => { ui.mkNew[d.key] = { ...ui.mkNew[d.key], name: el.value.trim() }; };
 actions.mkNewPack = (d, el) => { ui.mkNew[d.key] = { ...ui.mkNew[d.key], packSize: int(el.value) }; };
 actions.mkCat = (d, el) => { const s = new Set(ui.mkCats); if (el.checked) s.add(d.cat); else s.delete(d.cat); ui.mkCats = [...s]; rerender(); };
 actions.mkCatsAll = (d) => { const bar = d.bar === '1'; ui.mkCats = [...new Set([...ui.mkCats, ...ui.mkSections.filter((x) => x.bar === bar).map((x) => x.category)])]; rerender(); };
 actions.mkCatsNone = (d) => { const bar = d.bar === '1'; const drop = new Set(ui.mkSections.filter((x) => x.bar === bar).map((x) => x.category)); ui.mkCats = ui.mkCats.filter((c) => !drop.has(c)); rerender(); };
 actions.mkDetail = (_d, el) => { ui.mkDetail = el.value; rerender(); };
-// Ingredient lines: remove one, or add a stock item (existing, proposed, or new) to an item's recipe before saving.
-actions.mkLineX = (d) => { const p = mkFind(d.id); p.lines.splice(Number(d.i), 1); p.edited = true; if (!p.lines.length) ui.mkSel = ui.mkSel.filter((x) => x !== d.id); rerender(); };
+// Ingredient lines: remove one, or add a stock item (existing, proposed, or new) to a recipe before saving.
+actions.mkLineX = (d) => { const p = rowOf(d.id); p.lines.splice(Number(d.i), 1); p.edited = true; if (!p.lines.length) ui.mkSel = ui.mkSel.filter((x) => x !== d.id); rerender(); };
 actions.mkAdd = (d) => { Object.assign(ui, { mkAdd: d.id, maChoice: '', maQty: '', maName: '', maUnit: 'g', maPackSize: '' }); ui.error = null; rerender(); };
 actions.mkAddCancel = () => { ui.mkAdd = null; rerender(); };
 actions.mkAddGo = (d) => {
-  const p = mkFind(d.id);
+  const p = rowOf(d.id);
   const qty = int(ui.maQty);
   if (!ui.maChoice) throw new Error('Choose the stock item to add.');
   if (!(qty > 0)) throw new Error('Type the amount for one serving: a whole number above zero.');
@@ -1568,8 +1743,8 @@ actions.mkAddGo = (d) => {
     const have = ui.st.items.find((i) => i.name.toLowerCase() === name.toLowerCase());
     if (have) line = { stockItemId: have.id };
     else {
-      const key = ui.mk.newItems.find((n) => n.name.toLowerCase() === name.toLowerCase() && n.unit === unit)?.key ?? `new:${unit}:${name.toLowerCase()}`;
-      if (!ui.mk.newItems.some((n) => n.key === key)) ui.mk.newItems.push({ key, name, unit, packName: unit === 'pcs' ? 'piece' : unit === 'ml' ? 'litre' : 'kg', packSize: pack });
+      const key = ui.newPool.find((n) => n.name.toLowerCase() === name.toLowerCase() && n.unit === unit)?.key ?? `new:${unit}:${name.toLowerCase()}`;
+      if (!ui.newPool.some((n) => n.key === key)) ui.newPool.push({ key, name, unit, packName: unit === 'pcs' ? 'piece' : unit === 'ml' ? 'litre' : 'kg', packSize: pack });
       line = { newKey: key };
     }
   } else line = ui.maChoice.startsWith('new:') ? { newKey: ui.maChoice } : { stockItemId: ui.maChoice };
@@ -1579,38 +1754,40 @@ actions.mkAddGo = (d) => {
   ui.mkAdd = null; ui.error = null;
   rerender();
 };
-actions.mkSkip = (d) => { mkFind(d.id).skipped = true; ui.mkSel = ui.mkSel.filter((x) => x !== d.id); ui.error = null; rerender(); };
+actions.mkSkip = (d) => { rowOf(d.id).skipped = true; ui.mkSel = ui.mkSel.filter((x) => x !== d.id); ui.error = null; rerender(); };
 actions.mkUnskip = () => { for (const x of ui.mk.proposals) x.skipped = false; rerender(); };
-/** Saves these drinks' recipes (with any new stock items they need) and marks them saved, without reloading the page. */
+/** Saves these rows' recipes (with any new stock items they need), without losing what else is open on the screen. */
 async function mkSave(chosen) {
-  const bad = chosen.find((x) => x.lines.some((l) => !(l.qty > 0)));
-  if (bad) throw new Error(`${bad.menuItem}: type a whole number above zero for each amount.`);
+  const bad = chosen.find((x) => !x.lines.length || x.lines.some((l) => !(l.qty > 0)));
+  if (bad) throw new Error(`${bad.menuItem}: ${bad.lines.length ? 'type a whole number above zero for each amount' : 'add at least one ingredient'}.`);
   const keys = new Set(chosen.flatMap((x) => x.lines.map((l) => l.newKey)).filter(Boolean));
-  const newItems = ui.mk.newItems.filter((n) => keys.has(n.key)).map((n) => ({ ...n, name: ui.mkNew[n.key]?.name || n.name, packSize: ui.mkNew[n.key]?.packSize ?? n.packSize }));
+  const newItems = ui.newPool.filter((n) => keys.has(n.key)).map((n) => ({ ...n, name: ui.mkNew[n.key]?.name || n.name, packSize: ui.mkNew[n.key]?.packSize ?? n.packSize }));
   const r = await api('POST', `${B()}/stock/recipes/apply`, { newItems, recipes: chosen.map((x) => ({ menuItemId: x.menuItemId, lines: x.lines.map(({ stockItemId, newKey, qty }) => ({ stockItemId, newKey, qty })) })) });
-  // A new stock item now exists: every other drink using it points at it, and it is no longer "new".
+  // A new stock item now exists: every other recipe using it points at it, and it is no longer "new".
+  const rows = [...(ui.mk?.proposals ?? []), ...(ui.rd ? [ui.rd] : [])];
   for (const n of newItems) {
     const id = r.made[n.key];
     if (!id) continue;
-    if (!ui.st.items.some((i) => i.id === id)) ui.st.items.push({ id, name: n.name, unit: n.unit, packName: n.packName, packSize: n.packSize, active: true, byStore: {}, total: 0, valuePaise: 0 });
-    for (const p of ui.mk.proposals) for (const l of p.lines) if (l.newKey === n.key) { delete l.newKey; l.stockItemId = id; }
-    ui.mk.newItems = ui.mk.newItems.filter((x) => x.key !== n.key);
+    for (const p of rows) for (const l of p.lines) if (l.newKey === n.key) { delete l.newKey; l.stockItemId = id; }
+    ui.newPool = ui.newPool.filter((x) => x.key !== n.key);
   }
   for (const x of chosen) x.saved = true;
+  if (ui.mk) for (const p of ui.mk.proposals) if (chosen.some((x) => x.menuItemId === p.menuItemId)) p.saved = true;
   ui.mkSel = ui.mkSel.filter((id) => !chosen.some((x) => x.menuItemId === id));
+  if (ui.rd && chosen.includes(ui.rd)) ui.rd = null;
   ui.error = null;
-  flash = { kind: 'ok', text: `${chosen.length === 1 ? `${chosen[0].menuItem}: recipe saved` : `${plural(r.recipes, 'recipe')} saved`}${r.stockItemsCreated ? `, with ${plural(r.stockItemsCreated, 'new stock item')}` : ''}. Add bottle prices when you next receive stock, so costs show in the report.` };
-  rerender();
+  flash = { kind: 'ok', text: `${chosen.length === 1 ? `${chosen[0].menuItem}: recipe saved` : `${plural(r.recipes, 'recipe')} saved`}${r.stockItemsCreated ? `, with ${plural(r.stockItemsCreated, 'new stock item')}` : ''}. Add prices when you next receive stock, so costs show.` };
+  await refreshRecipes();
 }
-actions.mkSaveOne = (d) => mkSave([mkFind(d.id)]);
+actions.mkSaveOne = (d) => mkSave([rowOf(d.id)]);
 actions.mkApply = () => mkSave(ui.mk.proposals.filter((x) => x.lines.length && !x.saved && !x.skipped && ui.mkSel.includes(x.menuItemId)));
 actions.mkAsk = async (d) => {
-  const r = await api('POST', `${B()}/stock/recipes/ask`, { menuItemId: d.id, ...(ui.mkPours ?? {}), detail: ui.mkDetail, newItems: ui.mk.newItems });
+  const r = await api('POST', `${B()}/stock/recipes/ask`, { menuItemId: d.id, ...currentPours(), detail: ui.mkDetail, newItems: ui.newPool });
   const i = ui.mk.proposals.findIndex((x) => x.menuItemId === d.id);
   ui.mk.proposals[i] = r.proposal;
-  ui.mk.newItems = [...ui.mk.newItems, ...r.newItems.filter((n) => !ui.mk.newItems.some((x) => x.key === n.key))];
+  ui.newPool = [...ui.newPool, ...r.newItems.filter((n) => !ui.newPool.some((x) => x.key === n.key))];
   ui.error = null;
-  flash = { kind: r.proposal.lines.length ? 'ok' : 'warn', text: r.proposal.lines.length ? `${r.proposal.menuItem}: Claude suggested a recipe. Check it in the list above, then save it.` : `${r.proposal.menuItem}: ${r.proposal.note || 'Claude had no recipe for this one.'}` };
+  flash = { kind: r.proposal.lines.length ? 'ok' : 'warn', text: r.proposal.lines.length ? `${r.proposal.menuItem}: AI suggestion ready. Check it in the list above, then save it.` : `${r.proposal.menuItem}: ${r.proposal.note || 'the AI had no suggestion for this one.'}` };
   rerender();
 };
 actions.stHandover = async () => { ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`); rerender(); };
@@ -1668,10 +1845,14 @@ actions.stCount = async () => {
   const keep = ui.ctStore; await stockScreen('count'); ui.ctStore = keep; ui.countResult = r.lines; rerender();
 };
 actions.stReport = async () => { ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`); rerender(); };
-actions.stItem = async () => { await api('POST', `${B()}/stock/items`, { name: ui.siName, unit: ui.siUnit ?? 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0') }); route(); };
+actions.stItem = async () => {
+  const body = { name: ui.siName, unit: ui.siUnit || 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0') };
+  if (ui.siEditId) await api('PUT', `${B()}/stock/items/${ui.siEditId}`, { ...body, active: true });
+  else await api('POST', `${B()}/stock/items`, body);
+  flash = { kind: 'ok', text: `${ui.siName} ${ui.siEditId ? 'saved' : 'added'}.` };
+  route();
+};
 actions.stStore = async () => { await api('POST', `${B()}/stock/stores`, { name: ui.sStoreName, kind: ui.sStoreKind ?? 'bar' }); route(); };
-actions.stRecipe = async () => { await api('PUT', `${B()}/stock/recipes/${ui.rcMenu}`, { lines: [{ stockItemId: ui.rcStock, qty: int(ui.rcQty) }] }); route(); };
-actions.stRecipeClear = async () => { await api('PUT', `${B()}/stock/recipes/${ui.rcMenu}`, { lines: [] }); route(); };
 
 // ---------- exceptions
 

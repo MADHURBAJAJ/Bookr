@@ -108,6 +108,23 @@ stockRoutes.put(`${B}/stock/items/:id`, requireAction('stock.edit'), async (c) =
   return c.json({ ok: true });
 });
 
+// A stock item removed: refused while a recipe uses it; one with stock history is hidden (kept for its reports), else deleted.
+stockRoutes.delete(`${B}/stock/items/:id`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const it = await one<{ name: string }>(db, 'SELECT name FROM stock_items WHERE id = ? AND business_id = ?', id, bid);
+  if (!it) fail(404, 'Stock item not found.');
+  const used = await one<{ n: number }>(db, 'SELECT count(*) AS n FROM recipes WHERE stock_item_id = ?', id);
+  if (used!.n) fail(409, `${it.name} is in ${used!.n === 1 ? 'a recipe' : `${used!.n} recipes`}. Take it out of ${used!.n === 1 ? 'that recipe' : 'them'} first.`);
+  const moved = await one(db, 'SELECT 1 FROM stock_moves WHERE item_id = ? LIMIT 1', id);
+  await db.batch([
+    moved ? stmt(db, 'UPDATE stock_items SET active = 0 WHERE id = ?', id) : stmt(db, 'DELETE FROM stock_items WHERE id = ?', id),
+    audit(db, bid, c.get('staff').id, moved ? 'stock_item.hide' : 'stock_item.delete', 'stock_items', id, { name: it.name }, null),
+  ]);
+  return c.json({ ok: true, hidden: !!moved });
+});
+
 // A menu item's recipe, replaced whole: [{stockItemId, qty}] (an empty list takes the recipe away).
 stockRoutes.put(`${B}/stock/recipes/:menuItemId`, requireAction('stock.edit'), async (c) => {
   const bid = c.get('businessId');
@@ -166,7 +183,7 @@ async function fillWithClaude(env: AppEnv['Bindings'], ask: Proposal[], stock: S
     p.source = 'claude';
     p.check = true;
     p.lines = [];
-    if (!d) { p.note = 'Claude gave no recipe for this one.'; return; }
+    if (!d) { p.note = 'The AI gave no recipe for this one.'; return; }
     p.note = d.note;
     for (const l of d.lines) {
       if (l.qty <= 0 || l.qty > 5000) continue;
@@ -184,7 +201,7 @@ async function fillWithClaude(env: AppEnv['Bindings'], ask: Proposal[], stock: S
       if (!p.lines.some((x) => x.newKey === key)) p.lines.push({ newKey: key, qty: l.qty, label: `${l.qty} ${l.unit}` });
     }
     p.lines = p.lines.slice(0, 20);
-    if (!p.lines.length && !p.note) p.note = 'Claude gave no ingredients for this one.';
+    if (!p.lines.length && !p.note) p.note = 'The AI gave no ingredients for this one.';
   });
 }
 
@@ -224,7 +241,7 @@ stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), asyn
     if (!group.length) return;
     if (data.claude !== true || failed) { left.push(what); return; }
     const ask = group.slice(0, MAX_COCKTAILS);
-    if (group.length > MAX_COCKTAILS) notes.push(`Claude suggested the first ${MAX_COCKTAILS} ${what}; save those, then press Make recipes again for the rest.`);
+    if (group.length > MAX_COCKTAILS) notes.push(`AI suggestions were made for the first ${MAX_COCKTAILS} ${what}; save those, then press Make recipes again for the rest.`);
     try {
       await fillWithClaude(c.env, ask, stock, promptFor(kind, ask, stock, pours, detail, newItems), newItems);
     } catch (e) {
@@ -237,12 +254,12 @@ stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), asyn
   await run('kitchen', dishes, 'kitchen dishes');
   if (left.length) {
     const which = left.join(' and ');
-    notes.unshift(failed ? `${failed} The ${which} are left for you: add them by hand, or try Ask Claude later.`
-      : `The ${which} were not sent to Claude: add them by hand, use Ask Claude on one, or tick “Use Claude”.`);
+    notes.unshift(failed ? `${failed} The ${which} are left for you: add them by hand, or try AI suggestion on one later.`
+      : `The ${which} were not sent for AI suggestions: add them by hand, use AI suggestion on one, or tick “Use AI suggestions”.`);
   }
   const claudeNote = notes.join(' ') || null;
   for (const p of cocktails) if (!p.lines.length && !p.note) p.note = 'A cocktail: add its recipe by hand.';
-  for (const p of dishes) if (!p.lines.length && !p.note) p.note = 'A kitchen dish: add its recipe by hand, or Ask Claude.';
+  for (const p of dishes) if (!p.lines.length && !p.note) p.note = 'A kitchen dish: add its recipe by hand, or use AI suggestion.';
   // Only the new stock items some proposal still uses.
   const used = new Set(proposals.flatMap((p) => p.lines.map((l) => l.newKey)).filter(Boolean));
   return c.json({ pours, proposals, newItems: [...newItems.values()].filter((n) => used.has(n.key)), claudeNote });

@@ -601,3 +601,22 @@ tr.mksaved td { color: var(--quiet); }
 .mkadd input.in { width: 160px; flex: 0 1 160px; }
 .mkadd input.in.mkqty, .mkadd select.mkunit { width: 90px; flex: 0 0 90px; }
 @media (max-width: 760px) { .catgrid { grid-template-columns: 1fr; } .filterbar select.in { width: 100%; } }
+/* Stock items and Recipes */
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 4px 0 10px; }
+.toolbar input.in { width: 280px; flex: 0 1 280px; }
+.toolbar select.in { width: 220px; flex: 0 1 220px; }
+.counts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.counts .big { font-size: 24px; font-weight: 800; }
+.counts-act { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+tr.sechead td { background: var(--bg); font-weight: 800; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--quiet); padding-top: 10px; padding-bottom: 10px; }
+td.ing div { line-height: 1.6; }
+.cost { font-weight: 800; }
+.margin { color: var(--go-dark); }
+.addpanel { border: 2px solid var(--pri); }
+.ai { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; background: var(--bg); margin: 10px 0; }
+.radio { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.radio label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+.radio input { width: 18px; height: 18px; accent-color: var(--pri); }
+.costline { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+tr.editing td { background: var(--bg); }
+@media (max-width: 760px) { table.t.cards tr.sechead { display: block; } table.t.cards tr.sechead td { display: block; } .toolbar input.in, .toolbar select.in { width: 100%; flex: 1 1 100%; } .counts-act { margin-left: 0; } }

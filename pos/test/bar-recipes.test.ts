@@ -94,6 +94,11 @@ describe('Make recipes', () => {
       WHERE r.business_id = ? ORDER BY m.name, s.name`, s.businessId);
     expect(rows).toEqual([{ drink: 'Sample Mojito', stock: 'Mint', qty: 8 }, { drink: 'Sample Mojito', stock: 'Sample Rum', qty: 60 }, { drink: 'Sample Rum 30 ml', stock: 'Sample Rum', qty: 45 }]);
     expect((await q("SELECT count(*) AS n FROM audit_log WHERE business_id = ? AND action = 'recipe.auto'", s.businessId))[0].n).toBe(1);
+    // A stock item a recipe uses cannot be removed; an unused one can.
+    expect((await owner.call('DELETE', `${B}/stock/items/${rum}`, {})).status).toBe(409);
+    const spare = (await ok(owner.post(`${B}/stock/items`, { name: 'Sample Spare', unit: 'pcs', packSize: 1 }))).id;
+    expect(await ok(owner.call('DELETE', `${B}/stock/items/${spare}`, {}))).toEqual({ ok: true, hidden: false });
+    expect((await q('SELECT count(*) AS n FROM stock_items WHERE id = ?', spare))[0].n).toBe(0);
 
     // Next time only the drink still without a recipe is proposed; Claude off, or failing, leaves cocktails for later.
     const again = await ok(owner.post(`${B}/stock/recipes/suggest`, {}));
@@ -162,6 +167,6 @@ describe('Make recipes', () => {
     // Without Claude, kitchen dishes wait for a person.
     const plain = await ok(owner.post(`${B}/stock/recipes/suggest`, { categories: ['Starters'] }));
     expect(plain.proposals[0]).toMatchObject({ kind: 'kitchen', lines: [] });
-    expect(plain.claudeNote).toContain('kitchen dishes were not sent to Claude');
+    expect(plain.claudeNote).toContain('kitchen dishes were not sent for AI suggestions');
   });
 });
