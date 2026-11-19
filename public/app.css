@@ -78,6 +78,7 @@ td { padding: 8px 6px; border-top: 1px solid var(--line-soft); vertical-align: m
 .chip.wait { background: var(--wait-bg); color: var(--wait); }
 .chip.bad { background: #FEE2E2; color: #7F1D1D; }
 .chip.info { background: #DBEAFE; color: #1E3A8A; }
+.chip.mute { background: transparent; color: var(--muted); border: 1px dashed var(--line); }
 .chip.income { background: var(--income-bg); color: var(--income); }
 .chip.expense { background: var(--expense-bg); color: var(--expense); }
 .yes { color: var(--teal-ink); font-weight: 600; text-align: center; } .no { color: var(--muted); text-align: center; }

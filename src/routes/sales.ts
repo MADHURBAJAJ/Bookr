@@ -14,6 +14,8 @@ import { shiftSlips } from '../slips';
 import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
 import { waitingPicture } from '../waiting';
+import { pendingBills, pendingRange } from '../pending';
+import { allBills, billsRange } from '../billsReport';
 import { paidLaterLines } from '../paidLater';
 import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
 import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
@@ -992,6 +994,18 @@ salesRoutes.get('/businesses/:businessId/reports/large-discounts', requireRole('
   const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to ?? '') ? q.to! : istDay(Date.now());
   const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
   return c.json({ from, to, limitPct: LARGE_DISCOUNT_PCT, lines: await largeDiscounts(c.env.DB, c.get('businessId'), from, to) });
+});
+
+/** Reports → All bills (approved 19 Nov 2026): every bill, its tag, what was counted and how its payment came. */
+salesRoutes.get('/businesses/:businessId/reports/bills', requireRole('sales.view'), async (c) => {
+  const { from, to } = billsRange(c.req.query());
+  return c.json(await allBills(c.env.DB, c.get('businessId'), from, to));
+});
+
+/** Reports → Pending bills (approved 19 Nov 2026): bills whose money has not come, and those whose money came later. */
+salesRoutes.get('/businesses/:businessId/reports/pending', requireRole('sales.view'), async (c) => {
+  const { from, to } = pendingRange(c.req.query());
+  return c.json(await pendingBills(c.env.DB, c.get('businessId'), from, to));
 });
 
 salesRoutes.get('/businesses/:businessId/reports/complimentary', requireRole('reports.view'), async (c) => {

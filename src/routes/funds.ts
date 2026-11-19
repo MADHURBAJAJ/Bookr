@@ -2,8 +2,10 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, SUMMARY_IN_USE } from '../db';
-import { fail } from '../http';
-import { addDays, shiftDayOf } from '../time';
+import { fail, isUuid } from '../http';
+import { addDays, istDay, shiftDayOf } from '../time';
+import { bankStatement } from '../statement';
+
 
 export const fundsRoutes = new Hono<AppEnv>();
 
@@ -225,3 +227,20 @@ async function cashAt(db: D1Database, bid: string, a: Account, day: string) {
     WHERE ${TX_WHERE} AND t.account_id = ? AND ${TX_DAY} BETWEEN ? AND ?`, bid, a.id, a.opening_date, day);
   return a.opening_balance_paise + (r[0]?.paise ?? 0);
 }
+
+/** Reports → Bank statement (approved 19 Nov 2026): one account's lines as the bank wrote them, each tagged with how it was booked. */
+fundsRoutes.get('/businesses/:businessId/reports/bank-statement', requireRole('bank.link'), async (c) => {
+  const q = c.req.query();
+  const iso = (v?: string) => (/^\d{4}-\d{2}-\d{2}$/.test(v ?? '') ? v! : null);
+  const to = iso(q.to) ?? istDay(Date.now());
+  const from = iso(q.from) ?? `${to.slice(0, 8)}01`;
+  if (from > to) fail(400, 'From must be on or before To.');
+  if (from < addDays(to, -400)) fail(400, 'Choose up to a year at a time.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const accounts = await all<{ id: string; name: string }>(db, `SELECT a.id, a.name FROM accounts a WHERE a.business_id = ?
+    AND EXISTS (SELECT 1 FROM bank_rows r WHERE r.account_id = a.id) ORDER BY a.name`, bid);
+  const account = q.account && isUuid(q.account) && accounts.some((a) => a.id === q.account) ? q.account : accounts[0]?.id ?? null;
+  if (!account) return c.json({ accounts, statement: null });
+  return c.json({ accounts, statement: await bankStatement(db, bid, account, from, to) });
+});

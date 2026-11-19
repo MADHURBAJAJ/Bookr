@@ -140,7 +140,7 @@ const NAV = [
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts' },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
-  { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds'] },
+  { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds', 'pending', 'statement', 'bills'] },
   { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
@@ -535,7 +535,8 @@ async function dashboardView(biz) {
     : items[0] ? { title: items[0].text, why: '', href: items[0].href, label: items[0].label } : null;
   // Money: the Waiting groups over saved shifts (the same as each shift's To do), then the bank's own jobs.
   const kd = h.waitingBills?.kinds ?? {};
-  const waitHref = (k) => (kd[k]?.days?.[0] ? `#/b/${biz.id}/reconcile/${kd[k].days[0]}?top=wait` : null);
+  // Each opens Reports → Pending bills at its group (19 Nov 2026), every shift together.
+  const waitHref = (k) => (kd[k]?.n ? `#/b/${biz.id}/pending?group=${k}` : null);
   const tile = (cls, label, big, small, href) => html`<a class="td-tile ${cls}" ${href ? `href="${href}"` : ''}><div class="td-tl">${label}</div><div class="td-tv">${big}</div><div class="td-ts">${small}</div></a>`;
   const nOf = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
   const tiles = [
@@ -1197,9 +1198,277 @@ async function reportDayView(biz, dayIn) {
 
 /** Reports tabs: the checks (missed, discounts, complimentary) and Funds flow (bank data: Owner and Accountant). */
 function reportTabs(biz, active) {
-  if (!biz.actions.includes('bank.link')) return '';
-  const tabs = [['checks', 'Bills to look at', `#/b/${biz.id}/reports`], ['funds', 'Funds flow', `#/b/${biz.id}/funds`]];
+  // Pending bills and Bank statement (approved 19 Nov 2026) sit between the checks and Funds flow, each for those allowed.
+  const can = (a) => biz.actions.includes(a);
+  const tabs = [can('reports.view') && ['checks', 'Bills to look at', `#/b/${biz.id}/reports`], can('sales.view') && ['bills', 'All bills', `#/b/${biz.id}/bills`],
+    can('sales.view') && ['pending', 'Pending bills', `#/b/${biz.id}/pending`],
+    can('bank.link') && ['statement', 'Bank statement', `#/b/${biz.id}/statement`], can('bank.link') && ['funds', 'Funds flow', `#/b/${biz.id}/funds`]].filter(Boolean);
+  if (tabs.length < 2) return '';
   return html`<div class="seg mode-tabs" role="tablist" aria-label="Reports" style="margin:4px 0 10px">${tabs.map(([k, l, href]) => html`<a role="tab" href="${href}" class="${k === active ? 'on' : ''}" aria-selected="${k === active}">${l}</a>`)}</div>`;
+}
+
+/** A CSV file saved from the page (opens in Excel). */
+function saveCsv(name, rows) {
+  const cell = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const blob = new Blob([`﻿${rows.map((r) => r.map(cell).join(',')).join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+const rupeesCsv = (p) => (p == null ? '' : (p / 100).toFixed(2));
+
+// Reports → Pending bills (approved 19 Nov 2026): the groups of a shift's To do, over every shift in the range.
+const PENDING_GROUPS = [
+  ['not_received', 'Payment not received', 'bad'],
+  ['cash_short', 'Short in the cash count', 'wait'],
+  ['cash_wait', 'Cash bills not in the register', 'wait'],
+  ['found', 'Payment found, to match', 'info'],
+  ['paperwork', 'Money in, the paperwork differs', ''],
+  ['other', 'Other', ''],
+];
+const MODE_LABEL = { cash: 'Cash', upi: 'UPI', card: 'Card' };
+const shortDay = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+
+async function pendingView(biz, query) {
+  const q = new URLSearchParams(query);
+  const view = q.get('view') === 'received' ? 'received' : 'due';
+  const mode = MODE_LABEL[q.get('mode')] ? q.get('mode') : '';
+  const group = PENDING_GROUPS.some(([k]) => k === q.get('group')) ? q.get('group') : '';
+  const range = new URLSearchParams();
+  if (q.get('from')) range.set('from', q.get('from'));
+  if (q.get('to')) range.set('to', q.get('to'));
+  const r = await api('GET', `/businesses/${biz.id}/reports/pending?${range}`);
+  const link = (over) => { const o = { from: r.from, to: r.to, view, mode, group, ...over }; for (const k of Object.keys(o)) if (!o[k] || (k === 'view' && o[k] === 'due')) delete o[k]; return `#/b/${biz.id}/pending?${new URLSearchParams(o)}`; };
+  const byMode = (x) => !mode || x.mode === mode;
+  const due = r.toReceive.filter(byMode);
+  const got = r.received.filter(byMode);
+  const sum = (xs) => xs.reduce((t, x) => t + x.amountPaise, 0);
+  const open = (x) => `#/b/${biz.id}/reconcile/${x.day}?top=wait`;
+  const dueRow = (x) => html`<tr><td>${shortDay(x.day)}</td><td class="mono">${x.billNo}</td><td class="amount">${rs(x.amountPaise)}</td>
+    <td>${x.reason.startsWith(MODE_LABEL[x.mode] ?? '\u0000') ? '' : `${MODE_LABEL[x.mode] ?? 'No mode'} · `}${x.reason} <a href="${open(x)}">Open ›</a></td>
+    <td class="amount">${x.daysWaiting} day${x.daysWaiting === 1 ? '' : 's'}</td></tr>`;
+  const groups = PENDING_GROUPS.filter(([k]) => !group || k === group).map(([k, label, cls]) => {
+    const xs = due.filter((x) => x.group === k);
+    if (!xs.length) return '';
+    return html`<section class="card" style="gap:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap"><h2>${label}</h2><span class="chip ${cls}">${xs.length} bill${xs.length === 1 ? '' : 's'} · ₹ ${rs(sum(xs))}</span></div>
+      <div class="scroll"><table style="min-width:620px"><thead><tr><th>Shift</th><th>Bill</th><th style="text-align:right">Amount ₹</th><th>Why</th><th style="text-align:right">Waiting</th></tr></thead>
+      <tbody>${xs.map(dueRow)}</tbody></table></div></section>`;
+  });
+  const how = { changed: 'Changed after saving', late_credit: 'UPI credit came later', late_register: 'Written in a later register' };
+  const gotRow = (x) => html`<tr><td>${shortDay(x.day)}</td><td class="mono">${x.billNo}</td><td class="amount">${rs(x.amountPaise)}</td>
+    <td>${x.detail}${x.shortage ? ` · short on ${shortDay(x.day)} ₹ ${rs(x.shortage.fromPaise)} → ₹ ${rs(x.shortage.toPaise)}` : ''}${x.by ? ` · by ${x.by}${x.at ? `, ${shortDay(new Date(x.at + IST_MS).toISOString().slice(0, 10))}` : ''}` : ''}
+      <a href="${open(x)}">Open ›</a><div class="tiny">${how[x.how]}</div></td>
+    <td class="amount">${x.lateDays == null ? '' : `${x.lateDays} day${x.lateDays === 1 ? '' : 's'}`}</td></tr>`;
+  const csv = () => saveCsv(`pending-bills-${view === 'due' ? 'to-receive' : 'received'}-${r.from}-to-${r.to}.csv`, view === 'due'
+    ? [['Shift', 'Bill', 'Amount', 'Mode', 'Group', 'Why', 'Days waiting'], ...due.filter((x) => !group || x.group === group).map((x) => [x.day, x.billNo, rupeesCsv(x.amountPaise), MODE_LABEL[x.mode] ?? '', PENDING_GROUPS.find(([k]) => k === x.group)?.[1] ?? x.group, x.reason, x.daysWaiting])]
+    : [['Shift', 'Bill', 'Amount', 'Was', 'Came as', 'Paid on', 'How', 'Detail', 'By', 'Days late'], ...got.map((x) => [x.day, x.billNo, rupeesCsv(x.amountPaise), x.from ?? '', MODE_LABEL[x.mode] ?? x.mode, x.paidOn ?? '', how[x.how], x.detail, x.by ?? '', x.lateDays ?? ''])]);
+  render(shell(biz, 'reports', 'Reports', '', html`
+    ${reportTabs(biz, 'pending')}
+    <section class="card" style="gap:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="seg" role="tablist" aria-label="Pending bills">
+          <a role="tab" href="${link({ view: 'due' })}" class="${view === 'due' ? 'on' : ''}" aria-selected="${view === 'due'}">To be received · ₹ ${rs(sum(due))}</a>
+          <a role="tab" href="${link({ view: 'received', group: '' })}" class="${view === 'received' ? 'on' : ''}" aria-selected="${view === 'received'}">Already received · ₹ ${rs(sum(got))}</a></div>
+        <button class="btn plain" type="button" id="pbcsv">Download CSV</button>
+      </div>
+      <form id="pbdates" class="form-row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+        <div class="field"><label for="pbfrom">From shift</label><input id="pbfrom" type="date" name="from" value="${r.from}" required></div>
+        <div class="field"><label for="pbto">To shift</label><input id="pbto" type="date" name="to" value="${r.to}" required></div>
+        <div class="field"><label for="pbmode">Mode</label><select id="pbmode" name="mode"><option value="">All modes</option>${Object.entries(MODE_LABEL).map(([k, l]) => html`<option value="${k}" ${k === mode ? 'selected' : ''}>${l}</option>`)}</select></div>
+        <button class="btn plain" type="submit">Show</button>
+      </form>
+      ${view === 'due' && group ? html`<div class="note">Showing ${PENDING_GROUPS.find(([k]) => k === group)[1].toLowerCase()} only · <a href="${link({ group: '' })}">Show all groups</a></div>` : ''}
+      <div class="note">${view === 'due' ? 'Bills whose money has not come. Open a bill to fix it on its own shift.' : 'Bills whose money came on a later day: changed after saving, a UPI credit that came after the shift, or a cash bill written in a later register.'}</div>
+    </section>
+    ${view === 'due' ? html`${groups.some((g) => g) ? groups : html`<div class="ok-msg">Nothing to be received in these shifts.</div>`}
+      ${r.waitingForFiles ? html`<div class="note" style="padding:0 4px">Not listed: ${r.waitingForFiles} bill${r.waitingForFiles === 1 ? '' : 's'} waiting for a register page, a file or their shift to be saved. They join this list once they are overdue.</div>` : ''}`
+    : got.length ? html`<section class="card" style="gap:8px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>Received on a later day</h2><span class="chip ok">${got.length} bill${got.length === 1 ? '' : 's'} · ₹ ${rs(sum(got))}</span></div>
+      <div class="scroll"><table style="min-width:620px"><thead><tr><th>Shift</th><th>Bill</th><th style="text-align:right">Amount ₹</th><th>How it came</th><th style="text-align:right">Late by</th></tr></thead>
+      <tbody>${got.map(gotRow)}</tbody></table></div></section>` : html`<div class="ok-msg">No bill in these shifts was paid on a later day.</div>`}
+  `));
+  document.getElementById('pbcsv').addEventListener('click', csv);
+  document.getElementById('pbdates').addEventListener('submit', (e) => { e.preventDefault(); const f = e.target; go(link({ from: f.from.value, to: f.to.value, mode: f.mode.value })); });
+}
+
+// Reports → Bank statement (approved 19 Nov 2026): the bank's lines as it wrote them, a tag in front saying how each was booked.
+const TAG_CLASS = { bill: 'ok', card: 'info', transfer: 'info', fee: '', head: '', reversed: 'mute', ignored: 'mute', open: 'bad' };
+const TAG_GROUP = { bill: 'UPI bills', card: 'Card settlements', transfer: 'Transfers', fee: 'UPI card fees', head: 'Booked to a head', reversed: 'Reversed pairs', ignored: 'Left out', open: 'Not booked' };
+let stmtPrefs = { fees: true, reversed: true };
+try { stmtPrefs = { ...stmtPrefs, ...JSON.parse(localStorage.getItem('bookr.stmtPrefs') || '{}') }; } catch { /* defaults */ }
+
+async function statementView(biz, query) {
+  const q = new URLSearchParams(query);
+  const p = new URLSearchParams();
+  for (const k of ['account', 'from', 'to']) if (q.get(k)) p.set(k, q.get(k));
+  const { accounts, statement: s } = await api('GET', `/businesses/${biz.id}/reports/bank-statement?${p}`);
+  if (!s) {
+    render(shell(biz, 'reports', 'Reports', '', html`${reportTabs(biz, 'statement')}<section class="card"><h2>Bank statement</h2><div class="note">No bank statement lines yet. Bring them in on Bank → Statements.</div></section>`));
+    return;
+  }
+  const tagFilter = TAG_GROUP[q.get('tag')] ? q.get('tag') : '';
+  const isFee = (l) => l.kind === 'upi_fee';
+  const isRev = (l) => l.tag.kind === 'reversed';
+  const groupOf = (l) => (isFee(l) ? 'fee' : l.tag.kind);
+  const link = (over) => { const o = { account: s.account.id, from: s.from, to: s.to, tag: tagFilter, ...over }; for (const k of Object.keys(o)) if (!o[k]) delete o[k]; return `#/b/${biz.id}/statement?${new URLSearchParams(o)}`; };
+  const draw = () => {
+    const shown = s.lines.filter((l) => (!tagFilter || groupOf(l) === tagFilter) && (stmtPrefs.fees || !isFee(l) || tagFilter === 'fee') && (stmtPrefs.reversed || !isRev(l) || tagFilter === 'reversed'));
+    const counts = {};
+    for (const l of s.lines) { const c = (counts[groupOf(l)] ??= { n: 0, in: 0, out: 0 }); c.n++; c[l.direction === 'CR' ? 'in' : 'out'] += l.amountPaise; }
+    const chip = (k) => { const c = counts[k]; if (!c) return ''; const amt = [c.in ? `in ₹ ${rs(c.in)}` : '', c.out ? `out ₹ ${rs(c.out)}` : ''].filter(Boolean).join(' · ');
+      return html`<a class="chip ${TAG_CLASS[k]}" style="text-decoration:none${tagFilter === k ? ';outline:2px solid currentColor' : ''}" href="${link({ tag: tagFilter === k ? '' : k })}">${TAG_GROUP[k]} ${c.n} · ${amt}</a>`; };
+    const days = [...new Set(shown.map((l) => l.day))];
+    const lastOf = (d) => [...s.lines].reverse().find((l) => l.day === d && l.balancePaise != null);
+    const tagCls = (l) => (l.tag.kind === 'open' && isFee(l) ? 'wait' : TAG_CLASS[l.tag.kind]);
+    const tag = (l) => html`<span class="chip ${tagCls(l)}" style="white-space:normal">${l.tag.label}</span>${l.tag.hint ? html`<div class="tiny">${l.tag.hint}</div>` : ''}`;
+    const goTo = (l) => (l.tag.kind === 'open' ? `#/b/${biz.id}/bank?${new URLSearchParams({ tab: l.direction === 'CR' ? 'in' : 'out', from: l.shiftDay, to: l.shiftDay, account: s.account.id })}`
+      : l.tag.kind === 'bill' ? `#/b/${biz.id}/reconcile/${l.shiftDay}` : l.tag.kind === 'card' ? `#/b/${biz.id}/cards` : null);
+    const quiet = (l) => isFee(l) || isRev(l) || l.tag.kind === 'ignored';
+    const row = (l) => html`<tr style="${quiet(l) ? 'color:var(--muted);font-size:12px' : ''}">
+      <td>${goTo(l) ? html`<a href="${goTo(l)}" style="text-decoration:none">${tag(l)}</a>` : tag(l)}</td>
+      <td style="white-space:nowrap">${timeOf(l.postedAt)}</td>
+      <td style="word-break:break-word">${l.description}<div class="tiny mono">${l.tranId}</div></td>
+      <td class="amount">${l.direction === 'DR' ? money(l.amountPaise) : ''}</td><td class="amount">${l.direction === 'CR' ? money(l.amountPaise) : ''}</td>
+      <td class="amount">${l.balancePaise == null ? '' : money(l.balancePaise)}${l.balanceOk === false ? html`<div class="tiny" style="color:var(--danger)">doesn't follow: a line may be missing</div>` : ''}</td></tr>`;
+    const body = days.map((d) => { const last = lastOf(d); return html`<tr><td colspan="6" style="background:var(--chip)"><strong>${dayLabel(d)}</strong>${last ? html`<span class="tiny" style="float:right">closing ₹ ${money(last.balancePaise)}</span>` : ''}</td></tr>${shown.filter((l) => l.day === d).map(row)}`; });
+    const nIn = s.lines.filter((l) => l.direction === 'CR').length;
+    const tile = (label, value, sub = '') => html`<div class="card" style="gap:2px;padding:10px 12px;flex:1 1 150px;box-shadow:none"><div class="tiny">${label}</div><div style="font-size:17px;font-weight:600">${value}</div>${sub}</div>`;
+    render(shell(biz, 'reports', 'Reports', '', html`
+      ${reportTabs(biz, 'statement')}
+      <section class="card" style="gap:10px">
+        <form id="stform" class="form-row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+          <div class="field"><label for="stacc">Account</label><select id="stacc" name="account">${accounts.map((a) => html`<option value="${a.id}" ${a.id === s.account.id ? 'selected' : ''}>${a.name}</option>`)}</select></div>
+          <div class="field"><label for="stfrom">From</label><input id="stfrom" type="date" name="from" value="${s.from}" required></div>
+          <div class="field"><label for="stto">To</label><input id="stto" type="date" name="to" value="${s.to}" required></div>
+          <button class="btn plain" type="submit">Show</button>
+          <span style="flex:1"></span>
+          <button class="btn plain" type="button" id="stcsv">Download CSV</button>
+        </form>
+        <div class="note">${s.account.name}${s.account.accountNumber ? ` · ${s.account.accountNumber}` : ''} · ${s.lines.length} line${s.lines.length === 1 ? '' : 's'} as the bank wrote them, with how each was booked. Book open lines on Bank → Money in / Money out.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${tile('Opening balance', s.openingPaise == null ? '–' : `₹ ${money(s.openingPaise)}`)}
+          ${tile(`In · ${nIn} line${nIn === 1 ? '' : 's'}`, `₹ ${money(s.inPaise)}`)}
+          ${tile(`Out · ${s.lines.length - nIn} line${s.lines.length - nIn === 1 ? '' : 's'}`, `₹ ${money(s.outPaise)}`)}
+          ${tile('Closing balance', s.closingPaise == null ? '–' : `₹ ${money(s.closingPaise)}`, html`<div class="tiny" style="color:var(${s.breaks ? '--danger' : '--ok'})">${s.openingPaise == null ? 'no balance on the statement' : s.breaks ? `${s.breaks} line${s.breaks === 1 ? '' : 's'} where the balance doesn't follow` : '✓ follows the bank on every line'}</div>`)}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${['bill', 'card', 'transfer', 'head', 'fee', 'reversed', 'ignored', 'open'].map(chip)}${tagFilter ? html`<a class="chip" style="text-decoration:none" href="${link({ tag: '' })}">Show all</a>` : ''}</div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap" class="note">
+          <label><input type="checkbox" id="sthidefees" ${stmtPrefs.fees ? '' : 'checked'}> Hide UPI card fees</label>
+          <label><input type="checkbox" id="sthiderev" ${stmtPrefs.reversed ? '' : 'checked'}> Hide reversed pairs</label></div>
+        ${s.truncated ? html`<div class="note" style="color:var(--danger)">Only the first 5,000 lines are shown: choose fewer days.</div>` : ''}
+      </section>
+      <section class="card" style="padding:8px 10px">
+        ${shown.length ? html`<div class="scroll"><table style="min-width:760px;table-layout:fixed">
+          <colgroup><col style="width:170px"><col style="width:70px"><col><col style="width:96px"><col style="width:96px"><col style="width:110px"></colgroup>
+          <thead><tr><th>How it was booked</th><th>Time</th><th>Description, as the bank wrote it</th><th style="text-align:right">Debit ₹</th><th style="text-align:right">Credit ₹</th><th style="text-align:right">Balance ₹</th></tr></thead>
+          <tbody>${body}</tbody></table></div>` : html`<div class="note">No lines${tagFilter ? ' with this tag' : ''} in these days.</div>`}
+      </section>`));
+    document.getElementById('stform').addEventListener('submit', (e) => { e.preventDefault(); const f = e.target; go(link({ account: f.account.value, from: f.from.value, to: f.to.value, tag: '' })); });
+    document.getElementById('stcsv').addEventListener('click', () => saveCsv(`${s.account.name.replace(/[^\w]+/g, '-')}-${s.from}-to-${s.to}.csv`, [
+      ['Date', 'Time', 'Description', 'Reference', 'Debit', 'Credit', 'Balance', 'How it was booked', 'Detail'],
+      ...s.lines.map((l) => [l.day, timeOf(l.postedAt), l.description, l.tranId, l.direction === 'DR' ? rupeesCsv(l.amountPaise) : '', l.direction === 'CR' ? rupeesCsv(l.amountPaise) : '', rupeesCsv(l.balancePaise), l.tag.label, l.tag.hint ?? ''])]));
+    const pref = (id, key) => document.getElementById(id).addEventListener('change', (e) => { stmtPrefs[key] = !e.target.checked; try { localStorage.setItem('bookr.stmtPrefs', JSON.stringify(stmtPrefs)); } catch { /* fine */ } draw(); });
+    pref('sthidefees', 'fees');
+    pref('sthiderev', 'reversed');
+  };
+  draw();
+}
+
+// Reports → All bills (approved 19 Nov 2026): every bill with a tag, what was counted and how its payment came.
+const BILL_TAGS = [['both', 'Both', 'ok'], ['differ', 'Both, amounts differ', 'wait'], ['register', 'Only register', 'info'], ['software', 'Only software', 'bad'], ['comp', 'Complimentary', 'mute']];
+const MODE_SHORT = { cash: 'cash', upi: 'UPI', card: 'card', mixed: 'mixed', unknown: '–' };
+let billsOpenOld = new Set();
+
+async function allBillsView(biz, query) {
+  const q = new URLSearchParams(query);
+  const p = new URLSearchParams();
+  for (const k of ['day', 'from', 'to']) if (q.get(k)) p.set(k, q.get(k));
+  const r = await api('GET', `/businesses/${biz.id}/reports/bills?${p}`);
+  const tagF = BILL_TAGS.some(([k]) => k === q.get('tag')) || q.get('tag') === 'notcome' ? q.get('tag') : '';
+  const mode = MODE_LABEL[q.get('mode')] ? q.get('mode') : '';
+  const find = (q.get('q') ?? '').trim();
+  const oneDay = r.from === r.to;
+  const link = (over) => { const o = { ...(oneDay ? { day: r.from } : { from: r.from, to: r.to }), tag: tagF, mode, q: find, ...over }; for (const k of Object.keys(o)) if (!o[k]) delete o[k]; return `#/b/${biz.id}/bills?${new URLSearchParams(o)}`; };
+  const pass = (l) => (!tagF || (tagF === 'notcome' ? l.notCome : l.tag === tagF)) && (!mode || (l.counted?.mode ?? l.software?.mode ?? l.register?.mode) === mode) && (!find || l.billNo.includes(find));
+  const draw = () => {
+    const lines = r.lines.filter(pass);
+    const n = (k) => r.lines.filter((l) => (k === 'notcome' ? l.notCome : l.tag === k)).length;
+    const amt = (x) => (x?.amountPaise == null ? html`<span class="tiny">–</span>` : html`${rs(x.amountPaise)} <span class="tiny">${MODE_SHORT[x.mode] ?? x.mode ?? ''}</span>`);
+    const tagHtml = (l) => { const [, label, cls] = BILL_TAGS.find(([k]) => k === l.tag);
+      return html`<span class="chip ${cls}" style="white-space:normal">${label}</span>${l.tag === 'both' && l.apartPaise ? html`<div class="tiny">₹ ${rs(l.apartPaise)} apart</div>` : ''}${l.oldPos ? html`<div class="tiny">old POS</div>` : ''}${l.decision === 'leave_out' ? html`<div class="tiny">left out</div>` : ''}`; };
+    const payHtml = (l) => (l.payment.length ? l.payment.map((x) => html`<div style="${x.bad ? 'color:var(--danger)' : x.kind === 'unsaved' ? 'color:var(--muted)' : ''}">${x.text}</div>`) : html`<span class="tiny">–</span>`);
+    const row = (l) => html`<tr>
+      <td>${tagHtml(l)}</td>
+      <td class="mono"><a href="#/b/${biz.id}/compare/${l.day}">${l.billNo}</a>${l.paidAt ? html`<div class="tiny">${timeOf(l.paidAt)}</div>` : ''}</td>
+      <td class="amount">${amt(l.software)}</td><td class="amount">${amt(l.register)}</td>
+      <td>${l.counted ? html`₹ ${rs(l.counted.amountPaise)} ${MODE_SHORT[l.counted.mode] ?? ''}` : html`<span class="tiny">Not counted</span>`}${l.note && (l.tag !== 'register' || !l.oldPos) ? html`<div class="tiny">${l.note}</div>` : ''}</td>
+      <td>${payHtml(l)}</td></tr>`;
+    const days = [...new Set(lines.map((l) => l.day))];
+    const body = days.map((d) => {
+      const xs = lines.filter((l) => l.day === d);
+      const old = xs.filter((l) => l.oldPos);
+      const key = d;
+      const openOld = billsOpenOld.has(key) || !!find;
+      const byMode = {};
+      for (const l of old) { const m = l.counted?.mode ?? l.register?.mode ?? '?'; byMode[m] = (byMode[m] ?? 0) + (l.counted?.amountPaise ?? l.register?.amountPaise ?? 0); }
+      const oldTotal = Object.values(byMode).reduce((t, v) => t + v, 0);
+      const oldBad = old.filter((l) => l.notCome).length;
+      const foldRow = old.length ? html`<tr style="background:var(--chip)"><td><span class="chip info">Only register</span><div class="tiny">old POS</div></td>
+        <td colspan="3"><strong>${old.length} old POS bill${old.length === 1 ? '' : 's'}</strong> <button class="linkbtn" type="button" data-oldpos="${key}">${openOld ? 'Hide' : 'Show'} ›</button></td>
+        <td>₹ ${rs(oldTotal)}<div class="tiny">${Object.entries(byMode).sort((a, b) => b[1] - a[1]).map(([m, v]) => `${MODE_SHORT[m] ?? m} ${rs(v)}`).join(' · ')}</div></td>
+        <td>${oldBad ? html`<span style="color:var(--danger)">${oldBad} with money not come</span>` : 'UPI credits and card payments, matched in groups'}</td></tr>` : '';
+      return html`${days.length > 1 || !oneDay ? html`<tr><td colspan="6" style="background:var(--chip)"><strong>${dayLabel(d)}</strong> <span class="tiny">${xs.length} bill${xs.length === 1 ? '' : 's'}${r.savedDays.includes(d) ? ' · saved' : ' · not saved'}</span></td></tr>` : ''}
+        ${foldRow}${openOld ? old.map(row) : ''}${xs.filter((l) => !l.oldPos).map(row)}`;
+    });
+    const sumOf = (xs, f) => xs.reduce((t, l) => t + (f(l) ?? 0), 0);
+    const countedBy = {};
+    for (const l of lines) if (l.counted) countedBy[l.counted.mode ?? '?'] = (countedBy[l.counted.mode ?? '?'] ?? 0) + l.counted.amountPaise;
+    const notComeSum = sumOf(lines.filter((l) => l.notCome), (l) => l.counted?.amountPaise);
+    const chip = (k, label, cls) => html`<a class="chip ${cls}" style="text-decoration:none${tagF === k ? ';outline:2px solid currentColor' : ''}" href="${link({ tag: tagF === k ? '' : k })}">${label} ${n(k)}</a>`;
+    render(shell(biz, 'reports', 'Reports', '', html`
+      ${reportTabs(biz, 'bills')}
+      <section class="card" style="gap:10px">
+        <form id="blform" class="form-row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+          ${oneDay ? html`<a class="btn plain" href="${link({ day: addDaysIso(r.from, -1) })}" aria-label="Day before">‹</a>` : ''}
+          <div class="field"><label for="blfrom">${oneDay ? 'Shift' : 'From shift'}</label><input id="blfrom" type="date" name="from" value="${r.from}" required></div>
+          <div class="field"><label for="blto">To shift</label><input id="blto" type="date" name="to" value="${r.to}" required></div>
+          ${oneDay ? html`<a class="btn plain" href="${link({ day: addDaysIso(r.from, 1) })}" aria-label="Day after">›</a>` : ''}
+          <div class="field"><label for="blmode">Mode</label><select id="blmode" name="mode"><option value="">All modes</option>${Object.entries(MODE_LABEL).map(([k, l]) => html`<option value="${k}" ${k === mode ? 'selected' : ''}>${l}</option>`)}</select></div>
+          <div class="field"><label for="blq">Bill no.</label><input id="blq" name="q" value="${find}" inputmode="numeric" style="width:120px"></div>
+          <button class="btn plain" type="submit">Show</button>
+          <span style="flex:1"></span>
+          <button class="btn plain" type="button" id="blcsv">Download CSV</button>
+        </form>
+        <div class="note">${r.lines.length} bill${r.lines.length === 1 ? '' : 's'} from the register and the software report${oneDay ? '' : ` over ${dayLabel(r.from)} to ${dayLabel(r.to)} (up to 31 shifts)`}. Old POS bills are folded into one line per shift. Press a bill to open its shift.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${BILL_TAGS.map(([k, l, c]) => (n(k) ? chip(k, l, c) : ''))}${n('notcome') ? chip('notcome', 'Money not come', 'bad') : ''}${tagF ? html`<a class="chip" style="text-decoration:none" href="${link({ tag: '' })}">Show all</a>` : ''}</div>
+        ${r.truncated ? html`<div class="note" style="color:var(--danger)">Only the first 6,000 bills are shown: choose fewer shifts.</div>` : ''}
+      </section>
+      <section class="card" style="padding:8px 10px">
+        ${lines.length ? html`<div class="scroll"><table style="min-width:820px;table-layout:fixed">
+          <colgroup><col style="width:130px"><col style="width:96px"><col style="width:96px"><col style="width:96px"><col style="width:130px"><col></colgroup>
+          <thead><tr><th>Tag</th><th>Bill</th><th style="text-align:right">Software ₹</th><th style="text-align:right">Register ₹</th><th>Counted as</th><th>How the payment came</th></tr></thead>
+          <tbody>${body}</tbody>
+          <tfoot><tr><td colspan="2"><strong>Total</strong></td><td class="amount">${rs(sumOf(lines, (l) => l.software?.amountPaise))}</td><td class="amount">${rs(sumOf(lines, (l) => l.register?.amountPaise))}</td>
+            <td>₹ ${rs(Object.values(countedBy).reduce((t, v) => t + v, 0))}<div class="tiny">${Object.entries(countedBy).sort((a, b) => b[1] - a[1]).map(([m, v]) => `${MODE_SHORT[m] ?? m} ${rs(v)}`).join(' · ')}</div></td>
+            <td>${notComeSum ? html`<span style="color:var(--danger)">Not come ₹ ${rs(notComeSum)}</span>` : ''}</td></tr></tfoot>
+        </table></div>` : html`<div class="note">No bills${tagF || mode || find ? ' match' : ' in these shifts'}.</div>`}
+      </section>`));
+    app.querySelectorAll('[data-oldpos]').forEach((b) => b.addEventListener('click', () => { const k = b.dataset.oldpos; if (billsOpenOld.has(k)) billsOpenOld.delete(k); else billsOpenOld.add(k); draw(); }));
+    document.getElementById('blform').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const same = f.from.value === f.to.value;
+      go(link({ day: same ? f.from.value : '', from: same ? '' : f.from.value, to: same ? '' : f.to.value, mode: f.mode.value, q: f.q.value.trim() }));
+    });
+    document.getElementById('blcsv').addEventListener('click', () => saveCsv(`all-bills-${r.from}-to-${r.to}.csv`, [
+      ['Shift', 'Bill', 'Time', 'Tag', 'Old POS', 'Software', 'Software mode', 'Register', 'Register mode', 'Counted', 'Counted mode', 'Note', 'How the payment came', 'Money not come'],
+      ...lines.map((l) => [l.day, l.billNo, l.paidAt ? timeOf(l.paidAt) : '', BILL_TAGS.find(([k]) => k === l.tag)[1], l.oldPos ? 'yes' : '', rupeesCsv(l.software?.amountPaise), l.software?.mode ?? '',
+        rupeesCsv(l.register?.amountPaise), l.register?.mode ?? '', rupeesCsv(l.counted?.amountPaise), l.counted?.mode ?? '', l.note ?? '', l.payment.map((x) => x.text).join(' | '), l.notCome ? 'yes' : ''])]));
+  };
+  draw();
 }
 
 /**
@@ -4440,6 +4709,9 @@ async function bankView(biz, query = '') {
   const count = (t) => all.filter((r) => (t === 'done' ? r.status !== 'unmatched' : r.status === 'unmatched' && r.direction === (t === 'in' ? 'CR' : 'DR'))).length;
   const shifts = [...new Set(rows.map((r) => r.shift))].sort().reverse();
   const reversals = all.filter((r) => r.kind === 'reversal' && r.status === 'unmatched' && r.pairRowId).length;
+  // UPI card fees go to Bank charges (19 Nov 2026), booked by a person in one press.
+  const fees = all.filter((r) => r.kind === 'upi_fee' && r.status === 'unmatched' && r.direction === 'DR');
+  const feeHead = heads.find((h) => h.type === 'expense' && /^bank charges?$/i.test(h.name.trim())) ?? heads.find((h) => h.type === 'expense' && /bank charge/i.test(h.name));
   const link = (over) => { const p = new URLSearchParams({ from, to, account, tab, ...over }); return `#/b/${biz.id}/bank?${p}`; };
   const OPEN_KEY = 'bookr.bankOpen';
   let openShifts;
@@ -4623,6 +4895,8 @@ async function bankView(biz, query = '') {
       <div class="note">${tab === 'in' ? html`<strong>Match to bill</strong>: the credit is the payment for a bill already counted in sales (nothing new is booked). <strong>Book under a head</strong>: money received that is not a bill, e.g. hostel rent. <strong>Own account</strong>: money from another account of the business, not income.`
         : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Own account</strong>: money moved to another account of the business, not an expense.`
         : 'Lines already matched, booked or skipped. Undo puts a line back.'}</div>
+      ${tab === 'out' && fees.length ? html`<div>${feeHead ? html`<button class="btn plain" type="button" id="gofees">Book ${fees.length} UPI card fee${fees.length > 1 ? 's' : ''} to ${feeHead.name} · ₹ ${money(fees.reduce((t, r) => t + r.amountPaise, 0))}</button>`
+        : html`<span class="note">${fees.length} UPI card fee${fees.length > 1 ? 's' : ''} to book: add a Bank charges expense head on Heads and rules to book them in one go.</span>`}</div>` : ''}
       ${tab === 'out' && reversals ? html`<div><button class="btn plain" type="button" id="gorev">Skip ${reversals} failed payment${reversals > 1 ? 's' : ''} and ${reversals > 1 ? 'their' : 'its'} reversal</button></div>` : ''}
       <datalist id="bankparties">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
       <form class="inset" id="ruleform" hidden>
@@ -4848,6 +5122,8 @@ async function bankView(biz, query = '') {
       }
     });
   });
+  document.getElementById('gofees')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: fees.map((r) => ({ rowId: r.id, headId: feeHead.id, item: 'UPI card fee' })) }),
+    (r) => `${r.booked} UPI card fee${r.booked === 1 ? '' : 's'} booked to ${feeHead.name}.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`));
   document.getElementById('gorev')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/ignore-reversals`, {}), (r) => `${r.pairs} failed payment${r.pairs === 1 ? '' : 's'} skipped with ${r.pairs === 1 ? 'its' : 'their'} reversal.`));
   const rf = document.getElementById('ruleform');
   app.querySelectorAll('[data-mkrule]').forEach((x) => x.addEventListener('click', () => {
@@ -8156,6 +8432,9 @@ async function route() {
       if (screen === 'reconcile' || screen === 'upi') return reconcileView(biz, parts[3]);
       if (screen === 'reports') return reportsView(biz, query);
       if (screen === 'funds') return biz.actions.includes('bank.link') ? fundsView(biz, query) : go(`#/b/${biz.id}/reports`);
+      if (screen === 'pending') return biz.actions.includes('sales.view') ? pendingView(biz, query) : go(`#/b/${biz.id}/reports`);
+      if (screen === 'bills') return biz.actions.includes('sales.view') ? allBillsView(biz, query) : go(`#/b/${biz.id}/reports`);
+      if (screen === 'statement') return biz.actions.includes('bank.link') ? statementView(biz, query) : go(`#/b/${biz.id}/reports`);
       if (screen === 'money-out') return moneyOutView(biz, query);
       if (screen === 'parties') return partiesView(biz, query);
       if (item?.phase) return laterView(biz, screen);

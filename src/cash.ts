@@ -32,15 +32,17 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
     summaryFor(db, businessId, addDays(day, -1)),
     one<{ total: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS total FROM transactions
       WHERE business_id = ? AND shift_day = ? AND source = 'software_report' AND type = 'income' AND payment_mode = 'cash'`, businessId, day),
-    all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number; close_note: string | null; late: string | null }>(db, `
+    all<{ id: string; bill_no: string; sw_amount_paise: number; decision: string | null; bill_type: string | null; note: string | null; paid_at: number | null; typed: number; close_note: string | null; late: string | null; tx_mode: string | null }>(db, `
       SELECT c.id, c.bill_no, c.sw_amount_paise, c.decision, c.bill_type, c.note, sb.paid_at, 0 AS typed, c.close_note,
+        -- The sale's mode now: a bill changed to card or UPI on a later day (19 Nov 2026) no longer explains this drawer.
+        (SELECT t.payment_mode FROM transactions t WHERE t.business_id = c.business_id AND t.comparison_id = c.id AND t.type = 'income' LIMIT 1) AS tx_mode,
         -- Written late: the same bill on a later day's register, linked to this one (its day and written amount).
         (SELECT x.shift_day || '|' || coalesce(x.rg_amount_paise, '') || '|' || coalesce(x.rg_mode, '') FROM bill_comparisons x WHERE x.business_id = c.business_id AND x.linked_to_id = c.id
           ORDER BY x.shift_day LIMIT 1) AS late FROM bill_comparisons c
       LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.difference = 'missing_in_register' AND c.sw_mode = 'cash'
       UNION ALL
-      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1, NULL, NULL
+      SELECT c.id, c.bill_no, c.sw_amount_paise, 'use_software', r.bill_type, 'Added to the register from the software report', NULL, 1, NULL, NULL, NULL
       FROM bill_comparisons c JOIN register_rows r ON r.id = c.register_row_id
       WHERE c.business_id = ? AND c.shift_day = ? AND c.sw_mode = 'cash' AND json_extract(r.ocr_original, '$.source') = 'software_report'
         -- Only those written in as cash (18 Nov 2026): one added as UPI or card is not a cash sale of this drawer.
@@ -110,7 +112,7 @@ export async function cashCheck(db: DB, businessId: string, day: string) {
   if (difference !== null && difference < 0 && !settled) {
     let left = -difference;
     const bills = [];
-    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note), ...notCash.filter((x) => !x.close_note)];
+    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note && (x.tx_mode == null || x.tx_mode === 'cash')), ...notCash.filter((x) => !x.close_note)];
     for (const c of waiting.sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
       if (left <= 0) break;
       const part = Math.min(left, c.sw_amount_paise);
