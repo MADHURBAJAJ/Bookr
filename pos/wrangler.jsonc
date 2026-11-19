@@ -8,6 +8,10 @@
   // Runs the Worker next to its database (APAC, Singapore), so each database question is a few milliseconds.
   // Smart Placement left it wherever the guest's request lands (often Europe for Indian networks), ~170 ms per question.
   "placement": { "region": "aws:ap-southeast-1" },
+  // The POS's own address (19 Nov 2026). The domain's DNS is on Cloudflare, so the deploy makes the DNS record and the
+  // certificate. The workers.dev address keeps working too, until it is turned off.
+  "routes": [{ "pattern": "pos.thebajajgroup.co", "custom_domain": true }],
+  "workers_dev": true,
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
