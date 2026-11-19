@@ -1797,15 +1797,15 @@ const entityBody = (e, change) => ({
 // A file can be the sheet (CSV), an Excel file (.xlsx, read here in the browser), or photos or a PDF of a printed menu
 // (read by Claude on the server into the sheet layout). Columns are matched by their headings and can be changed on
 // screen; GST and the station are never guessed: when the file has none for a category, it is chosen here once.
-const TAX_TEXT = (t) => (t.mode === 'billing' ? 'Billing name rate' : t.mode === 'rate' ? `GST ${t.bp / 100}%` : t.mode === 'liquor' ? 'Liquor, outside GST' : 'No GST');
-const TAX_PICK = [['', 'Choose GST'], ['Billing name', 'Billing name rate (food)'], ['GST 5%', 'GST 5%'], ['GST 12%', 'GST 12%'], ['GST 18%', 'GST 18%'], ['GST 28%', 'GST 28%'], ['GST 40%', 'GST 40%'], ['No GST (liquor)', 'Liquor: outside GST'], ['No GST', 'No GST (exempt)']];
+const TAX_TEXT = (t) => (t.mode === 'billing' ? 'Food GST of the business on the bill' : t.mode === 'rate' ? `GST ${t.bp / 100}%` : t.mode === 'liquor' ? 'Liquor, outside GST' : 'No GST');
+const TAX_PICK = [['', 'Choose GST'], ['Billing name', 'Food GST of the business on the bill'], ['GST 5%', 'GST 5%'], ['GST 12%', 'GST 12%'], ['GST 18%', 'GST 18%'], ['GST 28%', 'GST 28%'], ['GST 40%', 'GST 40%'], ['No GST (liquor)', 'Liquor: outside GST'], ['No GST', 'No GST (exempt)']];
 const COLUMN_HELP = [
   ['Item', 'The name as on the bill. Needed.'],
   ['Category', 'The menu section (Starters, Bar…). GST is set per category; items that differ keep their own.'],
   ['Price (₹)', 'Before GST: 250, 250.50, ₹1,250. Leave empty, or write MRP or Market price, for price at billing.'],
   ['Price at billing', 'Yes for bottles and other items whose price is typed when ordered. Otherwise empty.'],
   ['Lowest price (₹)', 'For price at billing only: the least that can be typed. Optional.'],
-  ['Tax', 'Billing name (its rate, 5% for food), GST 5% / 12% / 18% / 28% / 40%, No GST (liquor), or No GST. Left empty: asked per category.'],
+  ['Tax', 'Billing name: the food GST of the business on the bill (5% when it is GST-registered, none when not). Or GST 5% / 12% / 18% / 28% / 40%, No GST (liquor), or No GST. Left empty: asked per category.'],
   ['Station', 'Where the KOT goes: a station\u2019s name (Kitchen, Bar, Tandoor…), or No KOT for things that never go to a station. Left empty: asked per category.'],
   ['SAC', 'Optional, 4 to 8 digits. Empty: kept, or 996332 for a new item.'],
 ];
@@ -2299,7 +2299,7 @@ actions.kdsPrint = (d) => { const k = ui.st.kots.find((x) => x.id === d.id) ?? u
 
 // Tax choices: an item can follow its category; a category can follow the billing name.
 const RATES = [5, 12, 18, 28, 40, 0];
-const taxChoices = (forItem) => [...(forItem ? [['category', 'From its category']] : []), ['billing', 'Billing name rate (food)'],
+const taxChoices = (forItem) => [...(forItem ? [['category', 'From its category']] : []), ['billing', 'Food GST of the business on the bill'],
   ...RATES.map((r) => [`rate:${r}`, `GST ${r}%`]), ['liquor', 'Liquor: outside GST'], ['none', 'No GST (exempt)']];
 const taxValue = (x) => (!x?.taxMode ? 'category' : x.taxMode === 'rate' ? `rate:${x.gstBp / 100}` : x.taxMode);
 const taxName = (x) => taxChoices(true).find(([v]) => v === taxValue(x))?.[1] ?? '';

@@ -21,6 +21,7 @@ afterAll(dispose);
 
 describe('reading the sheet', () => {
   it('reads taxes, add-ons and every bad row', () => {
+    expect(readTax('Food GST of the business on the bill')).toEqual({ mode: 'billing', bp: null });
     expect(readTax('GST 18%')).toEqual({ mode: 'rate', bp: 1800 });
     expect(readTax('No GST (not a sale)')).toEqual({ mode: 'none', bp: null });
     expect(readTax('abc')).toBeNull();

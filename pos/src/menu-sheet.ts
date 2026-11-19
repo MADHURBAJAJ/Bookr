@@ -69,7 +69,7 @@ function money(t: string): number | null {
 export function readTax(t: string): Tax | null {
   const s = norm(t).replace(/[@()]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!s) return null;
-  if (s.startsWith('billing name') || s === 'billing' || s === 'default' || s === 'as per billing name') return { mode: 'billing', bp: null };
+  if (s.startsWith('billing name') || s.startsWith('food gst') || s === 'billing' || s === 'default' || s === 'as per billing name') return { mode: 'billing', bp: null };
   if (/liquor|alcohol|non[- ]?gst|\bvat\b/.test(s)) return { mode: 'liquor', bp: null };
   if (/^(no gst|no tax|nil|nil rated|exempt|exempted|none|-)$/.test(s) || s.startsWith('no gst')) return { mode: 'none', bp: null };
   const m = /^(?:gst|igst|tax)?\s*(\d+(?:\.\d+)?)\s*%?$/.exec(s) ?? /^(\d+(?:\.\d+)?)\s*%?\s*gst$/.exec(s);
