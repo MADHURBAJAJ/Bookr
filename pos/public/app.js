@@ -84,6 +84,24 @@ const counterEntities = () => (cache.entities ?? []).filter((e) => e.active && e
 
 // ---------- rendering
 
+// ---------- day and night colours (Warm teal / Teal night), chosen per device: Auto switches at 7 pm and 7 am
+const THEME_KEY = 'pos-theme';
+const THEME_NAMES = { auto: 'Auto', day: 'Day', night: 'Night' };
+function themeMode() { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch { return 'auto'; } }
+function applyTheme() {
+  const m = themeMode();
+  const h = new Date().getHours();
+  document.documentElement.dataset.theme = m === 'night' || (m === 'auto' && (h >= 19 || h < 7)) ? 'night' : 'day';
+}
+applyTheme();
+setInterval(applyTheme, 60_000);
+const THEME_ICON = {
+  day: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`,
+  night: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`,
+  auto: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>`,
+};
+const themeButton = () => html`<button type="button" class="themebtn" data-act="theme" title="Colours: Auto switches to night at 7 pm and back at 7 am" aria-label="Colours: ${THEME_NAMES[themeMode()]}. Change">${THEME_ICON[themeMode()]}<span>${THEME_NAMES[themeMode()]}</span></button>`;
+
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
@@ -93,7 +111,7 @@ function shell(active, body) {
     <a class="brand" href="#/" title="${me.business.name}">${me.business.name}</a>
     <nav class="mainnav" aria-label="Main">${navLinks}</nav>
     ${links.length > 1 ? html`<details class="navmenu"><summary aria-label="Go to: ${current}">${current} <span aria-hidden="true">▾</span></summary><nav aria-label="Main">${navLinks}</nav></details>` : ''}
-    <div class="who"><span class="shiftchip" title="A shift runs 8 am to 8 am">Shift ${dayName(me.business.shiftDay)}</span>
+    <div class="who">${themeButton()}<span class="shiftchip" title="Shift of ${dayName(me.business.shiftDay)}: a shift runs 8 am to 8 am" aria-label="Shift ${dayName(me.business.shiftDay)}">${dayName(me.business.shiftDay)}</span>
       <span class="person">${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
   </div></header>
   <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span>${flash.link ? html`<a href="${flash.link[0]}">${flash.link[1]}</a>` : ''}</div>` : ''}${body}</main>`;
@@ -139,6 +157,11 @@ async function route() {
 // ---------- events: buttons carry data-act; inputs carry data-model (a key in ui)
 
 const actions = {};
+actions.theme = () => {
+  const next = { auto: 'day', day: 'night', night: 'auto' }[themeMode()];
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* a private window: this visit only */ }
+  applyTheme(); rerender();
+};
 root.addEventListener('click', async (ev) => {
   const el = ev.target.closest('[data-act]');
   if (!el || el.disabled) return;
