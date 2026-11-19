@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import { all, newId, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { creditTotals, rs, type Totals } from '../billing';
+import { creditNote, rs, type LineTax, type TaxRow, type Totals } from '../billing';
 import { clock, event, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendSoon } from '../sync';
 import { billOut } from './orders';
@@ -33,7 +33,18 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   const reason = text(data, 'reason', 'A reason for the credit note', { max: 120 })!;
 
   // What is credited: every line still left on the bill, or chosen quantities.
-  const lines = await all<{ id: string; name: string; qty: number; rate_paise: number; taxed: number }>(db, 'SELECT id, name, qty, rate_paise, taxed FROM bill_lines WHERE bill_id = ? ORDER BY rowid', billId);
+  const lines = await all<{ id: string; name: string; qty: number; rate_paise: number; taxed: number; tax_kind: string | null; gst_bp: number | null }>(db,
+    'SELECT id, name, qty, rate_paise, taxed, tax_kind, gst_bp FROM bill_lines WHERE bill_id = ? ORDER BY rowid', billId);
+  // Each line's tax as billed (older lines: GST at the bill's rate, or liquor).
+  const taxOfLine = (l: (typeof lines)[number]): LineTax => {
+    const kind = l.tax_kind ?? (l.taxed ? 'gst' : 'liquor');
+    return kind === 'gst' ? { kind: 'gst', bp: l.gst_bp ?? bill.gst_rate_bp } : { kind: kind as 'liquor' | 'exempt' };
+  };
+  const [billRows, priorRows] = await Promise.all([
+    all<TaxRow>(db, 'SELECT kind, gst_bp AS bp, value_paise AS valuePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise FROM bill_taxes WHERE bill_id = ?', billId),
+    all<TaxRow>(db, `SELECT t.kind, t.gst_bp AS bp, t.value_paise AS valuePaise, t.cgst_paise AS cgstPaise, t.sgst_paise AS sgstPaise FROM credit_note_taxes t
+      JOIN credit_notes n ON n.id = t.credit_note_id WHERE n.bill_id = ?`, billId),
+  ]);
   const prior = await all<{ lines: string; gross_paise: number; discount_paise: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; round_off_paise: number; total_paise: number }>(db,
     'SELECT lines, gross_paise, discount_paise, taxable_paise, nongst_paise, cgst_paise, sgst_paise, round_off_paise, total_paise FROM credit_notes WHERE bill_id = ?', billId);
   const creditedQty = new Map<string, number>();
@@ -56,10 +67,13 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   const lastOne = left.every((l) => l.left === (chosen.find((x) => x.lineId === l.id)?.qty ?? 0));
   const already = prior.reduce<Totals>((t, p) => ({ grossPaise: t.grossPaise + p.gross_paise, discountPaise: t.discountPaise + p.discount_paise, taxablePaise: t.taxablePaise + p.taxable_paise, nonGstPaise: t.nonGstPaise + p.nongst_paise,
     cgstPaise: t.cgstPaise + p.cgst_paise, sgstPaise: t.sgstPaise + p.sgst_paise, roundOffPaise: t.roundOffPaise + p.round_off_paise, totalPaise: t.totalPaise + p.total_paise }), ZERO);
-  const taxedIds = new Set(lines.filter((l) => l.taxed).map((l) => l.id));
-  const totals = creditTotals({ grossPaise: bill.gross_paise, discountPaise: bill.discount_paise, taxablePaise: bill.taxable_paise, nonGstPaise: bill.nongst_paise,
-    cgstPaise: bill.cgst_paise, sgstPaise: bill.sgst_paise, roundOffPaise: bill.round_off_paise, totalPaise: bill.total_paise, gstRateBp: bill.gst_rate_bp },
-    already, chosen.reduce((s, l) => s + l.amountPaise, 0), lastOne, chosen.filter((l) => taxedIds.has(l.lineId)).reduce((s, l) => s + l.amountPaise, 0));
+  // Earlier notes from before tax rows were kept count as GST at the bill's rate and liquor.
+  const alreadyRows = priorRows.length || !prior.length ? priorRows : [
+    { kind: 'gst' as const, bp: bill.gst_rate_bp, valuePaise: already.taxablePaise, cgstPaise: already.cgstPaise, sgstPaise: already.sgstPaise },
+    { kind: 'liquor' as const, bp: 0, valuePaise: already.nonGstPaise, cgstPaise: 0, sgstPaise: 0 }];
+  const { taxes: noteRows, ...totals } = creditNote({ grossPaise: bill.gross_paise, discountPaise: bill.discount_paise, taxablePaise: bill.taxable_paise, nonGstPaise: bill.nongst_paise,
+    cgstPaise: bill.cgst_paise, sgstPaise: bill.sgst_paise, roundOffPaise: bill.round_off_paise, totalPaise: bill.total_paise, gstRateBp: bill.gst_rate_bp, taxes: billRows },
+    already, alreadyRows, chosen.map((l) => ({ gross: l.amountPaise, tax: taxOfLine(lines.find((x) => x.id === l.lineId)!) })), lastOne);
   if (totals.totalPaise <= 0) fail(409, 'Nothing is left to give back on this bill.');
 
   // How the money goes back.
@@ -95,6 +109,8 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
         id, bid, billId, bill.entity_id, fy, bill.series_prefix, short, shiftDay, reason, JSON.stringify(chosen), totals.grossPaise, totals.discountPaise,
         totals.taxablePaise, totals.nonGstPaise, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, mode, payAccount, debtor?.id ?? null, staff.id, t, bill.entity_id, fy),
       stmt(db, 'UPDATE credit_note_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', bill.entity_id, fy),
+      ...noteRows.map((x) => stmt(db, 'INSERT INTO credit_note_taxes (credit_note_id, business_id, kind, gst_bp, value_paise, cgst_paise, sgst_paise) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        id, bid, x.kind, x.bp, x.valuePaise, x.cgstPaise, x.sgstPaise)),
       ...(debtor ? [stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, bill_id, by_staff, at) VALUES (?, ?, ?, 'credit_note', ?, ?, ?, ?)",
         newId(), bid, debtor.id, -totals.totalPaise, billId, staff.id, t)] : []),
       event(db, bid, 'credit_note', bill.bill_no, totals.totalPaise, reason, `${chosen.map((l) => `${l.qty} × ${l.name}`).join(', ')} · refund ${mode}`, staff.id, shiftDay),

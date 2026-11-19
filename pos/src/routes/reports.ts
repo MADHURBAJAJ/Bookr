@@ -5,7 +5,7 @@ import { all, one } from '../../../src/db';
 import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { clock, bizOf, loadBusiness } from '../util';
-import { fyOf } from '../billing';
+import { billTaxRows, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
 
 export const reportRoutes = new Hono<AppEnv>();
@@ -65,7 +65,7 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
   const [byHour, coversByHour, byService, byStaff, mix, items, notSold] = await Promise.all([
     // Each KOT line: its quantity, valued at the order's price for that dish (menu price, before discounts and GST).
     all(db, `SELECT ((k.printed_at + 19800000) / 3600000) % 24 AS hour, k.station, count(DISTINCT k.id) AS kots,
-        sum(json_extract(j.value, '$.qty')) AS items, sum(json_extract(j.value, '$.qty') * coalesce(ol.price_paise, 0)) AS valuePaise
+        sum(json_extract(j.value, '$.qty')) AS items, sum(json_extract(j.value, '$.qty') * coalesce(json_extract(j.value, '$.pricePaise'), ol.price_paise, 0)) AS valuePaise
       FROM kots k, json_each(k.lines) j
       LEFT JOIN order_lines ol ON ol.order_id = k.order_id AND ol.name = json_extract(j.value, '$.name')
       WHERE k.business_id = ? AND k.printed_at >= ? AND k.printed_at < ? GROUP BY hour, k.station ORDER BY hour`, bid, fromMs, toMs),
@@ -102,7 +102,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
   const day = date({ d: c.req.query('day') ?? '' }, 'd', 'Shift');
   const { t } = clock(b);
   const fy = fyOf(day, b.fy_start_month);
-  const [sales, byMode, events, diffs, unpaid, series, cnSeries, close, bar] = await Promise.all([
+  const [sales, byMode, events, diffs, unpaid, series, cnSeries, close, bar, typed] = await Promise.all([
     one<{ bills: number; net: number; total: number; voids: number }>(db, `SELECT sum(status <> 'void') AS bills,
         coalesce(sum(CASE WHEN status <> 'void' THEN taxable_paise + nongst_paise END), 0) AS net, coalesce(sum(CASE WHEN status <> 'void' THEN total_paise END), 0) AS total,
         sum(status = 'void') AS voids FROM bills WHERE business_id = ? AND shift_day = ?`, bid, day),
@@ -135,6 +135,10 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
         coalesce(sum(CASE WHEN m.kind = 'waste' THEN -m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size END), 0) AS waste
       FROM stock_moves m JOIN stock_items i ON i.id = m.item_id JOIN stock_stores ss ON ss.id = m.store_id
       WHERE m.business_id = ?1 AND m.shift_day = ?2 AND ss.kind = 'bar' AND m.kind IN ('count', 'waste')`, bid, day),
+    // Prices typed at billing (bottles, seafood, catering): each with who typed it and the item's lowest price.
+    all(db, `SELECT b.bill_no AS billNo, l.name, l.qty, l.rate_paise AS pricePaise, m.min_price_paise AS minPricePaise, st.name AS byName
+      FROM bill_lines l JOIN bills b ON b.id = l.bill_id LEFT JOIN menu_items m ON m.id = l.item_id LEFT JOIN staff st ON st.id = l.price_by
+      WHERE b.business_id = ? AND b.shift_day = ? AND b.status <> 'void' AND l.price_by IS NOT NULL ORDER BY b.printed_at`, bid, day),
   ]);
   // A series is unbroken when its numbers run 1, 2, 3 … with none missing (void bills keep their number, so they count).
   const gaps = (seqs: string) => {
@@ -158,6 +162,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     })),
     series: series.map((x) => ({ name: x.name, prefix: x.prefix, ...gaps(x.seqs) })),
     creditNoteSeries: cnSeries.map((x) => ({ name: x.name, ...gaps(x.seqs) })),
+    typedPrices: typed,
     bar: { counts: bar!.counts, missingPaise: Math.round(bar!.missing), extraPaise: Math.round(bar!.extra), breakagePaise: Math.round(bar!.waste) },
     shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at } : null,
   });
@@ -175,55 +180,74 @@ reportRoutes.get(`${B}/reports/gstr1`, requireAction('reports.view'), async (c) 
   const IST = 19_800_000;
   const start = Date.UTC(+month.slice(0, 4), +month.slice(5, 7) - 1, 1) - IST;
   const end = Date.UTC(+month.slice(0, 4), +month.slice(5, 7), 1) - IST;
-  const [entities, bills, lines, notes] = await Promise.all([
+  const [entities, bills, lines, notes, billRows, noteRows] = await Promise.all([
     all<{ id: string; name: string; gstin: string | null; gst_registered: number }>(db,
       'SELECT id, name, gstin, gst_registered FROM billing_entities WHERE business_id = ? ORDER BY is_default DESC, name', bid),
     all<{ id: string; entity_id: string; bill_no: string; seq: number; status: string; gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number }>(db,
       `SELECT id, entity_id, bill_no, seq, status, gst_rate_bp, taxable_paise, nongst_paise, cgst_paise, sgst_paise, total_paise FROM bills
        WHERE business_id = ? AND printed_at >= ? AND printed_at < ? ORDER BY entity_id, seq`, bid, start, end),
-    all<{ bill_id: string; sac: string; qty: number; amount_paise: number }>(db,
-      `SELECT l.bill_id, l.sac, l.qty, l.amount_paise FROM bill_lines l JOIN bills b ON b.id = l.bill_id
-       WHERE b.business_id = ? AND b.printed_at >= ? AND b.printed_at < ? AND b.status <> 'void' AND l.taxed = 1`, bid, start, end),
-    all<{ entity_id: string; cn_no: string; seq: number; gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number; lines: string }>(db,
-      `SELECT n.entity_id, n.cn_no, n.seq, b.gst_rate_bp, n.taxable_paise, n.nongst_paise, n.cgst_paise, n.sgst_paise, n.total_paise, n.lines FROM credit_notes n JOIN bills b ON b.id = n.bill_id
+    all<{ bill_id: string; sac: string; qty: number; amount_paise: number; bp: number }>(db,
+      `SELECT l.bill_id, l.sac, l.qty, l.amount_paise, coalesce(l.gst_bp, b.gst_rate_bp) AS bp FROM bill_lines l JOIN bills b ON b.id = l.bill_id
+       WHERE b.business_id = ? AND b.printed_at >= ? AND b.printed_at < ? AND b.status <> 'void'
+         AND coalesce(l.tax_kind, CASE WHEN l.taxed = 1 THEN 'gst' ELSE 'liquor' END) = 'gst'`, bid, start, end),
+    all<{ id: string; entity_id: string; cn_no: string; seq: number; gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number }>(db,
+      `SELECT n.id, n.entity_id, n.cn_no, n.seq, b.gst_rate_bp, n.taxable_paise, n.nongst_paise, n.cgst_paise, n.sgst_paise, n.total_paise FROM credit_notes n JOIN bills b ON b.id = n.bill_id
        WHERE n.business_id = ? AND n.at >= ? AND n.at < ? ORDER BY n.entity_id, n.seq`, bid, start, end),
+    all<TaxRow & { bill_id: string }>(db, `SELECT t.bill_id, t.kind, t.gst_bp AS bp, t.value_paise AS valuePaise, t.cgst_paise AS cgstPaise, t.sgst_paise AS sgstPaise
+      FROM bill_taxes t JOIN bills b ON b.id = t.bill_id WHERE b.business_id = ? AND b.printed_at >= ? AND b.printed_at < ? AND b.status <> 'void'`, bid, start, end),
+    all<TaxRow & { credit_note_id: string }>(db, `SELECT t.credit_note_id, t.kind, t.gst_bp AS bp, t.value_paise AS valuePaise, t.cgst_paise AS cgstPaise, t.sgst_paise AS sgstPaise
+      FROM credit_note_taxes t JOIN credit_notes n ON n.id = t.credit_note_id WHERE n.business_id = ? AND n.at >= ? AND n.at < ?`, bid, start, end),
   ]);
+  // Each bill's and note's tax rows (older ones: GST at the bill's rate, and liquor).
+  const rowsOf = (x: { gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number }, rows: TaxRow[]) =>
+    billTaxRows({ gstRateBp: x.gst_rate_bp, taxablePaise: x.taxable_paise, nonGstPaise: x.nongst_paise, cgstPaise: x.cgst_paise, sgstPaise: x.sgst_paise }, rows);
   const out = entities.map((e) => {
     const eb = bills.filter((x) => x.entity_id === e.id);
     const live = eb.filter((x) => x.status !== 'void');
     const en = notes.filter((n) => n.entity_id === e.id);
-    // B2C small: by rate, bills less credit notes.
+    // B2C small by rate, and Table 8 (liquor: non-GST supply; exempt), bills less credit notes.
     const rates = new Map<number, { taxable: number; cgst: number; sgst: number }>();
-    const add = (rate: number, k: 1 | -1, x: { taxable_paise: number; cgst_paise: number; sgst_paise: number }) => {
-      const r = rates.get(rate) ?? { taxable: 0, cgst: 0, sgst: 0 };
-      r.taxable += k * x.taxable_paise; r.cgst += k * x.cgst_paise; r.sgst += k * x.sgst_paise;
-      rates.set(rate, r);
+    const table8 = { liquor: 0, exempt: 0 };
+    const add = (k: 1 | -1, r: TaxRow) => {
+      if (r.kind !== 'gst') { table8[r.kind] += k * r.valuePaise; return; }
+      const x = rates.get(r.bp) ?? { taxable: 0, cgst: 0, sgst: 0 };
+      x.taxable += k * r.valuePaise; x.cgst += k * r.cgstPaise; x.sgst += k * r.sgstPaise;
+      rates.set(r.bp, x);
     };
-    // Bills whose lines are all liquor have no taxable value: they belong only in Table 8.
-    for (const x of live) if (x.taxable_paise || x.cgst_paise) add(x.gst_rate_bp, 1, x);
-    for (const n of en) if (n.taxable_paise || n.cgst_paise) add(n.gst_rate_bp, -1, n);
-    // SAC summary: each bill's taxable value and tax shared over its SACs by line value (one SAC per bill in practice).
-    const sac = new Map<string, { qty: number; taxable: number; cgst: number; sgst: number }>();
+    const gstRowsOf = new Map<string, TaxRow[]>();
     for (const x of live) {
-      const ls = lines.filter((l) => l.bill_id === x.id);
-      const gross = ls.reduce((t, l) => t + l.amount_paise, 0) || 1;
-      for (const l of ls) {
-        const r = sac.get(l.sac) ?? { qty: 0, taxable: 0, cgst: 0, sgst: 0 };
-        const share = l.amount_paise / gross;
-        r.qty += l.qty; r.taxable += x.taxable_paise * share; r.cgst += x.cgst_paise * share; r.sgst += x.sgst_paise * share;
-        sac.set(l.sac, r);
+      const rs = rowsOf(x, billRows.filter((r) => r.bill_id === x.id));
+      gstRowsOf.set(x.id, rs.filter((r) => r.kind === 'gst'));
+      for (const r of rs) add(1, r);
+    }
+    for (const n of en) for (const r of rowsOf(n, noteRows.filter((r) => r.credit_note_id === n.id))) add(-1, r);
+    // SAC summary per SAC and rate: each GST row's value and tax shared over that rate's lines by line value.
+    const sac = new Map<string, { sac: string; bp: number; qty: number; taxable: number; cgst: number; sgst: number }>();
+    for (const x of live) {
+      for (const r of gstRowsOf.get(x.id) ?? []) {
+        const ls = lines.filter((l) => l.bill_id === x.id && l.bp === r.bp);
+        const gross = ls.reduce((t, l) => t + l.amount_paise, 0) || 1;
+        for (const l of ls) {
+          const key = `${l.sac}:${r.bp}`;
+          const v = sac.get(key) ?? { sac: l.sac, bp: r.bp, qty: 0, taxable: 0, cgst: 0, sgst: 0 };
+          const share = l.amount_paise / gross;
+          v.qty += l.qty; v.taxable += r.valuePaise * share; v.cgst += r.cgstPaise * share; v.sgst += r.sgstPaise * share;
+          sac.set(key, v);
+        }
       }
     }
     const doc = (nos: { no: string; seq: number; cancelled: boolean }[]) => nos.length
       ? { from: nos[0].no, to: nos[nos.length - 1].no, total: nos.length, cancelled: nos.filter((d) => d.cancelled).length } : null;
     return {
       name: e.name, gstin: e.gstin, registered: !!e.gst_registered,
-      b2cs: [...rates].sort((x, y) => x[0] - y[0]).map(([rate, r]) => ({ ratePct: rate / 100, taxablePaise: r.taxable, cgstPaise: r.cgst, sgstPaise: r.sgst })),
-      sac: [...sac].filter(([, r]) => r.taxable || r.qty).map(([code, r]) => ({ sac: code, qty: r.qty, taxablePaise: Math.round(r.taxable), cgstPaise: Math.round(r.cgst), sgstPaise: Math.round(r.sgst) })),
+      b2cs: [...rates].sort((x, y) => x[0] - y[0]).filter(([, r]) => r.taxable || r.cgst).map(([rate, r]) => ({ ratePct: rate / 100, taxablePaise: r.taxable, cgstPaise: r.cgst, sgstPaise: r.sgst })),
+      sac: [...sac.values()].sort((a, b) => a.sac.localeCompare(b.sac) || a.bp - b.bp).filter((r) => r.taxable || r.qty)
+        .map((r) => ({ sac: r.sac, ratePct: r.bp / 100, qty: r.qty, taxablePaise: Math.round(r.taxable), cgstPaise: Math.round(r.cgst), sgstPaise: Math.round(r.sgst) })),
       invoices: doc(eb.map((x) => ({ no: x.bill_no, seq: x.seq, cancelled: x.status === 'void' }))),
       creditNotes: doc(en.map((n) => ({ no: n.cn_no, seq: n.seq, cancelled: false }))),
-      // Table 8: liquor, outside GST (non-GST supplies), net of credit notes.
-      nonGstPaise: live.reduce((t, x) => t + x.nongst_paise, 0) - en.reduce((t, n) => t + n.nongst_paise, 0),
+      // Table 8, net of credit notes: liquor (non-GST supply) and items with no GST (exempt).
+      nonGstPaise: table8.liquor,
+      exemptPaise: table8.exempt,
       totalPaise: live.reduce((t, x) => t + x.total_paise, 0) - en.reduce((t, n) => t + n.total_paise, 0),
     };
   }).filter((e) => e.invoices || e.creditNotes);

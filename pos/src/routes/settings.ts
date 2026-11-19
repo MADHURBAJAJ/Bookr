@@ -1,6 +1,6 @@
 // Settings a business chooses (nothing hotel-specific is fixed in code): business rules, staff and PINs, billing names
 // with their GST and limits, UPI accounts, the menu, reason lists, in-house stays and credit accounts.
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, optionalPaise, paise, text } from '../../../src/http';
@@ -260,29 +260,75 @@ settingsRoutes.put(`${B}/pay-accounts/:id`, requireAction('entities.edit'), asyn
 // ---------- menu
 
 settingsRoutes.get(`${B}/menu`, requireAction('pos.view'), async (c) => {
-  return c.json({ items: await all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, tax, active
-    FROM menu_items WHERE business_id = ? ORDER BY category, name`, c.get('businessId')) });
+  const bid = c.get('businessId');
+  const [items, links, categories, groups, options] = await Promise.all([
+    all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, active, tax_mode AS taxMode, gst_bp AS gstBp,
+      open_price AS openPrice, min_price_paise AS minPricePaise FROM menu_items WHERE business_id = ? ORDER BY category, name`, bid),
+    all<{ item_id: string; group_id: string }>(c.env.DB, 'SELECT item_id, group_id FROM menu_item_addons WHERE business_id = ? ORDER BY sort', bid),
+    all(c.env.DB, 'SELECT id, name, tax_mode AS taxMode, gst_bp AS gstBp FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
+    all<{ id: string; name: string; kind: string }>(c.env.DB, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ? ORDER BY name', bid),
+    all<{ id: string; group_id: string; name: string; add_paise: number }>(c.env.DB,
+      'SELECT id, group_id, name, add_paise FROM addon_options WHERE business_id = ? AND active = 1 ORDER BY sort, name', bid),
+  ]);
+  return c.json({
+    items: items.map((i) => ({ ...i, openPrice: !!i.openPrice, addonGroups: links.filter((l) => l.item_id === i.id).map((l) => l.group_id) })),
+    categories,
+    addonGroups: groups.map((g) => ({ ...g, options: options.filter((o) => o.group_id === g.id).map((o) => ({ id: o.id, name: o.name, addPaise: o.add_paise })) })),
+  });
 });
+
+/** A tax choice from a form: from the category (items only), the billing name, a GST rate, liquor (outside GST), or none. */
+function taxFields(data: Record<string, unknown>, forItem: boolean): { tax_mode: string | null; gst_bp: number | null } {
+  if (data.tax !== undefined && data.tax !== 'gst' && data.tax !== 'none') fail(400, 'Tax must be gst, or none for liquor.');
+  const mode = data.taxMode ?? (data.tax === 'none' ? 'liquor' : forItem ? 'category' : 'billing');
+  if (forItem && mode === 'category') return { tax_mode: null, gst_bp: null };
+  if (mode === 'billing' || mode === 'liquor' || mode === 'none') return { tax_mode: mode, gst_bp: null };
+  if (mode === 'rate') {
+    const r = data.gstRate;
+    if (typeof r !== 'number' || ![0, 5, 12, 18, 28, 40].includes(r)) fail(400, 'GST rate must be 0, 5, 12, 18, 28 or 40 percent.');
+    return { tax_mode: 'rate', gst_bp: r * 100 };
+  }
+  fail(400, 'Tax must be from the category, the billing name, a GST rate, liquor, or none.');
+}
 
 function itemFields(data: Record<string, unknown>) {
   const station = data.station ?? 'kitchen';
   if (station !== 'kitchen' && station !== 'bar') fail(400, 'Station must be kitchen or bar.');
   const sac = text(data, 'sac', 'SAC', { optional: true, max: 8 }) ?? '996332';
   if (!/^\d{4,8}$/.test(sac)) fail(400, 'SAC must be 4 to 8 digits.');
-  const tax = data.tax ?? 'gst';
-  if (tax !== 'gst' && tax !== 'none') fail(400, 'Tax must be gst, or none for liquor.');
-  const price = paise(data, 'price', 'Price');
+  const open = data.openPrice === true;
+  const price = open ? (optionalPaise(data, 'price', 'Price') ?? 0) : paise(data, 'price', 'Price');
   if (price < 0) fail(400, 'Price cannot be negative.');
-  return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station, tax, active: data.active === false ? 0 : 1 };
+  const groups = data.addonGroups ?? [];
+  if (!Array.isArray(groups) || groups.some((g) => typeof g !== 'string') || groups.length > 10) fail(400, 'Add-ons must be a list of add-on groups.');
+  return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station,
+    ...taxFields(data, true), open_price: open ? 1 : 0, min_price_paise: open ? optionalPaise(data, 'minPrice', 'Lowest price') : null,
+    addon_groups: [...new Set(groups as string[])], active: data.active === false ? 0 : 1 };
+}
+
+/** Statements that set a dish's add-on groups (each must be the business's own) and make sure its category exists. */
+async function itemExtras(c: { env: { DB: D1Database } }, bid: string, id: string, f: ReturnType<typeof itemFields>) {
+  if (f.addon_groups.length) {
+    const known = await all<{ id: string }>(c.env.DB, `SELECT id FROM addon_groups WHERE business_id = ? AND id IN (${f.addon_groups.map(() => '?').join(',')})`, bid, ...f.addon_groups);
+    if (known.length !== f.addon_groups.length) fail(400, 'An add-on group was not found.');
+  }
+  return [
+    stmt(c.env.DB, 'DELETE FROM menu_item_addons WHERE item_id = ?', id),
+    ...f.addon_groups.map((g, i) => stmt(c.env.DB, 'INSERT INTO menu_item_addons (item_id, group_id, business_id, sort) VALUES (?, ?, ?, ?)', id, g, bid, i)),
+    stmt(c.env.DB, 'INSERT OR IGNORE INTO menu_categories (id, business_id, name, created_at) VALUES (?, ?, ?, ?)', newId(), bid, f.category, now()),
+  ];
 }
 
 settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const f = itemFields(await body(c));
   const id = newId();
+  const extras = await itemExtras(c, bid, id, f);
   await c.env.DB.batch([
-    stmt(c.env.DB, 'INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax, f.active, now()),
+    stmt(c.env.DB, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, now()),
+    ...extras,
     audit(c.env.DB, bid, c.get('staff').id, 'menu.create', 'menu_items', id, null, f),
   ]);
   return c.json({ id }, 201);
@@ -291,16 +337,70 @@ settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
 settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one(c.env.DB, 'SELECT name, category, price_paise, sac, station, tax, active FROM menu_items WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one(c.env.DB, 'SELECT name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active FROM menu_items WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Item not found.');
   const f = itemFields(await body(c));
+  const extras = await itemExtras(c, bid, id, f);
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, tax = ?, active = ? WHERE id = ?',
-      f.name, f.category, f.price_paise, f.sac, f.station, f.tax, f.active, id),
+    stmt(c.env.DB, `UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, tax_mode = ?, gst_bp = ?, open_price = ?, min_price_paise = ?, active = ?
+      WHERE id = ?`, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, id),
+    ...extras,
     audit(c.env.DB, bid, c.get('staff').id, 'menu.update', 'menu_items', id, before, f),
   ]);
   return c.json({ ok: true });
 });
+
+// A category's tax, which its items take unless they say otherwise.
+settingsRoutes.put(`${B}/menu-categories/:id`, requireAction('menu.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  const before = await one(c.env.DB, 'SELECT name, tax_mode, gst_bp FROM menu_categories WHERE id = ? AND business_id = ?', id, bid);
+  if (!before) fail(404, 'Category not found.');
+  const f = taxFields(await body(c), false);
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE menu_categories SET tax_mode = ?, gst_bp = ? WHERE id = ?', f.tax_mode, f.gst_bp, id),
+    audit(c.env.DB, bid, c.get('staff').id, 'category.tax', 'menu_categories', id, before, f),
+  ]);
+  return c.json({ ok: true });
+});
+
+// Add-on groups: "choose one" (Half / Full) or "add any" (Peri Peri Fries, Extra Cheese), each with its options and prices.
+// Saving replaces the options; orders keep the names and prices they were taken with.
+async function saveGroup(c: Context<AppEnv>, id: string | null) {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const name = text(data, 'name', 'Add-on name', { max: 60 })!;
+  const kind = data.kind;
+  if (kind !== 'one' && kind !== 'any') fail(400, 'Choose "pick one" or "add any".');
+  const raw = Array.isArray(data.options) ? data.options : [];
+  if (!raw.length || raw.length > 20) fail(400, 'Add between 1 and 20 options.');
+  if (kind === 'one' && raw.length < 2) fail(400, 'A "pick one" add-on needs at least two options.');
+  const opts = raw.map((o, i) => {
+    const r = (o ?? {}) as Record<string, unknown>;
+    return { name: text(r, 'name', `Option ${i + 1}`, { max: 60 })!, add: optionalPaise(r, 'price', `Price of option ${i + 1}`) ?? 0 };
+  });
+  const gid = id ?? newId();
+  let before = null;
+  if (id) {
+    before = await one(c.env.DB, 'SELECT name, kind FROM addon_groups WHERE id = ? AND business_id = ?', id, bid);
+    if (!before) fail(404, 'Add-on not found.');
+  }
+  try {
+    await c.env.DB.batch([
+      id ? stmt(c.env.DB, 'UPDATE addon_groups SET name = ?, kind = ? WHERE id = ?', name, kind, id)
+        : stmt(c.env.DB, 'INSERT INTO addon_groups (id, business_id, name, kind, created_at) VALUES (?, ?, ?, ?, ?)', gid, bid, name, kind, now()),
+      stmt(c.env.DB, 'DELETE FROM addon_options WHERE group_id = ?', gid),
+      ...opts.map((o, i) => stmt(c.env.DB, 'INSERT INTO addon_options (id, business_id, group_id, name, add_paise, sort) VALUES (?, ?, ?, ?, ?, ?)', newId(), bid, gid, o.name, o.add, i)),
+      audit(c.env.DB, bid, c.get('staff').id, id ? 'addons.update' : 'addons.create', 'addon_groups', gid, before, { name, kind, options: opts }),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, `There is already an add-on called ${name}.`);
+    throw e;
+  }
+  return c.json({ id: gid }, id ? 200 : 201);
+}
+settingsRoutes.post(`${B}/addon-groups`, requireAction('menu.edit'), (c) => saveGroup(c, null));
+settingsRoutes.put(`${B}/addon-groups/:id`, requireAction('menu.edit'), (c) => saveGroup(c, c.req.param('id')));
 
 // ---------- reasons
 

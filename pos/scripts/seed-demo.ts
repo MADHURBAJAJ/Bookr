@@ -73,16 +73,39 @@ hufs.forEach((e, i) => insert('pay_accounts', { id: id(), business_id: B, name: 
 
 const MENU: [string, string, number, 'kitchen' | 'bar'][] = [
   ['Onion Pakora', 'Starters', 140, 'kitchen'], ['Paneer Tikka', 'Starters', 320, 'kitchen'], ['Chicken 65', 'Starters', 340, 'kitchen'],
+  ['Tandoori Chicken', 'Starters', 300, 'kitchen'], ['Veg Burger', 'Snacks', 160, 'kitchen'], ['Cheese Sandwich', 'Snacks', 150, 'kitchen'],
   ['Masala Dosa', 'Mains', 180, 'kitchen'], ['Veg Thali', 'Mains', 280, 'kitchen'], ['Dal Makhani', 'Mains', 240, 'kitchen'],
   ['Chicken Biryani', 'Mains', 360, 'kitchen'], ['Butter Naan', 'Breads', 60, 'kitchen'], ['Tandoori Roti', 'Breads', 30, 'kitchen'],
   ['Masala Chai', 'Drinks', 40, 'kitchen'], ['Fresh Lime Soda', 'Drinks', 90, 'kitchen'], ['Sweet Lassi', 'Drinks', 110, 'kitchen'],
-  ['Gulab Jamun', 'Desserts', 110, 'kitchen'], ['Beer 650 ml', 'Bar', 320, 'bar'], ['Whisky 30 ml', 'Bar', 220, 'bar'], ['Whisky bottle 750 ml', 'Bar', 4800, 'bar'],
+  ['Gulab Jamun', 'Desserts', 110, 'kitchen'], ['Beer 650 ml', 'Bar', 320, 'bar'], ['Whisky 30 ml', 'Bar', 220, 'bar'], ['Whisky bottle 750 ml', 'Bar', 0, 'bar'],
+  ['Laundry (per piece)', 'Hotel', 50, 'kitchen'], ['Dental kit', 'Hotel', 60, 'kitchen'],
 ];
+// GST by category: food takes the billing name's rate; the bar is liquor (outside GST); hotel services 18% (demo rates).
+const CATEGORY_TAX: Record<string, { tax_mode: string; gst_bp: number | null }> = {
+  Bar: { tax_mode: 'liquor', gst_bp: null }, Hotel: { tax_mode: 'rate', gst_bp: 1800 },
+};
+[...new Set(MENU.map((m) => m[1]))].forEach((name, i) =>
+  insert('menu_categories', { id: id(), business_id: B, name, tax_mode: CATEGORY_TAX[name]?.tax_mode ?? 'billing', gst_bp: CATEGORY_TAX[name]?.gst_bp ?? null, sort: i, created_at: t }));
 const menuIds: Record<string, string> = {};
 for (const [name, category, rupees, station] of MENU) {
   menuIds[name] = id();
-  // Liquor at the bar is outside GST (billed without tax).
-  insert('menu_items', { id: menuIds[name], business_id: B, name, category, price_paise: rupees * 100, sac: '996332', station, tax: station === 'bar' ? 'none' : 'gst', active: 1, created_at: t });
+  // The bottle's price is typed at billing, never under ₹4,000; the dental kit carries no GST although its category does.
+  const bottle = name === 'Whisky bottle 750 ml';
+  insert('menu_items', { id: menuIds[name], business_id: B, name, category, price_paise: rupees * 100, sac: '996332', station,
+    tax_mode: name === 'Dental kit' ? 'none' : null, gst_bp: null, open_price: bottle ? 1 : 0, min_price_paise: bottle ? 4000_00 : null, active: 1, created_at: t });
+}
+// Add-ons: a choice the order must make, and extras.
+const ADDONS: [string, 'one' | 'any', [string, number][], string[]][] = [
+  ['Tandoori Chicken size', 'one', [['Half', 0], ['Full', 150]], ['Tandoori Chicken']],
+  ['Peri Peri Fries', 'any', [['Peri Peri Fries', 30]], ['Veg Burger', 'Cheese Sandwich']],
+  ['Extra Cheese', 'any', [['Extra Cheese', 50]], ['Veg Burger', 'Masala Dosa']],
+  ['Butter', 'any', [['Butter', 30]], ['Masala Dosa']],
+];
+for (const [n, [name, kind, options, dishes]] of ADDONS.entries()) {
+  const g = id();
+  insert('addon_groups', { id: g, business_id: B, name, kind, created_at: t });
+  options.forEach(([o, rupees], i) => insert('addon_options', { id: id(), business_id: B, group_id: g, name: o, add_paise: rupees * 100, sort: i, active: 1 }));
+  for (const d of dishes) insert('menu_item_addons', { item_id: menuIds[d], group_id: g, business_id: B, sort: n });
 }
 
 // Bar stock: a main store and a bar, a whisky and a beer, recipes, and opening stock received and moved to the bar.

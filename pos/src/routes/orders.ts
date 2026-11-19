@@ -3,9 +3,9 @@
 // is voided with a reason (the order opens again) and billed again, perhaps under another billing name.
 import { Hono } from 'hono';
 import { all, newId, now, one, stmt } from '../../../src/db';
-import { body, fail, isUuid, text } from '../../../src/http';
+import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { billTotals, limitState, rs, type Discount } from '../billing';
+import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
 import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel, tableList } from '../util';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
@@ -15,7 +15,11 @@ const B = '/businesses/:businessId';
 orderRoutes.use(`${B}/*`, requireStaff);
 
 interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string }
-interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number }
+interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null }
+/** What was chosen on a line: [{group, name, addPaise}], in the dish's order of groups. */
+type Chosen = { group: string; name: string; addPaise: number }[];
+const chosenOf = (l: { options: string | null }): Chosen => (l.options ? JSON.parse(l.options) : []);
+const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by';
 
 async function order(c: { env: { DB: D1Database } }, bid: string, id: string, editable = false): Promise<OrderRow> {
   if (!isUuid(id)) fail(404, 'Order not found.');
@@ -26,13 +30,14 @@ async function order(c: { env: { DB: D1Database } }, bid: string, id: string, ed
 }
 
 const lines = (db: D1Database, orderId: string) =>
-  all<LineRow>(db, 'SELECT id, item_id, name, price_paise, sac, station, qty, sent_qty FROM order_lines WHERE order_id = ? ORDER BY created_at, rowid', orderId);
+  all<LineRow>(db, `SELECT ${LINE_COLS} FROM order_lines WHERE order_id = ? ORDER BY created_at, rowid`, orderId);
 
 function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
   return {
     id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, covers: o.covers, status: o.status,
     openedAt: o.opened_at, openedShiftDay: o.opened_shift_day,
-    lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty })),
+    lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty,
+      options: chosenOf(l), typedPrice: !!l.price_by })),
     itemsPaise: ls.reduce((s, l) => s + l.qty * l.price_paise, 0), bill,
   };
 }
@@ -43,7 +48,7 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const fixed = tableList(bizOf(c));
   const [os, ls, bills, used] = await Promise.all([
     all<OrderRow>(c.env.DB, "SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at", bid),
-    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
+    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
     all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
       "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
     // The counter's table grid: the restaurant's own list from Settings, or else the tables used in the last 60 days.
@@ -89,36 +94,73 @@ orderRoutes.get(`${B}/orders/:id`, requireAction('pos.view'), async (c) => {
   return c.json({ order: orderOut(o, await lines(c.env.DB, o.id)) });
 });
 
-// Adds or takes away items. Taking away an item already sent to the kitchen needs a reason and goes on the exceptions report.
+// Adds a dish, with its choices and add-ons and, for a price-at-billing dish, the typed price; or changes a line on the order
+// by its id (+1, -1). The same dish with other choices or another price is a line of its own. Taking away a line already
+// sent to the kitchen needs a reason and goes on the exceptions report.
 orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c) => {
   const bid = c.get('businessId');
-  const o = await order(c, bid, c.req.param('id'), true);
+  const db = c.env.DB;
   const data = await body(c);
-  const itemId = text(data, 'itemId', 'Item')!;
   const delta = data.delta;
   if (typeof delta !== 'number' || !Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 50) fail(400, 'Change must be a whole number of items.');
+  const [o, item, groups] = await Promise.all([
+    order(c, bid, c.req.param('id'), true),
+    data.lineId === undefined && delta > 0
+      ? one<{ id: string; name: string; price_paise: number; open_price: number; min_price_paise: number | null }>(db,
+        'SELECT id, name, price_paise, open_price, min_price_paise FROM menu_items WHERE id = ? AND business_id = ? AND active = 1', data.itemId, bid)
+      : Promise.resolve(null),
+    data.lineId === undefined && delta > 0
+      ? all<{ group_id: string; group_name: string; kind: string; option_id: string; option_name: string; add_paise: number }>(db, `SELECT g.id AS group_id, g.name AS group_name, g.kind,
+          o.id AS option_id, o.name AS option_name, o.add_paise FROM menu_item_addons a JOIN addon_groups g ON g.id = a.group_id
+          JOIN addon_options o ON o.group_id = g.id AND o.active = 1 WHERE a.item_id = ? AND a.business_id = ? ORDER BY a.sort, g.name, o.sort, o.name`, data.itemId, bid)
+      : Promise.resolve([]),
+  ]);
   const t = now();
-  if (delta > 0) {
-    // One trip: add the line from the menu, or add to it if it is already on the order.
-    const r = await stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, created_at)
-        SELECT ?, ?, ?, id, name, price_paise, sac, station, ?, ? FROM menu_items WHERE id = ? AND business_id = ? AND active = 1
-        ON CONFLICT (order_id, item_id) DO UPDATE SET qty = qty + excluded.qty`, newId(), bid, o.id, delta, t, itemId, bid).run();
-    if (!r.meta.changes) fail(400, 'Item not on the menu.');
-  } else {
-    const line = await one<LineRow>(c.env.DB, 'SELECT id, item_id, name, price_paise, sac, station, qty, sent_qty FROM order_lines WHERE order_id = ? AND item_id = ?', o.id, itemId);
-    if (!line || line.qty + delta < 0) fail(400, 'There are not that many on the order.');
-    const newQty = line.qty + delta;
-    const cancelSent = Math.max(0, line.sent_qty - newQty);
-    const statements = [stmt(c.env.DB, 'UPDATE order_lines SET qty = ?, sent_qty = ? WHERE id = ?', newQty, Math.min(line.sent_qty, newQty), line.id)];
-    if (cancelSent > 0) {
-      const reason = await reasonLabel(c.env.DB, bid, 'kot_cancel', data.reasonId, 'A reason for cancelling an item already sent to the kitchen');
-      statements.push(event(c.env.DB, bid, 'kot_cancel', `${o.place} · ${cancelSent} × ${line.name}`, cancelSent * line.price_paise, reason, null,
-        c.get('staff').id, clock(bizOf(c)).shiftDay));
+  if (data.lineId === undefined && delta > 0) {
+    if (!item) fail(400, 'Item not on the menu.');
+    // Choices: one from each "choose one" group, any from an "add any" group, nothing from elsewhere.
+    const picked = Array.isArray(data.options) ? data.options : [];
+    if (picked.some((x) => typeof x !== 'string') || new Set(picked).size !== picked.length) fail(400, 'Choose each add-on once.');
+    for (const id of picked) if (!groups.some((g) => g.option_id === id)) fail(400, 'That add-on is not offered with this dish.');
+    for (const g of new Set(groups.filter((x) => x.kind === 'one').map((x) => x.group_id))) {
+      const n = groups.filter((x) => x.group_id === g && picked.includes(x.option_id)).length;
+      if (n !== 1) fail(400, `Choose one ${groups.find((x) => x.group_id === g)!.group_name} for ${item.name}.`);
     }
-    await c.env.DB.batch(statements);
-    return c.json({ order: orderOut(o, await lines(c.env.DB, o.id)), cancelledSent: cancelSent });
+    const chosen: Chosen = groups.filter((g) => picked.includes(g.option_id)).map((g) => ({ group: g.group_name, name: g.option_name, addPaise: g.add_paise }));
+    // Price at billing: typed now, never below the lowest price; who typed it is kept.
+    let base = item.price_paise;
+    let priceBy: string | null = null;
+    if (item.open_price) {
+      base = paise(data, 'price', `Price of ${item.name}`);
+      if (base <= 0) fail(400, `Type the price of ${item.name}.`);
+      if (item.min_price_paise !== null && base < item.min_price_paise) fail(400, `${item.name} cannot be less than ${rs(item.min_price_paise)}.`);
+      priceBy = c.get('staff').id;
+    }
+    const unit = base + chosen.reduce((s, x) => s + x.addPaise, 0);
+    const variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
+    await stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, created_at, variant, options, price_by)
+        SELECT ?, ?, ?, id, name, ?, sac, station, ?, ?, ?, ?, ? FROM menu_items WHERE id = ?
+        ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = qty + excluded.qty`,
+      newId(), bid, o.id, unit, delta, t, variant, chosen.length ? JSON.stringify(chosen) : null, priceBy, item.id).run();
+    return c.json({ order: orderOut(o, await lines(db, o.id)) });
   }
-  return c.json({ order: orderOut(o, await lines(c.env.DB, o.id)) });
+  // A line by its id, or (older screens) the dish's plain line.
+  const line = data.lineId !== undefined
+    ? await one<LineRow>(db, `SELECT ${LINE_COLS} FROM order_lines WHERE id = ? AND order_id = ?`, data.lineId, o.id)
+    : await one<LineRow>(db, `SELECT ${LINE_COLS} FROM order_lines WHERE order_id = ? AND item_id = ? ORDER BY variant = '' DESC, created_at LIMIT 1`, o.id, data.itemId);
+  if (!line) fail(400, 'That line is not on the order.');
+  if (line.qty + delta < 0) fail(400, 'There are not that many on the order.');
+  const newQty = line.qty + delta;
+  const cancelSent = Math.max(0, line.sent_qty - newQty);
+  const statements = [stmt(db, 'UPDATE order_lines SET qty = ?, sent_qty = ? WHERE id = ?', newQty, Math.min(line.sent_qty, newQty), line.id)];
+  if (cancelSent > 0) {
+    const reason = await reasonLabel(db, bid, 'kot_cancel', data.reasonId, 'A reason for cancelling an item already sent to the kitchen');
+    const what = [line.name, ...chosenOf(line).map((x) => x.name)].join(' + ');
+    statements.push(event(db, bid, 'kot_cancel', `${o.place} · ${cancelSent} × ${what}`, cancelSent * line.price_paise, reason, null,
+      c.get('staff').id, clock(bizOf(c)).shiftDay));
+  }
+  await db.batch(statements);
+  return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: cancelSent });
 });
 
 // Sends what is new to the kitchen and bar: one KOT per station, numbered for the business.
@@ -133,7 +175,8 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
   await c.env.DB.batch([
     ...stations.map((st, i) => stmt(c.env.DB, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at)
       SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ? FROM kots WHERE business_id = ?`,
-      ids[i], bid, o.id, st, JSON.stringify(ls.filter((l) => l.station === st).map((l) => ({ name: l.name, qty: l.qty - l.sent_qty }))), c.get('staff').id, t, bid)),
+      ids[i], bid, o.id, st, JSON.stringify(ls.filter((l) => l.station === st).map((l) => ({ name: l.name, qty: l.qty - l.sent_qty,
+        options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise }))), c.get('staff').id, t, bid)),
     ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id)),
   ]);
   const kots = await all<{ kot_no: number; station: string; lines: string }>(c.env.DB, `SELECT kot_no, station, lines FROM kots WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY kot_no`, ...ids);
@@ -151,7 +194,7 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
   const moves: { line: LineRow; qty: number }[] = [];
   for (const raw of data.lines) {
     const r = (raw ?? {}) as Record<string, unknown>;
-    const line = ls.find((l) => l.item_id === r.itemId);
+    const line = r.lineId !== undefined ? ls.find((l) => l.id === r.lineId) : ls.find((l) => l.item_id === r.itemId);
     const qty = r.qty;
     if (!line || typeof qty !== 'number' || !Number.isInteger(qty) || qty < 0 || qty > line.qty) fail(400, 'A quantity to move is not on the order.');
     if (qty > 0 && !moves.some((m) => m.line.id === line.id)) moves.push({ line, qty });
@@ -172,8 +215,9 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
       const sentMoved = Math.max(0, qty - (line.qty - line.sent_qty)); // not-yet-sent move first
       return [
         stmt(c.env.DB, 'UPDATE order_lines SET qty = qty - ?, sent_qty = sent_qty - ? WHERE id = ?', qty, sentMoved, line.id),
-        stmt(c.env.DB, 'INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t),
+        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by),
       ];
     }),
   ]);
@@ -200,7 +244,7 @@ orderRoutes.post(`${B}/orders/:id/cancel`, requireAction('orders.edit'), async (
   return c.json({ ok: true });
 });
 
-interface Entity { id: string; name: string; gst_rate_bp: number; series_prefix: string; offered: number; active: number; warn1_paise: number | null; warn2_paise: number | null; stop_paise: number | null }
+interface Entity { id: string; name: string; gst_rate_bp: number; gst_registered: number; series_prefix: string; offered: number; active: number; warn1_paise: number | null; warn2_paise: number | null; stop_paise: number | null }
 
 // Prints the bill: the cashier chooses the billing name (the default is preselected on screen) and any discount, with its reason.
 orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c) => {
@@ -210,15 +254,25 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   const entityId = text(data, 'entityId', 'Billing name')!;
   const { t, shiftDay, fy } = clock(b);
   // Everything the bill needs, read in one go: the order, its lines, the billing name and its year so far.
-  const [o, allLines, e, yearRow, noTax] = await Promise.all([
+  const [o, allLines, e, yearRow, taxRows] = await Promise.all([
     order(c, bid, c.req.param('id'), true),
     lines(c.env.DB, c.req.param('id')),
-    one<Entity>(c.env.DB, 'SELECT id, name, gst_rate_bp, series_prefix, offered, active, warn1_paise, warn2_paise, stop_paise FROM billing_entities WHERE id = ? AND business_id = ?', entityId, bid),
+    one<Entity>(c.env.DB, 'SELECT id, name, gst_rate_bp, gst_registered, series_prefix, offered, active, warn1_paise, warn2_paise, stop_paise FROM billing_entities WHERE id = ? AND business_id = ?', entityId, bid),
     one<{ s: number }>(c.env.DB, "SELECT coalesce(sum(total_paise), 0) AS s FROM bills WHERE entity_id = ? AND fy = ? AND status <> 'void'", entityId, fy),
-    // Which dishes are outside GST (liquor), from the menu as it is now.
-    all<{ id: string }>(c.env.DB, "SELECT m.id FROM menu_items m JOIN order_lines l ON l.item_id = m.id WHERE l.order_id = ? AND m.tax = 'none'", c.req.param('id')),
+    // Each line's tax, from the menu as it is now: the item's own, else its category's, else the billing name's.
+    all<{ id: string; mode: string | null; bp: number | null; cmode: string | null; cbp: number | null }>(c.env.DB, `SELECT l.id, m.tax_mode AS mode, m.gst_bp AS bp,
+        k.tax_mode AS cmode, k.gst_bp AS cbp FROM order_lines l JOIN menu_items m ON m.id = l.item_id
+        LEFT JOIN menu_categories k ON k.business_id = m.business_id AND lower(k.name) = lower(m.category) WHERE l.order_id = ?`, c.req.param('id')),
   ]);
-  const untaxed = new Set(noTax.map((m) => m.id));
+  // A billing name not registered for GST charges no GST: its GST lines go at 0%; liquor and exempt stay as they are.
+  const lineTax = (lineId: string): LineTax => {
+    const r = taxRows.find((x) => x.id === lineId);
+    const mode = r?.mode ?? r?.cmode ?? 'billing';
+    if (mode === 'liquor') return { kind: 'liquor' };
+    if (mode === 'none') return { kind: 'exempt' };
+    const bp = mode === 'rate' ? (r!.mode === 'rate' ? r!.bp! : r!.cbp!) : e!.gst_rate_bp;
+    return { kind: 'gst', bp: e!.gst_registered ? bp : 0 };
+  };
   const ls = allLines.filter((l) => l.qty > 0);
   if (!ls.length) fail(409, 'The order has no items.');
   if (ls.some((l) => l.qty > l.sent_qty)) fail(409, 'Send the new items to the kitchen first.');
@@ -234,7 +288,7 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     discount = { kind: 'amount', paise: d.paise };
   } else if (d.kind !== 'none') fail(400, 'Discount must be none, a percentage or an amount.');
   let totals;
-  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, taxed: !untaxed.has(l.item_id) })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
+  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, tax: lineTax(l.id) })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
   const discountReason = totals.discountPaise > 0 ? await reasonLabel(c.env.DB, bid, 'discount', d.reasonId, 'A reason for the discount') : null;
 
   const year = yearRow!.s;
@@ -256,8 +310,15 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
         id, bid, o.id, e.id, fy, e.series_prefix, short, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
         totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
-      ...ls.map((l) => stmt(c.env.DB, 'INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise, untaxed.has(l.item_id) ? 0 : 1)),
+      ...ls.map((l) => {
+        const tx = lineTax(l.id);
+        return stmt(c.env.DB, `INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed, options, tax_kind, gst_bp, price_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise, tx.kind === 'gst' ? 1 : 0, l.options,
+          tx.kind, tx.kind === 'gst' ? tx.bp : null, l.price_by);
+      }),
+      ...totals.taxes.map((x) => stmt(c.env.DB, 'INSERT INTO bill_taxes (bill_id, business_id, kind, gst_bp, value_paise, cgst_paise, sgst_paise) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        id, bid, x.kind, x.bp, x.valuePaise, x.cgstPaise, x.sgstPaise)),
       stmt(c.env.DB, "UPDATE orders SET status = 'billed' WHERE id = ?", o.id),
       // The exceptions report, in the same batch: the discount takes its bill number from the row just written.
       ...(totals.discountPaise > 0 ? [stmt(c.env.DB, `INSERT INTO pos_events (business_id, kind, ref, amount_paise, reason, detail, by_staff, shift_day, at)
@@ -281,8 +342,9 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
-  const [items, creditNotes, pays, differences] = await Promise.all([
-    all(db, 'SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, taxed FROM bill_lines WHERE bill_id = ? ORDER BY rowid', id),
+  const [items, creditNotes, pays, differences, taxRows] = await Promise.all([
+    all<Record<string, unknown> & { options: string | null }>(db, `SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, taxed, options,
+      coalesce(tax_kind, CASE WHEN taxed = 1 THEN 'gst' ELSE 'liquor' END) AS taxKind, gst_bp AS gstBp, price_by IS NOT NULL AS typedPrice FROM bill_lines WHERE bill_id = ? ORDER BY rowid`, id),
     all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id),
     all(db, `SELECT p.mode, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
       d.name AS debtorAccount, p.comp_guest AS compGuest, p.comp_reason AS compReason, p.tendered_paise AS tenderedPaise
@@ -290,9 +352,13 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     WHERE a.bill_id = ? ORDER BY p.at, p.rowid`, id),
     all(db, `SELECT d.kind, d.amount_paise AS amountPaise, d.reason, p.mode FROM settle_differences d LEFT JOIN payments p ON p.id = d.payment_id
     WHERE d.bill_id = ? OR (d.kind = 'tip' AND d.settlement_id = (SELECT settlement_id FROM bills WHERE id = ?)) ORDER BY d.rowid`, id, id),
+    all<{ kind: TaxRow['kind']; bp: number; valuePaise: number; cgstPaise: number; sgstPaise: number }>(db,
+      `SELECT kind, gst_bp AS bp, value_paise AS valuePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise FROM bill_taxes WHERE bill_id = ? ORDER BY CASE kind WHEN 'gst' THEN 0 WHEN 'liquor' THEN 1 ELSE 2 END, gst_bp`, id),
   ]);
   const { entity_id, ...rest } = b;
-  return { ...rest, entityId: entity_id, items, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
+  const taxes = billTaxRows(b as unknown as { gstRateBp: number; taxablePaise: number; nonGstPaise: number; cgstPaise: number; sgstPaise: number }, taxRows);
+  return { ...rest, entityId: entity_id, items: items.map((i) => ({ ...i, gstBp: i.gstBp ?? (i.taxKind === 'gst' ? b.gstRateBp : null), options: i.options ? JSON.parse(i.options) : [] })),
+    taxes, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
 
 // Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.

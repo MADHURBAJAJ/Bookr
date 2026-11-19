@@ -291,7 +291,7 @@ describe('split bills', () => {
 
     // Nothing reprints for the kitchen except the dosa not sent before.
     const kot = (await s.counter.post(`${s.B}/orders/${r.json.id}/kot`)).json.kots;
-    expect(kot.flatMap((k: any) => k.lines)).toEqual([{ name: 'Masala Dosa', qty: 1 }]);
+    expect(kot.flatMap((k: any) => k.lines)).toEqual([{ name: 'Masala Dosa', qty: 1, options: [], pricePaise: 18000 }]);
     const billA = (await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.company })).json.bill;
     const billB = (await s.counter.post(`${s.B}/orders/${r.json.id}/bill`, { entityId: s.company })).json.bill;
     expect([billA.totalPaise, billB.totalPaise]).toEqual([42000, 42000]); // 400 + 5% each
@@ -526,7 +526,7 @@ describe('daily check and GSTR-1', () => {
     const e = r.entities[0];
     expect(e.registered).toBe(true);
     expect(e.b2cs).toEqual([{ ratePct: 5, taxablePaise: 18000, cgstPaise: 450, sgstPaise: 450 }]); // 36000 - 18000; 900 - 450 each
-    expect(e.sac).toEqual([{ sac: '996332', qty: 2, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
+    expect(e.sac).toEqual([{ sac: '996332', ratePct: 5, qty: 2, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
     expect(e.invoices).toMatchObject({ total: 2, cancelled: 1 });
     expect(e.creditNotes).toMatchObject({ total: 1, cancelled: 0 });
   });
@@ -579,7 +579,7 @@ describe('liquor without GST', () => {
     const month = new Date(bill.printedAt + 19_800_000).toISOString().slice(0, 7);
     const g = (await ok(owner.get(`${B}/reports/gstr1?month=${month}`))).entities[0];
     expect(g.b2cs).toEqual([{ ratePct: 5, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
-    expect(g.sac).toEqual([{ sac: '996332', qty: 2, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
+    expect(g.sac).toEqual([{ sac: '996332', ratePct: 5, qty: 2, taxablePaise: 36000, cgstPaise: 900, sgstPaise: 900 }]);
     expect(g.nonGstPaise).toBe(32000);
     const day = (await ok(owner.get(`${B}/reports/daily-check?day=${bill.shiftDay}`))).sales;
     expect(day.netPaise).toBe(68000); // net sales include liquor
@@ -589,5 +589,113 @@ describe('liquor without GST', () => {
     const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: beer.id, qty: 1 }], reason: 'Flat beer', refundMode: 'cash' }))).creditNote;
     expect(cn).toMatchObject({ taxablePaise: 0, nonGstPaise: 32000, cgstPaise: 0, totalPaise: 32000 });
     await expect(q('UPDATE bills SET nongst_paise = 0 WHERE id = ?', bill.id)).rejects.toThrow(/bill_frozen/);
+  });
+});
+
+describe('menu v2: add-ons, price at billing, GST by category and item', () => {
+  it('takes choices and add-ons into one priced line, merges the same choices, and shows them on the KOT and bill', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    const burger = (await ok(owner.post(`${B}/menu`, { name: 'Veg Burger', category: 'Continental', price: '249' }))).id;
+    const fries = (await ok(owner.post(`${B}/addon-groups`, { name: 'Peri Peri Fries', kind: 'any', options: [{ name: 'Peri Peri Fries', price: '30' }] }))).id;
+    const cheese = (await ok(owner.post(`${B}/addon-groups`, { name: 'Extra Cheese', kind: 'any', options: [{ name: 'Extra Cheese', price: '50' }] }))).id;
+    const size = (await ok(owner.post(`${B}/addon-groups`, { name: 'Size', kind: 'one', options: [{ name: 'Half', price: '0' }, { name: 'Full', price: '150' }] }))).id;
+    expect((await owner.post(`${B}/addon-groups`, { name: 'Size', kind: 'one', options: [{ name: 'A' }, { name: 'B' }] })).status).toBe(409);
+    expect((await counter.post(`${B}/addon-groups`, { name: 'X', kind: 'any', options: [{ name: 'X' }] })).status).toBe(403); // cashier
+    await ok(owner.put(`${B}/menu/${burger}`, { name: 'Veg Burger', category: 'Continental', price: '249', addonGroups: [fries, cheese] }));
+    const tandoori = (await ok(owner.post(`${B}/menu`, { name: 'Tandoori Chicken', category: 'Tandoor', price: '299', addonGroups: [size] }))).id;
+    const menu = (await ok(counter.get(`${B}/menu`)));
+    const opt = (g: string, n: string) => menu.addonGroups.find((x: any) => x.id === g).options.find((o: any) => o.name === n).id;
+    expect(menu.items.find((i: any) => i.id === burger).addonGroups).toEqual([fries, cheese]);
+
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T1' }))).id;
+    const add = (body: object) => counter.post(`${B}/orders/${o}/items`, { delta: 1, ...body });
+    expect((await add({ itemId: tandoori })).json.error).toMatch(/Choose one Size/);
+    expect((await add({ itemId: burger, options: [opt(size, 'Full')] })).json.error).toMatch(/not offered/);
+    await ok(add({ itemId: burger, options: [opt(fries, 'Peri Peri Fries'), opt(cheese, 'Extra Cheese')] }));
+    await ok(add({ itemId: burger, options: [opt(cheese, 'Extra Cheese'), opt(fries, 'Peri Peri Fries')] })); // same choices, other order: same line
+    await ok(add({ itemId: burger }));
+    let order = (await ok(add({ itemId: tandoori, options: [opt(size, 'Full')] }))).order;
+    expect(order.lines.map((l: any) => [l.name, l.qty, l.pricePaise, l.options.map((x: any) => x.name)])).toEqual([
+      ['Veg Burger', 2, 32900, ['Peri Peri Fries', 'Extra Cheese']],
+      ['Veg Burger', 1, 24900, []],
+      ['Tandoori Chicken', 1, 44900, ['Full']],
+    ]);
+    // Taking one off a line goes by the line.
+    order = (await ok(counter.post(`${B}/orders/${o}/items`, { lineId: order.lines[0].id, delta: -1 }))).order;
+    expect(order.lines[0].qty).toBe(1);
+    const kots = (await ok(counter.post(`${B}/orders/${o}/kot`))).kots;
+    expect(kots[0].lines[0]).toEqual({ name: 'Veg Burger', qty: 1, options: ['Peri Peri Fries', 'Extra Cheese'], pricePaise: 32900 });
+    const bill = (await ok(counter.post(`${B}/orders/${o}/bill`, { entityId: s.company }))).bill;
+    expect(bill.items.map((i: any) => [i.name, i.amountPaise, i.options.map((x: any) => x.name)])).toEqual([
+      ['Veg Burger', 32900, ['Peri Peri Fries', 'Extra Cheese']], ['Veg Burger', 24900, []], ['Tandoori Chicken', 44900, ['Full']]]);
+    expect(bill.grossPaise).toBe(102700);
+  });
+
+  it('takes a typed price for a price-at-billing item, never below its lowest price, and lists it on the Daily check', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    const bottle = (await ok(owner.post(`${B}/menu`, { name: 'Sample Whisky Bottle', category: 'Bar Bottles', station: 'bar', openPrice: true, minPrice: '3000', taxMode: 'liquor' }))).id;
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Bar 1' }))).id;
+    const add = (price?: string) => counter.post(`${B}/orders/${o}/items`, { itemId: bottle, delta: 1, price });
+    expect((await add()).json.error).toMatch(/amount in rupees/);
+    expect((await add('2500')).json.error).toMatch(/cannot be less than ₹3,000/);
+    await ok(add('3500'));
+    const order = (await ok(add('3200'))).order;
+    expect(order.lines.map((l: any) => [l.pricePaise, l.typedPrice])).toEqual([[350000, true], [320000, true]]);
+    await ok(counter.post(`${B}/orders/${o}/kot`));
+    const bill = (await ok(counter.post(`${B}/orders/${o}/bill`, { entityId: s.company }))).bill;
+    expect(bill).toMatchObject({ taxablePaise: 0, nonGstPaise: 670000, cgstPaise: 0, totalPaise: 670000 });
+    const d = await ok(owner.get(`${B}/reports/daily-check?day=${bill.shiftDay}`));
+    expect(d.typedPrices.map((x: any) => [x.name, x.pricePaise, x.minPricePaise])).toEqual([['Sample Whisky Bottle', 350000, 300000], ['Sample Whisky Bottle', 320000, 300000]]);
+    expect(d.typedPrices[0].byName).toBeTruthy();
+  });
+
+  it('taxes by item, then category, then billing name; keeps rates apart on the bill, credit notes and GSTR-1', async () => {
+    const s = await setupBusiness({ huf: true });
+    const { B, owner, counter, ok } = s;
+    const mk = async (name: string, category: string, price: string, tax: object = {}) => (await ok(owner.post(`${B}/menu`, { name, category, price, ...tax }))).id;
+    const dosa = await mk('Test Dosa', 'South Indian', '100');
+    const pool = await mk('Pool Table', 'Games', '200');
+    const beer = await mk('Test Beer', 'Bar', '300');
+    const cig = await mk('Test Cigarette', 'Smokes', '50', { taxMode: 'none' });
+    const tonic = await mk('Test Tonic', 'Bar', '80', { taxMode: 'billing' }); // in the bar's category, but taxed like food
+    const cats = (await ok(owner.get(`${B}/menu`))).categories;
+    const cat = (n: string) => cats.find((k: any) => k.name === n).id;
+    await ok(owner.put(`${B}/menu-categories/${cat('Games')}`, { taxMode: 'rate', gstRate: 18 }));
+    await ok(owner.put(`${B}/menu-categories/${cat('Bar')}`, { taxMode: 'liquor' }));
+    expect((await owner.put(`${B}/menu-categories/${cat('Bar')}`, { taxMode: 'rate', gstRate: 7 })).status).toBe(400);
+
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T2' }))).id;
+    for (const id of [dosa, pool, beer, cig, tonic]) await ok(counter.post(`${B}/orders/${o}/items`, { itemId: id, delta: 1 }));
+    await ok(counter.post(`${B}/orders/${o}/kot`));
+    const bill = (await ok(counter.post(`${B}/orders/${o}/bill`, { entityId: s.company }))).bill;
+    expect(bill.taxes).toEqual([
+      { kind: 'gst', bp: 500, valuePaise: 18000, cgstPaise: 450, sgstPaise: 450 },
+      { kind: 'gst', bp: 1800, valuePaise: 20000, cgstPaise: 1800, sgstPaise: 1800 },
+      { kind: 'liquor', bp: 0, valuePaise: 30000, cgstPaise: 0, sgstPaise: 0 },
+      { kind: 'exempt', bp: 0, valuePaise: 5000, cgstPaise: 0, sgstPaise: 0 },
+    ]);
+    expect(bill).toMatchObject({ taxablePaise: 38000, nonGstPaise: 35000, cgstPaise: 2250, sgstPaise: 2250, totalPaise: 77500 });
+    await ok(counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: rupees(bill.totalPaise) }] }));
+    // Money back on the pool table: its own 18%.
+    const poolLine = bill.items.find((i: any) => i.name === 'Pool Table');
+    expect(poolLine).toMatchObject({ taxKind: 'gst', gstBp: 1800 });
+    const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: poolLine.id, qty: 1 }], reason: 'Table broken', refundMode: 'cash' }))).creditNote;
+    expect(cn).toMatchObject({ taxablePaise: 20000, cgstPaise: 1800, sgstPaise: 1800, totalPaise: 23600 });
+
+    const month = new Date(bill.printedAt + 19_800_000).toISOString().slice(0, 7);
+    const g = (await ok(owner.get(`${B}/reports/gstr1?month=${month}`))).entities.find((e: any) => e.registered);
+    expect(g.b2cs).toEqual([{ ratePct: 5, taxablePaise: 18000, cgstPaise: 450, sgstPaise: 450 }]); // 18% netted to nothing by the credit note
+    expect(g).toMatchObject({ nonGstPaise: 30000, exemptPaise: 5000 });
+    expect(g.sac.map((x: any) => [x.ratePct, x.qty])).toEqual([[5, 2], [18, 1]]);
+
+    // The HUF is not registered: no GST on anything, liquor still kept apart.
+    const o2 = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T3' }))).id;
+    for (const id of [pool, beer]) await ok(counter.post(`${B}/orders/${o2}/items`, { itemId: id, delta: 1 }));
+    await ok(counter.post(`${B}/orders/${o2}/kot`));
+    const hufBill = (await ok(counter.post(`${B}/orders/${o2}/bill`, { entityId: s.huf }))).bill;
+    expect(hufBill.taxes).toEqual([{ kind: 'gst', bp: 0, valuePaise: 20000, cgstPaise: 0, sgstPaise: 0 }, { kind: 'liquor', bp: 0, valuePaise: 30000, cgstPaise: 0, sgstPaise: 0 }]);
+    await expect(q('UPDATE bill_taxes SET value_paise = 1 WHERE bill_id = ?', bill.id)).rejects.toThrow(/bill_frozen/);
   });
 });

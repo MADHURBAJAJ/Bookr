@@ -29,7 +29,7 @@ describe('bill numbers', () => {
 describe('bill totals', () => {
   const lines = [{ qty: 2, pricePaise: 18000 }, { qty: 1, pricePaise: 6000 }]; // ₹420
   it('adds 5% GST as CGST and SGST halves and rounds to the rupee', () => {
-    expect(billTotals(lines, { kind: 'none' }, 500)).toEqual({
+    expect(billTotals(lines, { kind: 'none' }, 500)).toMatchObject({
       grossPaise: 42000, discountPaise: 0, taxablePaise: 42000, nonGstPaise: 0, cgstPaise: 1050, sgstPaise: 1050, roundOffPaise: 0, totalPaise: 44100,
     });
   });
@@ -57,6 +57,23 @@ describe('bill totals', () => {
     expect(t.totalPaise).toBe(97300); // 378 + 576 + 18.90 = 972.90 → 973
     // A bill of only liquor has no GST at all.
     expect(billTotals([{ qty: 1, pricePaise: 22000, taxed: false }], { kind: 'none' }, 500)).toMatchObject({ taxablePaise: 0, nonGstPaise: 22000, cgstPaise: 0, totalPaise: 22000 });
+  });
+  it('taxes each line at its own rate, keeping liquor and exempt items apart, with the discount shared by value', () => {
+    // Food ₹420 at the bill's 5%, a pool table ₹200 at 18%, beer ₹320 as liquor, a cigarette ₹300 with no GST; 10% off ₹1,240.
+    const t = billTotals([
+      ...lines,
+      { qty: 1, pricePaise: 20000, tax: { kind: 'gst', bp: 1800 } },
+      { qty: 1, pricePaise: 32000, tax: { kind: 'liquor' } },
+      { qty: 1, pricePaise: 30000, tax: { kind: 'exempt' } },
+    ], { kind: 'pct', bp: 1000 }, 500);
+    expect(t.taxes).toEqual([
+      { kind: 'gst', bp: 500, valuePaise: 37800, cgstPaise: 945, sgstPaise: 945 },
+      { kind: 'gst', bp: 1800, valuePaise: 18000, cgstPaise: 1620, sgstPaise: 1620 },
+      { kind: 'liquor', bp: 0, valuePaise: 28800, cgstPaise: 0, sgstPaise: 0 },
+      { kind: 'exempt', bp: 0, valuePaise: 27000, cgstPaise: 0, sgstPaise: 0 },
+    ]);
+    expect(t).toMatchObject({ grossPaise: 124000, discountPaise: 12400, taxablePaise: 55800, nonGstPaise: 55800, cgstPaise: 2565, sgstPaise: 2565 });
+    expect(t.totalPaise).toBe(116700); // 1,116 + 51.30 = 1,167.30 → 1,167
   });
   it('refuses a discount larger than the bill', () => {
     expect(() => billTotals(lines, { kind: 'amount', paise: 50000 }, 500)).toThrow();
