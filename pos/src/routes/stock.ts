@@ -8,7 +8,8 @@ import { requireAction, requireStaff } from '../auth';
 import { audit, clock, event, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 import { z } from 'zod';
-import { OcrError, readWithClaude } from '../../../src/claude';
+import { askClaude, OcrError, readWithClaude } from '../../../src/claude';
+import { cocktailInstructions, propose, type Pours, type StockLite } from '../bar-recipes';
 
 export const stockRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -129,6 +130,126 @@ stockRoutes.put(`${B}/stock/recipes/:menuItemId`, requireAction('stock.edit'), a
     audit(db, bid, c.get('staff').id, 'recipe.set', 'recipes', menuItemId, before, lines),
   ]);
   return c.json({ ok: true });
+});
+
+// ---------- Make recipes: proposals for bar drinks without one, from their names (and Claude for cocktails). Saves nothing.
+const CocktailReading = z.object({
+  drinks: z.array(z.object({
+    menuItem: z.string(),
+    note: z.string(),
+    lines: z.array(z.object({ stock: z.string(), qty: z.number().int(), unit: z.enum(['ml', 'pcs', 'g']), isNew: z.boolean(), packName: z.string(), packSize: z.number().int() })),
+  })),
+});
+const MAX_COCKTAILS = 60;
+
+stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  const pours: Pours = { peg: whole(data.peg ?? 30, 'Peg size', 5, 200), large: whole(data.large ?? 60, 'Large peg size', 5, 400), glass: whole(data.glass ?? 150, 'Glass of wine', 50, 500) };
+  const [menu, stockRows] = await Promise.all([
+    all<{ id: string; name: string; category: string; open_price: number }>(db, `SELECT id, name, category, open_price FROM menu_items m
+      WHERE business_id = ? AND active = 1 AND station = 'bar' AND NOT EXISTS (SELECT 1 FROM recipes r WHERE r.menu_item_id = m.id) ORDER BY category, name`, bid),
+    all<{ id: string; name: string; unit: string; pack_size: number }>(db, 'SELECT id, name, unit, pack_size FROM stock_items WHERE business_id = ? AND active = 1 ORDER BY name', bid),
+  ]);
+  const stock: StockLite[] = stockRows.map((x) => ({ id: x.id, name: x.name, unit: x.unit, packSize: x.pack_size }));
+  const { proposals, newItems } = propose(menu.map((m) => ({ id: m.id, name: m.name, category: m.category, openPrice: !!m.open_price })), stock, pours);
+
+  // Cocktails and mocktails: Claude suggests, in this bar's pours, with its stock where it can.
+  const cocktails = proposals.filter((p) => p.kind === 'cocktail');
+  let claudeNote: string | null = null;
+  if (cocktails.length && data.claude === true) {
+    const ask = cocktails.slice(0, MAX_COCKTAILS);
+    if (cocktails.length > MAX_COCKTAILS) claudeNote = `Claude suggested the first ${MAX_COCKTAILS} cocktails; press Make recipes again after approving them for the rest.`;
+    try {
+      const r = await askClaude(c.env, cocktailInstructions(ask.map((p) => ({ name: p.menuItem, category: p.category })), stock, pours), CocktailReading);
+      for (const p of ask) {
+        const d = r.data.drinks.find((x) => x.menuItem.trim().toLowerCase() === p.menuItem.trim().toLowerCase());
+        p.source = 'claude';
+        p.check = true;
+        if (!d) { p.note = 'Claude gave no recipe for this one.'; continue; }
+        p.note = d.note;
+        for (const l of d.lines) {
+          if (l.qty <= 0 || l.qty > 5000) continue;
+          const name = l.stock.trim().slice(0, 80);
+          const have = stock.find((x) => x.name.toLowerCase() === name.toLowerCase());
+          if (have) {
+            if (have.unit !== l.unit) continue;
+            if (!p.lines.some((x) => x.stockItemId === have.id)) p.lines.push({ stockItemId: have.id, qty: l.qty, label: `${l.qty} ${l.unit}` });
+            continue;
+          }
+          const key = `new:${l.unit}:${name.toLowerCase()}`;
+          if (!newItems.has(key)) newItems.set(key, { key, name, unit: l.unit, packName: (l.packName || 'pack').slice(0, 20), packSize: Math.min(Math.max(1, l.packSize || 1), 100_000) });
+          if (!p.lines.some((x) => x.newKey === key)) p.lines.push({ newKey: key, qty: l.qty, label: `${l.qty} ${l.unit}` });
+        }
+        p.lines = p.lines.slice(0, 20);
+      }
+    } catch (e) {
+      if (!(e instanceof OcrError)) throw e;
+      claudeNote = `${e.message} Cocktails are left for you to add by hand.`;
+    }
+  } else if (cocktails.length) claudeNote = 'Cocktails were not sent to Claude: add them by hand, or tick “Suggest cocktails with Claude”.';
+  for (const p of cocktails) if (!p.lines.length && !p.note) p.note = 'A cocktail: add its recipe by hand.';
+  // Only the new stock items some proposal still uses.
+  const used = new Set(proposals.flatMap((p) => p.lines.map((l) => l.newKey)).filter(Boolean));
+  return c.json({ pours, proposals, newItems: [...newItems.values()].filter((n) => used.has(n.key)), claudeNote });
+});
+
+// The approved proposals: new stock items made first, then each drink's recipe set whole. All or nothing, one audit entry.
+stockRoutes.post(`${B}/stock/recipes/apply`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  if (!Array.isArray(data.recipes) || !data.recipes.length || data.recipes.length > 500) fail(400, 'Approve at least one recipe.');
+  const rawNew = Array.isArray(data.newItems) ? (data.newItems as Record<string, unknown>[]) : [];
+  if (rawNew.length > 500) fail(400, 'Too many new stock items at once.');
+  const existing = await all<{ id: string; name: string; unit: string }>(db, 'SELECT id, name, unit FROM stock_items WHERE business_id = ?', bid);
+  const t = Date.now();
+  const made = new Map<string, string>();      // new key → stock item id
+  const creates: ReturnType<typeof stmt>[] = [];
+  const createdList: unknown[] = [];
+  for (const n of rawNew) {
+    if (typeof n.key !== 'string' || !n.key.startsWith('new:')) fail(400, 'A new stock item has no key.');
+    const f = itemFields({ name: n.name, unit: n.unit, packName: n.packName, packSize: n.packSize });
+    // A stock item with that name already (made since the suggestion): used if it is counted the same way.
+    const same = existing.find((x) => x.name.toLowerCase() === f.name.toLowerCase());
+    if (same) {
+      if (same.unit !== f.unit) fail(409, `${same.name} is already a stock item counted in ${same.unit}. Rename the new one.`);
+      made.set(n.key, same.id); continue;
+    }
+    const id = newId();
+    made.set(n.key, id);
+    existing.push({ id, name: f.name, unit: f.unit });
+    creates.push(stmt(db, 'INSERT INTO stock_items (id, business_id, name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1, ?)',
+      id, bid, f.name, f.unit, f.pack_name, f.pack_size, t));
+    createdList.push({ id, ...f });
+  }
+  const menuIds = (data.recipes as Record<string, unknown>[]).map((r) => r?.menuItemId);
+  if (new Set(menuIds).size !== menuIds.length) fail(400, 'A drink is in the list twice.');
+  const menu = await all<{ id: string; name: string }>(db, 'SELECT id, name FROM menu_items WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))', bid, JSON.stringify(menuIds));
+  if (menu.length !== menuIds.length) fail(404, 'A drink was not found. Make the recipes again.');
+  const sets: { menuItemId: string; lines: { stockItemId: string; qty: number }[] }[] = [];
+  for (const r of data.recipes as Record<string, unknown>[]) {
+    const name = menu.find((m) => m.id === r.menuItemId)!.name;
+    if (!Array.isArray(r.lines) || !r.lines.length || r.lines.length > 20) fail(400, `${name}: a recipe is 1 to 20 stock items.`);
+    const lines: { stockItemId: string; qty: number }[] = [];
+    for (const raw of r.lines as Record<string, unknown>[]) {
+      const sid = typeof raw.newKey === 'string' ? made.get(raw.newKey) : existing.find((x) => x.id === raw.stockItemId)?.id;
+      if (!sid) fail(400, `${name}: a stock item was not found.`);
+      if (lines.some((l) => l.stockItemId === sid)) fail(400, `${name}: the same stock item twice.`);
+      lines.push({ stockItemId: sid, qty: whole(raw.qty, `${name}: quantity`) });
+    }
+    sets.push({ menuItemId: r.menuItemId as string, lines });
+  }
+  await db.batch([
+    ...creates,
+    ...sets.flatMap((s) => [
+      stmt(db, 'DELETE FROM recipes WHERE menu_item_id = ?', s.menuItemId),
+      ...s.lines.map((l) => stmt(db, 'INSERT INTO recipes (menu_item_id, stock_item_id, business_id, qty) VALUES (?, ?, ?, ?)', s.menuItemId, l.stockItemId, bid, l.qty)),
+    ]),
+    audit(db, bid, c.get('staff').id, 'recipe.auto', 'recipes', `${sets.length} drinks`, null, { stockItemsCreated: createdList, recipes: sets }),
+  ]);
+  return c.json({ ok: true, recipes: sets.length, stockItemsCreated: createdList.length });
 });
 
 // Goods received into a store, with the vendor's invoice: quantities in packs, price per pack (it becomes the item's last price).

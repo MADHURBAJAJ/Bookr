@@ -71,3 +71,38 @@ export async function readWithClaude<T extends z.ZodType>(
     throw new OcrError(502, 'Could not reach Claude. Try again shortly, or type the rows in.');
   }
 }
+
+/**
+ * A question with no page: text in, structured data out (for example, suggested cocktail recipes). Same key, model,
+ * fallbacks and errors as reading a page; tests replace this module too.
+ */
+export async function askClaude<T extends z.ZodType>(
+  env: Pick<Env, 'ANTHROPIC_API_KEY' | 'CLAUDE_OCR_MODEL'>,
+  instructions: string,
+  schema: T,
+): Promise<{ data: z.infer<T>; model: string }> {
+  if (!env.ANTHROPIC_API_KEY) throw new OcrError(503, 'Suggestions are not set up: the ANTHROPIC_API_KEY secret is missing on the server.');
+  const model = env.CLAUDE_OCR_MODEL || DEFAULT_OCR_MODEL;
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1, timeout: 120_000 });
+  try {
+    const response = await client.beta.messages.parse({
+      model,
+      max_tokens: 16000,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      output_config: { effort: 'medium', format: betaZodOutputFormat(schema) },
+      messages: [{ role: 'user', content: instructions }],
+    });
+    if (response.stop_reason === 'refusal') throw new OcrError(502, 'Claude declined to suggest these. Add them by hand instead.');
+    if (response.stop_reason === 'max_tokens') throw new OcrError(502, 'Too many at once for one suggestion. Try fewer.');
+    if (!response.parsed_output) throw new OcrError(502, 'Claude did not answer in the expected form. Try again.');
+    return { data: response.parsed_output as z.infer<T>, model: response.model };
+  } catch (e) {
+    if (e instanceof OcrError) throw e;
+    if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) throw new OcrError(503, 'The server could not sign in to Claude. Check the ANTHROPIC_API_KEY secret.');
+    if (e instanceof Anthropic.NotFoundError) throw new OcrError(503, `The model "${model}" was not found. Check the CLAUDE_OCR_MODEL setting.`);
+    if (e instanceof Anthropic.RateLimitError) throw new OcrError(429, 'Claude is busy right now. Try again in a minute.');
+    if (e instanceof Anthropic.APIError) throw new OcrError(502, 'The suggestion failed on Claude’s side. Try again shortly.');
+    throw new OcrError(502, 'Could not reach Claude. Try again shortly.');
+  }
+}

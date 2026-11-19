@@ -568,3 +568,11 @@ tr.picked td { background: var(--bg); }
   .bulkbar select.in { width: 100%; }
   .bulkbar select[data-do="tax"] { grid-column: 1 / -1; }
 }
+.tickline { display: flex; align-items: center; gap: 10px; min-height: 44px; font-weight: 600; cursor: pointer; }
+
+/* Make recipes */
+.mkline { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
+input.in.mkqty { width: 84px; flex: 0 0 84px; text-align: right; }
+.tag-new, .tag-check { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 1px 8px; margin-left: 4px; }
+.tag-new { background: var(--go-tint); color: var(--go-dark); border: 1px solid var(--go-line); }
+.tag-check { background: var(--warn-tint); color: var(--warn); border: 1px solid var(--warn-line); }
