@@ -58,7 +58,7 @@ describe('orders, KOT and bills', () => {
     await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Beer 650 ml'], delta: 1 });
     expect((await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.company })).json.error).toMatch(/kitchen/);
     const kot = await s.counter.post(`${s.B}/orders/${order}/kot`);
-    expect(kot.json.kots.map((k: any) => k.station).sort()).toEqual(['bar', 'kitchen']);
+    expect(kot.json.kots.map((k: any) => k.station).sort()).toEqual(['Bar', 'Kitchen']);
 
     const b1 = (await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.company })).json.bill;
     expect(b1).toMatchObject({ grossPaise: 68000, cgstPaise: 1700, sgstPaise: 1700, totalPaise: 71400, entityName: 'Sample Hotels Pvt Ltd' });

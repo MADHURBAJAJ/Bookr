@@ -19,7 +19,8 @@ export interface Group { name: string; kind: 'one' | 'any'; options: { name: str
  */
 type GroupRef = { name: string; def: Group | null; loose?: boolean; prices?: Prices | null };
 export interface Row {
-  line: number; name: string; category: string; pricePaise: number; openPrice: boolean; station: 'kitchen' | 'bar';
+  /** station: as written (a station's name, Kitchen / Bar or another word for them), checked against the stations later. */
+  line: number; name: string; category: string; pricePaise: number; openPrice: boolean; station: string; kot: boolean;
   tax: Tax; groups: GroupRef[];
   /** undefined: the column is not in the file, keep what the item has. */
   minPricePaise?: number | null; sac?: string;
@@ -75,7 +76,9 @@ export function readTax(t: string): Tax | null {
   if (m && [0, 5, 12, 18, 28, 40].includes(Number(m[1]))) return Number(m[1]) === 0 ? { mode: 'none', bp: null } : { mode: 'rate', bp: Number(m[1]) * 100 };
   return null;
 }
-/** "Kitchen" or "Bar", and the usual other words for them. */
+/** A Station cell that means the item makes no KOT (on the bill only). */
+export const isNoKot = (t: string) => /^(no kot|no-kot|nokot|none|no|not sent|bill only|counter only|-)$/.test(norm(t));
+/** "Kitchen" or "Bar", and the usual other words for them (for a station not named that way). */
 export function readStation(t: string): 'kitchen' | 'bar' | null {
   const s = norm(t);
   if (/^(kitchen|k|kot|food|restaurant|tandoor|chinese|main kitchen|cafe|bakery)$/.test(s) || s.includes('kitchen')) return 'kitchen';
@@ -249,9 +252,7 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
     const taxCell = get(c.tax);
     const tax = readTax(taxCell || d.tax || '');
     if (taxCell && !readTax(taxCell)) return bad(`tax "${taxCell}" should be Billing name, GST 5% (or 12, 18, 28, 40), No GST (liquor) or No GST.`);
-    const stCell = get(c.station);
-    const st = readStation(stCell || d.station || '');
-    if (stCell && !readStation(stCell)) return bad(`station "${stCell}" should be Kitchen or Bar.`);
+    const st = get(c.station) || d.station || '';
     if (!tax || !st) {
       const n = needs.get(norm(category)) ?? { category, tax: false, station: false, items: 0 };
       n.tax ||= !tax; n.station ||= !st; n.items++;
@@ -260,7 +261,7 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
     }
     const sac = c.sac >= 0 && get(c.sac) ? get(c.sac) : undefined;
     if (sac !== undefined && !/^\d{4,8}$/.test(sac)) return bad('SAC must be 4 to 8 digits.');
-    out.push({ line, name, category, pricePaise: p, openPrice, station: st, tax, groups, minPricePaise, sac });
+    out.push({ line, name, category, pricePaise: p, openPrice, station: isNoKot(st) ? '' : st, kot: !isNoKot(st), tax, groups, minPricePaise, sac });
   });
   return { ...base, rows: out, errors, needs: [...needs.values()] };
 }
@@ -289,17 +290,27 @@ export interface ExistingItem {
   openPrice: boolean; minPricePaise: number | null; active: boolean; groups: string[]; createdAt: number;
   /** This dish's own prices for each of its add-ons (same order as groups), or null. */
   groupPrices?: (Prices | null)[];
+  /** Its own KOT setting and station; null: from its category. */
+  kot?: number | null; stationId?: string | null;
 }
-export interface Existing { items: ExistingItem[]; categories: { name: string; taxMode: TaxMode; gstBp: number | null }[]; groups: (Group & { id: string })[] }
+export interface Station { id: string; name: string; isBar: boolean; active: boolean }
+export interface Existing {
+  items: ExistingItem[]; categories: { name: string; taxMode: TaxMode; gstBp: number | null; kot?: number; stationId?: string | null }[];
+  groups: (Group & { id: string })[]; stations?: Station[];
+}
 
 export interface PlanItem {
   id: string | null; name: string; category: string; pricePaise: number; station: string; sac: string; tax: Tax | null;
   openPrice: boolean; minPricePaise: number | null; groups: string[]; groupPrices: (Prices | null)[];
+  /** Its own KOT setting and station when they differ from its category's, else null. */
+  ownKot: number | null; ownStationId: string | null;
 }
+/** Where a category's or an item's KOTs go: a station, or none. */
+export interface Route { kot: boolean; stationId: string | null }
 export interface Plan {
   items: PlanItem[];
   off: { id: string; name: string; category: string }[];
-  categories: { name: string; tax: Tax; was: Tax | null }[];
+  categories: { name: string; tax: Tax; was: Tax | null; route: Route; routeText: string; wasRoute: string | null }[];
   groups: { name: string; def: Group; was: Group | null }[];
   added: string[]; back: string[]; priceChanges: { name: string; from: number; to: number }[]; otherChanges: { name: string; what: string[] }[];
   notes: string[]; errors: string[];
@@ -347,9 +358,43 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
     const top = [...count.values()].sort((a, b) => b.n - a.n)[0].tax;
     const own = rows.filter((x) => norm(x.category) === norm(name) && taxKey(x.tax) !== taxKey(top));
     if (own.length) notes.push(`${name}: ${taxText(top)} for the category; set on the item: ${own.map((x) => `${x.name} (${taxText(x.tax)})`).join(', ')}.`);
-    return { name, tax: top, was: oldCat.get(norm(name)) ?? null };
+    return { name, tax: top, was: oldCat.get(norm(name)) ?? null, route: { kot: true, stationId: null } as Route, routeText: '', wasRoute: null as string | null };
   });
   const catTax = new Map(categories.map((c) => [norm(c.name), c.tax]));
+
+  // KOT and station, the same way: each row's station is checked against the stations; a category goes where most of its
+  // items go, and an item that goes elsewhere (or makes no KOT) keeps its own.
+  const stations = (now.stations ?? []).filter((x) => x.active);
+  const allStations = now.stations ?? [];
+  const stName = (id: string | null | undefined) => allStations.find((x) => x.id === id)?.name ?? 'Kitchen';
+  const routeText = (r: Route) => (r.kot ? stName(r.stationId) : 'No KOT');
+  const routeKey = (r: Route) => (r.kot ? `k:${r.stationId}` : 'no');
+  const findStation = (t: string) => stations.find((x) => norm(x.name) === norm(t))
+    ?? (readStation(t) ? stations.find((x) => x.isBar === (readStation(t) === 'bar')) : undefined);
+  const rowRoute = new Map<number, Route>();
+  for (const r of rows) {
+    if (!r.kot) { rowRoute.set(r.line, { kot: false, stationId: null }); continue; }
+    const st = findStation(r.station);
+    if (!st) { errors.push(`Row ${r.line} (${r.name}): there is no station called "${r.station}". Use one of ${stations.map((x) => x.name).join(', ')} or No KOT, or add it in Settings → Stations first.`); continue; }
+    rowRoute.set(r.line, { kot: true, stationId: st.id });
+  }
+  const oldCatRoute = new Map(now.categories.map((c) => [norm(c.name), { kot: c.kot !== 0, stationId: c.stationId ?? null } as Route]));
+  const catRoute = new Map<string, Route>();
+  for (const k of categories) {
+    const count = new Map<string, { r: Route; n: number }>();
+    for (const r of rows.filter((x) => norm(x.category) === norm(k.name) && rowRoute.has(x.line))) {
+      const rr = rowRoute.get(r.line)!;
+      count.set(routeKey(rr), { r: rr, n: (count.get(routeKey(rr))?.n ?? 0) + 1 });
+    }
+    const top = [...count.values()].sort((a, b) => b.n - a.n)[0]?.r ?? { kot: true, stationId: stations.find((x) => !x.isBar)?.id ?? null };
+    // A no-KOT category still names a station (its old one, else the first kitchen), for items that print after all.
+    const route = top.kot ? top : { kot: false, stationId: oldCatRoute.get(norm(k.name))?.stationId ?? stations.find((x) => !x.isBar)?.id ?? null };
+    catRoute.set(norm(k.name), route);
+    const own = rows.filter((x) => norm(x.category) === norm(k.name) && rowRoute.has(x.line) && routeKey(rowRoute.get(x.line)!) !== routeKey(top));
+    if (own.length) notes.push(`${k.name}: KOT to ${routeText(top)} for the category; set on the item: ${own.map((x) => `${x.name} (${routeText(rowRoute.get(x.line)!)})`).join(', ')}.`);
+    const was = oldCatRoute.get(norm(k.name));
+    Object.assign(k, { route, routeText: routeText(top), wasRoute: was ? routeText(was) : null });
+  }
 
   // Match rows to items: same name and category first, then the one item with that name.
   const pick = (xs: ExistingItem[]) => [...xs].sort((a, b) => Number(b.active) - Number(a.active) || b.createdAt - a.createdAt)[0];
@@ -372,7 +417,11 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
     const tax = taxKey(r.tax) === taxKey(catTax.get(norm(r.category))!) ? null : r.tax;
     const groupPrices = r.groups.map((g) => g.prices ?? null);
     const base = r.openPrice ? null : basePrice(r.groups.map((g, i) => ({ kind: groupOf(g.name)?.kind ?? 'any', options: groupOf(g.name)?.options ?? [], prices: groupPrices[i] })));
-    const p: PlanItem = { id: x?.id ?? null, name: r.name, category: r.category, pricePaise: base ?? r.pricePaise, station: r.station,
+    const route = rowRoute.get(r.line) ?? { kot: true, stationId: null };
+    const cr = catRoute.get(norm(r.category))!;
+    const bar = allStations.find((s2) => s2.id === (route.kot ? route.stationId : cr.stationId))?.isBar ?? false;
+    const p: PlanItem = { id: x?.id ?? null, name: r.name, category: r.category, pricePaise: base ?? r.pricePaise, station: bar ? 'bar' : 'kitchen',
+      ownKot: route.kot === cr.kot ? null : route.kot ? 1 : 0, ownStationId: route.kot && route.stationId !== cr.stationId ? route.stationId : null,
       sac: r.sac ?? x?.sac ?? (/^room tariff$/i.test(r.name) ? '996311' : '996332'), tax, openPrice: r.openPrice,
       minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: r.groups.map((g) => groupName(g.name)), groupPrices };
     if (!x) { added.push(r.name); return p; }
@@ -381,7 +430,9 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
     const what: string[] = [];
     if (x.name !== r.name) what.push(`name "${x.name}" → "${r.name}"`);
     if (x.category !== r.category) what.push(`category ${x.category} → ${r.category}`);
-    if (x.station !== r.station) what.push(`station ${x.station} → ${r.station}`);
+    const xc = oldCatRoute.get(norm(x.category));
+    const xRoute: Route = { kot: (x.kot ?? (xc?.kot === false ? 0 : 1)) !== 0, stationId: x.stationId ?? xc?.stationId ?? null };
+    if (now.stations && routeText(xRoute) !== routeText(route)) what.push(`KOT ${routeText(xRoute)} → ${routeText(route)}`);
     const was = effective(x, oldCat.get(norm(x.category)));
     if (taxKey(was) !== taxKey(r.tax)) what.push(`tax ${taxText(was)} → ${taxText(r.tax)}`);
     if (x.openPrice !== r.openPrice) what.push(r.openPrice ? 'price now typed at billing' : `fixed price ${rs(p.pricePaise)}`);
@@ -409,11 +460,18 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
 /** The menu as the sheet, for download (active items only). */
 export function sheetOf(now: Existing): string {
   const cat = new Map(now.categories.map((c) => [norm(c.name), { mode: c.taxMode, bp: c.gstBp } as Tax]));
+  const catR = new Map(now.categories.map((c) => [norm(c.name), c]));
+  const route = (i: ExistingItem) => {
+    const c = catR.get(norm(i.category));
+    if ((i.kot ?? c?.kot ?? 1) === 0) return 'No KOT';
+    const st = (now.stations ?? []).find((s) => s.id === (i.stationId ?? c?.stationId));
+    return st?.name ?? (i.station === 'bar' ? 'Bar' : 'Kitchen');
+  };
   const gs = new Map(now.groups.map((g) => [norm(g.name), g]));
   const items = now.items.filter((i) => i.active);
   const order = now.categories.map((c) => norm(c.name));
   items.sort((a, b) => (order.indexOf(norm(a.category)) + 1 || 1e9) - (order.indexOf(norm(b.category)) + 1 || 1e9) || a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   return toCsv([HEADER, ...items.map((i) => [i.name, i.category, i.openPrice ? '' : (i.pricePaise / 100).toFixed(2).replace(/\.00$/, ''), i.openPrice ? 'Yes' : '',
     i.openPrice && i.minPricePaise !== null ? (i.minPricePaise / 100).toFixed(2).replace(/\.00$/, '') : '', taxText(effective(i, cat.get(norm(i.category)))),
-    i.station === 'bar' ? 'Bar' : 'Kitchen', i.sac, i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')])]);
+    route(i), i.sac, i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')])]);
 }

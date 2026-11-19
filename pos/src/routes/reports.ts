@@ -64,11 +64,13 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
   const toMs = startOf(to) + 86_400_000;
   const [byHour, coversByHour, byService, byStaff, mix, items, notSold] = await Promise.all([
     // Each KOT line: its quantity, valued at the order's price for that dish (menu price, before discounts and GST).
-    all(db, `SELECT ((k.printed_at + 19800000) / 3600000) % 24 AS hour, k.station, count(DISTINCT k.id) AS kots,
+    // Kitchen against bar: a KOT counts as bar when its station is a bar station (stations of their own since 19 Nov 2026).
+    all(db, `SELECT ((k.printed_at + 19800000) / 3600000) % 24 AS hour,
+        CASE WHEN coalesce(s.is_bar, lower(k.station) = 'bar') THEN 'bar' ELSE 'kitchen' END AS station, count(DISTINCT k.id) AS kots,
         sum(json_extract(j.value, '$.qty')) AS items, sum(json_extract(j.value, '$.qty') * coalesce(json_extract(j.value, '$.pricePaise'), ol.price_paise, 0)) AS valuePaise
-      FROM kots k, json_each(k.lines) j
+      FROM kots k JOIN json_each(k.lines) j LEFT JOIN stations s ON s.id = k.station_id
       LEFT JOIN order_lines ol ON ol.order_id = k.order_id AND ol.name = json_extract(j.value, '$.name')
-      WHERE k.business_id = ? AND k.printed_at >= ? AND k.printed_at < ? GROUP BY hour, k.station ORDER BY hour`, bid, fromMs, toMs),
+      WHERE k.business_id = ? AND k.printed_at >= ? AND k.printed_at < ? GROUP BY hour, 2 ORDER BY hour`, bid, fromMs, toMs),
     // Guests, counted at the hour of their order's first KOT.
     all(db, `SELECT ((first + 19800000) / 3600000) % 24 AS hour, sum(covers) AS covers FROM (
         SELECT min(k.printed_at) AS first, max(coalesce(o.covers, 0)) AS covers FROM kots k JOIN orders o ON o.id = k.order_id

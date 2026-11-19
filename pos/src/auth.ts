@@ -40,10 +40,10 @@ export async function setDeviceCookie(c: Context<AppEnv>, token: string): Promis
 }
 
 /** The counter device this browser is, if any (and not revoked). */
-export async function currentDevice(c: Context<AppEnv>): Promise<{ id: string; business_id: string; name: string; pin_failures: number; locked_until: number | null } | null> {
+export async function currentDevice(c: Context<AppEnv>): Promise<{ id: string; business_id: string; name: string; pin_failures: number; locked_until: number | null; station_id: string | null } | null> {
   const token = getCookie(c, DEVICE_COOKIE);
   if (!token) return null;
-  return one(c.env.DB, 'SELECT id, business_id, name, pin_failures, locked_until FROM devices WHERE token_hash = ? AND revoked_at IS NULL', await sha256(token));
+  return one(c.env.DB, 'SELECT id, business_id, name, pin_failures, locked_until, station_id FROM devices WHERE token_hash = ? AND revoked_at IS NULL', await sha256(token));
 }
 
 export const requireStaff: MiddlewareHandler<AppEnv> = async (c, next) => {

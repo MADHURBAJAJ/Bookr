@@ -76,7 +76,7 @@ async function load(...keys) {
   await Promise.all(keys.filter((k) => !(KEEP.includes(k) && cache[k])).map(async (k) => {
     const d = await api('GET', B() + paths[k]);
     cache[k] = k === 'menu' ? d.items : k === 'entities' ? d.entities : k === 'payAccounts' ? d.accounts : k === 'credit' ? d.accounts : d[k];
-    if (k === 'menu') { cache.menuCats = d.categories ?? []; cache.addonGroups = d.addonGroups ?? []; }
+    if (k === 'menu') { cache.menuCats = d.categories ?? []; cache.addonGroups = d.addonGroups ?? []; cache.stations = d.stations ?? []; }
   }));
 }
 const reasonsOf = (kind) => (cache.reasons ?? []).filter((r) => r.kind === kind);
@@ -110,7 +110,10 @@ const errorBox = () => (ui.error ? html`<div class="msg bad" role="alert">${ui.e
 
 async function route() {
   ui = {};
+  stopStation();
   try {
+    // A station's own device shows its KOTs; nobody signs in on it.
+    if (location.hash.startsWith('#/station')) return await stationScreen();
     if (!me) {
       try { me = await api('GET', '/me'); } catch { me = null; }
     }
@@ -175,6 +178,7 @@ function refocus(model, paintNow) {
 
 async function signIn() {
   const d = await api('GET', '/device');
+  if (d.device?.station) { go('#/station'); return; }
   ui.device = d.device; ui.people = d.people ?? []; ui.pin = ''; ui.who = null;
   rerender = () => {
     const initials = (n) => String(n).replace(/\(.*?\)/g, '').trim().split(/\s+/).map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase();
@@ -347,7 +351,7 @@ async function orderScreen(id) {
     const line = (l) => html`<div>
       <div class="line"><div class="grow"><div class="nm">${l.name}</div>
           ${l.options?.length ? html`<div class="mods">${l.options.map((x) => '+ ' + x.name).join('  ')}</div>` : ''}
-          <div class="sub">${rs(l.pricePaise)} each${l.typedPrice ? ' · price typed' : ''}${l.sentQty && l.qty > l.sentQty ? ` · ${l.sentQty} sent, ${l.qty - l.sentQty} new` : ''}</div></div>
+          <div class="sub">${rs(l.pricePaise)} each${l.typedPrice ? ' · price typed' : ''}${l.noKot ? ' · no KOT' : ''}${l.sentQty && l.qty > l.sentQty ? ` · ${l.sentQty} sent, ${l.qty - l.sentQty} new` : ''}</div></div>
         <button class="sq" type="button" data-act="less" data-id="${lineKey(l)}" aria-label="One less ${l.name}">−</button>
         <span class="qty" aria-label="${l.qty} of ${l.name}">${l.qty}</span>
         <button class="sq" type="button" data-act="more" data-id="${lineKey(l)}" aria-label="One more ${l.name}">+</button>
@@ -495,6 +499,8 @@ function change(target, delta, reasonId) {
   saving = saving.then(async () => {
     try {
       const r = await api('POST', `${B()}/orders/${orderId}/items`, lineId ? { lineId, delta, reasonId } : { itemId, delta, reasonId });
+      // A cancel of something already sent tells its station; print it here if the station's device is offline.
+      if (r.kots?.length) { printKots(r.kots.filter((k) => k.printAt === 'counter')); flash = { kind: 'ok', text: kotSummary(r.kots) }; }
       if (--pendingSaves === 0 && ui.order?.id === orderId) { ui.order = r.order; rerender(); }
     } catch (e) {
       pendingSaves--;
@@ -519,8 +525,8 @@ actions.kot = async () => {
   await saved();
   const { kots, order } = await api('POST', `${B()}/orders/${ui.order.id}/kot`);
   ui.order = order;
-  ui.kotDone = `KOT ${kots.map((k) => k.kotNo).join(', ')} sent (${kots.map((k) => k.station).join(', ')}).`;
-  printKots(kots); rerender();
+  ui.kotDone = kotSummary(kots);
+  printKots(kots.filter((k) => k.printAt === 'counter')); rerender();
 };
 actions.keepTab = () => { ui.tabAsk = true; rerender(); };
 actions.splitAsk = () => { ui.splitting = true; ui.split = {}; rerender(); };
@@ -889,11 +895,20 @@ function receipt(b) {
   </div>`;
 }
 function printReceipt(b) { printArea.innerHTML = asHtml(receipt(b)); window.print(); }
+/** One KOT slip (counter or station printer). A cancel KOT says CANCEL in large type. */
+const kotSlip = (k) => {
+  const cancel = k.lines.some((l) => l.cancelled);
+  return html`<div class="receipt" style="page-break-after:always"><div class="hd">${cancel ? 'CANCEL · ' : ''}KOT ${k.kotNo} · ${String(k.station).toUpperCase()}</div>
+    <div class="rl"><span>${k.place}</span><span>${time(k.at ?? Date.now())}</span></div>${k.by ? html`<div class="rl"><span>${k.by}</span></div>` : ''}<hr>
+    ${k.lines.map((l) => html`<div style="font-size:15px;${l.cancelled ? 'font-weight:700' : ''}">${l.cancelled ? `CANCEL ${Math.abs(l.qty)}` : l.qty} × ${l.name}</div>${(l.options ?? []).map((x) => html`<div style="padding-left:18px">+ ${x}</div>`)}`)}</div>`;
+};
 function printKots(kots) {
-  printArea.innerHTML = asHtml(html`${kots.map((k) => html`<div class="receipt" style="page-break-after:always"><div class="hd">KOT ${k.kotNo} · ${k.station.toUpperCase()}</div>
-    <div class="rl"><span>${k.place}</span><span>${time(Date.now())}</span></div><hr>${k.lines.map((l) => html`<div style="font-size:15px">${l.qty} × ${l.name}</div>${(l.options ?? []).map((x) => html`<div style="padding-left:18px">+ ${x}</div>`)}`)}</div>`)}`);
+  if (!kots.length) return;
+  printArea.innerHTML = asHtml(html`${kots.flatMap((k) => Array.from({ length: k.copies ?? 1 }, () => kotSlip(k)))}`);
   window.print();
 }
+/** Where each KOT went, for the counter: "KOT 12 Kitchen (printed there), 13 Tandoor (on its screen), 14 Bar (printed here)". */
+const kotSummary = (kots) => `KOT ${kots.map((k) => `${k.kotNo} ${k.station} (${k.printAt === 'counter' ? 'printed here' : k.printAt === 'station' ? 'printed there' : 'on its screen'})`).join(', ')}.`;
 
 // ---------- rooms and credit accounts
 
@@ -1493,7 +1508,7 @@ actions.tablesAddRange = () => {
 actions.tablesSave = async () => { await api('PUT', B() + '/tables', { tables: splitTables(ui.tableText) }); flash = { kind: 'ok', text: 'Tables saved. The counter shows them now.' }; route(); };
 actions.tablesClear = async () => { await api('PUT', B() + '/tables', { tables: [] }); flash = { kind: 'ok', text: 'List cleared. The counter shows the tables used lately.' }; route(); };
 async function settingsScreen(tab = 'menu') {
-  const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories and GST', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['tables', 'Tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
+  const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
     ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];
@@ -1510,7 +1525,7 @@ async function settingsScreen(tab = 'menu') {
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
         ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
           ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
-          <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${m.station}</td>
+          <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
           <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}</td>
           <td class="act"><div class="row"><button class="btn" type="button" data-act="itemEdit" data-id="${m.id}">Edit</button><button class="btn" type="button" data-act="itemToggle" data-id="${m.id}">${m.active ? 'Take off menu' : 'Put back'}</button></div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
@@ -1518,16 +1533,20 @@ async function settingsScreen(tab = 'menu') {
         ${ui.iOpen === 'yes' ? html`<label class="f">Lowest price allowed (₹, optional)<input class="in" inputmode="decimal" data-model="iMin" value="${ui.iMin ?? ''}"></label>`
           : choicePrice() !== null ? html`<label class="f">Price (₹, before GST)<input class="in" data-model="iPrice" value="${choicePrice()}" readonly aria-describedby="ip-n"><span class="small quiet" id="ip-n" style="font-weight:400">The first choice's price, set below.</span></label>`
           : html`<label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
-        <label class="f">Station<select class="in" data-model="iStation"><option value="kitchen">Kitchen</option><option value="bar" ${ui.iStation === 'bar' ? 'selected' : ''}>Bar</option></select></label>
+        ${itemKotFields()}
         <label class="f">Tax<select class="in" data-model="iTax">${taxChoices(true).map(([v, t]) => html`<option value="${v}" ${(ui.iTax ?? 'category') === v ? 'selected' : ''}>${t}</option>`)}</select></label>
         <div style="grid-column:1/-1">${itemAddons()}</div>
         <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="addItem" data-submit>${ui.editItem ? 'Save item' : 'Add item'}</button>${ui.editItem ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></div></form></section>`;
     if (tab === 'categories') body = html`<section class="panel"><h2>Categories and GST</h2>
       <p class="quiet small">Each item takes its GST from its own setting if it has one, else from its category here, else from the billing name on the bill. A billing name not registered for GST charges none. Check rates with your CA.</p>${errorBox()}
-      <div class="scroll"><table class="t cards"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th></tr></thead><tbody>
+      <p class="quiet small">KOT works the same way: each item follows its category unless the item says otherwise. "No KOT" items go on the order and the bill but never to a station (cigarettes, room charges).</p>
+      <div class="scroll"><table class="t cards"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th><th>KOT</th><th>Station</th></tr></thead><tbody>
         ${cache.menuCats.map((c) => html`<tr><td data-label="Category"><strong>${c.name}</strong></td><td data-label="Items" class="num">${cache.menu.filter((m) => m.active && m.category.toLowerCase() === c.name.toLowerCase()).length}</td>
-          <td data-label="GST"><select class="in" data-act-change="catTax" data-id="${c.id}" aria-label="GST for ${c.name}">${taxChoices(false).map(([v, t]) => html`<option value="${v}" ${taxValue(c) === v ? 'selected' : ''}>${t}</option>`)}</select></td></tr>`)}</tbody></table></div></section>`;
+          <td data-label="GST"><select class="in" data-act-change="catTax" data-id="${c.id}" aria-label="GST for ${c.name}">${taxChoices(false).map(([v, t]) => html`<option value="${v}" ${taxValue(c) === v ? 'selected' : ''}>${t}</option>`)}</select></td>
+          <td data-label="KOT"><select class="in" data-act-change="catKot" data-id="${c.id}" aria-label="KOT for ${c.name}"><option value="yes">Print KOT</option><option value="no" ${c.kot === 0 ? 'selected' : ''}>No KOT</option></select></td>
+          <td data-label="Station">${c.kot === 0 ? html`<span class="quiet small">Not sent anywhere</span>` : html`<select class="in" data-act-change="catStation" data-id="${c.id}" aria-label="Station for ${c.name}">${activeStations().map((x) => html`<option value="${x.id}" ${c.stationId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>`}</td></tr>`)}</tbody></table></div></section>`;
     if (tab === 'addons') body = addonsTab();
+    if (tab === 'stations') body = stationsTab();
     if (tab === 'tables') body = html`<section class="panel"><h2>Tables</h2>
       <p class="quiet small">The tables the counter shows as a grid, in this order. Leave the list empty to show the tables used in the last 60 days instead.</p>${errorBox()}
       ${ui.tableList.length ? html`<div class="tgrid">${ui.tableList.map((t) => html`<span class="tcell free">${t}</span>`)}</div>` : html`<p class="quiet">No list yet: the counter shows recent tables.</p>`}
@@ -1606,7 +1625,7 @@ const COLUMN_HELP = [
   ['Price at billing', 'Yes for bottles and other items whose price is typed when ordered. Otherwise empty.'],
   ['Lowest price (₹)', 'For price at billing only: the least that can be typed. Optional.'],
   ['Tax', 'Billing name (its rate, 5% for food), GST 5% / 12% / 18% / 28% / 40%, No GST (liquor), or No GST. Left empty: asked per category.'],
-  ['Station', 'Kitchen or Bar: where the KOT goes. Left empty: asked per category.'],
+  ['Station', 'Where the KOT goes: a station\u2019s name (Kitchen, Bar, Tandoor…), or No KOT for things that never go to a station. Left empty: asked per category.'],
   ['SAC', 'Optional, 4 to 8 digits. Empty: kept, or 996332 for a new item.'],
   ['Add-ons & choices', 'Extra Cheese +₹50 · Choose one: Half / Full +₹150 · Size: Small / Large +₹40 · Toppings (any): Olives +₹20 / Corn +₹15. Several: separate with ;'],
 ];
@@ -1622,7 +1641,7 @@ function menuSheetPanel() {
       <div class="scroll"><table class="t"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th><th>Station</th></tr></thead><tbody>
       ${r.needs.map((n) => { const d = ui.upDefaults[n.category] ?? {}; return html`<tr><td>${n.category}</td><td class="num">${n.items}</td>
         <td>${n.tax ? html`<select class="in" data-model-def="${n.category}" data-k="tax" aria-label="GST for ${n.category}">${TAX_PICK.map(([v, t]) => html`<option value="${v}" ${(d.tax ?? '') === v ? 'selected' : ''}>${t}</option>`)}</select>` : 'From the file'}</td>
-        <td>${n.station ? html`<select class="in" data-model-def="${n.category}" data-k="station" aria-label="Station for ${n.category}"><option value="">Choose</option>${['Kitchen', 'Bar'].map((v) => html`<option ${(d.station ?? '') === v ? 'selected' : ''}>${v}</option>`)}</select>` : 'From the file'}</td></tr>`; })}
+        <td>${n.station ? html`<select class="in" data-model-def="${n.category}" data-k="station" aria-label="Station for ${n.category}"><option value="">Choose</option>${[...activeStations().map((x) => x.name), 'No KOT'].map((v) => html`<option ${(d.station ?? '') === v ? 'selected' : ''}>${v}</option>`)}</select>` : 'From the file'}</td></tr>`; })}
       </tbody></table></div><div class="row" style="margin-top:8px"><button class="btn pri" type="button" data-act="upRecheck">Check again</button></div></div>` : '';
   return html`<section class="panel" style="margin-bottom:16px"><h2>Menu sheet</h2>
     <p class="quiet small">Download the menu, change it in Excel or Google Sheets and upload it back. An Excel file, another system's export, or photos or a PDF of a printed menu also work.
@@ -1832,7 +1851,7 @@ const gdOf = (g) => {
     legacy: g.kind === 'one' && g.options.some((o) => o.addPaise), options: g.options.map((o) => ({ name: o.name, price: o.addPaise ? rupeesShort(o.addPaise) : '' })) };
 };
 const newGd = (kind = 'one') => ({ id: null, kind, name: '', price: '', several: false, legacy: false, options: [{ name: '', price: '' }, { name: '', price: '' }] });
-async function reloadMenu() { const d = await api('GET', `${B()}/menu`); cache.menu = d.items; cache.menuCats = d.categories ?? []; cache.addonGroups = d.addonGroups ?? []; }
+async function reloadMenu() { const d = await api('GET', `${B()}/menu`); cache.menu = d.items; cache.menuCats = d.categories ?? []; cache.addonGroups = d.addonGroups ?? []; cache.stations = d.stations ?? []; }
 
 function itemAddons() {
   const on = ui.iGroups ?? [];
@@ -1944,6 +1963,140 @@ actions.gSaveItems = async () => {
   flash = { kind: 'ok', text: `${g.name}: offered on ${plural(ui.gItems.length, 'dish', 'dishes')}.` }; rerender();
 };
 
+// ---------- KOT stations (approved 19 Nov 2026): where each dish's KOT goes, set per category and per item like GST
+
+const activeStations = () => (cache.stations ?? []).filter((x) => x.active);
+const stationName = (id) => (cache.stations ?? []).find((x) => x.id === id)?.name ?? '';
+const catOfItem = (m) => (cache.menuCats ?? []).find((c) => c.name.toLowerCase() === m.category.toLowerCase());
+/** Where an item's KOT goes, as words: its station, or "No KOT"; "(category)" when it follows its category. */
+function routeOf(m) {
+  const c = catOfItem(m);
+  const kot = m.kot ?? c?.kot ?? 1;
+  const own = m.kot != null || m.stationId;
+  if (!kot) return html`No KOT${own ? '' : html` <span class="quiet small">· category</span>`}`;
+  return html`${stationName(m.stationId ?? c?.stationId) || m.station}${own ? '' : html` <span class="quiet small">· category</span>`}`;
+}
+function itemKotFields() {
+  const c = (cache.menuCats ?? []).find((x) => x.name.toLowerCase() === String(ui.iCat ?? '').trim().toLowerCase());
+  const catKot = c ? (c.kot === 0 ? 'No KOT' : 'Print KOT') : 'Print KOT';
+  const kot = ui.iKot ?? 'category';
+  const sends = kot === 'yes' || (kot === 'category' && c?.kot !== 0);
+  return html`<label class="f">KOT<select class="in" data-model="iKot"><option value="category">From its category (${catKot})</option>
+      <option value="yes" ${kot === 'yes' ? 'selected' : ''}>Print KOT</option><option value="no" ${kot === 'no' ? 'selected' : ''}>No KOT (bill only)</option></select></label>
+    ${sends ? html`<label class="f">Station<select class="in" data-model="iStationId"><option value="">From its category${c?.stationId ? ` (${stationName(c.stationId)})` : ''}</option>
+      ${activeStations().map((x) => html`<option value="${x.id}" ${ui.iStationId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select></label>`
+      : html`<div class="f small quiet" style="align-self:end;padding-bottom:12px">No KOT: on the order and bill, never sent to a station.</div>`}`;
+}
+actions.catKot = async (d, el) => { await api('PUT', `${B()}/menu-categories/${d.id}`, { kot: el.value === 'yes' }); await reloadMenu(); flash = { kind: 'ok', text: 'Saved.' }; rerender(); };
+actions.catStation = async (d, el) => { await api('PUT', `${B()}/menu-categories/${d.id}`, { stationId: el.value }); await reloadMenu(); flash = { kind: 'ok', text: `KOTs for ${catName(d.id)} now go to ${stationName(el.value)}.` }; rerender(); };
+const catName = (id) => (cache.menuCats ?? []).find((c) => c.id === id)?.name ?? '';
+
+const HOW = [['paper', 'Paper', 'Prints at once'], ['screen', 'Screen', 'Tickets to tap ready'], ['both', 'Screen and paper', 'Screen, and a slip']];
+function stationsTab() {
+  const sts = cache.stations ?? [];
+  const uses = (id) => cache.menuCats.filter((c) => c.stationId === id && c.kot !== 0).map((c) => c.name);
+  return html`<section class="panel"><div class="row" style="justify-content:space-between"><h2>Stations</h2><button class="btn pri" type="button" data-act="stNew">+ New station</button></div>
+    <p class="quiet small">Where KOTs go. Each station gets them on paper, on a screen, or both, at a tablet or PC set up as that station's device (with its thermal printer for paper).
+      When a station's device is off or offline, its KOTs print at the counter instead, so nothing is missed. Categories and items choose their station.</p>${errorBox()}
+    ${ui.stNew ? html`<form class="stcard" style="border-color:var(--pri)"><label class="f">Name<input class="in" data-model="stName" value="${ui.stName ?? ''}" placeholder="Tandoor, Chinese, Dessert counter" autofocus></label>
+      <div class="row"><button class="btn pri" type="submit" data-act="stAdd" data-submit>Add station</button><button class="btn" type="button" data-act="stNo">Cancel</button></div></form>` : ''}
+    <div class="stgrid">${sts.map((x) => html`<div class="stcard ${x.active ? '' : 'off'}"><div class="row" style="justify-content:space-between"><b class="stname">${x.name}</b>
+        ${!x.active ? html`<span class="tag-any">Not in use</span>` : x.devices ? html`<span class="${x.online ? 'pill-on' : 'pill-off'}">${x.online ? 'Device online' : `Device offline${x.lastSeenAt ? ` · seen ${since(x.lastSeenAt)} ago` : ''}`}</span>` : html`<span class="pill-off">No device yet</span>`}</div>
+      <div class="how" role="radiogroup" aria-label="How ${x.name} gets KOTs">${HOW.map(([v, t, sub]) => html`<label><input type="radio" name="how-${x.id}" value="${v}" data-act-change="stHow" data-id="${x.id}" ${x.how === v ? 'checked' : ''}>${t}<span>${sub}</span></label>`)}</div>
+      <div class="row">${x.how !== 'screen' ? html`<label class="f" style="width:110px">Copies<select class="in" data-act-change="stCopies" data-id="${x.id}">${[1, 2, 3].map((n) => html`<option ${x.copies === n ? 'selected' : ''}>${n}</option>`)}</select></label>` : ''}
+        <label class="chk"><input type="checkbox" data-act-change="stBar" data-id="${x.id}" ${x.isBar ? 'checked' : ''}>Bar station (bar stock and reports)</label></div>
+      <p class="small quiet" style="margin:0">${uses(x.id).length ? `Categories: ${uses(x.id).join(', ')}` : 'No category sends KOTs here yet. Choose it in Categories.'}</p>
+      <div class="row">${can('staff.manage') && x.active ? html`<button class="btn" type="button" data-act="stDevice" data-id="${x.id}">Make this browser ${x.name}'s device</button>` : ''}
+        ${ui.stRen === x.id ? html`<input class="in" style="max-width:180px" data-model="stRenName" value="${ui.stRenName ?? ''}" aria-label="New name"><button class="btn pri" type="button" data-act="stRenameGo" data-id="${x.id}">Save</button>`
+          : html`<button class="btn ghost" type="button" data-act="stRename" data-id="${x.id}">Rename</button>`}
+        <button class="btn ghost" type="button" data-act="stActive" data-id="${x.id}">${x.active ? 'Stop using' : 'Use again'}</button></div></div>`)}</div>
+    <details style="margin-top:6px"><summary>Setting up a station's device</summary><ol class="small">
+      <li>On the tablet or PC at the station, open this POS and sign in as the Owner.</li>
+      <li>Go to Settings → Stations and press "Make this browser …'s device". It then shows that station's KOTs and nothing else.</li>
+      <li>For paper: connect its thermal printer and make it the device's default printer. To print without a print window, start Chrome with the --kiosk-printing option (a shortcut on the device).</li>
+      <li>Keep the screen on and the page open. If it is closed or loses the internet, the counter prints that station's KOTs.</li></ol></details></section>`;
+}
+const stBody = (x, change) => ({ name: x.name, how: x.how, copies: x.copies, isBar: x.isBar, active: x.active, ...change });
+const stSave = async (id, change, text) => { const x = cache.stations.find((y) => y.id === id); await api('PUT', `${B()}/stations/${id}`, stBody(x, change)); await reloadMenu(); flash = { kind: 'ok', text: text ?? `${change.name ?? x.name} saved.` }; rerender(); };
+actions.stNew = () => { ui.stNew = true; ui.error = null; rerender(); };
+actions.stNo = () => { ui.stNew = false; rerender(); };
+actions.stAdd = async () => { await api('POST', `${B()}/stations`, { name: ui.stName ?? '' }); await reloadMenu(); flash = { kind: 'ok', text: `${ui.stName} added. Choose it for its categories in Categories.` }; ui.stNew = false; ui.stName = ''; rerender(); };
+actions.stHow = (d, el) => stSave(d.id, { how: el.value });
+actions.stCopies = (d, el) => stSave(d.id, { copies: Number(el.value) });
+actions.stBar = (d, el) => stSave(d.id, { isBar: el.checked });
+actions.stActive = (d) => { const x = cache.stations.find((y) => y.id === d.id); return stSave(d.id, { active: !x.active }, `${x.name} ${x.active ? 'is no longer in use' : 'is in use again'}.`); };
+actions.stRename = (d) => { const x = cache.stations.find((y) => y.id === d.id); ui.stRen = d.id; ui.stRenName = x.name; rerender(); };
+actions.stRenameGo = async (d) => { const name = String(ui.stRenName ?? '').trim(); ui.stRen = null; await stSave(d.id, { name }); };
+actions.stDevice = async (d) => {
+  const x = cache.stations.find((y) => y.id === d.id);
+  await api('POST', `${B()}/devices`, { name: `${x.name} device`, stationId: x.id });
+  await api('POST', '/auth/logout').catch(() => {});
+  me = null; go('#/station');
+};
+
+// ---------- a station's own device: its KOTs on a screen and/or printed here, nothing else
+let stationTimer = null;
+const stationPrinting = new Set();
+function stopStation() { if (stationTimer) { clearInterval(stationTimer); stationTimer = null; } }
+async function stationFetch(method, path) {
+  const r = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' }, body: method === 'GET' ? undefined : '{}' });
+  const data = await r.json().catch(() => null);
+  if (!r.ok) throw new ApiError(data?.error ?? 'Could not reach the server.', r.status);
+  return data;
+}
+async function stationScreen() {
+  ui.st = null; ui.stErr = null; ui.printed = ui.printed ?? [];
+  const tick = async () => {
+    try {
+      ui.st = await stationFetch('GET', '/station'); ui.stErr = null; ui.stAt = Date.now();
+      // Print what is meant to print here, one at a time, then tell the server.
+      if (ui.st.station.how !== 'screen') for (const k of ui.st.kots.filter((x) => x.toPrint && !stationPrinting.has(x.id))) {
+        stationPrinting.add(k.id);
+        printKots([{ ...k, station: ui.st.station.name, copies: ui.st.station.copies }]);
+        await stationFetch('POST', `/station/kots/${k.id}/printed`).catch(() => stationPrinting.delete(k.id));
+        ui.printed = [{ ...k, printedAt: Date.now() }, ...ui.printed].slice(0, 12);
+      }
+    } catch (e) {
+      ui.stErr = e.status === 401 ? 'setup' : e.message;
+    }
+    if (location.hash.startsWith('#/station')) rerender();
+  };
+  rerender = () => paintStation();
+  paintStation();
+  await tick();
+  stopStation();
+  stationTimer = setInterval(tick, 4000);
+}
+function paintStation() {
+  const st = ui.st;
+  if (ui.stErr === 'setup') {
+    root.innerHTML = asHtml(html`<main class="kds-wrap"><div class="kds-msg"><h1>Not a station device</h1><p>This browser is not set up for a station. The Owner sets it up in Settings → Stations.</p>
+      <p><a class="btn" href="#/">Sign in</a></p></div></main>`);
+    return;
+  }
+  if (!st) { root.innerHTML = asHtml(html`<main class="kds-wrap"><p class="kds-msg">Loading…</p></main>`); return; }
+  const now = Date.now();
+  const screen = st.station.how !== 'paper';
+  const open = st.kots.filter((k) => k.status !== 'ready');
+  const mins = (k) => Math.floor((now - k.at) / 60000);
+  const late = (k) => (mins(k) >= 15 ? 'late' : mins(k) >= 10 ? 'mid' : '');
+  root.innerHTML = asHtml(html`<main class="kds-wrap"><div class="kds-bar"><div><b>${st.station.name}</b> <span>${st.business} · ${st.device}</span></div>
+      <div><span class="${ui.stErr ? 'kds-off' : 'kds-on'}">${ui.stErr ? `Not connected: ${ui.stErr}` : `Connected · ${time(ui.stAt)}`}</span>
+        <span>${screen ? `${open.length} open` : 'Printing KOTs here'}</span></div></div>
+    ${screen ? (open.length ? html`<div class="kds-tickets">${open.map((k) => { const cancel = k.lines.some((l) => l.cancelled); return html`<div class="kds-tk ${late(k)} ${cancel ? 'cancel' : ''}">
+        <div class="kds-h"><span>${cancel ? 'CANCEL · ' : ''}${k.place}</span><span>${mins(k)} min · ${k.by ?? ''}</span></div>
+        <ul>${k.lines.map((l) => html`<li class="${l.cancelled ? 'cx' : ''}">${l.cancelled ? `Cancel ${Math.abs(l.qty)}` : l.qty} × ${l.name}${(l.options ?? []).map((o) => html`<small>+ ${o}</small>`)}</li>`)}</ul>
+        <div class="kds-act">${cancel ? html`<button type="button" class="go" data-act="kdsReady" data-id="${k.id}">Seen</button>` : html`<button type="button" data-act="kdsStart" data-id="${k.id}" ${k.status === 'started' ? 'disabled' : ''}>${k.status === 'started' ? 'Started' : 'Start'}</button>
+          <button type="button" class="go" data-act="kdsReady" data-id="${k.id}">Ready</button>`}</div>
+        <div class="kds-foot">KOT ${k.kotNo}${st.station.how === 'both' ? html` · <button type="button" class="kds-link" data-act="kdsPrint" data-id="${k.id}">Print again</button>` : ''}</div></div>`; })}</div>`
+      : html`<p class="kds-empty">No open KOTs.</p>`)
+      : html`<div class="kds-printed"><h2>Printed here</h2>${ui.printed.length ? html`<ul>${ui.printed.map((k) => html`<li>KOT ${k.kotNo} · ${k.place} · ${time(k.printedAt)} <button type="button" class="kds-link" data-act="kdsPrint" data-id="${k.id}">Print again</button></li>`)}</ul>` : html`<p>Nothing yet this session. New KOTs print as they come.</p>`}</div>`}
+  </main>`);
+}
+actions.kdsStart = async (d) => { await stationFetch('POST', `/station/kots/${d.id}/start`); const k = ui.st.kots.find((x) => x.id === d.id); if (k) k.status = 'started'; paintStation(); };
+actions.kdsReady = async (d) => { await stationFetch('POST', `/station/kots/${d.id}/ready`); ui.st.kots = ui.st.kots.filter((x) => x.id !== d.id); paintStation(); };
+actions.kdsPrint = (d) => { const k = ui.st.kots.find((x) => x.id === d.id) ?? ui.printed.find((x) => x.id === d.id); if (k) printKots([{ ...k, station: ui.st.station.name, copies: 1 }]); };
+
 // Tax choices: an item can follow its category; a category can follow the billing name.
 const RATES = [5, 12, 18, 28, 40, 0];
 const taxChoices = (forItem) => [...(forItem ? [['category', 'From its category']] : []), ['billing', 'Billing name rate (food)'],
@@ -1953,7 +2106,7 @@ const taxName = (x) => taxChoices(true).find(([v]) => v === taxValue(x))?.[1] ??
 const catOf = (m) => (cache.menuCats ?? []).find((c) => c.name.toLowerCase() === m.category.toLowerCase());
 /** The API form of a tax choice. */
 const taxBody = (v) => (v?.startsWith('rate:') ? { taxMode: 'rate', gstRate: Number(v.slice(5)) } : { taxMode: v ?? 'category' });
-const itemBody = (m) => ({ name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, station: m.station, ...taxBody(taxValue(m)),
+const itemBody = (m) => ({ name: m.name, category: m.category, price: rupees(m.pricePaise), sac: m.sac, stationId: m.stationId ?? '', kot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', ...taxBody(taxValue(m)),
   openPrice: !!m.openPrice, minPrice: m.minPricePaise != null ? rupees(m.minPricePaise) : '', active: !!m.active,
   addonGroups: (m.addonGroups ?? []).map((id) => ({ id, prices: m.addonPrices?.[id] ? Object.fromEntries(Object.entries(m.addonPrices[id]).map(([k, v]) => [k, rupees(v)])) : null })) });
 actions.itemToggle = async (d) => { const m = cache.menu.find((x) => x.id === d.id); await api('PUT', `${B()}/menu/${m.id}`, { ...itemBody(m), active: !m.active }); route(); };
@@ -1964,7 +2117,7 @@ actions.catTax = async (d, el) => {
 };
 actions.addItem = async () => {
   const open = ui.iOpen === 'yes';
-  const body = { name: ui.iName, category: ui.iCat, price: open ? '' : ui.iPrice ?? '', station: ui.iStation ?? 'kitchen', ...taxBody(ui.iTax ?? 'category'),
+  const body = { name: ui.iName, category: ui.iCat, price: open ? '' : ui.iPrice ?? '', stationId: ui.iStationId ?? '', kot: ui.iKot ?? 'category', ...taxBody(ui.iTax ?? 'category'),
     openPrice: open, minPrice: open ? ui.iMin ?? '' : '', addonGroups: (ui.iGroups ?? []).map((id) => ({ id, prices: itemPricesOut(id) })) };
   const fromChoice = !open && choicePrice();
   if (fromChoice) body.price = fromChoice;
@@ -1972,7 +2125,7 @@ actions.addItem = async () => {
   else await api('POST', B() + '/menu', body);
   flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.` }; route();
 };
-actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStation: m.station, iTax: taxValue(m),
+actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStationId: m.stationId ?? '', iKot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', iTax: taxValue(m),
   iOpen: m.openPrice ? 'yes' : 'no', iMin: m.minPricePaise != null ? rupees(m.minPricePaise) : '', iGroups: [...(m.addonGroups ?? [])],
   iPrices: Object.fromEntries(Object.entries(m.addonPrices ?? {}).map(([g, ps]) => [g, Object.fromEntries(Object.entries(ps).map(([k, v]) => [k, rupeesShort(v)]))])) }); rerender(); };
 actions.editCancel = () => route();

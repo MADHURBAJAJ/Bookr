@@ -50,6 +50,11 @@ for (const table of ['settle_differences', 'recipes', 'credit_notes', 'drawer_ou
 out.push(`DELETE FROM businesses WHERE id = ${lit(B)};`);
 
 insert('businesses', { id: B, name: 'Sample Restaurant (demo)', fy_start_month: 4, shift_start_hour: 8, tab_age_days: 3, tables: JSON.stringify(['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'Lawn 1', 'Lawn 2', 'Bar 1', 'Bar 2']), created_at: t });
+// KOT stations: the kitchen prints, the tandoor has a screen, the bar has both.
+const ST = { kitchen: id(), tandoor: id(), bar: id() };
+insert('stations', { id: ST.kitchen, business_id: B, name: 'Kitchen', how: 'paper', copies: 1, is_bar: 0, sort: 0, active: 1, created_at: t });
+insert('stations', { id: ST.tandoor, business_id: B, name: 'Tandoor', how: 'screen', copies: 1, is_bar: 0, sort: 1, active: 1, created_at: t });
+insert('stations', { id: ST.bar, business_id: B, name: 'Bar', how: 'both', copies: 1, is_bar: 1, sort: 2, active: 1, created_at: t });
 const hash = keep ? presentHash() : await hashPassword(password);
 insert('staff', { id: id(), business_id: B, name: 'Owner (demo)', role: 'owner', email: 'pos-owner@example.com', password_hash: hash, pin_hash: null, created_at: t });
 for (const [name, role, pin] of [['Ravi (cashier)', 'cashier', '1111'], ['Suresh (captain)', 'captain', '2222'], ['Anil (manager)', 'manager', '3333']]) {
@@ -76,7 +81,7 @@ const MENU: [string, string, number, 'kitchen' | 'bar'][] = [
   ['Tandoori Chicken', 'Starters', 300, 'kitchen'], ['Veg Burger', 'Snacks', 160, 'kitchen'], ['Cheese Sandwich', 'Snacks', 150, 'kitchen'],
   ['Masala Dosa', 'Mains', 180, 'kitchen'], ['Veg Thali', 'Mains', 280, 'kitchen'], ['Dal Makhani', 'Mains', 240, 'kitchen'],
   ['Chicken Biryani', 'Mains', 199, 'kitchen'], ['Butter Naan', 'Breads', 60, 'kitchen'], ['Tandoori Roti', 'Breads', 30, 'kitchen'],
-  ['Masala Chai', 'Drinks', 40, 'kitchen'], ['Fresh Lime Soda', 'Drinks', 90, 'kitchen'], ['Sweet Lassi', 'Drinks', 110, 'kitchen'],
+  ['Masala Chai', 'Drinks', 40, 'kitchen'], ['Fresh Lime Soda', 'Drinks', 90, 'bar'], ['Sweet Lassi', 'Drinks', 110, 'bar'],
   ['Gulab Jamun', 'Desserts', 110, 'kitchen'], ['Beer 650 ml', 'Bar', 320, 'bar'], ['Whisky 30 ml', 'Bar', 220, 'bar'], ['Whisky bottle 750 ml', 'Bar', 0, 'bar'],
   ['Laundry (per piece)', 'Hotel', 50, 'kitchen'], ['Dental kit', 'Hotel', 60, 'kitchen'],
 ];
@@ -84,15 +89,22 @@ const MENU: [string, string, number, 'kitchen' | 'bar'][] = [
 const CATEGORY_TAX: Record<string, { tax_mode: string; gst_bp: number | null }> = {
   Bar: { tax_mode: 'liquor', gst_bp: null }, Hotel: { tax_mode: 'rate', gst_bp: 1800 },
 };
+// KOT by category: breads to the tandoor, the bar to the bar, hotel charges make no KOT.
+const CATEGORY_KOT: Record<string, { kot: number; station_id: string }> = {
+  Breads: { kot: 1, station_id: ST.tandoor }, Bar: { kot: 1, station_id: ST.bar }, Drinks: { kot: 1, station_id: ST.bar }, Hotel: { kot: 0, station_id: ST.kitchen },
+};
 [...new Set(MENU.map((m) => m[1]))].forEach((name, i) =>
-  insert('menu_categories', { id: id(), business_id: B, name, tax_mode: CATEGORY_TAX[name]?.tax_mode ?? 'billing', gst_bp: CATEGORY_TAX[name]?.gst_bp ?? null, sort: i, created_at: t }));
+  insert('menu_categories', { id: id(), business_id: B, name, tax_mode: CATEGORY_TAX[name]?.tax_mode ?? 'billing', gst_bp: CATEGORY_TAX[name]?.gst_bp ?? null, sort: i, created_at: t,
+    kot: CATEGORY_KOT[name]?.kot ?? 1, station_id: CATEGORY_KOT[name]?.station_id ?? ST.kitchen }));
 const menuIds: Record<string, string> = {};
 for (const [name, category, rupees, station] of MENU) {
   menuIds[name] = id();
   // The bottle's price is typed at billing, never under ₹4,000; the dental kit carries no GST although its category does.
   const bottle = name === 'Whisky bottle 750 ml';
   insert('menu_items', { id: menuIds[name], business_id: B, name, category, price_paise: rupees * 100, sac: '996332', station,
-    tax_mode: name === 'Dental kit' ? 'none' : null, gst_bp: null, open_price: bottle ? 1 : 0, min_price_paise: bottle ? 4000_00 : null, active: 1, created_at: t });
+    tax_mode: name === 'Dental kit' ? 'none' : null, gst_bp: null, open_price: bottle ? 1 : 0, min_price_paise: bottle ? 4000_00 : null, active: 1, created_at: t,
+    // Tandoori dishes go to the tandoor although Starters go to the kitchen; chai is made in the kitchen although Drinks go to the bar.
+    station_id: name === 'Tandoori Chicken' || name === 'Paneer Tikka' ? ST.tandoor : name === 'Masala Chai' ? ST.kitchen : null });
 }
 // Add-ons: a choice the order must make (each dish with its own prices), and extras (a usual price; a dish may differ).
 const ADDONS: [string, 'one' | 'any', [string, number][], [string, Record<string, number> | null][]][] = [

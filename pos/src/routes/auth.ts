@@ -1,3 +1,4 @@
+import { defaultStations } from '../stations';
 import { Hono } from 'hono';
 import { all, newId, now, one, stmt } from '../../../src/db';
 import { DUMMY_HASH, hashPassword, randomToken, sha256, verifyPassword } from '../../../src/crypto';
@@ -29,6 +30,7 @@ authRoutes.post('/setup', async (c) => {
     stmt(c.env.DB, 'INSERT INTO businesses (id, name, created_at) VALUES (?, ?, ?)', id, name, t),
     stmt(c.env.DB, "INSERT INTO staff (id, business_id, name, role, email, password_hash, created_at) VALUES (?, ?, ?, 'owner', ?, ?, ?)",
       newId(), id, ownerName, email, await hashPassword(password), t),
+    ...defaultStations(c.env.DB, id, t),
   ]);
   return c.json({ ok: true });
 });
@@ -49,6 +51,8 @@ authRoutes.post('/auth/login', async (c) => {
 authRoutes.get('/device', async (c) => {
   const device = await currentDevice(c);
   if (!device) return c.json({ device: null });
+  // A station's device shows that station's KOTs; nobody signs in on it.
+  if (device.station_id) return c.json({ device: { name: device.name, station: true }, people: [] });
   const people = await all<{ id: string; name: string; role: string }>(c.env.DB,
     'SELECT id, name, role FROM staff WHERE business_id = ? AND active = 1 AND pin_hash IS NOT NULL ORDER BY name', device.business_id);
   const b = await one<{ name: string }>(c.env.DB, 'SELECT name FROM businesses WHERE id = ?', device.business_id);
@@ -57,7 +61,7 @@ authRoutes.get('/device', async (c) => {
 
 authRoutes.post('/auth/pin', async (c) => {
   const device = await currentDevice(c);
-  if (!device) fail(403, 'PIN sign-in works only on a counter device an Owner has set up.');
+  if (!device || device.station_id) fail(403, 'PIN sign-in works only on a counter device an Owner has set up.');
   const t = now();
   if (device.locked_until && device.locked_until > t) fail(429, 'Too many wrong PINs. Try again in a few minutes, or ask the Owner.');
   const data = await body(c);
@@ -94,17 +98,25 @@ authRoutes.get('/me', requireStaff, async (c) => {
 authRoutes.post('/businesses/:businessId/devices', requireStaff, requireAction('staff.manage'), async (c) => {
   const data = await body(c);
   const name = text(data, 'name', 'Device name', { max: 60 })!;
+  // A station's device (stationId): it shows and prints that station's KOTs and nothing else.
+  let stationId: string | null = null;
+  if (data.stationId !== undefined && data.stationId !== null && data.stationId !== '') {
+    const st = await one<{ id: string }>(c.env.DB, 'SELECT id FROM stations WHERE id = ? AND business_id = ? AND active = 1', data.stationId, c.get('businessId'));
+    if (!st) fail(400, 'That station was not found.');
+    stationId = st.id;
+  }
   const token = randomToken();
   const id = newId();
-  await stmt(c.env.DB, 'INSERT INTO devices (id, business_id, name, token_hash, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-    id, c.get('businessId'), name, await sha256(token), c.get('staff').id, now()).run();
+  await stmt(c.env.DB, 'INSERT INTO devices (id, business_id, name, token_hash, added_by, created_at, station_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    id, c.get('businessId'), name, await sha256(token), c.get('staff').id, now(), stationId).run();
   await setDeviceCookie(c, token);
   return c.json({ id }, 201);
 });
 
 authRoutes.get('/businesses/:businessId/devices', requireStaff, requireAction('staff.manage'), async (c) => {
   return c.json({ devices: await all(c.env.DB,
-    'SELECT id, name, created_at AS createdAt, revoked_at AS revokedAt FROM devices WHERE business_id = ? ORDER BY created_at', c.get('businessId')) });
+    `SELECT d.id, d.name, d.created_at AS createdAt, d.revoked_at AS revokedAt, d.last_seen_at AS lastSeenAt, s.name AS station
+     FROM devices d LEFT JOIN stations s ON s.id = d.station_id WHERE d.business_id = ? ORDER BY d.created_at`, c.get('businessId')) });
 });
 
 authRoutes.post('/businesses/:businessId/devices/:id/revoke', requireStaff, requireAction('staff.manage'), async (c) => {

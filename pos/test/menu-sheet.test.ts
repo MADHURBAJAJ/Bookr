@@ -40,7 +40,7 @@ describe('reading the sheet', () => {
     const r = readSheet(parseCsv('Item,Category,Price,Tax,Station\nA,Food,abc,GST 5%,Kitchen\nB,Food,10,GST 7%,Kitchen\nC,Food,10,GST 5%,Hall\nD,Food,10,GST 5%,Kitchen\nd,food,12,GST 5%,Kitchen\n'));
     expect(r.errors).toEqual([
       'Row 2 (A): "abc" is not a price.', 'Row 3 (B): tax "GST 7%" should be Billing name, GST 5% (or 12, 18, 28, 40), No GST (liquor) or No GST.',
-      'Row 4 (C): station "Hall" should be Kitchen or Bar.', 'Row 6 (d): the same item and category as row 5.']);
+      'Row 6 (d): the same item and category as row 5.']);
     expect(readSheet(parseCsv('Dish,Notes\nA,x\n')).errors).toEqual(['Choose which column is the Price.']);
   });
 
@@ -56,8 +56,8 @@ describe('reading the sheet', () => {
     const b = readSheet(parseCsv(sheet), { defaults: { starters: { tax: 'Billing name', station: 'Kitchen' }, BAR: { tax: 'No GST (liquor)' } } });
     expect(b.needs).toEqual([]);
     expect(b.rows.map((r) => [r.line, r.name, r.category, r.pricePaise, r.openPrice, r.station, r.tax.mode])).toEqual([
-      [5, 'Paneer Tikka', 'STARTERS', 28000, false, 'kitchen', 'billing'], [6, 'Crispy Corn', 'STARTERS', 22000, false, 'kitchen', 'billing'],
-      [8, 'Beer', 'BAR', 32000, false, 'bar', 'liquor'], [9, 'Whisky bottle', 'BAR', 0, true, 'bar', 'liquor']]);
+      [5, 'Paneer Tikka', 'STARTERS', 28000, false, 'Kitchen', 'billing'], [6, 'Crispy Corn', 'STARTERS', 22000, false, 'Kitchen', 'billing'],
+      [8, 'Beer', 'BAR', 32000, false, 'Bar', 'liquor'], [9, 'Whisky bottle', 'BAR', 0, true, 'Bar', 'liquor']]);
     // A column chosen on screen wins over the guess.
     expect(readSheet(parseCsv('A,B,C\nTea,Drinks,40\n'), { columns: { item: 0, category: 1, price: 2 } }).needs).toEqual([{ category: 'Drinks', tax: true, station: true, items: 1 }]);
   });

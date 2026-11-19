@@ -7,6 +7,7 @@ import { body, fail, isEmail, optionalPaise, paise, text } from '../../../src/ht
 import { requireAction, requireStaff } from '../auth';
 import { isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
+import { isOnline, syncItemStations } from '../stations';
 import { audit, clock, bizOf, loadBusiness, tableList } from '../util';
 import type { AppEnv } from '../types';
 
@@ -262,16 +263,18 @@ settingsRoutes.put(`${B}/pay-accounts/:id`, requireAction('entities.edit'), asyn
 
 settingsRoutes.get(`${B}/menu`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
-  const [items, links, categories, groups, options] = await Promise.all([
+  const [items, links, categories, groups, options, stations] = await Promise.all([
     all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, active, tax_mode AS taxMode, gst_bp AS gstBp,
-      open_price AS openPrice, min_price_paise AS minPricePaise FROM menu_items WHERE business_id = ? ORDER BY category, name`, bid),
+      open_price AS openPrice, min_price_paise AS minPricePaise, kot, station_id AS stationId FROM menu_items WHERE business_id = ? ORDER BY category, name`, bid),
     all<{ item_id: string; group_id: string; prices: string | null }>(c.env.DB, 'SELECT item_id, group_id, prices FROM menu_item_addons WHERE business_id = ? ORDER BY sort', bid),
-    all(c.env.DB, 'SELECT id, name, tax_mode AS taxMode, gst_bp AS gstBp FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
+    all(c.env.DB, 'SELECT id, name, tax_mode AS taxMode, gst_bp AS gstBp, kot, station_id AS stationId FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
     all<{ id: string; name: string; kind: string }>(c.env.DB, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ? ORDER BY name', bid),
     all<{ id: string; group_id: string; name: string; add_paise: number }>(c.env.DB,
       'SELECT id, group_id, name, add_paise FROM addon_options WHERE business_id = ? AND active = 1 ORDER BY sort, name', bid),
+    stationList(c.env.DB, bid),
   ]);
   return c.json({
+    stations,
     items: items.map((i) => {
       const mine = links.filter((l) => l.item_id === i.id);
       return { ...i, openPrice: !!i.openPrice, addonGroups: mine.map((l) => l.group_id),
@@ -297,8 +300,13 @@ function taxFields(data: Record<string, unknown>, forItem: boolean): { tax_mode:
 }
 
 function itemFields(data: Record<string, unknown>) {
+  // Where its KOT goes: stationId (null or '' = its category's), and kot: 'category', 'yes' or 'no'. The older
+  // station 'kitchen' / 'bar' still works: it picks the business's first kitchen or bar station.
   const station = data.station ?? 'kitchen';
   if (station !== 'kitchen' && station !== 'bar') fail(400, 'Station must be kitchen or bar.');
+  const stationId = data.stationId === undefined ? undefined : data.stationId === null || data.stationId === '' ? null : String(data.stationId);
+  const kotRaw = data.kot ?? 'category';
+  if (kotRaw !== 'category' && kotRaw !== 'yes' && kotRaw !== 'no') fail(400, 'KOT must be from the category, yes or no.');
   const sac = text(data, 'sac', 'SAC', { optional: true, max: 8 }) ?? '996332';
   if (!/^\d{4,8}$/.test(sac)) fail(400, 'SAC must be 4 to 8 digits.');
   const open = data.openPrice === true;
@@ -317,7 +325,7 @@ function itemFields(data: Record<string, unknown>) {
   if (new Set(groups.map((g) => g.id)).size !== groups.length) fail(400, 'Each add-on once.');
   return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station,
     ...taxFields(data, true), open_price: open ? 1 : 0, min_price_paise: open ? optionalPaise(data, 'minPrice', 'Lowest price') : null,
-    addon_groups: groups, active: data.active === false ? 0 : 1 };
+    addon_groups: groups, active: data.active === false ? 0 : 1, station_id: stationId, kot: kotRaw === 'category' ? null : kotRaw === 'yes' ? 1 : 0 };
 }
 
 /**
@@ -357,13 +365,27 @@ async function itemExtras(c: { env: { DB: D1Database } }, bid: string, id: strin
   const gs = await groupsWithOptions(c.env.DB, bid, f.addon_groups.map((g) => g.id));
   if (gs.length !== f.addon_groups.length) fail(400, 'An add-on group was not found.');
   const links = f.addon_groups.map((x) => { const g = gs.find((y) => y.id === x.id)!; return { ...g, prices: dishPrices(x.prices, g, f.name) }; });
+  // The station: the one chosen (the business's own), else for the older kitchen / bar field the first such station,
+  // kept on the item only when it differs from its category's.
+  const sts = await stationList(c.env.DB, bid);
+  if (f.station_id && !sts.some((x) => x.id === f.station_id)) fail(400, 'That station was not found.');
+  const cat = await one<{ station_id: string | null }>(c.env.DB, 'SELECT station_id FROM menu_categories WHERE business_id = ? AND lower(name) = lower(?)', bid, f.category);
+  if (f.station_id === undefined) {
+    const legacy = sts.find((x) => x.isBar === (f.station === 'bar') && x.active) ?? sts[0];
+    const catSt = sts.find((x) => x.id === cat?.station_id);
+    // A new category is made with this station, so the item follows it; an existing one is followed unless it differs.
+    f.station_id = !cat || (catSt && catSt.isBar === legacy?.isBar) ? null : legacy?.id ?? null;
+  }
+  const own = sts.find((x) => x.id === (f.station_id ?? cat?.station_id));
+  if (own) f.station = own.isBar ? 'bar' : 'kitchen';
   const base = f.open_price ? null : basePrice(links);
   if (base !== null) f.price_paise = base;
   if (f.price_paise === null) { if (f.open_price) f.price_paise = 0; else fail(400, 'Type the price.'); }
   return [
     stmt(c.env.DB, 'DELETE FROM menu_item_addons WHERE item_id = ?', id),
     ...links.map((g, i) => stmt(c.env.DB, 'INSERT INTO menu_item_addons (item_id, group_id, business_id, sort, prices) VALUES (?, ?, ?, ?, ?)', id, g.id, bid, i, g.prices ? JSON.stringify(g.prices) : null)),
-    stmt(c.env.DB, 'INSERT OR IGNORE INTO menu_categories (id, business_id, name, created_at) VALUES (?, ?, ?, ?)', newId(), bid, f.category, now()),
+    stmt(c.env.DB, 'INSERT OR IGNORE INTO menu_categories (id, business_id, name, station_id, created_at) VALUES (?, ?, ?, ?, ?)', newId(), bid, f.category,
+      f.station_id ?? sts.find((x) => x.isBar === (f.station === 'bar') && x.active)?.id ?? sts[0]?.id ?? null, now()),
   ];
 }
 
@@ -373,10 +395,11 @@ settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
   const id = newId();
   const extras = await itemExtras(c, bid, id, f);
   await c.env.DB.batch([
-    stmt(c.env.DB, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, now()),
+    stmt(c.env.DB, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, now(), f.kot, f.station_id ?? null),
     ...extras,
+    syncItemStations(c.env.DB, bid),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.create', 'menu_items', id, null, f),
   ]);
   return c.json({ id }, 201);
@@ -390,9 +413,10 @@ settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
   const f = itemFields(await body(c));
   const extras = await itemExtras(c, bid, id, f);
   await c.env.DB.batch([
-    stmt(c.env.DB, `UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, tax_mode = ?, gst_bp = ?, open_price = ?, min_price_paise = ?, active = ?
-      WHERE id = ?`, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, id),
+    stmt(c.env.DB, `UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, tax_mode = ?, gst_bp = ?, open_price = ?, min_price_paise = ?, active = ?,
+      kot = ?, station_id = ? WHERE id = ?`, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, f.kot, f.station_id ?? null, id),
     ...extras,
+    syncItemStations(c.env.DB, bid),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.update', 'menu_items', id, before, f),
   ]);
   return c.json({ ok: true });
@@ -402,12 +426,23 @@ settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
 settingsRoutes.put(`${B}/menu-categories/:id`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one(c.env.DB, 'SELECT name, tax_mode, gst_bp FROM menu_categories WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one<{ name: string; tax_mode: string; gst_bp: number | null; kot: number; station_id: string | null }>(c.env.DB,
+    'SELECT name, tax_mode, gst_bp, kot, station_id FROM menu_categories WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Category not found.');
-  const f = taxFields(await body(c), false);
+  const data = await body(c);
+  // Any of: its tax (taxMode, gstRate), whether its items make a KOT (kot: true / false), and its station.
+  const f = data.taxMode !== undefined || data.tax !== undefined ? taxFields(data, false) : { tax_mode: before.tax_mode, gst_bp: before.gst_bp };
+  if (data.kot !== undefined && typeof data.kot !== 'boolean') fail(400, 'KOT must be yes or no.');
+  const kot = data.kot === undefined ? before.kot : data.kot ? 1 : 0;
+  let stationId = before.station_id;
+  if (data.stationId !== undefined) {
+    if (!(await stationList(c.env.DB, bid)).some((x) => x.id === data.stationId)) fail(400, 'That station was not found.');
+    stationId = data.stationId as string;
+  }
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE menu_categories SET tax_mode = ?, gst_bp = ? WHERE id = ?', f.tax_mode, f.gst_bp, id),
-    audit(c.env.DB, bid, c.get('staff').id, 'category.tax', 'menu_categories', id, before, f),
+    stmt(c.env.DB, 'UPDATE menu_categories SET tax_mode = ?, gst_bp = ?, kot = ?, station_id = ? WHERE id = ?', f.tax_mode, f.gst_bp, kot, stationId, id),
+    syncItemStations(c.env.DB, bid),
+    audit(c.env.DB, bid, c.get('staff').id, 'category.update', 'menu_categories', id, before, { ...f, kot, station_id: stationId }),
   ]);
   return c.json({ ok: true });
 });
@@ -485,6 +520,65 @@ settingsRoutes.put(`${B}/addon-groups/:id/items`, requireAction('menu.edit'), as
     audit(c.env.DB, bid, c.get('staff').id, 'addons.items', 'addon_groups', id, { items: before.length }, { name: g.name, items: rows.length, priced: rows.filter((x) => x.prices).length }),
   ]);
   return c.json({ ok: true, items: rows.length });
+});
+
+// ---------- KOT stations (approved 19 Nov 2026)
+
+export async function stationList(db: D1Database, bid: string) {
+  const t = now();
+  const rows = await all<{ id: string; name: string; how: string; copies: number; is_bar: number; active: number; seen: number | null; devices: number }>(db,
+    `SELECT s.id, s.name, s.how, s.copies, s.is_bar, s.active,
+      (SELECT max(d.last_seen_at) FROM devices d WHERE d.station_id = s.id AND d.revoked_at IS NULL) AS seen,
+      (SELECT count(*) FROM devices d WHERE d.station_id = s.id AND d.revoked_at IS NULL) AS devices
+     FROM stations s WHERE s.business_id = ? ORDER BY s.sort, s.name`, bid);
+  return rows.map((r) => ({ id: r.id, name: r.name, how: r.how, copies: r.copies, isBar: !!r.is_bar, active: !!r.active, devices: r.devices, lastSeenAt: r.seen, online: isOnline(r.seen, t) }));
+}
+settingsRoutes.get(`${B}/stations`, requireAction('pos.view'), async (c) => c.json({ stations: await stationList(c.env.DB, c.get('businessId')) }));
+
+function stationFields(data: Record<string, unknown>) {
+  const how = data.how ?? 'paper';
+  if (how !== 'paper' && how !== 'screen' && how !== 'both') fail(400, 'A station gets KOTs on paper, on a screen, or both.');
+  const copies = data.copies ?? 1;
+  if (typeof copies !== 'number' || !Number.isInteger(copies) || copies < 1 || copies > 3) fail(400, 'Copies must be 1 to 3.');
+  return { name: text(data, 'name', 'Station name', { max: 40 })!, how, copies, is_bar: data.isBar === true ? 1 : 0, active: data.active === false ? 0 : 1 };
+}
+settingsRoutes.post(`${B}/stations`, requireAction('menu.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const f = stationFields(await body(c));
+  const id = newId();
+  try {
+    await c.env.DB.batch([
+      stmt(c.env.DB, 'INSERT INTO stations (id, business_id, name, how, copies, is_bar, active, sort, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, coalesce(max(sort), -1) + 1, ? FROM stations WHERE business_id = ?',
+        id, bid, f.name, f.how, f.copies, f.is_bar, f.active, now(), bid),
+      audit(c.env.DB, bid, c.get('staff').id, 'station.create', 'stations', id, null, f),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, `There is already a station called ${f.name}.`);
+    throw e;
+  }
+  return c.json({ id }, 201);
+});
+settingsRoutes.put(`${B}/stations/:id`, requireAction('menu.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  const before = await one(c.env.DB, 'SELECT name, how, copies, is_bar, active FROM stations WHERE id = ? AND business_id = ?', id, bid);
+  if (!before) fail(404, 'Station not found.');
+  const f = stationFields(await body(c));
+  if (!f.active) {
+    const used = await one<{ n: number }>(c.env.DB, `SELECT (SELECT count(*) FROM menu_categories WHERE station_id = ?) + (SELECT count(*) FROM menu_items WHERE station_id = ? AND active = 1) AS n`, id, id);
+    if (used!.n) fail(409, 'Categories or items still send their KOTs here. Move them to another station first.');
+  }
+  try {
+    await c.env.DB.batch([
+      stmt(c.env.DB, 'UPDATE stations SET name = ?, how = ?, copies = ?, is_bar = ?, active = ? WHERE id = ?', f.name, f.how, f.copies, f.is_bar, f.active, id),
+      syncItemStations(c.env.DB, bid),
+      audit(c.env.DB, bid, c.get('staff').id, 'station.update', 'stations', id, before, f),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, `There is already a station called ${f.name}.`);
+    throw e;
+  }
+  return c.json({ ok: true });
 });
 
 // ---------- reasons

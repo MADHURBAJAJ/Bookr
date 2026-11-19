@@ -2,6 +2,7 @@
 // comes from its billing name's series in the same batch, so numbers have no gaps. A printed bill never changes: a mistake
 // is voided with a reason (the order opens again) and billed again, perhaps under another billing name.
 import { optionAdd, readPrices } from '../addons';
+import { CATEGORY_JOIN, isOnline, ITEM_ROUTE } from '../stations';
 import { Hono } from 'hono';
 import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
@@ -16,11 +17,11 @@ const B = '/businesses/:businessId';
 orderRoutes.use(`${B}/*`, requireStaff);
 
 interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string }
-interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null }
+interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number }
 /** What was chosen on a line: [{group, name, addPaise}], in the dish's order of groups. */
 type Chosen = { group: string; name: string; addPaise: number }[];
 const chosenOf = (l: { options: string | null }): Chosen => (l.options ? JSON.parse(l.options) : []);
-const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by';
+const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by, station_id, kot';
 
 async function order(c: { env: { DB: D1Database } }, bid: string, id: string, editable = false): Promise<OrderRow> {
   if (!isUuid(id)) fail(404, 'Order not found.');
@@ -38,7 +39,7 @@ function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
     id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, covers: o.covers, status: o.status,
     openedAt: o.opened_at, openedShiftDay: o.opened_shift_day,
     lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty,
-      options: chosenOf(l), typedPrice: !!l.price_by })),
+      options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0 })),
     itemsPaise: ls.reduce((s, l) => s + l.qty * l.price_paise, 0), bill,
   };
 }
@@ -49,7 +50,7 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const fixed = tableList(bizOf(c));
   const [os, ls, bills, used] = await Promise.all([
     all<OrderRow>(c.env.DB, "SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at", bid),
-    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
+    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by, l.station_id, l.kot FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
     all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
       "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
     // The counter's table grid: the restaurant's own list from Settings, or else the tables used in the last 60 days.
@@ -143,10 +144,13 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
     }
     const unit = Math.max(0, base + chosen.reduce((s, x) => s + x.addPaise, 0));
     const variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
-    await stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, created_at, variant, options, price_by)
-        SELECT ?, ?, ?, id, name, ?, sac, station, ?, ?, ?, ?, ? FROM menu_items WHERE id = ?
-        ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = qty + excluded.qty`,
-      newId(), bid, o.id, unit, delta, t, variant, chosen.length ? JSON.stringify(chosen) : null, priceBy, item.id).run();
+    // Its station and whether it makes a KOT come from the dish, else its category. A no-KOT line counts as sent at once.
+    await stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, kot, station_id)
+        SELECT ?, ?, ?, m.id, m.name, ?, m.sac, m.station, ?, CASE coalesce(m.kot, c.kot, 1) WHEN 0 THEN ? ELSE 0 END, ?, ?, ?, ?, r.kot, r.station_id
+        FROM menu_items m ${CATEGORY_JOIN} JOIN (SELECT ${ITEM_ROUTE} FROM menu_items m ${CATEGORY_JOIN} WHERE m.id = ?) r WHERE m.id = ?
+        ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = order_lines.qty + excluded.qty,
+          sent_qty = CASE order_lines.kot WHEN 0 THEN order_lines.qty + excluded.qty ELSE order_lines.sent_qty END`,
+      newId(), bid, o.id, unit, delta, delta, t, variant, chosen.length ? JSON.stringify(chosen) : null, priceBy, item.id, item.id).run();
     return c.json({ order: orderOut(o, await lines(db, o.id)) });
   }
   // A line by its id, or (older screens) the dish's plain line.
@@ -156,16 +160,26 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
   if (!line) fail(400, 'That line is not on the order.');
   if (line.qty + delta < 0) fail(400, 'There are not that many on the order.');
   const newQty = line.qty + delta;
+  // A no-KOT line was never with a station: it follows its quantity and needs no reason to come off.
+  if (line.kot === 0) {
+    await stmt(db, 'UPDATE order_lines SET qty = ?, sent_qty = ? WHERE id = ?', newQty, newQty, line.id).run();
+    return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: 0, kots: [] });
+  }
   const cancelSent = Math.max(0, line.sent_qty - newQty);
   const statements = [stmt(db, 'UPDATE order_lines SET qty = ?, sent_qty = ? WHERE id = ?', newQty, Math.min(line.sent_qty, newQty), line.id)];
+  let kotIds: string[] = [];
   if (cancelSent > 0) {
     const reason = await reasonLabel(db, bid, 'kot_cancel', data.reasonId, 'A reason for cancelling an item already sent to the kitchen');
     const what = [line.name, ...chosenOf(line).map((x) => x.name)].join(' + ');
     statements.push(event(db, bid, 'kot_cancel', `${o.place} · ${cancelSent} × ${what}`, cancelSent * line.price_paise, reason, null,
       c.get('staff').id, clock(bizOf(c)).shiftDay));
+    // The station is told: a cancel KOT, printed or shown like any other.
+    const k = await kotStatements(db, bid, o.id, [{ ...line, qty: -cancelSent, sent_qty: 0 }], c.get('staff').id, now(), true);
+    statements.push(...k.statements);
+    kotIds = k.ids;
   }
   await db.batch(statements);
-  return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: cancelSent });
+  return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: cancelSent, kots: await kotsOut(db, kotIds, o.place) });
 });
 
 // Sends what is new to the kitchen and bar: one KOT per station, numbered for the business.
@@ -174,19 +188,46 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
   const o = await order(c, bid, c.req.param('id'), true);
   const ls = (await lines(c.env.DB, o.id)).filter((l) => l.qty > l.sent_qty);
   if (!ls.length) fail(409, 'Nothing new to send.');
-  const t = now();
-  const stations = [...new Set(ls.map((l) => l.station))];
-  const ids = stations.map(() => newId());
-  await c.env.DB.batch([
-    ...stations.map((st, i) => stmt(c.env.DB, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at)
-      SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ? FROM kots WHERE business_id = ?`,
-      ids[i], bid, o.id, st, JSON.stringify(ls.filter((l) => l.station === st).map((l) => ({ name: l.name, qty: l.qty - l.sent_qty,
-        options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise }))), c.get('staff').id, t, bid)),
-    ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id)),
-  ]);
-  const kots = await all<{ kot_no: number; station: string; lines: string }>(c.env.DB, `SELECT kot_no, station, lines FROM kots WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY kot_no`, ...ids);
-  return c.json({ kots: kots.map((k) => ({ kotNo: k.kot_no, station: k.station, place: o.place, lines: JSON.parse(k.lines) })), order: orderOut(o, await lines(c.env.DB, o.id)) }, 201);
+  const k = await kotStatements(c.env.DB, bid, o.id, ls, c.get('staff').id, now(), false);
+  await c.env.DB.batch([...k.statements, ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id))]);
+  return c.json({ kots: await kotsOut(c.env.DB, k.ids, o.place), order: orderOut(o, await lines(c.env.DB, o.id)) }, 201);
 });
+
+/**
+ * KOTs for lines going to stations (one per station, numbered for the business), and how each is delivered: printed at the
+ * station's device when it is online and prints, shown on its screen, or, when its device is offline, printed at the
+ * counter so nothing is missed. A cancel KOT (negative quantities) goes the same way.
+ */
+async function kotStatements(db: D1Database, bid: string, orderId: string, ls: LineRow[], staffId: string, t: number, cancel: boolean) {
+  const send = ls.filter((l) => l.kot !== 0 && l.qty !== l.sent_qty);
+  const stations = await all<{ id: string; name: string; how: string; seen: number | null }>(db,
+    `SELECT s.id, s.name, s.how, (SELECT max(d.last_seen_at) FROM devices d WHERE d.station_id = s.id AND d.revoked_at IS NULL) AS seen
+     FROM stations s WHERE s.business_id = ? ORDER BY s.is_bar, s.sort`, bid);
+  const fallback = stations[0];
+  const stationOf = (l: LineRow) => stations.find((s) => s.id === l.station_id) ?? stations.find((s) => (l.station === 'bar') === /bar/i.test(s.name)) ?? fallback;
+  const groups = new Map<string, LineRow[]>();
+  for (const l of send) { const s = stationOf(l); if (s) groups.set(s.id, [...(groups.get(s.id) ?? []), l]); }
+  const ids: string[] = [];
+  const statements = [...groups].map(([sid, gl]) => {
+    const s = stations.find((x) => x.id === sid)!;
+    const online = isOnline(s.seen, t);
+    const printAt = !online ? 'counter' : s.how === 'screen' ? 'none' : 'station';
+    const id = newId();
+    ids.push(id);
+    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status)
+      SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ?, ?, ?, ? FROM kots WHERE business_id = ?`,
+      id, bid, orderId, s.name, JSON.stringify(gl.map((l) => ({ name: l.name, qty: l.qty - l.sent_qty, options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise,
+        ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', bid);
+  });
+  return { ids, statements };
+}
+/** KOTs as the counter gets them: those it must print itself have printAt 'counter'. */
+async function kotsOut(db: D1Database, ids: string[], place: string) {
+  if (!ids.length) return [];
+  const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null }>(db,
+    `SELECT k.kot_no, k.station, k.lines, k.print_at, s.copies FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
+  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1 }));
+}
 
 // Split by item: chosen quantities move to a new order at the same place ("T4 · 2"), billed on its own with its own number
 // and GST. What was already sent to the kitchen stays sent, so no new KOT prints for it.
@@ -220,9 +261,9 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
       const sentMoved = Math.max(0, qty - (line.qty - line.sent_qty)); // not-yet-sent move first
       return [
         stmt(c.env.DB, 'UPDATE order_lines SET qty = qty - ?, sent_qty = sent_qty - ? WHERE id = ?', qty, sentMoved, line.id),
-        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by),
+        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by, line.station_id, line.kot),
       ];
     }),
   ]);
