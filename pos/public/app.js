@@ -51,7 +51,7 @@ async function api(method, path, body, extraHeaders = {}) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => null);
-  if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401); }
+  if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401, 'signin'); }
   if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data?.code);
   return data;
 }
@@ -155,7 +155,7 @@ async function route() {
     if (path === 'settings') return await settingsScreen(a);
     return await tablesScreen();
   } catch (e) {
-    if (e instanceof ApiError && e.status === 401) return;
+    if (e instanceof ApiError && e.code === 'signin') return; // already sent to the sign-in screen
     root.innerHTML = asHtml(html`<main><div class="msg bad" role="alert">${e.message}</div><p style="margin-top:12px"><a href="#/">Back to tables</a></p></main>`);
   }
 }
@@ -178,7 +178,7 @@ root.addEventListener('click', async (ev) => {
   el.classList.add('busy');
   const wait = setTimeout(() => el.setAttribute('aria-busy', 'true'), 150);
   try { await fn(el.dataset, el); } catch (e) {
-    if (e instanceof ApiError && e.status === 401) return;
+    if (e instanceof ApiError && e.code === 'signin') return; // already sent to the sign-in screen
     ui.error = e.message; rerender();
   } finally { clearTimeout(wait); el.classList.remove('busy'); el.removeAttribute('aria-busy'); }
 });
@@ -1430,7 +1430,7 @@ async function sendBillPhoto(file) {
   const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.85));
   const r = await fetch(`/api${B()}/stock/bills`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
   const data = await r.json().catch(() => null);
-  if (r.status === 401) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401); }
+  if (r.status === 401) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401, 'signin'); }
   if (!r.ok) throw new ApiError(data?.error ?? 'Could not send the photo.', r.status);
   return data;
 }
@@ -1453,7 +1453,7 @@ root.addEventListener('change', async (ev) => {
       if (!ui.rcLines.length) ui.rcLines = [{ k: 1, desc: '' }];
       ui.rcUnmatched = r.read.lines.filter((l) => !l.stockItemId).length;
     }
-  } catch (e) { if (!(e instanceof ApiError && e.status === 401)) ui.rcError = e.message; }
+  } catch (e) { if (!(e instanceof ApiError && e.code === 'signin')) ui.rcError = e.message; }
   ui.rcReading = false; rerender();
 });
 actions.stTransfer = async () => { await api('POST', `${B()}/stock/transfers`, { fromStoreId: ui.trFrom, toStoreId: ui.trTo, lines: [{ itemId: ui.trItem, qty: int(ui.trQty) }] }); flash = { kind: 'ok', text: 'Moved.' }; go('#/stock/hand'); };
