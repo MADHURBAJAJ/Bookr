@@ -1489,12 +1489,13 @@ async function settingsScreen(tab = 'menu') {
   await load('menu', 'reasons', 'entities', 'payAccounts');
   if (tab === 'staff') ui.staff = (await api('GET', B() + '/staff')).staff;
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
+  if (tab === 'menu' && can('menu.upload')) ui.uploads = (await api('GET', B() + '/menu/uploads')).uploads;
   if (tab === 'tables') { ui.tableList = (await api('GET', B() + '/tables')).tables; ui.tableText = ui.tableList.join(', '); }
   const head = html`${pageHead('Settings', 'Changes here reach every counter device at once.')}${tabsNav('Settings', tabs.map(([k, t]) => [`#/settings/${k}`, t, k]), tab)}`;
   const kinds = { discount: 'Discount', comp: 'Complimentary', void: 'Void', kot_cancel: 'Cancelled KOT line' };
   rerender = () => {
     let body = '';
-    if (tab === 'menu') body = html`<section class="panel"><h2>Menu</h2>${errorBox()}
+    if (tab === 'menu') body = html`${menuSheetPanel()}<section class="panel"><h2>Menu</h2>${ui.upCheck ? '' : errorBox()}
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
         ${cache.menu.map((m) => html`<tr><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
           <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : rs(m.pricePaise)}</td><td data-label="Category">${m.category}</td><td data-label="Station">${m.station}</td>
@@ -1590,6 +1591,54 @@ const entityBody = (e, change) => ({
   yearlyLimit: e.yearly_limit_paise ? rupees(e.yearly_limit_paise) : '', warn1: e.warn1_paise ? rupees(e.warn1_paise) : '', warn2: e.warn2_paise ? rupees(e.warn2_paise) : '',
   stopAt: e.stop_paise ? rupees(e.stop_paise) : '', isDefault: !!e.is_default, offered: !!e.offered, active: !!e.active, ...change,
 });
+// ---------- the menu as a sheet: download, change in Excel or Google Sheets, check, apply (Owner)
+const TAX_TEXT = (t) => (t.mode === 'billing' ? 'Billing name rate' : t.mode === 'rate' ? `GST ${t.bp / 100}%` : t.mode === 'liquor' ? 'Liquor, outside GST' : 'No GST');
+function menuSheetPanel() {
+  const r = ui.upCheck;
+  const list = (title, items, show = (x) => x) => (items.length ? html`<details><summary>${title} (${items.length})</summary><ul class="small">${items.map((x) => html`<li>${show(x)}</li>`)}</ul></details>` : '');
+  return html`<section class="panel" style="margin-bottom:16px"><h2>Menu sheet</h2>
+    <p class="quiet small">Download the menu, change it in Excel or Google Sheets, save it as CSV and upload it. You see every change before anything is changed.
+      Items are matched by name (and category); items not in the file are taken off the menu, and old bills keep them.</p>
+    <div class="row"><a class="btn" href="/api${B()}/menu/sheet" download="menu.csv">Download menu (CSV)</a>
+      ${can('menu.upload') ? html`<label class="btn pri">${ui.upReading ? 'Checking…' : 'Upload menu (CSV)'}<input type="file" accept=".csv,text/csv" data-menu-file class="vh"></label>` : ''}</div>
+    ${r ? html`<div class="msg ${r.ok ? 'ok' : 'bad'}" style="margin-top:14px" role="status">
+      ${r.ok ? html`<p><strong>${ui.upName}: ready to apply.</strong> Nothing has changed yet.</p>` : html`<p><strong>${ui.upName}: ${plural(r.errorCount, 'row')} to fix</strong> before it can be applied. Fix them in the sheet and upload it again.</p>
+        <ul class="small">${r.errors.map((e) => html`<li>${e}</li>`)}</ul>${r.errorCount > r.errors.length ? html`<p class="small">…and ${r.errorCount - r.errors.length} more.</p>` : ''}`}</div>
+      ${r.ok ? html`<div class="kpis" style="margin-top:12px">${kpi('Items on the menu', String(r.items), `${r.openPrice} with price at billing`)}${kpi('New', String(r.added.length), r.back.length ? `${r.back.length} back on the menu` : 'Not on the menu before')}
+        ${kpi('Price changes', String(r.priceChanges.length), `${r.otherChanges.length} other changes`)}${kpi('Taken off', String(r.off.length), 'Kept for old bills', r.off.length ? 'warn' : 'good')}</div>
+        ${errorBox()}
+        ${list('Price changes', r.priceChanges, (x) => `${x.name}: ${rs(x.from)} → ${rs(x.to)}`)}
+        ${list('New items', r.added)}${list('Back on the menu', r.back)}${list('Taken off the menu', r.off)}
+        ${list('Other changes', r.otherChanges, (x) => `${x.name}: ${x.what.join('; ')}`)}
+        ${list('GST by category', r.categories, (c) => `${c.name}: ${TAX_TEXT(c.tax)}${c.was && (c.was.mode !== c.tax.mode || c.was.bp !== c.tax.bp) ? ` (was ${TAX_TEXT(c.was)})` : c.was ? '' : ' (new category)'}`)}
+        ${list('Items with their own GST', r.notes)}
+        ${list('Add-ons', r.groups, (g) => `${g.name} (${g.def.kind === 'one' ? 'pick one' : 'add any'}): ${g.def.options.map((o) => `${o.name}${o.addPaise ? ' +' + rs(o.addPaise) : ''}`).join(' / ')} · ${plural(g.items, 'item')}${g.was ? '' : ' · new'}`)}
+        <div class="row" style="margin-top:12px"><button class="btn go" type="button" data-act="upApply">Apply this menu${r.off.length ? ` (${r.off.length} taken off)` : ''}</button><button class="btn" type="button" data-act="upCancel">Cancel</button></div>`
+      : html`<div class="row" style="margin-top:8px"><button class="btn" type="button" data-act="upCancel">Close</button></div>`}` : ''}
+    ${can('menu.upload') && ui.uploads?.length ? html`<details style="margin-top:12px"><summary>Menus uploaded before (${ui.uploads.length})</summary><ul class="small">
+      ${ui.uploads.map((u) => html`<li><a href="/api${B()}/menu/uploads/${u.name}" download>${dateTime(u.at)}</a> · ${u.by ?? ''} · ${plural(u.items, 'item')}</li>`)}</ul></details>` : ''}
+  </section>`;
+}
+root.addEventListener('change', async (ev) => {
+  const el = ev.target;
+  if (!el.matches?.('[data-menu-file]') || !el.files?.[0]) return;
+  const f = el.files[0];
+  ui.error = null; ui.upCheck = null;
+  if (f.size > 1024 * 1024) { ui.error = 'The file is larger than 1 MB.'; rerender(); return; }
+  if (/\.xlsx?$/i.test(f.name)) { ui.upCheck = { ok: false, errors: ['This is an Excel file. In Excel choose File → Save As → CSV, or in Google Sheets File → Download → CSV, and upload that.'], errorCount: 1 }; ui.upName = f.name; rerender(); return; }
+  ui.upReading = true; rerender();
+  try {
+    ui.upCsv = await f.text(); ui.upName = f.name;
+    ui.upCheck = await api('POST', `${B()}/menu/upload/check`, { csv: ui.upCsv });
+  } catch (e) { ui.error = e.message; } finally { ui.upReading = false; rerender(); }
+});
+actions.upCancel = () => { ui.upCheck = null; ui.upCsv = null; ui.error = null; rerender(); };
+actions.upApply = async () => {
+  const r = await api('POST', `${B()}/menu/upload/apply`, { csv: ui.upCsv, planHash: ui.upCheck.planHash });
+  flash = { kind: 'ok', text: `Menu applied: ${plural(r.items, 'item')}, ${r.added} new, ${r.priceChanges} price changes, ${r.off} taken off. The counter shows it at its next refresh.` };
+  route();
+};
+
 // Tax choices: an item can follow its category; a category can follow the billing name.
 const RATES = [5, 12, 18, 28, 40, 0];
 const taxChoices = (forItem) => [...(forItem ? [['category', 'From its category']] : []), ['billing', 'Billing name rate (food)'],

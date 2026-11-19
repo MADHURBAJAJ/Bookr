@@ -22,6 +22,7 @@ export const PERMISSIONS = {
   'reports.view': MANAGE,        // exceptions, shift reports, debtors
   'menu.edit': MANAGE,           // menu items and reason lists
   'stock.edit': MANAGE,          // stock items, recipes, receiving, transfers, breakage, counts and the stock report
+  'menu.upload': OWNER,          // replace the whole menu from a sheet (CSV), after checking what it changes
   'entities.edit': OWNER,        // billing names, GST, limits, which are offered; UPI accounts
   'staff.manage': OWNER,         // staff, PINs, counter devices, business settings
 } as const satisfies Record<string, readonly Role[]>;
