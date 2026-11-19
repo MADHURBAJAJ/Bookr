@@ -2,6 +2,7 @@
 // See docs/phase2-context.md, "Phase 2 design". The app never picks a side: every difference
 // waits for a person's decision.
 
+import { remember } from './memo';
 import { cardMatchStatements, isMachineUpi, machineLabel, machineUpiPayments, machineUpiStatements } from './cards';
 import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill, type EvidenceCredit } from './bankEvidence';
 import { settleOnCredit } from './bank';
@@ -173,7 +174,11 @@ export function applyPaidTogether(rows: RgRow[], written: Map<string, RgPay[]>) 
 }
 
 // One round trip: D1 runs a batch of reads together.
-async function loadShiftData(db: DB, businessId: string, day: string) {
+function loadShiftData(db: DB, businessId: string, day: string) {
+  return remember(db, `shiftData|${businessId}|${day}`, () => loadShiftDataRead(db, businessId, day));
+}
+
+async function loadShiftDataRead(db: DB, businessId: string, day: string) {
   const [status, sw, rg, pays, existing] = await db.batch([
     stmt(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     stmt(db, `SELECT id, pos_no, bill_no, paid_at, mode, amount_paise, is_complimentary, customer_name, mode_text FROM software_bills

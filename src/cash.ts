@@ -2,6 +2,7 @@
 // Opening (previous day's cash in hand) + confirmed cash sales - approved cash expenses (and any
 // booked shortage) = should be in hand; counted = cash in hand on the day's cash summary page.
 
+import { remember } from './memo';
 import { all, one, type DB, SUMMARY_IN_USE } from './db';
 import { addDays } from './time';
 import { paidLaterLines } from './paidLater';
@@ -25,7 +26,11 @@ async function summaryFor(db: DB, businessId: string, day: string) {
     WHERE business_id = ? AND shift_day = ? AND ${SUMMARY_IN_USE} ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, businessId, day);
 }
 
-export async function cashCheck(db: DB, businessId: string, day: string) {
+export function cashCheck(db: DB, businessId: string, day: string) {
+  return remember(db, `cashCheck|${businessId}|${day}`, () => cashCheckRead(db, businessId, day));
+}
+
+async function cashCheckRead(db: DB, businessId: string, day: string) {
   const [shift, today, yesterday, sales, notInRegister, expenses, shortages, accepted, moved] = await Promise.all([
     one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     summaryFor(db, businessId, day),

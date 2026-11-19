@@ -1025,6 +1025,8 @@ salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.v
   if (from < addDays(to, -366)) from = addDays(to, -366);
   // The last shift with bills, where the day view opens (17 Nov 2026).
   const last = await one<{ day: string | null }>(c.env.DB, 'SELECT max(shift_day) AS day FROM bill_comparisons WHERE business_id = ? AND shift_day <= ?', c.get('businessId'), istDay(Date.now()));
+  // Only the day the Reports page opens on (19 Nov 2026): no need to work out the missed bills for it.
+  if (q.lastOnly === '1') return c.json({ lastDay: last?.day ?? null });
   // Cash sheets whose figures were changed from the photo, with the reason (17 Nov 2026).
   const sheets = await all<{ day: string; uploadId: string; o: string }>(c.env.DB, `SELECT shift_day AS day, upload_id AS uploadId, ocr_original AS o FROM cash_summaries
     WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND json_extract(coalesce(ocr_original, '{}'), '$.revision') IS NOT NULL

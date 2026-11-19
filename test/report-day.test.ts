@@ -25,5 +25,7 @@ describe('Reports, one day', () => {
     const m = await h.clients.owner.get(`/businesses/${h.bid}/reports/missed?from=2026-10-31&to=2026-10-31`);
     expect(m.status).toBe(200);
     expect(m.json.lastDay).toBe('2026-10-31');
+    // The page's first ask: only the day, nothing else worked out.
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/reports/missed?lastOnly=1`)).json).toEqual({ lastDay: '2026-10-31' });
   });
 });

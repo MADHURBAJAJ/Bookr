@@ -45,6 +45,19 @@ function cacheAfter(method, path, data) {
   else { CAL_CACHE.clear(); if (clearsCache(path)) GET_CACHE.clear(); }
 }
 
+const BIZ_KEEP = new Map();
+async function bizDetail(id) {
+  const path = `/businesses/${id}`;
+  const kept = BIZ_KEEP.get(id);
+  if (kept && GET_CACHE.has(path)) {
+    if (Date.now() - GET_CACHE.get(path).at >= CACHE_MS) api('GET', path).then((d) => BIZ_KEEP.set(id, d)).catch(() => {});
+    return structuredClone(kept);
+  }
+  const d = await api('GET', path);
+  BIZ_KEEP.set(id, d);
+  return d;
+}
+
 // A change always goes as JSON (the server refuses anything else, see app.ts), so one with no body sends {}.
 const bodyFor = (method, body) => (body === undefined && method !== 'GET' ? {} : body);
 async function api(method, path, body) {
@@ -71,6 +84,33 @@ async function api(method, path, body) {
   if (!res.ok) throw new Error(data?.error ?? 'Something went wrong.');
   cacheAfter(method, path, data);
   return data;
+}
+
+/**
+ * Several GETs in one trip (19 Nov 2026): the server answers them together and asks the database a shared question once.
+ * Returns one promise per path, each resolving or failing like api('GET', path) would.
+ */
+function apiMany(paths) {
+  const fresh = paths.map((p) => { const hit = GET_CACHE.get(p); return hit && Date.now() - hit.at < CACHE_MS ? null : p; });
+  const ask = fresh.filter(Boolean);
+  const trip = ask.length ? fetch(`/api/many?${ask.map((p) => `p=${encodeURIComponent(p)}`).join('&')}`, { credentials: 'same-origin' })
+    .then(async (res) => {
+      const data = await res.json().catch(() => null);
+      if (res.status === 401) { me = null; GET_CACHE.clear(); go('#/login'); throw new Error('Please sign in.'); }
+      if (!res.ok) throw new Error(data?.error ?? 'Something went wrong.');
+      return data.results;
+    }) : Promise.resolve([]);
+  trip.catch(() => {});
+  return paths.map((p, i) => {
+    if (!fresh[i]) return api('GET', p);
+    return trip.then((results) => {
+      const x = results[ask.indexOf(p)];
+      if (x.status === 401) { me = null; GET_CACHE.clear(); go('#/login'); throw new Error('Please sign in.'); }
+      if (x.status >= 400) throw new Error(x.body?.error ?? 'Something went wrong.');
+      cacheAfter('GET', p, x.body);
+      return x.body;
+    });
+  });
 }
 
 // Amounts arrive as integer paise and are only turned into rupees here, for display.
@@ -157,9 +197,9 @@ async function fillNavCounts(biz) {
       if (el) { el.textContent = v ? String(v) : ''; el.hidden = !v; }
     }
   };
-  // The counts last known show at once; older than a minute, they are asked for again in the background.
+  // The counts last known show at once; older than five minutes (19 Nov 2026; was one), asked for again in the background.
   show();
-  if (navCounts.bizId !== biz.id || Date.now() - navCounts.at > 60000) {
+  if (navCounts.bizId !== biz.id || Date.now() - navCounts.at > 300000) {
     try { navCounts = { bizId: biz.id, at: Date.now(), n: todayCounts(await api('GET', `/businesses/${biz.id}/home`), biz) }; } catch { return; }
     show();
   }
@@ -1089,14 +1129,22 @@ const timeOf = (ms) => (ms == null ? '' : new Intl.DateTimeFormat('en-IN', { tim
  * made by hand), so it says the same as Reconcile. Bills in both that match are left out, except one whose money is
  * not in: it is listed at the top.
  */
+const reportLastDay = new Map();
 async function reportDayView(biz, dayIn) {
   let day = /^\d{4}-\d{2}-\d{2}$/.test(dayIn ?? '') ? dayIn : null;
-  if (!day) day = (await api('GET', `/businesses/${biz.id}/reports/missed?${new URLSearchParams({ to: currentShiftDay() })}`)).lastDay ?? currentShiftDay();
+  // The last shift with bills, asked once per session (19 Nov 2026): it used to work out a month of missed bills first.
+  if (!day) day = reportLastDay.get(biz.id);
+  if (!day) {
+    day = (await api('GET', `/businesses/${biz.id}/reports/missed?${new URLSearchParams({ to: currentShiftDay(), lastOnly: '1' })}`)).lastDay ?? currentShiftDay();
+    reportLastDay.set(biz.id, day);
+    setTimeout(() => reportLastDay.delete(biz.id), 10 * 60 * 1000);
+  }
   const range = new URLSearchParams({ from: day, to: day });
   const canBank = biz.actions.includes('bank.link');
-  const [m, d, cp, rc, cash] = await Promise.all([api('GET', `/businesses/${biz.id}/reports/missed?${range}`), api('GET', `/businesses/${biz.id}/reports/large-discounts?${range}`),
-    api('GET', `/businesses/${biz.id}/reports/complimentary?${range}`), canBank ? api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`).catch(() => null) : null,
-    api('GET', `/businesses/${biz.id}/shifts/${day}/cash`).catch(() => null)]);
+  // In one trip (19 Nov 2026), like the Shift page.
+  const parts = apiMany([`/businesses/${biz.id}/reports/missed?${range}`, `/businesses/${biz.id}/reports/large-discounts?${range}`,
+    `/businesses/${biz.id}/reports/complimentary?${range}`, `/businesses/${biz.id}/shifts/${day}/cash`, ...(canBank ? [`/businesses/${biz.id}/shifts/${day}/reconcile`] : [])]);
+  const [m, d, cp, cash, rc] = await Promise.all([parts[0], parts[1], parts[2], parts[3].catch(() => null), canBank ? parts[4].catch(() => null) : null]);
   const bankIn = !!rc?.coverage?.covered;
   const cardsIn = !!rc?.cards?.covered;
   // Payments not received, the same rule as To do's Waiting card (18 Nov 2026): UPI bills with no credit, card bills with
@@ -5824,12 +5872,15 @@ async function reconcileView(biz, dayArg) {
     return wireShell();
   }
   if (!biz.actions.includes('bank.link')) return reconcileReadOnly(biz, day);
-  const [r, v, { heads }, ent, cash, cv, waitPic, comp] = await Promise.all([api('GET', `/businesses/${biz.id}/shifts/${day}/reconcile`),
-    api('GET', `/businesses/${biz.id}/upi?more=${more}&day=${day}`), api('GET', `/businesses/${biz.id}/heads`),
-    api('GET', `/businesses/${biz.id}/shifts/${day}/entries`), api('GET', `/businesses/${biz.id}/shifts/${day}/cash`),
+  // In one trip (19 Nov 2026): the parts share their database questions on the server.
+  const parts = apiMany([`/businesses/${biz.id}/shifts/${day}/reconcile`,
+    `/businesses/${biz.id}/upi?more=${more}&day=${day}`, `/businesses/${biz.id}/heads`,
+    `/businesses/${biz.id}/shifts/${day}/entries`, `/businesses/${biz.id}/shifts/${day}/cash`,
     // The Compare sales view of the shift: every bill and its decision menu (approved 9 Nov 2026).
-    api('GET', `/businesses/${biz.id}/shifts/${day}`), api('GET', `/businesses/${biz.id}/waiting`).catch(() => null),
-    api('GET', `/businesses/${biz.id}/shifts/${day}/complimentary`).catch(() => ({ lines: [], valuePaise: 0 }))]);
+    `/businesses/${biz.id}/shifts/${day}`, `/businesses/${biz.id}/waiting`, `/businesses/${biz.id}/shifts/${day}/complimentary`]);
+  parts[6] = parts[6].catch(() => null);
+  parts[7] = parts[7].catch(() => ({ lines: [], valuePaise: 0 }));
+  const [r, v, { heads }, ent, cash, cv, waitPic, comp] = await Promise.all(parts);
   const tab0 = recKeep?.day === day && recKeep.tab ? recKeep.tab : reconcileTabPref();
   const tab = tab0 === 'comp' ? 'cash' : tab0;
   const top0 = recKeep?.day === day ? recKeep.top : 'todo';
@@ -8395,7 +8446,9 @@ async function route() {
     if (parts[0] === 'b' && parts[1]) {
       const summary = me.businesses.find((b) => b.id === parts[1]);
       if (!summary) return go('#/choose');
-      const detail = await api('GET', `/businesses/${summary.id}`);
+      // The business details kept for the session (19 Nov 2026): shown from memory and refreshed in the background
+      // after two minutes, so changing pages or dates does not wait on them. The server checks the role on every request.
+      const detail = await bizDetail(summary.id);
       const biz = { ...summary, ...detail, actions: summary.actions };
       const [screen, query = ''] = (parts[2] || 'dashboard').split('?');
       if (screen === 'accounts') return accountsView(biz, parts[3]);

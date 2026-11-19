@@ -1,3 +1,4 @@
+import { readScope, readTiming } from './memo';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { AppEnv } from './types';
@@ -34,6 +35,38 @@ app.use('*', async (c, next) => {
     }
   }
   await next();
+});
+
+// A read-only request gets its own handle, so a read asked twice in it is fetched once (19 Nov 2026).
+app.use('*', async (c, next) => {
+  if (c.req.method !== 'GET' || !c.env?.DB) return next();
+  const db = readScope(c.env.DB);
+  c.env = { ...c.env, DB: db };
+  const start = Date.now();
+  await next();
+  // Counts and times only (no query text), to see on live where a slow page spends its time.
+  const tm = readTiming(db);
+  if (tm) try { c.res.headers.set('Server-Timing', `db;desc="${tm.queries} reads";dur=${tm.ms.toFixed(1)}, total;dur=${Date.now() - start}`); } catch { /* a response whose headers cannot change */ }
+});
+
+// Several reads in one request (19 Nov 2026): the Shift page's parts, answered together. Each part is run as its own
+// request with the same sign-in, so its role is checked as usual; they share one database handle, so a question two
+// parts ask (the sign-in, a shift's cash check, its bills) is asked once. Only GETs under a business, at most 12.
+app.get('/many', requireUser, async (c) => {
+  const paths = new URL(c.req.url).searchParams.getAll('p');
+  if (!paths.length || paths.length > 12 || paths.some((p) => !/^\/businesses\/[0-9a-f-]{36}(\/[A-Za-z0-9_\-./?=&%:]*)?$/.test(p) || p.includes('..'))) {
+    throw new HTTPException(400, { message: 'Unknown request.' });
+  }
+  const headers = new Headers();
+  for (const k of ['Cookie', 'Authorization', 'User-Agent']) { const v = c.req.header(k); if (v) headers.set(k, v); }
+  let ctx: Parameters<typeof app.fetch>[2];
+  try { ctx = c.executionCtx as never; } catch { ctx = undefined; }
+  const results = await Promise.all(paths.map(async (p) => {
+    const res = await app.fetch(new Request(new URL(`/api${p}`, c.req.url), { headers }), c.env, ctx);
+    const body = res.status === 204 ? null : await res.json().catch(() => null);
+    return { status: res.status, body };
+  }));
+  return c.json({ results });
 });
 
 app.route('/', authRoutes);
