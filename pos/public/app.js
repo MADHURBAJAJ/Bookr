@@ -1938,10 +1938,12 @@ function addonsTab() {
               <span class="gcount">Offered on ${plural(on.size, 'dish', 'dishes')}</span>
               <button class="btn pri" type="button" data-act="gSaveItems">Save</button></div>
             ${shown.length ? '' : html`<p class="quiet">${ui.gOnly && !String(ui.gQ ?? '').trim() ? 'No dish is ticked yet.' : `No dish matches “${ui.gQ}”.`}</p>`}
-            ${cats.map((c) => { const its = items(c); const n = its.filter((m) => on.has(m.id)).length; return html`<div class="gcat"><div class="gcat-h">
-              <label><input type="checkbox" data-act-change="gTickCat" data-cat="${c}" ${n === its.length ? 'checked' : ''}>${filtering ? `Tick all ${its.length} shown in ${c}` : `Tick all in ${c}`}</label><span class="small quiet">${n} of ${its.length}</span></div>
-              <div class="grows">${its.map((m) => html`<div class="grow-r"><label><input type="checkbox" data-act-change="gTickItem" data-id="${m.id}" ${on.has(m.id) ? 'checked' : ''}><span>${m.name}</span></label>
-                <span class="gps">${on.has(m.id) ? g.options.map((o) => priceBox(m.id, g, o, ui.gPrices?.[m.id]?.[pkey(o.name)] ?? '', g.kind === 'one' || g.options.length > 1 ? o.name : '')) : html`<span class="quiet small">${m.openPrice ? 'typed' : rs(m.pricePaise)}</span>`}</span></div>`)}</div></div>`; })}
+            ${cats.length > 1 && !filtering ? html`<div class="row" style="gap:6px"><button class="btn ghost" type="button" data-act="gOpenAll">Open all</button><button class="btn ghost" type="button" data-act="gCloseAll">Close all</button></div>` : ''}
+            ${cats.map((c) => { const its = items(c); const n = its.filter((m) => on.has(m.id)).length; const open = filtering || ui.gOpen?.includes(c); return html`<div class="gcat"><div class="gcat-h">
+              <button type="button" class="gcat-t" data-act="gToggle" data-cat="${c}" aria-expanded="${open}"><span class="chev" aria-hidden="true">${open ? '▾' : '▸'}</span><b>${c}</b><span class="small quiet">${n ? `${n} of ${its.length} ticked` : plural(its.length, 'dish', 'dishes')}</span></button>
+              <label class="small"><input type="checkbox" data-act-change="gTickCat" data-cat="${c}" ${n === its.length ? 'checked' : ''}>${filtering ? `Tick all ${its.length} shown` : 'Tick all'}</label></div>
+              ${open ? html`<div class="grows">${its.map((m) => html`<div class="grow-r"><label><input type="checkbox" data-act-change="gTickItem" data-id="${m.id}" ${on.has(m.id) ? 'checked' : ''}><span>${m.name}</span></label>
+                <span class="gps">${on.has(m.id) ? g.options.map((o) => priceBox(m.id, g, o, ui.gPrices?.[m.id]?.[pkey(o.name)] ?? '', g.kind === 'one' || g.options.length > 1 ? o.name : '')) : html`<span class="quiet small">${m.openPrice ? 'typed' : rs(m.pricePaise)}</span>`}</span></div>`)}</div>` : ''}</div>`; })}
             <div class="row"><button class="btn pri" type="button" data-act="gSaveItems">Save · ${plural(on.size, 'dish', 'dishes')}</button></div>`
           : html`<p class="quiet">No add-ons yet. Make the first one with "New add-on or choice".</p>`}
       </div></div></section>`;
@@ -1963,6 +1965,10 @@ function gShown(on) {
     && words.every((w) => m.name.toLowerCase().includes(w) || m.category.toLowerCase().includes(w)));
 }
 actions.gOnly = () => { ui.gOnly = !ui.gOnly; rerender(); };
+// Categories start closed; open one to tick its dishes one by one (searching or "Ticked only" shows them open).
+actions.gToggle = (d) => { const o = new Set(ui.gOpen ?? []); o.has(d.cat) ? o.delete(d.cat) : o.add(d.cat); ui.gOpen = [...o]; rerender(); };
+actions.gOpenAll = () => { ui.gOpen = [...new Set(cache.menu.filter((m) => m.active).map((m) => m.category))]; rerender(); };
+actions.gCloseAll = () => { ui.gOpen = []; rerender(); };
 // "Tick all" ticks the dishes shown in that category (all of them when nothing is searched).
 actions.gTickCat = (d, el) => { for (const m of gShown(new Set(ui.gItems)).filter((x) => x.category === d.cat)) gTick(m.id, el.checked); rerender(); };
 actions.gSaveItems = async () => {
