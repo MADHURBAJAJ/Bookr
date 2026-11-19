@@ -65,7 +65,7 @@ describe('Make recipes', () => {
     await add('Pool Table', 'Bar: Games');
     const rum = (await ok(owner.post(`${B}/stock/items`, { name: 'Sample Rum', unit: 'ml', packName: 'bottle', packSize: 750 }))).id;
 
-    mocked.mockResolvedValue({ model: 'claude-opus-5-5', data: { drinks: [{ menuItem: 'Sample Mojito', note: '', lines: [
+    mocked.mockResolvedValue({ model: 'claude-opus-5-5', data: { drinks: [{ n: 1, menuItem: 'Sample Mojito', note: '', lines: [
       { stock: 'Sample Rum', qty: 60, unit: 'ml', isNew: false, packName: 'bottle', packSize: 750 },
       { stock: 'Mint', qty: 8, unit: 'g', isNew: true, packName: 'kg', packSize: 1000 },
     ] }] } });
@@ -84,7 +84,7 @@ describe('Make recipes', () => {
       { menuItemId: peg, lines: [{ stockItemId: rum, qty: 45 }] },
       { menuItemId: mojito, lines: p(mojito).lines },
     ] }));
-    expect(done).toEqual({ ok: true, recipes: 2, stockItemsCreated: 1 });
+    expect(done).toMatchObject({ ok: true, recipes: 2, stockItemsCreated: 1, made: { 'new:g:mint': expect.any(String) } });
     const rows = await q(`SELECT m.name AS drink, s.name AS stock, r.qty FROM recipes r JOIN menu_items m ON m.id = r.menu_item_id JOIN stock_items s ON s.id = r.stock_item_id
       WHERE r.business_id = ? ORDER BY m.name, s.name`, s.businessId);
     expect(rows).toEqual([{ drink: 'Sample Mojito', stock: 'Mint', qty: 8 }, { drink: 'Sample Mojito', stock: 'Sample Rum', qty: 60 }, { drink: 'Sample Rum 30 ml', stock: 'Sample Rum', qty: 45 }]);
@@ -102,11 +102,26 @@ describe('Make recipes', () => {
     expect(busy.claudeNote).toContain('Claude is busy');
     expect(busy.proposals.find((x: any) => x.menuItem === 'Sample Collins').lines).toEqual([]);
 
+    // Ask Claude for one drink: its recipe comes back for the screen, reusing an ingredient the screen already proposes.
+    const collins = busy.proposals.find((x: any) => x.menuItem === 'Sample Collins').menuItemId;
+    mocked.mockReset();
+    mocked.mockResolvedValue({ model: 'claude-opus-5-5', data: { drinks: [{ n: 1, menuItem: 'Sample Collins', note: '', lines: [
+      { stock: 'Sample Gin', qty: 60, unit: 'ml', isNew: true, packName: 'bottle', packSize: 750 },
+      { stock: 'Soda', qty: 1, unit: 'pcs', isNew: true, packName: 'pcs', packSize: 1 },
+    ] }] } });
+    const one = await ok(owner.post(`${B}/stock/recipes/ask`, { menuItemId: collins, peg: 30, large: 60, glass: 150, newItems: [{ key: 'new:pcs:soda', name: 'Soda', unit: 'pcs', packName: 'pcs', packSize: 1 }] }));
+    expect(one.proposal).toMatchObject({ menuItemId: collins, source: 'claude', check: true, lines: [{ newKey: 'new:ml:sample gin', qty: 60 }, { newKey: 'new:pcs:soda', qty: 1 }] });
+    expect(one.newItems).toEqual([{ key: 'new:ml:sample gin', name: 'Sample Gin', unit: 'ml', packName: 'bottle', packSize: 750 }]);
+    expect((await q('SELECT count(*) AS n FROM recipes WHERE menu_item_id = ?', collins))[0].n).toBe(0);
+    mocked.mockRejectedValue(new OcrError(429, 'Claude is busy right now. Try again in a minute.'));
+    expect((await owner.post(`${B}/stock/recipes/ask`, { menuItemId: collins })).status).toBe(429);
+
     // Someone else's drink or stock item, or a cashier: refused, nothing changes.
     const other = await setupBusiness();
     expect((await owner.post(`${B}/stock/recipes/apply`, { recipes: [{ menuItemId: other.items['Beer 650 ml'], lines: [{ stockItemId: rum, qty: 1 }] }] })).status).toBe(404);
     const theirs = (await other.ok(other.owner.post(`${other.B}/stock/items`, { name: 'Their Rum', unit: 'ml', packSize: 750 }))).id;
     expect((await owner.post(`${B}/stock/recipes/apply`, { recipes: [{ menuItemId: bottle, lines: [{ stockItemId: theirs, qty: 1 }] }] })).status).toBe(400);
     expect((await counter.post(`${B}/stock/recipes/suggest`, {})).status).toBe(403);
+    expect((await owner.post(`${B}/stock/recipes/ask`, { menuItemId: other.items['Beer 650 ml'] })).status).toBe(404);
   });
 });

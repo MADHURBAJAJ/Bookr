@@ -576,3 +576,7 @@ input.in.mkqty { width: 84px; flex: 0 0 84px; text-align: right; }
 .tag-new, .tag-check { display: inline-block; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 1px 8px; margin-left: 4px; }
 .tag-new { background: var(--go-tint); color: var(--go-dark); border: 1px solid var(--go-line); }
 .tag-check { background: var(--warn-tint); color: var(--warn); border: 1px solid var(--warn-line); }
+.ibtn.ok { color: var(--go-dark); }
+.ibtn.ok:hover { background: var(--go-tint); border-color: var(--go-line); }
+tr.mksaved td { color: var(--quiet); }
+.savedtag { display: inline-block; font-size: 13px; font-weight: 700; color: var(--go-dark); }

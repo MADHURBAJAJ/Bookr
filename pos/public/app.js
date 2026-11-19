@@ -107,6 +107,8 @@ const ICON = {
   edit: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`,
   trash: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>`,
   off: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.9 17.9A10 10 0 0 1 12 20C5 20 1 12 1 12a18 18 0 0 1 5.1-5.9M9.9 4.2A9 9 0 0 1 12 4c7 0 11 8 11 8a18 18 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2"/><path d="M1 1l22 22"/></svg>`,
+  check: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>`,
+  skip: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>`,
   on: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
 };
 const iconBtn = (act, id, icon, label, cls = '') => html`<button class="ibtn ${cls}" type="button" data-act="${act}" data-id="${id}" title="${label}" aria-label="${label}">${ICON[icon]}</button>`;
@@ -1450,32 +1452,44 @@ function makeRecipesTab() {
       <div><button class="btn pri" type="submit" data-act="mkRun" data-submit>Make recipes</button></div></form></section>`;
   if (!ui.mk) return form;
   const r = ui.mk;
-  const ready = r.proposals.filter((x) => x.lines.length);
-  const rest = r.proposals.filter((x) => !x.lines.length);
+  const live = r.proposals.filter((x) => !x.skipped);
+  const ready = live.filter((x) => x.lines.length);
+  const rest = live.filter((x) => !x.lines.length);
+  const skipped = r.proposals.filter((x) => x.skipped);
+  const open = ready.filter((x) => !x.saved);
   const stockName = (l) => (l.newKey ? (ui.mkNew[l.newKey]?.name ?? r.newItems.find((n) => n.key === l.newKey)?.name) : ui.st.items.find((i) => i.id === l.stockItemId)?.name) ?? '?';
   const unitOf = (l) => (l.newKey ? r.newItems.find((n) => n.key === l.newKey)?.unit : ui.st.items.find((i) => i.id === l.stockItemId)?.unit) ?? '';
-  const ticked = ready.filter((x) => ui.mkSel.includes(x.menuItemId));
-  const usedNew = r.newItems.filter((n) => ticked.some((x) => x.lines.some((l) => l.newKey === n.key)));
+  const ticked = open.filter((x) => ui.mkSel.includes(x.menuItemId));
+  const usedNew = r.newItems.filter((n) => open.some((x) => x.lines.some((l) => l.newKey === n.key)));
+  const tickedNew = usedNew.filter((n) => ticked.some((x) => x.lines.some((l) => l.newKey === n.key)));
+  const row = (x) => x.saved
+    ? html`<tr class="mksaved"><td class="selcol"></td><td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
+        <td data-label="Takes from stock">${x.lines.map((l) => html`<div>${l.qty} ${unitOf(l)} ${stockName(l)}</div>`)}</td><td data-label="How"><span class="savedtag">Saved ✓</span></td><td class="act"></td></tr>`
+    : html`<tr class="${ui.mkSel.includes(x.menuItemId) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mkSel" data-id="${x.menuItemId}" aria-label="Tick ${x.menuItem}" ${ui.mkSel.includes(x.menuItemId) ? 'checked' : ''}></td>
+        <td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
+        <td data-label="Takes from stock">${x.lines.map((l, i) => html`<div class="mkline"><input class="in mkqty" inputmode="numeric" data-act-change="mkQty" data-id="${x.menuItemId}" data-i="${i}" value="${l.qty}" aria-label="${x.menuItem}: amount of ${stockName(l)}"><span class="small">${unitOf(l)}</span>
+          <span>${stockName(l)}</span>${l.newKey ? html`<span class="tag-new">new</span>` : ''}</div>`)}</td>
+        <td data-label="How">${DRINK_KIND[x.kind]} · ${x.check ? html`<span class="tag-check">please check</span>` : html`<span class="small quiet">${x.source === 'claude' ? 'suggested by Claude' : 'from the name'}</span>`}${x.note ? html`<div class="small quiet">${x.note}</div>` : ''}</td>
+        <td class="act"><div class="irow">${iconBtn('mkSaveOne', x.menuItemId, 'check', `Save recipe for ${x.menuItem}`, 'ok')}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`;
   return html`${form}
     <section class="panel">${errorBox()}${r.claudeNote ? html`<div class="msg warn" role="status">${r.claudeNote}</div>` : ''}
-      <h2>${plural(ready.length, 'drink')} with a proposed recipe</h2>
-      ${ready.length ? html`<p class="small quiet">Amounts can be changed before approving. “Please check” means Claude suggested it, or the name was not clear enough to be sure.</p>
+      <h2>${plural(ready.length, 'drink')} with a proposed recipe${ready.length > open.length ? html` <span class="small quiet">· ${ready.length - open.length} saved</span>` : ''}</h2>
+      ${ready.length ? html`<p class="small quiet">Change amounts, then save a drink with its tick button, or tick several and approve them together. “Please check” means Claude suggested it, or the name was not clear enough to be sure.</p>
       <div class="bulkbar" style="position:static;box-shadow:none"><strong>${plural(ticked.length, 'drink')} ticked</strong>
         <button class="btn pri" type="button" data-act="mkApply" ${ticked.length ? '' : 'disabled'}>Approve ticked recipes</button>
-        ${usedNew.length ? html`<span class="small quiet">Also makes ${plural(usedNew.length, 'new stock item')} (below)</span>` : ''}</div>
-      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mkSelAll" aria-label="Tick every drink" ${ticked.length === ready.length ? 'checked' : ''}></th><th>Drink</th><th>Takes from stock (one serving)</th><th>How</th></tr></thead><tbody>
-        ${ready.map((x) => html`<tr class="${ui.mkSel.includes(x.menuItemId) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mkSel" data-id="${x.menuItemId}" aria-label="Tick ${x.menuItem}" ${ui.mkSel.includes(x.menuItemId) ? 'checked' : ''}></td>
-          <td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td>
-          <td data-label="Takes from stock">${x.lines.map((l, i) => html`<div class="mkline"><input class="in mkqty" inputmode="numeric" data-act-change="mkQty" data-id="${x.menuItemId}" data-i="${i}" value="${l.qty}" aria-label="${x.menuItem}: amount of ${stockName(l)}"><span class="small">${unitOf(l)}</span>
-            <span>${stockName(l)}</span>${l.newKey ? html`<span class="tag-new">new</span>` : ''}</div>`)}</td>
-          <td data-label="How">${DRINK_KIND[x.kind]} · ${x.check ? html`<span class="tag-check">please check</span>` : html`<span class="small quiet">${x.source === 'claude' ? 'suggested by Claude' : 'from the name'}</span>`}${x.note ? html`<div class="small quiet">${x.note}</div>` : ''}</td></tr>`)}</tbody></table></div>` : html`<p class="quiet">Every bar drink that could be worked out already has a recipe.</p>`}
-      ${usedNew.length ? html`<h2>New stock items to make</h2><p class="small quiet">Made only for the ticked drinks. Check the name and how it is bought; the price is added when you receive it.</p>
+        ${tickedNew.length ? html`<span class="small quiet">Also makes ${plural(tickedNew.length, 'new stock item')} (below)</span>` : ''}</div>
+      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mkSelAll" aria-label="Tick every drink not saved yet" ${open.length && ticked.length === open.length ? 'checked' : ''}></th><th>Drink</th><th>Takes from stock (one serving)</th><th>How</th><th></th></tr></thead><tbody>
+        ${ready.map(row)}</tbody></table></div>` : html`<p class="quiet">No drink here has a proposed recipe.</p>`}
+      ${usedNew.length ? html`<h2>New stock items to make</h2><p class="small quiet">Each is made when the first drink using it is saved. Check the name and how it is bought; the price is added when you receive it.</p>
         <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Counted in</th><th>Bought as</th><th class="num">Units in one</th></tr></thead><tbody>
           ${usedNew.map((n) => html`<tr><td><input class="in" data-act-change="mkNewName" data-key="${n.key}" value="${ui.mkNew[n.key]?.name ?? n.name}" aria-label="Name of new stock item ${n.name}"></td><td>${n.unit}</td><td>${n.packName}</td>
             <td class="num"><input class="in mkqty" inputmode="numeric" data-act-change="mkNewPack" data-key="${n.key}" value="${ui.mkNew[n.key]?.packSize ?? n.packSize}" aria-label="${n.name}: ${n.unit} in one ${n.packName}"></td></tr>`)}</tbody></table></div>` : ''}
-      ${rest.length ? html`<details style="margin-top:12px"><summary>${plural(rest.length, 'drink')} left for you (${rest.filter((x) => x.kind === 'skip').length} not drinks)</summary>
-        <div class="sums">${rest.map((x) => html`<div><span>${x.menuItem} <span class="small quiet">${x.category}</span></span><span class="small quiet">${x.note || DRINK_KIND[x.kind]}</span></div>`)}</div>
-        <p class="small quiet">Add these on <a href="#/stock/items">Items and recipes</a>.</p></details>` : ''}
+      ${rest.length ? html`<h2 style="margin-top:16px">${plural(rest.length, 'drink')} left for you</h2>
+        <p class="small quiet">The name was not enough. Ask Claude for one (a fraction of a rupee, always check it), skip it, or add it by hand on <a href="#/stock/items">Items and recipes</a>.</p>
+        <div class="scroll"><table class="t cards"><thead><tr><th>Drink</th><th>Why</th><th></th></tr></thead><tbody>
+          ${rest.map((x) => html`<tr><td data-label="Drink"><strong>${x.menuItem}</strong><div class="small quiet">${x.category}</div></td><td data-label="Why" class="small quiet">${x.note || DRINK_KIND[x.kind]}</td>
+            <td class="act"><div class="row" style="justify-content:flex-end">${x.kind === 'skip' && x.note.startsWith('Not a drink') ? '' : html`<button class="btn" type="button" data-act="mkAsk" data-id="${x.menuItemId}">Ask Claude</button>`}${iconBtn('mkSkip', x.menuItemId, 'skip', `Skip ${x.menuItem} for now`)}</div></td></tr>`)}</tbody></table></div>` : ''}
+      ${skipped.length ? html`<p class="small quiet" style="margin-top:12px">${plural(skipped.length, 'drink')} skipped for now: ${skipped.map((x) => x.menuItem).join(', ')}. <button class="btn ghost" type="button" data-act="mkUnskip">Show them again</button></p>` : ''}
     </section>`;
 }
 actions.mkRun = async () => {
@@ -1483,25 +1497,51 @@ actions.mkRun = async () => {
   try { localStorage.setItem(POUR_KEY, JSON.stringify(pours)); } catch { /* this visit only */ }
   ui.error = null;
   ui.mk = await api('POST', `${B()}/stock/recipes/suggest`, { ...pours, claude: !!ui.pClaude });
+  ui.mkPours = pours;
   ui.mkNew = {};
   // Ticked to start: worked out from the name with nothing to check. Claude's and doubtful ones wait for a person.
   ui.mkSel = ui.mk.proposals.filter((x) => x.lines.length && !x.check).map((x) => x.menuItemId);
   rerender();
 };
+const mkFind = (id) => ui.mk.proposals.find((x) => x.menuItemId === id);
 actions.mkSel = (d, el) => { const s = new Set(ui.mkSel); if (el.checked) s.add(d.id); else s.delete(d.id); ui.mkSel = [...s]; rerender(); };
-actions.mkSelAll = (_d, el) => { ui.mkSel = el.checked ? ui.mk.proposals.filter((x) => x.lines.length).map((x) => x.menuItemId) : []; rerender(); };
-actions.mkQty = (d, el) => { const p = ui.mk.proposals.find((x) => x.menuItemId === d.id); p.lines[Number(d.i)].qty = int(el.value); };
+actions.mkSelAll = (_d, el) => { ui.mkSel = el.checked ? ui.mk.proposals.filter((x) => x.lines.length && !x.saved && !x.skipped).map((x) => x.menuItemId) : []; rerender(); };
+actions.mkQty = (d, el) => { mkFind(d.id).lines[Number(d.i)].qty = int(el.value); };
 actions.mkNewName = (d, el) => { ui.mkNew[d.key] = { ...ui.mkNew[d.key], name: el.value.trim() }; };
 actions.mkNewPack = (d, el) => { ui.mkNew[d.key] = { ...ui.mkNew[d.key], packSize: int(el.value) }; };
-actions.mkApply = async () => {
-  const chosen = ui.mk.proposals.filter((x) => x.lines.length && ui.mkSel.includes(x.menuItemId));
+actions.mkSkip = (d) => { mkFind(d.id).skipped = true; ui.mkSel = ui.mkSel.filter((x) => x !== d.id); ui.error = null; rerender(); };
+actions.mkUnskip = () => { for (const x of ui.mk.proposals) x.skipped = false; rerender(); };
+/** Saves these drinks' recipes (with any new stock items they need) and marks them saved, without reloading the page. */
+async function mkSave(chosen) {
   const bad = chosen.find((x) => x.lines.some((l) => !(l.qty > 0)));
   if (bad) throw new Error(`${bad.menuItem}: type a whole number above zero for each amount.`);
   const keys = new Set(chosen.flatMap((x) => x.lines.map((l) => l.newKey)).filter(Boolean));
   const newItems = ui.mk.newItems.filter((n) => keys.has(n.key)).map((n) => ({ ...n, name: ui.mkNew[n.key]?.name || n.name, packSize: ui.mkNew[n.key]?.packSize ?? n.packSize }));
   const r = await api('POST', `${B()}/stock/recipes/apply`, { newItems, recipes: chosen.map((x) => ({ menuItemId: x.menuItemId, lines: x.lines.map(({ stockItemId, newKey, qty }) => ({ stockItemId, newKey, qty })) })) });
-  flash = { kind: 'ok', text: `${plural(r.recipes, 'recipe')} saved${r.stockItemsCreated ? `, and ${plural(r.stockItemsCreated, 'new stock item')} made` : ''}. Add bottle prices when you next receive stock, so costs show in the report.` };
-  route();
+  // A new stock item now exists: every other drink using it points at it, and it is no longer "new".
+  for (const n of newItems) {
+    const id = r.made[n.key];
+    if (!id) continue;
+    if (!ui.st.items.some((i) => i.id === id)) ui.st.items.push({ id, name: n.name, unit: n.unit, packName: n.packName, packSize: n.packSize, active: true, byStore: {}, total: 0, valuePaise: 0 });
+    for (const p of ui.mk.proposals) for (const l of p.lines) if (l.newKey === n.key) { delete l.newKey; l.stockItemId = id; }
+    ui.mk.newItems = ui.mk.newItems.filter((x) => x.key !== n.key);
+  }
+  for (const x of chosen) x.saved = true;
+  ui.mkSel = ui.mkSel.filter((id) => !chosen.some((x) => x.menuItemId === id));
+  ui.error = null;
+  flash = { kind: 'ok', text: `${chosen.length === 1 ? `${chosen[0].menuItem}: recipe saved` : `${plural(r.recipes, 'recipe')} saved`}${r.stockItemsCreated ? `, with ${plural(r.stockItemsCreated, 'new stock item')}` : ''}. Add bottle prices when you next receive stock, so costs show in the report.` };
+  rerender();
+}
+actions.mkSaveOne = (d) => mkSave([mkFind(d.id)]);
+actions.mkApply = () => mkSave(ui.mk.proposals.filter((x) => x.lines.length && !x.saved && !x.skipped && ui.mkSel.includes(x.menuItemId)));
+actions.mkAsk = async (d) => {
+  const r = await api('POST', `${B()}/stock/recipes/ask`, { menuItemId: d.id, ...(ui.mkPours ?? {}), newItems: ui.mk.newItems });
+  const i = ui.mk.proposals.findIndex((x) => x.menuItemId === d.id);
+  ui.mk.proposals[i] = r.proposal;
+  ui.mk.newItems = [...ui.mk.newItems, ...r.newItems.filter((n) => !ui.mk.newItems.some((x) => x.key === n.key))];
+  ui.error = null;
+  flash = { kind: r.proposal.lines.length ? 'ok' : 'warn', text: r.proposal.lines.length ? `${r.proposal.menuItem}: Claude suggested a recipe. Check it in the list above, then save it.` : `${r.proposal.menuItem}: ${r.proposal.note || 'Claude had no recipe for this one.'}` };
+  rerender();
 };
 actions.stHandover = async () => { ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`); rerender(); };
 actions.stReceive = async () => {

@@ -9,7 +9,7 @@ import { audit, clock, event, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
 import { z } from 'zod';
 import { askClaude, OcrError, readWithClaude } from '../../../src/claude';
-import { cocktailInstructions, propose, type Pours, type StockLite } from '../bar-recipes';
+import { cocktailInstructions, propose, type NewStock, type Pours, type Proposal, type StockLite } from '../bar-recipes';
 
 export const stockRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -135,24 +135,60 @@ stockRoutes.put(`${B}/stock/recipes/:menuItemId`, requireAction('stock.edit'), a
 // ---------- Make recipes: proposals for bar drinks without one, from their names (and Claude for cocktails). Saves nothing.
 const CocktailReading = z.object({
   drinks: z.array(z.object({
+    n: z.number().int(),
     menuItem: z.string(),
     note: z.string(),
     lines: z.array(z.object({ stock: z.string(), qty: z.number().int(), unit: z.enum(['ml', 'pcs', 'g']), isNew: z.boolean(), packName: z.string(), packSize: z.number().int() })),
   })),
 });
 const MAX_COCKTAILS = 60;
+const pourSizes = (data: Record<string, unknown>): Pours => ({ peg: whole(data.peg ?? 30, 'Peg size', 5, 200), large: whole(data.large ?? 60, 'Large peg size', 5, 400), glass: whole(data.glass ?? 150, 'Glass of wine', 50, 500) });
+const loadStock = async (db: DB, bid: string): Promise<StockLite[]> =>
+  (await all<{ id: string; name: string; unit: string; pack_size: number }>(db, 'SELECT id, name, unit, pack_size FROM stock_items WHERE business_id = ? AND active = 1 ORDER BY name', bid))
+    .map((x) => ({ id: x.id, name: x.name, unit: x.unit, packSize: x.pack_size }));
+const drinkKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** Claude's recipes for these drinks, into their proposals (matched by number, else by name). Throws OcrError. */
+async function fillWithClaude(env: AppEnv['Bindings'], ask: Proposal[], stock: StockLite[], pours: Pours, newItems: Map<string, NewStock>) {
+  const r = await askClaude(env, cocktailInstructions(ask.map((p) => ({ name: p.menuItem, category: p.category })), stock, pours), CocktailReading);
+  ask.forEach((p, i) => {
+    const d = r.data.drinks.find((x) => x.n === i + 1 && drinkKey(x.menuItem) === drinkKey(p.menuItem))
+      ?? r.data.drinks.find((x) => drinkKey(x.menuItem) === drinkKey(p.menuItem)) ?? r.data.drinks.find((x) => x.n === i + 1);
+    p.source = 'claude';
+    p.check = true;
+    p.lines = [];
+    if (!d) { p.note = 'Claude gave no recipe for this one.'; return; }
+    p.note = d.note;
+    for (const l of d.lines) {
+      if (l.qty <= 0 || l.qty > 5000) continue;
+      const name = l.stock.trim().slice(0, 80);
+      if (!name) continue;
+      const have = stock.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      if (have) {
+        if (have.unit !== l.unit) continue;
+        if (!p.lines.some((x) => x.stockItemId === have.id)) p.lines.push({ stockItemId: have.id, qty: l.qty, label: `${l.qty} ${l.unit}` });
+        continue;
+      }
+      // A new ingredient, or one the name rules already proposed (same name and unit): one stock item either way.
+      const key = [...newItems.values()].find((x) => x.unit === l.unit && x.name.toLowerCase() === name.toLowerCase())?.key ?? `new:${l.unit}:${name.toLowerCase()}`;
+      if (!newItems.has(key)) newItems.set(key, { key, name, unit: l.unit, packName: (l.packName || 'pack').slice(0, 20), packSize: Math.min(Math.max(1, l.packSize || 1), 100_000) });
+      if (!p.lines.some((x) => x.newKey === key)) p.lines.push({ newKey: key, qty: l.qty, label: `${l.qty} ${l.unit}` });
+    }
+    p.lines = p.lines.slice(0, 20);
+    if (!p.lines.length && !p.note) p.note = 'Claude gave no ingredients for this one.';
+  });
+}
 
 stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
   const data = await body(c);
-  const pours: Pours = { peg: whole(data.peg ?? 30, 'Peg size', 5, 200), large: whole(data.large ?? 60, 'Large peg size', 5, 400), glass: whole(data.glass ?? 150, 'Glass of wine', 50, 500) };
-  const [menu, stockRows] = await Promise.all([
+  const pours = pourSizes(data);
+  const [menu, stock] = await Promise.all([
     all<{ id: string; name: string; category: string; open_price: number }>(db, `SELECT id, name, category, open_price FROM menu_items m
       WHERE business_id = ? AND active = 1 AND station = 'bar' AND NOT EXISTS (SELECT 1 FROM recipes r WHERE r.menu_item_id = m.id) ORDER BY category, name`, bid),
-    all<{ id: string; name: string; unit: string; pack_size: number }>(db, 'SELECT id, name, unit, pack_size FROM stock_items WHERE business_id = ? AND active = 1 ORDER BY name', bid),
+    loadStock(db, bid),
   ]);
-  const stock: StockLite[] = stockRows.map((x) => ({ id: x.id, name: x.name, unit: x.unit, packSize: x.pack_size }));
   const { proposals, newItems } = propose(menu.map((m) => ({ id: m.id, name: m.name, category: m.category, openPrice: !!m.open_price })), stock, pours);
 
   // Cocktails and mocktails: Claude suggests, in this bar's pours, with its stock where it can.
@@ -162,28 +198,7 @@ stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), asyn
     const ask = cocktails.slice(0, MAX_COCKTAILS);
     if (cocktails.length > MAX_COCKTAILS) claudeNote = `Claude suggested the first ${MAX_COCKTAILS} cocktails; press Make recipes again after approving them for the rest.`;
     try {
-      const r = await askClaude(c.env, cocktailInstructions(ask.map((p) => ({ name: p.menuItem, category: p.category })), stock, pours), CocktailReading);
-      for (const p of ask) {
-        const d = r.data.drinks.find((x) => x.menuItem.trim().toLowerCase() === p.menuItem.trim().toLowerCase());
-        p.source = 'claude';
-        p.check = true;
-        if (!d) { p.note = 'Claude gave no recipe for this one.'; continue; }
-        p.note = d.note;
-        for (const l of d.lines) {
-          if (l.qty <= 0 || l.qty > 5000) continue;
-          const name = l.stock.trim().slice(0, 80);
-          const have = stock.find((x) => x.name.toLowerCase() === name.toLowerCase());
-          if (have) {
-            if (have.unit !== l.unit) continue;
-            if (!p.lines.some((x) => x.stockItemId === have.id)) p.lines.push({ stockItemId: have.id, qty: l.qty, label: `${l.qty} ${l.unit}` });
-            continue;
-          }
-          const key = `new:${l.unit}:${name.toLowerCase()}`;
-          if (!newItems.has(key)) newItems.set(key, { key, name, unit: l.unit, packName: (l.packName || 'pack').slice(0, 20), packSize: Math.min(Math.max(1, l.packSize || 1), 100_000) });
-          if (!p.lines.some((x) => x.newKey === key)) p.lines.push({ newKey: key, qty: l.qty, label: `${l.qty} ${l.unit}` });
-        }
-        p.lines = p.lines.slice(0, 20);
-      }
+      await fillWithClaude(c.env, ask, stock, pours, newItems);
     } catch (e) {
       if (!(e instanceof OcrError)) throw e;
       claudeNote = `${e.message} Cocktails are left for you to add by hand.`;
@@ -193,6 +208,32 @@ stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), asyn
   // Only the new stock items some proposal still uses.
   const used = new Set(proposals.flatMap((p) => p.lines.map((l) => l.newKey)).filter(Boolean));
   return c.json({ pours, proposals, newItems: [...newItems.values()].filter((n) => used.has(n.key)), claudeNote });
+});
+
+// One drink to Claude, from the Make recipes screen ("Ask Claude" on a drink the name did not explain). Saves nothing.
+stockRoutes.post(`${B}/stock/recipes/ask`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  const pours = pourSizes(data);
+  const m = await one<{ id: string; name: string; category: string; open_price: number }>(db,
+    "SELECT id, name, category, open_price FROM menu_items WHERE id = ? AND business_id = ? AND active = 1", data.menuItemId, bid);
+  if (!m) fail(404, 'Drink not found.');
+  const stock = await loadStock(db, bid);
+  const p: Proposal = { menuItemId: m.id, menuItem: m.name, category: m.category, kind: 'cocktail', source: 'claude', lines: [], note: '', check: true };
+  const newItems = new Map<string, NewStock>();
+  // The screen's own new items, so an ingredient it already proposes is reused rather than proposed twice.
+  if (Array.isArray(data.newItems)) for (const n of (data.newItems as Record<string, unknown>[]).slice(0, 500)) {
+    if (typeof n.key === 'string' && typeof n.name === 'string' && ['ml', 'pcs', 'g'].includes(n.unit as string)) newItems.set(n.key, { key: n.key, name: n.name, unit: n.unit as NewStock['unit'], packName: String(n.packName ?? 'pack'), packSize: Number(n.packSize) || 1 });
+  }
+  const before = new Set(newItems.keys());
+  try {
+    await fillWithClaude(c.env, [p], stock, pours, newItems);
+  } catch (e) {
+    if (!(e instanceof OcrError)) throw e;
+    fail(e.status, e.message);
+  }
+  return c.json({ proposal: p, newItems: [...newItems.values()].filter((n) => !before.has(n.key) && p.lines.some((l) => l.newKey === n.key)) });
 });
 
 // The approved proposals: new stock items made first, then each drink's recipe set whole. All or nothing, one audit entry.
@@ -249,7 +290,8 @@ stockRoutes.post(`${B}/stock/recipes/apply`, requireAction('stock.edit'), async 
     ]),
     audit(db, bid, c.get('staff').id, 'recipe.auto', 'recipes', `${sets.length} drinks`, null, { stockItemsCreated: createdList, recipes: sets }),
   ]);
-  return c.json({ ok: true, recipes: sets.length, stockItemsCreated: createdList.length });
+  // made: each new item's key → the stock item it became, so the screen points other drinks at it.
+  return c.json({ ok: true, recipes: sets.length, stockItemsCreated: createdList.length, made: Object.fromEntries(made) });
 });
 
 // Goods received into a store, with the vendor's invoice: quantities in packs, price per pack (it becomes the item's last price).
