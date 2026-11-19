@@ -151,9 +151,10 @@ const drinkKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
 type Detail = 'major' | 'all';
 const detailOf = (v: unknown): Detail => (v === 'all' ? 'all' : 'major');
 /** The question for Claude: cocktails in the bar's pours, or kitchen dishes at the chosen detail. */
-const promptFor = (kind: 'bar' | 'kitchen', ask: Proposal[], stock: StockLite[], pours: Pours, detail: Detail) => {
+const promptFor = (kind: 'bar' | 'kitchen', ask: Proposal[], stock: StockLite[], pours: Pours, detail: Detail, planned: Map<string, NewStock>) => {
   const list = ask.map((p) => ({ name: p.menuItem, category: p.category }));
-  return kind === 'kitchen' ? kitchenInstructions(list, stock, detail) : cocktailInstructions(list, stock, pours);
+  const plan = [...planned.values()];
+  return kind === 'kitchen' ? kitchenInstructions(list, stock, detail, plan) : cocktailInstructions(list, stock, pours, plan);
 };
 
 /** Claude's recipes for these items, into their proposals (matched by number, else by name). Throws OcrError. */
@@ -225,7 +226,7 @@ stockRoutes.post(`${B}/stock/recipes/suggest`, requireAction('stock.edit'), asyn
     const ask = group.slice(0, MAX_COCKTAILS);
     if (group.length > MAX_COCKTAILS) notes.push(`Claude suggested the first ${MAX_COCKTAILS} ${what}; save those, then press Make recipes again for the rest.`);
     try {
-      await fillWithClaude(c.env, ask, stock, promptFor(kind, ask, stock, pours, detail), newItems);
+      await fillWithClaude(c.env, ask, stock, promptFor(kind, ask, stock, pours, detail, newItems), newItems);
     } catch (e) {
       if (!(e instanceof OcrError)) throw e;
       failed = e.message;
@@ -266,7 +267,7 @@ stockRoutes.post(`${B}/stock/recipes/ask`, requireAction('stock.edit'), async (c
   }
   const before = new Set(newItems.keys());
   try {
-    await fillWithClaude(c.env, [p], stock, promptFor(kitchen ? 'kitchen' : 'bar', [p], stock, pours, detailOf(data.detail)), newItems);
+    await fillWithClaude(c.env, [p], stock, promptFor(kitchen ? 'kitchen' : 'bar', [p], stock, pours, detailOf(data.detail), newItems), newItems);
   } catch (e) {
     if (!(e instanceof OcrError)) throw e;
     fail(e.status, e.message);

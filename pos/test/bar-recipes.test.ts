@@ -72,6 +72,11 @@ describe('Make recipes', () => {
     const r = await ok(owner.post(`${B}/stock/recipes/suggest`, { peg: 30, large: 60, glass: 150, claude: true }));
     expect(mocked).toHaveBeenCalledTimes(1);
     expect(String(mocked.mock.calls[0][1])).toContain('Sample Mojito');
+    // Claude is told the bar's pours and the brands this same run is adding, and to use one form per ingredient.
+    const asked = String(mocked.mock.calls[0][1]);
+    expect(asked).toContain('a peg (30 ml) or a large peg (60 ml)');
+    expect(asked).toContain('whole limes (pcs), not lime juice');
+    expect(asked).toMatch(/Stock items being added in this same setup[\s\S]*- Beer \(pcs\)/);
     const p = (id: string) => r.proposals.find((x: any) => x.menuItemId === id);
     expect(p(peg).lines).toEqual([{ stockItemId: rum, qty: 30, label: '30 ml' }]);
     expect(p(bottle).lines).toEqual([{ stockItemId: rum, qty: 750, label: '1 bottle (750 ml)' }]);
@@ -143,6 +148,7 @@ describe('Make recipes', () => {
     expect(mocked).toHaveBeenCalledTimes(1);
     const prompt = String(mocked.mock.calls[0][1]);
     expect(prompt).toContain('MAJOR ingredients');
+    expect(prompt).toContain('ONE form and ONE name per ingredient');
     expect(prompt).toContain('1. Sample Paneer Tikka — Starters');
     expect(prompt).not.toContain('Gulab Jamun');                               // a section not chosen
     expect(r.proposals.map((x: any) => x.menuItem).sort()).toEqual(['Sample Paneer Tikka', 'Sample Rum 30 ml']);
