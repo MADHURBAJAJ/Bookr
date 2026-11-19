@@ -186,6 +186,9 @@ root.addEventListener('input', (ev) => {
   const el = ev.target;
   if (el.dataset.model) {
     ui[el.dataset.model] = el.type === 'checkbox' ? el.checked : el.value;
+    // data-live="name" redraws only when that check's answer changes; a bare data-live redraws on every key.
+    const check = LIVE_CHECKS[el.dataset.live];
+    if (check) { const v = check(); if ((ui.liveSeen?.[el.dataset.model] ?? false) === v) return; ui.liveSeen = { ...ui.liveSeen, [el.dataset.model]: v }; }
     if (el.dataset.live !== undefined) refocus(el.dataset.model, () => rerender());
   }
 });
@@ -196,6 +199,10 @@ root.addEventListener('change', (ev) => {
 });
 root.addEventListener('submit', (ev) => { ev.preventDefault(); const b = ev.target.querySelector('[data-submit]'); if (b) b.click(); });
 let rerender = () => {};
+const LIVE_CHECKS = {
+  // Admin, Add a restaurant: the form changes only when the email does or stops belonging to an owner already here.
+  knownOwner: () => { const e = (ui.rOwnerEmail ?? '').trim().toLowerCase(); return !!e && (ui.rests ?? []).some((r) => r.owners.some((o) => o.email.toLowerCase() === e)); },
+};
 /** Repaints while typing without losing the field being typed in. */
 function refocus(model, paintNow) {
   const was = root.querySelector(`[data-model="${model}"]`);
@@ -1721,7 +1728,7 @@ async function adminScreen() {
         <tbody>${ui.rests.length ? ui.rests.map(row) : html`<tr><td colspan="6" class="quiet">No restaurants yet. Add the first one below.</td></tr>`}</tbody></table></div></section>
       <section class="panel"><form class="grid3"><h2 style="grid-column:1/-1">Add a restaurant</h2>
         <label class="f">Restaurant name<input class="in" data-model="rName" value="${ui.rName ?? ''}"></label>
-        <label class="f">Owner's email<input class="in" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" data-model="rOwnerEmail" data-live value="${ui.rOwnerEmail ?? ''}"></label>
+        <label class="f">Owner's email<input class="in" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" data-model="rOwnerEmail" data-live="knownOwner" value="${ui.rOwnerEmail ?? ''}"></label>
         ${known ? html`<p class="small quiet" style="grid-column:1/-1">This owner already has a Bookr POS login: the new restaurant is added to it and they keep their password.</p>
           <label class="f">Copy the menu from (optional)<select class="in" data-model="rCopy"><option value="">Start with an empty menu</option>${copyChoices.map((r) => html`<option value="${r.id}" ${ui.rCopy === r.id ? 'selected' : ''}>${r.name}</option>`)}</select></label>`
         : html`<label class="f">Owner's name<input class="in" data-model="rOwnerName" value="${ui.rOwnerName ?? ''}"></label>
