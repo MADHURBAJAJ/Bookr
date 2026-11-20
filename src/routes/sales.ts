@@ -785,7 +785,7 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/cash', requireRole('sales.v
   // Before saving, the same sum from what Save would book now (approved 14 Nov 2026). The figures above stay final-only,
   // as other screens use them.
   const draftShould = !k.confirmed && k.openingPaise !== null
-    ? k.openingPaise + cb.plannedCashPaise! - k.expensesPaise - k.shortagePaise - k.depositedPaise + k.drawnPaise : null;
+    ? k.openingPaise + cb.plannedCashPaise! - k.expensesPaise - k.shortagePaise - k.depositedPaise + k.drawnPaise + k.lateInPaise - k.lateOutPaise : null;
   const draft = k.confirmed ? null : { cashSalesPaise: cb.plannedCashPaise, shouldBePaise: draftShould,
     differencePaise: draftShould !== null && k.countedPaise !== null ? k.countedPaise - draftShould : null };
   const [pair, reverse, prevK, here] = await Promise.all([cashPairOf(db, bid, day, k), shortageToReverse(db, bid, day, k), cashCheck(db, bid, addDays(day, -1)),
@@ -825,6 +825,33 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/cash/pair', requireRole('s
   }
   await db.batch(statements);
   return c.json({ ok: true, note });
+});
+
+// An earlier day's cash bill paid in cash here (approved 20 Nov 2026): the sale stays on its own day, its cash moves to
+// this day's drawer. Recorded, with Undo; nothing is booked twice.
+salesRoutes.post('/businesses/:businessId/shifts/:day/cash/paid-late', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = dayParam(c.req.param('day'));
+  const b = await body(c);
+  const k = await cashCheck(db, bid, day);
+  const x = k.lateOffers.find((o) => o.comparisonId === b.comparisonId);
+  if (!x) fail(409, 'This line is not an earlier bill paid in cash here any more.');
+  const r = await stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'cash.paid_late', 'bill_comparisons', ?, NULL, ?, ?)`, bid, c.get('user').id, x!.comparisonId,
+    JSON.stringify({ day, fromDay: x!.fromDay, comparisonId: x!.comparisonId, linkedId: x!.linkedId, billNo: x!.billNo, amountPaise: x!.amountPaise, swAmountPaise: x!.swAmountPaise }), now()).run();
+  return c.json({ ok: true, auditId: r.meta.last_row_id });
+});
+salesRoutes.post('/businesses/:businessId/cash/paid-late/:auditId/undo', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = Number(c.req.param('auditId'));
+  const a = await one<{ id: number }>(db, `SELECT a.id FROM audit_log a WHERE a.business_id = ? AND a.id = ? AND a.action = 'cash.paid_late'
+    AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'cash.paid_late_undone' AND x.row_id = CAST(a.id AS TEXT))`, bid, id);
+  if (!a) fail(404, 'Nothing to undo.');
+  await stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'cash.paid_late_undone', 'audit_log', ?, NULL, '{}', ?)`, bid, c.get('user').id, String(id), now()).run();
+  return c.json({ ok: true });
 });
 
 // A difference that is a writing mistake (the cash is there) is accepted with a note. Owner or Accountant.

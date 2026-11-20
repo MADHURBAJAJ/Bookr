@@ -21,8 +21,8 @@ export function cashMoveOf(r: { direction: string; kind: string; description: st
 export const LEAVE_OUT_REASONS = ['Cancelled in POS', 'Paid another way', "In another shift's register", 'Test bill'] as const;
 
 async function summaryFor(db: DB, businessId: string, day: string) {
-  return one<{ upload_id: string; opening_paise: number | null; cash_in_hand_paise: number | null; status: string }>(db, `
-    SELECT upload_id, opening_paise, cash_in_hand_paise, status FROM cash_summaries
+  return one<{ upload_id: string; opening_paise: number | null; received_paise: number | null; expenses_paise: number | null; cash_in_hand_paise: number | null; status: string }>(db, `
+    SELECT upload_id, opening_paise, received_paise, expenses_paise, cash_in_hand_paise, status FROM cash_summaries
     WHERE business_id = ? AND shift_day = ? AND ${SUMMARY_IN_USE} ORDER BY status = 'approved' DESC, created_at DESC LIMIT 1`, businessId, day);
 }
 
@@ -31,7 +31,7 @@ export function cashCheck(db: DB, businessId: string, day: string) {
 }
 
 async function cashCheckRead(db: DB, businessId: string, day: string) {
-  const [shift, today, yesterday, sales, notInRegister, expenses, shortages, accepted, moved] = await Promise.all([
+  const [shift, today, yesterday, sales, notInRegister, expenses, shortages, accepted, moved, lateRows, offers, registerCash] = await Promise.all([
     one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', businessId, day),
     summaryFor(db, businessId, day),
     summaryFor(db, businessId, addDays(day, -1)),
@@ -53,7 +53,8 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
         -- Only those written in as cash (18 Nov 2026): one added as UPI or card is not a cash sale of this drawer.
         AND EXISTS (SELECT 1 FROM register_payments p WHERE p.register_row_id = r.id AND p.mode = 'cash')
       ORDER BY 2`, businessId, day, businessId, day),
-    one<{ approved: number; waiting: number; waitingPaise: number; waitingUpload: string | null }>(db, `SELECT
+    one<{ approved: number; waiting: number; waitingPaise: number; waitingUpload: string | null; anyUpload: string | null }>(db, `SELECT
+        min(upload_id) AS anyUpload,
         coalesce(sum(CASE WHEN status = 'approved' THEN amount_paise END), 0) AS approved,
         count(CASE WHEN status <> 'approved' THEN 1 END) AS waiting,
         coalesce(sum(CASE WHEN status <> 'approved' THEN amount_paise END), 0) AS waitingPaise,
@@ -69,7 +70,34 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
         coalesce(sum(CASE WHEN json_extract(t.ocr_original, '$.leg') = 'in' THEN t.amount_paise END), 0) AS drawn
       FROM transactions t JOIN accounts a ON a.id = t.account_id
       WHERE t.business_id = ? AND t.shift_day = ? AND t.type = 'transfer' AND a.kind = 'cash'`, businessId, day),
+    // An earlier day's cash bill paid in cash on a later day (approved 20 Nov 2026): the sale stays on its day; its cash
+    // leaves that day's drawer and comes into the later one's.
+    all<{ id: number; after: string; created_at: number; who: string | null }>(db, `SELECT a.id, a.after, a.created_at, u.name AS who FROM audit_log a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = ? AND a.action = 'cash.paid_late' AND (json_extract(a.after, '$.day') = ? OR json_extract(a.after, '$.fromDay') = ?)
+        AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'cash.paid_late_undone' AND x.row_id = CAST(a.id AS TEXT))
+      ORDER BY a.id`, businessId, day, day),
+    // Offered: a line of this day's register, left out, written for an earlier day's cash bill and paid in cash here.
+    all<{ id: string; bill_no: string; linked_id: string; from_day: string; sw_amount_paise: number; cash: number }>(db, `SELECT c.id, c.bill_no, o.id AS linked_id, o.shift_day AS from_day,
+        o.sw_amount_paise, (SELECT coalesce(sum(p.amount_paise), 0) FROM register_payments p WHERE p.register_row_id = c.register_row_id AND p.mode = 'cash') AS cash
+      FROM bill_comparisons c JOIN bill_comparisons o ON o.id = c.linked_to_id
+      WHERE c.business_id = ? AND c.shift_day = ? AND c.decision = 'leave_out' AND c.register_row_id IS NOT NULL AND o.shift_day < c.shift_day AND o.sw_mode = 'cash'
+        AND coalesce((SELECT t.payment_mode FROM transactions t WHERE t.business_id = o.business_id AND t.comparison_id = o.id AND t.type = 'income' LIMIT 1), 'cash') = 'cash'
+      ORDER BY c.bill_no`, businessId, day),
+    // The register's own cash column for the day, to set beside the cash page's "received" (20 Nov 2026).
+    one<{ total: number }>(db, `SELECT coalesce(sum(p.amount_paise), 0) AS total FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id
+      WHERE r.business_id = ? AND r.shift_day = ? AND p.mode = 'cash' AND coalesce(json_extract(r.ocr_original, '$.source'), '') <> 'software_report'`, businessId, day),
   ]);
+  const late = lateRows.map((a) => {
+    const o = JSON.parse(a.after) as { day: string; fromDay: string; comparisonId: string; linkedId: string; billNo: string; amountPaise: number; swAmountPaise: number };
+    return { auditId: a.id, day: o.day, fromDay: o.fromDay, comparisonId: o.comparisonId, linkedId: o.linkedId, billNo: o.billNo, amountPaise: o.amountPaise, swAmountPaise: o.swAmountPaise, by: a.who, at: a.created_at };
+  });
+  const lateIn = late.filter((x) => x.day === day);
+  const lateOut = late.filter((x) => x.fromDay === day);
+  const lateInPaise = lateIn.reduce((t, x) => t + x.amountPaise, 0);
+  const lateOutPaise = lateOut.reduce((t, x) => t + x.amountPaise, 0);
+  const lateOffers = offers.filter((x) => x.cash > 0 && !lateIn.some((l) => l.comparisonId === x.id))
+    .map((x) => ({ comparisonId: x.id, linkedId: x.linked_id, billNo: x.bill_no, fromDay: x.from_day, amountPaise: x.cash, swAmountPaise: x.sw_amount_paise }));
 
   // Cash in the software, counted as cash (Use software), but the register wrote it another way and has no cash on it
   // (18 Nov 2026): to the drawer the same as a bill not in the register, so it explains a short count too.
@@ -85,13 +113,15 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
   const openingFrom = yesterday?.cash_in_hand_paise != null ? 'previous' : today?.opening_paise != null ? 'page' : null;
   const counted = today?.cash_in_hand_paise ?? null;
   const shortageTotal = shortages.reduce((t, x) => t + x.amount_paise, 0);
-  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortageTotal - moved!.deposited + moved!.drawn : null;
+  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortageTotal - moved!.deposited + moved!.drawn + lateInPaise - lateOutPaise : null;
   const difference = shouldBe !== null && counted !== null ? counted - shouldBe : null;
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
   // Changed to card or UPI after saving (20 Nov 2026): the sale is not cash any more, so it is not one of this drawer's bills.
   const notInRegisterRows = notInRegister.filter((c) => c.tx_mode == null || c.tx_mode === 'cash').map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note,
     paidAt: c.paid_at, closeNote: c.close_note,
     late: c.late ? { day: c.late.split('|')[0], amountPaise: c.late.split('|')[1] ? Number(c.late.split('|')[1]) : null, mode: c.late.split('|')[2] || null } : null,
+    // Paid in cash on a later day (20 Nov 2026): its cash came into that day's drawer.
+    cashLate: lateOut.find((l) => l.linkedId === c.id) ?? null,
     // Written late as card or UPI (18 Nov 2026): the money came on that day, not into this drawer.
     paidLater: null as Awaited<ReturnType<typeof paidLaterLines>>[number] | null }));
   if (!confirmed && notInRegisterRows.some((c) => c.late?.mode === 'card' || c.late?.mode === 'upi')) {
@@ -118,7 +148,7 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
   if (difference !== null && difference < 0 && !settled) {
     let left = -difference;
     const bills = [];
-    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note && (x.tx_mode == null || x.tx_mode === 'cash')), ...notCash.filter((x) => !x.close_note)];
+    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note && (x.tx_mode == null || x.tx_mode === 'cash') && !lateOut.some((l) => l.linkedId === x.id)), ...notCash.filter((x) => !x.close_note)];
     for (const c of waiting.sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
       if (left <= 0) break;
       const part = Math.min(left, c.sw_amount_paise);
@@ -143,11 +173,16 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
     expensesWaitingPaise: expenses!.waitingPaise,
     // The day's own expense page, so its Review link opens it (18 Nov 2026), not the list of every day.
     expensesWaitingUploadId: expenses!.waitingUpload,
+    expensesUploadId: expenses!.anyUpload,
     shortagePaise: shortageTotal,
     // Each shortage booked on this shift, and the bill it was booked for (18 Nov 2026).
     shortages: shortages.map((x) => { let o: { comparisonId?: string; billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
       return { id: x.id, amountPaise: x.amount_paise, note: x.narration, comparisonId: o.comparisonId ?? null, billNo: o.billNo ?? null }; }),
     depositedPaise: moved!.deposited,
+    lateIn, lateOut, lateInPaise, lateOutPaise, lateOffers,
+    // The cash page as written, and the register's cash column (20 Nov 2026): set beside Bookr's sums.
+    page: today ? { openingPaise: today.opening_paise, receivedPaise: today.received_paise, expensesPaise: today.expenses_paise, cashInHandPaise: today.cash_in_hand_paise } : null,
+    registerCashPaise: registerCash!.total,
     drawnPaise: moved!.drawn,
     shouldBePaise: shouldBe,
     countedPaise: counted,
