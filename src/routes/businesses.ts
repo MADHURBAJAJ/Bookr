@@ -20,9 +20,13 @@ businessRoutes.post('/businesses', async (c) => {
 });
 
 businessRoutes.get('/businesses/:businessId', requireRole('business.view'), async (c) => {
-  const b = await one<{ id: string; name: string; fyStart: string; isDemo: number }>(c.env.DB,
-    'SELECT id, name, fy_start AS fyStart, is_demo AS isDemo FROM businesses WHERE id = ?', c.get('businessId'));
-  return c.json({ ...b, isDemo: b?.isDemo === 1, role: c.get('role') });
+  // cashBooks (20 Nov 2026): the business keeps cashier cash books (a school); myBooks: how many the caller keeps.
+  const b = await one<{ id: string; name: string; fyStart: string; isDemo: number; cashBooks: number; myBooks: number }>(c.env.DB,
+    `SELECT id, name, fy_start AS fyStart, is_demo AS isDemo,
+      (SELECT count(*) FROM branches WHERE business_id = businesses.id) AS cashBooks,
+      (SELECT count(*) FROM accounts WHERE business_id = businesses.id AND kind = 'cash' AND cashier_user_id = ?) AS myBooks
+    FROM businesses WHERE id = ?`, c.get('user').id, c.get('businessId'));
+  return c.json({ ...b, isDemo: b?.isDemo === 1, cashBooks: (b?.cashBooks ?? 0) > 0, myBooks: b?.myBooks ?? 0, role: c.get('role') });
 });
 
 businessRoutes.patch('/businesses/:businessId', requireRole('business.edit'), async (c) => {

@@ -656,3 +656,32 @@ tr.rd-red td { background: #FCEBEB; }
 .ub-table .tiny { color: var(--muted); }
 .ub-tot td { font-weight: 600; border-bottom: 0; }
 @media (max-width: 560px) { .ub-mets { grid-template-columns: 1fr; } }
+
+/* School cash book (20 Nov 2026): made for the phone first. */
+.cb { display: flex; flex-direction: column; gap: 12px; max-width: 560px; }
+.cb-card { padding: 14px 16px; gap: 0; }
+.cb-card > .list-row:first-child { border-top: 0; }
+.cb-day { display: flex; gap: 8px; align-items: center; }
+.cb-day .btn.off { opacity: .4; pointer-events: none; display: inline-flex; align-items: center; }
+.cb-day a.btn { display: inline-flex; align-items: center; }
+.cb-pick { position: relative; flex: 1; text-align: center; font-weight: 500; font-size: 16px; border: 1px solid var(--field); border-radius: 8px; min-height: 44px; display: flex; align-items: center; justify-content: center; background: #fff; cursor: pointer; }
+.cb-pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+.cb-hd { font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 0; text-transform: none; }
+.cb-line { align-items: flex-start; flex-wrap: nowrap; }
+.cb-amt { white-space: nowrap; text-align: right; }
+.cb-amt.in { color: var(--ok); }
+.cb-amt.out { color: var(--danger); }
+.cb-total { font-weight: 600; }
+.cb-gap { padding: 8px 10px; border-radius: 8px; font-size: 14px; margin-top: 6px; }
+.cb-gap.ok { background: var(--ok-bg); color: var(--ok); }
+.cb-gap.bad { background: #FEE2E2; color: #7F1D1D; }
+.cb-wait { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; }
+.cb-wait + .cb-wait { border-top: 1px solid var(--line-soft); }
+.cb-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.cb-actions .btn { padding: 0 6px; }
+.cb-branch { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 10px; }
+.cb-book { color: inherit; text-decoration: none; }
+@media (max-width: 760px) {
+  .cb-actions { position: sticky; bottom: 8px; background: var(--ground); padding: 6px 0; z-index: 2; }
+}
+.menu .menu-install { width: calc(100% - 24px); margin: 4px 12px 8px; min-height: 36px; }
