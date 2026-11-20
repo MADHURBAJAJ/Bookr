@@ -54,8 +54,11 @@ export async function creditChecks(db: DB, businessId: string, row: { id: string
   ]);
   const t2 = twice[0];
   // The same payer, where the bank shows both; otherwise only the amount and the minutes.
-  const paidTwice = t2 && (!row.vpa || !t2.vpa || row.vpa === t2.vpa)
-    ? { id: t2.id, postedAt: t2.postedAt, minutes: Math.round(Math.abs(t2.postedAt - row.posted_at) / 60000), samePayer: !!row.vpa && row.vpa === t2.vpa, status: t2.status } : null;
+  // xxz555@axl and xxz555@ybl are one payer on two UPI apps (20 Nov 2026): the name before @ is compared.
+  const who = (v: string | null) => (v ?? '').toLowerCase().split('@')[0];
+  const same = !!row.vpa && !!t2?.vpa && who(row.vpa) === who(t2.vpa);
+  const paidTwice = t2 && (!row.vpa || !t2.vpa || same)
+    ? { id: t2.id, postedAt: t2.postedAt, minutes: Math.round(Math.abs(t2.postedAt - row.posted_at) / 60000), samePayer: same, status: t2.status } : null;
   return { day, owed, paidTwice, parts };
 }
 

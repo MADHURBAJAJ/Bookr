@@ -375,6 +375,18 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   };
   const openCredits = credits.filter((c) => !settled.has(c.id) && c.postedAt >= w.from && c.postedAt < w.to).map((c) => ({ id: c.id, amountPaise: c.amount, postedAt: c.postedAt, accountName: detail.get(c.id)?.accountName ?? null, remark: detail.get(c.id)?.remark ?? null, label: c.label ?? null, noBill: noBillIds.has(c.id),
     ...whyNow(c.id, c.amount) }));
+  // More "could be" credits than the bills they could be (approved 20 Nov 2026): six ₹ 30 credits and one ₹ 30 bill.
+  // The credits nearest a bill's time keep "could be"; the rest are extra and can be booked.
+  const byAmount = new Map<number, typeof openCredits>();
+  for (const c of openCredits) if (c.why === 'unpaired') byAmount.set(c.amountPaise, [...(byAmount.get(c.amountPaise) ?? []), c]);
+  for (const [, cs] of byAmount) {
+    const names = new Set(cs.flatMap((c) => c.bills.map((b) => b.billNo ?? '')));
+    if (cs.length <= names.size) continue;
+    const times = cs.flatMap((c) => c.bills.map((b) => b.paidAt).filter((t): t is number => t != null));
+    const gap = (c: { postedAt: number }) => (times.length ? Math.min(...times.map((t) => Math.abs(t - c.postedAt))) : 0);
+    const keep = new Set([...cs].sort((a, b) => gap(a) - gap(b) || a.postedAt - b.postedAt).slice(0, names.size).map((c) => c.id));
+    for (const c of cs) if (!keep.has(c.id)) Object.assign(c, { why: 'extra' as const, bills: [], spare: { credits: cs.length, bills: names.size } });
+  }
   // An amount on one side of a bill whose software and register disagree (not a discount or tip both agree on) may be
   // that bill's real payment: not an extra.
   const disagree = view.comparisons.filter((c) => c.software && c.register && c.software.amountPaise !== c.register.amountPaise
@@ -394,7 +406,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit,
     // Money with no bill can be booked before saving too (11 Nov 2026): booking a bank line does not wait for the shift.
     noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill' || (c.why === 'extra' && !splitSides.has(c.amountPaise))).map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark,
-      extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0, otherSide: otherSides.get(c.amountPaise) ?? [] })),
+      extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0, spare: (c as { spare?: { credits: number; bills: number } }).spare ?? null, otherSide: otherSides.get(c.amountPaise) ?? [] })),
     unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
     choices, save: { blockers: view.blockers, canSave: view.canConfirm }, numberSlips: view.numberSlips,
     // Old POS bills still to decide (approved 9 Nov 2026): ticked for "Use register" in one click; a row not reviewed yet waits.

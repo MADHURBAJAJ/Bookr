@@ -78,4 +78,22 @@ describe('extra credits on Money with no bill', () => {
     const after = (await h.reconcile()).noBill.find((x: any) => x.creditId === other);
     expect(after?.otherSide).toEqual([{ billNo: '2610311', softwarePaise: 3200, registerPaise: 3000, chose: 'register' }]);
   });
+
+  it('more "could be" credits than bills: the nearest keeps Pair, the rest are extra and bookable (20 Nov 2026)', async () => {
+    const h = await hotel();
+    await h.account('HUF A', 'UPI XOXO');
+    // One ₹30 bill at 4 pm waits for a credit (no credit near its time); four ₹30 credits came later.
+    await h.software([['2610311', '31 16:00', 'UPI', '30']]);
+    await h.register([{ no: '2610311', amount: '30', pays: [['upi', '30']] }]);
+    const ids = await h.credits([['31 19:00', 30], ['31 17:10', 30], ['31 21:00', 30], ['31 22:30', 30]]);
+    const r = await h.reconcile();
+    const why = (id: string) => r.open.credits.find((x: any) => x.id === id)?.why;
+    expect(why(ids[1]), 'the credit nearest the bill keeps "could be"').toBe('unpaired');
+    const extras = [ids[0], ids[2], ids[3]];
+    expect(extras.map(why)).toEqual(['extra', 'extra', 'extra']);
+    expect(r.noBill.map((x: any) => x.creditId).sort()).toEqual([...extras].sort());
+    expect(r.noBill[0].spare).toEqual({ credits: 4, bills: 1 });
+    const res = await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: extras.map((rowId) => ({ rowId, billType: 'fnb', item: 'tea' })) });
+    expect(res.json).toMatchObject({ booked: 3 });
+  });
 });
