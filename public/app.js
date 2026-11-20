@@ -3415,6 +3415,7 @@ function expensePanel(biz, u, heads, parties = []) {
           <td style="text-align:right">${r.status === 'draft' ? html`<button class="btn plain" type="button" data-eedit="${r.id}">Edit</button>` : ''}</td>
         </tr>`; })}</tbody>
       </table></div>
+      <div><button class="btn plain" type="button" id="eaddline">+ Add a line</button></div>
       <div class="form-row" style="justify-content:space-between">
         <div class="note">Rows add up to ₹ ${money(sum)}. ${u.pageWrittenTotalPaise == null ? 'Enter the total written on the page to check it.' : u.pageWrittenTotalPaise === sum ? html`<span class="ok-msg">Matches the written total.</span>` : html`<span class="error">The page says ₹ ${money(u.pageWrittenTotalPaise)}.</span>`}</div>
         <form id="ptotal" class="form-row" style="align-items:flex-end"><div class="field"><label for="pt">Total written on the page (₹)</label><input id="pt" name="pageWrittenTotal" class="mono" value="${u.pageWrittenTotalPaise == null ? '' : rupeesForInput(u.pageWrittenTotalPaise)}"></div><button class="btn plain" type="submit">Save total</button></form>
@@ -3430,7 +3431,7 @@ function expensePanel(biz, u, heads, parties = []) {
         <datalist id="vendorlist">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
         <div class="note" id="vendorhint">Name the party and its head once; next time the head fills in by itself.</div>
         <div class="form-msg"></div>
-        <div class="form-row"><button class="btn" type="submit">Save line</button><button class="btn danger" type="button" id="edel" hidden>Delete line</button></div>
+        <div class="form-row"><button class="btn" type="submit">Save line</button><button class="btn plain" type="button" id="enew" hidden>Cancel, add a new line</button><button class="btn danger" type="button" id="edel" hidden>Delete line</button></div>
       </form>
       ${drafts.length ? html`<div class="form-row" style="justify-content:space-between;border-top:1px solid var(--line-soft);padding-top:12px">
         <div class="note">${drafts.length - ready.length ? `${drafts.length - ready.length} line${drafts.length - ready.length > 1 ? 's need' : ' needs'} a head before approval.` : 'All draft lines have a head.'}</div>
@@ -3494,7 +3495,7 @@ function wireExpense(biz, u, parties = []) {
     if (back.done) form.headId.value = back.done;
     lastHead = form.headId.value;
     onVendor();
-    if (editing) { document.getElementById('etitle').textContent = `Edit line ${u.rows.find((x) => x.id === editing)?.lineNo ?? ''}`; document.getElementById('edel').hidden = false; }
+    if (editing) { document.getElementById('etitle').textContent = `Edit line ${u.rows.find((x) => x.id === editing)?.lineNo ?? ''}`; document.getElementById('edel').hidden = false; document.getElementById('enew').hidden = false; }
     form.scrollIntoView({ block: 'center' });
     (back.done ? form.querySelector('button[type=submit]') : form.headId).focus();
   }
@@ -3514,8 +3515,22 @@ function wireExpense(biz, u, parties = []) {
     onVendor();
     document.getElementById('etitle').textContent = `Edit line ${r.lineNo}`;
     document.getElementById('edel').hidden = false;
+    document.getElementById('enew').hidden = false;
     form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }));
+  // Add a line (20 Nov 2026): back to an empty form at any time, also after pressing Edit on a line.
+  const newLine = () => {
+    editing = null;
+    form.reset();
+    onVendor();
+    document.getElementById('etitle').textContent = 'Add a line from the page';
+    document.getElementById('edel').hidden = true;
+    document.getElementById('enew').hidden = true;
+    form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    form.narration.focus();
+  };
+  document.getElementById('eaddline')?.addEventListener('click', newLine);
+  document.getElementById('enew')?.addEventListener('click', newLine);
   app.querySelectorAll('[data-quickhead]').forEach((b) => b.addEventListener('click', async () => {
     const r = u.rows.find((x) => x.id === b.dataset.quickhead);
     try {
