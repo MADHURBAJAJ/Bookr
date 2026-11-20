@@ -534,6 +534,7 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   // Before saving, the trial card picture (approved 10 Nov 2026): what Save would match, and what needs a person.
   const [slips, cards] = await Promise.all([slipsP, status === 'confirmed' ? cashOverP!.then((over) => shiftCards(db, bid, day, over, offered)) : trialCardsP!]);
   // What the card side explains is told there, and counted once (approved 9 Nov 2026).
+  let cardCredits = 0;
   if (cards && !('trial' in cards) && 'left' in r) {
     const w = shiftWindow(day);
     const cr = new Set(cards.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).map((x) => x.id));
@@ -546,6 +547,7 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
       return rows.reduce((t, x) => t + (x?.a ?? 0), 0);
     };
     const [crPaise, blPaise] = await Promise.all([sumOf('bank_rows', [...cr]), sumOf('transactions', [...bl])]);
+    cardCredits = crPaise;
     r.strip.creditsLeft -= cr.size; r.strip.creditsLeftPaise -= crPaise;
     r.strip.billsLeft -= bl.size; r.strip.billsLeftPaise -= blPaise;
     r.noBill = r.noBill.filter((x) => !cr.has(x.creditId));
@@ -579,7 +581,8 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   // check-out): told before a credit is booked with no bill (approved 11 Nov 2026).
   const next = addDays(day, 1);
   const nextShift = { day: next, saved: shifts.some((x) => x.day === next && x.status === 'confirmed') };
-  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards, byUpi, paidLater, paidLaterDone, nextShift });
+  const upiBook = await upiBankVsBookr(db, bid, day, r.strip, cardCredits);
+  return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards, byUpi, paidLater, paidLaterDone, nextShift, upiBook });
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
@@ -1508,3 +1511,37 @@ bankRoutes.delete('/businesses/:businessId/rules/:ruleId', requireRole('rules.ed
 });
 
 
+
+/** UPI: the bank against Bookr (approved 20 Nov 2026). Every UPI credit of the shift's window (8 am to 8 am), split into
+ * this shift's bills, other days' bills, card-tab money, sales booked with no bill and what is not booked yet; and this
+ * shift's bills paid by a credit outside the window. */
+async function upiBankVsBookr(db: D1Database, bid: string, day: string, strip: { upiSalesPaise: number; bills: number; billsLeftPaise: number; billsLeft: number; creditsLeft: number; creditsLeftPaise: number }, cardPaise: number) {
+  const w = shiftWindow(day);
+  const [tot, other, outside] = await Promise.all([
+    all<{ status: string; n: number; a: number }>(db, `SELECT status, count(*) AS n, sum(amount_paise) AS a FROM bank_rows
+      WHERE business_id = ? AND kind = 'upi_in' AND direction = 'CR' AND status != 'ignored' AND posted_at >= ? AND posted_at < ? GROUP BY status`, bid, w.from, w.to),
+    all<{ id: string; amountPaise: number; postedAt: number; bills: string; day: string }>(db, `SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt,
+        group_concat(t.bill_no, ' + ') AS bills, max(t.shift_day) AS day
+      FROM bank_rows r JOIN bank_matches m ON m.bank_row_id = r.id JOIN transactions t ON t.id = m.transaction_id
+      WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'matched' AND r.posted_at >= ? AND r.posted_at < ?
+      GROUP BY r.id HAVING sum(t.shift_day = ?) = 0 ORDER BY r.posted_at`, bid, w.from, w.to, day),
+    all<{ id: string; amountPaise: number; postedAt: number; bills: string }>(db, `SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt,
+        group_concat(t.bill_no, ' + ') AS bills
+      FROM transactions t JOIN bank_matches m ON m.transaction_id = t.id JOIN bank_rows r ON r.id = m.bank_row_id
+      WHERE t.business_id = ? AND t.shift_day = ? AND t.payment_mode = 'upi' AND r.kind = 'upi_in' AND (r.posted_at < ? OR r.posted_at >= ?)
+      GROUP BY r.id ORDER BY r.posted_at`, bid, day, w.from, w.to),
+  ]);
+  const totalPaise = tot.reduce((t, x) => t + (x.a ?? 0), 0);
+  const booked = tot.find((x) => x.status === 'booked');
+  const otherPaise = other.reduce((t, x) => t + x.amountPaise, 0);
+  const forBillsPaise = totalPaise - (booked?.a ?? 0) - strip.creditsLeftPaise - otherPaise - cardPaise;
+  return {
+    totalPaise, payments: tot.reduce((t, x) => t + x.n, 0),
+    forBillsPaise,
+    other: other.map((x) => ({ amountPaise: x.amountPaise, postedAt: x.postedAt, bills: x.bills, day: x.day })),
+    cardPaise,
+    bookedPaise: booked?.a ?? 0, booked: booked?.n ?? 0,
+    leftPaise: strip.creditsLeftPaise, left: strip.creditsLeft,
+    elsewhere: outside.map((x) => ({ amountPaise: x.amountPaise, postedAt: x.postedAt, bills: x.bills, day: shiftDayOf(x.postedAt) })),
+  };
+}

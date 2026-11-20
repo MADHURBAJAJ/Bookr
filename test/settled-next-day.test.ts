@@ -64,6 +64,8 @@ describe('a bill settled the next day', () => {
     await h.confirm('2026-11-01');
     const m = await sql`SELECT t.bill_no FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.settlement_id = ${pay} ORDER BY t.bill_no`;
     expect(m.map((x: any) => x.bill_no)).toEqual(['2610317', '2611012']);
+    // 31 Oct's Card tab tells the bill as paid on 1 Nov's swipe, with the bill beside it (20 Nov 2026).
+    expect((await h.reconcile('2026-10-31')).cards.elsewhere).toEqual([expect.objectContaining({ billNo: '2610317', amountPaise: 163400, day: '2026-11-01', withBills: ['2611012'] })]);
     // Counted once: 2610317 is a sale of 31 Oct only.
     expect((await sql`SELECT shift_day FROM transactions WHERE bill_no = '2610317' AND type = 'income'`).map((x: any) => x.shift_day)).toEqual(['2026-10-31']);
   });

@@ -122,6 +122,16 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
       const extra = sales.filter((x) => x.bankRowId && x.amountPaise === c.amount_paise).length;
       return { ...credit(c.id), extra, otherSide: otherSides.get(c.amount_paise) ?? [] };
     });
+  // Saved shift (20 Nov 2026): every credit left over can be booked, also one with an unpaid bill of its amount elsewhere.
+  const noBillIds = new Set(noBill.map((x) => x.creditId));
+  // Only the candidate bills are let go, and only bills of other shifts: a side or a group short is still told as such.
+  for (const id of leftCredits.filter((x) => !noBillIds.has(x))) {
+    const c = creditOf.get(id)!;
+    if (sideAmounts.has(c.amount_paise) || nearGroup(c.amount_paise, groupsWaiting.map((g) => g.total))
+      || (sug.candidates.get(id) ?? []).some((k) => k.transactionIds.some((x) => sales.some((y) => y.id === x)))) continue;
+    noBill.push({ ...credit(id), extra: sales.filter((x) => x.bankRowId && x.amountPaise === c.amount_paise).length, otherSide: otherSides.get(c.amount_paise) ?? [] });
+  }
+  noBill.sort((a, b) => a.postedAt - b.postedAt);
 
   const sum = (xs: { amountPaise: number }[]) => xs.reduce((t, x) => t + x.amountPaise, 0);
   const left = sales.filter((s) => !got(s));

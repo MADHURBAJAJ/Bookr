@@ -497,8 +497,20 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   const plans = await plannedLater(db, businessId, noSwipeAll.map((x) => x.transactionId));
   const planned = noSwipeAll.filter((x) => plans.has(x.transactionId)).map((x) => ({ ...x, planned: plans.get(x.transactionId)! }));
   const noSwipe = noSwipeAll.filter((x) => !plans.has(x.transactionId));
+  // Card bills of this shift paid on another shift's swipe (20 Nov 2026): told with the swipe's day and the bills beside it.
+  const inShift = new Set(payments.map((p) => p.id));
+  const away = matchedBills.length ? (await all<CardPayment & { tx_id: string }>(db, `SELECT s.*, m.transaction_id AS tx_id FROM card_matches m JOIN card_settlements s ON s.id = m.settlement_id
+      WHERE m.business_id = ? AND m.transaction_id IN (${matchedBills.map(() => '?').join(',')})`, businessId, ...matchedBills.map((x) => x.id))).filter((x) => !inShift.has(x.id)) : [];
+  const awayWith = away.length ? await all<{ settlement_id: string; bill_no: string | null; tx_id: string }>(db, `SELECT m.settlement_id, t.bill_no, t.id AS tx_id FROM card_matches m
+      JOIN transactions t ON t.id = m.transaction_id WHERE m.business_id = ? AND m.settlement_id IN (${away.map(() => '?').join(',')}) AND t.source = 'software_report'`,
+    businessId, ...away.map((x) => x.id)) : [];
+  const elsewhere = away.map((p) => {
+    const b = matchedBills.find((x) => x.id === p.tx_id)!;
+    return { billNo: b.bill_no, amountPaise: b.amount_paise, payment: pay(p), day: shiftDayOf(p.paid_at),
+      withBills: [...new Set(awayWith.filter((w) => w.settlement_id === p.id && w.tx_id !== p.tx_id).map((w) => w.bill_no ?? ''))] };
+  });
   return {
-    day, covered, bankCovered: bank.covered, explains,
+    day, covered, bankCovered: bank.covered, explains, elsewhere,
     strip: { billsPaise: sum(bills), bills: bills.length, matchedPaise: sum(matchedBills), matched: matchedBills.length, byBookr: done.filter((d) => d.byBookr).length,
       machineCardPaise: purchases.filter((p) => !isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
       machineUpiPaise: purchases.filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),

@@ -642,3 +642,17 @@ tr.rd-red td { background: #FCEBEB; }
 .chip.plan { background: #DBEAFE; color: #1E3A8A; }
 .plan-box { border-left: 3px solid #3B82F6; border-radius: 0 10px 10px 0; }
 .wc-g.blue .wc-gh { color: #1E3A8A; }
+
+/* UPI: the bank against Bookr (20 Nov 2026). */
+.ub-mets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.ub-met { background: var(--bg-soft, #F8FAFC); border-radius: 10px; padding: 10px 12px; }
+.ub-met.warn { background: #FEF3C7; color: #92400E; }
+.ub-met.ok { background: #DCFCE7; color: #166534; }
+.ub-met .tiny { color: inherit; opacity: .85; }
+.ub-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+.ub-table th { font-weight: 500; font-size: 12px; color: var(--muted); text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
+.ub-table td { padding: 8px; border-bottom: 1px solid var(--line-soft); text-align: right; }
+.ub-table th:first-child, .ub-table td:first-child { text-align: left; }
+.ub-table .tiny { color: var(--muted); }
+.ub-tot td { font-weight: 600; border-bottom: 0; }
+@media (max-width: 560px) { .ub-mets { grid-template-columns: 1fr; } }

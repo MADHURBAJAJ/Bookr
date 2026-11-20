@@ -5949,9 +5949,12 @@ function editChip(x) {
   const said = /^(?:Mode differs|Amount differs|Amount and mode differ)[^(]*\(register ([^·]+)· software ([^)]+)\) → used the (register|software)/.exec(t);
   const plain = (m = /^Bill no\. read (\S+) → (\S+)/.exec(t)) ? `Bill no. fixed: ${m[1]} → ${m[2]}`
     : (m = /^Amount read (.+) → (.+)$/.exec(t)) ? `Amount fixed: ${m[1]} → ${m[2]}`
-    : (m = /^Paid by read (.+) → (.+)$/.exec(t)) ? `Paid by changed: ${low(m[1])} → ${low(m[2])}`
+    : (m = /^Paid by read (.+) → (.+)$/.exec(t)) ? `Register read as ${low(m[1])}, corrected to ${low(m[2])}`
     : said ? `Software said ${low(said[2])}, register said ${low(said[1])}: kept ${said[3] === 'register' ? low(said[1]) : low(said[2])}`
+    : /^Missing in the register → used the software/.test(t) ? 'Not in the register: counted from the software'
+    : (m = /^([A-Za-z ]+) → ([A-Za-z ]+)(?: \(.*\))?$/.exec(t)) ? `Changed later: ${low(m[1])} → ${low(m[2])}`
     : null;
+  if (said && low(said[1]) === low(said[2])) return '';
   if (plain) return html`<span class="chip wait" style="font-size:11px" title="${t}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}">${plain}</span>`;
   const [label, cls] = /: to decide$/.test(t) ? ['To decide', 'bad'] : /^Bill no\. read/.test(t) ? ['No. corrected', 'wait'] : /^Amount read/.test(t) ? ['Amount corrected', 'wait']
     : /^Paid by read/.test(t) ? ['Mode corrected', 'wait'] : /old pos/i.test(t) ? ['Old POS', ''] : /used the register/i.test(t) ? ['Register used', '']
@@ -6033,11 +6036,57 @@ function entriesHtml(biz, day, t, mode, cv) {
 
 /** What backs a bill's money; who found it as a chip (20 Nov 2026): Bookr's exact match, or a person's pick. */
 function evidenceHtml(ev) {
-  const m = / · (Bookr matches on save|chosen, matched on save)$/.exec(ev);
+  const m = / · (Bookr matches on save|chosen, matched on save|found by Bookr|picked)$/.exec(ev);
   if (!m) return html`<span style="color:var(--teal)">✓ ${ev}</span>`;
-  return html`<span style="color:var(--teal)">✓ ${ev.slice(0, m.index)}</span> <span class="chip ok" style="font-size:11px">${m[1].startsWith('Bookr') ? 'exact match' : 'you picked'}</span>`;
+  return html`<span style="color:var(--teal)">✓ ${ev.slice(0, m.index)}</span> <span class="chip ok" style="font-size:11px">${/Bookr/.test(m[1]) ? 'exact match' : 'you picked'}</span>`;
 }
 /** Filters and paid-together lines of the payment tables. */
+
+// UPI: the bank against Bookr (approved 20 Nov 2026). Three figures, then every credit of the 8 am to 8 am window split
+// into this shift's bills, other days' bills, sales booked with no bill and what is not booked yet.
+function upiBookHtml(r) {
+  const s = r.strip;
+  const b = r.upiBook;
+  const n = (x, one, many) => `${x} ${x === 1 ? one : many}`;
+  const rp = (p) => `₹ ${money(p).replace(/\.00$/, '')}`;
+  if (!b) return '';
+  const dl = (d) => dayLabel(d).replace(/\s\d{4}$/, '');
+  const elsewhere = b.elsewhere.reduce((t, x) => t + x.amountPaise, 0);
+  const gap = s.upiSalesPaise - b.forBillsPaise;
+  const rest = gap - elsewhere - s.billsLeftPaise;
+  const gapPills = gap === 0 ? [html`<span class="chip ok">${r.confirmed ? 'same' : 'same, on save'}</span>`]
+    : [elsewhere ? html`<span class="chip">${rp(elsewhere)} paid on another day</span>` : '',
+      s.billsLeftPaise ? html`<span class="chip wait">${rp(s.billsLeftPaise)} not in the bank yet</span>` : '',
+      rest ? html`<span class="chip wait">${rp(Math.abs(rest))} apart</span>` : ''];
+  const reconciled = !b.left && !s.billsLeft && !rest;
+  const otherDays = [...new Set(b.other.map((x) => x.day))];
+  const otherLabel = b.other.length === 1 ? html`Paid early for ${dl(b.other[0].day)} <span class="tiny">${b.other[0].bills}</span>`
+    : otherDays.length === 1 ? `For ${dl(otherDays[0])}'s bills` : 'For other days\' bills';
+  const leftAmounts = (() => {
+    const m = new Map();
+    for (const x of r.noBill ?? []) m.set(x.amountPaise, (m.get(x.amountPaise) ?? 0) + 1);
+    return m.size && m.size <= 3 && [...m.values()].some((c) => c > 1) ? [...m].map(([a, c]) => (c > 1 ? `${c} × ${rp(a)}` : rp(a))).join(' + ') : '';
+  })();
+  const why = [
+    b.elsewhere.length ? `Paid on another day: ${b.elsewhere.map((x) => `${x.bills} ${rp(x.amountPaise)} on ${dl(x.day)}`).join(' · ')}` : '',
+    b.other.length > 1 ? `For other days: ${b.other.map((x) => `${x.bills} ${rp(x.amountPaise)} (${dl(x.day)})`).join(' · ')}` : '',
+  ].filter(Boolean);
+  return html`<div class="ub-mets">
+      <div class="ub-met"><div class="tiny">Bank got by UPI</div><div class="amount rec-n">${rp(b.totalPaise)}</div><div class="tiny">${n(b.payments, 'payment', 'payments')}, 8 am to 8 am</div></div>
+      <div class="ub-met"><div class="tiny">UPI bills</div><div class="amount rec-n">${rp(s.upiSalesPaise)}</div><div class="tiny">${n(s.bills, 'bill', 'bills')}${s.billsLeft ? `, ${s.billsLeft} not in the bank yet` : ', all paid'}</div></div>
+      <div class="ub-met ${b.left ? 'warn' : 'ok'}"><div class="tiny">Not booked yet</div><div class="amount rec-n">${rp(b.leftPaise)}</div><div class="tiny">${b.left ? (leftAmounts || n(b.left, 'payment', 'payments')) : 'UPI reconciled'}</div></div>
+    </div>
+    <div class="scroll"><table class="ub-table"><thead><tr><th></th><th>Bank</th><th>Bookr</th><th></th></tr></thead><tbody>
+      <tr><td>UPI bills <span class="tiny">${s.bills}</span></td><td>${rp(b.forBillsPaise)}</td><td>${rp(s.upiSalesPaise)}</td><td>${gapPills}</td></tr>
+      ${b.other.length ? html`<tr><td>${otherLabel}</td><td>${rp(b.other.reduce((t, x) => t + x.amountPaise, 0))}</td><td>on ${otherDays.map(dl).join(', ')}</td><td><span class="chip">ok</span></td></tr>` : ''}
+      ${b.cardPaise ? html`<tr><td>Card machine money</td><td>${rp(b.cardPaise)}</td><td>Card tab</td><td><span class="chip">ok</span></td></tr>` : ''}
+      ${b.booked ? html`<tr><td>Sales with no bill</td><td>${rp(b.bookedPaise)}</td><td>${rp(b.bookedPaise)}</td><td><span class="chip ok">same</span></td></tr>` : ''}
+      ${b.left ? html`<tr><td>Not booked yet <span class="tiny">${leftAmounts || b.left}</span></td><td>${rp(b.leftPaise)}</td><td>—</td><td><button type="button" class="chip wait" style="border:0;cursor:pointer" data-jump="${r.open ? 'trialopen' : 'nobill'}">book below ↓</button></td></tr>` : ''}
+      <tr class="ub-tot"><td>Total</td><td>${rp(b.totalPaise)}</td><td>${rp(s.upiSalesPaise + b.other.reduce((t, x) => t + x.amountPaise, 0) + b.cardPaise + b.bookedPaise)}</td><td>${reconciled ? html`<span class="chip ok">✓ ${r.confirmed ? 'reconciled' : 'on save'}</span>` : b.left ? rp(b.leftPaise) : ''}</td></tr>
+    </tbody></table></div>
+    ${why.map((x) => html`<div class="tiny" style="color:var(--muted);margin-top:6px">${x}</div>`)}`;
+}
+
 function wirePayTables(root) {
   root.querySelectorAll('.paytable').forEach((box) => {
     const show = () => {
@@ -6435,6 +6484,21 @@ async function reconcileView(biz, dayArg) {
     compLook && [`Complimentary: ${compLook} bill${compLook === 1 ? '' : 's'} need${compLook === 1 ? 's' : ''} a look`, 'comp'],
 
   ].filter(Boolean);
+  // A saved shift with nothing waiting (approved 20 Nov 2026): one short card, a line for what waits on earlier days and a
+  // line for each tab with something left, each with its way there. The details stay on their tab.
+  const quietSaved = r.confirmed && !noRegister && !(split.notReceived.length + split.found.length + split.paperwork.length + split.cashWait.length + (split.planned?.length ?? 0));
+  const othersList = (waitPic?.look ?? []).filter((x) => x.day !== day);
+  const otherDays = [...new Set(othersList.map((x) => x.day))];
+  const TAB_NAME = { 'pay:cash': 'Cash', 'pay:upi': 'UPI', 'pay:card': 'Card', comp: 'Complimentary' };
+  const plainLeft = ([t, go]) => (go === 'pay:cash' && cashDiff && !ent.cash.left
+    ? [`Cash is ₹ ${money(Math.abs(cashDiff))} ${cashDiff > 0 ? 'more' : 'less'} than expected`, 'The reason and what to do are on the Cash tab']
+    : [t, '']);
+  const quietSavedHtml = quietSaved ? html`<section class="card" style="gap:0;padding-top:4px;padding-bottom:4px">
+    <div class="list-row" style="padding:10px 0;align-items:center"><span>✓ Nothing waiting on ${dayLabel(day)}${othersList.length ? html`<div class="tiny note">Still waiting from ${otherDays.length === 1 ? dayLabel(otherDays[0]) : 'earlier days'}: ${othersList.slice(0, 3).map((x, i) => html`${i ? ', ' : ''}<span class="mono">${x.billNo}</span> ₹ ${rs(x.amountPaise)} ${MODE_LABELS[x.mode] ?? x.mode ?? ''}${otherDays.length > 1 ? ` (${dayLabel(x.day)})` : ''}`)}${othersList.length > 3 ? ` and ${othersList.length - 3} more` : ''}</div>` : ''}</span>
+      ${othersList.length ? (otherDays.length === 1 ? html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${otherDays[0]}">Open ${dayLabel(otherDays[0])} ›</a>` : biz.actions.includes('reports.view') ? html`<a class="btn plain dchip" href="#/b/${biz.id}/dashboard">Open Today ›</a>` : '') : ''}</div>
+    ${leftLines.map((l) => { const [t, sub] = plainLeft(l); return html`<div class="list-row" style="padding:10px 0;align-items:center;border-top:1px solid var(--line)"><span><span style="color:#B45309">●</span> ${t}${sub ? html`<div class="tiny note">${sub}</div>` : ''}</span>
+      <button type="button" class="btn plain dchip" data-goto="${l[1]}">Open ${TAB_NAME[l[1]] ?? 'tab'} ›</button></div>`; })}
+  </section>` : '';
   // To do (approved 17 Nov 2026): Save at the top and the steps before it, numbered. Each step opens on a click and
   // stays shut otherwise; a step with nothing left is green and shut. Every line has its fix in place.
   const notSame = todoNotSame(day);
@@ -6518,11 +6582,11 @@ async function reconcileView(biz, dayArg) {
       ${x.body && x.left ? html`<div class="todo-body" ${openStep === x.key ? '' : 'hidden'}>${x.body}</div>` : ''}</section>`)}
     ${(r.columnHints ?? []).length >= 3 ? html`<section class="card"><div class="note"><strong>${r.columnHints.length} UPI payments are written under the wrong account's column</strong> this shift
       (the money came into another account). Staff may be using the wrong UPI column: worth a word. Each one is on the UPI tab to change.</div></section>` : ''}
-    <div data-rsec="wait"><div id="waitmsg"></div>${noRegister ? html`<section class="card"><div class="note"><strong>No register rows for this shift.</strong> Read its photos on <a href="${screenHref(biz, 'review', day)}">Register</a>, or bring them in if they are not uploaded. Until then every bill looks missing in the register, so nothing is shown as waiting.</div></section>`
+    <div data-rsec="wait"><div id="waitmsg"></div>${quietSaved ? quietSavedHtml : noRegister ? html`<section class="card"><div class="note"><strong>No register rows for this shift.</strong> Read its photos on <a href="${screenHref(biz, 'review', day)}">Register</a>, or bring them in if they are not uploaded. Until then every bill looks missing in the register, so nothing is shown as waiting.</div></section>`
       : waitCardHtml(biz, day, split, waitPic, { canDecide, confirmed: r.confirmed, canWriteoff: biz.actions.includes('cash.writeoff'), others: othersN })}
       ${oddNumbersHtml(biz, waitPic, canDecide)}</div>
-    <div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
-      ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`;
+    ${quietSaved ? '' : html`<div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
+      ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`}`;
   // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
   const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
   const oneTab = (key, label, n) => html`<button type="button" role="tab" data-rtab1="${key}" class="${curTab === key ? 'on' : ''}" aria-selected="${curTab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : ''}</button>`;
@@ -6553,7 +6617,7 @@ async function reconcileView(biz, dayArg) {
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
       ${paidLaterHtml(biz, r, 'card')}
       ${r.cards?.trial ? trialCardSection(biz, r.cards, biz.actions.includes('bank.link') ? { unbilled: r.unbilledHeads ?? [], income: heads.filter((h) => h.type === 'income') } : null, { entries: ent.card, oldPos: r.oldPos, cv, earlier: earlierCard(r) }) : r.cards ? cardSection(biz, r.cards, heads) : ''}
-      ${entriesHtml(biz, day, withEarlier(ent.card, r), 'card', cv)}
+      ${entriesHtml(biz, day, r.cards?.trial ? withEarlier(ent.card, r) : withSavedCards(ent.card, r.cards), 'card', cv)}
       ${machineUpiLine(r.cards)}
     </div>
     <div data-rpanel="upi" ${tab === 'upi' ? '' : 'hidden'}>
@@ -6568,12 +6632,7 @@ async function reconcileView(biz, dayArg) {
         </div>
         <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/bank?from=${day}&to=${day}&tab=in">Bank</a>
       </div>
-      <div class="rec-strip">
-        <div><div class="tiny">UPI ${r.confirmed ? 'counted' : 'on this shift'}</div><div class="amount rec-n">₹ ${money(s.upiSalesPaise)}</div><div class="tiny">${s.bills} bill${s.bills === 1 ? '' : 's'}</div></div>
-        <div><div class="tiny">${r.confirmed ? 'Matched to the bank' : 'Would match the bank'}</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(s.matchedPaise)}</div></div>
-        <div><div class="tiny">Bills not in the bank yet</div><div class="amount rec-n" style="color:${s.billsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.billsLeftPaise)}</div><div class="tiny">${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}</div></div>
-        <div><div class="tiny">Credits not matched yet</div><div class="amount rec-n" style="color:${s.creditsLeft ? 'var(--danger)' : 'inherit'}">₹ ${money(s.creditsLeftPaise)}</div><div class="tiny">${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'}${s.creditsLeft && covered ? ` · ${s.creditsNoBill ?? 0} with no bill of that amount` : ''}</div></div>
-      </div>
+      ${upiBookHtml(r)}
     </section>
     ${covered ? '' : html`<div class="cmp-warn">⚠ Bank data is not in for the whole shift: the latest line is ${r.coverage.lastBankAt ? when(r.coverage.lastBankAt) : 'missing'}, the shift ends ${when(r.coverage.shiftEnd)}. Sync the bank first; until then, bills with no credit are not flagged.</div>`}
     ${nearSection()}
@@ -7103,6 +7162,18 @@ function paidLaterHtml(biz, r, mode) {
     })}
   </section>`;
 }
+// A saved shift's card bills (20 Nov 2026): a swipe of another day says its day and the bills beside it; each says who found it.
+function withSavedCards(t, k) {
+  if (!k || k.trial) return t;
+  const away = new Map((k.elsewhere ?? []).map((x) => [x.billNo, x]));
+  const found = new Map((k.done ?? []).flatMap((d) => d.bills.map((b) => [b, d.byBookr])));
+  return { ...t, entries: t.entries.map((e) => {
+    const a = away.get(e.billNo);
+    if (a) return { ...e, evidence: `${a.payment.label} ₹${money(a.payment.amountPaise)} on ${dayLabel(a.day)}, ${hhmm(a.payment.paidAt)}${a.withBills.length ? `, with ${a.withBills.join(', ')}` : ''} · picked` };
+    if (e.evidence && found.has(e.billNo)) return { ...e, evidence: `${e.evidence} · ${found.get(e.billNo) ? 'found by Bookr' : 'picked'}` };
+    return e;
+  }) };
+}
 // Earlier-day bills changed to card and paid here (20 Nov 2026): listed with this shift's card bills, tagged with their day.
 const earlierCard = (r) => (r.paidLaterDone ?? []).filter((x) => x.rowMode === 'card');
 function withEarlier(t, r) {
@@ -7497,34 +7568,49 @@ function cardSection(biz, k, heads) {
     <div class="note">The card report is in for this shift and has no payment for this bill.${x.cashFits ? html` <strong>The shift's cash is over by exactly ₹ ${money(x.amountPaise)}</strong>: it was most likely paid in cash.` : ' Was it paid another way?'}</div>
     <div class="form-row" style="gap:6px"><button class="btn ${x.cashFits ? '' : 'plain'}" type="button" style="min-height:36px" data-cardwas="cash" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was cash</button>
       <button class="btn plain" type="button" style="min-height:36px" data-cardwas="upi" data-tx="${x.transactionId}" data-group="${x.groupHead ?? ''}">Was UPI</button></div><div class="form-msg"></div></div>`;
-  const settle = (x) => html`<tr><td>${dayLabel(x.settledOn)}<div class="tiny">${x.payments} payment${x.payments === 1 ? '' : 's'} · merchant ${x.merchantId}</div></td>
+  const settle = (x) => html`<tr><td>${dayLabel(x.settledOn)}<div class="tiny">${x.payments} swipe${x.payments === 1 ? '' : 's'} · merchant ${x.merchantId}</div></td>
     <td class="amount">${money(x.amountPaise)}</td><td class="amount">${money(x.feePaise)}</td><td class="amount">${money(x.gstPaise)}</td><td class="amount"><strong>${money(x.netPaise)}</strong></td>
     <td>${x.bank ? html`<span class="chip ok">${x.bank.byBookr ? 'Settled by Bookr' : 'Settled'}</span><div class="tiny">${when(x.bank.postedAt)} · ${x.bank.accountName}</div>
       <button class="btn plain dchip" type="button" data-cardunsettle="${x.bank.id}">Undo</button>`
-      : !x.ruleSet ? html`<span class="chip wait">No card rule</span><div class="tiny"><a href="#/b/${biz.id}/heads">Set the Card settlement rule</a></div>`
+      : !x.ruleSet ? html`<span class="chip wait">Can't check yet</span>`
       : html`<span class="chip">Waiting for the bank</span><div class="tiny"><a href="#/b/${biz.id}/cards">Card settlements</a></div>`}</td></tr>`;
   return html`<section class="card" style="gap:10px" id="cardsec">
     <div class="lane-h"><h2 style="margin:0">Card machine</h2>${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>`
       : left ? html`<span class="chip wait">${left} left</span>` : (k.planned ?? []).length ? html`<span class="chip plan">${k.planned.length} planned on a later shift</span>` : html`<span class="chip ok">Card reconciled</span>`}</div>
-    <div class="rec-strip">
-      <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
-      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}</div></div>
-      <div><div class="tiny">Matched to machine payments</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.matchedPaise)}</div><div class="tiny">${st.matched} bill${st.matched === 1 ? '' : 's'}${st.byBookr ? ` · ${st.byBookr} by Bookr` : ''}</div></div>
-      <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`}</div></div>
-      <div><div class="tiny">Machine payments with no card bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
-    </div>
+    ${savedStrip(k)}
     ${(k.planned ?? []).length ? html`<div class="rv-cards">${k.planned.map((x) => plannedCardBox(biz, x, k.day))}</div>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
-    ${k.done.length ? html`<details class="cmp-fold"><summary>Done (${k.done.length})</summary><div class="scroll"><table style="min-width:560px"><thead><tr><th>Card payment</th><th style="text-align:right">Amount</th><th>Bill</th><th></th></tr></thead><tbody>
+    ${k.done.length ? html`<details class="cmp-fold"><summary><strong>Swipes matched · ${k.done.length}</strong> <span class="note">· ${[k.done.filter((d) => d.byBookr).length && `${k.done.filter((d) => d.byBookr).length} found by Bookr`, k.done.filter((d) => !d.byBookr).length && `${k.done.filter((d) => !d.byBookr).length} picked`].filter(Boolean).join(', ')}</span></summary><div class="scroll"><table style="min-width:560px"><thead><tr><th>Card payment</th><th style="text-align:right">Amount</th><th>Bill</th><th></th></tr></thead><tbody>
       ${k.done.map((d) => html`<tr><td>${when(d.payment.paidAt)}<div class="tiny">${card(d.payment)}</div></td><td class="amount">${money(d.payment.amountPaise)}</td>
         <td>${d.booked ? 'Booked to a head' : html`<span class="mono">${d.bills.join(' + ')}</span>`}${d.tipPaise ? html`<div class="tiny">₹ ${money(d.tipPaise)} tip</div>` : ''}${d.byBookr ? html` <span class="chip">by Bookr</span>` : ''}</td>
         <td><button class="btn plain dchip" type="button" data-cardunmatch="${d.payment.id}">Undo</button></td></tr>`)}</tbody></table></div></details>` : ''}
-    ${k.settlements.length ? html`<div><strong>Settlement</strong><div class="scroll"><table style="min-width:620px"><thead><tr><th>Settled</th><th style="text-align:right">Gross</th><th style="text-align:right">Fee</th><th style="text-align:right">GST</th><th style="text-align:right">Net</th><th>Bank</th></tr></thead>
-      <tbody>${k.settlements.map(settle)}</tbody></table></div></div>` : ''}
+    ${k.settlements.length ? html`<div><strong>Paid into the bank</strong> <span class="note">· each day the card company pays that day's swipes, less fee and GST</span><div class="scroll"><table style="min-width:620px"><thead><tr><th>Settled</th><th style="text-align:right">Gross</th><th style="text-align:right">Fee</th><th style="text-align:right">GST</th><th style="text-align:right">Net</th><th>Bank</th></tr></thead>
+      <tbody>${k.settlements.map(settle)}</tbody></table></div>
+      ${k.settlements.some((x) => !x.bank && !x.ruleSet) ? html`<div class="tiny note" style="margin-top:4px">Bookr doesn't know which bank account card payouts arrive in, so it can't tick these off or book the fee. Set it once and it works for every day. <a href="#/b/${biz.id}/heads">Set where card payouts arrive ›</a></div>` : ''}</div>` : ''}
     <div id="cardmsg" class="form-msg"></div>
   </section>`;
 }
 
+/** A saved shift's card money in plain words (approved 20 Nov 2026): swiped here, and bills paid on another day's swipe. */
+function savedStrip(k) {
+  const st = k.strip;
+  const got = st.machineCardPaise + st.machineUpiPaise;
+  const away = k.elsewhere ?? [];
+  const awayP = away.reduce((t, x) => t + x.amountPaise, 0);
+  const awayDays = [...new Set(away.map((x) => x.day))];
+  const awayLabel = awayDays.length === 1 ? `Paid on ${dayLabel(awayDays[0])}'s swipe` : 'Paid on other days\' swipes';
+  const met = (label, v, sub, color = 'inherit') => html`<div><div class="tiny">${label}</div><div class="amount rec-n" style="color:${color}">₹ ${money(v)}</div>${sub ? html`<div class="tiny">${sub}</div>` : ''}</div>`;
+  const nSw = k.done.length + (k.needs ?? []).length;
+  const allPaid = !st.noSwipe && st.matched === st.bills;
+  return html`<div class="rec-strip">
+    ${met('Card bills', st.billsPaise, `${st.bills} bill${st.bills === 1 ? '' : 's'}${allPaid ? ', all paid' : ''}`)}
+    ${met('Swiped this shift', got, `${nSw} swipe${nSw === 1 ? '' : 's'}${st.machineUpiPaise ? ` · ₹ ${rs(st.machineUpiPaise)} UPI on the machine` : ''}`)}
+    ${away.length ? met(awayLabel, awayP, html`${away.map((x, i) => html`${i ? ', ' : ''}<span class="mono">${x.billNo}</span>`)}`) : ''}
+    ${st.noSwipe ? met('Card bills with no swipe', st.noSwipePaise, `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}`, 'var(--danger)') : ''}
+    ${st.noBill ? met('Swipes with no bill', st.noBillPaise, `${st.noBill} swipe${st.noBill === 1 ? '' : 's'}`, 'var(--danger)') : ''}
+  </div>
+  ${away.length ? html`<div class="tiny note">₹ ${rs(got)} swiped this shift${st.noBillPaise ? ` (₹ ${rs(st.noBillPaise)} with no bill)` : ''} + ₹ ${rs(awayP)} paid on ${awayDays.length === 1 ? dayLabel(awayDays[0]) : 'other days'} = ₹ ${rs(got - (st.noBillPaise ?? 0) + awayP)}${got - (st.noBillPaise ?? 0) + awayP === st.billsPaise ? ', every card bill' : ''}.</div>` : ''}`;
+}
 function wireCardSection(biz, k, act) {
   const box = document.getElementById('cardsec');
   if (!box || !k) return;
