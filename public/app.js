@@ -3767,7 +3767,15 @@ const CASH_WATCH_DAYS = 2;
  * oneSided: { comparisonId, billNo, amountPaise, mode, side: 'software'|'register', otherDay, oldPos }.
  */
 function waitSplit({ day, rc, cash, oneSided }) {
-  const out = { notReceived: [], found: [], paperwork: [], cashWait: [], closed: [] };
+  const out = { notReceived: [], found: [], paperwork: [], cashWait: [], closed: [], planned: [] };
+  // Planned on a later shift (approved 20 Nov 2026): its money is chosen there, matched when that shift is saved.
+  const planWhy = (p) => `${p.withBills?.length ? `with ${p.withBills.join(', ')} on ` : 'on '}the ${p.label} ₹ ${rs(p.amountPaise)} ${p.kind === 'card' ? 'swipe' : 'credit'}, ${dayLabel(p.day)} ${timeOf(p.at)}`;
+  for (const k of (rc?.fixes ?? []).filter((x) => x.kind === 'planned_later' && x.planned)) {
+    out.planned.push({ billNo: k.billNos.join(' + '), amountPaise: k.amountPaise ?? 0, paidAt: k.paidAt ?? null, mode: 'upi', why: planWhy(k.planned), planned: k.planned });
+  }
+  for (const c of rc?.cards?.planned ?? []) {
+    out.planned.push({ billNo: c.billNo ?? '', amountPaise: c.amountPaise ?? 0, paidAt: c.paidAt ?? null, mode: 'card', why: planWhy(c.planned), planned: c.planned });
+  }
   const bankIn = !!rc?.coverage?.covered;
   const cardsIn = !!rc?.cards?.covered;
   const credits = (rc?.noBill ?? []).filter((c) => c.amountPaise != null);
@@ -3784,7 +3792,7 @@ function waitSplit({ day, rc, cash, oneSided }) {
     if (c.near) out.found.push({ ...x, offer: { amountPaise: c.near.amountPaise, at: c.near.paidAt, label: c.near.label } });
     else out.notReceived.push(x);
   }
-  const listed = new Set([...out.notReceived, ...out.found].flatMap((x) => x.billNo.split(' + ')));
+  const listed = new Set([...out.notReceived, ...out.found, ...out.planned].flatMap((x) => x.billNo.split(' + ')));
   // Cash bills the register does not have: the short count is explained by them, oldest first.
   const diff = cash ? (cash.confirmed ? (cash.settled ? 0 : cash.differencePaise) : cash.draft?.differencePaise ?? null) : null;
   const late = new Map(oneSided.filter((o) => o.otherDay && !o.otherDay.closed).map((o) => [o.comparisonId, o.otherDay]));
@@ -3824,7 +3832,7 @@ function waitSplit({ day, rc, cash, oneSided }) {
 /** The Waiting card of one shift's To do (18 Nov 2026): the four groups, each line with its fix in place. */
 function waitCardHtml(biz, day, sp, waitPic, opts) {
   const sum = (xs) => xs.reduce((t, x) => t + (x.amountPaise ?? 0), 0);
-  const n = sp.notReceived.length + sp.found.length + sp.paperwork.length + sp.cashWait.length;
+  const n = sp.notReceived.length + sp.found.length + sp.paperwork.length + sp.cashWait.length + (sp.planned?.length ?? 0);
   const pic = new Map((waitPic?.look ?? []).filter((x) => x.day === day).map((x) => [x.billNo, x]));
   const canDecide = opts.canDecide;
   const line = (x, extra) => html`<div class="wc-row"><span class="mono">${x.billNo}${drawerBtn(x.billNo.split(' + ')[0], day)}</span><span class="amount">${money(x.amountPaise)}</span>
@@ -3853,6 +3861,8 @@ function waitCardHtml(biz, day, sp, waitPic, opts) {
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Waiting · ${n ? `${n} bill${n === 1 ? '' : 's'}` : 'nothing'}</h2>
       <span class="note">${opts.confirmed ? 'Saved' : 'Before saving: what will wait when saved'}</span></div>
     ${group('red', 'Payment not received', sp.notReceived, sp.notReceived.map((x) => html`${line(x)}${x.mode === 'cash' ? cashActs(x, true) : opts.readOnly ? '' : x.mode === 'upi' && !opts.confirmed ? html`<div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:upi">Fix on the UPI tab ›</button></div>` : savedActs(x)}`))}
+    ${group('blue', 'Planned on a later shift', sp.planned ?? [], (sp.planned ?? []).map((x) => html`${line(x, html` <span class="chip plan">matched when ${dayLabel(x.planned.day)} is saved</span>`)}
+      ${opts.readOnly ? '' : html`<div class="wc-acts"><a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${x.planned.day}?tab=${x.mode === 'card' ? 'card' : 'upi'}">Open ${dayLabel(x.planned.day)} ${x.mode === 'card' ? 'Card' : 'UPI'} tab ›</a></div>`}`))}
     ${group('teal', 'Payment found, to match', sp.found, sp.found.map((x) => html`${line(x, x.offer ? html`<div class="tiny" style="color:var(--teal-ink)">${x.mode === 'card' ? 'Machine payment' : 'Credit'} ₹ ${money(x.offer.amountPaise)} at ${timeOf(x.offer.at)}${x.offer.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(x.offer.amountPaise - x.amountPaise))} ${x.offer.amountPaise > x.amountPaise ? 'more' : 'less'}` : ''}</div>` : '')}
       ${opts.readOnly ? '' : html`<div class="wc-acts"><button type="button" class="btn plain dchip" data-goto="pay:${x.mode === 'card' ? 'card' : 'upi'}">Match on the ${x.mode === 'card' ? 'Card' : 'UPI'} tab ›</button></div>`}`))}
     ${group('amb', 'Cash bill not in the register', sp.cashWait, sp.cashWait.map((x) => html`${line(x, html` <span class="chip wait">day ${Math.max(1, x.age)} of ${CASH_WATCH_DAYS}</span><div class="tiny">Counted as a ${dayLabel(day)} sale. Closes by itself when a later register writes it.</div>`)}${cashActs(x, false)}`))}
@@ -5744,6 +5754,7 @@ const SG_GROUPS = [
   ['same', 'Booked directly earlier', 'money booked before its bill came', ['same_sale']],
   ['nocredit', 'UPI bill, no credit in the bank', 'paid another way, or still on its way', ['no_upi_credit']],
   ['nobill', 'Money with no bill', 'a sale not written down, or money that is not a sale', ['no_bill']],
+  ['planned', 'Planned on a later shift', 'its money is chosen there, matched when that shift is saved', ['planned_later']],
 ];
 const sgParse = (v) => { const m = /₹\s?([\d,]+(?:\.\d+)?)(?:\s·\s(\w+))?/.exec(v ?? ''); return m ? { amt: m[1].replace(/\.00$/, ''), mode: m[2] ?? null } : null; };
 /** A bank-backs button that says what pressing does: the amount counted, or the way it was paid. */
@@ -5856,6 +5867,15 @@ const ENTRY_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', mixed: 'Mixed' };
 /** A change on a bill, as a short chip; the whole text, who and when are on hover (approved 10 Nov 2026). */
 function editChip(x) {
   const t = x.text;
+  const low = (v) => String(v).trim().replace(/\b(Cash|Card)\b/g, (m) => m.toLowerCase());
+  let m;
+  const said = /^(?:Mode differs|Amount differs|Amount and mode differ)[^(]*\(register ([^·]+)· software ([^)]+)\) → used the (register|software)/.exec(t);
+  const plain = (m = /^Bill no\. read (\S+) → (\S+)/.exec(t)) ? `Bill no. fixed: ${m[1]} → ${m[2]}`
+    : (m = /^Amount read (.+) → (.+)$/.exec(t)) ? `Amount fixed: ${m[1]} → ${m[2]}`
+    : (m = /^Paid by read (.+) → (.+)$/.exec(t)) ? `Paid by changed: ${low(m[1])} → ${low(m[2])}`
+    : said ? `Software said ${low(said[2])}, register said ${low(said[1])}: kept ${said[3] === 'register' ? low(said[1]) : low(said[2])}`
+    : null;
+  if (plain) return html`<span class="chip wait" style="font-size:11px" title="${t}${x.by ? ` · ${x.by}` : ''}${x.at ? ` · ${when(x.at)}` : ''}">${plain}</span>`;
   const [label, cls] = /: to decide$/.test(t) ? ['To decide', 'bad'] : /^Bill no\. read/.test(t) ? ['No. corrected', 'wait'] : /^Amount read/.test(t) ? ['Amount corrected', 'wait']
     : /^Paid by read/.test(t) ? ['Mode corrected', 'wait'] : /old pos/i.test(t) ? ['Old POS', ''] : /used the register/i.test(t) ? ['Register used', '']
     : /used the software/i.test(t) ? ['Software used', ''] : /group's discount/i.test(t) ? ['Group discount', ''] : /complimentary/i.test(t) ? ['Complimentary', ''] : /^[A-Za-z ]+ → [A-Za-z ]+/.test(t) ? ['Mode changed', 'wait'] : ['Changed', ''];
@@ -5869,7 +5889,7 @@ function editChip(x) {
 function entriesHtml(biz, day, t, mode, cv) {
   const canDecide = biz.actions.includes('sales.decide');
   const side = (x) => (x ? html`${x.mode ? ENTRY_MODE[x.mode] ?? MODE_LABELS[x.mode] ?? x.mode : 'no mode'}` : html`<em class="note">missing</em>`);
-  const received = (e) => (e.noMode ? html`<span style="color:#92400E">Mode not known: say how it was paid</span>` : e.evidence ? html`<span style="color:var(--teal)">✓ ${e.evidence}</span>`
+  const received = (e) => (e.noMode ? html`<span style="color:#92400E">Mode not known: say how it was paid</span>` : e.evidence ? evidenceHtml(e.evidence)
     : e.state === 'waiting' ? html`<span style="color:#92400E">⏳ ${mode === 'upi' ? 'No bank credit yet' : mode === 'card' ? 'No machine payment yet' : 'Waiting'}</span>`
     : e.state === 'decide' ? html`<span class="note">Decide first</span>` : html`<span class="note">—</span>`);
   const action = (e) => {
@@ -5878,8 +5898,8 @@ function entriesHtml(biz, day, t, mode, cv) {
     return c && !c.decision && c.difference !== 'match' && c.difference !== 'complimentary' ? decideMenuHtml(c, cv) : '';
   };
   const row = (e, inGroup = '') => html`<tr data-pstate="${e.state}" ${inGroup ? html`data-pgroup="${inGroup}" hidden` : ''} class="${e.state === 'decide' ? 'undecided' : ''} ${inGroup ? 'grp-bill' : ''}">
-    <td class="mono"><strong>${e.billNo ?? '—'}</strong>${e.part ? html` <span class="chip" style="font-size:11px">${e.part}</span>` : ''}
-      <div class="tiny">${e.paidAt ? hhmm(e.paidAt) : 'register only'}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${day}">Open row</button>` : ''}</div></td>
+    <td class="mono"><strong>${e.billNo ?? '—'}</strong>${e.part ? html` <span class="chip" style="font-size:11px">${e.part}</span>` : ''}${e.fromDay ? html` <span class="chip plan" style="font-size:11px">${dayLabel(e.fromDay)}</span>` : ''}
+      <div class="tiny">${e.fromDay ? `bill of ${dayLabel(e.fromDay)}` : e.paidAt ? hhmm(e.paidAt) : 'register only'}${e.billNo ? html` · <button type="button" class="linkbtn tiny" data-bill-drawer="${e.billNo}|${e.fromDay ?? day}">Open row</button>` : ''}</div></td>
     <td class="amount">${money(e.amountPaise)}</td>
     <td>${side(e.register)} · ${side(e.software)}${e.edits.length ? html`<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px">${e.edits.map(editChip)}</div>` : ''}</td>
     <td style="white-space:normal">${inGroup ? '' : received(e)}</td></tr>
@@ -5934,6 +5954,12 @@ function entriesHtml(biz, day, t, mode, cv) {
 </details>`;
 }
 
+/** What backs a bill's money; who found it as a chip (20 Nov 2026): Bookr's exact match, or a person's pick. */
+function evidenceHtml(ev) {
+  const m = / · (Bookr matches on save|chosen, matched on save)$/.exec(ev);
+  if (!m) return html`<span style="color:var(--teal)">✓ ${ev}</span>`;
+  return html`<span style="color:var(--teal)">✓ ${ev.slice(0, m.index)}</span> <span class="chip ok" style="font-size:11px">${m[1].startsWith('Bookr') ? 'exact match' : 'you picked'}</span>`;
+}
 /** Filters and paid-together lines of the payment tables. */
 function wirePayTables(root) {
   root.querySelectorAll('.paytable').forEach((box) => {
@@ -6449,8 +6475,8 @@ async function reconcileView(biz, dayArg) {
     </div>
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
       ${paidLaterHtml(biz, r, 'card')}
-      ${r.cards?.trial ? trialCardSection(biz, r.cards, biz.actions.includes('bank.link') ? { unbilled: r.unbilledHeads ?? [], income: heads.filter((h) => h.type === 'income') } : null, { entries: ent.card, oldPos: r.oldPos, cv }) : r.cards ? cardSection(biz, r.cards, heads) : ''}
-      ${entriesHtml(biz, day, ent.card, 'card', cv)}
+      ${r.cards?.trial ? trialCardSection(biz, r.cards, biz.actions.includes('bank.link') ? { unbilled: r.unbilledHeads ?? [], income: heads.filter((h) => h.type === 'income') } : null, { entries: ent.card, oldPos: r.oldPos, cv, earlier: earlierCard(r) }) : r.cards ? cardSection(biz, r.cards, heads) : ''}
+      ${entriesHtml(biz, day, withEarlier(ent.card, r), 'card', cv)}
       ${machineUpiLine(r.cards)}
     </div>
     <div data-rpanel="upi" ${tab === 'upi' ? '' : 'hidden'}>
@@ -6983,7 +7009,7 @@ function paidLaterHtml(biz, r, mode) {
   if (!todo.length && !done.length) return '';
   const row = (x) => html`<a href="#/b/${biz.id}/review/${x.uploadId}/${x.rowId}" class="tiny">Open the line</a>`;
   return html`<section class="card" style="gap:8px">
-    <div class="lane-h"><strong>Settled here, counted on an earlier day</strong>${todo.length ? html`<span class="tchip warn">${todo.length} to check</span>` : ''}</div>
+    <div class="lane-h"><strong>${!todo.length && done.length === 1 ? `A ${dayLabel(done[0].fromDay)} bill paid here` : 'Bills of an earlier day paid here'}</strong>${todo.length ? html`<span class="tchip warn">${todo.length} to check</span>` : ''}</div>
     ${todo.map((x) => html`<div class="ent-line" data-plrow><div><span class="mono"><strong>${x.billNo}</strong></span> · ₹ ${money(x.amountPaise)} · ${dayLabel(x.fromDay)} bill ${row(x)}
       <div class="tiny">Counted as <strong>${MODE_WORD[x.txMode] ?? x.txMode}</strong> on ${dayLabel(x.fromDay)} (saved). The register here says it was paid by <strong>${MODE_WORD[x.rowMode]}</strong>.${x.txMode === 'cash' ? (x.fromCash?.differencePaise < 0 ? ` ${dayLabel(x.fromDay)}'s cash is short ₹ ${money(-x.fromCash.differencePaise)}: this takes ₹ ${money(x.amountPaise)} off it.` : ` If ${dayLabel(x.fromDay)}'s cash was short by ₹ ${money(x.amountPaise)}, this is why.`) : ''}</div>
       ${x.evidence ? html`<div class="tiny" style="color:var(--teal-ink)">✓ ${x.evidence.label} ₹ ${money(x.evidence.amountPaise)} at ${when(x.evidence.at)}${x.evidence.with.length ? html` = this bill + ${x.evidence.with.map((w) => `${w.billNo} ₹ ${money(w.amountPaise)}`).join(' + ')} (the line${x.evidence.with.length > 1 ? 's' : ''} beside it)` : ' = this bill'}</div>` : ''}
@@ -6991,9 +7017,27 @@ function paidLaterHtml(biz, r, mode) {
         <input type="checkbox" data-plshort checked> ${dayLabel(x.fromDay)} has a cash shortage of ₹ ${money(x.fromCash.shortagePaise)} booked: also reduce it by ₹ ${money(Math.min(x.amountPaise, x.fromCash.shortagePaise))}</label>` : ''}
       <div class="form-msg"></div></div>
       <button class="btn" type="button" style="min-height:36px" data-paidlater="${x.txId}" data-mode="${x.rowMode}" data-bill="${x.billNo}" data-day="${x.fromDay}" data-amt="${x.amountPaise}" data-short="${x.txMode === 'cash' && x.fromCash?.differencePaise < 0 ? -x.fromCash.differencePaise : ''}">Paid by ${MODE_WORD[x.rowMode]} here</button></div>`)}
-    ${done.map((x) => html`<div class="ent-line"><div><span class="mono">${x.billNo}</span> · ₹ ${money(x.amountPaise)} · ${dayLabel(x.fromDay)} bill: changed from ${MODE_WORD[x.from] ?? x.from} to ${MODE_WORD[x.rowMode]}, paid here.${mode === 'card' ? ' Match it to its card payment below.' : ''}<div class="form-msg"></div></div>
-      <button class="btn plain dchip" type="button" data-paidlaterundo="${x.auditId}">Undo</button></div>`)}
+    ${done.map((x) => {
+      const ch = mode === 'card' ? (r.cards?.choices ?? []).find((c) => c.open && c.billNos.includes(x.billNo)) : null;
+      const others = ch ? ch.billNos.filter((b) => b !== x.billNo) : [];
+      return html`<div class="ent-line"><div><span class="mono"><strong>${x.billNo}</strong></span> · ₹ ${money(x.amountPaise)} was counted as ${MODE_WORD[x.from] ?? x.from} on ${dayLabel(x.fromDay)}. It was paid here by ${MODE_WORD[x.rowMode]}${ch ? html`${others.length ? html`, together with <span class="mono">${others.join(', ')}</span>, on one ${ch.upiBill ? 'payment' : 'swipe'}` : ''}: ${ch.label} ₹ ${money(ch.amountPaise)} at ${hhmm(ch.paidAt)}.` : '.'}
+        ${ch ? html`<div style="margin-top:4px"><span class="chip ok">Picked, matched on save</span></div>` : mode === 'card' ? html`<div class="tiny" style="color:#92400E">Pick its card payment below.</div>` : ''}<div class="form-msg"></div></div>
+      <button class="btn plain dchip" type="button" data-paidlaterundo="${x.auditId}">Put it back to ${MODE_WORD[x.from] ?? x.from}</button></div>`;
+    })}
   </section>`;
+}
+// Earlier-day bills changed to card and paid here (20 Nov 2026): listed with this shift's card bills, tagged with their day.
+const earlierCard = (r) => (r.paidLaterDone ?? []).filter((x) => x.rowMode === 'card');
+function withEarlier(t, r) {
+  const xs = earlierCard(r).filter((x) => !t.entries.some((e) => e.billNo === x.billNo));
+  if (!xs.length) return t;
+  const rows = xs.map((x) => {
+    const ch = (r.cards?.choices ?? []).find((c) => c.open && c.billNos.includes(x.billNo));
+    const others = ch ? ch.billNos.filter((b) => b !== x.billNo) : [];
+    return { billNo: x.billNo, amountPaise: x.amountPaise, paidAt: null, fromDay: x.fromDay, register: { mode: 'card' }, software: { mode: 'card' }, edits: [],
+      state: ch ? 'done' : 'waiting', evidence: ch ? `${ch.label} ₹${money(ch.amountPaise)} at ${hhmm(ch.paidAt)}${others.length ? ` with ${others.join(', ')}` : ''} · chosen, matched on save` : null, comparisonId: null, group: null };
+  });
+  return { ...t, entries: [...t.entries, ...rows], totalPaise: t.totalPaise + xs.reduce((a, x) => a + x.amountPaise, 0) };
 }
 function wirePaidLater(biz, reload) {
   app.querySelectorAll('[data-paidlater]').forEach((b) => b.addEventListener('click', async () => {
@@ -7102,23 +7146,38 @@ function trialCardSection(biz, k, book = null, ex = {}) {
       <div style="margin-top:4px"><button class="btn plain dchip" type="button" data-tcarduseadv="${a.paymentId}" data-cmp="${x.comparisonId}" data-bill="${x.billNo}">Uses this advance</button></div><div class="form-msg"></div></div>`)}
     ${byUpiOffer((k.byUpi ?? []).find((o) => o.comparisonId === x.comparisonId))}</div>`;
   const chosen = k.choices.filter((c) => c.open);
+  // Plain words (approved 20 Nov 2026): where the machine's money went, as one sum; the bills it pays, earlier days told.
+  const earlier = new Map((ex.earlier ?? []).map((x) => [x.billNo, x]));
+  const amtOf = new Map([...(ex.entries?.entries ?? []).map((e) => [e.billNo, e.amountPaise]), ...[...earlier.values()].map((x) => [x.billNo, x.amountPaise])]);
+  const nEarlier = [...earlier.keys()].filter((b) => chosen.some((c) => c.billNos.includes(b))).length;
+  const got = st.machineCardPaise + st.machineUpiPaise;
+  const nBooked = (k.booked ?? []).length;
+  const parts = st.machine ? [[st.machine.cardPaise, 'for card bills'], [st.machine.upiPaise, 'for UPI bills'], [st.machine.bookedPaise, 'with no bill'], [st.machine.leftPaise, 'not matched yet']].filter(([v]) => v) : [];
+  const adds = st.machine && parts.reduce((a, [v]) => a + v, 0) === got;
+  const allOk = k.covered && !k.left && !st.noBill;
+  const met = (label, v, sub, color = 'inherit') => html`<div><div class="tiny">${label}</div><div class="amount rec-n" style="color:${color}">₹ ${money(v)}</div>${sub ? html`<div class="tiny">${sub}</div>` : ''}</div>`;
+  const nBills = (c) => c.billNos.length;
+  const pickBills = chosen.reduce((a, c) => a + nBills(c), 0);
+  const bookedSame = nBooked > 1 && k.booked.every((x) => (x.what || '') === (k.booked[0].what || '') && (x.headName || '') === (k.booked[0].headName || ''));
+  const bookedAs = (x) => [x.what, x.headName].filter(Boolean).join(', ') || 'Booked';
   return html`<section class="card" style="gap:10px" id="tcardsec">
     <div class="lane-h"><h2 style="margin:0">Card machine</h2><span style="display:flex;gap:6px;flex-wrap:wrap">${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>` : ''}
-      ${k.left ? html`<span class="chip wait">${k.left} left</span>` : k.covered ? html`<span class="chip ok">Card ready to save</span>` : ''}<span class="chip">Not saved</span></span></div>
+      ${k.left ? html`<span class="chip wait">${k.left} left</span>` : allOk ? html`<span class="chip ok">✓ All card money explained</span>` : ''}</span></div>
     <div class="rec-strip">
-      <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
-      <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">${st.machine ? `card bills ₹ ${rs(st.machine.cardPaise)} · UPI bills ₹ ${rs(st.machine.upiPaise)} · not matched ₹ ${rs(st.machine.leftPaise)}${st.machine.bookedPaise ? ` · booked, no bill ₹ ${rs(st.machine.bookedPaise)}` : ''}` : `card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}`}</div></div>
-      <div><div class="tiny">Would match on save</div><div class="amount rec-n" style="color:var(--teal)">₹ ${money(st.wouldPaise)}</div><div class="tiny">${st.would} bill${st.would === 1 ? '' : 's'}${st.chosen ? ` · ${st.chosen} chosen` : ''}</div></div>
-      <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`}</div></div>
-      <div><div class="tiny">${st.machine ? 'Machine payments not matched yet' : 'Machine payments with no card bill'}</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
+      ${met('Machine got', got, '')}
+      ${met('For bills', st.machine ? st.machine.cardPaise : st.wouldPaise, `${st.would} of ${st.bills} card bill${st.bills === 1 ? '' : 's'}${nEarlier ? ` (${nEarlier} from ${nEarlier === 1 ? dayLabel([...earlier.values()][0].fromDay) : 'earlier days'})` : ''}${st.machine?.upiPaise ? ` · + ₹ ${rs(st.machine.upiPaise)} for UPI bills` : ''}`, 'var(--teal)')}
+      ${st.machine ? met('No bill, booked', st.machine.bookedPaise, `${nBooked} payment${nBooked === 1 ? '' : 's'}`) : ''}
+      ${st.noBill ? met('Not matched yet', st.noBillPaise, `${st.noBill} payment${st.noBill === 1 ? '' : 's'}: see below`, 'var(--danger)') : ''}
+      ${st.noSwipe || !k.covered ? met('Card bills with no payment', st.noSwipePaise, k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`, st.noSwipe ? 'var(--danger)' : 'inherit') : ''}
     </div>
-    <div class="tiny" style="color:var(--muted)" title="Bookr matches a payment on its own only when it is the one card bill of its amount within 20 minutes and no other payment wants it, or, for a bill with no time, the only card bill and the only payment of its amount in the shift.">Nothing is matched until you save. The Money received column below shows what Save will match.</div>
-    ${chosen.length ? html`<details class="cmp-fold"><summary><strong>Chosen by you, matched on save (${chosen.length})</strong></summary>${chosen.map((c) => html`<div class="list-row" style="padding:4px 0"><span class="tiny"><span class="mono">${c.billNos.join(' + ')}</span>${c.upiBill ? html` <span class="upitag">UPI bill</span>` : ''} · ${c.label} ₹ ${money(c.amountPaise)} at ${hhmm(c.paidAt)}${c.by ? ` · ${c.by}` : ''}${c.upiBill ? html` · <button type="button" class="linkbtn tiny" data-goto="pay:upi">on the UPI tab</button>` : ''}</span>
+    <div class="tiny" style="color:var(--muted)" title="Bookr matches a payment on its own only when it is the one card bill of its amount within 20 minutes and no other payment wants it, or, for a bill with no time, the only card bill and the only payment of its amount in the shift.">${adds && parts.length > 1 ? `${parts.map(([v, w]) => `₹ ${rs(v)} ${w}`).join(' + ')} = ₹ ${rs(got)}. ` : ''}${k.left ? `${k.left} left to match below. ` : k.covered ? 'Nothing is left to match. ' : ''}Nothing is saved until you press Save shift.</div>
+    ${chosen.length ? html`<details class="cmp-fold" open><summary><strong>Payments you picked</strong> <span class="tiny">· ${chosen.length} payment${chosen.length === 1 ? '' : 's'}${pickBills !== chosen.length ? ` for ${pickBills} bills` : ''}</span></summary>${chosen.map((c) => html`<div class="list-row" style="padding:6px 0"><span class="tiny">${c.billNos.map((b, i) => html`${i ? ' + ' : ''}<span class="mono">${b}</span>${amtOf.has(b) ? ` ₹ ${money(amtOf.get(b))}` : ''}${earlier.has(b) ? html` <span class="chip plan" style="font-size:11px">${dayLabel(earlier.get(b).fromDay)}</span>` : ''}`)}${c.upiBill ? html` <span class="upitag">UPI bill</span>` : ''} ← ${c.label} ₹ ${money(c.amountPaise)}, ${hhmm(c.paidAt)}
+      <div style="color:var(--muted)">${nBills(c) > 1 ? `${nBills(c)} bills on one ${c.upiBill ? 'payment' : 'swipe'} · ` : ''}${c.by ? `picked by ${c.by}` : 'picked'}${c.upiBill ? html` · <button type="button" class="linkbtn tiny" data-goto="pay:upi">on the UPI tab</button>` : ''}</div></span>
       <span style="display:flex;gap:6px">${c.upiBill && c.bill?.uploadId ? html`<button class="btn plain dchip" type="button" data-choicetocard="${c.id}" title="Card machine money is a card bill: changes the register's payment to Card, matched on save">Change to card</button>` : ''}
       <button class="btn plain dchip" type="button" data-unchoose="${c.id}">Undo</button></span><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${(k.advancePlans ?? []).length ? html`<details class="cmp-fold" open><summary><strong>Advances used by a bill, matched on save (${k.advancePlans.length})</strong></summary>${k.advancePlans.map((a) => html`<div class="list-row" style="padding:4px 0"><span class="tiny"><span class="mono">${a.billNo}</span> · ${a.label} ₹ ${money(a.amountPaise)} at ${when(a.paidAt)} · ${a.what}</span>
       <button class="btn plain dchip" type="button" data-tcardunadv="${a.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
-    ${(k.booked ?? []).length ? html`<details class="cmp-fold"><summary><strong>Booked with no bill (${k.booked.length}) · ₹ ${money(k.booked.reduce((a, x) => a + x.amountPaise, 0))}</strong></summary>${k.booked.map((x) => html`<div class="list-row" style="padding:4px 0"><span class="tiny">${x.label} ₹ ${money(x.amountPaise)} at ${hhmm(x.paidAt)} · ${x.what || x.headName || 'Booked'}${x.headName && x.what ? ` · ${x.headName}` : ''}</span>
+    ${nBooked ? html`<details class="cmp-fold" open><summary><strong>Money with no bill</strong> <span class="tiny">· ${nBooked} payment${nBooked === 1 ? '' : 's'} · ₹ ${money(k.booked.reduce((a, x) => a + x.amountPaise, 0))}${bookedSame ? ` · booked as ${bookedAs(k.booked[0])}` : ''}</span></summary>${k.booked.map((x) => html`<div class="list-row" style="padding:4px 0"><span class="tiny">₹ ${money(x.amountPaise)} · ${x.label}, ${hhmm(x.paidAt)}${bookedSame ? '' : ` · ${bookedAs(x)}`}</span>
       <button class="btn plain dchip" type="button" data-tcardunbook="${x.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${groupsOld.length ? html`<div class="rv-cards">${groupsOld.map((x) => oldGroupBox(x, k.day))}</div>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.filter((n) => !ogPay.has(n.payment.id)).map(need)}${k.noSwipe.filter((x) => !ogBill.has(x.comparisonId)).map(noSwipe)}</div>` : ''}
@@ -7304,6 +7363,15 @@ function wireTrialCards(biz, day, k, reload) {
 // ---- Card, on Reconcile (approved 8 Nov 2026): a confirmed shift's card bills against the card company's payments,
 // next to UPI. Bookr matches the safe pairs and settles by the Card settlement rule; the rest waits here for a person.
 
+/** A card bill of this saved shift paid on a later shift's swipe (approved 20 Nov 2026): matched when that shift is saved. */
+function plannedCardBox(biz, x, day) {
+  const p = x.planned;
+  return html`<div class="rv-card plan-box">
+    <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: paid ${p.day === addDaysIso(day, 1) ? 'next day' : `on ${dayLabel(p.day)}`}</strong><span class="chip plan">Matched when ${dayLabel(p.day)} is saved</span></div>
+    <div class="tiny">${p.withBills.length ? html`Paid with bill${p.withBills.length === 1 ? '' : 's'} <span class="mono">${p.withBills.join(', ')}</span> on one swipe: ` : ''}${p.label} ₹ ${money(p.amountPaise)} · ${when(p.at)}${p.by ? ` · chosen by ${p.by}` : ''}</div>
+    <div class="form-row" style="gap:6px"><a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${p.day}?tab=card">Open ${dayLabel(p.day)} Card tab ›</a>
+      <button class="btn plain dchip" type="button" data-unplan="${p.choiceId}" data-day="${p.day}">Undo the choice</button></div><div class="form-msg"></div></div>`;
+}
 function cardSection(biz, k, heads) {
   const st = k.strip;
   const at = (ms) => (ms ? when(ms) : 'register only');
@@ -7360,7 +7428,7 @@ function cardSection(biz, k, heads) {
       : html`<span class="chip">Waiting for the bank</span><div class="tiny"><a href="#/b/${biz.id}/cards">Card settlements</a></div>`}</td></tr>`;
   return html`<section class="card" style="gap:10px" id="cardsec">
     <div class="lane-h"><h2 style="margin:0">Card machine</h2>${!k.covered ? html`<span class="chip">Card report not in for this shift yet</span>`
-      : left ? html`<span class="chip wait">${left} left</span>` : html`<span class="chip ok">Card reconciled</span>`}</div>
+      : left ? html`<span class="chip wait">${left} left</span>` : (k.planned ?? []).length ? html`<span class="chip plan">${k.planned.length} planned on a later shift</span>` : html`<span class="chip ok">Card reconciled</span>`}</div>
     <div class="rec-strip">
       <div><div class="tiny">Card bills</div><div class="amount rec-n">₹ ${money(st.billsPaise)}</div><div class="tiny">${st.bills} bill${st.bills === 1 ? '' : 's'}</div></div>
       <div><div class="tiny">Card machine got</div><div class="amount rec-n">₹ ${money(st.machineCardPaise + st.machineUpiPaise)}</div><div class="tiny">card ₹ ${rs(st.machineCardPaise)} · UPI on machine ₹ ${rs(st.machineUpiPaise)}</div></div>
@@ -7368,6 +7436,7 @@ function cardSection(biz, k, heads) {
       <div><div class="tiny">Bills with no swipe</div><div class="amount rec-n" style="color:${st.noSwipe ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noSwipePaise)}</div><div class="tiny">${k.covered ? `${st.noSwipe} bill${st.noSwipe === 1 ? '' : 's'}` : `${k.waitingReport} waiting for the report`}</div></div>
       <div><div class="tiny">Machine payments with no card bill</div><div class="amount rec-n" style="color:${st.noBill ? 'var(--danger)' : 'inherit'}">₹ ${money(st.noBillPaise)}</div><div class="tiny">${st.noBill} payment${st.noBill === 1 ? '' : 's'}</div></div>
     </div>
+    ${(k.planned ?? []).length ? html`<div class="rv-cards">${k.planned.map((x) => plannedCardBox(biz, x, k.day))}</div>` : ''}
     ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
     ${k.done.length ? html`<details class="cmp-fold"><summary>Done (${k.done.length})</summary><div class="scroll"><table style="min-width:560px"><thead><tr><th>Card payment</th><th style="text-align:right">Amount</th><th>Bill</th><th></th></tr></thead><tbody>
       ${k.done.map((d) => html`<tr><td>${when(d.payment.paidAt)}<div class="tiny">${card(d.payment)}</div></td><td class="amount">${money(d.payment.amountPaise)}</td>
@@ -7382,6 +7451,11 @@ function cardSection(biz, k, heads) {
 function wireCardSection(biz, k, act) {
   const box = document.getElementById('cardsec');
   if (!box || !k) return;
+  // Undo a later shift's choice (20 Nov 2026): the swipe goes back to its shift's list, this bill waits again.
+  box.querySelectorAll('[data-unplan]').forEach((b) => b.addEventListener('click', () => {
+    if (!confirm(`Undo the choice made on ${dayLabel(b.dataset.day)}? The swipe goes back to that shift's list, and this bill waits for a card payment again.`)) return;
+    act(() => apiFull('DELETE', `/businesses/${biz.id}/shifts/${b.dataset.day}/choices/${b.dataset.unplan}`, {}));
+  }));
   const B = `/businesses/${biz.id}/cards`;
   const unmatch = (pid) => apiFull('POST', `${B}/${pid}/unmatch`, {});
   box.querySelectorAll('[data-cardpick]').forEach((b) => b.addEventListener('click', () => {

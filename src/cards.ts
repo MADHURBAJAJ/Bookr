@@ -4,6 +4,7 @@
 // bill of the same amount within AUTO_MIN minutes with no other candidate on either side, and a settlement whose bank
 // credit carries its date and exactly its net. Everything else waits for a person. Every step can be undone.
 
+import { plannedLater } from './plannedLater';
 import { all, newId, now, one, stmt, type DB } from './db';
 import type { CardLine } from './cardsettlement';
 import { cashCheck } from './cash';
@@ -433,7 +434,7 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   // FAR_BACK_MIN before when it is the only one); else two machine payments, or a machine payment and a UPI credit,
   // that add up to it. Cash over by exactly its amount is said as before.
   const freePays = openPays.filter((p) => p.txn_type === 'PURCHASE' && !(candidates.get(p.id) ?? []).length);
-  const noSwipe = covered ? waiting.filter((x) => !offered.has(x.id)).map((x) => {
+  const noSwipeAll = covered ? waiting.filter((x) => !offered.has(x.id)).map((x) => {
     let upi: { creditId: string; amountPaise: number; postedAt: number; accountName: string | null; minutes: number | null } | null = null;
     let parts: { paymentIds: string[]; payments: ReturnType<typeof pay>[]; credit: { creditId: string; amountPaise: number; postedAt: number; accountName: string | null } | null } | null = null;
     if (bank.covered) {
@@ -486,12 +487,16 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
   // What the card side explains on the UPI side, so it is told (and counted) once: credits that paid a card bill, and
   // UPI bills that were paid on the machine.
   const explains = {
-    credits: noSwipe.flatMap((x) => [...(x.upi ? [{ id: x.upi.creditId, postedAt: x.upi.postedAt }] : []), ...(x.parts?.credit ? [{ id: x.parts.credit.creditId, postedAt: x.parts.credit.postedAt }] : [])]),
+    credits: noSwipeAll.flatMap((x) => [...(x.upi ? [{ id: x.upi.creditId, postedAt: x.upi.postedAt }] : []), ...(x.parts?.credit ? [{ id: x.parts.credit.creditId, postedAt: x.parts.credit.postedAt }] : [])]),
     bills: needs.flatMap((n) => (n.written?.mode === 'upi' ? [{ id: n.written.transactionId, billNo: n.written.billNo, shiftDay: n.written.shiftDay }] : [])),
   };
   const purchases = payments.filter((p) => p.txn_type === 'PURCHASE');
   // A payment that is part of a bill paid in parts is told on that bill, not on its own.
   const needsLeft = needs.filter((n) => !partsPays.has(n.payment.id));
+  // Planned on a later shift (approved 20 Nov 2026): a swipe chosen there pays it when that shift is saved.
+  const plans = await plannedLater(db, businessId, noSwipeAll.map((x) => x.transactionId));
+  const planned = noSwipeAll.filter((x) => plans.has(x.transactionId)).map((x) => ({ ...x, planned: plans.get(x.transactionId)! }));
+  const noSwipe = noSwipeAll.filter((x) => !plans.has(x.transactionId));
   return {
     day, covered, bankCovered: bank.covered, explains,
     strip: { billsPaise: sum(bills), bills: bills.length, matchedPaise: sum(matchedBills), matched: matchedBills.length, byBookr: done.filter((d) => d.byBookr).length,
@@ -499,10 +504,10 @@ export async function shiftCards(db: DB, businessId: string, day: string, cashOv
       machineUpiPaise: purchases.filter((p) => isMachineUpi(p)).reduce((a, p) => a + p.amount_paise, 0),
       noSwipePaise: sum(noSwipe), noSwipe: noSwipe.length, noBillPaise: sum(needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').map((n) => n.payment)),
       noBill: needsLeft.filter((n) => n.why === 'no_bill' || n.why === 'written').length },
-    needs: needsLeft, noSwipe, done, settlements,
+    needs: needsLeft, noSwipe, planned, done, settlements,
     // Card bills waiting while the card report is not in: left too (approved 10 Nov 2026).
-    waitingReport: covered ? 0 : waiting.filter((x) => !offered.has(x.id)).length,
-    left: needsLeft.length + noSwipe.length + (covered ? 0 : waiting.filter((x) => !offered.has(x.id)).length),
+    waitingReport: covered ? 0 : waiting.filter((x) => !offered.has(x.id) && !plans.has(x.id)).length,
+    left: needsLeft.length + noSwipe.length + (covered ? 0 : waiting.filter((x) => !offered.has(x.id) && !plans.has(x.id)).length),
   };
 }
 

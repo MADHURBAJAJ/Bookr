@@ -1524,7 +1524,15 @@ export async function cashBills(db: DB, businessId: string, day: string) {
   }
   const rgById = new Map(rg.map((r) => [r.id, r]));
   const headOf = new Map(groups.flatMap((g) => g.rowIds.map((id) => [id, g] as const)));
+  // A cash bill changed to card or UPI after saving (20 Nov 2026): not a cash bill of this drawer any more.
+  const movedOff = confirmed ? new Set((await all<{ comparison_id: string }>(db, `SELECT comparison_id FROM transactions
+      WHERE business_id = ? AND shift_day = ? AND source = 'software_report' AND type = 'income' AND payment_mode <> 'cash' AND comparison_id IS NOT NULL
+        AND id IN (SELECT j.value FROM audit_log a, json_each(json_extract(a.after, '$.transactionIds')) j
+          WHERE a.business_id = ? AND a.action = 'sale.repaid' AND json_extract(a.after, '$.from') = 'cash'
+            AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'sale.repay_undone' AND x.row_id = CAST(a.id AS TEXT)))`,
+    businessId, day, businessId)).map((x) => x.comparison_id)) : new Set<string>();
   const bills = comps.flatMap((c) => {
+    if (movedOff.has(c.id)) return [];
     const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
     const pays = r ? paysByRow.get(r.id) ?? [] : [];
     const rgCash = pays.filter((p) => p.mode === 'cash').reduce((t, p) => t + p.amount_paise, 0);

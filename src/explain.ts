@@ -3,6 +3,7 @@
 // becomes a card with the evidence in words and a one-click fix that calls an existing, recorded and reversible
 // correction. Nothing is applied by itself. Cards never share a bill or a credit: best explanation first.
 
+import { plannedLater } from './plannedLater';
 import { all, one, type DB } from './db';
 import { billDistance, sameBillNo } from './sales';
 import { suggestionsFor } from './bank';
@@ -276,7 +277,17 @@ export async function explainShift(db: DB, businessId: string, day: string) {
     SELECT r.amount_paise AS amount, r.posted_at AS postedAt, (SELECT group_concat(t.bill_no, ' + ') FROM bank_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.bank_row_id = r.id) AS bills
     FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'matched' AND r.posted_at >= ? AND r.posted_at < ?`, businessId, w.from - 3600e3, w.to + 3 * 3600e3) : [];
   if (covered) {
+    // Planned on a later shift (approved 20 Nov 2026): its credit is chosen there and matched when that shift is saved.
+    const plans = await plannedLater(db, businessId, sales.filter((y) => y.parts === 1 && !y.grouped && !used.has(`tx:${y.id}`)).map((y) => y.id));
     for (const x of sales.filter((y) => y.parts === 1 && !y.grouped && !used.has(`tx:${y.id}`))) {
+      const pl = plans.get(x.id);
+      if (pl) {
+        kept.push({ key: `planned:${x.id}`, kind: 'planned_later', billNos: [x.billNo ?? ''], amountPaise: x.net, paidAt: x.paidAt,
+          title: `Bill ${x.billNo} (${rs(x.net)}): paid on ${pl.day}`,
+          evidence: [`${pl.withBills.length ? `Paid with ${pl.withBills.join(', ')} on one payment: ` : ''}${pl.label} ${rs(pl.amountPaise)} at ${hm(pl.at)}${pl.by ? `, chosen by ${pl.by}` : ''}. Matched when the ${pl.day} shift is saved.`],
+          score: 90, uses: [`tx:${x.id}`], planned: pl, actions: [] } as never);
+        continue;
+      }
       const any = credits.some((c) => (c.amount === x.net || c.amount === x.gross) && near(c, x.paidAt, 180))
         // Paid by UPI on the card machine: offered on the Card tab, matched as UPI on the machine.
         || onMachine.some((p) => (p.amount_paise === x.net || p.amount_paise === x.gross) && (x.paidAt == null || mins(p.paid_at, x.paidAt) <= 180));

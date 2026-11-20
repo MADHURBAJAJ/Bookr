@@ -88,7 +88,8 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
   const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortageTotal - moved!.deposited + moved!.drawn : null;
   const difference = shouldBe !== null && counted !== null ? counted - shouldBe : null;
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
-  const notInRegisterRows = notInRegister.map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note,
+  // Changed to card or UPI after saving (20 Nov 2026): the sale is not cash any more, so it is not one of this drawer's bills.
+  const notInRegisterRows = notInRegister.filter((c) => c.tx_mode == null || c.tx_mode === 'cash').map((c) => ({ id: c.id, billNo: c.bill_no, amountPaise: c.sw_amount_paise, decision: c.decision, billType: c.bill_type, note: c.note,
     paidAt: c.paid_at, closeNote: c.close_note,
     late: c.late ? { day: c.late.split('|')[0], amountPaise: c.late.split('|')[1] ? Number(c.late.split('|')[1]) : null, mode: c.late.split('|')[2] || null } : null,
     // Written late as card or UPI (18 Nov 2026): the money came on that day, not into this drawer.

@@ -51,6 +51,14 @@ describe('a bill settled the next day', () => {
     const w = (await o.get(`${base}/waiting`)).json;
     expect(w.look.map((x: any) => x.billNo)).not.toContain('2610317');
     expect(w.grey.find((x: any) => x.billNo === '2610317')).toMatchObject({ waitFor: 'chosen', chosenOn: '2026-11-01', chosenWith: expect.stringMatching(/with bill 2611012$/) });
+    // Planned on a later shift (20 Nov 2026): 31 Oct's Card tab tells it as planned on 1 Nov, not as a bill with no swipe,
+    // and its Cash tab no longer lists it with the cash bills.
+    const oct = await h.reconcile('2026-10-31');
+    expect(oct.cards.planned).toEqual([expect.objectContaining({ billNo: '2610317', planned: expect.objectContaining({ day: '2026-11-01', kind: 'card', amountPaise: 213500, withBills: ['2611012'] }) })]);
+    expect(oct.cards.noSwipe.map((x: any) => x.billNo)).not.toContain('2610317');
+    const cash = (await o.get(`${base}/shifts/2026-10-31/cash`)).json;
+    expect(cash.notInRegister.map((x: any) => x.billNo)).not.toContain('2610317');
+    expect(cash.bills.map((x: any) => x.billNo)).not.toContain('2610317');
 
     await h.decideRest('2026-11-01');
     await h.confirm('2026-11-01');

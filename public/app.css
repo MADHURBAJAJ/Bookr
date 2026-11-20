@@ -637,3 +637,8 @@ tr.rd-red td { background: #FCEBEB; }
 .sg-src.warn { background: var(--wait-bg); color: var(--wait); }
 #nearpairs > .sg-group { border-right: 0; border-top: 0; border-bottom: 0; padding: 0; background: transparent; }
 #nearpairs > .sg-group.left-box { border-left: 0; }
+
+/* Planned on a later shift (20 Nov 2026). */
+.chip.plan { background: #DBEAFE; color: #1E3A8A; }
+.plan-box { border-left: 3px solid #3B82F6; border-radius: 0 10px 10px 0; }
+.wc-g.blue .wc-gh { color: #1E3A8A; }
