@@ -5771,12 +5771,12 @@ function sgMiddle(c) {
     const at = /around ([^.]+)\./.exec(c.evidence?.[0] ?? '')?.[1];
     return html`<span>₹ ${amt ?? ''}${at ? ` · ${at}` : ''}</span>`;
   }
-  const head = c.kind === 'no_bill' ? '' : html`<span class="sg-t">${c.title}</span>`;
+  const head = c.kind === 'no_bill' || (chips && (c.billNos ?? []).length) ? '' : html`<span class="sg-t">${c.title}</span>`;
   return html`${head}${chips ? html`<span class="sg-chips">${chips}</span>` : ''}${(c.evidence ?? []).length ? html`<details class="sg-why"><summary>Why</summary><ul>${c.evidence.map((e) => html`<li>${e}</li>`)}</ul></details>` : ''}`;
 }
 function sgRow(c, day) {
   const bills = (c.billNos ?? []).filter(Boolean);
-  const lead = bills.length ? bills.map((b) => drawerBtn(b, day)) : c.kind === 'no_bill' ? html`<span class="sg-t">${c.title.replace(/ with no bill$/, '')}</span>` : '';
+  const lead = bills.length ? bills.map((b) => html`<button type="button" class="linkbtn mono sg-bill" data-bill-drawer="${b}|${day ?? ''}" title="Everything about this bill">${b}</button>`) : c.kind === 'no_bill' ? html`<span class="sg-t">${c.title.replace(/ with no bill$/, '')}</span>` : '';
   const wait = c.kind === 'no_upi_credit';
   return html`<div class="sg-row" data-card="${c.key}"><div class="sg-lead">${lead}</div><div class="sg-mid">${sgMiddle(c)}</div>
     <div class="sg-acts">${c.actions.map((a, i) => a.href ? html`<a class="btn ${i === 0 ? '' : 'plain'} dchip" href="${a.href}">${a.label}</a>`
@@ -6115,15 +6115,15 @@ async function reconcileView(biz, dayArg) {
   const nearSection = () => (near.length || isSameCards.length ? html`<section class="card left-box" id="nearpairs" style="gap:8px">
     <div class="lane-h"><strong>Is this the same? (${near.length + isSameCards.length})</strong><span class="tchip warn">Check</span></div>
     <div class="tiny" style="color:var(--muted)">Bookr's guesses: a bill and a credit that look like one payment. Nothing is matched until you choose; it is matched when you save the shift.</div>
-    ${near.map((p, i) => html`<div class="near-pair" data-card="near:${p.bill.id}:${p.credit.id}">
-      <div><span class="mono"><strong>${p.bill.billNo ?? '—'}</strong></span>${p.bill.billNo ? html` <button type="button" class="linkbtn tiny" data-bill-drawer="${p.bill.billNo}|${day}">Open row</button>` : ''}
-        <div class="tiny">₹ ${money(p.bill.amountPaise)} · ${p.bill.paidAt ? hhmm(p.bill.paidAt) : 'register only'}</div></div>
-      <span aria-hidden="true" class="near-arrow">↔</span>
-      <div>Credit ₹ ${money(p.credit.amountPaise)}<div class="tiny">${hhmm(p.credit.postedAt)}${p.credit.accountName ? ` · ${p.credit.accountName}` : ''}</div></div>
-      <div class="near-acts"><span class="tchip ${p.kind === 'register' ? 'ok' : 'warn'}">${p.kind === 'register' ? 'Same amount · bill only in the register' : `Bank got ₹ ${money(Math.abs(p.diff))} ${p.diff > 0 ? 'more' : 'less'}`}</span>
-        <button class="btn plain dchip" type="button" data-nearmatch="${i}">${nearLabel(p)}</button>
-        <button class="btn plain dchip" type="button" data-carddismiss="near:${p.bill.id}:${p.credit.id}" title="Keep these apart on this device">Not these</button></div>
-      <div class="form-msg" style="grid-column:1/-1"></div></div>`)}
+    ${near.length ? html`<section class="sg-group left-box"><div class="sg-h"><strong>Close, not exact (${near.length})</strong><span class="tiny">a bill and a credit near in time, a little apart in amount</span></div>
+    ${near.map((p, i) => html`<div class="sg-row" data-card="near:${p.bill.id}:${p.credit.id}">
+      <div class="sg-lead">${p.bill.billNo ? html`<button type="button" class="linkbtn mono sg-bill" data-bill-drawer="${p.bill.billNo}|${day}" title="Everything about this bill">${p.bill.billNo}</button>` : html`<span class="mono">—</span>`}</div>
+      <div class="sg-mid"><span class="sg-chips"><span class="sg-src">Bill ₹ ${money(p.bill.amountPaise).replace(/\.00$/, '')} · ${p.bill.paidAt ? hhmm(p.bill.paidAt) : 'register only'}</span>
+        <span class="sg-src">Bank ₹ ${money(p.credit.amountPaise).replace(/\.00$/, '')} · ${hhmm(p.credit.postedAt)}</span>
+        <span class="sg-src ${p.kind === 'register' ? 'ok' : 'warn'}">${p.kind === 'register' ? 'same amount · bill only in the register' : `bank ₹ ${money(Math.abs(p.diff)).replace(/\.00$/, '')} ${p.diff > 0 ? 'more' : 'less'}`}</span></span></div>
+      <div class="sg-acts"><button class="btn dchip" type="button" data-nearmatch="${i}">${nearLabel(p)}</button>
+        <button class="btn plain dchip sg-x" type="button" data-carddismiss="near:${p.bill.id}:${p.credit.id}" title="Not these: keep them apart on this device" aria-label="Not these">✕</button></div>
+      <div class="form-msg"></div></div>`)}</section>` : ''}
     ${isSameCards.length ? suggestionList(isSameCards, day) : ''}
   </section>` : '');
   const view = reconcileViewPref(r.confirmed);
