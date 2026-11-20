@@ -27,14 +27,15 @@ authRoutes.post('/auth/logout', async (c) => {
 
 authRoutes.get('/me', requireUser, async (c) => {
   const user = c.get('user');
-  const rows = await all<{ id: string; name: string; is_demo: number; role: string }>(c.env.DB, `
-    SELECT b.id, b.name, b.is_demo, m.role
+  // cash_books (20 Nov 2026): the business keeps cashier cash books (a school), so it opens on them.
+  const rows = await all<{ id: string; name: string; is_demo: number; role: string; cash_books: number }>(c.env.DB, `
+    SELECT b.id, b.name, b.is_demo, m.role, EXISTS (SELECT 1 FROM branches x WHERE x.business_id = b.id) AS cash_books
     FROM memberships m JOIN businesses b ON b.id = m.business_id
     WHERE m.user_id = ?
     ORDER BY b.name`, user.id);
   const businesses = rows
     .filter((r) => isRole(r.role))
-    .map((r) => ({ id: r.id, name: r.name, isDemo: r.is_demo === 1, role: r.role, actions: actionsFor(r.role as Role) }));
+    .map((r) => ({ id: r.id, name: r.name, isDemo: r.is_demo === 1, role: r.role, cashBooks: r.cash_books === 1, actions: actionsFor(r.role as Role) }));
   return c.json({
     user,
     businesses,

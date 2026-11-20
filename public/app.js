@@ -133,7 +133,8 @@ const rupeesForInput = (p) => { const r = rupeeParts(p); return `${r.neg ? '-' :
 /** Whole rupees without ".00" (paise shown only when there are any): for the register review. */
 const rs = (p) => { const r = rupeeParts(p); return r.paise === '00' ? `${r.neg ? '−' : ''}${inrWhole.format(r.rupees)}` : money(p); };
 const rsIn = (p) => { const r = rupeeParts(p); return r.paise === '00' ? `${r.neg ? '-' : ''}${r.rupees}` : rupeesForInput(p); };
-const home = (b) => `#/b/${b.id}/${b.actions.includes('reports.view') ? 'dashboard' : b.actions.includes('rows.upload') ? 'bringin' : 'accounts'}`;
+// A school (it keeps cash books) opens on them: the books page, or a cashier's own book (see routeInner).
+const home = (b) => (b.cashBooks ? `#/b/${b.id}` : `#/b/${b.id}/${b.actions.includes('reports.view') ? 'dashboard' : b.actions.includes('rows.upload') ? 'bringin' : 'accounts'}`);
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else route(); };
 
 function relative(ts) {
@@ -234,8 +235,11 @@ function navShown() { if (navEnd) navEnd(); }
 // A count beside an item says what is waiting there (from the Today figures).
 const NAV = [
   { key: 'dashboard', label: 'Today', needs: 'reports.view', badge: 'today' },
+  // Cash books (approved 20 Nov 2026): shown once the business has a branch (a school); a cashier sees their own book.
+  { key: 'cashbooks', label: 'Cash books', group: 'Daily work', screens: ['cashbooks', 'cashbook'], when: (b) => b.cashBooks && (b.role !== 'entry_staff' || b.myBooks > 0) },
+  { key: 'fees', label: 'Fee check', needs: 'sales.view', group: 'Daily work', when: (b) => b.cashBooks && b.role !== 'entry_staff' },
   // Bring in, Register and Reconcile are the three steps of one shift (the shift bar at the top of each).
-  { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts' },
+  { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts', when: (b) => !b.cashBooks },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
   { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds', 'pending', 'statement', 'bills'] },
@@ -408,7 +412,7 @@ function wireShiftCalendar(biz, box, day, cal, to) {
 }
 
 function shell(biz, current, title, subtitle, body, opts = {}) {
-  const shown = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))
+  const shown = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs)) && (!n.when || n.when(biz))
     && (n.key !== 'shifts' || SHIFT_SCREENS.some(([, , need]) => biz.actions.includes(need))));
   const link = (n) => html`<a class="nav ${(n.screens ?? [n.key]).includes(current) ? 'on' : ''}" data-navkey="${n.key}" href="${navHref(biz, n.key)}">
       <span>${n.label}</span>${n.badge ? html`<span class="nav-n" data-navn="${n.badge}" hidden></span>` : ''}</a>`;
@@ -8847,6 +8851,313 @@ async function cardsView(biz, query = '') {
   })));
 }
 
+// ---------- School cash book (approved 20 Nov 2026): each cashier keeps their own book on the phone.
+
+const CB_IN = ['fee', 'other_in', 'handover_in'];
+const CB_KIND = { fee: 'Fee received', other_in: 'Other money in', handover_in: 'Cash received', expense: 'Expense', other_out: 'Other money out', handover_out: 'Handed over' };
+const cbStatus = (h) => (h.status === 'sent'
+  ? html`<span class="chip wait">${h.toKind === 'bank' ? 'waiting for the deposit' : h.toKind === 'person' ? `waiting for ${h.toName} to confirm` : `waiting for ${h.toName} to accept`}</span>`
+  : html`<span class="chip ok">${h.status === 'deposited' ? 'deposited' : 'received'}</span>`);
+const cbWhere = (h) => (h.toKind === 'bank' ? `Bank: ${h.toName}` : h.toName);
+
+/** All the books: cash with each cashier by branch, cash handed over not yet shown on the other side, and set up. */
+async function cashBooksView(biz, editId) {
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  const byBranch = new Map();
+  for (const b of d.books) { const k = b.branchName ?? 'No branch'; byBranch.set(k, [...(byBranch.get(k) ?? []), b]); }
+  const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
+  const countChip = (b) => (!b.lastCount ? html`<span class="tiny">not counted yet</span>`
+    : b.lastCount.gapPaise === 0 ? html`<span class="chip ok" title="Counted on ${dayLabel(b.lastCount.day)}">count matches</span>`
+      : html`<span class="chip bad" title="Counted on ${dayLabel(b.lastCount.day)}">${b.lastCount.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(b.lastCount.gapPaise))} · ${shortDay(b.lastCount.day)}</span>`);
+  const books = [...byBranch].map(([branch, list]) => html`
+    <div class="cb-branch"><span>${branch}</span><span class="amount">₹ ${rs(list.reduce((t, b) => t + b.inHandPaise, 0))}</span></div>
+    ${list.map((b) => html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}">
+      <span><span style="font-weight:500">${b.name}</span>${b.cashierName ? html` <span class="tiny">· ${b.cashierName}</span>` : html` <span class="chip wait">no cashier</span>`}
+        <div>${countChip(b)}</div></span>
+      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`)}`);
+  const open = d.handovers.map((h) => html`<div class="list-row" style="align-items:flex-start">
+    <span><span style="font-weight:500">${h.fromBookName} → ${cbWhere(h)}</span> <span class="tiny">· ${shortDay(h.day)}</span>
+      ${h.narration ? html`<div class="tiny">${h.narration}</div>` : ''}<div>${cbStatus(h)}</div>
+      ${h.toKind === 'bank' && d.can.approve ? (h.deposits.length
+        ? h.deposits.map((r) => html`<div class="tiny" style="margin-top:4px">${shortDay(r.day)} · ${r.description}
+            <button type="button" class="btn ghost" style="min-height:32px" data-cbdeposit="${h.id}" data-row="${r.id}">Match this deposit</button></div>`)
+        : html`<div class="tiny">No deposit of ₹ ${rs(h.amountPaise)} in ${h.toName} within a week yet. Sync the bank on the Bank page.</div>`) : ''}
+      ${h.toKind === 'person' && d.can.approve ? html`<div style="margin-top:4px"><button type="button" class="btn ghost" style="min-height:32px" data-cbreceive="${h.id}">${h.toName} got it</button></div>` : ''}</span>
+    <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`);
+  const done = d.done.map((h) => html`<div class="list-row">
+    <span>${h.fromBookName} → ${cbWhere(h)} <span class="tiny">· ${shortDay(h.day)}${h.settledByName ? ` · ${h.status === 'deposited' ? 'matched' : 'confirmed'} by ${h.settledByName}` : ''}</span> ${cbStatus(h)}
+      ${(h.toKind !== 'book' && d.can.approve) ? html`<button type="button" class="linkbtn tiny" data-cbundo="${h.id}">Undo</button>` : ''}</span>
+    <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`);
+  const editing = d.books.find((b) => b.id === editId);
+  const setup = d.can.setup ? html`<section class="card">
+      <h2>Set up</h2>
+      <form id="cb-branch" class="form-row">
+        <div class="field"><label for="cbb">New branch</label><input id="cbb" name="name" placeholder="Chilkana Road" required></div>
+        <button class="btn plain" type="submit">Add branch</button><div class="form-msg"></div></form>
+      ${d.branches.length ? html`<form id="cb-book" style="display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--line-soft);padding-top:12px">
+        <div style="font-weight:500">${editing ? `Change ${editing.name}` : 'New cash book'}</div>
+        ${editing ? '' : html`<div class="field"><label for="cbn">Book name</label><input id="cbn" name="name" placeholder="SMS CR EXP" required></div>`}
+        <div class="form-row">
+          <div class="field"><label for="cbbr">Branch</label><select id="cbbr" name="branchId" required>${d.branches.map((b) => html`<option value="${b.id}" ${editing?.branchId === b.id ? 'selected' : ''}>${b.name}</option>`)}</select></div>
+          <div class="field"><label for="cbc">Cashier</label><select id="cbc" name="cashierUserId"><option value="">Not chosen yet</option>
+            ${d.members.map((m) => html`<option value="${m.id}" ${editing?.cashierUserId === m.id ? 'selected' : ''}>${m.name} (${ROLE_LABELS[m.role]})</option>`)}</select></div>
+        </div>
+        ${editing ? '' : html`<div class="form-row">
+          <div class="field"><label for="cbo">Opening cash (₹)</label><input id="cbo" name="openingBalance" class="mono" inputmode="decimal" value="0" required></div>
+          <div class="field"><label for="cbd">Opening date</label><input id="cbd" name="openingDate" type="date" value="${d.today}" required></div></div>
+        <div class="tiny">Opening cash: what the cashier holds at the start of the opening date (for a Khatabook book, its balance that morning).</div>`}
+        <div class="tiny">The cashier signs in as Entry staff (invite them on Users and roles) and sees only their own book.</div>
+        <div class="form-msg"></div>
+        <div class="form-row"><button class="btn" type="submit">${editing ? 'Save' : 'Add cash book'}</button>
+          ${editing ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/cashbooks">Cancel</a>` : ''}</div>
+      </form>
+      ${d.books.length ? html`<div class="tiny">Change a book's branch or cashier: ${d.books.map((b, i) => html`${i ? ' · ' : ''}<a href="#/b/${biz.id}/cashbooks/${b.id}">${b.name}</a>`)}</div>` : ''}`
+        : html`<div class="tiny">Add a branch first, then its cashiers' books.</div>`}
+    </section>` : '';
+  render(shell(biz, 'cashbooks', 'Cash books', 'Cash with each cashier, and cash handed over until the other side shows it.', html`
+    <div class="row">
+      <section class="card grow3">
+        <h2>Cash with cashiers <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
+        ${d.books.length ? books : html`<div class="note">No cash books yet.${d.can.setup ? ' Add a branch and a book under Set up.' : ''}</div>`}
+      </section>
+      <section class="card grow2">
+        <h2>Needs a look${d.handovers.length ? html` <span class="chip wait">${d.handovers.length}</span>` : ''}</h2>
+        ${open.length ? open : html`<div class="note">All cash handed over is shown on the other side.</div>`}
+        ${done.length ? html`<h2 style="margin-top:8px;font-size:15px">Done this week</h2>${done}` : ''}
+      </section>
+    </div>
+    ${setup}`));
+  wireShell();
+  const act = (sel, f) => app.querySelectorAll(sel).forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await f(b); await cashBooksView(biz, editId); } catch (err) { alert(err.message); b.disabled = false; }
+  }));
+  act('[data-cbreceive]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbreceive}/receive`, {}));
+  act('[data-cbdeposit]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbdeposit}/deposit`, { bankRowId: b.dataset.row }));
+  act('[data-cbundo]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbundo}/undo`, {}));
+  const bf = document.getElementById('cb-branch');
+  bf && onSubmit(bf, async (x) => { await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear(); await cashBooksView(biz); });
+  const kf = document.getElementById('cb-book');
+  kf && onSubmit(kf, async (x) => {
+    if (editing) await api('PATCH', `/businesses/${biz.id}/cashbooks/${editing.id}`, x);
+    else await api('POST', `/businesses/${biz.id}/cashbooks`, x);
+    BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+    go(`#/b/${biz.id}/cashbooks`);
+  });
+}
+
+/** One day of a cashier's book, made for the phone: what came in, what went out, what should be in hand, and the count. */
+async function cashBookDayView(biz, accountId, dayIn) {
+  if (!accountId) return go(`#/b/${biz.id}/cashbooks`);
+  const day = isDay(dayIn) ? dayIn : todayIst();
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/day/${day}`);
+  const b = d.book;
+  const prev = addDaysIso(day, -1);
+  const next = addDaysIso(day, 1);
+  const line = (e) => html`<div class="list-row cb-line">
+    <span><span>${e.kind === 'expense' ? (e.narration || e.headName) : e.narration || CB_KIND[e.kind]}</span>
+      <span class="tiny">${e.kind === 'expense' && e.narration ? ` · ${e.headName}` : ''}${e.kind === 'handover_out' && e.handover ? ` · to ${cbWhere(e.handover)}` : ''}</span>
+      ${e.feeReportId ? html`<div><span class="chip info">from fee report</span></div>` : ''}
+      ${e.handover && e.kind === 'handover_out' ? html`<div>${cbStatus(e.handover)}</div>` : ''}</span>
+    <span class="cb-amt ${CB_IN.includes(e.kind) ? 'in' : 'out'}">${CB_IN.includes(e.kind) ? '+' : '−'} ₹ ${rs(e.amountPaise)}
+      ${d.can.write && !e.feeReportId && !(e.kind === 'handover_out' && e.handover?.status !== 'sent') ? html`<button type="button" class="linkbtn tiny" data-cbdel="${e.id}" aria-label="Remove this line">✕</button>` : ''}</span></div>`;
+  const group = (title, kinds, empty) => {
+    const list = d.entries.filter((e) => kinds.includes(e.kind));
+    return html`<div class="hd cb-hd">${title}</div>${list.length ? list.map(line) : html`<div class="list-row"><span class="tiny">${empty}</span><span></span></div>`}`;
+  };
+  const gap = d.count?.gapPaise ?? null;
+  const waiting = d.waiting.map((h) => html`<div class="cb-wait"><span><span style="font-weight:500">${h.fromBookName}</span> sent you ₹ ${rs(h.amountPaise)}
+      <span class="tiny">· ${shortDay(h.day)}${h.narration ? ` · ${h.narration}` : ''}</span></span>
+    ${d.can.write && h.day <= day ? html`<button type="button" class="btn" style="min-height:36px" data-cbaccept="${h.id}">Got it</button>` : ''}</div>`);
+  const forms = d.can.write && !d.before ? html`
+    <div class="cb-actions">
+      <button type="button" class="btn" data-cbadd="fee">+ Fee</button>
+      <button type="button" class="btn plain" data-cbadd="expense">+ Expense</button>
+      <button type="button" class="btn plain" data-cbadd="handover_out">Hand over</button>
+      <button type="button" class="btn plain" data-cbadd="more" aria-label="Other money in or out">More</button>
+    </div>
+    <form id="cb-form" class="card" hidden style="gap:10px">
+      <div style="font-weight:500" data-cbtitle></div>
+      <div class="field" data-for="more"><label for="cbk">This is</label><select id="cbk" name="moreKind"><option value="other_in">Other money in</option><option value="other_out">Other money out</option></select></div>
+      <div class="field"><label for="cba">Amount (₹)</label><input id="cba" name="amount" class="mono" inputmode="decimal" placeholder="1,14,180" required></div>
+      <div class="field" data-for="expense"><label for="cbh">Expense head</label><select id="cbh" name="headId"><option value="">Choose</option>
+        ${d.heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select></div>
+      <div class="field" data-for="handover_out"><label for="cbt">Given to</label><select id="cbt" name="to">
+        ${d.targets.length ? html`<optgroup label="Another cashier">${d.targets.map((t) => html`<option value="book:${t.id}">${t.name}${t.cashierName ? ` (${t.cashierName})` : ''}${t.branchName ? ` · ${t.branchName}` : ''}</option>`)}</optgroup>` : ''}
+        <optgroup label="A person">${d.people.map((p) => html`<option value="person:${p}">${p}</option>`)}<option value="person:">Someone else…</option></optgroup>
+        ${d.banks.length ? html`<optgroup label="Deposited in the bank">${d.banks.map((x) => html`<option value="bank:${x.id}">${x.name}</option>`)}</optgroup>` : ''}</select></div>
+      <div class="field" data-for="person"><label for="cbp">Person's name</label><input id="cbp" name="person" placeholder="haji ji"></div>
+      <div class="field"><label for="cbn2">Details</label><input id="cbn2" name="narration" placeholder="chilkana road fee received"></div>
+      <div class="form-msg"></div>
+      <div class="form-row"><button class="btn" type="submit">Save</button><button class="btn plain" type="button" data-cbcancel>Cancel</button></div>
+    </form>` : '';
+  render(shell(biz, 'cashbook', b.name, `${b.branchName ?? ''}${b.cashierName ? ` · ${b.cashierName}` : ''}`, html`
+    <div class="cb">
+      <nav class="cb-day" aria-label="Day">
+        ${day > b.openingDate ? html`<a class="btn plain" href="#/b/${biz.id}/cashbook/${b.id}/${prev}" aria-label="Previous day">‹</a>` : html`<span class="btn plain off">‹</span>`}
+        <label class="cb-pick">${dayLabel(day)}<input type="date" id="cb-date" value="${day}" min="${b.openingDate}" max="${d.today}" aria-label="Choose a day"></label>
+        ${day < d.today ? html`<a class="btn plain" href="#/b/${biz.id}/cashbook/${b.id}/${next}" aria-label="Next day">›</a>` : html`<span class="btn plain off">›</span>`}
+      </nav>
+      ${d.before ? html`<div class="note">This book starts on ${dayLabel(b.openingDate)}.</div>` : ''}
+      ${waiting.length ? html`<section class="card cb-card">${waiting}</section>` : ''}
+      <section class="card cb-card">
+        <div class="list-row"><span>Opening cash</span><span class="amount">₹ ${rs(d.openingPaise)}</span></div>
+        ${group('Money in', CB_IN, 'Nothing yet')}
+        ${group('Expenses', ['expense', 'other_out'], 'None')}
+        ${group('Handed over', ['handover_out'], 'None')}
+        <div class="list-row cb-total"><span>Should be in hand</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
+        ${d.can.write && !d.before ? html`<form id="cb-count" class="list-row" style="gap:8px">
+            <label for="cbcount">Counted</label>
+            <span style="display:flex;gap:6px;align-items:center"><input id="cbcount" name="counted" class="mono" inputmode="decimal" style="width:130px;text-align:right"
+              value="${d.count ? rsIn(d.count.countedPaise) : ''}" placeholder="₹ count"><button class="btn plain" type="submit" style="min-height:36px">Save</button></span></form>`
+          : d.count ? html`<div class="list-row"><span>Counted</span><span class="amount">₹ ${rs(d.count.countedPaise)}</span></div>` : ''}
+        ${gap == null ? '' : html`<div class="cb-gap ${gap === 0 ? 'ok' : 'bad'}">${gap === 0 ? 'Count matches the book.' : `Cash ${gap < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(gap))}: check the lines of the day.`}
+          <span class="tiny">${d.count.countedByName ? ` Counted by ${d.count.countedByName}.` : ''}</span></div>`}
+      </section>
+      ${forms}
+      ${biz.role !== 'entry_staff' ? html`<a class="tiny" href="#/b/${biz.id}/cashbooks">All cash books</a>` : ''}
+    </div>`));
+  wireShell();
+  const reload = () => cashBookDayView(biz, accountId, day);
+  document.getElementById('cb-date')?.addEventListener('change', (e) => { if (isDay(e.target.value)) go(`#/b/${biz.id}/cashbook/${b.id}/${e.target.value}`); });
+  app.querySelectorAll('[data-cbdel]').forEach((x) => x.addEventListener('click', async () => {
+    if (!confirm('Remove this line from the book?')) return;
+    try { await api('DELETE', `/businesses/${biz.id}/cashbooks/${b.id}/entries/${x.dataset.cbdel}`); await reload(); } catch (err) { alert(err.message); }
+  }));
+  app.querySelectorAll('[data-cbaccept]').forEach((x) => x.addEventListener('click', async () => {
+    x.disabled = true;
+    try { await api('POST', `/businesses/${biz.id}/handovers/${x.dataset.cbaccept}/receive`, { day }); await reload(); } catch (err) { alert(err.message); x.disabled = false; }
+  }));
+  const cf = document.getElementById('cb-count');
+  cf && onSubmit(cf, async (x) => { await api('PUT', `/businesses/${biz.id}/cashbooks/${b.id}/count/${day}`, x); await reload(); });
+  const form = document.getElementById('cb-form');
+  if (!form) return;
+  let kind = null;
+  const titles = { fee: 'Fee received', expense: 'Expense', handover_out: 'Cash handed over', more: 'Other money' };
+  const show = (k) => {
+    kind = k;
+    form.hidden = false;
+    form.querySelector('[data-cbtitle]').textContent = titles[k];
+    form.querySelector('#cbn2').placeholder = { fee: 'chilkana road fee received', expense: 'stationery exam', handover_out: 'Transfer entry haji ji', more: 'from Anoop' }[k];
+    const to = form.querySelector('#cbt');
+    const person = to && to.value.startsWith('person:') && !to.value.slice(7);
+    form.querySelectorAll('[data-for]').forEach((f) => { f.hidden = f.dataset.for === 'person' ? !(k === 'handover_out' && person) : f.dataset.for !== k; });
+    form.querySelector('#cba').focus();
+  };
+  app.querySelectorAll('[data-cbadd]').forEach((x) => x.addEventListener('click', () => show(x.dataset.cbadd)));
+  form.querySelector('#cbt')?.addEventListener('change', () => show(kind));
+  form.querySelector('[data-cbcancel]').addEventListener('click', () => { form.reset(); form.hidden = true; });
+  onSubmit(form, async (x) => {
+    const body = { day, amount: x.amount, narration: x.narration, kind: kind === 'more' ? x.moreKind : kind };
+    if (kind === 'expense') body.headId = x.headId;
+    if (kind === 'handover_out') {
+      const [k, v] = [x.to.slice(0, x.to.indexOf(':')), x.to.slice(x.to.indexOf(':') + 1)];
+      body.to = k === 'person' ? { kind: 'person', name: v || x.person } : { kind: k, accountId: v };
+    }
+    await api('POST', `/businesses/${biz.id}/cashbooks/${b.id}/entries`, body);
+    await reload();
+  });
+}
+
+// ---------- Fee check (approved 20 Nov 2026): a day's fee report against where its money should be.
+
+const FEE_MODES = [['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card'], ['bank', 'Bank transfer'], ['cheque', 'Cheque'], ['other', 'Other']];
+async function feesView(biz, dayIn) {
+  // From the menu: the latest day brought in.
+  if (!isDay(dayIn)) {
+    const { days } = await api('GET', `/businesses/${biz.id}/fees/${todayIst()}`);
+    return location.replace(`#/b/${biz.id}/fees/${days[0] ?? todayIst()}`);
+  }
+  const day = dayIn;
+  const d = await api('GET', `/businesses/${biz.id}/fees/${day}`);
+  const r = d.report;
+  const upload = d.can.import ? html`<label class="btn ${r ? 'plain' : ''}" style="display:inline-flex;align-items:center;cursor:pointer">${r ? 'Bring in again' : 'Bring in the fee report'}
+      <input type="file" id="fee-file" accept=".xls,.html,.htm,text/html,application/vnd.ms-excel" hidden></label>` : '';
+  const dayNav = html`<nav class="cb-day" aria-label="Day" style="max-width:560px">
+    <a class="btn plain" href="#/b/${biz.id}/fees/${addDaysIso(day, -1)}" aria-label="Previous day">‹</a>
+    <label class="cb-pick">${dayLabel(day)}<input type="date" id="fee-date" value="${day}" max="${todayIst()}" aria-label="Choose a day"></label>
+    ${day < todayIst() ? html`<a class="btn plain" href="#/b/${biz.id}/fees/${addDaysIso(day, 1)}" aria-label="Next day">›</a>` : html`<span class="btn plain off">›</span>`}</nav>`;
+  let body;
+  if (!r) {
+    body = html`${dayNav}<section class="card"><div class="note">No fee report for ${dayLabel(day)} yet.${d.can.import ? ' Bring in the FeeDaySheet file from the fee software.' : ''}</div>
+      <div>${upload}</div><div class="form-msg" id="fee-msg"></div>
+      ${d.days.length ? html`<div class="tiny">Days brought in: ${d.days.slice(0, 10).map((x, i) => html`${i ? ' · ' : ''}<a href="#/b/${biz.id}/fees/${x}">${shortDay(x)}</a>`)}</div>` : ''}</section>`;
+  } else {
+    const branchOpts = (sel) => html`<option value="">Not this business</option>${d.branches.map((b) => html`<option value="${b.id}" ${sel === b.id ? 'selected' : ''}>${b.name}</option>`)}`;
+    const unknown = d.codes.filter((c) => c.state === 'unknown');
+    const codesCard = d.codes.length ? html`<section class="card">
+      <h2>Schools in this file${unknown.length ? html` <span class="chip wait">${unknown.length} to set</span>` : ''}</h2>
+      <div class="tiny">The receipt number says which school it is. Link each code once; codes of your other business are left out here.</div>
+      ${d.codes.map((c) => html`<div class="list-row"><span><span class="mono">${c.code}</span> <span class="tiny">· ₹ ${rs(c.paise)}</span></span>
+        ${d.can.setup ? html`<select data-feecode="${c.code}" style="max-width:200px">${c.state === 'unknown' ? html`<option value="" selected disabled>Which school?</option>` : ''}${branchOpts(c.branchId)}</select>`
+          : html`<span>${c.state === 'ours' ? c.branchName : c.state === 'other' ? 'Not this business' : html`<span class="chip wait">not set</span>`}</span>`}</div>`)}
+    </section>` : '';
+    const tiles = FEE_MODES.filter(([m]) => d.totals[m]).map(([m, label]) => html`<div class="tile" style="padding:10px"><div class="tiny">${label}</div><div class="amount" style="text-align:left;font-weight:500">₹ ${rs(d.totals[m])}</div></div>`);
+    const schools = d.schools.map((s) => html`<div class="list-row"><span>${s.name} <span class="tiny">${FEE_MODES.filter(([m]) => s.byMode[m]).map(([m, l]) => `${l.toLowerCase()} ${rs(s.byMode[m])}`).join(' · ')}</span></span>
+      <span class="amount">₹ ${rs(s.totalPaise)}</span></div>`);
+    const bookOpts = (sel) => html`<option value="">No book (not a cashier)</option>${d.books.map((b) => html`<option value="${b.id}" ${sel === b.id ? 'selected' : ''}>${b.name}${b.cashierName && b.cashierName !== b.name ? ` (${b.cashierName})` : ''}</option>`)}`;
+    const cashiers = d.cashiers.map((x) => {
+      const state = !x.cashPaise ? html`<span class="tiny">no cash</span>`
+        : x.book ? (x.beforeBook ? html`<span class="chip wait">before ${x.book.name} starts</span>` : html`<a class="chip ok" href="#/b/${biz.id}/cashbook/${x.book.id}/${day}">in ${x.book.name}</a>`)
+          : x.noBook ? html`<span class="chip mute">no book</span>` : html`<span class="chip bad">whose book?</span>`;
+      const pick = d.can.setup && x.cashPaise && x.nameKey && (!x.book || x.book.how === 'chosen' || x.noBook)
+        ? html`<select data-feecashier="${x.name}" style="max-width:190px;margin-top:4px">${!x.book && !x.noBook ? html`<option value="" selected disabled>Whose book?</option>` : ''}${bookOpts(x.book?.id)}</select>` : '';
+      return html`<div class="list-row" style="align-items:flex-start"><span><span style="font-weight:500">${x.name}</span> <span class="tiny">· ${x.schools.join(', ')}</span>
+          ${x.otherPaise ? html`<div class="tiny">UPI, card and bank ₹ ${rs(x.otherPaise)}: checked against the bank, not the cash count</div>` : ''}<div>${pick}</div></span>
+        <span style="text-align:right"><div class="amount">₹ ${rs(x.cashPaise)}</div>${state}</span></div>`;
+    });
+    const bank = d.bank.map((x) => html`<div class="list-row" style="align-items:flex-start"><span><span class="mono">${x.receiptNo}</span> <span class="tiny">· ${x.modeText} · ${x.school ?? ''} · ${x.student ?? ''}</span>
+        ${x.match ? html`<div class="tiny">${x.match.accountName} · ${shortDay(x.match.day)} · ${x.match.description}${d.can.approve ? html` <button type="button" class="linkbtn tiny" data-feeunmatch="${x.receiptNo}">Undo</button>` : ''}</div>`
+          : x.candidates.length ? x.candidates.map((c) => html`<div class="tiny" style="margin-top:4px">${c.accountName} · ${shortDay(c.day)} · ${c.description}
+              ${d.can.approve ? html`<button type="button" class="btn ghost" style="min-height:30px" data-feematch="${x.receiptNo}" data-row="${c.id}">Match</button>` : ''}</div>`)
+            : html`<div class="tiny">No credit of ₹ ${rs(x.amountPaise)} near ${shortDay(day)} yet. Bring in the bank statement on the Bank page.</div>`}</span>
+      <span style="text-align:right"><div class="amount">₹ ${rs(x.amountPaise)}</div>${x.match ? html`<span class="chip ok">in the bank</span>` : html`<span class="chip wait">to match</span>`}</span></div>`);
+    const footer = r.footer.filter((f) => f.amountPaise || /total|net/i.test(f.label));
+    body = html`${dayNav}
+      <div class="row">
+        <section class="card grow3">
+          <h2>Fees of ${biz.name} <span class="amount" style="float:right">₹ ${rs(d.totalPaise)}</span></h2>
+          <div class="tiny">${r.receipts} receipts · ${r.oursLines} of ${r.lines} lines in the file${r.fileName ? ` · ${r.fileName}` : ''}${r.importedByName ? ` · brought in by ${r.importedByName}` : ''}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">${tiles}</div>
+          ${schools.length ? html`<div class="cb-hd">By school</div>${schools}` : ''}
+          <div class="cb-hd">Cash → cashier books</div>
+          ${cashiers.length ? cashiers : html`<div class="note">No receipts of this business's schools yet. Link the codes under Schools in this file.</div>`}
+          ${bank.length ? html`<div class="cb-hd">Bank transfer and cheque → bank credit</div>${bank}` : ''}
+          ${d.totals.upi || d.totals.card ? html`<div class="cb-hd">UPI and card</div><div class="note">UPI ₹ ${rs(d.totals.upi)} and card ₹ ${rs(d.totals.card)} are matched to the apps' and machines' payouts once their bank accounts are added.</div>` : ''}
+          <div>${upload}</div><div class="form-msg" id="fee-msg"></div>
+        </section>
+        <div class="grow2" style="display:flex;flex-direction:column;gap:16px">
+          ${codesCard}
+          <section class="card"><h2>The report's own totals</h2><div class="tiny">Whole file, every school in it.</div>
+            ${footer.map((f) => html`<div class="list-row" style="align-items:flex-start"><span>${f.label}${f.detail ? html`<div class="tiny">${f.detail}</div>` : ''}</span><span class="amount">₹ ${rs(f.amountPaise)}</span></div>`)}</section>
+        </div>
+      </div>`;
+  }
+  render(shell(biz, 'fees', 'Fee check', 'The fee software\'s day against the cashier books and the bank.', body));
+  wireShell();
+  const reload = () => feesView(biz, day);
+  document.getElementById('fee-date')?.addEventListener('change', (e) => { if (isDay(e.target.value)) go(`#/b/${biz.id}/fees/${e.target.value}`); });
+  document.getElementById('fee-file')?.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0];
+    const msg = document.getElementById('fee-msg');
+    if (!f) return;
+    msg.textContent = 'Reading…'; msg.className = 'form-msg';
+    try {
+      const res = await api('POST', `/businesses/${biz.id}/fees/import`, { fileName: f.name, text: await f.text() });
+      go(`#/b/${biz.id}/fees/${res.day}`);
+      if (res.day === day) await reload();
+    } catch (err) { msg.textContent = err.message; msg.className = 'form-msg error'; }
+  });
+  const act = (sel, ev, f) => app.querySelectorAll(sel).forEach((x) => x.addEventListener(ev, async () => {
+    x.disabled = true;
+    try { await f(x); await reload(); } catch (err) { alert(err.message); x.disabled = false; }
+  }));
+  act('[data-feecode]', 'change', (x) => api('PUT', `/businesses/${biz.id}/fees/codes/${x.dataset.feecode}`, { branchId: x.value || null }));
+  act('[data-feecashier]', 'change', (x) => api('PUT', `/businesses/${biz.id}/fees/cashiers`, { name: x.dataset.feecashier, accountId: x.value || null }));
+  act('[data-feematch]', 'click', (x) => api('POST', `/businesses/${biz.id}/fees/receipts/${encodeURIComponent(x.dataset.feematch)}/match`, { bankRowId: x.dataset.row }));
+  act('[data-feeunmatch]', 'click', (x) => api('DELETE', `/businesses/${biz.id}/fees/receipts/${encodeURIComponent(x.dataset.feeunmatch)}/match`));
+}
+
 async function route() {
   const seq = navStart((location.hash || '#/').slice(2).split('/'));
   try { await routeInner(); } finally { if (seq === navSeq) navShown(); }
@@ -8872,6 +9183,17 @@ async function routeInner() {
       const detail = await bizDetail(summary.id);
       const biz = { ...summary, ...detail, actions: summary.actions };
       const [screen, query = ''] = (parts[2] || 'dashboard').split('?');
+      // A school (it has cash books) opens on them; a cashier with one book opens straight on today's page of it.
+      if (!parts[2] && biz.cashBooks) {
+        if (biz.role === 'entry_staff' && biz.myBooks === 1) {
+          const { books } = await api('GET', `/businesses/${biz.id}/cashbooks`);
+          if (books[0]) return location.replace(`#/b/${biz.id}/cashbook/${books[0].id}/${todayIst()}`);
+        }
+        return location.replace(`#/b/${biz.id}/cashbooks`);
+      }
+      if (screen === 'cashbooks') return cashBooksView(biz, parts[3]);
+      if (screen === 'cashbook') return cashBookDayView(biz, parts[3], parts[4]);
+      if (screen === 'fees') return feesView(biz, parts[3]);
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);
       if (screen === 'users' && biz.role === 'owner') return usersView(biz, parts[3]);
