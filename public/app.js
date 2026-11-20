@@ -5719,6 +5719,68 @@ function suggestionCard(c, day) {
       <button class="btn plain" type="button" data-carddismiss="${c.key}" style="min-height:36px" title="Hide this suggestion on this device">Not this</button></div>
     <div class="form-msg"></div></div>`;
 }
+// Suggestions grouped by what you do (approved 20 Nov 2026): one heading and one reason per kind, one line per bill,
+// the three sources as chips (the odd one struck), a button that names the result, and a quiet ✕.
+const SG_GROUPS = [
+  ['bank', 'The bank settles it', "the bank's credit shows which side is right", ['bank_backs']],
+  ['number', 'Wrong bill number', 'check the number against the photo first', ['number_typo', 'register_slip']],
+  ['written', 'Register written differently', 'the money came in another way than the register says', ['wrong_column', 'discount_not_given', 'change_in_cash', 'payment_written_wrong']],
+  ['together', 'Paid together or in parts', 'one payment for several bills, or one bill in several payments', ['one_credit_many_bills', 'paid_in_parts', 'clear_matches']],
+  ['same', 'Booked directly earlier', 'money booked before its bill came', ['same_sale']],
+  ['nocredit', 'UPI bill, no credit in the bank', 'paid another way, or still on its way', ['no_upi_credit']],
+  ['nobill', 'Money with no bill', 'a sale not written down, or money that is not a sale', ['no_bill']],
+];
+const sgParse = (v) => { const m = /₹\s?([\d,]+(?:\.\d+)?)(?:\s·\s(\w+))?/.exec(v ?? ''); return m ? { amt: m[1].replace(/\.00$/, ''), mode: m[2] ?? null } : null; };
+/** A bank-backs button that says what pressing does: the amount counted, or the way it was paid. */
+function sgLabel(c, a, i) {
+  if (c.kind !== 'bank_backs' || i !== 0 || !c.witnesses) return a.label;
+  const keep = c.witnesses.odd === 'software' ? c.witnesses.register : c.witnesses.software;
+  const drop = c.witnesses.odd === 'software' ? c.witnesses.software : c.witnesses.register;
+  const k = sgParse(keep); const d = sgParse(drop);
+  if (!k || !d) return a.label;
+  if (k.amt !== d.amt) return `Count ₹ ${k.amt}`;
+  if (k.mode && k.mode !== d.mode) return `Make it ${MODE_LABELS[k.mode] ?? k.mode}`;
+  return a.label;
+}
+function sgChips(c) {
+  const w = c.witnesses;
+  if (!w) return '';
+  const chip = (label, v, odd) => (v == null ? '' : html`<span class="sg-src ${odd ? 'bad' : w.odd ? 'ok' : ''}">${label} ${v.replace(/\.00\b/g, '').replace(/ · (upi|card|cash|mixed)\b/g, (_, m) => ` · ${MODE_LABELS[m] ?? m}`)}</span>`);
+  return html`${chip('Software', w.software, w.odd === 'software')}${chip('Register', w.register, w.odd === 'register')}${chip('Bank', w.bank, w.odd === 'bank')}`;
+}
+/** The middle of a line: the chips, else the amount and time, else the title; the reasons under Why. */
+function sgMiddle(c) {
+  const chips = sgChips(c);
+  if (c.kind === 'no_upi_credit') {
+    const amt = /\(₹\s?([\d,.]+)\)/.exec(c.title)?.[1]?.replace(/\.00$/, '');
+    const at = /around ([^.]+)\./.exec(c.evidence?.[0] ?? '')?.[1];
+    return html`<span>₹ ${amt ?? ''}${at ? ` · ${at}` : ''}</span>`;
+  }
+  const head = c.kind === 'no_bill' ? '' : html`<span class="sg-t">${c.title}</span>`;
+  return html`${head}${chips ? html`<span class="sg-chips">${chips}</span>` : ''}${(c.evidence ?? []).length ? html`<details class="sg-why"><summary>Why</summary><ul>${c.evidence.map((e) => html`<li>${e}</li>`)}</ul></details>` : ''}`;
+}
+function sgRow(c, day) {
+  const bills = (c.billNos ?? []).filter(Boolean);
+  const lead = bills.length ? bills.map((b) => drawerBtn(b, day)) : c.kind === 'no_bill' ? html`<span class="sg-t">${c.title.replace(/ with no bill$/, '')}</span>` : '';
+  const wait = c.kind === 'no_upi_credit';
+  return html`<div class="sg-row" data-card="${c.key}"><div class="sg-lead">${lead}</div><div class="sg-mid">${sgMiddle(c)}</div>
+    <div class="sg-acts">${c.actions.map((a, i) => a.href ? html`<a class="btn ${i === 0 ? '' : 'plain'} dchip" href="${a.href}">${a.label}</a>`
+      : html`<button class="btn ${a.primary ? '' : 'plain'} dchip" type="button" data-cardact="${c.key}" data-i="${i}">${sgLabel(c, a, i)}</button>`)}
+      <button class="btn plain dchip sg-x" type="button" data-carddismiss="${c.key}" title="${wait ? 'Leave it for a later bank statement (hidden on this device)' : 'Not this: hide it on this device'}" aria-label="${wait ? 'Wait' : 'Not this'}">${wait ? 'Wait' : '✕'}</button></div>
+    <div class="form-msg"></div></div>`;
+}
+function suggestionList(cards, day) {
+  if (!cards.length) return '';
+  const known = new Set(SG_GROUPS.flatMap((g) => g[3]));
+  const groups = [...SG_GROUPS, ['other', 'Other checks', '', []]].map(([id, title, sub, kinds]) => [id, title, sub,
+    cards.filter((c) => (id === 'other' ? !known.has(c.kind) : kinds.includes(c.kind)))]).filter((g) => g[3].length);
+  return html`${groups.map(([id, title, sub, list]) => {
+    const all = id === 'bank' && list.length > 1 && list.every((c) => c.actions?.[0] && !c.actions[0].href && c.actions[0].op !== 'pick');
+    return html`<section class="sg-group left-box" data-sg="${id}"><div class="sg-h"><strong>${title} (${list.length})</strong>${sub ? html`<span class="tiny">${sub}</span>` : ''}<span class="lo-fill"></span>
+      ${all ? html`<button class="btn dchip" type="button" data-cardall="${list.map((c) => c.key).join('|')}">Accept all ${list.length}</button>` : ''}</div>
+      ${list.map((c) => sgRow(c, day))}<div class="form-msg" data-sgmsg></div></section>`;
+  })}`;
+}
 const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist" aria-label="Reconcile">
   <a role="tab" class="${tab === 'shift' ? 'on' : ''}" href="#/b/${biz.id}/reconcile${day ? `/${day}` : ''}">This shift</a>
   <a role="tab" class="${tab === 'all' ? 'on' : ''}" href="#/b/${biz.id}/reconcile/all">All unmatched</a></div>`;
@@ -6035,7 +6097,7 @@ async function reconcileView(biz, dayArg) {
     ${r.unbilledHeads.length ? '' : html`<div class="note">Choose the income heads for F&amp;B and Room bills on <a href="#/b/${biz.id}/heads">Heads and rules</a> to book unbilled sales.</div>`}
   </section>` : '';
   const upiDecide = r.confirmed ? 0 : (ent.upi?.entries ?? []).filter((e) => e.state === 'decide').length;
-  const nearSection = () => (near.length || isSameCards.length ? html`<section class="card" id="nearpairs" style="gap:8px">
+  const nearSection = () => (near.length || isSameCards.length ? html`<section class="card left-box" id="nearpairs" style="gap:8px">
     <div class="lane-h"><strong>Is this the same? (${near.length + isSameCards.length})</strong><span class="tchip warn">Check</span></div>
     <div class="tiny" style="color:var(--muted)">Bookr's guesses: a bill and a credit that look like one payment. Nothing is matched until you choose; it is matched when you save the shift.</div>
     ${near.map((p, i) => html`<div class="near-pair" data-card="near:${p.bill.id}:${p.credit.id}">
@@ -6047,7 +6109,7 @@ async function reconcileView(biz, dayArg) {
         <button class="btn plain dchip" type="button" data-nearmatch="${i}">${nearLabel(p)}</button>
         <button class="btn plain dchip" type="button" data-carddismiss="near:${p.bill.id}:${p.credit.id}" title="Keep these apart on this device">Not these</button></div>
       <div class="form-msg" style="grid-column:1/-1"></div></div>`)}
-    ${isSameCards.length ? html`<div class="rv-cards">${isSameCards.map((c) => suggestionCard(c, day))}</div>` : ''}
+    ${isSameCards.length ? suggestionList(isSameCards, day) : ''}
   </section>` : '');
   const view = reconcileViewPref(r.confirmed);
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;
@@ -6072,7 +6134,7 @@ async function reconcileView(biz, dayArg) {
     <div class="form-row" style="gap:6px"><button class="btn" type="button" id="matchlikely" disabled style="min-height:36px">Match 0 ticked</button></div><div class="form-msg" id="likelymsg"></div></div>` : '';
   const nothing = !r.clear.length && !cols.length && !fixes.length && !r.likely.length && !noCredit.length;
   const suggestions = html`<section class="card lane" style="gap:10px">
-    <div class="rv-cards">${clearCard}${cols.map((c) => suggestionCard(c, day))}${fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)).map((c) => suggestionCard(c, day))}${likelyCard}${noCredit.map((c) => suggestionCard(c, day))}</div>
+    <div class="rv-cards">${clearCard}${likelyCard}</div>${suggestionList([...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)), ...noCredit], day)}
     ${nothing ? html`<div class="note">${done ? 'No suggestions: nothing is left to explain.' : 'No suggestions for what is left. Open the entries to compare them yourself.'}</div>` : ''}
     ${cardSide ? html`<div class="note">${cardSide} UPI entr${cardSide === 1 ? 'y is' : 'ies are'} explained by the card machine: see Card machine below.</div>` : ''}
   </section>`;
@@ -6183,7 +6245,7 @@ async function reconcileView(biz, dayArg) {
       <div class="lo-cell"><input type="checkbox" data-tside="cr" data-amt="${x.amountPaise}" data-id="${x.id}" aria-label="Tick credit ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">${hint}<span class="lo-fill"></span>${nb && !r.confirmed ? html`<button type="button" class="btn plain dchip lo-book" data-loopen>Book ▾</button>` : ''}<strong class="amount">₹ ${money(x.amountPaise)}</strong>${loMenu(`Choices for the credit of ₹ ${money(x.amountPaise)}`, body)}</div></div>`;
   };
   const nbIds = new Set(noBillLeft.map((n) => n.creditId));
-  const trialLists = r.open ? html`<section class="card" style="gap:8px" id="trialopen">
+  const trialLists = r.open ? html`<section class="card left-box" style="gap:8px" id="trialopen">
     <div class="lane-h"><strong>Not matched yet · ${loBills.length} bill${loBills.length === 1 ? '' : 's'} · ${loCredits.length} credit${loCredits.length === 1 ? '' : 's'}</strong>${lone.length > 1 ? html`<button type="button" class="linkbtn tiny" data-tray="exact">Tick all exact pairs (${lone.length})</button>` : ''}</div>
     <div class="tiny" style="color:var(--muted)">Tick a bill and a credit to pair them; pairs are matched when you save. ⋯ on a line for its choices: Book, Was cash, Was card, or the fix its note suggests.</div>
     <div data-tray="fix"></div><div data-tray="sum" class="note" hidden></div><div class="form-msg" data-tray="msg"></div>
@@ -6197,11 +6259,23 @@ async function reconcileView(biz, dayArg) {
   // Is this the same? (approved 17 Nov 2026): Bookr's guesses, a bill and a credit that look like one payment, and the
   // register slips and Same sale cards, each told once here and not again on the list.
   const listedCredit = new Set([...loCredits, ...(r.open?.credits ?? [])].map((c) => `cr:${c.id}`));
-  const isSameCards = r.confirmed || !r.open ? [] : [...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)),
+  let isSameCards = r.confirmed || !r.open ? [] : [...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)),
     ...noCredit.filter((k) => !(k.billNos ?? []).some((b) => loBills.some((x) => x.billNo === b)))]
     // A credit with no bill is a line of the list below, with its choices in its ⋯ (18 Nov 2026): not a card too.
     .filter((k) => !(k.kind === 'no_bill' && (k.uses ?? []).some((u) => listedCredit.has(u))));
-  const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold"><summary><h2>Done (${r.done.length + r.booked.length})</h2></summary>
+  // Left on top, done below in green (approved 20 Nov 2026): a Same sale a person chose is not a question; it is told
+  // under Done as On save, with Undo.
+  const planCards = isSameCards.filter((k) => String(k.key ?? '').startsWith('same-sale-plan:'));
+  isSameCards = isSameCards.filter((k) => !planCards.includes(k));
+  const onSaveHtml = planCards.length ? html`<section class="card done-box" style="gap:6px"><div class="lane-h"><strong>✓ On save (${planCards.length})</strong><span class="tiny">your choices, done when the shift is saved</span></div>
+    ${planCards.map((k, i) => html`<div class="done-line"><span>${k.title.replace(' will join the ', ' joins the ')}</span>${k.actions?.[0] ? html`<button class="btn plain dchip" type="button" data-plandel="${i}">Undo</button>` : ''}</div>`)}
+    <div class="tiny">Each bill is counted once, on the day its money was booked.</div></section>` : '';
+  const clearList = r.clear ?? [];
+  const wouldMatch = !r.confirmed && r.open && s.bills - s.billsLeft > 0 ? html`<details class="card cmp-fold done-box"><summary><h2>✓ Would match the bank · ${s.bills - s.billsLeft} bill${s.bills - s.billsLeft === 1 ? '' : 's'} · ₹ ${money(s.matchedPaise)}</h2></summary>
+    ${clearList.length ? html`<div class="scroll"><table style="min-width:520px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th></tr></thead><tbody>
+      ${clearList.map((x) => html`<tr><td class="mono">${(x.billNos ?? []).join(' + ')}</td><td class="amount">${money(x.amountPaise)}</td><td>${when(x.postedAt)}${x.accountName ? html`<div class="tiny">${x.accountName}</div>` : ''}</td></tr>`)}
+    </tbody></table></div>` : ''}<div class="tiny">Matched when you save the shift.</div></details>` : '';
+  const doneFold = r.done.length || r.booked.length ? html`<details class="card cmp-fold done-box"><summary><h2>✓ Done (${r.done.length + r.booked.length})</h2></summary>
       <div class="scroll"><table style="min-width:620px"><thead><tr><th>Bill</th><th style="text-align:right">Amount</th><th>Credit</th><th></th></tr></thead><tbody>
         ${r.done.map((x) => html`<tr><td class="mono">${x.bills.join(' + ')}</td><td class="amount">${money(x.creditPaise ?? x.billsPaise)}</td><td>${when(x.postedAt)}<div class="tiny">${x.accountName}</div></td>
           <td><button class="btn plain dchip" type="button" data-unmatch="${x.rowId}">Unmatch</button></td></tr>`)}
@@ -6360,7 +6434,7 @@ async function reconcileView(biz, dayArg) {
     </div>
     <div data-rpanel="card" ${tab === 'card' ? '' : 'hidden'}>
       ${paidLaterHtml(biz, r, 'card')}
-      ${r.cards?.trial ? trialCardSection(biz, r.cards, biz.actions.includes('bank.link') ? { unbilled: r.unbilledHeads ?? [], income: heads.filter((h) => h.type === 'income') } : null) : r.cards ? cardSection(biz, r.cards, heads) : ''}
+      ${r.cards?.trial ? trialCardSection(biz, r.cards, biz.actions.includes('bank.link') ? { unbilled: r.unbilledHeads ?? [], income: heads.filter((h) => h.type === 'income') } : null, { entries: ent.card, oldPos: r.oldPos, cv }) : r.cards ? cardSection(biz, r.cards, heads) : ''}
       ${entriesHtml(biz, day, ent.card, 'card', cv)}
       ${machineUpiLine(r.cards)}
     </div>
@@ -6370,6 +6444,7 @@ async function reconcileView(biz, dayArg) {
       <div class="cmp-top">
         <div class="cmp-day">
           ${done ? html`<span class="chip ok">UPI reconciled</span>` : html`<span class="chip wait">Left to explain: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'}, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched</span>`}
+          ${!r.confirmed && r.open && (s.bills - s.billsLeft || planCards.length) ? html`<span class="chip ok">Done: ${s.bills - s.billsLeft} bill${s.bills - s.billsLeft === 1 ? '' : 's'}${planCards.length ? ` · ${planCards.length} on save` : ''}</span>` : ''}
           ${r.confirmed ? html`<span class="chip ok">Saved</span>` : html`<span class="chip">Not saved</span>`}
           ${near.length + isSameCards.length ? html`<button type="button" class="chip wait" style="border:0;cursor:pointer" data-jump="nearpairs">${near.length + isSameCards.length} to check ↓</button>` : ''}
         </div>
@@ -6387,9 +6462,12 @@ async function reconcileView(biz, dayArg) {
     ${r.confirmed ? html`<div class="lane-h"><div class="seg" id="recview"><button type="button" data-view="cards" class="${view === 'cards' ? 'on' : ''}">Suggestions</button><button type="button" data-view="open" class="${view === 'open' ? 'on' : ''}">All open entries</button></div></div>
     ${view === 'cards' ? suggestions : pairPanel(v, waiting)}
     ${noBillSection}` : r.open ? trialLists : suggestions}
-    ${upiDecide ? html`<section class="card" style="flex-direction:row;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><span>${upiDecide} UPI bill${upiDecide === 1 ? '' : 's'} where the register and the software differ: decide on To do</span><button type="button" class="btn plain" data-gotodo>Open To do ›</button></section>` : ''}
-    ${doneFold}
+    ${upiDecide ? html`<section class="card left-box" style="flex-direction:row;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><span>${upiDecide} UPI bill${upiDecide === 1 ? '' : 's'} where the register and the software differ: decide on To do</span><button type="button" class="btn plain" data-gotodo>Open To do ›</button></section>` : ''}
+    ${onSaveHtml || choicesHtml(r) || wouldMatch || doneFold ? html`<div class="grp-h ok">✓ Done</div>` : ''}
+    ${onSaveHtml}
     ${choicesHtml(r)}
+    ${wouldMatch}
+    ${doneFold}
     ${entriesHtml(biz, day, ent.upi, 'upi', cv)}
     </div>
     </div>`));
@@ -6431,6 +6509,13 @@ async function reconcileView(biz, dayArg) {
       doneToast(`${ticked.length - skipped.length} old POS bill${ticked.length - skipped.length === 1 ? '' : 's'} counted from the register.${skipped.length ? ` Not changed: ${skipped.map((x) => `${x.billNo} (${x.reason})`).join(', ')}.` : ''}`);
     } catch (err) { oldGo.disabled = false; showError(document.getElementById('oldposmsg'), err); }
   });
+  app.querySelectorAll('[data-plandel]').forEach((b) => b.addEventListener('click', async () => {
+    const a = planCards[Number(b.dataset.plandel)]?.actions?.[0];
+    if (!a) return;
+    b.disabled = true;
+    try { await apiFull(a.method, a.path, a.body); await reload(); }
+    catch (err) { b.disabled = false; showError(document.getElementById('recmsg'), err); }
+  }));
   app.querySelectorAll('[data-unchoose]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
     try { await apiFull('DELETE', `/businesses/${biz.id}/shifts/${day}/choices/${b.dataset.unchoose}`, {}); await reload(); }
@@ -6914,8 +6999,50 @@ function wirePaidLater(biz, reload) {
   }));
 }
 
-function trialCardSection(biz, k, book = null) {
+/**
+ * A swipe that pays bills together with old POS bills (approved 20 Nov 2026): one swipe, a group of bills of exactly its
+ * amount, held up only by old POS bills not decided yet. Shown as one box with one button; a person presses it.
+ */
+function oldPosGroups(k, entries, oldPos, cv) {
+  const old = new Map((oldPos?.bills ?? []).filter((b) => b.reviewed).map((b) => [b.comparisonId, b]));
+  if (!old.size || !entries?.entries) return [];
+  const gone = dismissed();
+  const ids = [...new Set(entries.entries.filter((e) => e.group).map((e) => e.group.id))];
+  const out = [];
+  for (const gid of ids) {
+    const es = entries.entries.filter((e) => e.group?.id === gid);
+    // A bill of the group still to decide itself (the group as a whole shows "decide" while any one is).
+    const cmpOf = (e) => cv?.comparisons?.find((c) => c.id === e.comparisonId);
+    const open = (e) => { const c = cmpOf(e); return !c || (!c.decision && c.difference !== 'match' && c.difference !== 'complimentary'); };
+    const undecided = es.filter(open);
+    if (!undecided.length || !undecided.every((e) => old.has(e.comparisonId))) continue;
+    const g = es[0].group;
+    const total = g.billsPaise;
+    const pays = k.needs.filter((n) => !n.candidates.length && !['written', 'not_purchase', 'tip'].includes(n.why) && n.payment.amountPaise === total);
+    if (pays.length !== 1 || gone.has(`oldgrp:${pays[0].payment.id}`)) continue;
+    out.push({ payment: pays[0].payment, total, bills: es.map((e) => ({ billNo: e.billNo, comparisonId: e.comparisonId, amountPaise: e.amountPaise ?? old.get(e.comparisonId)?.amountPaise ?? 0,
+      old: old.get(e.comparisonId) ?? null, decide: open(e) })) });
+  }
+  return out;
+}
+function oldGroupBox(x, day) {
+  const olds = x.bills.filter((b) => b.decide);
+  return html`<div class="rv-card left-box" data-card="oldgrp:${x.payment.id}" data-oldgrpbox="${x.payment.id}">
+    <div class="lane-h"><strong>₹ ${money(x.total)} swipe = ${x.bills.length} bills paid together</strong><span class="tchip warn">${olds.length} old POS to decide</span></div>
+    <div class="tiny">${x.payment.label} · machine ${x.payment.terminalId} · ${when(x.payment.paidAt)}. The ${x.bills.length} bills add up to exactly ₹ ${money(x.total)}.</div>
+    <div class="og-list">${x.bills.map((b) => html`<div class="og-row"><span class="mono">${b.billNo ?? '—'}</span>
+      <span>${b.decide ? html`<span class="chip">Old POS</span> <span class="tiny">register only</span>` : html`<span class="chip ok">ready</span>`}</span>
+      <span class="amount">${money(b.amountPaise)}</span><button type="button" class="linkbtn tiny" data-bill-drawer="${b.billNo}|${day}">Open row</button></div>`)}
+      <div class="og-row" style="font-weight:600"><span>Total</span><span></span><span class="amount">${money(x.total)}</span><span></span></div></div>
+    <div class="form-row" style="gap:6px"><button class="btn" type="button" data-oldgrp="${x.payment.id}" data-old="${olds.map((b) => `${b.comparisonId}:${b.old?.kind ?? 'full'}:${b.billNo ?? ''}`).join(',')}" data-cmps="${x.bills.map((b) => b.comparisonId).join(',')}">Use register for the ${olds.length} old POS bill${olds.length === 1 ? '' : 's'} and match ₹ ${money(x.total)}</button>
+      <button class="btn plain" type="button" data-carddismiss="oldgrp:${x.payment.id}" title="Show them apart again (on this device)">Not one payment</button></div>
+    <div class="tiny" style="color:var(--muted)">Leave out or complimentary instead: open the old POS bill's row. Matched when you save the shift.</div><div class="form-msg"></div></div>`;
+}
+function trialCardSection(biz, k, book = null, ex = {}) {
   const st = k.strip;
+  const groupsOld = oldPosGroups(k, ex.entries, ex.oldPos, ex.cv);
+  const ogPay = new Set(groupsOld.map((x) => x.payment.id));
+  const ogBill = new Set(groupsOld.flatMap((x) => x.bills.map((b) => b.comparisonId)));
   const at = (ms) => (ms ? when(ms) : 'register only');
   const openRow = (billNo) => html`<button type="button" class="linkbtn tiny" data-bill-drawer="${billNo}|${k.day}">Open row</button>`;
   const need = (n) => {
@@ -6978,15 +7105,17 @@ function trialCardSection(biz, k, book = null) {
       <button class="btn plain dchip" type="button" data-tcardunadv="${a.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
     ${(k.booked ?? []).length ? html`<details class="cmp-fold"><summary><strong>Booked with no bill (${k.booked.length}) · ₹ ${money(k.booked.reduce((a, x) => a + x.amountPaise, 0))}</strong></summary>${k.booked.map((x) => html`<div class="list-row" style="padding:4px 0"><span class="tiny">${x.label} ₹ ${money(x.amountPaise)} at ${hhmm(x.paidAt)} · ${x.what || x.headName || 'Booked'}${x.headName && x.what ? ` · ${x.headName}` : ''}</span>
       <button class="btn plain dchip" type="button" data-tcardunbook="${x.paymentId}">Undo</button><div class="form-msg" style="flex-basis:100%"></div></div>`)}</details>` : ''}
-    ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.map(need)}${k.noSwipe.map(noSwipe)}</div>` : ''}
-    ${trialCardOpen(k)}
+    ${groupsOld.length ? html`<div class="rv-cards">${groupsOld.map((x) => oldGroupBox(x, k.day))}</div>` : ''}
+    ${k.needs.length || k.noSwipe.length ? html`<div class="rv-cards">${k.needs.filter((n) => !ogPay.has(n.payment.id)).map(need)}${k.noSwipe.filter((x) => !ogBill.has(x.comparisonId)).map(noSwipe)}</div>` : ''}
+    ${trialCardOpen(k, ogPay, ogBill)}
   </section>`;
 }
 // Card payments as the tray's left side: its time is the swipe, its name the card.
-const cardTrayOpen = (k) => ({ credits: (k.open?.payments ?? []).map((p) => ({ ...p, postedAt: p.paidAt, accountName: p.label })), bills: k.open?.bills ?? [] });
+const cardTrayOpen = (k, skipPay = new Set(), skipBill = new Set()) => ({ credits: (k.open?.payments ?? []).filter((p) => !skipPay.has(p.id)).map((p) => ({ ...p, postedAt: p.paidAt, accountName: p.label })),
+  bills: (k.open?.bills ?? []).filter((b) => !skipBill.has(b.id)) });
 // The Card tab's open entries (card tray, approved 10 Nov 2026): tick payments and card bills, match the pairs on save.
-function trialCardOpen(k) {
-  const o = cardTrayOpen(k);
+function trialCardOpen(k, skipPay, skipBill) {
+  const o = cardTrayOpen(k, skipPay, skipBill);
   if (!o.bills.length) return '';
   const lone = lonePairs(o);
   return html`<details class="cmp-fold" id="tcardopen" ${o.credits.length + o.bills.length <= 30 ? 'open' : ''}><summary><strong>Match several at once</strong> <span class="tiny">· ${o.credits.length} payment${o.credits.length === 1 ? '' : 's'} · ${o.bills.length} bill${o.bills.length === 1 ? '' : 's'}</span></summary>
@@ -7120,6 +7249,33 @@ function wireTrialCards(biz, day, k, reload) {
     await paidOnCardClick(biz, day, { payment: { id: c.paymentId, amountPaise: c.amountPaise, paidAt: c.paidAt, upi: true }, written: c.bill }, b, reload);
   }));
   box.querySelectorAll('[data-tpaidcard]').forEach((b) => b.addEventListener('click', () => paidOnCardClick(biz, day, k.needs.find((x) => x.payment.id === b.dataset.tpaidcard), b, reload)));
+  box.querySelectorAll('[data-carddismiss^="oldgrp:"]').forEach((b) => b.addEventListener('click', () => setTimeout(reload, 0)));
+  box.querySelectorAll('[data-oldgrp]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    const base = `/businesses/${biz.id}`;
+    const olds = b.dataset.old.split(',').map((x) => x.split(':'));
+    const decided = [];
+    try {
+      for (const [note, kind] of [[OLD_POS_NOTE, 'full'], [SHORT_OLD_POS_NOTE, 'short']]) {
+        const ids = olds.filter(([, k2]) => k2 === kind).map(([id]) => id);
+        if (!ids.length) continue;
+        const res = await apiFull('POST', `${base}/shifts/${day}/register-only`, { ids, note });
+        const skipped = res.skipped ?? [];
+        decided.push(...olds.filter(([id, k2, no]) => k2 === kind && !skipped.some((x) => x.billNo === no)).map(([id]) => id));
+        if (skipped.length) throw new Error(`Not counted from the register: ${skipped.map((x) => `${x.billNo} (${x.reason})`).join(', ')}.`);
+      }
+      const { id } = await apiFull('POST', `${base}/shifts/${day}/card-choices`, { paymentId: b.dataset.oldgrp, comparisonIds: b.dataset.cmps.split(',') });
+      await reload();
+      doneToast(`${olds.length} old POS bill${olds.length === 1 ? '' : 's'} counted from the register; the ₹ ${b.textContent.match(/₹\s?([\d,.]+)/)?.[1] ?? ''} swipe is matched to the ${b.dataset.cmps.split(',').length} bills when you save.`, async () => {
+        await apiFull('DELETE', `${base}/shifts/${day}/choices/${id}`, {});
+        for (const cid of decided) await apiFull('PUT', `${base}/comparisons/${cid}`, { decision: null });
+      }, reload);
+    } catch (err) {
+      b.disabled = false;
+      showError(b.closest('.rv-card').querySelector('.form-msg'), err);
+      if (decided.length) await reload();
+    }
+  }));
   box.querySelectorAll('[data-tcardpick]').forEach((b) => b.addEventListener('click', async () => {
     b.disabled = true;
     try {
@@ -7412,7 +7568,7 @@ async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
     <div class="tiny">${x.side === 'bill' ? html`${x.paidAt ? `Paid at ${when(x.paidAt)}` : 'Register only, no bill time'}${x.labels ? ` · written under ${x.labels}` : ''}`
       : html`${x.accountName ?? ''}${x.vpa ? ` · ${x.vpa}` : ''}${x.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(x.remark) ? ` · ${x.remark}` : ''}`}</div>
     ${checksHtml}
-    ${cards.length ? html`<div class="rv-cards">${cards.map((c) => suggestionCard(c, x.day))}</div>` : ''}
+    ${cards.length ? suggestionList(cards, x.day) : ''}
     ${others.length ? html`<div><strong>Closest possible</strong>${others.map((o) => html`<div class="um-line" style="cursor:default"><span style="flex:1">${o.side === 'bill' ? html`Bill <span class="mono">${o.billNo ?? ''}</span>` : `Credit at ${when(o.postedAt)}`}
       <span class="tiny" style="display:block">${dayLabel(o.day)} shift${o.amountPaise !== x.amountPaise ? ` · ₹ ${money(Math.abs(o.amountPaise - x.amountPaise))} ${o.amountPaise > x.amountPaise ? 'more' : 'less'}` : ' · same amount'}</span></span><span class="amount">₹ ${money(o.amountPaise)}</span></div>`)}</div>` : html`<div class="tiny">Nothing open comes close to this amount.</div>`}
     <div class="form-row" style="gap:6px">
@@ -7553,6 +7709,27 @@ function undoFor(biz, a, res) {
 }
 function wireExplain(ex, reload, biz, root = document) {
   if (!ex) return;
+  // One action, and how to take it back.
+  const runCard = async (a) => {
+    if (a.op === 'setColumn') return setColumn(biz, a);
+    if (a.op === 'slip') return applySlip(biz, a);
+    if (a.op) return changeRegisterRow(biz, a);
+    return undoFor(biz, a, await apiFull(a.method, `${a.path}`, a.body));
+  };
+  root.querySelectorAll('[data-cardall]').forEach((b) => b.addEventListener('click', async () => {
+    const list = b.dataset.cardall.split('|').map((k) => ex.cards.find((x) => x.key === k)).filter(Boolean);
+    b.disabled = true;
+    const undos = [];
+    try {
+      for (const c of list) { const u = await runCard(c.actions[0]); if (u) undos.push(u); }
+      await reload();
+      doneToast(`Done for ${list.length} bills: ${list.flatMap((c) => c.billNos ?? []).join(', ')}.`, undos.length ? async () => { for (const u of undos.reverse()) await u(); } : null, reload);
+    } catch (err) {
+      b.disabled = false;
+      showError(b.closest('[data-sg]')?.querySelector('[data-sgmsg]'), err);
+      if (undos.length) await reload();
+    }
+  }));
   root.querySelectorAll('[data-cardact]').forEach((b) => b.addEventListener('click', async () => {
     const c = ex.cards.find((x) => x.key === b.dataset.cardact);
     const a = c.actions[Number(b.dataset.i)];
@@ -7567,11 +7744,7 @@ function wireExplain(ex, reload, biz, root = document) {
     }
     b.disabled = true;
     try {
-      let undo = null;
-      if (a.op === 'setColumn') undo = await setColumn(biz, a);
-      else if (a.op === 'slip') undo = await applySlip(biz, a);
-      else if (a.op) undo = await changeRegisterRow(biz, a);
-      else undo = undoFor(biz, a, await apiFull(a.method, `${a.path}`, a.body));
+      const undo = await runCard(a);
       await reload();
       doneToast(c.billNos?.length ? `${a.label}: bill ${c.billNos.join(' + ')}.` : `Done: ${c.title}.`, undo, reload);
     } catch (err) { b.disabled = false; showError(root.querySelector(`[data-card="${CSS.escape(c.key)}"] .form-msg`), err); }
