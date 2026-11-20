@@ -8,6 +8,7 @@
  * A bill left out is not waiting (its reason stays on the bill). A cash bill not in the register whose shift's cash
  * count agrees is not waiting either: the cash backs it.
  */
+import { twiceFor } from './countedTwice';
 import type { DB } from './db';
 import { all, one } from './db';
 import { addDays, shiftWindow } from './time';
@@ -25,6 +26,8 @@ export interface WaitItem {
   count?: number;
   /** Chosen on an unsaved shift's Reconcile (12 Nov 2026): that shift, and the money it is matched to when saved. */
   chosenOn?: string; chosenWith?: string;
+  /** One payment counted twice on a saved shift (20 Nov 2026): this half never comes; it can be removed. */
+  twice?: { otherMode: string; billPaise: number; discountPaise: number; tipPaise: number; newDiscountPaise: number; newTipPaise: number };
   /** A matched credit the bank reversed (Stage 6): the reversal line, to make the bill unpaid again. */
   reversalId?: string;
   /**
@@ -226,6 +229,15 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
   }
 
   await Promise.all(later);
+  // A half counted twice (20 Nov 2026): said on its line, with its fix.
+  const saved = out.filter((x) => x.group === 'look' && x.confirmed && x.key.startsWith('t:'));
+  if (saved.length) {
+    const tw = await twiceFor(db, businessId, saved.map((x) => x.key.slice(2)));
+    for (const x of saved) {
+      const k = tw.get(x.key.slice(2));
+      if (k) x.twice = { otherMode: k.otherMode, billPaise: k.billPaise, discountPaise: k.discountPaise, tipPaise: k.tipPaise, newDiscountPaise: k.newDiscountPaise, newTipPaise: k.newTipPaise };
+    }
+  }
   for (const x of reversed) {
     out.push({ key: `r:${x.revId}:${x.txId}`, comparisonId: x.comparisonId, billNo: x.billNo ?? '', day: x.day, amountPaise: x.amount, mode: 'upi', side: 'both', confirmed: true,
       group: 'look', waitFor: null, reason: `Its ${rs(x.amount)} credit was reversed by the bank on ${dayOf(x.revAt, x.day)}: the payment failed`, daysWaiting: days(x.day),

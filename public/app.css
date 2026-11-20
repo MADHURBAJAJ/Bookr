@@ -594,3 +594,13 @@ tr.rd-red td { background: #FCEBEB; }
 .wc-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 0 0 6px; }
 .rd-wait { color: #92400E; }
 @media (max-width: 640px) { .wc-row { grid-template-columns: 1fr auto; } .wc-why { grid-column: 1 / -1; } }
+
+/* Loading feedback (approved 19 Nov 2026): a thin bar along the top, the old page faded while the next one loads. */
+#topbar { position: fixed; top: 0; left: 0; height: 3px; width: 0; background: var(--teal); z-index: 1000; opacity: 0; pointer-events: none; }
+#topbar.run { opacity: 1; animation: topbar-run 8s cubic-bezier(.1, .8, .2, 1) forwards; }
+#topbar.done { opacity: 0; width: 100%; transition: opacity .35s .15s; }
+@keyframes topbar-run { 0% { width: 0; } 3% { width: 30%; } 100% { width: 88%; } }
+.main.is-loading > :not(.head):not(.demo-band):not(.nav-keep) { opacity: .3; pointer-events: none; transition: opacity .15s; }
+.nav-spin { width: 13px; height: 13px; border: 2px solid var(--line); border-top-color: var(--teal); border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; vertical-align: -1px; margin-left: 4px; }
+.nav-pending { display: flex; }
+@media (prefers-reduced-motion: reduce) { #topbar.run { animation: none; width: 60%; } .nav-spin { animation: none; } }

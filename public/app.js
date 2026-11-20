@@ -168,7 +168,65 @@ function onSubmit(form, handler) {
 
 function render(view) {
   app.innerHTML = view.__html;
+  navShown();
 }
+
+// Loading feedback (approved 19 Nov 2026). A press on the menu, a link, or ‹ › shows at once: the menu marks the new
+// item, the old page fades and cannot be pressed, the new page's heading (Shift: its day, with a spinner) shows, and a
+// thin bar runs along the top while the page loads. Quick pages show none of it (the fade waits 0.1 s, the bar 0.2 s).
+let navSeq = 0;
+let navEnd = null;
+const topBar = document.createElement('div');
+topBar.id = 'topbar';
+topBar.setAttribute('aria-hidden', 'true');
+document.body.appendChild(topBar);
+const SHIFT_PAGE = ['bringin', 'review', 'compare', 'reconcile', 'upi'];
+function navStart(parts) {
+  const seq = ++navSeq;
+  const main = app.querySelector('.main');
+  const [screen, query = ''] = (parts[2] || 'dashboard').split('?');
+  const item = parts[0] === 'b' ? NAV.find((n) => n.key === screen || n.screens?.includes(screen)) : null;
+  if (main && item) app.querySelectorAll('.side a.nav').forEach((a) => a.classList.toggle('on', a.dataset.navkey === item.key));
+  const undo = [];
+  const fade = setTimeout(() => {
+    if (seq !== navSeq || !main?.isConnected) return;
+    main.classList.add('is-loading');
+    const spin = '<span class="nav-spin" aria-hidden="true"></span>';
+    const tail = (parts[3] ?? '').split('?')[0];
+    const day = isDay(tail) ? tail : isDay(new URLSearchParams(query).get('day')) ? new URLSearchParams(query).get('day') : parts[1] ? lastDay(parts[1]) : null;
+    const bar = main.querySelector(':scope > .shiftbar');
+    if (SHIFT_PAGE.includes(screen) && day) {
+      const pick = bar?.querySelector('.sb-pick');
+      if (pick) {
+        const before = pick.innerHTML;
+        pick.innerHTML = `${esc(dayLabel(day))} shift ${spin}`;
+        bar.classList.add('nav-keep');
+        undo.push(() => { pick.innerHTML = before; bar.classList.remove('nav-keep'); });
+      } else {
+        const tmp = document.createElement('div');
+        tmp.className = 'nav-pending nav-keep';
+        tmp.innerHTML = `<span class="btn plain">${esc(dayLabel(day))} shift ${spin}</span>`;
+        main.querySelector(':scope > .head')?.after(tmp);
+        undo.push(() => tmp.remove());
+      }
+    } else if (item) {
+      const h1 = main.querySelector(':scope > .head h1');
+      if (h1) { const before = h1.innerHTML; h1.innerHTML = `${esc(item.label)} ${spin}`; undo.push(() => { h1.innerHTML = before; }); }
+    }
+    undo.push(() => main.classList.remove('is-loading'));
+  }, 100);
+  const run = setTimeout(() => { if (seq === navSeq) { topBar.className = ''; void topBar.offsetWidth; topBar.className = 'run'; } }, 200);
+  navEnd = () => {
+    clearTimeout(fade); clearTimeout(run);
+    navEnd = null;
+    if (topBar.className === 'run') { topBar.className = 'done'; setTimeout(() => { if (topBar.className === 'done') topBar.className = ''; }, 600); }
+    // Nothing new was drawn (an error, or the page stayed): the old page comes back as it was.
+    if (main?.isConnected) undo.reverse().forEach((f) => f());
+  };
+  return seq;
+}
+/** The new page is drawn (or the load ended): the bar fills and fades. */
+function navShown() { if (navEnd) navEnd(); }
 
 // ---------- shell: sidebar + header with business switcher
 
@@ -352,7 +410,7 @@ function wireShiftCalendar(biz, box, day, cal, to) {
 function shell(biz, current, title, subtitle, body, opts = {}) {
   const shown = NAV.filter((n) => (!n.owner || biz.role === 'owner') && (!n.needs || biz.actions.includes(n.needs))
     && (n.key !== 'shifts' || SHIFT_SCREENS.some(([, , need]) => biz.actions.includes(need))));
-  const link = (n) => html`<a class="nav ${(n.screens ?? [n.key]).includes(current) ? 'on' : ''}" href="${navHref(biz, n.key)}">
+  const link = (n) => html`<a class="nav ${(n.screens ?? [n.key]).includes(current) ? 'on' : ''}" data-navkey="${n.key}" href="${navHref(biz, n.key)}">
       <span>${n.label}</span>${n.badge ? html`<span class="nav-n" data-navn="${n.badge}" hidden></span>` : ''}</a>`;
   const settings = shown.filter((n) => n.group === 'Settings');
   const inSettings = settings.some((n) => (n.screens ?? [n.key]).includes(current));
@@ -3759,7 +3817,12 @@ function waitCardHtml(biz, day, sp, waitPic, opts) {
   const savedActs = (x) => {
     const w = pic.get(x.billNo);
     if (!w || !canDecide) return '';
-    return html`<div class="wc-acts">
+    // Counted twice (approved 20 Nov 2026): one payment written in two columns; this half never comes.
+    const tw = w.twice;
+    const twiceBox = tw ? html`<div class="cmp-warn" style="margin:4px 0 0"><strong>Probably counted twice.</strong> The register line has ₹ ${money(w.amountPaise)} ${MODE_LABELS[tw.otherMode] ?? tw.otherMode} and ₹ ${money(w.amountPaise)} ${MODE_LABELS[w.mode] ?? w.mode} (₹ ${money(w.amountPaise * 2)}) for a ₹ ${money(tw.billPaise)} bill. The ${MODE_LABELS[tw.otherMode] ?? tw.otherMode} ₹ ${money(w.amountPaise)} came; the software says ${MODE_LABELS[tw.otherMode] ?? tw.otherMode} only.
+      <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn plain dchip" type="button" data-twice="${w.key.slice(2)}" data-bill="${w.billNo}" data-day="${w.day}" data-amt="${w.amountPaise}"
+        data-mode="${MODE_LABELS[w.mode] ?? w.mode}" data-other="${MODE_LABELS[tw.otherMode] ?? tw.otherMode}" data-bp="${tw.billPaise}" data-nd="${tw.newDiscountPaise}" data-nt="${tw.newTipPaise}">Remove the ${MODE_LABELS[w.mode] ?? w.mode} ₹ ${money(w.amountPaise)} (counted twice)</button></div></div>` : '';
+    return html`${twiceBox}<div class="wc-acts">
       ${w.reversalId ? html`<button class="btn plain dchip" type="button" data-reversed="${w.reversalId}" data-bill="${w.billNo}">Bill unpaid again</button>` : ''}
       ${w.side === 'both' && w.mode === 'upi' && w.key.startsWith('t:') ? html`<button class="btn plain dchip" type="button" data-owedtx="${w.key.slice(2)}" data-bill="${w.billNo}">Owed by guest/company</button>` : ''}
       ${w.comparisonId && w.side !== 'both' ? html`<button class="btn plain dchip" type="button" data-closebill="${w.comparisonId}" data-bill="${w.billNo}">Close with a reason</button>
@@ -3798,6 +3861,18 @@ function wireWaiting(biz, root, act) {
   root.querySelectorAll('[data-owedtx]').forEach((b) => b.addEventListener('click', () => {
     const who = (prompt(`Bill ${b.dataset.bill}: owed by which guest or company? Its payment is matched to it when it comes.`) ?? '').trim();
     if (who) act(() => apiFull('POST', `/businesses/${biz.id}/sales/${b.dataset.owedtx}/close`, { note: `Owed by ${who}` }));
+  }));
+  root.querySelectorAll('[data-twice]').forEach((b) => b.addEventListener('click', async () => {
+    const d = b.dataset;
+    const amt = Number(d.amt);
+    const left = Number(d.nd) ? `discount ₹ ${money(Number(d.nd))}` : Number(d.nt) ? `tip ₹ ${money(Number(d.nt))}` : 'no discount';
+    if (!confirm(`Remove ${d.mode} ₹ ${money(amt)} from bill ${d.bill} (${dayLabel(d.day)}, saved)?\n\nRegister line: ${d.other} ₹ ${money(amt)} + ${d.mode} ₹ ${money(amt)} → ${d.other} ₹ ${money(amt)}\nBill ₹ ${money(Number(d.bp))}: ${left}\n${dayLabel(d.day)} income: − ₹ ${money(amt)}\nThe ${d.other} ₹ ${money(amt)} and its match stay. The shift stays saved.`)) return;
+    const note = (prompt('Reason', `Paid once by ${d.other.toLowerCase()} (₹ ${money(amt)}); the ${d.mode} entry was the same payment`) ?? '').trim();
+    if (!note) return;
+    let res = null;
+    await act(async () => { res = await apiFull('POST', `/businesses/${biz.id}/sales/${d.twice}/counted-twice`, { note }); });
+    if (res) doneToast(`${d.mode} ₹ ${money(amt)} removed from bill ${d.bill}. ${dayLabel(d.day)} income is ₹ ${money(amt)} less.`,
+      () => apiFull('POST', `/businesses/${biz.id}/counted-twice/${res.auditId}/undo`, {}), () => (drawerReload ?? route)());
   }));
   root.querySelectorAll('[data-keepwait]').forEach((b) => b.addEventListener('click', () => {
     const note = (prompt(`Keep bill ${b.dataset.bill} waiting: what are you waiting for?`) ?? '').trim();
@@ -8432,6 +8507,11 @@ async function cardsView(biz, query = '') {
 }
 
 async function route() {
+  const seq = navStart((location.hash || '#/').slice(2).split('/'));
+  try { await routeInner(); } finally { if (seq === navSeq) navShown(); }
+}
+
+async function routeInner() {
   document.body.classList.remove('review-expanded');
   drawerReload = null;
   const hash = location.hash || '#/';

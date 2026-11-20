@@ -1,3 +1,4 @@
+import { removeTwice, undoTwice } from '../countedTwice';
 import { Hono } from 'hono';
 import { bookTransferStatements, ownAccounts, transferHints, undoTransferStatements } from '../transfers';
 import type { AppEnv } from '../types';
@@ -582,6 +583,19 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
 });
 
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
+
+/** Counted twice (20 Nov 2026): the half of a payment written in two columns that never comes is removed, with a reason. */
+bankRoutes.post('/businesses/:businessId/sales/:txId/counted-twice', requireRole('sales.decide'), async (c) => {
+  const id = c.req.param('txId');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const note = text(await body(c), 'note', 'Reason', { max: 300 })!;
+  return c.json(await removeTwice(c.env.DB, c.get('businessId'), id, note, c.get('user').id));
+});
+bankRoutes.post('/businesses/:businessId/counted-twice/:auditId/undo', requireRole('sales.decide'), async (c) => {
+  const id = Number(c.req.param('auditId'));
+  if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
+  return c.json(await undoTwice(c.env.DB, c.get('businessId'), id, c.get('user').id));
+});
 
 /** Closes a bill whose credit will never come, after the watch and with a reason. The sale stays in income. Owner or Accountant. */
 bankRoutes.post('/businesses/:businessId/sales/:txId/close', requireRole('sales.decide'), async (c) => {
