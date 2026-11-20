@@ -670,3 +670,4 @@ tr.rd-red td { background: #FCEBEB; }
 @media (max-width: 760px) {
   .cb-actions { position: sticky; bottom: 8px; background: var(--ground); padding: 6px 0; z-index: 2; }
 }
+.menu .menu-install { width: calc(100% - 24px); margin: 4px 12px 8px; min-height: 36px; }

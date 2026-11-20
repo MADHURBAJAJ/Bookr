@@ -445,6 +445,7 @@ function shell(biz, current, title, subtitle, body, opts = {}) {
           <div class="menu" id="switch-menu" hidden>
             ${others}
             <a href="#/choose"><span>All businesses</span></a>
+            ${installButton('btn plain menu-install')}
             <div class="tiny" style="padding:8px 12px;border-top:1px solid var(--line-soft)">${ROLE_LABELS[biz.role]} · ${me.user.email}
               <div><button id="signout" type="button" class="btn plain" style="margin-top:6px;min-height:32px">Sign out</button></div></div>
           </div>
@@ -9016,6 +9017,7 @@ async function cashBookDayView(biz, accountId, dayIn) {
       </section>
       ${forms}
       ${biz.role !== 'entry_staff' ? html`<a class="tiny" href="#/b/${biz.id}/cashbooks">All cash books</a>` : ''}
+      ${installButton()}
     </div>`));
   wireShell();
   const reload = () => cashBookDayView(biz, accountId, day);
@@ -9243,6 +9245,22 @@ async function routeInner() {
     if (me) render(html`<div class="center"><section class="card"><div class="error">${e.message}</div><a href="#/choose">Back</a></section></div>`);
   }
 }
+
+// Bookr on the phone (approved 20 Nov 2026): installable as an app. The service worker keeps only an offline page.
+// When the phone offers to install, "Install Bookr on this phone" shows in the business menu and on the cash book.
+let installPrompt = null;
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; document.querySelectorAll('[data-install]').forEach((b) => { b.hidden = false; }); });
+window.addEventListener('appinstalled', () => { installPrompt = null; document.querySelectorAll('[data-install]').forEach((b) => { b.hidden = true; }); });
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest?.('[data-install]');
+  if (!b || !installPrompt) return;
+  const p = installPrompt;
+  installPrompt = null;
+  await p.prompt();
+  document.querySelectorAll('[data-install]').forEach((x) => { x.hidden = true; });
+});
+const installButton = (cls = 'btn plain') => html`<button type="button" class="${cls}" data-install ${installPrompt ? '' : 'hidden'}>Install Bookr on this phone</button>`;
 
 window.addEventListener('hashchange', route);
 route();
