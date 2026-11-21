@@ -64,7 +64,10 @@ eventRoutes.get(`${B}/event-mode/now`, requireAction('pos.view'), async (c) => {
   const t = now();
   const e = await one<Record<string, unknown> & { sections: string; menu: string | null }>(c.env.DB,
     `SELECT ${EVENT_COLS} FROM events WHERE business_id = ? AND starts_at <= ? AND ends_at > ? AND cancelled_at IS NULL ORDER BY starts_at DESC LIMIT 1`, c.get('businessId'), t, t);
-  return c.json({ event: e ? eventOut(e) : null });
+  if (!e) return c.json({ event: null });
+  const ev = eventOut(e);
+  const tables = (tableLayout(bizOf(c)) ?? []).filter((x) => (ev.sections as string[]).includes(x.name)).flatMap((x) => x.tables);
+  return c.json({ event: { ...ev, tables } });
 });
 
 // Recent and coming events with their sales, commission, what has been paid and what is still due.

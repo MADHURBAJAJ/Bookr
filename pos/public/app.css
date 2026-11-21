@@ -620,3 +620,43 @@ td.ing div { line-height: 1.6; }
 .costline { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 tr.editing td { background: var(--bg); }
 @media (max-width: 760px) { table.t.cards tr.sechead { display: block; } table.t.cards tr.sechead td { display: block; } .toolbar input.in, .toolbar select.in { width: 100%; flex: 1 1 100%; } .counts-act { margin-left: 0; } }
+
+/* Tables in sections (rooms, dorms, Out House, NC) and the event strip */
+.secttabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+.secttabs button { padding: 0 14px; min-height: 40px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.secttabs button[aria-pressed="true"] { background: var(--pri); border-color: var(--pri); color: var(--on-pri); }
+.secttabs .n { font-weight: 500; opacity: .8; margin-left: 6px; }
+.grouph { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 16px 0 8px; }
+.grouph h3 { margin: 0; font-size: 17px; }
+.dormrow { display: grid; grid-template-columns: minmax(140px, 180px) 1fr; gap: 10px; align-items: stretch; margin-bottom: 10px; }
+.dormrow .tgrid { margin: 0; }
+.tcell.blocked { opacity: .5; cursor: default; }
+.tcell.nc { background: var(--warn-tint); border-color: var(--warn-line); }
+.ncbadge { display: inline-block; font-size: 11px; font-weight: 800; padding: 0 7px; border-radius: 999px; background: var(--warn-tint); color: var(--warn); border: 1px solid var(--warn-line); }
+.evstrip { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.evtag { font-size: 12px; font-weight: 800; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--warn-line); }
+@media (max-width: 760px) { .dormrow { grid-template-columns: 1fr; } }
+.seccard { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; display: grid; gap: 8px; background: var(--panel); }
+.sechead2 { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(200px, 1fr) auto; gap: 10px; align-items: end; }
+.dormedit { align-items: end; } .dormedit .f { flex: 0 1 200px; }
+.numset { align-items: center; gap: 6px; } .numset .in { flex: none; }
+@media (max-width: 760px) { .sechead2 { grid-template-columns: 1fr; } }
+/* Finding an in-house guest; NC close; event note */
+.stayfind { gap: 6px; }
+.stayhits { display: grid; gap: 6px; margin-top: 4px; max-height: 360px; overflow: auto; }
+.stayhit { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; cursor: pointer; min-height: 44px; }
+.stayhit[aria-pressed="true"] { border: 2px solid var(--pri); background: var(--bg); }
+.stayhit mark { background: #fde68a; color: inherit; padding: 0 1px; }
+.ncclose { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 12px; }
+.evnote { margin: 0 0 8px; }
+.approve .row { align-items: center; gap: 8px; } .approve select.in { width: 200px; } .approve input.in { width: 130px; }
+/* By hour and events */
+.hbars { display: grid; gap: 8px; }
+.hrow { display: grid; grid-template-columns: 110px 1fr 100px; gap: 10px; align-items: center; font-size: 14px; }
+.hrow b { display: block; height: 16px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.hrow b i { display: block; height: 16px; border-radius: 4px; background: var(--pri); }
+.kv { display: grid; grid-template-columns: 170px 1fr; gap: 6px 12px; font-size: 15px; }
+.eventcard { border: 2px solid var(--pri); }
+.pill { display: inline-block; font-size: 12px; font-weight: 800; padding: 2px 9px; border-radius: 999px; background: var(--bg); color: var(--quiet); border: 1px solid var(--line); vertical-align: middle; }
+.pill.on { background: var(--go-tint); color: var(--go-dark); border-color: var(--go-line); }
+@media (max-width: 760px) { .kv { grid-template-columns: 1fr; } .hrow { grid-template-columns: 80px 1fr 80px; } }
