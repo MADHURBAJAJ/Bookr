@@ -661,3 +661,5 @@ tr.editing td { background: var(--bg); }
 .pill.on { background: var(--go-tint); color: var(--go-dark); border-color: var(--go-line); }
 @media (max-width: 760px) { .kv { grid-template-columns: 1fr; } .hrow { grid-template-columns: 80px 1fr 80px; } }
 .tcell.free.stay .ts { color: var(--pri); font-weight: 700; }
+.roomgrp { display: grid; gap: 4px; margin-top: 6px; }
+.roomchip.taken { opacity: .55; cursor: not-allowed; text-decoration: none; }

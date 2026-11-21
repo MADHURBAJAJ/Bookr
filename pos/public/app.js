@@ -398,7 +398,7 @@ function tableGrid() {
   };
   return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${total}</span></h2>
       <div class="legend" aria-hidden="true"><span><i class="free"></i>Free</span><span><i class="new"></i>Not sent</span><span><i class="open"></i>With kitchen</span><span><i class="billed"></i>To pay</span><span><i class="tab"></i>Tab</span></div></div>
-    ${ui.tablesFixed ? '' : html`<p class="small quiet" style="margin:-4px 0 10px">Showing tables used lately. Set your own tables, in sections, in Settings, Tables.</p>`}
+    ${ui.tablesFixed ? '' : html`<p class="small quiet" style="margin:-4px 0 10px">Showing tables used lately. Set your own tables, in sections, in Settings, Tables and rooms.</p>`}
     ${tabs}
     ${shown.map((x) => html`${all.length > 1 ? html`<div class="grouph"><h3>${x.name}</h3>${SECTION_NOTE[x.kind] ? html`<span class="small quiet">${SECTION_NOTE[x.kind]}</span>` : ''}</div>` : ''}${body(x)}`)}`;
 }
@@ -1099,7 +1099,9 @@ const kotSummary = (kots) => `KOT ${kots.map((k) => `${k.kotNo} ${k.station} (${
 // ---------- rooms and credit accounts
 
 async function roomsScreen() {
-  await load('stays', 'credit', 'payAccounts');
+  const [o] = await Promise.all([api('GET', B() + '/orders'), load('stays', 'credit', 'payAccounts')]);
+  // Rooms and beds as set in Settings, Tables and rooms: check-in picks from them (none set up: the room is typed).
+  ui.roomSecs = (o.sections ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms');
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms and credit', 'In-house guests and credit accounts: what each owes, payments, advances and refunds.')}
     ${ui.refund ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Refund advance to ${ui.refund.name}</h2>${errorBox()}
       <p class="quiet small">${rs(ui.refund.max)} of advance is held.</p>
@@ -1124,10 +1126,11 @@ async function roomsScreen() {
           <button class="btn" type="button" data-act="checkOut" data-id="${s.id}">Check out</button></div></td></tr>`)}
       </tbody></table></div>
       ${can('stays.edit') ? html`<form class="grid2"><label class="f">Phone<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" placeholder="Finds a returning guest" autocomplete="off"></label>
-        <label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>
+        ${ui.roomSecs.length ? '' : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`}
+        ${ui.roomSecs.length ? roomChooser() : ''}
         ${ui.gFound ? html`<div class="msg ok" style="grid-column:1/-1">Returning guest: <strong>${ui.gFound.name}</strong> · ${plural(ui.gFound.stays.length, 'earlier stay')}${ui.gFound.stays[0] ? ` · last ${dayName(ui.gFound.stays[0].checkIn)} (${ui.gFound.stays[0].room}, ${rs(ui.gFound.stays[0].chargedPaise)})` : ''}</div>` : ''}
         <label class="f">Guest name<input class="in" data-model="guest" value="${ui.guest ?? ''}"></label><label class="f">City (optional)<input class="in" data-model="gCity" value="${ui.gCity ?? ''}"></label>
-        <button class="btn pri" type="submit" data-act="openStay" data-submit>Open stay</button></form>` : ''}
+        <button class="btn pri" type="submit" data-act="openStay" data-submit>Check in</button></form>` : ''}
     </section>
     <section class="panel"><h2>Credit accounts</h2>
       <div class="scroll"><table class="t cards"><thead><tr><th>Name</th><th class="num">Owes</th><th class="num">Limit</th><th></th></tr></thead><tbody>
@@ -1143,6 +1146,36 @@ actions.openStay = async () => {
   await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined });
   flash = { kind: 'ok', text: `${ui.guest} checked in to ${ui.room}.` }; route();
 };
+/** Check-in's room or bed, from Settings: free ones to pick, taken ones show who is there; a whole dorm for a group. */
+function roomChooser() {
+  const who = (t) => cache.stays.find((x) => roomKeyOf(x.room) === roomKeyOf(t));
+  const q = (ui.roomQ ?? '').trim().toLowerCase();
+  const match = (t) => !q || t.toLowerCase().includes(q);
+  const tile = (t, blockedBy) => {
+    const g = who(t);
+    const taken = g ? g.guestName : blockedBy;
+    return html`<button type="button" class="chip roomchip ${taken ? 'taken' : ''}" aria-pressed="${ui.room === t}" ${taken ? 'disabled' : ''} data-act="pickRoom" data-name="${t}" title="${taken ? `${t}: ${taken}` : t}">${t}${taken ? html`<span class="small"> · ${taken}</span>` : ''}</button>`;
+  };
+  const group = (x) => {
+    if (x.kind === 'dorms') {
+      return html`${(x.dorms ?? []).map((d) => {
+        const whole = `${d.name} · whole`;
+        const beds = Array.from({ length: d.beds }, (_, i) => `${d.name} · Bed ${i + 1}`);
+        const wholeTaken = !!who(whole);
+        const bedTaken = beds.some((b) => who(b));
+        const shown = [whole, ...beds].filter(match);
+        return shown.length ? html`<div class="roomgrp"><span class="small quiet">${d.name}</span><div class="chips">${shown.map((t) => (t === whole ? tile(t, bedTaken ? 'beds in use' : null) : tile(t, wholeTaken ? 'booked whole' : null)))}</div></div>` : '';
+      })}`;
+    }
+    const shown = x.tables.filter(match);
+    return shown.length ? html`<div class="roomgrp"><span class="small quiet">${x.name}</span><div class="chips">${shown.map((t) => tile(t, null))}</div></div>` : '';
+  };
+  return html`<div class="f" style="grid-column:1/-1">Room or bed${ui.room ? html` <strong>· ${ui.room}</strong>` : ''}
+    <input class="in" type="search" data-model="roomQ" data-live value="${ui.roomQ ?? ''}" placeholder="Search rooms and beds" aria-label="Search rooms and beds" autocomplete="off">
+    ${ui.roomSecs.map(group)}
+    <span class="small quiet">Rooms and beds come from Settings, Tables and rooms. “Whole” books a dorm for one group.</span></div>`;
+}
+actions.pickRoom = (d) => { ui.room = d.name; ui.error = null; rerender(); };
 // A phone number typed at check-in finds a returning guest: their name and city fill in, and their earlier stays show.
 actions.gLookup = async (_d, el) => {
   const digits = el.value.replace(/\D/g, '');
@@ -1392,7 +1425,7 @@ async function sectionsTab(head, from, to) {
           ${charged.map((x) => html`<tr><td>${x.section}</td><td class="num">${x.bills}</td><td class="num">${rs(x.netPaise)}</td><td class="num">${rs(Math.round(x.netPaise / x.bills))}</td></tr>`)}
           ${comp.map((x) => html`<tr><td>${x.section} <span class="ncbadge">NC</span></td><td class="num">${x.bills}</td><td class="num quiet">${rs(x.netPaise)} at menu price</td><td></td></tr>`)}
           <tr><td><strong>Total charged</strong></td><td class="num"><strong>${charged.reduce((t, x) => t + x.bills, 0)}</strong></td><td class="num"><strong>${rs(total)}</strong></td><td></td></tr></tbody></table></div>
-          <p class="small quiet">Sales are after bill discounts and before GST. NC and complimentary bills are shown at menu price, not counted in sales. Sections are as set in Settings, Tables.</p>`
+          <p class="small quiet">Sales are after bill discounts and before GST. NC and complimentary bills are shown at menu price, not counted in sales. Sections are as set in Settings, Tables and rooms.</p>`
         : html`<p class="quiet">No bills in these shifts.</p>`}</section>
       <section class="panel"><h2>By hour${ui.hSec ? ` · ${ui.hSec}` : ''}</h2>
         <form class="row" style="align-items:end"><label class="f">From<input class="in" type="datetime-local" data-model="hFromT" value="${ui.hFromT}"></label>
@@ -1440,7 +1473,7 @@ async function eventsTab(head) {
           <label class="f">Starts<input class="in" type="datetime-local" data-model="evFrom" value="${ui.evFrom}"></label><label class="f">Ends<input class="in" type="datetime-local" data-model="evTo" value="${ui.evTo}"></label>
           <label class="f">Commission (%)<input class="in" inputmode="decimal" data-model="evPct" value="${ui.evPct}"></label></div>
         <div class="f" style="margin-top:8px">Counts bills from these table sections<div class="chips">${ui.secNames.map((n) => html`<button type="button" class="chip" aria-pressed="${ui.evSecs.includes(n)}" data-act="evSec" data-name="${n}">${n}</button>`)}</div>
-          ${ui.secNames.length ? '' : html`<span class="small quiet">Set up table sections in Settings, Tables first.</span>`}</div>
+          ${ui.secNames.length ? '' : html`<span class="small quiet">Set up table sections in Settings, Tables and rooms first.</span>`}</div>
         <div class="f" style="margin-top:8px">Menu at those tables during the event (none chosen: the full menu)<div class="chips">${cats.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.evMenu.includes(c)}" data-act="evCat" data-name="${c}">${c}</button>`)}</div></div>
         <p class="small quiet">Commission is on the event's bills after discounts and before GST, liquor included; NC and complimentary bills do not count.</p>
         <div class="row"><button class="btn pri" type="button" data-act="evStart">Start event</button></div></section>
@@ -2157,7 +2190,7 @@ actions.exDay = () => go(`#/exceptions/${ui.day}`);
 // ---------- settings (Owner and manager)
 
 const splitTables = (text) => (text ?? '').split(/[,\n]/).map((t) => t.trim()).filter(Boolean);
-// ---------- Settings, Tables: sections (Private Rooms, Dorms, Out House, NC, other), in the counter's order
+// ---------- Settings, Tables and rooms: sections (Private Rooms, Dorms, Out House, NC, other), in the counter's order
 const KIND_NAMES = [['rooms', 'Private rooms'], ['dorms', 'Dorms (beds and whole dorm)'], ['outhouse', 'Out House (guests not staying)'], ['nc', 'NC (non-chargeable)'], ['other', 'Other tables']];
 const KIND_HELP = { rooms: 'One table per room, e.g. Room 101, Room 102.', dorms: 'Each dorm with its number of beds: the counter shows each bed and the whole dorm.',
   outhouse: 'Tables for guests who do not stay with you.', nc: 'One table per person whose orders are free (their name). Only managers and owners use these; bills close as complimentary in that name.', other: '' };
@@ -2176,8 +2209,8 @@ function tablesSettings() {
         ${x.kind === 'nc' ? '' : html`<div class="row numset"><span class="small quiet">Add a numbered set:</span><input class="in" data-model="tPrefix${i}" value="${ui[`tPrefix${i}`] ?? (x.kind === 'rooms' ? 'Room ' : x.kind === 'outhouse' ? 'OH ' : 'T')}" aria-label="Names start with" style="width:90px">
           <input class="in" inputmode="numeric" data-model="tFrom${i}" value="${ui[`tFrom${i}`] ?? '1'}" aria-label="From" style="width:70px"><span>to</span><input class="in" inputmode="numeric" data-model="tTo${i}" value="${ui[`tTo${i}`] ?? '6'}" aria-label="To" style="width:70px">
           <button class="btn" type="button" data-act="secRange" data-i="${i}">Add</button></div>`}`}</div>`;
-  return html`<section class="panel"><h2>Tables</h2>
-    <p class="quiet small">The counter shows tables in these sections, in this order. With no sections, it shows the tables used in the last 60 days.</p>${errorBox()}
+  return html`<section class="panel"><h2>Tables and rooms</h2>
+    <p class="quiet small">Set up once, used everywhere: the counter's tables (in these sections, in this order), check-in's rooms and beds (Private rooms and Dorms), Room service and Post to room. With no sections, the counter shows the tables used in the last 60 days.</p>${errorBox()}
     ${ui.secs.map(secCard)}
     <div class="row" style="margin-top:10px"><span class="small quiet">Add a section:</span>${KIND_NAMES.map(([k, t]) => html`<button class="btn" type="button" data-act="secAdd" data-kind="${k}">+ ${t.replace(/ \(.*/, '')}</button>`)}</div>
     <div class="row" style="margin-top:14px"><button class="btn pri" type="button" data-act="tablesSave">Save tables</button>
@@ -2209,7 +2242,7 @@ actions.tablesSave = async () => {
 };
 actions.tablesClear = async () => { if (!confirm('Clear all sections? The counter then shows the tables used lately.')) return; await api('PUT', B() + '/tables', { sections: [] }); flash = { kind: 'ok', text: 'Tables cleared. The counter shows the tables used lately.' }; route(); };
 async function settingsScreen(tab = 'menu') {
-  const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
+  const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Tables and rooms', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
     ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];

@@ -8,7 +8,7 @@ import { requireAction, requireStaff } from '../auth';
 import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { isOnline, syncItemStations } from '../stations';
-import { audit, clock, bizOf, loadBusiness, SECTION_KINDS, sectionTables, tableLayout, tableList, type SectionKind } from '../util';
+import { audit, clock, bizOf, dormWhole, loadBusiness, placeOf, SECTION_KINDS, sectionTables, tableLayout, tableList, type SectionKind } from '../util';
 import type { AppEnv } from '../types';
 
 export const settingsRoutes = new Hono<AppEnv>();
@@ -792,8 +792,25 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const b = bizOf(c);
   const data = await body(c);
-  const room = text(data, 'room', 'Room', { max: 30 })!;
+  let room = text(data, 'room', 'Room', { max: 40 })!;
   const guest = text(data, 'guestName', 'Guest name', { max: 80 })!;
+  // Rooms and beds come from Settings, Tables and rooms (21 Nov 2026): once any are set up, a stay is in one of them,
+  // under its exact name, so its tile, its orders and its folio match. A dorm is checked in by bed, or whole for a group.
+  const layout = tableLayout(b);
+  const stayable = (layout ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms');
+  if (stayable.length) {
+    const all_ = stayable.flatMap((x) => x.tables);
+    const key = room.toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '');
+    const name = all_.find((t) => t.toLowerCase() === room.toLowerCase()) ?? all_.find((t) => t.toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '') === key);
+    if (!name) fail(400, 'Choose a room or bed from the list (Settings, Tables and rooms).');
+    room = name;
+    const at = placeOf(layout, room);
+    if (at?.dorm) {
+      const others = at.whole ? sectionTables({ kind: 'dorms', dorms: at.section.dorms!.filter((d) => d.name === at.dorm) }).filter((x) => x !== dormWhole(at.dorm!)) : [dormWhole(at.dorm)];
+      const busy = await all<{ room: string }>(c.env.DB, `SELECT room FROM stays WHERE business_id = ? AND checked_out_at IS NULL AND lower(room) IN (SELECT lower(value) FROM json_each(?))`, bid, JSON.stringify(others));
+      if (busy.length) fail(409, at.whole ? `${busy.map((x) => x.room).join(', ')} already ${busy.length === 1 ? 'has a guest' : 'have guests'}: the whole dorm cannot be booked.` : `${at.dorm} is booked whole for a group.`);
+    }
+  }
   const phone = phoneKey(data.phone);
   const city = text(data, 'city', 'City', { optional: true, max: 60 });
   const id = newId();
@@ -809,11 +826,11 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
       stmt(c.env.DB, 'INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at, guest_id, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         id, bid, room, guest, clock(b, t).shiftDay, c.get('staff').id, t, guestId, phone),
       stmt(c.env.DB, "INSERT INTO debtor_accounts (id, business_id, kind, name, stay_id, created_by, created_at) VALUES (?, ?, 'room', ?, ?, ?, ?)",
-        newId(), bid, `Room ${room} · ${guest}`, id, c.get('staff').id, t),
+        newId(), bid, `${/^\d/.test(room) ? 'Room ' : ''}${room} · ${guest}`, id, c.get('staff').id, t),
       audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest, returning: !!known }),
     ]);
   } catch (e) {
-    if (isUniqueViolation(e)) fail(409, `Room ${room} already has an open stay. Check it out first.`);
+    if (isUniqueViolation(e)) fail(409, `${/^\d/.test(room) ? 'Room ' : ''}${room} already has a guest. Check them out first.`);
     throw e;
   }
   return c.json({ id }, 201);

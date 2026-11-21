@@ -130,4 +130,23 @@ describe('hostel', () => {
     const room102 = (await ok(counter.get(`${B}/orders/${(await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Room 102' }))).id}`))).order;
     expect(room102.stayId).toBeNull();   // nobody staying there
   });
+
+  it('checks in only to rooms and beds from Settings, and a whole dorm for a group whose orders go to its folio', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    await ok(owner.put(`${B}/tables`, { sections: SECTIONS }));
+    expect((await owner.post(`${B}/stays`, { room: '999', guestName: 'X' })).json.error).toContain('Choose a room or bed');
+    expect((await owner.post(`${B}/stays`, { room: 'OH 1', guestName: 'X' })).status).toBe(400);           // not a room
+    await ok(owner.post(`${B}/stays`, { room: 'room 101', guestName: 'Sample Guest' }));
+    expect((await ok(owner.get(`${B}/stays`))).stays[0].room).toBe('Room 101');                       // saved under the Settings name
+    expect((await owner.post(`${B}/stays`, { room: 'Room 101', guestName: 'Y' })).status).toBe(409);
+    await ok(owner.post(`${B}/stays`, { room: 'Dorm A · Bed 1', guestName: 'Sample Backpacker' }));
+    expect((await owner.post(`${B}/stays`, { room: 'Dorm A · whole', guestName: 'Sample Group' })).json.error).toContain('whole dorm cannot be booked');
+    // Once the bed is free, the group checks in whole: beds are closed to others, and whole-dorm orders are the group's.
+    await q('UPDATE stays SET checked_out_at = 1 WHERE business_id = ? AND room = ?', s.businessId, 'Dorm A · Bed 1');
+    await ok(owner.post(`${B}/stays`, { room: 'Dorm A · whole', guestName: 'Sample Group' }));
+    expect((await owner.post(`${B}/stays`, { room: 'Dorm A · Bed 2', guestName: 'Z' })).json.error).toContain('booked whole');
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Dorm A · whole' }))).id;
+    expect((await ok(counter.get(`${B}/orders/${o}`))).order).toMatchObject({ guestName: 'Sample Group' });
+  });
 });

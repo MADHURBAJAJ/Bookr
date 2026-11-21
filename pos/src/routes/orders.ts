@@ -97,8 +97,8 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
     const layout = tableLayout(b);
     const at = placeOf(layout, place);
     if (at?.section.kind === 'nc' && !isManager(c)) fail(403, 'NC tables are for managers and owners.');
-    // A private room or a dorm bed with a guest staying: the order is theirs, so its bill goes to their folio (21 Nov 2026).
-    if (at && (at.section.kind === 'rooms' || (at.section.kind === 'dorms' && !at.whole))) {
+    // A private room, a dorm bed, or a whole dorm (a group) with a guest staying: the order is theirs, so its bill goes to their folio (21 Nov 2026).
+    if (at && (at.section.kind === 'rooms' || at.section.kind === 'dorms')) {
       const key = roomKey(place);
       const st = (await all<{ id: string; room: string; guest_name: string }>(c.env.DB, 'SELECT id, room, guest_name FROM stays WHERE business_id = ? AND checked_out_at IS NULL', bid))
         .find((x) => roomKey(x.room) === key);
