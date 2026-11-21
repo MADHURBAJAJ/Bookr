@@ -10,6 +10,7 @@ import { body, fail, isUuid } from '../http';
 import { nameKey, parseFeeReport } from '../feereport';
 import { cashierBooks, codeMap, receiptCandidates, refillAll, refillCash } from '../fees';
 import { can } from '../permissions';
+import type { Role } from '../permissions';
 
 export const feeRoutes = new Hono<AppEnv>();
 
@@ -17,6 +18,24 @@ const audit = (db: DB, e: { businessId: string; userId: string; action: string; 
   stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     e.businessId, e.userId, e.action, e.table, e.rowId, e.before === undefined ? null : JSON.stringify(e.before), e.after === undefined ? null : JSON.stringify(e.after), e.at);
 const isDay = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
+
+/** Keeps a day's report for one business (the same day brought in again replaces the earlier copy and the cash it filled). */
+async function storeReport(db: DB, bid: string, rep: ReturnType<typeof parseFeeReport>, fileName: string | null, userId: string) {
+  const id = newId();
+  const t = now();
+  const lines = rep.lines.map((l) => stmt(db, `INSERT INTO fee_lines (id, business_id, report_id, line_no, day, receipt_no, code, enrollment_code, admission_no,
+      student, class_section, fee_type, mode, mode_text, cashier, amount_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    newId(), bid, id, l.lineNo, l.day, l.receiptNo, l.code, l.enrollmentCode, l.admissionNo, l.student, l.classSection, l.feeType, l.mode, l.modeText, l.cashier, l.amountPaise));
+  await db.batch([
+    stmt(db, 'DELETE FROM fee_reports WHERE business_id = ? AND day = ?', bid, rep.day),
+    stmt(db, 'INSERT INTO fee_reports (id, business_id, day, file_name, footer, imported_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      id, bid, rep.day, fileName, JSON.stringify(rep.footer), userId, t),
+    ...lines,
+    audit(db, { businessId: bid, userId, action: 'fees.import', table: 'fee_reports', rowId: id, after: { day: rep.day, fileName, lines: rep.lines.length }, at: t }),
+  ]);
+  await refillCash(db, bid, id, userId);
+  return id;
+}
 
 feeRoutes.post('/businesses/:businessId/fees/import', requireRole('sales.import'), async (c) => {
   const data = await body(c);
@@ -28,21 +47,21 @@ feeRoutes.post('/businesses/:businessId/fees/import', requireRole('sales.import'
   const bid = c.get('businessId');
   const user = c.get('user');
   const fileName = typeof data.fileName === 'string' ? data.fileName.slice(0, 120) : null;
-  const id = newId();
-  const t = now();
-  const lines = rep.lines.map((l) => stmt(db, `INSERT INTO fee_lines (id, business_id, report_id, line_no, day, receipt_no, code, enrollment_code, admission_no,
-      student, class_section, fee_type, mode, mode_text, cashier, amount_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    newId(), bid, id, l.lineNo, l.day, l.receiptNo, l.code, l.enrollmentCode, l.admissionNo, l.student, l.classSection, l.feeType, l.mode, l.modeText, l.cashier, l.amountPaise));
-  // The same day brought in again replaces the earlier copy (its lines and the cash it filled go with it).
-  await db.batch([
-    stmt(db, 'DELETE FROM fee_reports WHERE business_id = ? AND day = ?', bid, rep.day),
-    stmt(db, 'INSERT INTO fee_reports (id, business_id, day, file_name, footer, imported_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      id, bid, rep.day, fileName, JSON.stringify(rep.footer), user.id, t),
-    ...lines,
-    audit(db, { businessId: bid, userId: user.id, action: 'fees.import', table: 'fee_reports', rowId: id, after: { day: rep.day, fileName, lines: rep.lines.length }, at: t }),
-  ]);
-  await refillCash(db, bid, id, user.id);
-  return c.json({ id, day: rep.day, lines: rep.lines.length }, 201);
+  const id = await storeReport(db, bid, rep, fileName, user.id);
+  // One file covers every school (21 Nov 2026): it is also brought into the caller's other businesses that have linked
+  // one of its codes to a school and where the caller may bring in fees, so the same file is not brought in twice.
+  const others = await all<{ businessId: string; name: string; role: string }>(db, `SELECT m.business_id AS businessId, b.name, m.role
+    FROM memberships m JOIN businesses b ON b.id = m.business_id WHERE m.user_id = ? AND m.business_id <> ?
+      AND EXISTS (SELECT 1 FROM fee_codes f WHERE f.business_id = m.business_id AND f.branch_id IS NOT NULL
+        AND f.code IN (SELECT value FROM json_each(?))) ORDER BY b.name`, user.id, bid, JSON.stringify([...new Set(rep.lines.map((l) => l.code))]));
+  const also: { businessId: string; name: string; receipts: number; paise: number }[] = [];
+  for (const o of others.filter((x) => can(x.role as Role, 'sales.import'))) {
+    await storeReport(db, o.businessId, rep, fileName, user.id);
+    const codes = await codeMap(db, o.businessId);
+    const of = rep.lines.filter((l) => codes.get(l.code));
+    also.push({ businessId: o.businessId, name: o.name, receipts: new Set(of.map((l) => l.receiptNo)).size, paise: of.reduce((t, l) => t + l.amountPaise, 0) });
+  }
+  return c.json({ id, day: rep.day, lines: rep.lines.length, also }, 201);
 });
 
 feeRoutes.get('/businesses/:businessId/fees/:day', requireRole('sales.view'), async (c) => {
