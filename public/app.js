@@ -2312,7 +2312,20 @@ function rowIssues(r) {
   const od = r.otherDayBill;
   const odMode = (m) => (m === 'upi' ? 'UPI' : m ?? '');
   const rowMode = r.payments.length === 1 ? r.payments[0].mode : null;
-  if (od && bm && !bm.exact) {
+  const cp = r.copyOf;
+  if (cp && !od && bm && !bm.exact) {
+    // Already on another day (approved 21 Nov 2026): in that day's software report and register, most likely written twice.
+    const d = dayLabel(cp.day).replace(/\s\d{4}$/, '');
+    const where = html`Bill <span class="mono">${r.billNo}</span> is a ${d} bill: ₹ ${rs(cp.amountPaise)} ${odMode(cp.mode)} in the ${d} software report and on line ${cp.line.lineNo} of the ${d} register`;
+    if (r.status === 'checked') info.push(html`Kept as a second payment. ${where}; this one needs its own bill in the software.`);
+    else {
+      flags.bill_no = 'red';
+      red.push(html`<span class="chip" style="background:#DBEAFE;color:#1E3A8A">Already on ${d}</span><div class="tiny" style="color:var(--ink);margin-top:4px">${where}.</div>
+        <div class="form-row" style="gap:6px;margin-top:6px"><button type="button" class="btn plain dchip" data-copydel>Written twice: remove this line</button>
+        <button type="button" class="btn plain dchip" data-copykeep>A second payment: keep it</button>
+        <a class="btn plain dchip" href="#/b/${currentBizId()}/review/${cp.line.uploadId}/${cp.line.rowId}">Open ${d} line ${cp.line.lineNo} ›</a></div>`);
+    }
+  } else if (od && bm && !bm.exact) {
     // Settled on another day (11 Nov 2026): the bill is in that day's software report, counted there.
     info.push(`${dayLabel(od.day)} bill: in that day's software report${od.amount != null ? ` as ${odMode(od.mode)} ₹ ${rs(od.amount)}` : ''}, counted there${rowMode && od.mode && rowMode !== od.mode ? `. Paid here by ${odMode(rowMode)}: change it on Reconcile` : ''}.`);
   } else if (bm && !bm.exact && isOldPos(r.billNo)) info.push('Old POS bill');
@@ -3161,6 +3174,8 @@ function wireInlineRows(biz, u, strip) {
         await reviewView(biz, u.id, id);
       } catch (err) { showError(document.getElementById('rmsg'), err); }
     });
+    tr.querySelector('[data-copydel]')?.addEventListener('click', () => tr.querySelector('[data-delrow]')?.click());
+    tr.querySelector('[data-copykeep]')?.addEventListener('click', () => { const cb = tr.querySelector('[data-f="checked"]'); if (cb && !cb.checked) cb.click(); });
     tr.querySelector('[data-delrow]')?.addEventListener('click', async () => {
       const r = u.rows.find((x) => x.id === tr.dataset.row);
       const why = await askDeleteReason(r);

@@ -282,6 +282,20 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       return x ? { amountPaise: x.amount_paise, at: x.posted_at } : null;
     };
     const elsewhereBill = new Map(elsewhereList.map((x) => [x.rowId, x]));
+    // Already on another day (approved 21 Nov 2026): a line whose bill is not in this shift's software report but is in
+    // another day's (a week either side), and on that day's register too: most likely written twice.
+    const copies = await all<{ rowId: string; day: string; amount: number; mode: string; line: string | null }>(db, `
+      SELECT r.id AS rowId, sb.shift_day AS day, sb.amount_paise AS amount, sb.mode,
+        (SELECT rr.id || '|' || rr.upload_id || '|' || rr.line_no || '|' || rr.amount_paise FROM register_rows rr
+          WHERE rr.business_id = r.business_id AND rr.bill_no = r.bill_no AND rr.shift_day = sb.shift_day ORDER BY rr.line_no LIMIT 1) AS line
+      FROM register_rows r JOIN software_bills sb ON sb.business_id = r.business_id AND sb.bill_no = r.bill_no AND sb.shift_day <> r.shift_day
+      WHERE r.business_id = ? AND r.upload_id = ? AND r.bill_no <> ''
+        AND sb.shift_day BETWEEN date(r.shift_day, '-7 day') AND date(r.shift_day, '+7 day')
+        AND NOT EXISTS (SELECT 1 FROM software_bills s2 WHERE s2.business_id = r.business_id AND s2.shift_day = r.shift_day AND s2.bill_no = r.bill_no)`, bid, u.id);
+    const copyOf = new Map(copies.filter((x) => x.line).map((x) => {
+      const [rowId, uploadId, lineNo, amount] = x.line!.split('|');
+      return [x.rowId, { day: x.day, amountPaise: x.amount, mode: x.mode, line: { rowId, uploadId, lineNo: Number(lineNo), amountPaise: Number(amount) } }];
+    }));
     const pageNo = new Map(pages.map((p, i) => [p.id, i + 1]));
     const slip = pageSlip(rows as unknown as SlipRow[], pays as unknown as { registerRowId: string; amountPaise: number }[]);
     return c.json({
@@ -294,6 +308,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         // "Use ₹145?" is not offered for a row whose own amount fits another bill a digit away.
         slipBank: slipBank(r.id),
         otherDayBill: elsewhereBill.get(r.id) ?? null,
+        copyOf: copyOf.get(r.id) ?? null,
         hint: flagsOf.get(r.id)?.some((f) => f.kind === 'pending_typo') ? null : hintFor(r as unknown as { billNo: string; ocrOriginal: string | null }), columnHint: colHints.find((h) => h.rowId === r.id) ?? null })),
       otherPageRows: others.map((r) => ({ ...r, pageNo: pageNo.get(r.uploadId) ?? null, payments: otherPays.filter((p) => p.registerRowId === r.id) })),
     });
