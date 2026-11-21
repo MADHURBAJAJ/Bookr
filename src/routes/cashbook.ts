@@ -38,7 +38,8 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   const mine = new Set(books.map((b) => b.id));
   const [branches, counts, open, done] = await Promise.all([
     all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? ORDER BY name', bid),
-    all<{ accountId: string; day: string; countedPaise: number }>(db, `SELECT account_id AS accountId, day, counted_paise AS countedPaise FROM cash_counts c
+    all<{ accountId: string; day: string; countedPaise: number; note: string | null; settle: string | null }>(db, `SELECT account_id AS accountId, day,
+        counted_paise AS countedPaise, note, settle FROM cash_counts c
       WHERE business_id = ? AND day = (SELECT max(day) FROM cash_counts x WHERE x.account_id = c.account_id)`, bid),
     handovers(db, bid, "AND h.status = 'sent'"),
     handovers(db, bid, "AND h.status <> 'sent' AND h.settled_at >= ?", now() - 7 * 86400000),
@@ -47,7 +48,7 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   const withCash = await Promise.all(books.map(async (b) => {
     const k = lastCount.get(b.id);
     const atCount = k ? await inHandThrough(db, b, k.day) : null;
-    return { ...b, inHandPaise: await inHandThrough(db, b, t), lastCount: k ? { day: k.day, countedPaise: k.countedPaise, gapPaise: k.countedPaise - atCount! } : null };
+    return { ...b, inHandPaise: await inHandThrough(db, b, t), lastCount: k ? { day: k.day, countedPaise: k.countedPaise, gapPaise: k.countedPaise - atCount!, note: k.note, settle: k.settle } : null };
   }));
   // A cashier sees what their own books sent and what was sent to them; the others see it all.
   const visible = (h: HandoverRow) => seesAllBooks(role) || mine.has(h.fromAccountId) || (h.toKind === 'book' && mine.has(h.toAccountId!));
@@ -322,7 +323,8 @@ cashBookRoutes.put('/businesses/:businessId/cashbooks/:accountId/count/:day', re
   const gap = counted - (await inHandThrough(db, book, day));
   if (gap !== 0 && !note) fail(400, `Cash is ${gap < 0 ? 'short' : 'extra'} ₹ ${(Math.abs(gap) / 100).toLocaleString('en-IN')}. Write why.`);
   const t = now();
-  const was = await one<{ countedPaise: number; note: string | null }>(db, 'SELECT counted_paise AS countedPaise, note FROM cash_counts WHERE account_id = ? AND day = ?', book.id, day);
+  const was = await one<{ countedPaise: number; note: string | null; settle: string | null }>(db, 'SELECT counted_paise AS countedPaise, note, settle FROM cash_counts WHERE account_id = ? AND day = ?', book.id, day);
+  if (was?.settle) fail(409, 'The owner has settled this count. Ask the owner to undo it to count again.');
   await db.batch([
     stmt(db, `INSERT INTO cash_counts (id, business_id, account_id, day, counted_paise, counted_by, counted_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (account_id, day) DO UPDATE SET counted_paise = excluded.counted_paise, counted_by = excluded.counted_by, counted_at = excluded.counted_at,
@@ -332,6 +334,112 @@ cashBookRoutes.put('/businesses/:businessId/cashbooks/:accountId/count/:day', re
       before: was ?? undefined, after: { countedPaise: counted, note }, at: t }),
   ]);
   return c.json({ ok: true, gapPaise: gap });
+});
+
+// ---- Settling a count that came out short or extra (approved 21 Nov 2026, migration 0035). Owner only.
+
+const SETTLE_HEADS = { shortage: { name: 'Cash shortage', type: 'expense', tally: 'Cash Shortage' }, extra: { name: 'Cash extra', type: 'income', tally: 'Cash Extra' } } as const;
+
+async function headFor(db: DB, bid: string, h: { name: string; type: string; tally: string }) {
+  const found = await one<{ id: string }>(db, 'SELECT id FROM heads WHERE business_id = ? AND type = ? AND lower(name) = lower(?)', bid, h.type, h.name);
+  if (found) return { id: found.id, create: null };
+  const id = newId();
+  return { id, create: stmt(db, 'INSERT INTO heads (id, business_id, name, type, tally_ledger, is_custom, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)', id, bid, h.name, h.type, h.tally, now()) };
+}
+
+cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/count/:day/settle', requireRole('members.manage'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const day = dayParam(c.req.param('day'));
+  const data = await body(c);
+  const how = data.how;
+  if (how !== 'shortage' && how !== 'extra' && how !== 'given_back' && how !== 'found') fail(400, 'Choose how to settle it.');
+  const note = text(data, 'note', 'Note', { optional: true, max: 300 }) ?? null;
+  const k = await one<{ id: string; countedPaise: number; settle: string | null }>(db,
+    'SELECT id, counted_paise AS countedPaise, settle FROM cash_counts WHERE account_id = ? AND day = ?', book.id, day);
+  if (!k) fail(404, 'No count on this day.');
+  if (k.settle) fail(409, 'This count is already settled.');
+  const gap = k.countedPaise - (await inHandThrough(db, book, day));
+  if (gap === 0) fail(409, 'This count agrees with the book now. Nothing to settle.');
+  if (how === 'shortage' && gap > 0) fail(400, 'The cash is extra, not short.');
+  if ((how === 'extra' || how === 'given_back') && gap < 0) fail(400, 'The cash is short, not extra.');
+  const t = now();
+  const st = [];
+  let entryId: string | null = null;
+  if (how === 'shortage' || how === 'extra') {
+    const head = await headFor(db, bid, SETTLE_HEADS[how]);
+    if (head.create) st.push(head.create);
+    entryId = newId();
+    st.push(stmt(db, `INSERT INTO cash_entries (id, business_id, account_id, day, kind, amount_paise, head_id, narration, entered_by, entered_at, created_at,
+        review_status, reviewed_by, reviewed_at, review_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)`,
+      entryId, bid, book.id, day, how === 'shortage' ? 'expense' : 'other_in', Math.abs(gap), head.id,
+      `${how === 'shortage' ? 'Cash short' : 'Cash extra'} on count${note ? ` · ${note}` : ''}`, user.id, t, t, user.id, t, note));
+  }
+  st.push(
+    stmt(db, 'UPDATE cash_counts SET settle = ?, settle_note = ?, settle_gap_paise = ?, settle_entry_id = ?, settled_by = ?, settled_at = ? WHERE id = ?',
+      how, note, gap, entryId, user.id, t, k.id),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.count.settle', table: 'cash_counts', rowId: k.id,
+      after: { bookId: book.id, day, how, note, gapPaise: gap, entryId }, at: t }),
+  );
+  await db.batch(st);
+  return c.json({ ok: true, gapPaise: gap, entryId });
+});
+
+// Undo: the line written for a shortage or extra goes, and the count is open again.
+cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/count/:day/settle', requireRole('members.manage'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const day = dayParam(c.req.param('day'));
+  const k = await one<{ id: string; settle: string | null; entryId: string | null }>(db,
+    'SELECT id, settle, settle_entry_id AS entryId FROM cash_counts WHERE account_id = ? AND day = ?', book.id, day);
+  if (!k?.settle) fail(404, 'This count is not settled.');
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE cash_counts SET settle = NULL, settle_note = NULL, settle_gap_paise = NULL, settle_entry_id = NULL, settled_by = NULL, settled_at = NULL WHERE id = ?', k.id),
+    ...(k.entryId ? [stmt(db, 'DELETE FROM cash_entries WHERE id = ? AND account_id = ?', k.entryId, book.id)] : []),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.count.unsettle', table: 'cash_counts', rowId: k.id, before: { how: k.settle, entryId: k.entryId }, at: t }),
+  ]);
+  return c.json({ ok: true });
+});
+
+// The Owner's "Needs a look" (owner phone app, approved 21 Nov 2026): cash sent to the Owner's own books or to a person
+// to tick, expenses to approve or still without a head, fee totals that differ from the sheet, and counts short or extra
+// not settled (each book's latest count: an earlier gap carries into it).
+cashBookRoutes.get('/businesses/:businessId/owner-look', requireRole('members.manage'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const t = today();
+  const books = await booksOf(db, bid, user.id, c.get('role'));
+  const mine = new Set(books.filter((b) => b.cashierUserId === user.id).map((b) => b.id));
+  const from = new Date(Date.parse(`${t}T00:00:00Z`) - 13 * 86400000).toISOString().slice(0, 10);
+  const [open, expenses, heads, counts] = await Promise.all([
+    handovers(db, bid, "AND h.status = 'sent' AND h.to_kind <> 'bank'"),
+    all(db, `${reviewSql} AND e.kind = 'expense' AND e.review_status IS NULL ORDER BY e.day, e.entered_at`, bid),
+    all<{ id: string; name: string; type: string }>(db, 'SELECT id, name, type FROM heads WHERE business_id = ? ORDER BY type, name', bid),
+    all<{ accountId: string; day: string; countedPaise: number; note: string | null; settle: string | null }>(db, `SELECT account_id AS accountId, day,
+        counted_paise AS countedPaise, note, settle FROM cash_counts c
+      WHERE business_id = ? AND day = (SELECT max(day) FROM cash_counts x WHERE x.account_id = c.account_id)`, bid),
+  ]);
+  const byId = new Map(books.map((b) => [b.id, b]));
+  const gaps = (await Promise.all(counts.filter((k) => !k.settle && byId.has(k.accountId)).map(async (k) => {
+    const b = byId.get(k.accountId)!;
+    const gap = k.countedPaise - (await inHandThrough(db, b, k.day));
+    return gap ? { bookId: b.id, bookName: b.name, branchName: b.branchName, day: k.day, gapPaise: gap, note: k.note } : null;
+  }))).filter((x) => x);
+  const fees = (await Promise.all(books.filter((b) => b.branchId).map(async (b) =>
+    (await feeChecks(db, b, from > b.openingDate ? from : b.openingDate, t, false))
+      .filter((f) => f.state === 'less' || f.state === 'more' || f.state === 'kept')
+      .map((f) => ({ bookId: b.id, bookName: b.name, branchName: b.branchName, ...f }))))).flat();
+  return c.json({
+    today: t,
+    handovers: open.filter((h) => h.toKind === 'person' || (h.toKind === 'book' && mine.has(h.toAccountId!))),
+    expenses, heads, fees, counts: gaps,
+  });
 });
 
 // ---- The cashier's fee cash total for a day, and sorting out a difference with the fee day sheet (21 Nov 2026).
