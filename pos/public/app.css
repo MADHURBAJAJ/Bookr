@@ -663,3 +663,17 @@ tr.editing td { background: var(--bg); }
 .tcell.free.stay .ts { color: var(--pri); font-weight: 700; }
 .roomgrp { display: grid; gap: 4px; margin-top: 6px; }
 .roomchip.taken { opacity: .55; cursor: not-allowed; text-decoration: none; }
+/* Settings: rooms by category */
+.sub3 { font-size: 16px; margin: 12px 0 4px; }
+.cathead { display: grid; grid-template-columns: minmax(160px, 1.2fr) minmax(170px, 1fr) minmax(110px, 140px) auto; gap: 10px; align-items: end; }
+.roomsline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rno { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); font-weight: 700; font-size: 14px; }
+.rno i { font-style: normal; color: var(--quiet); font-weight: 500; font-size: 13px; }
+.rno .lnx { width: 28px; height: 28px; font-size: 18px; }
+.bedsin { width: 38px; border: 1px solid var(--field-line); border-radius: 6px; background: var(--field); color: var(--ink); font: inherit; font-size: 13px; text-align: center; padding: 2px; }
+.roomadd { display: inline-flex; gap: 6px; align-items: center; } .roomadd .in { width: 120px; }
+.count { font-size: 13px; color: var(--quiet); } .count b { color: var(--ink); }
+.totbar { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 10px 12px; border-radius: 10px; background: var(--go-tint); border: 1px solid var(--go-line); color: var(--go-dark); font-weight: 600; margin-top: 12px; }
+.quick { display: grid; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; background: var(--bg); margin: 8px 0; font-size: 14px; }
+.quick code { background: var(--panel); padding: 1px 6px; border-radius: 4px; }
+@media (max-width: 760px) { .cathead { grid-template-columns: 1fr; } }

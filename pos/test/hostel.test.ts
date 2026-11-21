@@ -149,4 +149,23 @@ describe('hostel', () => {
     const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Dorm A · whole' }))).id;
     expect((await ok(counter.get(`${B}/orders/${o}`))).order).toMatchObject({ guestName: 'Sample Group' });
   });
+
+  it('keeps rooms by category (private, or shared by the bed with beds per room) and will not drop one in use', async () => {
+    const s = await setupBusiness();
+    const { B, owner, ok } = s;
+    const cats = [
+      { name: 'Sample Deluxe', kind: 'rooms', tables: ['201', '202'] },
+      { name: 'Sample Mixed Dorm', kind: 'dorms', dorms: [{ name: 'M1', beds: 6 }, { name: 'M2', beds: 8 }] },
+      { name: 'Out House', kind: 'outhouse', tables: ['OH 1'] },
+    ];
+    const t = await ok(owner.put(`${B}/tables`, { sections: cats }));
+    expect(t.tables.filter((x: string) => x.startsWith('M2'))).toHaveLength(9);              // whole + 8 beds
+    expect((await owner.put(`${B}/tables`, { sections: [...cats, { name: 'Sample Suite', kind: 'rooms', tables: ['201'] }] })).status).toBe(400);   // a room number twice
+    await ok(owner.post(`${B}/stays`, { room: '202', guestName: 'Sample Guest' }));
+    const without202 = [{ ...cats[0], tables: ['201'] }, cats[1], cats[2]];
+    const r = await owner.put(`${B}/tables`, { sections: without202 });
+    expect([r.status, r.json.error]).toEqual([409, expect.stringContaining('202 (Sample Guest staying)')]);
+    // A free room can go.
+    await ok(owner.put(`${B}/tables`, { sections: [{ ...cats[0], tables: ['202'] }, cats[1], cats[2]] }));
+  });
 });

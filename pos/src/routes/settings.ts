@@ -53,7 +53,7 @@ settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
   const id = c.get('businessId');
   const data = await body(c);
   const raw = Array.isArray(data.sections) ? data.sections : Array.isArray(data.tables) ? [{ name: 'Tables', kind: 'other', tables: data.tables }] : null;
-  if (!raw || raw.length > 20) fail(400, 'Tables must be up to 20 sections.');
+  if (!raw || raw.length > 40) fail(400, 'Up to 40 sections and room categories.');
   const seen = new Set<string>();
   const unique = (name: string) => { if (seen.has(name.toLowerCase())) fail(400, `${name} is in the list twice.`); seen.add(name.toLowerCase()); };
   const sections: { name: string; kind: SectionKind; tables?: string[]; dorms?: { name: string; beds: number }[] }[] = [];
@@ -86,9 +86,20 @@ settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
       sections.push({ name, kind, tables });
     }
   }
-  if (seen.size > 400) fail(400, 'Up to 400 tables in all.');
+  if (seen.size > 600) fail(400, 'Up to 600 tables, rooms and beds in all.');
   const keep = sections.filter((x) => (x.tables?.length ?? 0) + (x.dorms?.length ?? 0) > 0);
   const before = tableLayout(bizOf(c));
+  // A room, bed or table cannot go (or be renamed) while a guest is checked in there or an order is open on it.
+  const gone = (before ?? []).flatMap((x) => x.tables).filter((t) => !seen.has(t.toLowerCase()));
+  if (gone.length) {
+    const json = JSON.stringify(gone.map((t) => t.toLowerCase()));
+    const [st, od] = await Promise.all([
+      all<{ room: string; guest_name: string }>(c.env.DB, 'SELECT room, guest_name FROM stays WHERE business_id = ? AND checked_out_at IS NULL AND lower(room) IN (SELECT value FROM json_each(?))', id, json),
+      all<{ place: string }>(c.env.DB, "SELECT place FROM orders WHERE business_id = ? AND kind = 'table' AND status IN ('open', 'tab', 'billed') AND lower(place) IN (SELECT value FROM json_each(?))", id, json),
+    ]);
+    const busy = [...st.map((x) => `${x.room} (${x.guest_name} staying)`), ...od.map((x) => `${x.place} (order open)`)];
+    if (busy.length) fail(409, `In use, so not removed or renamed: ${busy.join(', ')}. Check the guest out or close the order first.`);
+  }
   await c.env.DB.batch([
     stmt(c.env.DB, 'UPDATE businesses SET tables = ? WHERE id = ?', keep.length ? JSON.stringify({ sections: keep }) : null, id),
     audit(c.env.DB, id, c.get('staff').id, 'tables.update', 'businesses', id, { sections: before }, { sections: keep.length ? keep : null }),
