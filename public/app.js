@@ -5934,6 +5934,7 @@ function sameSaleRow(c, ctx) {
   const ai = c.actions.indexOf(a);
   const bookedDay = ssDay(m.day);
   const left = ctx?.billsLeftPaise;
+  if (c.same.chosen) return sameSaleChosen(c);
   const after = [`One sale, on ${bookedDay}, matched to this bill.`,
     ...(b.headName && m.headName && b.headName !== m.headName ? [`It moves from ${m.headName} to ${b.headName}.`] : []),
     ...(left != null && left >= b.amountPaise && b.day === ctx.day ? [`${ssDay(b.day)}: not in the bank yet ${ssRs(left)} → ${ssRs(left - b.amountPaise)}.`] : []),
@@ -5961,8 +5962,95 @@ function sameSaleRow(c, ctx) {
       ${a ? html`<button class="btn dchip" type="button" data-cardact="${c.key}" data-i="${ai}">${a.label}</button>` : ''}</div>
     <div class="form-msg"></div></div>`;
 }
+// The other suggestion cards side by side (approved 21 Nov 2026): the money on the left, the bill's two sides on the
+// right, what is wrong now and what the blue button does; every button says what it does.
+const ssMode = (s) => (s ? `${MODE_LABELS[s.mode] ?? s.mode} ${ssRs(s.amountPaise)}` : '—');
+const ssBill = (no, day) => html`<button type="button" class="linkbtn mono" data-bill-drawer="${no}|${day ?? ''}" title="Everything about this bill">${no}</button>`;
+const ssGap = (a, b) => { const m = Math.round(Math.abs(a - b) / 60000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+const ssActs = (c, skip) => html`${c.actions.map((a, i) => (skip?.(a) ? '' : a.href ? html`<a class="btn plain dchip" href="${a.href}">${a.label}</a>`
+  : html`<button class="btn ${a.primary ? '' : 'plain'} dchip" type="button" data-cardact="${c.key}" data-i="${i}">${a.label}</button>`))}`;
+function sameSaleChosen(c) {
+  const { credit: m, bill: b } = c.same;
+  return html`<div class="ss-card" data-card="${c.key}">
+    <div class="ss-pair">
+      <div class="ss-side"><div class="tiny">${ssDay(m.day)} shift · money came</div><div class="ss-amt">${ssRs(m.amountPaise)}</div>
+        <div class="tiny">UPI · ${ssWhen(m.postedAt)}</div>${m.accountName ? html`<div class="tiny">${m.accountName}</div>` : ''}
+        <span class="ss-tag">${m.advance ? 'Booked as an advance' : `Booked as ${m.headName ?? 'a sale'}`}</span></div>
+      <div class="ss-mid"><span>same sale</span><span class="ss-arrow" aria-hidden="true">⇄</span>${b.paidAt ? html`<span>${ssGap(m.postedAt, b.paidAt)} ${m.postedAt < b.paidAt ? 'before' : 'after'}</span>` : ''}</div>
+      <div class="ss-side"><div class="tiny">${ssDay(b.day)} shift · bill ${ssBill(b.billNo, b.day)}${b.paidAt ? ` · ${hhmm(b.paidAt)}` : ''}</div>
+        <div class="ss-amt">${ssRs(b.amountPaise)}</div>
+        ${b.rgPaise != null ? html`<div class="tiny">Register ${ssRs(b.rgPaise)}${b.rgPaise === m.amountPaise ? ' ✓' : ''}</div>` : ''}
+        ${b.swPaise != null ? html`<div class="tiny">Software ${ssRs(b.swPaise)}${b.swPaise === m.amountPaise ? ' ✓' : ''}</div>` : ''}
+        <span class="ss-tag chosen">Chosen · done on save</span></div>
+    </div>
+    <div class="ss-now">
+      <div class="ss-bad"><strong>Now</strong>${ssRs(m.amountPaise)} shows twice: in ${m.advance ? 'the advance' : m.headName ?? 'the booking'} and in the bill.</div>
+      <div class="ss-good"><strong>On save</strong>The ${m.advance ? 'advance' : `${m.headName ?? ''} booking`} comes off. The bill counts ${ssRs(b.amountPaise)}, matched to the ${hhmm(m.postedAt)} credit.</div>
+    </div>
+    <div class="ss-acts">${ssActs(c)}</div><div class="form-msg"></div></div>`;
+}
+const SS_USE = { free: 'Not used', bill: 'matched to bill', pick: 'for bill', booked: 'booked as', ignored: 'set aside' };
+function noCreditRow(c) {
+  const L = c.look; const b = L.bill;
+  const amt = ssRs(L.amountPaise);
+  const at = b.paidAt;
+  const useLine = (x) => (x.use === 'free' ? 'not used yet' : x.use === 'bill' ? html`matched to bill ${ssBill(x.bills ?? '', '')}`
+    : x.use === 'pick' ? html`for bill ${ssBill(x.bills ?? '', b.day)} on save` : x.use === 'booked' ? `booked as ${x.headName ?? 'income'}${x.note ? ` · "${x.note}"` : ''}` : 'set aside, not a sale');
+  const rel = (x) => (at ? ` · ${ssGap(x.postedAt, at)} ${x.postedAt < at ? 'before' : 'after'} the bill` : '');
+  const free = L.credits.some((x) => x.use === 'free');
+  const booked = L.credits.find((x) => x.use === 'booked');
+  const prim = c.actions.find((a) => a.primary);
+  const after = !prim ? '' : prim.method === 'POST' ? `The ${booked?.headName ?? ''} booking comes off. The ${amt} pays the bill's UPI${L.mixed ? ' part; the cash part stays in the drawer' : ''}. Done when you save the shift.`
+    : prim.op === 'setMode' ? `The bill counts ${prim.label.replace(/^It was /, '')} instead of UPI. Nothing waits for the bank.`
+    : `The bill counts ${prim.label.replace(/^It was /, '').replace(/ \(software\)$/, '')}, as the software says. Nothing waits for the bank.`;
+  return html`<div class="ss-card" data-card="${c.key}">
+    <div class="ss-pair">
+      <div class="ss-side"><div class="tiny">${amt} UPI credits nearest the bill</div>
+        ${L.credits.length ? html`<div class="ss-list">${L.credits.map((x) => html`<div><strong>${hhmm(x.postedAt)}</strong>${new Date(x.postedAt).toDateString() !== new Date(at ?? x.postedAt).toDateString() ? ` ${ssWhen(x.postedAt).split(',')[0]}` : ''} · <span class="tiny">${useLine(x)}${rel(x)}</span></div>`)}</div>` : ''}
+        <span class="ss-tag">${free ? `A free ${amt} is in the bank` : `No free ${amt} from ${hhmm(L.from)} to ${hhmm(L.to)}`}</span></div>
+      <div class="ss-mid"><span>${booked && !free ? 'booked' : 'no money'}</span><span class="ss-arrow" aria-hidden="true">⇢</span><span>for it</span></div>
+      <div class="ss-side"><div class="tiny">${ssDay(b.day)} shift · bill ${ssBill(b.billNo, b.day)}${at ? ` · ${hhmm(at)}` : ''}</div>
+        <div class="ss-rows"><span class="tiny">Register</span><strong>${ssMode(b.register)}</strong><span class="tiny">Software</span><strong>${ssMode(b.software)}</strong></div>
+        <span class="ss-tag wait">Waiting for ${amt} UPI${L.mixed ? ' (its UPI part)' : ''}</span></div>
+    </div>
+    <div class="ss-now">
+      <div class="ss-bad"><strong>Now</strong>Bookr counts UPI ${amt} that ${booked && !free ? 'is already booked elsewhere' : 'is not in the bank'}.${L.mixed ? '' : ' Cash is not counted for this bill.'}</div>
+      ${after ? html`<div class="ss-good"><strong>After "${prim.label}"</strong>${after}</div>` : html`<div class="ss-good"><strong>Wait</strong>If the credit is still on its way, leave it: it pairs when the statement has it.</div>`}
+    </div>
+    <div class="ss-acts"><button class="btn plain dchip" type="button" data-carddismiss="${c.key}" title="Leave it for a later bank statement (hidden on this device)">Wait for the bank</button>${ssActs(c)}</div>
+    <div class="form-msg"></div></div>`;
+}
+function bankBacksRow(c) {
+  const L = c.look;
+  const sw = L.software; const rg = L.register;
+  const ok = (side) => (L.backs === side ? html` <span class="ss-ok">✓ same as bank</span>` : html` <span class="ss-no">✕</span>`);
+  const said = (s) => ssMode(s);
+  const backed = L.backs === 'software' ? sw : rg;
+  const other = L.backs === 'software' ? rg : sw;
+  const labels = c.actions.map((a) => (a.href ? a.label : a.body?.decision === `use_${L.backs}` ? `It was ${said(backed)}` : `It was ${said(other)}`));
+  return html`<div class="ss-card" data-card="${c.key}">
+    <div class="ss-pair">
+      <div class="ss-side"><div class="tiny">Money came</div>
+        <div class="ss-amt">${ssRs(L.credit.amountPaise)}</div><div class="tiny">UPI · ${hhmm(L.credit.postedAt)}${L.credit.accountName ? ` · ${L.credit.accountName}` : ''}</div>
+        <span class="ss-tag">Not used yet</span></div>
+      <div class="ss-mid">${L.paidAt ? html`<span>${ssGap(L.credit.postedAt, L.paidAt)}</span><span class="ss-arrow" aria-hidden="true">⇄</span><span>${L.credit.postedAt < L.paidAt ? 'before' : 'after'}</span>` : html`<span class="ss-arrow" aria-hidden="true">⇄</span>`}</div>
+      <div class="ss-side"><div class="tiny">Bill ${ssBill(L.billNo, '')}${L.paidAt ? ` · ${hhmm(L.paidAt)}` : ''}</div>
+        <div class="ss-rows"><span class="tiny">Software</span><span><strong>${said(sw)}</strong>${sw ? ok('software') : ''}</span><span class="tiny">Register</span><span><strong>${said(rg)}</strong>${rg ? ok('register') : ''}</span></div>
+        ${(L.warn ?? []).map((w) => html`<div class="tiny ss-warn">${w}</div>`)}</div>
+    </div>
+    <div class="ss-now">
+      <div class="ss-bad"><strong>Now</strong>Undecided. The ${ssRs(L.credit.amountPaise)} credit has no bill${other && other.mode === 'cash' ? `, and the cash drawer expects ${ssRs(other.amountPaise)} for this bill` : ''}.</div>
+      <div class="ss-good"><strong>After "${labels[0]}"</strong>The bill counts ${said(backed)}, matched to the ${hhmm(L.credit.postedAt)} credit.${other && other.mode === 'cash' ? ` The drawer expects ${ssRs(other.amountPaise)} less.` : ''}</div>
+    </div>
+    <div class="ss-acts"><button class="btn plain dchip" type="button" data-carddismiss="${c.key}" title="Not this: hide it on this device">Not this</button>
+      ${c.actions.map((a, i) => (a.href ? html`<a class="btn plain dchip" href="${a.href}">${a.label}</a>` : '')).filter(Boolean)}
+      ${c.actions.map((a, i) => (a.href ? '' : html`<button class="btn ${a.primary ? '' : 'plain'} dchip" type="button" data-cardact="${c.key}" data-i="${i}">${labels[i]}</button>`)).reverse()}</div>
+    <div class="form-msg"></div></div>`;
+}
 function sgRow(c, day, ctx) {
   if (c.kind === 'same_sale' && c.same) return sameSaleRow(c, ctx);
+  if (c.kind === 'no_upi_credit' && c.look) return noCreditRow(c);
+  if (c.kind === 'bank_backs' && c.look) return bankBacksRow(c);
   const bills = (c.billNos ?? []).filter(Boolean);
   const lead = bills.length ? bills.map((b) => html`<button type="button" class="linkbtn mono sg-bill" data-bill-drawer="${b}|${day ?? ''}" title="Everything about this bill">${b}</button>`) : c.kind === 'no_bill' ? html`<span class="sg-t">${c.title.replace(/ with no bill$/, '')}</span>` : '';
   const wait = c.kind === 'no_upi_credit';
@@ -6516,11 +6604,7 @@ async function reconcileView(biz, dayArg) {
           <div class="nb-sep"></div>
           <button class="btn plain" type="button" data-nbignore="${x.creditId}">Not business (skip)</button></div></details>
 `;
-  const noBillSection = noBillLeft.length ? html`<section class="card" id="nobill" style="gap:0">
-    <div class="lane-h"><strong>Money with no bill (${noBillLeft.length})</strong>
-      <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="nbtickall" style="width:18px;height:18px;min-height:0"> Tick all</label></div>
-    <div class="tiny" style="color:var(--muted);padding-bottom:6px">${nbOneAccount ? `Into ${nbOneAccount} · ` : ''}A sale not written down, or money that is not a sale.${r.confirmed ? '' : ' Book it now; if its bill turns up, Bookr joins them so it is counted once.'} Press Book on a row for its choices, or tick several.</div>
-    ${noBillLeft.map((x) => html`<div class="nb-row" data-nbrow="${x.creditId}">
+  const nbRow = (x) => html`<div class="nb-row" data-nbrow="${x.creditId}">
       <div class="nb-line"><label class="nb-head"><input type="checkbox" data-nbtick="${x.creditId}" aria-label="Tick ₹ ${money(x.amountPaise)} at ${hhmm(x.postedAt)}">
         <strong class="nb-amt">₹ ${money(x.amountPaise)}</strong><span class="tiny nb-meta">${hhmm(x.postedAt)}${nbOneAccount ? '' : ` · ${x.accountName ?? ''}`}${x.vpa ? ` · ${x.vpa}` : ''}${plainRemark(x) ? html` · <em>"${plainRemark(x)}"</em>` : ''}</span></label>
         ${x.spare ? html`<span class="nb-chip">Extra · ${x.spare.credits} credits of this amount, ${x.spare.bills} bill${x.spare.bills === 1 ? '' : 's'}</span>`
@@ -6530,7 +6614,32 @@ async function reconcileView(biz, dayArg) {
       ${byUpiOffer((r.byUpi ?? []).find((o) => o.creditId === x.creditId), true)}
       <div class="nb-check" data-nbcheck="${x.creditId}"></div>
       ${nbActs(x)}
-      </div></div>`)}
+      </div></div>`;
+  // Grouped (approved 21 Nov 2026): one payer paying in parts minutes apart, small amounts booked together, then the rest.
+  const nbPairs = [];
+  const nbInPair = new Set();
+  for (const x of [...noBillLeft].sort((a, b) => a.postedAt - b.postedAt)) {
+    if (!x.vpa || nbInPair.has(x.creditId)) continue;
+    const mates = noBillLeft.filter((y) => y.vpa === x.vpa && !nbInPair.has(y.creditId) && y.postedAt >= x.postedAt && y.postedAt - x.postedAt <= 10 * 60000);
+    if (mates.length < 2) continue;
+    mates.forEach((y) => nbInPair.add(y.creditId));
+    nbPairs.push(mates);
+  }
+  const nbSmall = noBillLeft.filter((x) => !nbInPair.has(x.creditId) && x.amountPaise <= 5000);
+  const nbRest = noBillLeft.filter((x) => !nbInPair.has(x.creditId) && x.amountPaise > 5000);
+  const fnbHead = r.unbilledHeads.find((h) => h.billType === 'fnb');
+  const nbSum = (l) => l.reduce((t, x) => t + x.amountPaise, 0);
+  const nbGroupHtml = html`${nbPairs.length ? html`<div class="nb-grp"><strong>Same payer, minutes apart (${nbPairs.length})</strong><div class="tiny">Payments from one UPI id: one bill paid in parts, or a room advance.</div>
+      ${nbPairs.map((g) => html`<div class="tiny nb-sum">${ssRs(nbSum(g))} = ${g.map((x) => ssRs(x.amountPaise)).join(' + ')} from <span class="mono">${g[0].vpa}</span>, ${hhmm(g[0].postedAt)}${g.length > 1 ? `–${hhmm(g.at(-1).postedAt)}` : ''}</div>${g.map(nbRow)}`)}</div>` : ''}
+    ${nbSmall.length ? html`<div class="nb-grp"><strong>Small amounts, ₹50 or less (${nbSmall.length} · ${ssRs(nbSum(nbSmall))})</strong>
+      ${fnbHead && nbSmall.length > 1 ? html`<div class="form-row" style="justify-content:flex-end"><button class="btn" type="button" data-nbsmall="${nbSmall.map((x) => x.creditId).join(',')}">Book all ${nbSmall.length} as Unbilled F&amp;B</button></div>` : ''}
+      ${nbSmall.map(nbRow)}</div>` : ''}
+    ${nbRest.length ? html`<div class="nb-grp">${nbPairs.length || nbSmall.length ? html`<strong>The rest (${nbRest.length} · ${ssRs(nbSum(nbRest))})</strong>` : ''}${nbRest.map(nbRow)}</div>` : ''}`;
+  const noBillSection = noBillLeft.length ? html`<section class="card" id="nobill" style="gap:0">
+    <div class="lane-h"><strong>Money with no bill (${noBillLeft.length})</strong>
+      <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="nbtickall" style="width:18px;height:18px;min-height:0"> Tick all</label></div>
+    <div class="tiny" style="color:var(--muted);padding-bottom:6px">${nbOneAccount ? `Into ${nbOneAccount} · ` : ''}A sale not written down, or money that is not a sale.${r.confirmed ? '' : ' Book it now; if its bill turns up, Bookr joins them so it is counted once.'} Press Book on a row for its choices, or tick several.</div>
+    ${nbGroupHtml}
     ${r.unbilledHeads.length ? html`<div class="form-row" id="nbbulk" hidden style="gap:6px;padding-top:10px;border-top:1px solid var(--line-soft)"><span class="tiny" id="nbcount"></span>
       ${r.unbilledHeads.map((h) => html`<button class="btn" type="button" style="min-height:36px" data-nbmany="${h.billType}">Book ticked as Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}</div>` : ''}
     ${r.unbilledHeads.length ? '' : html`<div class="note">Choose the income heads for F&amp;B and Room bills on <a href="#/b/${biz.id}/heads">Heads and rules</a> to book unbilled sales.</div>`}
@@ -6574,7 +6683,7 @@ async function reconcileView(biz, dayArg) {
     <div class="form-row" style="gap:6px"><button class="btn" type="button" id="matchlikely" disabled style="min-height:36px">Match 0 ticked</button></div><div class="form-msg" id="likelymsg"></div></div>` : '';
   const nothing = !r.clear.length && !cols.length && !fixes.length && !r.likely.length && !noCredit.length;
   const suggestions = html`<section class="card lane" style="gap:10px">
-    <div class="rv-cards">${clearCard}${likelyCard}</div>${suggestionList([...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)), ...noCredit], day)}
+    <div class="rv-cards">${clearCard}${likelyCard}</div>${suggestionList([...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)), ...noCredit.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length))], day)}
     ${nothing ? html`<div class="note">${done ? 'No suggestions: nothing is left to explain.' : 'No suggestions for what is left. Open the entries to compare them yourself.'}</div>` : ''}
     ${cardSide ? html`<div class="note">${cardSide} UPI entr${cardSide === 1 ? 'y is' : 'ies are'} explained by the card machine: see Card machine below.</div>` : ''}
   </section>`;
@@ -7144,6 +7253,12 @@ async function reconcileView(biz, dayArg) {
     b.disabled = true;
     act(async () => { const res = await nbMany(ids.map((id) => ({ rowId: id, billType: b.dataset.nbmany, item: nbWhat(id) }))); if (res.skipped.length) alert(`Not booked: ${res.skipped.join(' ')}`); },
       { text: `${ids.length} booked as Unbilled ${label}.`, undo: nbReopen(ids) }).finally(() => { b.disabled = false; });
+  }));
+  app.querySelectorAll('[data-nbsmall]').forEach((b) => b.addEventListener('click', () => {
+    const ids = b.dataset.nbsmall.split(',');
+    b.disabled = true;
+    act(async () => { const res = await nbMany(ids.map((id) => ({ rowId: id, billType: 'fnb', item: nbWhat(id) }))); if (res.skipped.length) alert(`Not booked: ${res.skipped.join(' ')}`); },
+      { text: `${ids.length} small amounts booked as Unbilled F&B.`, undo: nbReopen(ids) }).finally(() => { b.disabled = false; });
   }));
   app.querySelectorAll('[data-nbadvance]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.nbadvance;

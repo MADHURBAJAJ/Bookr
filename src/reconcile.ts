@@ -172,6 +172,25 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
 }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const rr = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: p % 100 ? 2 : 0, maximumFractionDigits: 2 })}`;
+const MODE_WORD: Record<string, string> = { cash: 'cash', upi: 'UPI', card: 'card', mixed: 'part cash, part UPI' };
+type Side = { mode: string; amountPaise: number } | null;
+/** The bank settles it, side by side (approved 21 Nov 2026): which side the credit backs, and what to check first. */
+function bankBacksLook(c: { billNo: string; paidAt?: unknown; software?: unknown; register?: unknown; bank?: { amountPaise: number; postedAt: number; creditId: string } | null }, useSoftware: boolean, accountName: string | null, regLines: number) {
+  const sw = c.software as Side; const rg = c.register as Side;
+  const backed = useSoftware ? sw : rg; const other = useSoftware ? rg : sw;
+  const warn: string[] = [];
+  if (regLines > 1) warn.push(`The register has ${c.billNo} ${regLines} times: check it is one bill written once.`);
+  if (backed && other && other.amountPaise !== backed.amountPaise) {
+    const gap = Math.abs(other.amountPaise - backed.amountPaise);
+    if (rg && sw && rg.amountPaise >= 5 * Math.max(sw.amountPaise, 1)) warn.push(`The register's ${rr(rg.amountPaise)} looks misread: check the line.`);
+    else if (gap > Math.max(10000, Math.round(other.amountPaise * 0.2))) warn.push(backed.amountPaise < other.amountPaise
+      ? `${rr(gap)} less than the ${useSoftware ? 'register' : 'software'}: a discount, or a second payment still to come?`
+      : `${rr(gap)} more than the ${useSoftware ? 'register' : 'software'}: a tip, or another bill paid with it?`);
+  }
+  return { backs: useSoftware ? 'software' : 'register', software: sw, register: rg, paidAt: (c.paidAt as number | null) ?? null, billNo: c.billNo,
+    credit: { amountPaise: c.bank!.amountPaise, postedAt: c.bank!.postedAt, accountName }, warn };
+}
 const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
 
 /**
@@ -190,7 +209,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     all<{ id: string; tranId: string; accountName: string | null; vpa: string | null; remark: string | null }>(db, `
       SELECT r.id, r.tran_id AS tranId, a.name AS accountName, r.vpa, r.remark FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id
       WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?`, businessId, w.from - 3600e3, w.to + 3 * 3600e3),
-    all<{ id: string; paidWith: string | null }>(db, 'SELECT id, paid_with_row_id AS paidWith FROM register_rows WHERE business_id = ? AND shift_day = ?', businessId, day),
+    all<{ id: string; paidWith: string | null; billNo: string }>(db, 'SELECT id, paid_with_row_id AS paidWith, bill_no AS billNo FROM register_rows WHERE business_id = ? AND shift_day = ?', businessId, day),
     all<{ rowId: string; mode: string; amountPaise: number }>(db, `SELECT p.register_row_id AS rowId, p.mode, p.amount_paise AS amountPaise FROM register_payments p
       JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ?`, businessId, day),
     all<{ billType: string; headId: string; headName: string }>(db, `SELECT b.bill_type AS billType, b.head_id AS headId, h.name AS headName
@@ -251,6 +270,13 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       if (billOf.has(s.id) || !(sameBillNo(b.c.billNo, s.billNo) || billDistance(b.c.billNo, s.billNo) <= 2)) continue;
       const m = free().find((c) => c.amount === b.amount && nearAt(c.postedAt, s.paidAt, 60));
       if (!m) continue;
+      // Only a real slip (21 Nov 2026): the two bills' amounts agree (or a small discount apart), the software bill has
+      // no money of its own near it, and the credit is the only one of its amount near it (₹30 six times proves nothing).
+      const swAmt = (s.software!.amountPaise as number) ?? 0;
+      const rgAmt = (b.c.register?.amountPaise as number) ?? b.amount;
+      if (Math.abs(swAmt - rgAmt) > Math.max(2000, Math.round(swAmt * 0.1))) continue;
+      if (swAmt !== m.amount && free().some((c) => c.amount === swAmt && nearAt(c.postedAt, s.paidAt, 60))) continue;
+      if (free().filter((c) => c.amount === m.amount && nearAt(c.postedAt, s.paidAt, 60)).length > 1) continue;
       used.add(m.id); billOf.add(s.id); billOf.add(b.c.id);
       cards.push({ key: `trial-typo:${b.c.id}:${s.id}`, kind: 'number_typo', billNos: [s.billNo, b.c.billNo], title: `Register bill ${b.c.billNo} is probably ${s.billNo}`,
         evidence: [`The register has ${b.c.billNo}, not in the software report; the software has ${s.billNo}, not in the register.`, `A UPI credit of ${rs(m.amount)} came in at ${hm(m.postedAt)}.`, 'Check the number against the photo before correcting it.'],
@@ -268,7 +294,10 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       evidence: [`A UPI credit of ${rs(b.c.bank!.amountPaise)} came in at ${hm(b.c.bank!.postedAt)}.`], score: 80, uses: [`cmp:${b.c.id}`, `cr:${b.c.bank!.creditId}`],
       witnesses: { software: b.c.software ? `${rs(b.c.software.amountPaise as number)} · ${b.c.software.mode}` : null, register: b.c.register ? `${rs(b.c.register.amountPaise as number)} · ${b.c.register.mode}` : null,
         bank: `${rs(b.c.bank!.amountPaise)} at ${hm(b.c.bank!.postedAt)}`, odd: useSoftware ? 'register' : 'software' },
-      actions: [{ label: `Use ${useSoftware ? 'software' : 'register'}`, primary: true, method: 'PUT', path: `${base}/comparisons/${b.c.id}`, body: { decision: b.c.bank!.suggest, note: 'Bank credit agrees (trial reconcile)' } }] });
+      look: bankBacksLook(b.c, useSoftware, detail.get(b.c.bank!.creditId)?.accountName ?? null, rows.filter((r) => r.billNo === b.c.billNo).length),
+      actions: [{ label: `Use ${useSoftware ? 'software' : 'register'}`, primary: true, method: 'PUT', path: `${base}/comparisons/${b.c.id}`, body: { decision: b.c.bank!.suggest, note: 'Bank credit agrees (trial reconcile)' } },
+        ...(b.c.software && b.c.register ? [{ label: `Use ${useSoftware ? 'register' : 'software'}`, method: 'PUT' as const, path: `${base}/comparisons/${b.c.id}`, body: { decision: useSoftware ? 'use_register' : 'use_software', note: 'Bank credit checked (trial reconcile)' } }] : []),
+        ...(rows.filter((r) => r.billNo === b.c.billNo).length > 1 && b.c.register?.uploadId ? [{ label: 'Open the register lines', href: `#/b/${businessId}/review/${b.c.register.uploadId}/${b.c.register.rowId}` }] : [])] });
   }
 
   // The bank got the bill before its discount (14 Nov 2026): the credit equals the register's amount before the
@@ -330,6 +359,10 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     billOf.add(b.c.id);
     cards.push({ key: `same-sale-plan:${m.id}`, kind: 'same_sale', billNos: [b.c.billNo], title: `Bill ${b.c.billNo} will join the ${rs(m.amountPaise)} booked on ${dayName(m.txDay)}`,
       evidence: ['You marked them as one sale. Confirming the shift does it, and the sale stays on the booked day.'], score: 90, uses: [`cmp:${b.c.id}`],
+      same: { credit: { amountPaise: m.amountPaise, postedAt: m.postedAt, day: m.txDay, accountName: m.accountName, headName: m.headName, advance: !!m.advance },
+        bill: { billNo: b.c.billNo, amountPaise: b.amount, day, swPaise: (b.c.software?.amountPaise as number | null) ?? null, rgPaise: (b.c.register?.amountPaise as number | null) ?? null,
+          paidAt: (b.c.paidAt as number | null) ?? null, headName: headOfType.get((b.c.register?.billType ?? '') as string) ?? null },
+        counted: true, trial: true, others: 0, chosen: true },
       actions: [{ label: 'Keep them apart', method: 'DELETE', path: `${base}/comparisons/${b.c.id}/same-sale`, body: { rowId: m.id } }] });
   }
   const single = left.filter((x) => !x.grouped && !billOf.has(x.c.id) && !x.c.bank && !(paysOf(x.c.register?.rowId ?? '').length > 1));
@@ -342,6 +375,34 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     cards.push(sameSaleCard(base, p, b.c.difference.startsWith('missing') === false));
   }
 
+  // Where money of a bill's amount went (approved 21 Nov 2026): free, for which bill (matched, or on save), booked as what.
+  const onSave = new Map<string, string[]>();
+  for (const x of clear) onSave.set(x.creditId, x.billNos);
+  for (const k of choices) if (k.bankRowId) onSave.set(k.bankRowId, k.comparisonIds.map((id) => view.comparisons.find((c) => c.id === id)?.billNo ?? '').filter(Boolean));
+  for (const g of view.paidGroups) if (g.bank?.creditId) onSave.set(g.bank.creditId, g.billNos);
+  const saleHeads = new Set(typeHeads.map((h) => h.headId));
+  type LookCredit = { id: string; postedAt: number; amountPaise: number; accountName: string | null; use: 'free' | 'bill' | 'pick' | 'booked' | 'ignored'; bills: string | null; headName: string | null; note: string | null; sale: boolean };
+  const SPAN = 6 * 3600e3;
+  const noCreditLook = async (c: typeof view.comparisons[number], amount: number, mixed: boolean) => {
+    const at = (c.paidAt as number | null) ?? null;
+    const from = Math.min(w.from - 3600e3, (at ?? w.from) - SPAN); const to = Math.max(w.to + 3 * 3600e3, (at ?? w.to) + SPAN);
+    const found = await all<{ id: string; postedAt: number; amountPaise: number; accountName: string | null; status: string; bills: string | null; headId: string | null; headName: string | null; note: string | null }>(db, `
+      SELECT r.id, r.posted_at AS postedAt, r.amount_paise AS amountPaise, a.name AS accountName, r.status, r.note, t.head_id AS headId, h.name AS headName,
+        (SELECT group_concat(x.bill_no, ' + ') FROM bank_matches m JOIN transactions x ON x.id = m.transaction_id WHERE m.bank_row_id = r.id) AS bills
+      FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id LEFT JOIN transactions t ON t.id = r.transaction_id LEFT JOIN heads h ON h.id = t.head_id
+      WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.amount_paise = ? AND r.posted_at >= ? AND r.posted_at < ? ORDER BY abs(r.posted_at - ?) LIMIT 4`,
+      businessId, amount, from, to, at ?? w.from);
+    const list: LookCredit[] = found.map((x) => {
+      const pick = onSave.get(x.id);
+      const use = x.status === 'matched' ? 'bill' : x.status === 'booked' ? 'booked' : x.status === 'ignored' ? 'ignored' : pick ? 'pick' : 'free';
+      return { id: x.id, postedAt: x.postedAt, amountPaise: x.amountPaise, accountName: x.accountName, use, bills: x.status === 'matched' ? x.bills : pick?.join(' + ') ?? null,
+        headName: x.headName, note: x.note, sale: !!x.headId && saleHeads.has(x.headId) };
+    });
+    return { amountPaise: amount, from, to, credits: list, mixed,
+      bill: { billNo: c.billNo, paidAt: at, day, software: c.software ? { mode: c.software.mode, amountPaise: c.software.amountPaise } : null,
+        register: c.register ? { mode: c.register.mode, amountPaise: c.register.amountPaise } : null } };
+  };
+
   // Only with the bank in: a UPI bill with no credit of its amount near it, and money with no bill.
   const noCredit: Card[] = [];
   if (cov.covered) {
@@ -350,13 +411,24 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       const cashFits = cash.differencePaise != null && cash.differencePaise === b.amount;
       const rowId = b.c.register?.rowId as string | undefined;
       const onePay = rowId && paysOf(rowId).length === 1 && b.c.register?.mode === 'upi';
+      const look = await noCreditLook(b.c, b.amount, rowId ? paysOf(rowId).length > 1 : false);
+      const sameMoney = (look.credits as LookCredit[]).find((x) => x.use === 'booked' && x.sale && b.c.paidAt != null && Math.abs(x.postedAt - (b.c.paidAt as number)) <= 60 * 60000);
+      const sw = b.c.software as { mode: string; amountPaise: number } | null;
+      const swOther = sw && b.c.difference !== 'match' && b.c.decision !== 'use_software' && (sw.mode !== 'upi' || sw.amountPaise !== b.amount);
+      const anyFree = (look.credits as LookCredit[]).some((x) => x.use === 'free');
+      const better: Card['actions'] = [
+        ...(sameMoney && !planned.has(b.c.id) ? [{ label: `Same money: use the ${rs(b.amount)} at ${hm(sameMoney.postedAt)} for this bill`, primary: true, method: 'POST' as const, path: `${base}/comparisons/${b.c.id}/same-sale`, body: { rowId: sameMoney.id } }] : []),
+        ...(swOther ? [{ label: `It was ${MODE_WORD[sw!.mode] ?? sw!.mode} ${rr(sw!.amountPaise)} (software)`, primary: !sameMoney && !anyFree, method: 'PUT' as const, path: `${base}/comparisons/${b.c.id}`, body: { decision: 'use_software', note: `No UPI ${rr(b.amount)} free in the bank` } }] : []),
+      ];
       const open = rowId ? `#/b/${businessId}/review/${b.c.register!.uploadId}/${rowId}` : `#/b/${businessId}/compare/${day}`;
       noCredit.push({ key: `trial-mode:${b.c.id}`, kind: 'no_upi_credit', billNos: [b.c.billNo], amountPaise: b.amount, paidAt: b.c.paidAt ?? null, title: `Bill ${b.c.billNo} (${rs(b.amount)}): no UPI payment of this amount in the bank`,
         evidence: [`No credit of ${rs(b.amount)} in any account around ${b.c.paidAt ? hm(b.c.paidAt) : 'this shift'}.`,
           cashFits ? `The shift's cash is ${rs(b.amount)} more than expected: exactly this bill. It was probably paid in cash.` : 'If it was paid by cash or card, change it. The credit may also still be on its way.'],
         score: cashFits ? 70 : 30, uses: [`cmp:${b.c.id}`],
-        actions: onePay ? [{ label: 'Was cash', primary: cashFits, op: 'setMode', rowId, uploadId: b.c.register!.uploadId as string, mode: 'cash' }, { label: 'Was card', op: 'setMode', rowId, uploadId: b.c.register!.uploadId as string, mode: 'card' }]
-          : [{ label: 'Open the bill', href: open }] });
+        look,
+        actions: [...better, ...(onePay ? [{ label: `It was cash ${rr(b.amount)}`, primary: cashFits && !better.some((x) => x.primary), op: 'setMode' as const, rowId, uploadId: b.c.register!.uploadId as string, mode: 'cash' },
+          { label: `It was card ${rr(b.amount)}`, op: 'setMode' as const, rowId, uploadId: b.c.register!.uploadId as string, mode: 'card' }]
+          : [{ label: 'Open the bill', href: open }])] });
     }
     for (const n of view.bank?.noBill ?? []) {
       if (used.has(n.id)) continue;
@@ -424,7 +496,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       billsLeft: openBills.length, billsLeftPaise: sum(openBills), creditsLeft: openCredits.length, creditsLeftPaise: sum(openCredits), creditsNoBill: openCredits.filter((c) => c.noBill).length },
     clear, groupsFit: groupsFit.size, fixes: cards, likely: [], noCredit,
     // Money with no bill can be booked before saving too (11 Nov 2026): booking a bank line does not wait for the shift.
-    noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill' || (c.why === 'extra' && !splitSides.has(c.amountPaise))).map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: null, remark: c.remark,
+    noBill: openCredits.filter((c) => c.noBill || c.why === 'no_bill' || (c.why === 'extra' && !splitSides.has(c.amountPaise))).map((c) => ({ creditId: c.id, tranId: null, accountName: c.accountName, postedAt: c.postedAt, amountPaise: c.amountPaise, vpa: detail.get(c.id)?.vpa ?? null, remark: c.remark,
       extra: c.why === 'extra' && !c.noBill ? c.billsOfAmount : 0, spare: (c as { spare?: { credits: number; bills: number } }).spare ?? null, otherSide: otherSides.get(c.amountPaise) ?? [] })),
     unbilledHeads: typeHeads, done: [], booked: [], open: { bills: openBills, credits: openCredits },
     choices, save: { blockers: view.blockers, canSave: view.canConfirm }, numberSlips: view.numberSlips,

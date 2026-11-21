@@ -24,7 +24,9 @@ export interface Card { key: string; kind: string; title: string; evidence: stri
   /** Same sale (approved 21 Nov 2026): the money and the bill side by side. */
   same?: { credit: { amountPaise: number; postedAt: number; day: string; accountName: string | null; headName: string | null; advance: boolean };
     bill: { billNo: string; amountPaise: number; day: string; swPaise: number | null; rgPaise: number | null; paidAt: number | null; headName: string | null };
-    counted: boolean; trial: boolean; others: number } }
+    counted: boolean; trial: boolean; others: number; chosen?: boolean };
+  /** Side-by-side cards (approved 21 Nov 2026): the money, the bill's two sides, what is wrong now and what a button does. */
+  look?: Record<string, unknown> }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rupees = (p: number) => (p / 100).toFixed(2);
@@ -110,7 +112,13 @@ export async function explainShift(db: DB, businessId: string, day: string) {
       const dist = billDistance(r.billNo!, s.billNo);
       const alike = sameBillNo(r.billNo!, s.billNo) || dist <= 2;
       if (!alike) continue;
-      for (const m of credits.filter((c) => c.amount === r.net && near(c, s.paidAt))) {
+      // Only a real slip (21 Nov 2026): amounts agree or a small discount apart, the software bill has no money of its
+      // own near it, and the credit is the only one of its amount near it.
+      if (Math.abs(s.swAmount - r.net) > Math.max(2000, Math.round(s.swAmount * 0.1))) continue;
+      if (s.swAmount !== r.net && credits.some((c) => c.amount === s.swAmount && near(c, s.paidAt))) continue;
+      const fits = credits.filter((c) => c.amount === r.net && near(c, s.paidAt));
+      if (fits.length > 1) continue;
+      for (const m of fits) {
         const gap = s.swAmount - m.amount;
         const minutes = s.paidAt ? mins(m.postedAt, s.paidAt) : null;
         cards.push({

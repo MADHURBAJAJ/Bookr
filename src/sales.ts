@@ -1122,8 +1122,9 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   const handled = new Set(view.comparisons.filter((c) => c.bank).map((c) => c.id));
   for (const plan of await plansFor(db, businessId, day)) {
     if (handled.has(plan.comparisonId) || chosen.has(plan.comparisonId)) continue;
+    // A bill paid part cash, part UPI (21 Nov 2026): its one UPI part joins the booked credit; the cash part stays cash.
     const at = rows.findIndex((r) => r.c.id === plan.comparisonId && r.mode === 'upi');
-    if (at < 0 || rows.filter((r) => r.c.id === plan.comparisonId).length !== 1) continue;
+    if (at < 0 || rows.filter((r) => r.c.id === plan.comparisonId && r.mode === 'upi').length !== 1) continue;
     const [booked, row] = await Promise.all([bookedTx(db, businessId, plan.rowId),
       one<{ id: string; note: string | null; done_by: string | null; done_at: number | null }>(db, 'SELECT id, note, done_by, done_at FROM bank_rows WHERE id = ?', plan.rowId)]);
     if (!booked || !row || booked.amount_paise !== rows[at].amount) continue;
