@@ -82,7 +82,9 @@ describe('fee report', () => {
     expect((await o.post(`/businesses/${h.bid}/fees/import`, { text: sheet(DAY, LINES.slice(0, 2)) })).status).toBe(201);
     const again = (await h.clients.owner.get(`/businesses/${h.bid}/cashbooks/${anupBook}/day/2026-11-20`)).json;
     expect(again.entries.map((e: { amountPaise: number }) => e.amountPaise)).toEqual([513000]);
-    expect((await h.clients.owner.get(`/businesses/${h.bid}/cashbooks/${raviBook}/day/2026-11-20`)).json.entries).toHaveLength(0);
+    // That file covered only SMS (21 Nov 2026): BIS keeps the lines of the earlier file, so Ravi's cash stays.
+    expect((await h.clients.owner.get(`/businesses/${h.bid}/cashbooks/${raviBook}/day/2026-11-20`)).json.entries.map((e: { amountPaise: number }) => e.amountPaise)).toEqual([200000]);
+    expect((await o.get(`/businesses/${h.bid}/fees/2026-11-20`)).json.totals).toMatchObject({ cash: 713000, bank: 1275000 });
     // Only Owner/Accountant link codes and names.
     expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/fees/codes/SMSSMS`, { branchId: sms })).status).toBe(403);
   });

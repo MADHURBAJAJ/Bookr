@@ -247,13 +247,14 @@ const NAV = [
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
   { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
-  // A new school business (21 Nov 2026): before its first branch, Cash books is reached from Settings to set it up.
-  { key: 'cashbooks', label: 'Cash books', needs: 'accounts.edit', group: 'Settings', screens: ['cashbooks'], when: (b) => !b.cashBooks },
+  // Schools and cashiers (21 Nov 2026): set up of a school business, also how a new business becomes one.
+  { key: 'schools', label: 'Schools and cashiers', needs: 'accounts.edit', group: 'Settings' },
 ];
 // The menu counts: the Today figures, kept a minute so moving between pages does not ask again.
 let navCounts = { bizId: null, at: 0, n: null };
 async function fillNavCounts(biz) {
-  if (!biz.actions.includes('reports.view')) return;
+  // A school's Today has its own list; the hotel's counts are not shown beside it.
+  if (!biz.actions.includes('reports.view') || biz.cashBooks) return;
   const show = () => {
     if (navCounts.bizId !== biz.id) return;
     for (const [k, v] of Object.entries(navCounts.n ?? {})) {
@@ -8951,26 +8952,16 @@ const cbStatus = (h) => (h.status === 'sent'
 const cbWhere = (h) => (h.toKind === 'bank' ? `Bank: ${h.toName}` : h.toName);
 
 /** All the books: cash with each cashier by branch, cash handed over not yet shown on the other side, and set up. */
-async function cashBooksView(biz, editId) {
-  const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
-  const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
-  const countChip = (b) => (!b.lastCount ? html`<span class="tiny">not counted yet</span>`
-    : b.lastCount.gapPaise === 0 ? html`<span class="chip ok" title="Counted on ${dayLabel(b.lastCount.day)}">count matches</span>`
-      : html`<span class="chip bad" title="Counted on ${dayLabel(b.lastCount.day)}">${b.lastCount.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(b.lastCount.gapPaise))} · ${shortDay(b.lastCount.day)}</span>`);
-  const phoneText = (p) => (p ? `${p.slice(3, 8)} ${p.slice(8)}` : '');
-  // One line per cashier (21 Nov 2026): the school beside the name, and where the cashier is: invite, invite sent, signed in.
-  const who = (b) => (b.cashierUserId
-    ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span> ${countChip(b)}`
-    : b.invite ? html`<span class="tiny">Invite sent to ${phoneText(b.invite.phone)} on ${shortDay(new Date(b.invite.createdAt + IST_MS).toISOString().slice(0, 10))} · not joined yet ·
-        <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${phoneText(b.invite.phone)}">Send again</button></span>`
-      : d.can.invite ? html`<button type="button" class="btn plain" style="min-height:34px;margin-top:4px" data-cbinvite="${b.id}">Invite cashier by phone</button>`
-        : html`<span class="tiny">no cashier yet</span>`);
-  const books = d.books.map((b) => html`<div class="list-row cb-book" style="align-items:flex-start">
-      <span><a href="#/b/${biz.id}/cashbook/${b.id}/${d.today}" style="font-weight:500;color:inherit">${b.name}</a>${b.branchName ? html` <span class="tiny">· ${b.branchName}</span>` : ''}
-        <div data-cbwho="${b.id}">${who(b)}</div></span>
-      <span style="text-align:right;white-space:nowrap"><span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span>
-        ${d.can.setup ? html` <a href="#/b/${biz.id}/cashbooks/${b.id}" class="linkbtn" title="Change ${b.name}" aria-label="Change ${b.name}">⋯</a>` : ''}</span></div>`);
-  const open = d.handovers.map((h) => html`<div class="list-row" style="align-items:flex-start">
+// School screens on the PC (approved 21 Nov 2026): Cash books shows money only; set up and inviting cashiers live on
+// Settings → Schools and cashiers; Today is the school's day (fees, cash with cashiers, and what needs a look).
+const cbCountChip = (b) => (!b.lastCount ? html`<span class="tiny">not counted yet</span>`
+  : b.lastCount.gapPaise === 0 ? html`<span class="chip ok" title="Counted on ${dayLabel(b.lastCount.day)}">count matches · ${shortDay(b.lastCount.day)}</span>`
+    : html`<span class="chip bad" title="Counted on ${dayLabel(b.lastCount.day)}">${b.lastCount.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(b.lastCount.gapPaise))} · ${shortDay(b.lastCount.day)}</span>`);
+const cbPhone = (p) => (p ? `${p.slice(3, 8)} ${p.slice(8)}` : '');
+
+/** Cash handed over that waits on the other side, with the Owner's actions; shared by Today and Cash books. */
+function cbOpenRows(biz, d) {
+  return d.handovers.map((h) => html`<div class="list-row" style="align-items:flex-start">
     <span><span style="font-weight:500">${h.fromBookName} → ${cbWhere(h)}</span> <span class="tiny">· ${shortDay(h.day)}</span>
       ${h.narration ? html`<div class="tiny">${h.narration}</div>` : ''}<div>${cbStatus(h)}</div>
       ${h.toKind === 'bank' && d.can.approve ? (h.deposits.length
@@ -8979,76 +8970,135 @@ async function cashBooksView(biz, editId) {
         : html`<div class="tiny">No deposit of ₹ ${rs(h.amountPaise)} in ${h.toName} within a week yet. Sync the bank on the Bank page.</div>`) : ''}
       ${h.toKind === 'person' && d.can.approve ? html`<div style="margin-top:4px"><button type="button" class="btn ghost" style="min-height:32px" data-cbreceive="${h.id}">${h.toName} got it</button></div>` : ''}</span>
     <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`);
+}
+function cbWireActions(biz, again) {
+  const act = (sel, f) => app.querySelectorAll(sel).forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await f(b); await again(); } catch (err) { alert(err.message); b.disabled = false; }
+  }));
+  act('[data-cbreceive]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbreceive}/receive`, {}));
+  act('[data-cbdeposit]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbdeposit}/deposit`, { bankRowId: b.dataset.row }));
+  act('[data-cbundo]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbundo}/undo`, {}));
+}
+
+async function cashBooksView(biz, oldEditId) {
+  // The old "change a book" address now opens it on Schools and cashiers.
+  if (oldEditId) return location.replace(`#/b/${biz.id}/schools/${oldEditId}`);
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
+  const books = d.books.map((b) => html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}">
+      <span><span style="font-weight:500">${b.name}</span>${b.branchName ? html` <span class="tiny">· ${b.branchName}</span>` : ''}
+        <div>${b.cashierUserId || !d.can.setup ? cbCountChip(b) : html`<span class="tiny">${b.invite ? 'invite sent, not joined yet' : 'no cashier yet'}</span> ${cbCountChip(b)}`}</div></span>
+      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`);
   const done = d.done.map((h) => html`<div class="list-row">
     <span>${h.fromBookName} → ${cbWhere(h)} <span class="tiny">· ${shortDay(h.day)}${h.settledByName ? ` · ${h.status === 'deposited' ? 'matched' : 'confirmed'} by ${h.settledByName}` : ''}</span> ${cbStatus(h)}
       ${(h.toKind !== 'book' && d.can.approve) ? html`<button type="button" class="linkbtn tiny" data-cbundo="${h.id}">Undo</button>` : ''}</span>
     <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`);
-  const editing = d.books.find((b) => b.id === editId);
-  // Set up is folded behind one button (21 Nov 2026); open when changing a book or when there is nothing yet.
-  const setup = d.can.setup ? html`<details class="card" id="cb-setup" ${editing || !d.books.length ? 'open' : ''}>
-      <summary style="cursor:pointer;font-weight:500">${d.books.length ? '+ Add branch or cash book' : 'Add your first school'}</summary>
-      <form id="cb-branch" class="form-row">
-        <div class="field"><label for="cbb">New branch</label><input id="cbb" name="name" placeholder="Chilkana Road" required></div>
-        <button class="btn plain" type="submit">Add branch</button><div class="form-msg"></div></form>
-      ${d.branches.length ? html`<form id="cb-book" style="display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--line-soft);padding-top:12px">
-        <div style="font-weight:500">${editing ? `Change ${editing.name}` : 'New cash book'}</div>
-        ${editing ? '' : html`<div class="field"><label for="cbn">Book name</label><input id="cbn" name="name" placeholder="SMS CR EXP" required></div>`}
-        <div class="form-row">
-          <div class="field"><label for="cbbr">Branch</label><select id="cbbr" name="branchId" required>${d.branches.map((b) => html`<option value="${b.id}" ${editing?.branchId === b.id ? 'selected' : ''}>${b.name}</option>`)}</select></div>
-          <div class="field"><label for="cbc">Cashier</label><select id="cbc" name="cashierUserId"><option value="">Not chosen yet</option>
-            ${d.members.map((m) => html`<option value="${m.id}" ${editing?.cashierUserId === m.id ? 'selected' : ''}>${m.name} (${ROLE_LABELS[m.role]})</option>`)}</select></div>
-        </div>
-        ${editing ? '' : html`<div class="form-row">
-          <div class="field"><label for="cbo">Opening cash (₹)</label><input id="cbo" name="openingBalance" class="mono" inputmode="decimal" value="0" required></div>
-          <div class="field"><label for="cbd">Opening date</label><input id="cbd" name="openingDate" type="date" value="${d.today}" required></div></div>
-        <div class="tiny">Opening cash: what the cashier holds at the start of the opening date (for a Khatabook book, its balance that morning).</div>`}
-        <div class="tiny">${editing ? 'Or invite the cashier by phone from their line above: joining makes them its cashier.' : 'Then invite the cashier by phone from the book\'s line: they sign in with their mobile number and see only their own book.'}</div>
-        <div class="form-msg"></div>
-        <div class="form-row"><button class="btn" type="submit">${editing ? 'Save' : 'Add cash book'}</button>
-          ${editing ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/cashbooks">Cancel</a>` : ''}</div>
-      </form>
-      `
-        : html`<div class="tiny">Add a branch first, then its cashiers' books.</div>`}
-    </details>` : '';
+  const open = cbOpenRows(biz, d);
   render(shell(biz, 'cashbooks', 'Cash books', 'Cash with each cashier, and cash handed over until the other side shows it.', html`
     <div class="row">
       <section class="card grow3">
         <h2>Cash with cashiers <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
-        ${d.books.length ? books : html`<div class="note">No cash books yet.${d.can.setup ? ' Add a school and its cashier\'s book below.' : ''}</div>`}
+        ${d.books.length ? books : html`<div class="note">No cashiers yet.${d.can.setup ? html` Add your schools and their cashiers on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.` : ''}</div>`}
+        ${d.can.setup && d.books.length ? html`<div class="tiny" style="margin-top:8px">Add a cashier, invite one, or change opening cash on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.</div>` : ''}
       </section>
       <section class="card grow2">
         <h2>Needs a look${d.handovers.length ? html` <span class="chip wait">${d.handovers.length}</span>` : ''}</h2>
         ${open.length ? open : html`<div class="note">All cash handed over is shown on the other side.</div>`}
         ${done.length ? html`<h2 style="margin-top:8px;font-size:15px">Done this week</h2>${done}` : ''}
       </section>
-    </div>
-    ${setup}`));
+    </div>`));
   wireShell();
-  const act = (sel, f) => app.querySelectorAll(sel).forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true;
-    try { await f(b); await cashBooksView(biz, editId); } catch (err) { alert(err.message); b.disabled = false; }
-  }));
-  act('[data-cbreceive]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbreceive}/receive`, {}));
-  act('[data-cbdeposit]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbdeposit}/deposit`, { bankRowId: b.dataset.row }));
-  act('[data-cbundo]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbundo}/undo`, {}));
+  cbWireActions(biz, () => cashBooksView(biz));
+}
+
+/** Settings → Schools and cashiers: each school with its receipt codes and its cashiers; add, change, invite by phone. */
+async function schoolsView(biz, editId) {
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  const editing = d.books.find((b) => b.id === editId) ?? null;
+  const codesOf = (branchId) => d.codes.filter((c) => c.branchId === branchId).map((c) => c.code);
+  const otherCodes = d.codes.filter((c) => !c.branchId).map((c) => c.code);
+  const who = (b) => (b.cashierUserId
+    ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span>${b.cashierLastActive ? html` <span class="tiny">last seen ${when(b.cashierLastActive)}</span>` : ''}`
+    : b.invite ? html`<span class="chip wait">invite sent</span> <span class="tiny">to ${cbPhone(b.invite.phone)} on ${shortDay(new Date(b.invite.createdAt + IST_MS).toISOString().slice(0, 10))}, not joined yet</span>
+        ${d.can.invite ? html` <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${cbPhone(b.invite.phone)}">Send again</button>` : ''}`
+      : d.can.invite ? html`<button type="button" class="btn plain" style="min-height:32px" data-cbinvite="${b.id}">Invite by phone</button>`
+        : html`<span class="tiny">no cashier yet</span>`);
+  const cashierRow = (b) => html`<div class="list-row" style="align-items:flex-start">
+      <span style="min-width:0"><span style="font-weight:500">${b.name}</span>
+        <span class="tiny">· opening ₹ ${rs(b.openingBalancePaise)} on ${shortDay(b.openingDate)}</span>
+        <div data-cbwho="${b.id}" style="margin-top:4px">${who(b)}</div></span>
+      <a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a></div>`;
+  const schools = d.branches.map((br) => {
+    const list = d.books.filter((b) => b.branchId === br.id);
+    const codes = codesOf(br.id);
+    return html`<section class="card">
+      <h2 style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">${br.name}
+        <span class="tiny" style="font-weight:400">${codes.length ? `Fee report code ${codes.join(', ')}` : 'No fee report code yet'}</span></h2>
+      ${list.length ? list.map(cashierRow) : html`<div class="note">No cashier yet.</div>`}
+      <details data-addcashier="${br.id}" style="margin-top:6px"><summary class="linkbtn" style="cursor:pointer">+ Add cashier to ${br.name}</summary>
+        <form class="cb-add" data-branch="${br.id}" style="display:flex;flex-direction:column;gap:10px;margin-top:8px">
+          <div class="form-row">
+            <div class="field"><label>Cashier's name</label><input name="name" placeholder="Rajesh Kumar" required></div>
+            <div class="field"><label>Cash they hold now (₹)</label><input name="openingBalance" class="mono" inputmode="decimal" value="0" required></div>
+            <div class="field"><label>From</label><input name="openingDate" type="date" value="${d.today}" required></div>
+          </div>
+          <div class="tiny">Their cash book is named after them, so the fee report's cashier name finds it. Invite them by phone after adding.</div>
+          <div class="form-msg"></div>
+          <div><button class="btn" type="submit">Add cashier</button></div>
+        </form></details>
+    </section>`;
+  });
+  const edit = editing ? html`<section class="card" id="cb-edit">
+      <h2>Change ${editing.name}</h2>
+      <form id="cb-book" style="display:flex;flex-direction:column;gap:12px">
+        <div class="form-row">
+          <div class="field"><label for="cbn">Cashier's name</label><input id="cbn" name="name" value="${editing.name}" required></div>
+          <div class="field"><label for="cbbr">School</label><select id="cbbr" name="branchId" required>${d.branches.map((b) => html`<option value="${b.id}" ${editing.branchId === b.id ? 'selected' : ''}>${b.name}</option>`)}</select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label for="cbo">Cash they held at the start (₹)</label><input id="cbo" name="openingBalance" class="mono" inputmode="decimal" value="${rsIn(editing.openingBalancePaise)}" required></div>
+          <div class="field"><label for="cbd">On</label><input id="cbd" name="openingDate" type="date" value="${editing.openingDate}" required></div>
+          <div class="field"><label for="cbc">Signs in as</label><select id="cbc" name="cashierUserId"><option value="">Nobody yet</option>
+            ${d.members.map((m) => html`<option value="${m.id}" ${editing.cashierUserId === m.id ? 'selected' : ''}>${m.name} (${ROLE_LABELS[m.role]})</option>`)}</select></div>
+        </div>
+        <div class="tiny">Start: the cash in their hand that morning (for a Khatabook book, its balance that day). Fee report days from then on fill the book.</div>
+        <div class="form-msg"></div>
+        <div class="form-row"><button class="btn" type="submit">Save</button>
+          <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/schools">Cancel</a></div>
+      </form></section>` : '';
+  render(shell(biz, 'schools', 'Schools and cashiers', 'Each school, its fee report code and its cashiers. Cashiers sign in with their mobile number.', html`
+    ${edit}
+    ${d.branches.length ? schools : html`<section class="card"><div class="note">Start with your first school, then add its cashiers.</div></section>`}
+    <section class="card">
+      <form id="cb-branch" class="form-row" style="align-items:flex-end">
+        <div class="field"><label for="cbb">${d.branches.length ? 'Add a school' : 'Your first school'}</label><input id="cbb" name="name" placeholder="Chilkana Road" required></div>
+        <button class="btn plain" type="submit">Add school</button><div class="form-msg"></div></form>
+      ${otherCodes.length ? html`<div class="tiny" style="margin-top:8px">Fee report codes of your other business, left out here: ${otherCodes.join(', ')}. Codes are linked on Fee check the first time a report brings them.</div>` : ''}
+    </section>`));
+  wireShell();
+  if (editing) document.getElementById('cb-edit').scrollIntoView({ block: 'start' });
+  const again = () => schoolsView(biz, editId);
   // Invite a cashier by phone: the link opens WhatsApp to that number; joining makes them this book's cashier.
   app.querySelectorAll('[data-cbinvite]').forEach((btn) => btn.addEventListener('click', () => {
     const book = d.books.find((b) => b.id === btn.dataset.cbinvite);
     const box = app.querySelector(`[data-cbwho="${book.id}"]`);
-    box.innerHTML = html`<form class="cb-invite" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:6px">
-        <div class="field" style="margin:0"><label for="cbph-${book.id}">Mobile number</label>
+    box.innerHTML = html`<form style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+        <div class="field" style="margin:0"><label for="cbph-${book.id}">${book.name}'s mobile number</label>
           <input id="cbph-${book.id}" name="phone" type="tel" inputmode="numeric" autocomplete="off" placeholder="94120 55555" value="${btn.dataset.phone ?? ''}" required style="max-width:170px"></div>
         <button class="btn" type="submit">Send on WhatsApp</button>
-        <button class="btn plain" type="button" data-copy>Copy link</button>
-        <div class="tiny" style="flex-basis:100%">${book.name} joins as Entry staff, signs in with this number and sees only this book.</div>
+        <button class="btn plain" type="button" data-copy>Copy invite</button>
+        <button class="btn plain" type="button" data-cancel>Cancel</button>
+        <div class="tiny" style="flex-basis:100%">They join as Entry staff, sign in with this number and see only their own book.</div>
         <div class="form-msg" style="flex-basis:100%"></div></form>`.__html;
     const f = box.querySelector('form');
     const msg = f.querySelector('.form-msg');
     f.querySelector('input').focus();
     const make = async () => {
       const res = await api('POST', `/businesses/${biz.id}/invites`, { phone: f.elements.phone.value, role: 'entry_staff', accountId: book.id });
-      return { res, text: `Join ${biz.name} on Bookr to keep your cash book (${book.name}). Open this link, choose a password, then sign in with your mobile number: ${res.link}` };
+      return { res, text: `Join ${biz.name} on Bookr to keep your cash book. Open this link, choose a password, then sign in with your mobile number: ${res.link}` };
     };
+    f.querySelector('[data-cancel]').addEventListener('click', again);
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       // Opened at once (a tap is needed to open WhatsApp), then pointed at the chat once the link is made.
@@ -9058,7 +9108,7 @@ async function cashBooksView(biz, editId) {
         const { res, text } = await make();
         const wa = `https://wa.me/${res.phone.slice(1)}?text=${encodeURIComponent(text)}`;
         if (w) w.location.href = wa; else location.href = wa;
-        await cashBooksView(biz, editId);
+        await again();
       } catch (err) { w?.close(); msg.textContent = err.message; msg.className = 'form-msg error'; }
     });
     f.querySelector('[data-copy]').addEventListener('click', async () => {
@@ -9071,130 +9121,389 @@ async function cashBooksView(biz, editId) {
       } catch (err) { msg.textContent = err.message; msg.className = 'form-msg error'; }
     });
   }));
+  app.querySelectorAll('form.cb-add').forEach((f) => onSubmit(f, async (x) => {
+    await api('POST', `/businesses/${biz.id}/cashbooks`, { ...x, branchId: f.dataset.branch });
+    BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+    await again();
+  }));
   const bf = document.getElementById('cb-branch');
-  bf && onSubmit(bf, async (x) => { await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
-    // The first branch makes it a school: route again so the menu changes over (Cash books under Daily work, no Shift).
-    if (biz.cashBooks) await cashBooksView(biz); else await route(); });
+  onSubmit(bf, async (x) => {
+    await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+    // The first school makes it a school business: route again so the menu changes over.
+    if (biz.cashBooks) await again(); else await route();
+  });
   const kf = document.getElementById('cb-book');
   kf && onSubmit(kf, async (x) => {
-    if (editing) await api('PATCH', `/businesses/${biz.id}/cashbooks/${editing.id}`, x);
-    else await api('POST', `/businesses/${biz.id}/cashbooks`, x);
+    await api('PATCH', `/businesses/${biz.id}/cashbooks/${editing.id}`, x);
     BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
-    go(`#/b/${biz.id}/cashbooks`);
+    go(`#/b/${biz.id}/schools`);
   });
 }
 
+/** Today for a school: the latest fee report, cash with cashiers, and everything that waits on someone. */
+async function schoolTodayView(biz) {
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  const first = biz.actions.includes('sales.view') ? await api('GET', `/businesses/${biz.id}/fees/${d.today}`) : null;
+  const lastDay = first?.days?.[0] ?? null;
+  const fees = first && lastDay && lastDay !== d.today ? await api('GET', `/businesses/${biz.id}/fees/${lastDay}`) : first;
+  const rep = fees?.report ? fees : null;
+  const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
+  const notCounted = d.books.filter((b) => b.cashierUserId && b.lastCount?.day !== d.today);
+  const gaps = d.books.filter((b) => b.lastCount && b.lastCount.gapPaise !== 0 && b.lastCount.day >= lastDay7(d.today));
+  const noCashier = d.books.filter((b) => !b.cashierUserId);
+  const tile = (label, value, sub, href) => html`<a class="tile" href="${href}" style="padding:12px;color:inherit;text-decoration:none">
+      <div class="tiny">${label}</div><div class="amount" style="text-align:left;font-size:22px;font-weight:500">${value}</div>${sub ? html`<div class="tiny">${sub}</div>` : ''}</a>`;
+  const look = [
+    ...cbOpenRows(biz, d),
+    ...gaps.map((b) => html`<a class="list-row" href="#/b/${biz.id}/cashbook/${b.id}/${b.lastCount.day}" style="color:inherit">
+      <span>${b.name} counted ₹ ${rs(Math.abs(b.lastCount.gapPaise))} ${b.lastCount.gapPaise < 0 ? 'short' : 'extra'} <span class="tiny">· ${b.branchName ?? ''} · ${shortDay(b.lastCount.day)}</span></span>
+      <span class="chip bad">${b.lastCount.gapPaise < 0 ? 'short' : 'extra'}</span></a>`),
+    ...notCounted.map((b) => html`<a class="list-row" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}" style="color:inherit">
+      <span>${b.name} has not counted today <span class="tiny">· ${b.branchName ?? ''}</span></span><span class="chip wait">count</span></a>`),
+    ...(rep ? [] : [html`<a class="list-row" href="#/b/${biz.id}/fees/${d.today}" style="color:inherit"><span>Bring in today's fee report</span><span class="chip wait">Fee check ›</span></a>`]),
+    ...(noCashier.length && d.can.setup ? [html`<a class="list-row" href="#/b/${biz.id}/schools" style="color:inherit">
+      <span>${noCashier.length === 1 ? `${noCashier[0].name} has not joined` : `${noCashier.length} cashiers have not joined`} <span class="tiny">· invite them by phone</span></span><span class="chip wait">Schools and cashiers ›</span></a>`] : []),
+  ];
+  const cashiers = d.books.map((b) => html`<a class="list-row" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}" style="color:inherit">
+      <span><span style="font-weight:500">${b.name}</span> <span class="tiny">· ${b.branchName ?? ''}</span><div>${cbCountChip(b)}</div></span>
+      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`);
+  render(shell(biz, 'dashboard', 'Today', '', html`
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+      ${rep ? tile(`Fees, ${lastDay === d.today ? 'today' : shortDay(lastDay)}`, `₹ ${rs(rep.totalPaise)}`, `${rep.report.receipts} receipts · cash ₹ ${rs(rep.totals.cash)}`, `#/b/${biz.id}/fees/${lastDay}`)
+        : tile('Fees, today', '—', 'fee report not brought in', `#/b/${biz.id}/fees/${d.today}`)}
+      ${tile('Cash with cashiers', `₹ ${rs(total)}`, `${d.books.length} cashier${d.books.length === 1 ? '' : 's'}`, `#/b/${biz.id}/cashbooks`)}
+      ${rep ? tile('UPI and card to match', `₹ ${rs((rep.totals.upi ?? 0) + (rep.totals.card ?? 0))}`, 'with the bank, once its accounts are added', `#/b/${biz.id}/fees/${lastDay}`) : ''}
+    </div>
+    <div class="row" style="margin-top:12px">
+      <section class="card grow3">
+        <h2>Needs a look${look.length ? html` <span class="chip wait">${look.length}</span>` : ''}</h2>
+        ${look.length ? look : html`<div class="note">Nothing waits on anyone.</div>`}
+      </section>
+      <section class="card grow2">
+        <h2>Cash with cashiers <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
+        ${cashiers.length ? cashiers : html`<div class="note">No cashiers yet.</div>`}
+      </section>
+    </div>`));
+  wireShell();
+  cbWireActions(biz, () => schoolTodayView(biz));
+}
+const lastDay7 = (day) => new Date(Date.parse(`${day}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+
 /** One day of a cashier's book, made for the phone: what came in, what went out, what should be in hand, and the count. */
+// Cashier phone app (approved 21 Nov 2026): a cashier (Entry staff) sees their book with a bar at the bottom: Today,
+// Days, Handed over, More. The day's fee cash is one total entered at the end of the day; once the fee day sheet is in,
+// the book uses the sheet and shows any difference to sort out. Owner and Accountant open the same day in the side menu.
+const cbIsCashier = (biz) => biz.role === 'entry_staff';
+const cbRupees = (v) => { const n = Number(String(v ?? '').replace(/[₹,\s]/g, '')); return Number.isFinite(n) ? Math.round(n * 100) : NaN; };
+const cbDayName = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+const CB_WHAT_IN = ['Admission form', 'TC / certificate', 'Fine'];
+
+function cbFrame(biz, b, tab, body) {
+  if (!cbIsCashier(biz)) return shell(biz, 'cashbook', b.name, `${b.branchName ?? ''}${b.cashierName && b.cashierName !== b.name ? ` · ${b.cashierName}` : ''}`, body);
+  const t = (key, label, href) => html`<a class="cbt ${tab === key ? 'on' : ''}" href="${href}" ${tab === key ? html`aria-current="page"` : ''}>${label}</a>`;
+  return html`<div class="cbapp">
+    <header class="cbapp-head"><span><b>${b.cashierName ?? b.name}</b> <span class="tiny">· ${b.branchName ?? ''}</span></span>
+      ${me.businesses.length > 1 ? html`<a class="tiny" href="#/choose">${biz.name} ▾</a>` : html`<span class="tiny">${biz.name}</span>`}</header>
+    <main class="cbapp-main">${body}</main>
+    <nav class="cbbar" aria-label="Cash book">
+      ${t('today', 'Today', `#/b/${biz.id}/cashbook/${b.id}/${todayIst()}`)}${t('days', 'Days', `#/b/${biz.id}/cbdays/${b.id}`)}
+      ${t('handed', 'Handed over', `#/b/${biz.id}/cbhanded/${b.id}`)}${t('more', 'More', `#/b/${biz.id}/cbmore/${b.id}`)}</nav>
+  </div>`;
+}
+
+const cbReviewChip = (e) => (e.kind === 'other_in'
+  ? html`<span class="chip info">extra</span>${e.headName ? html` <span class="tiny">${e.headName}</span>` : ''}`
+  : e.reviewStatus === 'approved' ? html`<span class="chip ok">approved</span>`
+    : e.reviewStatus === 'rejected' ? html`<span class="chip bad">rejected</span>`
+      : !e.headId ? html`<span class="chip wait">head to set</span>` : html`<span class="chip info">to approve</span>`);
+
+/** The fee check of a day, as the cashier sees it, with what they can do about a difference. */
+function cbFeeBox(f, canWrite, seeSheet) {
+  if (!f || !f.sheetIn || f.typedPaise == null) return '';
+  const diff = Math.abs(f.diffPaise);
+  if (f.state === 'agrees') return html`<div class="cb-box ok">Fee sheet agrees with your total ✓</div>`;
+  if (f.state === 'cleared') return html`<div class="cb-box ok">${f.missing.join(', ')} found in a later sheet ✓ The ₹ ${rs(diff)} counts on that day now.</div>`;
+  if (f.state === 'kept') return html`<div class="cb-box info"><span>You kept ₹ ${rs(diff)} that is not in the sheet${f.missing.length ? ` (${f.missing.join(', ')})` : ''}. It clears when a later sheet has it. The owner sees it.</span>
+    ${canWrite ? html`<span><button type="button" class="linkbtn" data-cbsettle="sheet">The sheet is right after all</button></span>` : ''}</div>`;
+  if (f.state === 'sheet') return html`<div class="cb-box info"><span>${f.diffPaise > 0 ? `You said you added wrong: the sheet's ₹ ${rs(f.sheetPaise)} is used.` : `You said the sheet is right: ₹ ${rs(diff)} more than you entered.`}</span>
+    ${canWrite ? html`<span><button type="button" class="linkbtn" data-cbsettle="">Undo</button></span>` : ''}</div>`;
+  if (f.state === 'less') return html`<div class="cb-box wait"><b>You entered ₹ ${rs(diff)} more than the sheet.</b>
+    <span>${f.missing.length ? `${f.missing.join(', ')} ${f.missing.length === 1 ? 'is' : 'are'} not in the sheet.` : 'Your total ₹ ' + rs(f.typedPaise) + ', sheet ₹ ' + rs(f.sheetPaise) + '.'}</span>
+    ${canWrite ? html`<div class="cb-opts">
+      <a class="btn" href="${seeSheet.bring}"><span><b>Receipt made after the sheet was taken out</b><br><span class="tiny">Bring in the sheet again</span></span></a>
+      <button type="button" class="btn plain" data-cbsettle="kept"><span><b>Keep my ₹ ${rs(diff)}, the office will fix it</b><br><span class="tiny">Stays as "fee not in sheet" until a later sheet has it</span></span></button>
+      <button type="button" class="btn plain" data-cbsettle="sheet"><span><b>I added wrong, the sheet is right</b></span></button></div>` : ''}</div>`;
+  return html`<div class="cb-box wait"><b>The sheet has ₹ ${rs(diff)} more than you entered.</b>
+    <span>Your book uses the sheet. If that cash is not in your hand, the count shows it short.</span>
+    ${canWrite ? html`<div class="cb-opts"><button type="button" class="btn" data-cbsettle="sheet">I missed it, the sheet is right</button>
+      <a class="btn plain" href="${seeSheet.view}">See the sheet's receipts</a></div>` : ''}</div>`;
+}
+
 async function cashBookDayView(biz, accountId, dayIn) {
   if (!accountId) return go(`#/b/${biz.id}/cashbooks`);
   const day = isDay(dayIn) ? dayIn : todayIst();
   const d = await api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/day/${day}`);
   const b = d.book;
+  const f = d.fee;
+  const w = d.can.write && !d.before;
   const prev = addDaysIso(day, -1);
   const next = addDaysIso(day, 1);
-  const line = (e) => html`<div class="list-row cb-line">
-    <span><span>${e.kind === 'expense' ? (e.narration || e.headName) : e.narration || CB_KIND[e.kind]}</span>
-      <span class="tiny">${e.kind === 'expense' && e.narration ? ` · ${e.headName}` : ''}${e.kind === 'handover_out' && e.handover ? ` · to ${cbWhere(e.handover)}` : ''}</span>
-      ${e.feeReportId ? html`<div><span class="chip info">from fee report</span></div>` : ''}
-      ${e.handover && e.kind === 'handover_out' ? html`<div>${cbStatus(e.handover)}</div>` : ''}</span>
-    <span class="cb-amt ${CB_IN.includes(e.kind) ? 'in' : 'out'}">${CB_IN.includes(e.kind) ? '+' : '−'} ₹ ${rs(e.amountPaise)}
-      ${d.can.write && !e.feeReportId && !(e.kind === 'handover_out' && e.handover?.status !== 'sent') ? html`<button type="button" class="linkbtn tiny" data-cbdel="${e.id}" aria-label="Remove this line">✕</button>` : ''}</span></div>`;
-  const group = (title, kinds, empty) => {
-    const list = d.entries.filter((e) => kinds.includes(e.kind));
-    return html`<div class="hd cb-hd">${title}</div>${list.length ? list.map(line) : html`<div class="list-row"><span class="tiny">${empty}</span><span></span></div>`}`;
-  };
+  const del = (e) => (w && !e.feeReportId && !e.reviewStatus && !(e.kind === 'fee') && !(e.kind === 'handover_out' && e.handover?.status !== 'sent')
+    ? html`<button type="button" class="linkbtn tiny" data-cbdel="${e.id}" aria-label="Remove this line">✕</button>` : '');
+  const row = (label, sub, amt, sign, cls = '', extra = '') => html`<div class="list-row cb-line ${cls}"><span>${label}${sub ? html`<div class="tiny">${sub}</div>` : ''}</span>
+    <span class="cb-amt ${sign === '+' ? 'in' : sign === '−' ? 'out' : ''}">${sign}${amt}${extra}</span></div>`;
+  const typed = d.entries.filter((e) => e.kind === 'fee' && !e.feeReportId);
+  const sheetLines = d.entries.filter((e) => e.feeReportId);
+  const feeRows = [
+    ...sheetLines.map((e) => row(html`Fee sheet <span class="tiny">· ${e.narration?.match(/\d+ receipts?/)?.[0] ?? ''} in cash</span>`, '', `₹ ${rs(e.amountPaise)}`, '+')),
+    ...(f?.sheetIn && !sheetLines.length ? [row('Fee sheet', 'no cash receipts for you', '₹ 0', '')] : []),
+    ...typed.map((e) => (f?.sheetIn
+      ? row(html`<span class="cb-strike">Your fee total</span>`, f.receipts ? `${f.receipts} receipts${f.first ? ` · ${f.first}–${f.last}` : ''}` : '', html`<span class="cb-strike">₹ ${rs(e.amountPaise)}</span>`, '')
+      : row(html`Fee cash, your total ${f?.state === 'waiting' ? html`<span class="chip wait">sheet not in yet</span>` : ''}`,
+        f?.receipts ? `${f.receipts} receipts${f.first ? ` · ${f.first}–${f.last}` : ''}` : '', `₹ ${rs(e.amountPaise)}`, '+'))),
+    ...(f?.state === 'kept' ? [row(html`Fee not in sheet <span class="chip bad">kept</span>`, f.missing.join(', '), `₹ ${rs(f.diffPaise)}`, '+')] : []),
+  ];
+  const others = d.entries.filter((e) => e.kind !== 'fee').map((e) => {
+    const inn = CB_IN.includes(e.kind);
+    const label = e.kind === 'handover_out' ? html`To ${e.handover ? cbWhere(e.handover) : 'someone'} ${e.handover ? cbStatus(e.handover) : ''}`
+      : e.kind === 'handover_in' ? html`${e.narration || 'Cash received'}`
+        : html`${e.narration || e.headName || CB_KIND[e.kind]} ${e.kind === 'expense' || e.kind === 'other_in' ? cbReviewChip(e) : ''}`;
+    const sub = e.kind === 'handover_out' ? e.narration : e.reviewStatus === 'rejected' && e.reviewNote ? `Owner: ${e.reviewNote}` : e.kind === 'expense' && e.headName ? e.headName : '';
+    return row(label, sub, `₹ ${rs(e.amountPaise)}`, inn ? '+' : '−', '', del(e));
+  });
   const gap = d.count?.gapPaise ?? null;
-  const waiting = d.waiting.map((h) => html`<div class="cb-wait"><span><span style="font-weight:500">${h.fromBookName}</span> sent you ₹ ${rs(h.amountPaise)}
+  const waiting = d.waiting.map((h) => html`<div class="cb-box wait cb-wait"><span><b>${h.fromBookName}</b> sent you ₹ ${rs(h.amountPaise)}
       <span class="tiny">· ${shortDay(h.day)}${h.narration ? ` · ${h.narration}` : ''}</span></span>
     ${d.can.write && h.day <= day ? html`<button type="button" class="btn" style="min-height:36px" data-cbaccept="${h.id}">Got it</button>` : ''}</div>`);
-  const forms = d.can.write && !d.before ? html`
-    <div class="cb-actions">
-      <button type="button" class="btn" data-cbadd="fee">+ Fee</button>
-      <button type="button" class="btn plain" data-cbadd="expense">+ Expense</button>
-      <button type="button" class="btn plain" data-cbadd="handover_out">Hand over</button>
-      <button type="button" class="btn plain" data-cbadd="more" aria-label="Other money in or out">More</button>
+  const feeLabel = f?.sheetIn ? '' : typed.length ? 'Change today\'s fee cash' : 'Enter today\'s fee cash';
+  const needCount = !d.count && (typed.length || f?.sheetIn);
+  const opts = (list) => list.map((x) => html`<option value="${x}">${x}</option>`);
+  const forms = w ? html`
+    <div class="cb-btns">
+      ${feeLabel ? html`<button type="button" class="btn wide ${typed.length ? 'plain' : ''}" data-cbopen="fee">${feeLabel}</button>` : ''}
+      <button type="button" class="btn plain" data-cbopen="receipt">+ Receipt</button>
+      <button type="button" class="btn plain" data-cbopen="expense">+ Expense</button>
+      <button type="button" class="btn plain" data-cbopen="handover">Hand over</button>
+      <button type="button" class="btn ${needCount ? '' : 'plain'}" data-cbopen="count">${d.count ? 'Count again' : 'Count cash'}</button>
     </div>
-    <form id="cb-form" class="card" hidden style="gap:10px">
-      <div style="font-weight:500" data-cbtitle></div>
-      <div class="field" data-for="more"><label for="cbk">This is</label><select id="cbk" name="moreKind"><option value="other_in">Other money in</option><option value="other_out">Other money out</option></select></div>
-      <div class="field"><label for="cba">Amount (₹)</label><input id="cba" name="amount" class="mono" inputmode="decimal" placeholder="1,14,180" required></div>
-      <div class="field" data-for="expense"><label for="cbh">Expense head</label><select id="cbh" name="headId"><option value="">Choose</option>
-        ${d.heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select></div>
-      <div class="field" data-for="handover_out"><label for="cbt">Given to</label><select id="cbt" name="to">
-        ${d.targets.length ? html`<optgroup label="Another cashier">${d.targets.map((t) => html`<option value="book:${t.id}">${t.name}${t.cashierName ? ` (${t.cashierName})` : ''}${t.branchName ? ` · ${t.branchName}` : ''}</option>`)}</optgroup>` : ''}
-        <optgroup label="A person">${d.people.map((p) => html`<option value="person:${p}">${p}</option>`)}<option value="person:">Someone else…</option></optgroup>
-        ${d.banks.length ? html`<optgroup label="Deposited in the bank">${d.banks.map((x) => html`<option value="bank:${x.id}">${x.name}</option>`)}</optgroup>` : ''}</select></div>
-      <div class="field" data-for="person"><label for="cbp">Person's name</label><input id="cbp" name="person" placeholder="haji ji"></div>
-      <div class="field"><label for="cbn2">Details</label><input id="cbn2" name="narration" placeholder="chilkana road fee received"></div>
-      <div class="form-msg"></div>
-      <div class="form-row"><button class="btn" type="submit">Save</button><button class="btn plain" type="button" data-cbcancel>Cancel</button></div>
+    <form class="card cb-form" data-cbform="fee" hidden>
+      <div style="font-weight:500">Today's fee cash · ${shortDay(day)}</div>
+      <div class="field"><label for="cbf-a">Total cash fees collected today (₹)</label><input id="cbf-a" name="amount" class="mono" inputmode="decimal" required value="${typed.length ? rsIn(typed.reduce((t, e) => t + e.amountPaise, 0)) : ''}" placeholder="25,000"></div>
+      <div class="field"><label for="cbf-r">Receipts (optional)</label><input id="cbf-r" name="receipts" class="mono" inputmode="numeric" value="${f?.receipts ?? ''}" placeholder="8"></div>
+      <div class="field"><label>Receipt nos (optional)</label><span style="display:flex;gap:8px">
+        <input name="first" class="mono" aria-label="First receipt no." value="${f?.first ?? ''}" placeholder="from 0401" style="flex:1;min-width:0">
+        <input name="last" class="mono" aria-label="Last receipt no." value="${f?.last ?? ''}" placeholder="to 0408" style="flex:1;min-width:0"></span></div>
+      <div class="tiny">Only cash. UPI and card fees come from the sheet and the bank. You can change this until the sheet comes in.</div>
+      <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
+    </form>
+    <form class="card cb-form" data-cbform="receipt" hidden>
+      <div style="font-weight:500">+ Receipt <span class="tiny">· cash not in the fee software</span></div>
+      <div class="field"><label for="cbr-a">Amount (₹)</label><input id="cbr-a" name="amount" class="mono" inputmode="decimal" required placeholder="600"></div>
+      <div class="field"><label for="cbr-w">What for</label><select id="cbr-w" name="what">${opts(CB_WHAT_IN)}<option value="">Something else…</option></select></div>
+      <div class="field" data-cbelse hidden><label for="cbr-o">What was it?</label><input id="cbr-o" name="other" placeholder="Book sale"></div>
+      <div class="field"><label for="cbr-s">Slip no. (manual book, optional)</label><input id="cbr-s" name="slip" class="mono" placeholder="M-118"></div>
+      <div class="tiny">The fee sheet never replaces it. The accountant sets its head.</div>
+      <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save receipt</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
+    </form>
+    <form class="card cb-form" data-cbform="expense" hidden>
+      <div style="font-weight:500">+ Expense</div>
+      <div class="field"><label for="cbe-a">Amount (₹)</label><input id="cbe-a" name="amount" class="mono" inputmode="decimal" required placeholder="450"></div>
+      <div class="field"><label for="cbe-w">What for</label><input id="cbe-w" name="what" required placeholder="Registers and chalk"></div>
+      <div class="field"><label for="cbe-p">Paid to (optional)</label><input id="cbe-p" name="paidTo" placeholder="Gupta Stationers"></div>
+      <div class="tiny">The cash leaves your book now. The accountant sets the head and the owner approves.</div>
+      <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save expense</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
+    </form>
+    <form class="card cb-form" data-cbform="handover" hidden>
+      <div style="font-weight:500">Hand over cash</div>
+      <div class="field"><label for="cbh-a">Amount (₹)</label><input id="cbh-a" name="amount" class="mono" inputmode="decimal" required placeholder="20,000"></div>
+      <div class="field"><label for="cbh-t">To</label><select id="cbh-t" name="to">
+        ${d.banks.length ? html`<optgroup label="Bank">${d.banks.map((x) => html`<option value="bank:${x.id}">Bank: ${x.name}</option>`)}</optgroup>` : ''}
+        ${d.targets.length ? html`<optgroup label="Another cashier">${d.targets.map((t) => html`<option value="book:${t.id}">${t.cashierName ?? t.name}${t.branchName ? ` · ${t.branchName}` : ''}</option>`)}</optgroup>` : ''}
+        <optgroup label="A person">${d.people.map((p) => html`<option value="person:${p}">${p}</option>`)}<option value="person:">Someone else…</option></optgroup></select></div>
+      <div class="field" data-cbperson hidden><label for="cbh-p">Person's name</label><input id="cbh-p" name="person" placeholder="Anoop"></div>
+      <div class="field"><label for="cbh-n">Note (optional)</label><input id="cbh-n" name="narration" placeholder="Deposit slip 4471"></div>
+      <div class="tiny">Leaves your book now; waits until the other side shows it.</div>
+      <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Hand over</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
+    </form>
+    <form class="card cb-form" data-cbform="count" hidden>
+      <div style="font-weight:500">Count cash · ${shortDay(day)}</div>
+      <div class="field"><label for="cbc-a">Notes and coins counted (₹)</label><input id="cbc-a" name="counted" class="mono" inputmode="decimal" required value="${d.count ? rsIn(d.count.countedPaise) : ''}" placeholder="24,950"></div>
+      <div class="list-row"><span>Should be</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
+      <div data-cbgap></div>
+      <div class="field" data-cbnote hidden><label for="cbc-n">Why? (needed when short or extra)</label><textarea id="cbc-n" name="note" rows="2" placeholder="Gave ₹ 300 to the peon for the gas cylinder, bill tomorrow">${d.count?.note ?? ''}</textarea>
+        <span class="tiny">The owner sees this note.</span></div>
+      <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save count</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
     </form>` : '';
-  render(shell(biz, 'cashbook', b.name, `${b.branchName ?? ''}${b.cashierName ? ` · ${b.cashierName}` : ''}`, html`
+  const body = html`
     <div class="cb">
       <nav class="cb-day" aria-label="Day">
         ${day > b.openingDate ? html`<a class="btn plain" href="#/b/${biz.id}/cashbook/${b.id}/${prev}" aria-label="Previous day">‹</a>` : html`<span class="btn plain off">‹</span>`}
-        <label class="cb-pick">${dayLabel(day)}<input type="date" id="cb-date" value="${day}" min="${b.openingDate}" max="${d.today}" aria-label="Choose a day"></label>
+        <label class="cb-pick">${cbDayName(day)}<input type="date" id="cb-date" value="${day}" min="${b.openingDate}" max="${d.today}" aria-label="Choose a day"></label>
         ${day < d.today ? html`<a class="btn plain" href="#/b/${biz.id}/cashbook/${b.id}/${next}" aria-label="Next day">›</a>` : html`<span class="btn plain off">›</span>`}
       </nav>
-      ${d.before ? html`<div class="note">This book starts on ${dayLabel(b.openingDate)}.</div>` : ''}
-      ${waiting.length ? html`<section class="card cb-card">${waiting}</section>` : ''}
+      ${d.before ? html`<div class="note">This book starts on ${dayLabel(b.openingDate)}.</div>` : html`
+      <div><div class="cb-big">₹ ${rs(d.shouldPaise)}</div><div class="tiny">should be in hand${f?.sheetIn ? html` · <span class="chip ok">sheet in</span>` : typed.length ? html` · <span class="chip wait">sheet not in yet</span>` : ''}</div></div>`}
+      ${waiting}
+      ${cbFeeBox(f, d.can.write, { bring: `#/b/${biz.id}/cbmore/${b.id}`, view: `#/b/${biz.id}/fees/${day}` })}
       <section class="card cb-card">
-        <div class="list-row"><span>Opening cash</span><span class="amount">₹ ${rs(d.openingPaise)}</span></div>
-        ${group('Money in', CB_IN, 'Nothing yet')}
-        ${group('Expenses', ['expense', 'other_out'], 'None')}
-        ${group('Handed over', ['handover_out'], 'None')}
+        ${row('Opening', '', `₹ ${rs(d.openingPaise)}`, '')}
+        ${feeRows.length ? feeRows : !d.before ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
+        ${others}
         <div class="list-row cb-total"><span>Should be in hand</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
-        ${d.can.write && !d.before ? html`<form id="cb-count" class="list-row" style="gap:8px">
-            <label for="cbcount">Counted</label>
-            <span style="display:flex;gap:6px;align-items:center"><input id="cbcount" name="counted" class="mono" inputmode="decimal" style="width:130px;text-align:right"
-              value="${d.count ? rsIn(d.count.countedPaise) : ''}" placeholder="₹ count"><button class="btn plain" type="submit" style="min-height:36px">Save</button></span></form>`
-          : d.count ? html`<div class="list-row"><span>Counted</span><span class="amount">₹ ${rs(d.count.countedPaise)}</span></div>` : ''}
-        ${gap == null ? '' : html`<div class="cb-gap ${gap === 0 ? 'ok' : 'bad'}">${gap === 0 ? 'Count matches the book.' : `Cash ${gap < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(gap))}: check the lines of the day.`}
-          <span class="tiny">${d.count.countedByName ? ` Counted by ${d.count.countedByName}.` : ''}</span></div>`}
+        ${d.count ? html`<div class="list-row"><span>Counted${d.count.countedByName ? html` <span class="tiny">by ${d.count.countedByName}</span>` : ''}</span><span class="amount">₹ ${rs(d.count.countedPaise)}</span></div>
+          <div class="cb-gap ${gap === 0 ? 'ok' : 'bad'}">${gap === 0 ? 'Count matches ✓' : `Cash ${gap < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(gap))}`}
+            ${d.count.note ? html`<div class="tiny">"${d.count.note}"</div>` : ''}</div>` : ''}
       </section>
       ${forms}
-      ${biz.role !== 'entry_staff' ? html`<a class="tiny" href="#/b/${biz.id}/cashbooks">All cash books</a>` : ''}
-      ${installButton()}
-    </div>`));
+      ${!cbIsCashier(biz) && biz.role !== 'entry_staff' ? html`<a class="tiny" href="#/b/${biz.id}/cashbooks">All cash books</a>` : ''}
+    </div>`;
+  render(cbFrame(biz, b, day === d.today ? 'today' : 'days', body));
   wireShell();
   const reload = () => cashBookDayView(biz, accountId, day);
+  const base = `/businesses/${biz.id}/cashbooks/${b.id}`;
   document.getElementById('cb-date')?.addEventListener('change', (e) => { if (isDay(e.target.value)) go(`#/b/${biz.id}/cashbook/${b.id}/${e.target.value}`); });
-  app.querySelectorAll('[data-cbdel]').forEach((x) => x.addEventListener('click', async () => {
-    if (!confirm('Remove this line from the book?')) return;
-    try { await api('DELETE', `/businesses/${biz.id}/cashbooks/${b.id}/entries/${x.dataset.cbdel}`); await reload(); } catch (err) { alert(err.message); }
+  const act = (sel, fn) => app.querySelectorAll(sel).forEach((x) => x.addEventListener('click', async () => {
+    x.disabled = true;
+    try { await fn(x); await reload(); } catch (err) { alert(err.message); x.disabled = false; }
   }));
+  act('[data-cbdel]', async (x) => { if (confirm('Remove this line from the book?')) await api('DELETE', `${base}/entries/${x.dataset.cbdel}`); });
+  act('[data-cbaccept]', (x) => api('POST', `/businesses/${biz.id}/handovers/${x.dataset.cbaccept}/receive`, { day }));
+  act('[data-cbsettle]', (x) => api('PUT', `${base}/fee/${day}/settle`, { how: x.dataset.cbsettle || null }));
+  const forms$ = [...app.querySelectorAll('[data-cbform]')];
+  const open = (k) => {
+    forms$.forEach((fm) => { fm.hidden = fm.dataset.cbform !== k; });
+    const fm = forms$.find((x) => x.dataset.cbform === k);
+    fm?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    fm?.querySelector('input,select')?.focus({ preventScroll: true });
+  };
+  app.querySelectorAll('[data-cbopen]').forEach((x) => x.addEventListener('click', () => open(x.dataset.cbopen)));
+  app.querySelectorAll('[data-cbclose]').forEach((x) => x.addEventListener('click', () => { forms$.forEach((fm) => { fm.hidden = true; }); }));
+  const fm = (k) => forms$.find((x) => x.dataset.cbform === k);
+  if (!forms$.length) return;
+  onSubmit(fm('fee'), async (x) => {
+    await api('PUT', `${base}/fee/${day}`, { amount: x.amount, receipts: x.receipts || null, first: x.first, last: x.last });
+    await reload();
+  });
+  const what = fm('receipt').querySelector('[name=what]');
+  what.addEventListener('change', () => { fm('receipt').querySelector('[data-cbelse]').hidden = !!what.value; });
+  onSubmit(fm('receipt'), async (x) => {
+    const w2 = x.what || x.other?.trim();
+    if (!w2) throw new Error('Write what this receipt was for.');
+    await api('POST', `${base}/entries`, { day, kind: 'other_in', amount: x.amount, narration: `${w2}${x.slip?.trim() ? ` · slip ${x.slip.trim()}` : ''}` });
+    await reload();
+  });
+  onSubmit(fm('expense'), async (x) => {
+    await api('POST', `${base}/entries`, { day, kind: 'expense', amount: x.amount, narration: `${x.what.trim()}${x.paidTo?.trim() ? ` · paid to ${x.paidTo.trim()}` : ''}` });
+    await reload();
+  });
+  const to = fm('handover').querySelector('[name=to]');
+  const person = () => { fm('handover').querySelector('[data-cbperson]').hidden = to.value !== 'person:'; };
+  to.addEventListener('change', person);
+  person();
+  onSubmit(fm('handover'), async (x) => {
+    const k = x.to.slice(0, x.to.indexOf(':'));
+    const v = x.to.slice(x.to.indexOf(':') + 1);
+    const body2 = { day, kind: 'handover_out', amount: x.amount, narration: x.narration, to: k === 'person' ? { kind: 'person', name: v || x.person } : { kind: k, accountId: v } };
+    await api('POST', `${base}/entries`, body2);
+    await reload();
+  });
+  const cf = fm('count');
+  const showGap = () => {
+    const p = cbRupees(cf.querySelector('[name=counted]').value);
+    const g = Number.isNaN(p) || cf.querySelector('[name=counted]').value.trim() === '' ? null : p - d.shouldPaise;
+    cf.querySelector('[data-cbgap]').innerHTML = g == null ? '' : g === 0 ? '<div class="cb-gap ok">Matches ✓</div>'
+      : `<div class="cb-gap bad">Cash ${g < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(g))}</div>`;
+    cf.querySelector('[data-cbnote]').hidden = !g;
+  };
+  cf.querySelector('[name=counted]').addEventListener('input', showGap);
+  showGap();
+  onSubmit(cf, async (x) => { await api('PUT', `${base}/count/${day}`, { counted: x.counted, note: x.note }); await reload(); });
+}
+
+/** Days: each day of the book, newest first, with its count and whether the fee sheet agrees. */
+async function cbDaysView(biz, accountId) {
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/days`);
+  const b = d.book;
+  const feeNote = (f) => (!f ? '' : f.state === 'waiting' ? 'sheet not in' : f.state === 'less' || f.state === 'more' ? 'sheet differs' : f.state === 'kept' ? 'fee not in sheet' : '');
+  const rows = d.days.map((x) => {
+    const k = x.count;
+    const chip = !k ? html`<span class="chip wait">not counted</span>` : k.gapPaise === 0 ? html`<span class="chip ok">matches</span>`
+      : html`<span class="chip bad">${k.gapPaise < 0 ? 'short' : 'extra'} ${rs(Math.abs(k.gapPaise))}</span>`;
+    const note = feeNote(x.fee);
+    return html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${x.day}">
+      <span><span style="font-weight:500">${cbDayName(x.day)}</span>${x.day === d.today ? html` <span class="tiny">today</span>` : ''}
+        ${note ? html`<div class="tiny">${note}</div>` : ''}</span>
+      <span style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">${chip}<span class="amount tiny">₹ ${rs(x.shouldPaise)}</span></span></a>`;
+  });
+  render(cbFrame(biz, b, 'days', html`<div class="cb"><h2 style="margin:0;font-size:16px">Your days</h2>
+    <section class="card cb-card">${rows.length ? rows : html`<div class="note">This book starts on ${dayLabel(b.openingDate)}.</div>`}</section>
+    <div class="tiny">The amount is what should have been in hand at the end of the day. Tap a day to open it.</div></div>`));
+  wireShell();
+}
+
+/** Handed over: cash this book sent (waiting, done) and cash sent to it. */
+async function cbHandedView(biz, accountId) {
+  const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  const b = d.books.find((x) => x.id === accountId);
+  if (!b) return go(home(biz));
+  const mineOut = (h) => h.fromAccountId === b.id;
+  const toMe = (h) => h.toKind === 'book' && h.toAccountId === b.id;
+  const line = (h, right) => html`<div class="list-row" style="align-items:flex-start"><span>${mineOut(h) ? html`To ${cbWhere(h)}` : html`From ${h.fromBookName}`}
+      <span class="tiny">· ${shortDay(h.day)}</span>${h.narration ? html`<div class="tiny">${h.narration}</div>` : ''}<div>${right}</div></span>
+    <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`;
+  const waiting = d.handovers.filter(mineOut).map((h) => line(h, cbStatus(h)));
+  const sent = d.handovers.filter(toMe).map((h) => line(h, html`<button type="button" class="btn" style="min-height:36px;margin-top:4px" data-cbaccept="${h.id}">Got it</button>`));
+  const done = d.done.filter((h) => mineOut(h) || toMe(h)).map((h) => line(h, html`<span class="chip ok">${h.status === 'deposited' ? 'in the bank' : `${mineOut(h) ? h.toName : 'you'} got it`}</span>`));
+  render(cbFrame(biz, b, 'handed', html`<div class="cb">
+    ${sent.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Sent to you</div>${sent}</section>` : ''}
+    <section class="card cb-card"><div class="cb-hd" style="margin-top:0">Waiting</div>${waiting.length ? waiting : html`<div class="list-row"><span class="tiny">Nothing waiting.</span><span></span></div>`}</section>
+    <section class="card cb-card"><div class="cb-hd" style="margin-top:0">Done this week</div>${done.length ? done : html`<div class="list-row"><span class="tiny">None yet.</span><span></span></div>`}</section>
+    </div>`));
+  wireShell();
   app.querySelectorAll('[data-cbaccept]').forEach((x) => x.addEventListener('click', async () => {
     x.disabled = true;
-    try { await api('POST', `/businesses/${biz.id}/handovers/${x.dataset.cbaccept}/receive`, { day }); await reload(); } catch (err) { alert(err.message); x.disabled = false; }
+    try { await api('POST', `/businesses/${biz.id}/handovers/${x.dataset.cbaccept}/receive`, { day: todayIst() }); await cbHandedView(biz, accountId); } catch (err) { alert(err.message); x.disabled = false; }
   }));
-  const cf = document.getElementById('cb-count');
-  cf && onSubmit(cf, async (x) => { await api('PUT', `/businesses/${biz.id}/cashbooks/${b.id}/count/${day}`, x); await reload(); });
-  const form = document.getElementById('cb-form');
-  if (!form) return;
-  let kind = null;
-  const titles = { fee: 'Fee received', expense: 'Expense', handover_out: 'Cash handed over', more: 'Other money' };
-  const show = (k) => {
-    kind = k;
-    form.hidden = false;
-    form.querySelector('[data-cbtitle]').textContent = titles[k];
-    form.querySelector('#cbn2').placeholder = { fee: 'chilkana road fee received', expense: 'stationery exam', handover_out: 'Transfer entry haji ji', more: 'from Anoop' }[k];
-    const to = form.querySelector('#cbt');
-    const person = to && to.value.startsWith('person:') && !to.value.slice(7);
-    form.querySelectorAll('[data-for]').forEach((f) => { f.hidden = f.dataset.for === 'person' ? !(k === 'handover_out' && person) : f.dataset.for !== k; });
-    form.querySelector('#cba').focus();
-  };
-  app.querySelectorAll('[data-cbadd]').forEach((x) => x.addEventListener('click', () => show(x.dataset.cbadd)));
-  form.querySelector('#cbt')?.addEventListener('change', () => show(kind));
-  form.querySelector('[data-cbcancel]').addEventListener('click', () => { form.reset(); form.hidden = true; });
-  onSubmit(form, async (x) => {
-    const body = { day, amount: x.amount, narration: x.narration, kind: kind === 'more' ? x.moreKind : kind };
-    if (kind === 'expense') body.headId = x.headId;
-    if (kind === 'handover_out') {
-      const [k, v] = [x.to.slice(0, x.to.indexOf(':')), x.to.slice(x.to.indexOf(':') + 1)];
-      body.to = k === 'person' ? { kind: 'person', name: v || x.person } : { kind: k, accountId: v };
-    }
-    await api('POST', `/businesses/${biz.id}/cashbooks/${b.id}/entries`, body);
-    await reload();
+}
+
+/** More: bring in the fee sheet, my expenses and receipts, install, sign out. */
+async function cbMoreView(biz, accountId) {
+  const t = todayIst();
+  const [d, l] = await Promise.all([
+    api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/day/${t}`),
+    api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/lines`),
+  ]);
+  const b = d.book;
+  const canImport = biz.actions.includes('sales.import');
+  const toSet = l.lines.filter((x) => x.kind === 'expense' && !x.reviewStatus).length;
+  const lines = l.lines.map((x) => html`<div class="list-row" style="align-items:flex-start"><span>${x.narration || x.headName}
+      <div>${cbReviewChip(x)} <span class="tiny">· ${shortDay(x.day)}${x.headName && x.kind === 'expense' ? ` · ${x.headName}` : ''}</span></div>
+      ${x.reviewStatus === 'rejected' && x.reviewNote ? html`<div class="tiny">Owner: "${x.reviewNote}"</div>` : ''}</span>
+    <span class="cb-amt ${x.kind === 'other_in' ? 'in' : 'out'}">${x.kind === 'other_in' ? '+' : '−'}₹ ${rs(x.amountPaise)}</span></div>`);
+  render(cbFrame(biz, b, 'more', html`<div class="cb">
+    ${canImport ? html`<section class="card" style="gap:8px">
+      <label class="btn" for="cb-sheet" style="justify-content:center">Bring in today's fee sheet</label>
+      <input type="file" id="cb-sheet" accept=".xls,.xlsx,.html,.htm,text/html,application/vnd.ms-excel" hidden>
+      <div class="tiny">${b.branchName ?? 'Your school'}, ${shortDay(t)}: ${d.fee?.sheetIn ? 'brought in ✓' : 'not brought in yet'}. The FeeDaySheet from the fee software; it replaces only the schools in the file.</div>
+      <div class="form-msg" id="cb-sheet-msg"></div></section>` : ''}
+    <section class="card cb-card"><div class="cb-hd" style="margin-top:0">My expenses and receipts ${toSet ? html`<span class="chip info">${toSet} waiting</span>` : ''}</div>
+      ${lines.length ? lines : html`<div class="list-row"><span class="tiny">None in the last 60 days.</span><span></span></div>`}</section>
+    <section class="card" style="gap:8px">
+      ${installButton()}
+      <button type="button" class="btn plain" id="signout">Sign out</button>
+      <div class="tiny">Signed in as ${me.user.name} · ${me.user.email}</div>
+    </section></div>`));
+  wireShell();
+  document.getElementById('cb-sheet')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    const msg = document.getElementById('cb-sheet-msg');
+    if (!file) return;
+    msg.textContent = 'Reading…'; msg.className = 'form-msg';
+    try {
+      const res = await api('POST', `/businesses/${biz.id}/fees/import`, { fileName: file.name, text: await file.text() });
+      go(`#/b/${biz.id}/cashbook/${b.id}/${res.day}`);
+      doneToast(`Fee sheet for ${shortDay(res.day)} brought in.${res.also?.length ? ` Also into ${res.also.map((a) => a.name).join(', ')}.` : ''}`, null, null);
+    } catch (err) { msg.textContent = err.message; msg.className = 'form-msg error'; e.target.value = ''; }
   });
 }
 
@@ -9330,10 +9639,17 @@ async function routeInner() {
           const { books } = await api('GET', `/businesses/${biz.id}/cashbooks`);
           if (books[0]) return location.replace(`#/b/${biz.id}/cashbook/${books[0].id}/${todayIst()}`);
         }
-        return location.replace(`#/b/${biz.id}/cashbooks`);
+        // Owner and Accountant open on the school's Today (21 Nov 2026).
+        return location.replace(`#/b/${biz.id}/${biz.actions.includes('reports.view') ? 'dashboard' : 'cashbooks'}`);
       }
+      if (screen === 'dashboard' && biz.cashBooks && biz.actions.includes('reports.view')) return schoolTodayView(biz);
+      if (screen === 'schools' && biz.actions.includes('accounts.edit')) return schoolsView(biz, parts[3]);
       if (screen === 'cashbooks') return cashBooksView(biz, parts[3]);
       if (screen === 'cashbook') return cashBookDayView(biz, parts[3], parts[4]);
+      // The cashier's phone bar (21 Nov 2026): Days, Handed over, More.
+      if (screen === 'cbdays' && parts[3]) return cbDaysView(biz, parts[3]);
+      if (screen === 'cbhanded' && parts[3]) return cbHandedView(biz, parts[3]);
+      if (screen === 'cbmore' && parts[3]) return cbMoreView(biz, parts[3]);
       if (screen === 'fees') return feesView(biz, parts[3]);
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);

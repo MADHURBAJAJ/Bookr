@@ -684,4 +684,24 @@ tr.rd-red td { background: #FCEBEB; }
 @media (max-width: 760px) {
   .cb-actions { position: sticky; bottom: 8px; background: var(--ground); padding: 6px 0; z-index: 2; }
 }
+/* Cashier phone app (21 Nov 2026): no side menu; the book with a bar at the bottom. */
+.cbapp { min-height: 100vh; display: flex; flex-direction: column; max-width: 560px; margin: 0 auto; }
+.cbapp-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+.cbapp-main { flex: 1; padding: 12px 16px 96px; }
+.cbapp .cb { max-width: none; }
+.cbbar { position: fixed; bottom: 0; left: 0; right: 0; display: grid; grid-template-columns: repeat(4, 1fr); max-width: 560px; margin: 0 auto; background: var(--card); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); z-index: 6; }
+.cbt { display: flex; align-items: center; justify-content: center; min-height: 56px; padding: 0 4px; font-size: 13px; color: var(--muted); text-align: center; }
+.cbt.on { color: var(--teal); font-weight: 600; box-shadow: inset 0 3px 0 var(--teal); }
+.cb-big { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 28px; font-weight: 500; }
+.cb-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cb-btns .wide { grid-column: span 2; }
+.cb-form { gap: 10px; scroll-margin-top: 64px; }
+.cb-box { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+.cb-box.wait { background: var(--wait-bg); color: var(--wait); }
+.cb-box.ok { background: var(--ok-bg); color: var(--ok); }
+.cb-box.info { background: #DBEAFE; color: #1E3A8A; }
+.cb-box.cb-wait { flex-direction: row; justify-content: space-between; align-items: center; }
+.cb-opts { display: flex; flex-direction: column; gap: 6px; }
+.cb-opts .btn { justify-content: flex-start; text-align: left; height: auto; min-height: 44px; padding: 8px 12px; white-space: normal; }
+.cb-strike { text-decoration: line-through; color: var(--muted); }
 .menu .menu-install { width: calc(100% - 24px); margin: 4px 12px 8px; min-height: 36px; }

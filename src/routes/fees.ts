@@ -19,19 +19,35 @@ const audit = (db: DB, e: { businessId: string; userId: string; action: string; 
     e.businessId, e.userId, e.action, e.table, e.rowId, e.before === undefined ? null : JSON.stringify(e.before), e.after === undefined ? null : JSON.stringify(e.after), e.at);
 const isDay = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
 
-/** Keeps a day's report for one business (the same day brought in again replaces the earlier copy and the cash it filled). */
+/**
+ * Keeps a day's report for one business. The same day brought in again replaces only the schools (receipt codes) the new
+ * file covers (21 Nov 2026): a cashier brings in their own school's sheet, the accountant may bring in the all-schools
+ * sheet the next day, and neither wipes out nor counts twice the other's schools. A file covering every code of the day
+ * replaces the day's report as before.
+ */
 async function storeReport(db: DB, bid: string, rep: ReturnType<typeof parseFeeReport>, fileName: string | null, userId: string) {
-  const id = newId();
   const t = now();
+  const newCodes = [...new Set(rep.lines.map((l) => l.code))];
+  const was = await one<{ id: string }>(db, 'SELECT id FROM fee_reports WHERE business_id = ? AND day = ?', bid, rep.day);
+  const kept = was ? await all<{ code: string; maxLine: number }>(db, `SELECT code, max(line_no) AS maxLine FROM fee_lines WHERE report_id = ?
+    AND code NOT IN (SELECT value FROM json_each(?)) GROUP BY code`, was.id, JSON.stringify(newCodes)) : [];
+  const merge = !!was && kept.length > 0;
+  const id = merge ? was!.id : newId();
+  const offset = merge ? Math.max(0, ...(await all<{ m: number }>(db, 'SELECT max(line_no) AS m FROM fee_lines WHERE report_id = ?', id)).map((x) => x.m ?? 0)) : 0;
   const lines = rep.lines.map((l) => stmt(db, `INSERT INTO fee_lines (id, business_id, report_id, line_no, day, receipt_no, code, enrollment_code, admission_no,
       student, class_section, fee_type, mode, mode_text, cashier, amount_paise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    newId(), bid, id, l.lineNo, l.day, l.receiptNo, l.code, l.enrollmentCode, l.admissionNo, l.student, l.classSection, l.feeType, l.mode, l.modeText, l.cashier, l.amountPaise));
+    newId(), bid, id, offset + l.lineNo, l.day, l.receiptNo, l.code, l.enrollmentCode, l.admissionNo, l.student, l.classSection, l.feeType, l.mode, l.modeText, l.cashier, l.amountPaise));
   await db.batch([
-    stmt(db, 'DELETE FROM fee_reports WHERE business_id = ? AND day = ?', bid, rep.day),
-    stmt(db, 'INSERT INTO fee_reports (id, business_id, day, file_name, footer, imported_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      id, bid, rep.day, fileName, JSON.stringify(rep.footer), userId, t),
+    ...(merge
+      // The file's own totals were for the whole earlier file; with schools from two files they no longer apply.
+      ? [stmt(db, 'DELETE FROM fee_lines WHERE report_id = ? AND code IN (SELECT value FROM json_each(?))', id, JSON.stringify(newCodes)),
+        stmt(db, "UPDATE fee_reports SET file_name = ?, footer = '[]', imported_by = ?, created_at = ? WHERE id = ?", fileName, userId, t, id)]
+      : [stmt(db, 'DELETE FROM fee_reports WHERE business_id = ? AND day = ?', bid, rep.day),
+        stmt(db, 'INSERT INTO fee_reports (id, business_id, day, file_name, footer, imported_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          id, bid, rep.day, fileName, JSON.stringify(rep.footer), userId, t)]),
     ...lines,
-    audit(db, { businessId: bid, userId, action: 'fees.import', table: 'fee_reports', rowId: id, after: { day: rep.day, fileName, lines: rep.lines.length }, at: t }),
+    audit(db, { businessId: bid, userId, action: 'fees.import', table: 'fee_reports', rowId: id,
+      after: { day: rep.day, fileName, lines: rep.lines.length, codes: newCodes, keptCodes: kept.map((k) => k.code) }, at: t }),
   ]);
   await refillCash(db, bid, id, userId);
   return id;
