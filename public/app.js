@@ -9190,9 +9190,9 @@ async function feesView(biz, dayIn) {
     const bookOpts = (sel) => html`<option value="">No book (not a cashier)</option>${d.books.map((b) => html`<option value="${b.id}" ${sel === b.id ? 'selected' : ''}>${b.name}${b.cashierName && b.cashierName !== b.name ? ` (${b.cashierName})` : ''}</option>`)}`;
     const cashiers = d.cashiers.map((x) => {
       const state = !x.cashPaise ? html`<span class="tiny">no cash</span>`
-        : x.book ? (x.beforeBook ? html`<span class="chip wait">before ${x.book.name} starts</span>` : html`<a class="chip ok" href="#/b/${biz.id}/cashbook/${x.book.id}/${day}">in ${x.book.name}</a>`)
+        : x.book ? (x.beforeBook ? html`<span class="chip wait">before ${x.book.name} starts</span>` : html`<a class="chip ok" href="#/b/${biz.id}/cashbook/${x.book.id}/${day}">in ${x.book.name}</a>${x.book.how === 'branch' ? html`<div class="tiny">the branch's book</div>` : ''}`)
           : x.noBook ? html`<span class="chip mute">no book</span>` : html`<span class="chip bad">whose book?</span>`;
-      const pick = d.can.setup && x.cashPaise && x.nameKey && (!x.book || x.book.how === 'chosen' || x.noBook)
+      const pick = d.can.setup && x.cashPaise && x.nameKey && (!x.book || x.book.how === 'chosen' || x.book.how === 'branch' || x.noBook)
         ? html`<select data-feecashier="${x.name}" style="max-width:190px;margin-top:4px">${!x.book && !x.noBook ? html`<option value="" selected disabled>Whose book?</option>` : ''}${bookOpts(x.book?.id)}</select>` : '';
       return html`<div class="list-row" style="align-items:flex-start"><span><span style="font-weight:500">${x.name}</span> <span class="tiny">· ${x.schools.join(', ')}</span>
           ${x.otherPaise ? html`<div class="tiny">UPI, card and bank ₹ ${rs(x.otherPaise)}: checked against the bank, not the cash count</div>` : ''}<div>${pick}</div></span>

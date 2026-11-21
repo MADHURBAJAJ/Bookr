@@ -89,7 +89,8 @@ feeRoutes.get('/businesses/:businessId/fees/:day', requireRole('sales.view'), as
   const names = [...new Set(ours.map((l) => l.cashier ?? ''))];
   const cashiers = names.map((name) => {
     const of = ours.filter((l) => (l.cashier ?? '') === name);
-    const m = cb.of(name || null);
+    // The branch of the name's cash (else of any of its lines) picks the branch's book when no name matches.
+    const m = cb.of(name || null, codes.get((of.find((l) => l.mode === 'cash') ?? of[0]).code));
     const cash = sum(of.filter((l) => l.mode === 'cash'));
     const book = m && m !== 'none' ? m.book : null;
     return { name: name || '(no cashier)', nameKey: name ? nameKey(name) : '', cashPaise: cash, otherPaise: sum(of) - cash,
