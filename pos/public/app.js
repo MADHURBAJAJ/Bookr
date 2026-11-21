@@ -356,6 +356,7 @@ async function tablesScreen() {
   rerender();
 }
 /** The tables, by section (Private Rooms, Dorms, Out House, NC…): a busy one opens its order or bill, a free one starts an order. */
+const roomKeyOf = (x) => String(x).toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '');
 const isMgr = () => ['owner', 'manager'].includes(me?.staff.role);
 const SECTION_NOTE = { rooms: "Orders go on the room's folio or are paid at the table", dorms: 'Each bed is sold on its own; “whole” is for a group that books all of it',
   outhouse: 'Guests not staying with us', nc: 'Non-chargeable: closes as complimentary in the person’s name · managers and owners only', other: '' };
@@ -371,7 +372,8 @@ function tableGrid() {
     const o = busy.get(t.toLowerCase());
     const nc = kind === 'nc';
     if (!o && blocked) return html`<span class="tcell free blocked" aria-label="${t}: ${blocked}"><span class="tn">${t}</span><span class="ts">${blocked}</span></span>`;
-    if (!o) return html`<button type="button" class="tcell free ${nc ? 'nc' : ''}" data-act="quickTable" data-place="${t}" aria-label="${t}, free: start an order"><span class="tn">${t}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}Free</span></button>`;
+    const guest = (kind === 'rooms' || kind === 'dorms') && !o ? cache.stays?.find((x) => roomKeyOf(x.room) === roomKeyOf(t)) : null;
+    if (!o) return html`<button type="button" class="tcell free ${nc ? 'nc' : ''} ${guest ? 'stay' : ''}" data-act="quickTable" data-place="${t}" aria-label="${t}, free${guest ? `, ${guest.guestName} staying` : ''}: start an order"><span class="tn">${t}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${guest ? guest.guestName : 'Free'}</span></button>`;
     const s = orderState(o);
     return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${t}</span>
       <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
@@ -525,7 +527,9 @@ async function orderScreen(id) {
           ${unsent && can('bills.print') ? html`<p class="hint">Send the new dishes to the kitchen before billing.</p>` : ''}
           <div class="tk-more">${count > 1 && !ui.splitting ? html`<button class="btn" type="button" data-act="splitAsk">Split bill</button>` : ''}
             ${o.status === 'open' ? html`<button class="btn" type="button" data-act="keepTab">Keep as a tab</button>` : ''}
-            ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>` : ''}</div>
+            ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>`
+              : ui.wholeCancel ? '' : html`<button class="btn danger" type="button" data-act="wholeAsk">Cancel whole order</button>`}</div>
+          ${ui.wholeCancel ? wholeCancelBox(o) : ''}
         </div>
       </section></div>
       <div class="orderbar"><div class="ob-t">${o.place} · ${rs(total)}<span class="small" role="status">${ui.kotDone && !unsent ? 'KOT sent ✓' : `${plural(count, 'item')}${unsent ? ` · ${newCount} not sent` : ''}`}</span></div>
@@ -583,6 +587,10 @@ actions.dish = (d) => {
   const m = cache.menu.find((x) => x.id === d.id);
   if (needsPicker(m)) { ui.pick = { itemId: m.id, chosen: [], qty: 1, opening: true }; ui.pickPrice = ''; ui.error = null; rerender(); return; }
   change({ itemId: m.id }, 1);
+};
+actions.folioPost = async () => {
+  await api('POST', `${B()}/settlements`, { billIds: [ui.bill.id], payments: [{ mode: 'room', amount: rupees(ui.bill.totalPaise), debtorAccountId: ui.folio.accountId }] });
+  go(`#/done/${ui.bill.id}`);
 };
 actions.ncClose = async () => {
   if (!confirm(`Close bill ${ui.bill.billNo} as NC (complimentary for ${ui.ncPlace})?`)) return;
@@ -663,6 +671,31 @@ actions.lessApprove = () => {
 };
 actions.toBill = async () => { await saved(); if (!ui.error) go(`#/bill/${ui.order.id}`); };
 actions.fullMenu = () => { ui.fullMenu = !ui.fullMenu; ui.cat = 'All'; rerender(); };
+// Cancelling a whole order already sent to the kitchen: one reason and one approval for all of it (21 Nov 2026).
+function wholeCancelBox(o) {
+  const w = ui.wholeCancel;
+  const sent = o.lines.filter((l) => l.sentQty > 0 && !l.noKot);
+  return html`<form class="msg warn approve" role="alert" style="margin-top:10px"><p style="margin-bottom:8px"><strong>Cancel the whole order?</strong> ${plural(sent.reduce((t, l) => t + l.sentQty, 0), 'item')} already with the kitchen get a cancel KOT.</p>
+    <div class="chips">${reasonsOf('kot_cancel').map((r) => html`<button type="button" class="chip" aria-pressed="${w.reasonId === r.id}" data-act="wholeWhy" data-r="${r.id}">${r.label}</button>`)}</div>
+    ${isMgr() ? '' : ui.approvers?.length ? html`<div class="row" style="margin-top:8px"><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((a) => html`<option value="${a.id}" ${ui.apId === a.id ? 'selected' : ''}>${a.name}</option>`)}</select>
+        <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's or owner's PIN"></div>`
+      : html`<p>No manager or owner has a PIN yet. The Owner sets one in Settings, Staff and PINs.</p>`}
+    <div class="row" style="margin-top:8px"><button class="btn danger" type="submit" data-act="wholeGo" data-submit ${w.reasonId ? '' : 'disabled'}>Cancel whole order</button><button class="btn ghost" type="button" data-act="wholeNo">Keep the order</button></div></form>`;
+}
+actions.wholeAsk = async () => {
+  await saved();
+  if (!isMgr()) { ui.approvers = (await api('GET', `${B()}/approvers`)).approvers; ui.apId = ui.approvers[0]?.id; }
+  ui.wholeCancel = { reasonId: null }; ui.apPin = ''; ui.error = null; rerender();
+};
+actions.wholeWhy = (d) => { ui.wholeCancel.reasonId = d.r; rerender(); };
+actions.wholeNo = () => { ui.wholeCancel = null; ui.apPin = ''; rerender(); };
+actions.wholeGo = async () => {
+  if (!isMgr() && !/^\d{4,6}$/.test(ui.apPin ?? '')) throw new Error("Type the manager's or owner's 4 to 6 digit PIN.");
+  const r = await api('POST', `${B()}/orders/${ui.order.id}/cancel`, { reasonId: ui.wholeCancel.reasonId, ...(isMgr() ? {} : { approverId: ui.apId, approverPin: ui.apPin }) });
+  printKots(r.kots.filter((k) => k.printAt === 'counter'));
+  flash = { kind: 'ok', text: `${ui.order.place}: order cancelled. ${r.kots.length ? kotSummary(r.kots) : ''}` };
+  go('#/');
+};
 actions.lessNo = () => { ui.asking = null; ui.approve = null; ui.apPin = ''; rerender(); };
 actions.kot = async () => {
   await saved();
@@ -791,8 +824,11 @@ async function settleScreen(billId) {
   // A bill from an NC table closes as complimentary in the person's name (managers and owners).
   const ord = orders.find((o) => o.bill?.id === billId);
   ui.ncPlace = ord?.kind === 'table' && (sections ?? []).some((x) => x.kind === 'nc' && x.tables.some((t) => t.toLowerCase() === ord.place.toLowerCase())) ? ord.place : null;
+  // Room service, a private room or a dorm bed with a guest staying: the bill goes to their folio, ready to post (21 Nov 2026).
+  ui.folio = !ui.ncPlace && ord?.stayId ? cache.stays.find((x) => x.id === ord.stayId) ?? null : null;
   ui.bill = bill; ui.others = orders.filter((o) => o.status === 'billed' && o.bill && o.bill.id !== billId);
-  ui.together = []; ui.pays = []; ui.mode = 'cash';
+  ui.together = []; ui.pays = []; ui.mode = ui.folio ? 'room' : 'cash';
+  if (ui.folio) ui.debtorAccountId = ui.folio.accountId;
   rerender = () => {
     const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
     const paid = ui.pays.reduce((s, p) => s + p.amountPaise, 0);
@@ -808,6 +844,8 @@ async function settleScreen(billId) {
     const notes = thisAmt ? [...new Set([Math.ceil(thisAmt / 10000) * 10000, Math.ceil(thisAmt / 50000) * 50000, Math.ceil(thisAmt / 100000) * 100000, Math.ceil(thisAmt / 200000) * 200000])].filter((n) => n > thisAmt).slice(0, 4) : [];
     paint(shell('#/', html`
       ${pageHead(html`Take payment · ${ui.bill.place}`, `Bill ${ui.bill.billNo} · ${ui.bill.entityName}${ui.bill.gstRegistered ? '' : ' · no GST'}`, html`<a class="btn" href="#/">Tables</a>`)}
+      ${ui.folio && !ui.together.length && !ui.pays.length ? html`<div class="msg ok ncclose"><span><strong>${/^\d/.test(ui.folio.room) ? 'Room ' : ''}${ui.folio.room} · ${ui.folio.guestName}</strong> is staying: this bill goes on their folio, paid at check-out.</span>
+        <button class="btn pri" type="button" data-act="folioPost">Post ${rs(ui.bill.totalPaise)} to their folio</button></div>` : ''}
       ${ui.ncPlace ? html`<div class="msg warn ncclose"><span><span class="ncbadge">NC</span> <strong>${ui.ncPlace}</strong> is an NC table: this bill closes as complimentary in that name, with no payment.</span>
         ${isMgr() ? html`<button class="btn pri" type="button" data-act="ncClose">Close as NC · ${rs(ui.bill.totalPaise)}</button>` : html`<span class="small">A manager or owner closes NC bills.</span>`}</div>` : ''}
       <div class="two">

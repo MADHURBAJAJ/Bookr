@@ -104,4 +104,30 @@ describe('hostel', () => {
     const hrs = await ok(owner.get(`${B}/reports/hours?from=${t - 3_600_000}&to=${t + 3_600_000}&section=Out%20House`));
     expect([hrs.bills, hrs.totalPaise, hrs.hours.length >= 2]).toEqual([1, 18000, true]);
   });
+
+  it('cancels a whole order already sent with one reason and one approval, and links a room order to its guest', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    await ok(owner.put(`${B}/tables`, { sections: SECTIONS }));
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'OH 2' }))).id;
+    await ok(counter.post(`${B}/orders/${o}/items`, { itemId: s.items['Masala Dosa'], delta: 2 }));
+    await ok(counter.post(`${B}/orders/${o}/items`, { itemId: s.items['Beer 650 ml'], delta: 1 }));
+    await ok(counter.post(`${B}/orders/${o}/kot`));
+    expect((await counter.post(`${B}/orders/${o}/cancel`, { reasonId: s.reasons.kot_cancel })).status).toBe(403);
+    expect((await counter.post(`${B}/orders/${o}/cancel`, { reasonId: s.reasons.kot_cancel, approverId: s.managerId, approverPin: '1111' })).status).toBe(403);
+    expect((await counter.post(`${B}/orders/${o}/cancel`, { approverId: s.managerId, approverPin: '9753' })).status).toBe(400);   // a reason is needed
+    const r = await ok(counter.post(`${B}/orders/${o}/cancel`, { reasonId: s.reasons.kot_cancel, approverId: s.managerId, approverPin: '9753' }));
+    expect(r.kots.flatMap((k: any) => k.lines.map((l: any) => [l.name, l.qty, l.cancelled])).sort()).toEqual([['Beer 650 ml', -1, true], ['Masala Dosa', -2, true]]);
+    expect((await q('SELECT status FROM orders WHERE id = ?', o))[0].status).toBe('cancelled');
+    expect(await q("SELECT reason, detail FROM pos_events WHERE business_id = ? AND kind = 'kot_cancel'", s.businessId))
+      .toEqual([{ reason: 'Guest changed mind', detail: 'Approved by Sample Manager' }, { reason: 'Guest changed mind', detail: 'Approved by Sample Manager' }]);
+
+    // A guest staying in room 101: an order at the Room 101 table is theirs, and its bill can go to their folio.
+    await ok(owner.post(`${B}/stays`, { room: '101', guestName: 'Sample Guest' }));
+    const ro = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Room 101' }))).id;
+    const order = (await ok(counter.get(`${B}/orders/${ro}`))).order;
+    expect([order.stayId !== null, order.guestName]).toEqual([true, 'Sample Guest']);
+    const room102 = (await ok(counter.get(`${B}/orders/${(await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Room 102' }))).id}`))).order;
+    expect(room102.stayId).toBeNull();   // nobody staying there
+  });
 });

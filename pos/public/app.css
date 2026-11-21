@@ -660,3 +660,4 @@ tr.editing td { background: var(--bg); }
 .pill { display: inline-block; font-size: 12px; font-weight: 800; padding: 2px 9px; border-radius: 999px; background: var(--bg); color: var(--quiet); border: 1px solid var(--line); vertical-align: middle; }
 .pill.on { background: var(--go-tint); color: var(--go-dark); border-color: var(--go-line); }
 @media (max-width: 760px) { .kv { grid-template-columns: 1fr; } .hrow { grid-template-columns: 80px 1fr 80px; } }
+.tcell.free.stay .ts { color: var(--pri); font-weight: 700; }

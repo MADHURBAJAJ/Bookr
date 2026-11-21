@@ -67,6 +67,9 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
 });
 
 // Who can approve, with their PIN, cancelling an item already sent to the kitchen: managers and owners with a PIN.
+/** A room or bed name compared loosely: "Room 101", "room-101" and "101" are the same room. */
+export const roomKey = (s: string) => s.toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '');
+
 orderRoutes.get(`${B}/approvers`, requireAction('pos.view'), async (c) => {
   return c.json({ approvers: await all(c.env.DB, "SELECT id, name, role FROM staff WHERE business_id = ? AND active = 1 AND support = 0 AND role IN ('owner', 'manager') AND pin_hash IS NOT NULL ORDER BY role DESC, name", c.get('businessId')) });
 });
@@ -94,6 +97,13 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
     const layout = tableLayout(b);
     const at = placeOf(layout, place);
     if (at?.section.kind === 'nc' && !isManager(c)) fail(403, 'NC tables are for managers and owners.');
+    // A private room or a dorm bed with a guest staying: the order is theirs, so its bill goes to their folio (21 Nov 2026).
+    if (at && (at.section.kind === 'rooms' || (at.section.kind === 'dorms' && !at.whole))) {
+      const key = roomKey(place);
+      const st = (await all<{ id: string; room: string; guest_name: string }>(c.env.DB, 'SELECT id, room, guest_name FROM stays WHERE business_id = ? AND checked_out_at IS NULL', bid))
+        .find((x) => roomKey(x.room) === key);
+      if (st) { stayId = st.id; guest ??= st.guest_name; }
+    }
     // A dorm is sold bed by bed, or whole to one group: not both at once.
     if (at?.dorm) {
       const others = at.whole ? sectionTables({ kind: 'dorms', dorms: at.section.dorms!.filter((d) => d.name === at.dorm) }).filter((x) => x !== dormWhole(at.dorm!)) : [dormWhole(at.dorm)];
@@ -307,12 +317,33 @@ orderRoutes.post(`${B}/orders/:id/tab`, requireAction('orders.edit'), async (c) 
   return c.json({ ok: true });
 });
 
-// An order with nothing sent to the kitchen can be dropped (a table that left before ordering).
+// An order with nothing sent to the kitchen can be dropped (a table that left before ordering). One with items already
+// sent is cancelled whole (21 Nov 2026): one reason, approved by a manager or owner (their sign-in, or their PIN), a cancel
+// KOT to each station for everything it was sent, and each line on the Daily check.
 orderRoutes.post(`${B}/orders/:id/cancel`, requireAction('orders.edit'), async (c) => {
-  const o = await order(c, c.get('businessId'), c.req.param('id'), true);
-  if ((await lines(c.env.DB, o.id)).some((l) => l.sent_qty > 0)) fail(409, 'Items have gone to the kitchen. Cancel them one by one with a reason, or bill the order.');
-  await stmt(c.env.DB, "UPDATE orders SET status = 'cancelled' WHERE id = ?", o.id).run();
-  return c.json({ ok: true });
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const o = await order(c, bid, c.req.param('id'), true);
+  const ls = await lines(db, o.id);
+  const sent = ls.filter((l) => l.sent_qty > 0 && l.kot !== 0);
+  if (!sent.length) {
+    await stmt(db, "UPDATE orders SET status = 'cancelled' WHERE id = ?", o.id).run();
+    return c.json({ ok: true, kots: [] });
+  }
+  if (o.kind === 'table' && !isManager(c) && isNcPlace(tableLayout(bizOf(c)), o.place)) fail(403, 'NC tables are for managers and owners.');
+  const data = await body(c);
+  const reason = await reasonLabel(db, bid, 'kot_cancel', data.reasonId, 'A reason for cancelling an order already sent to the kitchen');
+  const approver = isManager(c) ? { name: c.get('staff').name } : await approverOf(c, data.approverId, data.approverPin);
+  const { shiftDay } = clock(bizOf(c));
+  const staffId = c.get('staff').id;
+  const k = await kotStatements(db, bid, o.id, sent.map((l) => ({ ...l, qty: -l.sent_qty, sent_qty: 0 })), staffId, now(), true, shiftDay);
+  await db.batch([
+    ...k.statements,
+    ...sent.map((l) => event(db, bid, 'kot_cancel', `${o.place} · ${l.sent_qty} × ${[l.name, ...chosenOf(l).map((x) => x.name)].join(' + ')} (whole order)`,
+      l.sent_qty * l.price_paise, reason, `Approved by ${approver.name}`, staffId, shiftDay)),
+    stmt(db, "UPDATE orders SET status = 'cancelled' WHERE id = ?", o.id),
+  ]);
+  return c.json({ ok: true, kots: await kotsOut(db, k.ids, o.place) });
 });
 
 interface Entity { id: string; name: string; gst_rate_bp: number; gst_registered: number; series_prefix: string; offered: number; active: number; warn1_paise: number | null; warn2_paise: number | null; stop_paise: number | null }
