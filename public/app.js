@@ -9023,7 +9023,7 @@ async function cashBooksView(biz, oldEditId) {
 /** Settings → Schools and cashiers: each school with its receipt codes and its cashiers; add, change, invite by phone. */
 async function schoolsView(biz, editId) {
   const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
-  const editing = d.books.find((b) => b.id === editId) ?? null;
+  const editing = d.books.find((b) => b.id === editId) ?? (d.pendingHolders ?? []).map((b) => ({ ...b, branchId: null, cashierUserId: null, pending: true })).find((b) => b.id === editId) ?? null;
   const codesOf = (branchId) => d.codes.filter((c) => c.branchId === branchId).map((c) => c.code);
   const otherCodes = d.codes.filter((c) => !c.branchId).map((c) => c.code);
   const who = (b) => (b.cashierUserId
@@ -9036,7 +9036,7 @@ async function schoolsView(biz, editId) {
       <span style="min-width:0"><span style="font-weight:500">${b.name}</span>
         <span class="tiny">· opening ₹ ${rs(b.openingBalancePaise)} on ${shortDay(b.openingDate)}</span>
         <div data-cbwho="${b.id}" style="margin-top:4px">${who(b)}</div></span>
-      ${b.pending ? '' : html`<a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a>`}</div>`;
+      <a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a></div>`;
   // Cash holders (21 Nov 2026): people not at a school who keep a cash book, e.g. a director.
   const holders = [...d.books.filter((b) => !b.branchId), ...(d.pendingHolders ?? []).map((b) => ({ ...b, pending: true }))];
   const holderSection = html`<section class="card">
@@ -9090,10 +9090,11 @@ async function schoolsView(biz, editId) {
         <div class="form-row">
           <div class="field"><label for="cbo">Cash they held at the start (₹)</label><input id="cbo" name="openingBalance" class="mono" inputmode="decimal" value="${rsIn(editing.openingBalancePaise)}" required></div>
           <div class="field"><label for="cbd">On</label><input id="cbd" name="openingDate" type="date" value="${editing.openingDate}" required></div>
-          <div class="field"><label for="cbc">Signs in as</label><select id="cbc" name="cashierUserId">${editing.branchId ? html`<option value="">Nobody yet</option>` : ''}
+          <div class="field"><label for="cbc">Signs in as</label><select id="cbc" name="cashierUserId">${editing.branchId ? html`<option value="">Nobody yet</option>` : editing.pending ? html`<option value="">Nobody yet: invite them by phone</option>` : ''}
             ${d.members.map((m) => html`<option value="${m.id}" ${editing.cashierUserId === m.id ? 'selected' : ''}>${m.name} (${ROLE_LABELS[m.role]})</option>`)}</select></div>
         </div>
-        <div class="tiny">Start: the cash in their hand that morning (for a Khatabook book, its balance that day). Fee report days from then on fill the book.</div>
+        <div class="tiny">${editing.branchId ? 'Start: the cash in their hand that morning (for a Khatabook book, its balance that day). Fee report days from then on fill the book.'
+          : 'Someone who already signs in, e.g. a director who joined as Owner, keeps this book from now on and opens it from My book. A phone invite still waiting for it is cancelled, so they never get a second login.'}</div>
         <div class="form-msg"></div>
         <div class="form-row"><button class="btn" type="submit">Save</button>
           <a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/schools">Cancel</a></div>

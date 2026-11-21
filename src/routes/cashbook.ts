@@ -154,10 +154,18 @@ cashBookRoutes.patch('/businesses/:businessId/cashbooks/:accountId', requireRole
   const db = c.env.DB;
   const bid = c.get('businessId');
   const user = c.get('user');
-  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const accountId = id404(c.req.param('accountId'), 'Cash book');
+  // A cash holder nobody keeps yet (added, not joined) is changed here too (21 Nov 2026): most often to give it to a
+  // user who already signs in, e.g. a director who joined as Owner.
+  const pending = await one<{ id: string; name: string; openingBalancePaise: number; openingDate: string }>(db, `SELECT a.id, a.name,
+      a.opening_balance_paise AS openingBalancePaise, a.opening_date AS openingDate FROM accounts a
+    WHERE a.id = ? AND a.business_id = ? AND a.kind = 'cash' AND a.branch_id IS NULL AND a.cashier_user_id IS NULL
+      AND (EXISTS (SELECT 1 FROM invites i WHERE i.account_id = a.id)
+        OR EXISTS (SELECT 1 FROM audit_log l WHERE l.business_id = a.business_id AND l.action = 'cashbook.create' AND l.row_id = a.id))`, accountId, bid);
+  const book = pending ? { ...pending, branchId: null, cashierUserId: null as string | null } : await bookFor(db, bid, accountId, user.id, c.get('role'));
   const data = await body(c);
   const { branchId, cashierUserId } = await bookInput(db, bid, data, !book.branchId);
-  if (!book.branchId && !cashierUserId) fail(400, 'Choose who keeps this cash holder\'s book.');
+  if (!book.branchId && book.cashierUserId && !cashierUserId) fail(400, 'Choose who keeps this cash holder\'s book.');
   // Schools and cashiers (21 Nov 2026): the name, opening cash and opening date change here too, when sent.
   const name = data.name !== undefined ? text(data, 'name', 'Cashier name', { max: 120 })! : book.name;
   const opening = data.openingBalance !== undefined ? paise(data, 'openingBalance', 'Opening cash') : book.openingBalancePaise;
@@ -167,6 +175,8 @@ cashBookRoutes.patch('/businesses/:businessId/cashbooks/:accountId', requireRole
     await db.batch([
       stmt(db, `UPDATE accounts SET name = ?, branch_id = ?, cashier_user_id = ?, opening_balance_paise = ?, opening_date = ? WHERE id = ? AND business_id = ?`,
         name, branchId, cashierUserId, opening, openingDate, book.id, bid),
+      // Someone now keeps the book: a phone invite still waiting for it would make a second login, so it is cancelled.
+      ...(cashierUserId ? [stmt(db, 'UPDATE invites SET revoked_at = ? WHERE account_id = ? AND accepted_at IS NULL AND revoked_at IS NULL', t, book.id)] : []),
       audit(db, { businessId: bid, userId: user.id, action: 'cashbook.update', table: 'accounts', rowId: book.id,
         before: { name: book.name, branchId: book.branchId, cashierUserId: book.cashierUserId, openingBalancePaise: book.openingBalancePaise, openingDate: book.openingDate },
         after: { name, branchId, cashierUserId, openingBalancePaise: opening, openingDate }, at: t }),
