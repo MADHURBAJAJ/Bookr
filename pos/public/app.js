@@ -401,7 +401,7 @@ function tableGrid() {
   };
   return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${total}</span></h2>
       <div class="legend" aria-hidden="true"><span><i class="free"></i>Free</span><span><i class="new"></i>Not sent</span><span><i class="open"></i>With kitchen</span><span><i class="billed"></i>To pay</span><span><i class="tab"></i>Tab</span></div></div>
-    ${ui.tablesFixed ? '' : html`<p class="small quiet" style="margin:-4px 0 10px">Showing tables used lately. Set your own tables, in sections, in Settings, Tables and rooms.</p>`}
+    ${ui.tablesFixed ? '' : html`<p class="small quiet" style="margin:-4px 0 10px">Showing tables used lately. Set your own tables, in sections, in Settings, Rooms and tables.</p>`}
     ${tabs}
     ${shown.map((x) => html`${all.length > 1 ? html`<div class="grouph"><h3>${x.name}</h3>${SECTION_NOTE[x.kind] ? html`<span class="small quiet">${SECTION_NOTE[x.kind]}</span>` : ''}</div>` : ''}${body(x)}`)}`;
 }
@@ -1103,7 +1103,7 @@ const kotSummary = (kots) => `KOT ${kots.map((k) => `${k.kotNo} ${k.station} (${
 
 async function roomsScreen() {
   const [o] = await Promise.all([api('GET', B() + '/orders'), load('stays', 'credit', 'payAccounts')]);
-  // Rooms and beds as set in Settings, Tables and rooms: check-in picks from them (none set up: the room is typed).
+  // Rooms and beds as set in Settings, Rooms and tables: check-in picks from them (none set up: the room is typed).
   ui.roomSecs = (o.sections ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms');
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms and credit', 'In-house guests and credit accounts: what each owes, payments, advances and refunds.')}
     ${ui.refund ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Refund advance to ${ui.refund.name}</h2>${errorBox()}
@@ -1180,7 +1180,7 @@ function roomChooser() {
   return html`<div class="f" style="grid-column:1/-1">Room or bed${ui.room ? html` <strong>· ${ui.room}</strong>` : ''}
     <input class="in" type="search" data-model="roomQ" data-live value="${ui.roomQ ?? ''}" placeholder="Search rooms and beds" aria-label="Search rooms and beds" autocomplete="off">
     ${ui.roomSecs.map(group)}
-    <span class="small quiet">Rooms and beds come from Settings, Tables and rooms. “Whole” books a dorm for one group.</span></div>`;
+    <span class="small quiet">Rooms and beds come from Settings, Rooms and tables. “Whole” books a dorm for one group.</span></div>`;
 }
 actions.pickRoom = (d) => { ui.room = d.name; ui.error = null; rerender(); };
 // A phone number typed at check-in finds a returning guest: their name and city fill in, and their earlier stays show.
@@ -1432,7 +1432,7 @@ async function sectionsTab(head, from, to) {
           ${charged.map((x) => html`<tr><td>${x.section}</td><td class="num">${x.bills}</td><td class="num">${rs(x.netPaise)}</td><td class="num">${rs(Math.round(x.netPaise / x.bills))}</td></tr>`)}
           ${comp.map((x) => html`<tr><td>${x.section} <span class="ncbadge">NC</span></td><td class="num">${x.bills}</td><td class="num quiet">${rs(x.netPaise)} at menu price</td><td></td></tr>`)}
           <tr><td><strong>Total charged</strong></td><td class="num"><strong>${charged.reduce((t, x) => t + x.bills, 0)}</strong></td><td class="num"><strong>${rs(total)}</strong></td><td></td></tr></tbody></table></div>
-          <p class="small quiet">Sales are after bill discounts and before GST. NC and complimentary bills are shown at menu price, not counted in sales. Sections are as set in Settings, Tables and rooms.</p>`
+          <p class="small quiet">Sales are after bill discounts and before GST. NC and complimentary bills are shown at menu price, not counted in sales. Sections are as set in Settings, Rooms and tables.</p>`
         : html`<p class="quiet">No bills in these shifts.</p>`}</section>
       <section class="panel"><h2>By hour${ui.hSec ? ` · ${ui.hSec}` : ''}</h2>
         <form class="row" style="align-items:end"><label class="f">From<input class="in" type="datetime-local" data-model="hFromT" value="${ui.hFromT}"></label>
@@ -1480,7 +1480,7 @@ async function eventsTab(head) {
           <label class="f">Starts<input class="in" type="datetime-local" data-model="evFrom" value="${ui.evFrom}"></label><label class="f">Ends<input class="in" type="datetime-local" data-model="evTo" value="${ui.evTo}"></label>
           <label class="f">Commission (%)<input class="in" inputmode="decimal" data-model="evPct" value="${ui.evPct}"></label></div>
         <div class="f" style="margin-top:8px">Counts bills from these table sections<div class="chips">${ui.secNames.map((n) => html`<button type="button" class="chip" aria-pressed="${ui.evSecs.includes(n)}" data-act="evSec" data-name="${n}">${n}</button>`)}</div>
-          ${ui.secNames.length ? '' : html`<span class="small quiet">Set up table sections in Settings, Tables and rooms first.</span>`}</div>
+          ${ui.secNames.length ? '' : html`<span class="small quiet">Set up table sections in Settings, Rooms and tables first.</span>`}</div>
         <div class="f" style="margin-top:8px">Menu at those tables during the event (none chosen: the full menu)<div class="chips">${cats.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.evMenu.includes(c)}" data-act="evCat" data-name="${c}">${c}</button>`)}</div></div>
         <p class="small quiet">Commission is on the event's bills after discounts and before GST, liquor included; NC and complimentary bills do not count.</p>
         <div class="row"><button class="btn pri" type="button" data-act="evStart">Start event</button></div></section>
@@ -2197,140 +2197,136 @@ actions.exDay = () => go(`#/exceptions/${ui.day}`);
 // ---------- settings (Owner and manager)
 
 const splitTables = (text) => (text ?? '').split(/[,\n]/).map((t) => t.trim()).filter(Boolean);
-// ---------- Settings, Tables and rooms (21 Nov 2026): rooms by category, as a hotel sells them (private rooms, or shared
-// rooms sold by the bed), and the other tables (Out House, NC, others). Any hotel's own names; nothing is built in.
-// A category is stored as a section: private = its rooms are tables; shared = its rooms are dorms with beds each.
+// ---------- Settings, Rooms and tables (21 Nov 2026). 1. Your rooms: one row per room type, a private room or a dorm sold
+// per bed. 2. Restaurant tables: Out House, NC (free) and other groups. Every hotel's own names; nothing is built in.
+// Stored as sections: a private room type keeps its rooms as tables; a dorm type keeps rooms with their beds.
 const isRoomCat = (x) => x.kind === 'rooms' || x.kind === 'dorms';
-const KIND_NAMES = [['outhouse', 'Out House (guests not staying)'], ['nc', 'NC (non-chargeable)'], ['other', 'Other tables']];
-const KIND_HELP = { outhouse: 'Tables for guests who do not stay with you.', nc: 'One table per person whose orders are free (their name). Only managers and owners use these; bills close as complimentary in that name.', other: '' };
-function roomCatCard(x, i) {
-  const shared = x.kind === 'dorms';
-  const rooms = shared ? x.dorms : x.rooms.map((name) => ({ name }));
-  const beds = shared ? x.dorms.reduce((t, d) => t + (Number(d.beds) || 0), 0) : 0;
-  return html`<div class="seccard"><div class="cathead">
-      <label class="f">Category<input class="in" data-act-change="secName" data-i="${i}" value="${x.name}" maxlength="30" aria-label="Category name"></label>
-      <label class="f">Sold as<select class="in" data-act-change="catKind" data-i="${i}"><option value="rooms">Private room</option><option value="dorms" ${shared ? 'selected' : ''}>Shared · by the bed</option></select></label>
-      ${shared ? html`<label class="f">Beds each (new rooms)<input class="in" inputmode="numeric" data-act-change="catBeds" data-i="${i}" value="${x.beds}"></label>` : html`<span></span>`}
-      <div class="irow" style="align-self:end">${iconBtn('secDel', String(i), 'trash', `Remove category ${x.name}`, 'danger')}</div></div>
-    <div class="roomsline"><span class="small quiet">Rooms:</span>
-      ${rooms.map((r, j) => html`<span class="rno">${r.name}${shared ? html` <input class="bedsin" inputmode="numeric" data-act-change="dormBeds" data-i="${i}" data-j="${j}" value="${r.beds}" aria-label="Beds in ${r.name}"><i>beds</i>` : ''}<button class="lnx" type="button" data-act="roomDel" data-i="${i}" data-j="${j}" aria-label="Remove ${r.name}">×</button></span>`)}
-      <form class="roomadd"><input class="in" data-model="newRoom${i}" value="${ui[`newRoom${i}`] ?? ''}" placeholder="Room no." aria-label="New room in ${x.name}" maxlength="24"><button class="btn" type="submit" data-act="roomAdd" data-i="${i}" data-submit>+ Add room</button></form></div>
-    <div class="row numset"><span class="small quiet">Or several:</span><input class="in" data-model="tPrefix${i}" value="${ui[`tPrefix${i}`] ?? ''}" placeholder="starts with" aria-label="Room names start with" style="width:110px">
-      <input class="in" inputmode="numeric" data-model="tFrom${i}" value="${ui[`tFrom${i}`] ?? '1'}" aria-label="From" style="width:70px"><span>to</span><input class="in" inputmode="numeric" data-model="tTo${i}" value="${ui[`tTo${i}`] ?? '4'}" aria-label="To" style="width:70px">
-      <button class="btn" type="button" data-act="secRange" data-i="${i}">Add</button></div>
-    <div class="count"><b>${plural(rooms.length, 'room')}${shared ? ` · ${plural(beds, 'bed')}` : ''}</b>${shared ? ' · each room can also be booked whole by a group' : ''}</div></div>`;
-}
-function otherCard(x, i) {
-  return html`<div class="seccard"><div class="sechead2">
-      <label class="f">Section name<input class="in" data-act-change="secName" data-i="${i}" value="${x.name}" maxlength="30"></label>
-      <label class="f">Kind<select class="in" data-act-change="secKind" data-i="${i}">${KIND_NAMES.map(([k, t]) => html`<option value="${k}" ${x.kind === k ? 'selected' : ''}>${t}</option>`)}</select></label>
-      <div class="irow" style="align-self:end">${iconBtn('secDel', String(i), 'trash', `Remove section ${x.name}`, 'danger')}</div></div>
-    ${KIND_HELP[x.kind] ? html`<p class="small quiet">${KIND_HELP[x.kind]}</p>` : ''}
-    <label class="f">Tables, in order (commas or new lines)<textarea class="in" rows="2" data-act-change="secText" data-i="${i}">${x.text}</textarea></label>
-    ${x.kind === 'nc' ? '' : html`<div class="row numset"><span class="small quiet">Add a numbered set:</span><input class="in" data-model="tPrefix${i}" value="${ui[`tPrefix${i}`] ?? (x.kind === 'outhouse' ? 'OH ' : 'T')}" aria-label="Names start with" style="width:90px">
-      <input class="in" inputmode="numeric" data-model="tFrom${i}" value="${ui[`tFrom${i}`] ?? '1'}" aria-label="From" style="width:70px"><span>to</span><input class="in" inputmode="numeric" data-model="tTo${i}" value="${ui[`tTo${i}`] ?? '6'}" aria-label="To" style="width:70px">
-      <button class="btn" type="button" data-act="secRange" data-i="${i}">Add</button></div>`}</div>`;
-}
-function tablesSettings() {
-  const cats = ui.secs.map((x, i) => [x, i]).filter(([x]) => isRoomCat(x));
-  const others = ui.secs.map((x, i) => [x, i]).filter(([x]) => !isRoomCat(x));
-  const privateRooms = cats.filter(([x]) => x.kind === 'rooms').reduce((t, [x]) => t + x.rooms.length, 0);
-  const sharedRooms = cats.filter(([x]) => x.kind === 'dorms').reduce((t, [x]) => t + x.dorms.length, 0);
-  const beds = cats.filter(([x]) => x.kind === 'dorms').reduce((t, [x]) => t + x.dorms.reduce((u, d) => u + (Number(d.beds) || 0), 0), 0);
-  return html`<section class="panel"><h2>Tables and rooms</h2>
-    <p class="quiet small">Set up once, used everywhere: the counter's tables, check-in's rooms and beds, Room service and Post to room, and reports. With nothing set up, the counter shows the tables used in the last 60 days.</p>${errorBox()}
-    <h3 class="sub3">Rooms, by category</h3>
-    <p class="small quiet">One card per room category, named as you sell it (as in your channel manager). Private: one guest or party per room. Shared: sold by the bed, or whole to a group.</p>
-    ${cats.length ? '' : html`<div class="quick"><strong>Start from a list</strong> (optional): one category per line, e.g. <code>Deluxe, 4 rooms</code> or <code>Quad Sharing, 4 rooms, 4 beds</code>. Rooms are numbered for you; rename them after.
-      <textarea class="in" rows="4" data-model="quickList" placeholder="Deluxe, 4 rooms&#10;Quad Sharing, 4 rooms, 4 beds">${ui.quickList ?? ''}</textarea><div class="row"><button class="btn" type="button" data-act="quickRooms">Make these categories</button></div></div>`}
-    ${cats.map(([x, i]) => roomCatCard(x, i))}
-    <div class="row" style="margin-top:10px"><button class="btn" type="button" data-act="catAdd" data-kind="rooms">+ Category of private rooms</button><button class="btn" type="button" data-act="catAdd" data-kind="dorms">+ Category of shared rooms (by the bed)</button></div>
-    ${cats.length ? html`<div class="totbar"><span>${plural(cats.length, 'category', 'categories')}</span><span>${plural(privateRooms, 'private room')}</span><span>${plural(sharedRooms, 'shared room')} · ${plural(beds, 'bed')}</span><span class="small">Check these against your channel manager.</span></div>` : ''}
-    <h3 class="sub3" style="margin-top:22px">Other tables</h3>
-    ${others.map(([x, i]) => otherCard(x, i))}
-    <div class="row" style="margin-top:10px"><span class="small quiet">Add:</span>${KIND_NAMES.map(([k, t]) => html`<button class="btn" type="button" data-act="secAdd" data-kind="${k}">+ ${t.replace(/ \(.*/, '')}</button>`)}</div>
-    <div class="row" style="margin-top:16px"><button class="btn pri" type="button" data-act="tablesSave">Save tables and rooms</button>
-      ${ui.tableList.length ? html`<button class="btn" type="button" data-act="tablesClear">Clear all</button>` : ''}</div></section>`;
-}
-const SEC_DEFAULT = { outhouse: 'Out House', nc: 'NC', other: 'Tables' };
+const GROUP_KINDS = [['outhouse', 'Outside guests'], ['nc', 'Free (no charge)'], ['other', 'Tables']];
 const freeName = (base) => { let n = base; let k = 2; while (ui.secs.some((x) => x.name.toLowerCase() === n.toLowerCase())) n = `${base} ${k++}`; return n; };
-/** Every table, room and bed name in use, to keep new room names unique. */
-const allNames = () => new Set(ui.secs.flatMap((x) => (x.kind === 'rooms' ? x.rooms : x.kind === 'dorms' ? x.dorms.map((d) => d.name) : splitTables(x.text))).map((t) => t.toLowerCase()));
-/** Short code from a category name, for numbering its rooms: Quad Sharing → QS, Deluxe → Del. */
-const roomCode = (name) => { const w = name.trim().split(/\s+/).filter(Boolean); return w.length > 1 ? w.map((x) => x[0].toUpperCase()).join('') : (w[0] ?? 'R').slice(0, 3).replace(/^./, (c) => c.toUpperCase()); };
-actions.catAdd = (d) => { ui.secs.push({ name: freeName(d.kind === 'dorms' ? 'Shared rooms' : 'Rooms'), kind: d.kind, text: '', rooms: [], dorms: [], beds: 4 }); ui.error = null; rerender(); };
-actions.secAdd = (d) => { ui.secs.push({ name: freeName(SEC_DEFAULT[d.kind]), kind: d.kind, text: '', rooms: [], dorms: [], beds: 4 }); ui.error = null; rerender(); };
-actions.secDel = (d) => { const x = ui.secs[Number(d.id)]; if (!confirm(`Remove ${x.name}? Its rooms or tables go when you save.`)) return; ui.secs.splice(Number(d.id), 1); rerender(); };
-actions.secName = (d, el) => { ui.secs[Number(d.i)].name = el.value.trim(); };
-actions.secKind = (d, el) => { ui.secs[Number(d.i)].kind = el.value; rerender(); };
-actions.secText = (d, el) => { ui.secs[Number(d.i)].text = el.value; };
-// Private ↔ shared: the same rooms, with beds added (each new room's bed count) or dropped.
-actions.catKind = (d, el) => {
-  const x = ui.secs[Number(d.i)];
-  if (el.value === 'dorms' && x.kind === 'rooms') x.dorms = x.rooms.map((name) => ({ name, beds: Number(x.beds) || 4 }));
-  if (el.value === 'rooms' && x.kind === 'dorms') x.rooms = x.dorms.map((r) => r.name);
-  x.kind = el.value; rerender();
-};
-actions.catBeds = (d, el) => { ui.secs[Number(d.i)].beds = int(el.value); };
-actions.dormBeds = (d, el) => { ui.secs[Number(d.i)].dorms[Number(d.j)].beds = int(el.value); };
-actions.roomDel = (d) => { const x = ui.secs[Number(d.i)]; (x.kind === 'dorms' ? x.dorms : x.rooms).splice(Number(d.j), 1); rerender(); };
-function addRooms(x, names) {
-  const have = allNames();
-  const dup = names.find((n) => have.has(n.toLowerCase()));
-  if (dup) throw new Error(`${dup} is already used. Each room, bed and table needs its own name.`);
-  if (x.kind === 'dorms') x.dorms.push(...names.map((name) => ({ name, beds: Number(x.beds) || 4 })));
-  else x.rooms.push(...names);
+/** Every room, bed and table name in use (except in one row), to keep names unique. */
+const allNames = (skip) => new Set(ui.secs.filter((x) => x !== skip).flatMap((x) => (x.kind === 'rooms' ? x.rooms : x.kind === 'dorms' ? x.dorms.map((d) => d.name) : splitTables(x.text))).map((t) => t.toLowerCase()));
+/** Short code from a room type, for numbering its rooms: Quad Sharing → QS, Luxury → LUX. */
+const roomCode = (name) => { const w = name.trim().split(/\s+/).filter(Boolean); return w.length > 1 ? w.map((x) => x[0].toUpperCase()).join('') : (w[0] ?? 'R').slice(0, 3).toUpperCase(); };
+const bedsText = (x) => { const b = [...new Set(x.dorms.map((d) => Number(d.beds)))]; return b.length ? (b.length === 1 ? `${b[0]} beds` : `${Math.min(...b)}–${Math.max(...b)} beds`) : `${x.beds} beds`; };
+/** "Q1, Q2, Q5:8": room names, each with its beds after a colon when it differs. */
+function readRooms(text, beds) {
+  return splitTables(text).map((t) => { const m = t.match(/^(.*?)\s*:\s*(\d+)$/); return m ? { name: m[1].trim(), beds: Number(m[2]) } : { name: t, beds }; });
 }
-actions.roomAdd = (d) => {
-  const i = Number(d.i); const name = (ui[`newRoom${i}`] ?? '').trim();
-  if (!name) throw new Error('Type the room number or name.');
-  addRooms(ui.secs[i], [name]); ui[`newRoom${i}`] = ''; ui.error = null; rerender();
+const roomsText = (x) => (x.kind === 'dorms' ? x.dorms.map((d) => (Number(d.beds) === Number(x.beds) ? d.name : `${d.name}:${d.beds}`)).join(', ') : x.kind === 'rooms' ? x.rooms.join(', ') : x.text);
+const roomList = (x) => (x.kind === 'dorms' ? x.dorms.map((d) => d.name) : x.kind === 'rooms' ? x.rooms : splitTables(x.text));
+
+function tablesSettings() {
+  const rows = ui.secs.map((x, i) => [x, i]);
+  const cats = rows.filter(([x]) => isRoomCat(x));
+  const groups = rows.filter(([x]) => !isRoomCat(x));
+  const privateN = cats.filter(([x]) => x.kind === 'rooms').reduce((t, [x]) => t + x.rooms.length, 0);
+  const dorms = cats.filter(([x]) => x.kind === 'dorms');
+  const dormN = dorms.reduce((t, [x]) => t + x.dorms.length, 0);
+  const bedN = dorms.reduce((t, [x]) => t + x.dorms.reduce((u, d) => u + (Number(d.beds) || 0), 0), 0);
+  const tags = (x, i) => html`${roomList(x).map((t, j) => html`<span class="tag">${t}${x.kind === 'dorms' && Number(x.dorms[j].beds) !== Number(x.beds) ? html`<i> ${x.dorms[j].beds} beds</i>` : ''}<button class="lnx" type="button" data-act="roomDel" data-i="${i}" data-j="${j}" aria-label="Remove ${t}">×</button></span>`)}
+    ${ui.addIn === i ? html`<form class="roomadd"><input class="in" data-model="addName" value="${ui.addName ?? ''}" placeholder="${isRoomCat(x) ? 'Room no.' : 'Table'}" aria-label="New name" autofocus maxlength="30"><button class="btn" type="submit" data-act="rowAddGo" data-i="${i}" data-submit>Add</button></form>`
+      : html`<button class="addlink" type="button" data-act="rowAdd" data-i="${i}">+ Add</button>`}`;
+  const editForm = (x, i) => html`<tr><td colspan="4"><form class="edit"><strong>${i === -1 ? (ui.editRow.room ? 'Add room type' : 'Add table group') : `Edit ${x.name}`}</strong>
+    <div class="grid3" style="margin-top:10px"><label class="f">Name<input class="in" data-model="erName" value="${ui.erName ?? ''}" maxlength="30" autofocus></label>
+      <label class="f">Kind<select class="in" data-model="erKind">${(ui.editRow.room ? [['rooms', 'Private room'], ['dorms', 'Dorm (sold per bed)']] : GROUP_KINDS).map(([k, t]) => html`<option value="${k}" ${ui.erKind === k ? 'selected' : ''}>${t}</option>`)}</select></label>
+      ${ui.erKind === 'dorms' ? html`<label class="f">Beds in each room<input class="in" inputmode="numeric" data-model="erBeds" value="${ui.erBeds ?? '4'}"></label>` : html`<span></span>`}
+      <label class="f" style="grid-column:1/-1">${ui.editRow.room ? 'Room numbers' : 'Tables'} (comma between)${ui.erKind === 'dorms' ? html` <span class="note">· a room with other beds: Q5:8</span>` : ''}<input class="in" data-model="erList" value="${ui.erList ?? ''}"></label></div>
+    <div class="row" style="margin-top:10px"><button class="btn pri" type="submit" data-act="editSave" data-submit>${i === -1 ? 'Add' : 'Done'}</button><button class="btn ghost" type="button" data-act="editNo">Cancel</button>
+      ${i >= 0 ? html`<button class="btn danger" type="button" data-act="rowDel" data-i="${i}" style="margin-left:auto">Remove ${x.name}</button>` : ''}</div></form></td></tr>`;
+  const row = ([x, i], kindBadge) => (ui.editRow?.i === i ? editForm(x, i)
+    : html`<tr><td><strong>${x.name}</strong></td><td>${kindBadge(x)}</td><td>${tags(x, i)}</td><td class="act"><button class="btn" type="button" data-act="rowEdit" data-i="${i}">Edit</button></td></tr>`);
+  const roomBadge = (x) => (x.kind === 'dorms' ? html`<span class="type d">Dorm · ${bedsText(x)}</span>` : html`<span class="type p">Private room</span>`);
+  const groupBadge = (x) => html`<span class="type ${x.kind}">${(GROUP_KINDS.find(([k]) => k === x.kind) ?? GROUP_KINDS[2])[1]}</span>`;
+  return html`${errorBox()}<section class="panel">
+    <div class="step"><b>1</b><h2>Your rooms</h2></div>
+    ${cats.length || ui.editRow?.room ? html`<div class="scroll"><table class="rt"><thead><tr><th style="width:20%">Room type</th><th style="width:16%">Kind</th><th>Room numbers</th><th style="width:110px"></th></tr></thead><tbody>
+      ${cats.map((c) => row(c, roomBadge))}${ui.editRow?.i === -1 && ui.editRow.room ? editForm(null, -1) : ''}</tbody></table></div>` : html`<p class="quiet">No rooms yet. A restaurant without rooms can leave this empty.</p>`}
+    ${cats.length ? html`<div class="total">Total: ${plural(privateN, 'private room')} + ${plural(dormN, 'dorm')} (${plural(bedN, 'bed')}) <span>· compare with your channel manager</span></div>` : ''}
+    <div class="row" style="margin-top:12px"><button class="btn pri" type="button" data-act="rowNew" data-room="1">+ Add room type</button><button class="btn" type="button" data-act="manyOpen">+ Add many at once</button></div>
+    ${ui.many ? html`<div class="many"><strong>Add many at once</strong> <span class="note">· one room type per line: name, rooms, beds (beds only for dorms)</span>
+      <textarea class="in" rows="4" data-model="quickList" placeholder="Luxury, 2&#10;Boutique Rooms, 5&#10;Hexa Neo, 2, 6" style="margin-top:6px">${ui.quickList ?? ''}</textarea>
+      <div class="note">Rooms get numbers like LUX1, LUX2. Change them after.</div>
+      <div class="row" style="margin-top:8px"><button class="btn" type="button" data-act="quickRooms">Add these</button><button class="btn ghost" type="button" data-act="manyOpen">Close</button></div></div>` : ''}
+  </section>
+  <section class="panel">
+    <div class="step"><b>2</b><h2>Restaurant tables</h2></div>
+    ${groups.length || (ui.editRow && !ui.editRow.room) ? html`<div class="scroll"><table class="rt"><thead><tr><th style="width:20%">Group</th><th style="width:16%">Kind</th><th>Tables</th><th style="width:110px"></th></tr></thead><tbody>
+      ${groups.map((g) => row(g, groupBadge))}${ui.editRow?.i === -1 && !ui.editRow.room ? editForm(null, -1) : ''}</tbody></table></div>` : html`<p class="quiet">No tables yet.</p>`}
+    <div class="row" style="margin-top:12px"><button class="btn" type="button" data-act="rowNew" data-room="">+ Add table group</button></div>
+  </section>
+  <div class="row"><button class="btn pri big" type="button" data-act="tablesSave">Save</button>${ui.tableList.length ? html`<button class="btn ghost" type="button" data-act="tablesClear">Clear everything</button>` : ''}</div>`;
+}
+actions.manyOpen = () => { ui.many = !ui.many; ui.error = null; rerender(); };
+actions.rowAdd = (d) => { ui.addIn = Number(d.i); ui.addName = ''; ui.error = null; rerender(); };
+actions.rowAddGo = (d) => {
+  const x = ui.secs[Number(d.i)]; const name = (ui.addName ?? '').trim();
+  if (!name) throw new Error('Type the room number or table name.');
+  if (allNames().has(name.toLowerCase())) throw new Error(`${name} is already used. Each room, bed and table needs its own name.`);
+  if (x.kind === 'dorms') x.dorms.push({ name, beds: Number(x.beds) || 4 }); else if (x.kind === 'rooms') x.rooms.push(name); else x.text = [...splitTables(x.text), name].join(', ');
+  ui.addIn = null; ui.addName = ''; ui.error = null; rerender();
 };
-actions.secRange = (d) => {
-  const i = Number(d.i); const x = ui.secs[i];
-  const from = int(ui[`tFrom${i}`] ?? '1'); const to = int(ui[`tTo${i}`] ?? (isRoomCat(x) ? '4' : '6'));
-  if (!Number.isInteger(from) || !Number.isInteger(to) || from > to || to - from >= 150) throw new Error('Type a from and to number, such as 1 and 12.');
-  if (isRoomCat(x)) {
-    const prefix = ui[`tPrefix${i}`] ?? '';
-    addRooms(x, Array.from({ length: to - from + 1 }, (_, k) => `${prefix}${from + k}`));
-  } else {
-    const prefix = ui[`tPrefix${i}`] ?? (x.kind === 'outhouse' ? 'OH ' : 'T');
-    const have = splitTables(x.text);
-    const add = Array.from({ length: to - from + 1 }, (_, k) => `${prefix}${from + k}`).filter((t) => !have.some((h) => h.toLowerCase() === t.toLowerCase()));
-    x.text = [...have, ...add].join(', ');
+actions.roomDel = (d) => {
+  const x = ui.secs[Number(d.i)]; const j = Number(d.j);
+  if (x.kind === 'dorms') x.dorms.splice(j, 1); else if (x.kind === 'rooms') x.rooms.splice(j, 1); else { const l = splitTables(x.text); l.splice(j, 1); x.text = l.join(', '); }
+  rerender();
+};
+actions.rowNew = (d) => { ui.editRow = { i: -1, room: !!d.room }; Object.assign(ui, { erName: '', erKind: d.room ? 'rooms' : 'outhouse', erBeds: '4', erList: '' }); ui.error = null; rerender(); };
+actions.rowEdit = (d) => {
+  const x = ui.secs[Number(d.i)];
+  ui.editRow = { i: Number(d.i), room: isRoomCat(x) };
+  Object.assign(ui, { erName: x.name, erKind: x.kind, erBeds: String(x.beds ?? 4), erList: roomsText(x) }); ui.error = null; rerender();
+};
+actions.editNo = () => { ui.editRow = null; ui.error = null; rerender(); };
+actions.rowDel = (d) => { const x = ui.secs[Number(d.i)]; if (!confirm(`Remove ${x.name} and its ${isRoomCat(x) ? 'rooms' : 'tables'}? This happens when you press Save.`)) return; ui.secs.splice(Number(d.i), 1); ui.editRow = null; rerender(); };
+actions.editSave = () => {
+  const e = ui.editRow; const old = e.i >= 0 ? ui.secs[e.i] : null;
+  const name = (ui.erName ?? '').trim();
+  if (!name) throw new Error('Type a name.');
+  if (ui.secs.some((x) => x !== old && x.name.toLowerCase() === name.toLowerCase())) throw new Error(`${name} is already used. Each room type and table group needs its own name.`);
+  const beds = int(ui.erBeds || '4');
+  if (ui.erKind === 'dorms' && !(beds >= 1 && beds <= 30)) throw new Error('Beds in each room: 1 to 30.');
+  const list = ui.erKind === 'dorms' ? readRooms(ui.erList, beds) : splitTables(ui.erList).map((n) => ({ name: n }));
+  const have = allNames(old);
+  const seen = new Set();
+  for (const r of list) {
+    if (have.has(r.name.toLowerCase()) || seen.has(r.name.toLowerCase())) throw new Error(`${r.name} is already used. Each room, bed and table needs its own name.`);
+    if (r.beds !== undefined && !(r.beds >= 1 && r.beds <= 30)) throw new Error(`${r.name}: beds must be 1 to 30.`);
+    seen.add(r.name.toLowerCase());
   }
-  ui.error = null; rerender();
+  const x = { name, kind: ui.erKind, beds: beds || 4, rooms: ui.erKind === 'rooms' ? list.map((r) => r.name) : [], dorms: ui.erKind === 'dorms' ? list : [], text: isRoomCat({ kind: ui.erKind }) ? '' : list.map((r) => r.name).join(', ') };
+  if (old) ui.secs[e.i] = x; else ui.secs.push(x);
+  ui.editRow = null; ui.error = null; rerender();
 };
-// "Deluxe, 4 rooms" / "Quad Sharing, 4 rooms, 4 beds": categories with numbered rooms, to rename after.
+// "Luxury, 2" / "Hexa Neo, 2, 6": room types with numbered rooms (LUX1, HN1…), to rename after.
 actions.quickRooms = () => {
   const lines = String(ui.quickList ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) throw new Error('Type one category per line, e.g. Deluxe, 4 rooms.');
+  if (!lines.length) throw new Error('Type one room type per line, e.g. Luxury, 2.');
   const made = [];
   for (const line of lines) {
     const parts = line.split(',').map((p) => p.trim());
     const name = parts[0];
-    const rest = parts.slice(1);      // after the name (which may itself say "Rooms")
-    const rooms = Number((rest.find((p) => /room/i.test(p)) ?? rest.find((p) => !/bed/i.test(p)) ?? '').match(/\d+/)?.[0]);
-    const beds = Number((rest.find((p) => /bed/i.test(p)) ?? '').match(/\d+/)?.[0]) || 0;
-    if (!name || !(rooms > 0) || rooms > 150) throw new Error(`“${line}”: write it as Name, number of rooms (and beds, for shared rooms).`);
-    const x = { name: freeName(name), kind: beds ? 'dorms' : 'rooms', text: '', rooms: [], dorms: [], beds: beds || 4 };
+    const rooms = Number(parts[1]?.match(/\d+/)?.[0]);
+    const beds = Number(parts[2]?.match(/\d+/)?.[0]) || 0;
+    if (!name || !(rooms > 0) || rooms > 150) throw new Error(`“${line}”: write it as name, number of rooms (and beds, for a dorm), e.g. Hexa Neo, 2, 6.`);
+    if (beds > 30) throw new Error(`“${line}”: up to 30 beds in a room.`);
+    if ([...ui.secs, ...made].some((x) => x.name.toLowerCase() === name.toLowerCase())) throw new Error(`${name} is already a room type.`);
     const code = roomCode(name);
     const have = new Set([...allNames(), ...made.flatMap((m) => (m.kind === 'dorms' ? m.dorms.map((r) => r.name) : m.rooms)).map((t) => t.toLowerCase())]);
     const names = []; for (let k = 1; names.length < rooms; k++) { const n = `${code}${k}`; if (!have.has(n.toLowerCase())) names.push(n); }
-    if (beds) x.dorms = names.map((n) => ({ name: n, beds })); else x.rooms = names;
-    made.push(x);
+    made.push({ name, kind: beds ? 'dorms' : 'rooms', text: '', beds: beds || 4, rooms: beds ? [] : names, dorms: beds ? names.map((n) => ({ name: n, beds })) : [] });
   }
-  ui.secs = [...made, ...ui.secs]; ui.quickList = ''; ui.error = null; rerender();
+  ui.secs = [...ui.secs.filter(isRoomCat), ...made, ...ui.secs.filter((x) => !isRoomCat(x))];
+  ui.quickList = ''; ui.many = false; ui.error = null; rerender();
 };
 actions.tablesSave = async () => {
   const sections = ui.secs.map((x) => (x.kind === 'dorms' ? { name: x.name, kind: x.kind, dorms: x.dorms.map((d) => ({ name: d.name, beds: Number(d.beds) })) }
     : { name: x.name, kind: x.kind, tables: x.kind === 'rooms' ? x.rooms : splitTables(x.text) }));
   await api('PUT', B() + '/tables', { sections });
-  flash = { kind: 'ok', text: 'Tables and rooms saved. The counter and check-in use them now.' }; route();
+  flash = { kind: 'ok', text: 'Saved. The counter and check-in use these now.' }; route();
 };
-actions.tablesClear = async () => { if (!confirm('Clear all rooms and tables? The counter then shows the tables used lately.')) return; await api('PUT', B() + '/tables', { sections: [] }); flash = { kind: 'ok', text: 'Cleared. The counter shows the tables used lately.' }; route(); };
+actions.tablesClear = async () => { if (!confirm('Clear all rooms and tables? The counter then shows the tables used lately.')) return; await api('PUT', B() + '/tables', { sections: [] }); flash = { kind: 'ok', text: 'Cleared.' }; route(); };
 async function settingsScreen(tab = 'menu') {
-  const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Tables and rooms', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
+  const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Rooms and tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
     ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];

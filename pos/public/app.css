@@ -677,3 +677,22 @@ tr.editing td { background: var(--bg); }
 .quick { display: grid; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; background: var(--bg); margin: 8px 0; font-size: 14px; }
 .quick code { background: var(--panel); padding: 1px 6px; border-radius: 4px; }
 @media (max-width: 760px) { .cathead { grid-template-columns: 1fr; } }
+/* Settings, Rooms and tables */
+.step { display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; }
+.step b { display: inline-flex; width: 30px; height: 30px; border-radius: 50%; background: var(--pri); color: var(--on-pri); align-items: center; justify-content: center; font-size: 16px; }
+.step h2 { margin: 0; font-size: 20px; }
+table.rt { width: 100%; border-collapse: collapse; font-size: 15px; }
+table.rt th { text-align: left; font-size: 13px; color: var(--quiet); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+table.rt td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.tag { display: inline-flex; align-items: center; gap: 2px; padding: 1px 2px 1px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); font-weight: 700; font-size: 14px; margin: 2px 4px 2px 0; }
+.tag i { font-style: normal; font-weight: 500; color: var(--quiet); font-size: 13px; }
+.tag .lnx { width: 26px; height: 26px; font-size: 17px; }
+.type { display: inline-block; font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.type.p, .type.other { background: #e3eef8; color: #1d4f7a; } .type.d { background: #f3e8d6; color: #7a4a10; }
+.type.outhouse { background: #e6f2e6; color: #2d5a2d; } .type.nc { background: #fbe9e6; color: #8a2a1f; }
+.addlink { color: var(--pri); font-weight: 700; font-size: 14px; white-space: nowrap; background: none; border: 0; cursor: pointer; padding: 4px 6px; min-height: 32px; }
+.roomadd { display: inline-flex; gap: 6px; align-items: center; } .roomadd .in { width: 120px; }
+.total { margin-top: 10px; font-size: 16px; font-weight: 700; } .total span { color: var(--quiet); font-weight: 500; font-size: 14px; }
+form.edit { border: 2px solid var(--pri); border-radius: 12px; padding: 14px; background: var(--panel); }
+.many { border: 1px dashed var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; background: var(--bg); }
+.note { font-size: 13px; color: var(--quiet); font-weight: 400; }

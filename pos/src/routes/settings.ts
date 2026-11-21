@@ -805,7 +805,7 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   const data = await body(c);
   let room = text(data, 'room', 'Room', { max: 40 })!;
   const guest = text(data, 'guestName', 'Guest name', { max: 80 })!;
-  // Rooms and beds come from Settings, Tables and rooms (21 Nov 2026): once any are set up, a stay is in one of them,
+  // Rooms and beds come from Settings, Rooms and tables (21 Nov 2026): once any are set up, a stay is in one of them,
   // under its exact name, so its tile, its orders and its folio match. A dorm is checked in by bed, or whole for a group.
   const layout = tableLayout(b);
   const stayable = (layout ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms');
@@ -813,7 +813,7 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
     const all_ = stayable.flatMap((x) => x.tables);
     const key = room.toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '');
     const name = all_.find((t) => t.toLowerCase() === room.toLowerCase()) ?? all_.find((t) => t.toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '') === key);
-    if (!name) fail(400, 'Choose a room or bed from the list (Settings, Tables and rooms).');
+    if (!name) fail(400, 'Choose a room or bed from the list (Settings, Rooms and tables).');
     room = name;
     const at = placeOf(layout, room);
     if (at?.dorm) {
