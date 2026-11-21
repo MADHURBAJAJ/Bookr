@@ -685,3 +685,12 @@ tr.rd-red td { background: #FCEBEB; }
   .cb-actions { position: sticky; bottom: 8px; background: var(--ground); padding: 6px 0; z-index: 2; }
 }
 .menu .menu-install { width: calc(100% - 24px); margin: 4px 12px 8px; min-height: 36px; }
+
+.ub-open { font: inherit; color: inherit; text-align: left; }
+.ub-arrow { display: inline-block; width: 1em; color: var(--muted); }
+.ub-sub { background: var(--bg-soft, #F8FAFC); padding: 4px 8px 8px !important; }
+.ub-sub table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ub-sub td { border-bottom: 1px solid var(--line-soft); padding: 5px 6px; text-align: left; }
+.ub-sub td:nth-child(2) { text-align: right; }
+.ub-hand > summary { cursor: pointer; color: var(--muted); font-size: 14px; padding: 4px 2px; list-style: none; }
+.nb-near { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; background: #DCFCE7; color: #166534; border-radius: 8px; padding: 8px 10px; font-size: 14px; }

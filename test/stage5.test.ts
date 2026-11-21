@@ -33,14 +33,18 @@ describe('money with no bill', () => {
     expect((await tx('2610311')).matched_bank_row).toBe(pay);
     expect(await sql`SELECT 1 FROM closed_bills WHERE transaction_id = ${owedTx}`).toHaveLength(0);
 
-    // Part of a bill: ₹500 on the shift of the ₹900 bill still waiting.
-    const { ids: [part, twiceA, twiceB, out, interest] } = await h.lines([
+    // Part of a bill (21 Nov 2026: near-equal only): ₹500 and ₹400 on the shift of the ₹900 bill still waiting.
+    const { ids: [part, twiceA, twiceB, out, interest, rest] } = await h.lines([
       ['31 20:05', 500, 'CR', 'UPI/700000001/Paid/guest1@okaxis/SAMPLE BANK/ICIa'],
       ['31 21:00', 250, 'CR', 'UPI/700000002/Paid/rahul@okicici/SAMPLE BANK/ICIa'],
       ['31 21:04', 250, 'CR', 'UPI/700000003/Paid/rahul@okicici/SAMPLE BANK/ICIa'],
       ['2 12:00', 250, 'DR', 'UPI/700000004/Refund/guest9@okhdfc/SAMPLE BANK/ICIa'],
-      ['2 13:00', 37, 'CR', 'INT PD 01-10-2026 TO 31-10-2026']]);
-    expect((await acc.get(`${base}/bank-rows/${part}/checks`)).json.parts.map((o: any) => o.billNo)).toContain('2610312');
+      ['2 13:00', 37, 'CR', 'INT PD 01-10-2026 TO 31-10-2026'],
+      ['31 20:07', 400, 'CR', 'UPI/700000005/Paid/guest1@okaxis/SAMPLE BANK/ICIa']]);
+    const partChk = (await acc.get(`${base}/bank-rows/${part}/checks`)).json.parts;
+    expect(partChk.map((o: any) => [o.billNo, o.exact, o.credits.map((x: any) => x.id)])).toEqual([['2610312', true, [rest]]]);
+    // ₹37 is not near the ₹900 alone, nor with one or two others: not told.
+    expect((await acc.get(`${base}/bank-rows/${interest}/checks`)).json.parts).toEqual([]);
     // Paid twice: same payer, four minutes apart.
     expect((await acc.get(`${base}/bank-rows/${twiceB}/checks`)).json.paidTwice).toMatchObject({ id: twiceA, minutes: 4, samePayer: true });
 

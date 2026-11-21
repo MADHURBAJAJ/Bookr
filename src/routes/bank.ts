@@ -1517,7 +1517,7 @@ bankRoutes.delete('/businesses/:businessId/rules/:ruleId', requireRole('rules.ed
  * shift's bills paid by a credit outside the window. */
 async function upiBankVsBookr(db: D1Database, bid: string, day: string, strip: { upiSalesPaise: number; bills: number; billsLeftPaise: number; billsLeft: number; creditsLeft: number; creditsLeftPaise: number }, cardPaise: number) {
   const w = shiftWindow(day);
-  const [tot, other, outside] = await Promise.all([
+  const [tot, other, outside, waiting] = await Promise.all([
     all<{ status: string; n: number; a: number }>(db, `SELECT status, count(*) AS n, sum(amount_paise) AS a FROM bank_rows
       WHERE business_id = ? AND kind = 'upi_in' AND direction = 'CR' AND status != 'ignored' AND posted_at >= ? AND posted_at < ? GROUP BY status`, bid, w.from, w.to),
     all<{ id: string; amountPaise: number; postedAt: number; bills: string; day: string }>(db, `SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt,
@@ -1530,6 +1530,12 @@ async function upiBankVsBookr(db: D1Database, bid: string, day: string, strip: {
       FROM transactions t JOIN bank_matches m ON m.transaction_id = t.id JOIN bank_rows r ON r.id = m.bank_row_id
       WHERE t.business_id = ? AND t.shift_day = ? AND t.payment_mode = 'upi' AND r.kind = 'upi_in' AND (r.posted_at < ? OR r.posted_at >= ?)
       GROUP BY r.id ORDER BY r.posted_at`, bid, day, w.from, w.to),
+    // UPI bills of the shifts either side still waiting for their payment (21 Nov 2026): one quiet line on this tab.
+    all<{ billNo: string | null; amountPaise: number; day: string }>(db, `SELECT t.bill_no AS billNo, t.amount_paise AS amountPaise, t.shift_day AS day
+      FROM transactions t WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match'
+        AND t.matched_bank_row IS NULL AND t.shift_day BETWEEN ? AND ? AND t.shift_day <> ?
+        AND t.id NOT IN (SELECT transaction_id FROM closed_bills WHERE business_id = ?)
+      ORDER BY t.shift_day, t.bill_no LIMIT 5`, bid, addDays(day, -1), addDays(day, 1), day, bid),
   ]);
   const totalPaise = tot.reduce((t, x) => t + (x.a ?? 0), 0);
   const booked = tot.find((x) => x.status === 'booked');
@@ -1543,5 +1549,6 @@ async function upiBankVsBookr(db: D1Database, bid: string, day: string, strip: {
     bookedPaise: booked?.a ?? 0, booked: booked?.n ?? 0,
     leftPaise: strip.creditsLeftPaise, left: strip.creditsLeft,
     elsewhere: outside.map((x) => ({ amountPaise: x.amountPaise, postedAt: x.postedAt, bills: x.bills, day: shiftDayOf(x.postedAt) })),
+    waiting,
   };
 }

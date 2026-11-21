@@ -33,7 +33,7 @@ export const isHeldDone = (note: string | null) => / · (paid back|paid out) /.t
 export async function creditChecks(db: DB, businessId: string, row: { id: string; amount_paise: number; posted_at: number; vpa: string | null }) {
   const day = shiftDayOf(row.posted_at);
   const near = { from: shiftWindow(addDays(day, -1)).from, to: shiftWindow(addDays(day, 1)).to };
-  const [owed, twice, parts] = await Promise.all([
+  const [owed, twice, waiting, others] = await Promise.all([
     all<{ txId: string; billNo: string | null; day: string; amountPaise: number; note: string }>(db, `
       SELECT t.id AS txId, t.bill_no AS billNo, t.shift_day AS day, t.amount_paise AS amountPaise, b.note
       FROM closed_bills b JOIN transactions t ON t.id = b.transaction_id
@@ -44,13 +44,18 @@ export async function creditChecks(db: DB, businessId: string, row: { id: string
       SELECT id, posted_at AS postedAt, vpa, status FROM bank_rows
       WHERE business_id = ? AND kind = 'upi_in' AND id <> ? AND amount_paise = ? AND abs(posted_at - ?) <= ?
       ORDER BY abs(posted_at - ?) LIMIT 1`, businessId, row.id, row.amount_paise, row.posted_at, TWICE_MIN * 60000, row.posted_at),
-    // Bills still waiting for a credit, larger than this one: it may be one part of the payment.
+    // Bills still waiting for a credit, as large as this one or larger (21 Nov 2026: only a near-equal amount is told,
+    // this credit alone or with one or two other credits left over near it).
     all<{ txId: string; billNo: string | null; day: string; amountPaise: number }>(db, `
       SELECT t.id AS txId, t.bill_no AS billNo, t.shift_day AS day, t.amount_paise AS amountPaise
       FROM transactions t LEFT JOIN bill_comparisons c ON c.id = t.comparison_id LEFT JOIN software_bills sb ON sb.id = c.software_bill_id
       WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
-        AND t.amount_paise > ? + ? AND t.shift_day BETWEEN ? AND ? AND (sb.paid_at IS NULL OR sb.paid_at BETWEEN ? AND ?)
-      ORDER BY t.amount_paise LIMIT 3`, businessId, row.amount_paise, GAP, addDays(day, -1), addDays(day, 1), near.from, near.to),
+        AND t.amount_paise >= ? - max(?, ? / 100) AND t.shift_day BETWEEN ? AND ? AND (sb.paid_at IS NULL OR sb.paid_at BETWEEN ? AND ?)
+      ORDER BY t.amount_paise LIMIT 20`, businessId, row.amount_paise, GAP, row.amount_paise, addDays(day, -1), addDays(day, 1), near.from, near.to),
+    all<{ id: string; amountPaise: number; postedAt: number }>(db, `
+      SELECT id, amount_paise AS amountPaise, posted_at AS postedAt FROM bank_rows
+      WHERE business_id = ? AND kind = 'upi_in' AND direction = 'CR' AND status = 'unmatched' AND id <> ? AND posted_at >= ? AND posted_at < ?
+      ORDER BY posted_at LIMIT 300`, businessId, row.id, near.from, near.to),
   ]);
   const t2 = twice[0];
   // The same payer, where the bank shows both; otherwise only the amount and the minutes.
@@ -59,6 +64,20 @@ export async function creditChecks(db: DB, businessId: string, row: { id: string
   const same = !!row.vpa && !!t2?.vpa && who(row.vpa) === who(t2.vpa);
   const paidTwice = t2 && (!row.vpa || !t2.vpa || same)
     ? { id: t2.id, postedAt: t2.postedAt, minutes: Math.round(Math.abs(t2.postedAt - row.posted_at) / 60000), samePayer: same, status: t2.status } : null;
+  // Near: within ₹10 or 1% of the bill, whichever is more.
+  const near1 = (bill: number, got: number) => Math.abs(bill - got) <= Math.max(GAP, Math.floor(bill / 100));
+  const parts: { txId: string; billNo: string | null; day: string; amountPaise: number; credits: { id: string; amountPaise: number; postedAt: number }[]; exact: boolean }[] = [];
+  for (const b of waiting) {
+    if (near1(b.amountPaise, row.amount_paise)) { parts.push({ ...b, credits: [], exact: b.amountPaise === row.amount_paise }); continue; }
+    const fit = others.filter((o) => o.amountPaise < b.amountPaise);
+    let found: typeof others | null = null;
+    for (let i = 0; i < fit.length && !found; i++) {
+      if (near1(b.amountPaise, row.amount_paise + fit[i].amountPaise)) found = [fit[i]];
+      for (let j = i + 1; j < fit.length && !found; j++) if (near1(b.amountPaise, row.amount_paise + fit[i].amountPaise + fit[j].amountPaise)) found = [fit[i], fit[j]];
+    }
+    if (found) parts.push({ ...b, credits: found, exact: b.amountPaise === row.amount_paise + found.reduce((t, x) => t + x.amountPaise, 0) });
+    if (parts.length >= 3) break;
+  }
   return { day, owed, paidTwice, parts };
 }
 
