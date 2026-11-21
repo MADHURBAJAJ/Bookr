@@ -2,10 +2,10 @@ import { now, one, stmt, type DB } from '../../src/db';
 import { fail } from '../../src/http';
 import { fyOf, shiftDayAt } from './billing';
 
-export interface Business { id: string; name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null }
+export interface Business { id: string; name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null; disc_limit_bp: number }
 
 export async function loadBusiness(db: DB, id: string): Promise<Business> {
-  const b = await one<Business>(db, 'SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables FROM businesses WHERE id = ?', id);
+  const b = await one<Business>(db, 'SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp FROM businesses WHERE id = ?', id);
   if (!b) fail(404, 'Business not found.');
   return b;
 }

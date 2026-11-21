@@ -43,8 +43,10 @@ function since(ms) {
 const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
 class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
+let approvalCreds = null;   // { approverId, approverPin } while a step a manager approved is tried again
 async function api(method, path, body, extraHeaders = {}) {
   if (body === undefined && method !== 'GET') body = {};
+  if (approvalCreds && method !== 'GET' && body && typeof body === 'object') body = { ...body, ...approvalCreds };
   const res = await fetch(`/api${path}`, {
     method, credentials: 'same-origin',
     headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
@@ -142,7 +144,16 @@ const tabsNav = (label, items, current) => html`<nav class="tabs" aria-label="${
 const kpi = (k, v, n, tone = '') => html`<div class="kpi ${tone}"><span class="k">${k}</span><span class="v">${v}</span>${n ? html`<span class="n">${n}</span>` : ''}</div>`;
 
 function paint(view) { root.innerHTML = asHtml(view); flash = null; const f = root.querySelector('[autofocus]'); if (f) f.focus(); }
-const errorBox = () => (ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : '');
+const errorBox = () => html`${ui.approval ? approvalBox() : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
+/** The manager's PIN for a step a cashier may not take alone (asked for by the server). */
+const approvalBox = () => {
+  const a = ui.approval;
+  return html`<form class="msg warn approve" role="alert"><p style="margin-bottom:8px"><strong>${a.message}</strong></p>
+    ${a.approvers.length ? html`<div class="row"><select class="in" data-model="apId" aria-label="Approved by">${a.approvers.map((x) => html`<option value="${x.id}" ${ui.apId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>
+      <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's or owner's PIN" autofocus></div>
+      <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="approveGo" data-submit>Approve</button><button class="btn ghost" type="button" data-act="approveNo">Cancel</button></div>`
+    : html`<p>No manager or owner has a PIN yet. The Owner sets one in Settings, Staff and PINs.</p><button class="btn ghost" type="button" data-act="approveNo">Close</button>`}</form>`;
+};
 
 async function route() {
   ui = {};
@@ -199,6 +210,12 @@ root.addEventListener('click', async (ev) => {
   const wait = setTimeout(() => el.setAttribute('aria-busy', 'true'), 150);
   try { await fn(el.dataset, el); } catch (e) {
     if (e instanceof ApiError && e.code === 'signin') return; // already sent to the sign-in screen
+    // A step a cashier may not take alone: ask for a manager's PIN, then do the same tap again with it.
+    if (e instanceof ApiError && e.code === 'approval') {
+      const approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers;
+      ui.approval = { message: e.message, act: el.dataset.act, data: { ...el.dataset }, approvers }; ui.apId = approvers[0]?.id; ui.apPin = ''; ui.error = null;
+      rerender(); return;
+    }
     ui.error = e.message; rerender();
   } finally { clearTimeout(wait); el.classList.remove('busy'); el.removeAttribute('aria-busy'); }
 });
@@ -219,6 +236,19 @@ root.addEventListener('change', (ev) => {
 });
 root.addEventListener('submit', (ev) => { ev.preventDefault(); const b = ev.target.querySelector('[data-submit]'); if (b) b.click(); });
 let rerender = () => {};
+actions.discLimitSave = async () => {
+  const b = me.business;
+  await api('PUT', `${B()}/settings`, { name: b.name, fyStartMonth: b.fy_start_month, shiftStartHour: b.shift_start_hour, tabAgeDays: b.tab_age_days, discLimitPct: Number(ui.discLimit ?? b.disc_limit_bp / 100) });
+  me = await api('GET', '/me'); flash = { kind: 'ok', text: `Saved: a cashier may give up to ${me.business.disc_limit_bp / 100}% alone.` }; route();
+};
+actions.approveNo = () => { ui.approval = null; ui.apPin = ''; rerender(); };
+actions.approveGo = async () => {
+  const a = ui.approval;
+  if (!/^\d{4,6}$/.test(ui.apPin ?? '')) throw new Error("Type the manager's or owner's 4 to 6 digit PIN.");
+  approvalCreds = { approverId: ui.apId, approverPin: ui.apPin };
+  ui.approval = null; ui.apPin = '';
+  try { await actions[a.act](a.data); } finally { approvalCreds = null; }
+};
 const LIVE_CHECKS = {
   // Admin, Add a restaurant: the form changes only when the email does or stops belonging to an owner already here.
   knownOwner: () => { const e = (ui.rOwnerEmail ?? '').trim().toLowerCase(); return !!e && (ui.rests ?? []).some((r) => r.owners.some((o) => o.email.toLowerCase() === e)); },
@@ -736,25 +766,29 @@ function dishTax(itemId, e) {
   const bp = from.taxMode === 'rate' ? from.gstBp : e?.gst_rate_bp ?? 0;
   return { kind: 'gst', bp: e?.gst_registered ? bp : 0 };
 }
-function previewTotals(lines, discBp, e) {
+function previewTotals(lines, discBp, e, lineBp = {}) {
   const gross = lines.reduce((t, l) => t + l.qty * l.pricePaise, 0);
-  const disc = roundDiv(gross * discBp, 10000);
+  // Item discounts first, off their own lines; the bill's discount then shares what is left (as the server does).
+  const offOf = (l) => (lineBp[l.id] ? Math.floor((l.qty * l.pricePaise * lineBp[l.id] + 5000) / 10000) : 0);
+  const lineDisc = lines.reduce((t, l) => t + offOf(l), 0);
+  const base = gross - lineDisc;
+  const billDisc = roundDiv(base * discBp, 10000);
   const m = new Map();
   for (const l of lines) {
     const tax = dishTax(l.itemId, e); const k = `${tax.kind}:${tax.bp ?? 0}`;
-    const b = m.get(k) ?? { tax, gross: 0 }; b.gross += l.qty * l.pricePaise; m.set(k, b);
+    const b = m.get(k) ?? { tax, gross: 0 }; b.gross += l.qty * l.pricePaise - offOf(l); m.set(k, b);
   }
   const ord = { gst: 0, liquor: 1, exempt: 2 };
   const bs = [...m.values()].filter((b) => b.gross > 0).sort((a, b) => ord[a.tax.kind] - ord[b.tax.kind] || (a.tax.bp ?? 0) - (b.tax.bp ?? 0));
-  let left = disc;
+  let left = billDisc;
   const taxes = bs.map((b, i) => {
-    const share = i === bs.length - 1 ? left : roundDiv(b.gross * disc, gross); left -= share;
+    const share = i === bs.length - 1 ? left : roundDiv(b.gross * billDisc, base); left -= share;
     const v = b.gross - share; const half = b.tax.kind === 'gst' ? roundDiv(v * b.tax.bp, 20000) : 0;
     return { kind: b.tax.kind, bp: b.tax.bp ?? 0, valuePaise: v, cgstPaise: half, sgstPaise: half };
   });
   const raw = taxes.reduce((t, r) => t + r.valuePaise + r.cgstPaise + r.sgstPaise, 0);
   const total = roundDiv(raw, 100) * 100;
-  return { gross, disc, taxes, raw, total };
+  return { gross, disc: lineDisc + billDisc, lineDisc, billDisc, offOf, taxes, raw, total };
 }
 const taxTag = (t) => (t.kind === 'liquor' ? 'liquor, no GST' : t.kind === 'exempt' ? 'no GST' : t.bp ? `GST ${t.bp / 100}%` : 'no GST');
 /** A bill's tax rows as lines: value and CGST/SGST for each rate, then liquor and no-GST values. */
@@ -769,14 +803,18 @@ async function billScreen(orderId) {
   ui.order = order;
   const ents = counterEntities();
   ui.entityId = (ents.find((e) => e.is_default) ?? ents[0])?.id;
-  ui.disc = 0; ui.discReason = null;
+  ui.disc = 0; ui.discReason = null; ui.lineBp = {};
   rerender = () => {
     const o = ui.order;
     const e = ents.find((x) => x.id === ui.entityId);
+    const billed = o.lines.filter((l) => l.qty > 0);
     // The same sums as the server: each line taxed by dish, category or billing name; the discount shared by value.
-    const { gross, disc, taxes, raw, total } = previewTotals(o.lines, ui.disc * 100, e);
+    const { gross, disc, lineDisc, billDisc, offOf, taxes, raw, total } = previewTotals(billed, ui.disc * 100, e, ui.lineBp);
     const near = e && e.warn1_paise !== null && e.year_paise + total >= e.warn1_paise;
-    const ready = e && !(ui.disc && !ui.discReason);
+    const anyDisc = disc > 0;
+    const ready = e && !(anyDisc && !ui.discReason) && total > 0;
+    const limit = me.business.disc_limit_bp ?? 1000;
+    const needsMgr = !isMgr() && anyDisc && (disc * 10000 > gross * limit || billed.some((l) => ui.lineBp[l.id] === 10000));
     paint(shell('#/', html`
       ${pageHead(html`Bill for ${o.place}`, 'Check the name on the bill and any discount, then print. A printed bill cannot be edited.', html`<a class="btn" href="#/order/${o.id}">Back to the order</a>`)}
       ${errorBox()}
@@ -787,32 +825,42 @@ async function billScreen(orderId) {
         ${near ? html`<div class="msg warn">${e.name} has ${rs(e.year_paise)} billed this year${e.stop_paise ? `; it stops at ${rs(e.stop_paise)}` : ''}.</div>` : ''}
         <div><p class="label">Discount</p>
           <div class="chips">${[0, 5, 10, 15].map((p) => html`<button type="button" class="chip" aria-pressed="${ui.disc === p}" data-act="disc" data-p="${p}">${p ? p + '%' : 'None'}</button>`)}</div>
-          ${ui.disc ? html`<p class="label" style="margin-top:14px">Reason for the discount (required)</p><div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.discReason === r.id}" data-act="discWhy" data-id="${r.id}">${r.label}</button>`)}</div>` : ''}</div>
+          <p class="label" style="margin-top:14px">Discount on one item <button type="button" class="chip" aria-pressed="${!!ui.itemDisc}" data-act="itemDiscOpen">${ui.itemDisc ? 'Hide' : 'Show items'}</button></p>
+          ${ui.itemDisc ? html`<div class="paylist">${billed.map((l) => html`<div class="line"><span class="grow">${l.qty} × ${l.name}</span>
+            <span class="chips">${[[0, 'None'], [2500, '25% off'], [5000, '50% off'], [10000, 'Free']].map(([bp, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.lineBp[l.id] ?? 0) === bp}" data-act="lineDisc" data-id="${l.id}" data-bp="${bp}">${t}</button>`)}</span></div>`)}</div>` : ''}
+          ${anyDisc ? html`<p class="label" style="margin-top:14px">Reason for the discount (required)</p><div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.discReason === r.id}" data-act="discWhy" data-id="${r.id}">${r.label}</button>`)}</div>` : ''}
+          ${needsMgr ? html`<p class="hint">A discount above ${limit / 100}% or a free item needs a manager's PIN when you print.</p>` : ''}</div>
         <label class="f">Guest name on the bill (optional)<input class="in" data-model="guestName" value="${ui.guestName ?? o.guestName ?? ''}"></label>
       </section>
       <section class="panel">
         <div class="preview" aria-label="Bill preview">
           <div class="pl"><strong>${e?.name ?? 'Choose a billing name'}</strong><span class="quiet">${o.place}</span></div><hr>
-          ${o.lines.filter((l) => l.qty > 0).map((l) => html`<div class="pl"><span>${l.qty} × ${l.name}${l.options?.length ? ` (${l.options.map((x) => x.name).join(', ')})` : ''} <span class="small quiet">${taxTag(dishTax(l.itemId, e))}</span></span><span>${rs(l.qty * l.pricePaise)}</span></div>`)}<hr>
+          ${billed.map((l) => html`<div class="pl"><span>${l.qty} × ${l.name}${l.options?.length ? ` (${l.options.map((x) => x.name).join(', ')})` : ''} <span class="small quiet">${taxTag(dishTax(l.itemId, e))}</span></span><span>${rs(l.qty * l.pricePaise)}</span></div>
+            ${offOf(l) ? html`<div class="pl"><span class="quiet" style="padding-left:14px">${ui.lineBp[l.id] === 10000 ? 'Free' : `${ui.lineBp[l.id] / 100}% off`}</span><span>${rs(-offOf(l))}</span></div>` : ''}`)}<hr>
           <div class="pl"><span class="quiet">Items</span><span>${rs(gross)}</span></div>
-          ${disc ? html`<div class="pl"><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-disc)}</span></div>` : ''}
+          ${lineDisc ? html`<div class="pl"><span class="quiet">Item discounts</span><span>${rs(-lineDisc)}</span></div>` : ''}
+          ${billDisc ? html`<div class="pl"><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-billDisc)}</span></div>` : ''}
           ${taxLines(taxes, 'pl', !!e?.gst_registered)}
           ${total !== raw ? html`<div class="pl"><span class="quiet">Round off</span><span>${rs(total - raw)}</span></div>` : ''}
           <hr><div class="pl tot"><span>Total</span><span>${rs(total)}</span></div>
         </div>
         <button class="btn go big wide" type="button" data-act="printBill" ${ready ? '' : 'disabled'}>Print bill · ${rs(total)}</button>
-        ${ui.disc && !ui.discReason ? html`<p class="hint">Choose a reason for the discount to print.</p>` : ''}
+        ${anyDisc && !ui.discReason ? html`<p class="hint">Choose a reason for the discount to print.</p>` : ''}
+        ${total <= 0 && e ? html`<p class="hint">Everything is free: print it with no discount and choose Complimentary when taking payment.</p>` : ''}
       </section></div>`));
   };
   rerender();
 }
 actions.ent = (d) => { ui.entityId = d.id; rerender(); };
-actions.disc = (d) => { ui.disc = Number(d.p); if (!ui.disc) ui.discReason = null; rerender(); };
+actions.disc = (d) => { ui.disc = Number(d.p); rerender(); };
+actions.itemDiscOpen = () => { ui.itemDisc = !ui.itemDisc; rerender(); };
+actions.lineDisc = (d) => { const bp = Number(d.bp); if (bp) ui.lineBp[d.id] = bp; else delete ui.lineBp[d.id]; rerender(); };
 actions.discWhy = (d) => { ui.discReason = d.id; rerender(); };
 actions.printBill = async () => {
   const r = await api('POST', `${B()}/orders/${ui.order.id}/bill`, {
     entityId: ui.entityId, guestName: ui.guestName,
     discount: ui.disc ? { kind: 'pct', bp: ui.disc * 100, reasonId: ui.discReason } : { kind: 'none' },
+    lineDiscounts: Object.entries(ui.lineBp).map(([lineId, bp]) => ({ lineId, bp })), discountReasonId: ui.discReason ?? undefined,
   });
   printReceipt(r.bill);
   if (r.warning) flash = { kind: 'warn', text: r.warning };
@@ -999,7 +1047,7 @@ actions.reprint = async () => { const r = await api('POST', `${B()}/bills/${(ui.
 
 async function doneScreen(billId) {
   const { bill } = await api('GET', `${B()}/bills/${billId}`);
-  if (can('bills.refund') && bill.status === 'settled') await load('payAccounts', 'stays', 'credit');
+  if (bill.status === 'settled' && (can('bills.refund') || can('bills.settle'))) await load('payAccounts', 'stays', 'credit');
   ui.done = bill; ui.cn = null;
   const credited = {};
   for (const n of bill.creditNotes) for (const l of n.lines) credited[l.lineId] = (credited[l.lineId] ?? 0) + l.qty;
@@ -1013,6 +1061,15 @@ async function doneScreen(billId) {
       <div class="done-head"><span class="tick ${st[0]}" aria-hidden="true">${st[1]}</span><div><h1>${st[2]}</h1>
         <p class="quiet">Bill ${bill.billNo} · ${bill.place} · <strong class="money" style="color:var(--ink)">${rs(bill.totalPaise)}</strong></p></div></div>
       ${bill.status === 'printed' && can('bills.settle') ? html`<a class="btn go big" href="#/settle/${bill.id}">Take payment</a>` : ''}
+      ${bill.status === 'settled' && bill.payments.length ? html`<div class="sums"><div><strong>Paid by</strong></div>${bill.payments.map((p) => html`<div><span>${PAY_NAME[p.mode] ?? p.mode}${p.payAccount ? ` · ${p.payAccount}` : ''}${p.cardLast4 ? ` · ****${p.cardLast4}` : ''}
+          ${can('bills.settle') && ['cash', 'upi', 'card'].includes(p.mode) && !ui.pc ? html` <button class="btn ghost" type="button" data-act="pcAsk" data-id="${p.id}" data-m="${p.mode}">Change</button>` : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}</div>
+        ${ui.pc ? html`<form class="msg warn" style="display:flex;flex-direction:column;gap:10px"><strong>Change how ${rs(bill.payments.find((p) => p.id === ui.pc.id).amountPaise)} was paid</strong>
+          <div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${ui.pc.mode === k}" data-act="pcMode" data-m="${k}">${t}</button>`)}</div>
+          ${ui.pc.mode === 'upi' ? html`<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.pc.payAccountId === a.id}" data-act="pcAcc" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
+          ${ui.pc.mode === 'card' ? html`<div class="grid2"><label class="f">Approval code (from the slip)<input class="in" data-model="pcAppr" maxlength="6" autocomplete="off"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="pcLast4" maxlength="4" autocomplete="off"></label></div>` : ''}
+          <label class="f">Reason (required)<input class="in" data-model="pcWhy" value="${ui.pcWhy ?? ''}" placeholder="e.g. Guest paid by UPI, entered as cash"></label>
+          <p class="small quiet">Only while this shift is open. A cashier needs a manager's PIN. It shows on the Daily check.</p>
+          <div class="row"><button class="btn pri" type="submit" data-act="pcGo" data-submit>Save change</button><button class="btn" type="button" data-act="pcNo">Cancel</button></div></form>` : ''}` : ''}
       ${bill.creditNotes.length ? html`<div class="sums"><div><strong>Money given back</strong></div>${bill.creditNotes.map((n) => html`<div><span>${n.cnNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
       <p class="quiet">The printed bill cannot be edited. Before payment a mistake is voided and billed again; after payment, money given back is a credit note.</p>
       ${errorBox()}
@@ -1033,6 +1090,16 @@ async function doneScreen(billId) {
   };
   rerender();
 }
+const PAY_NAME = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'To room', credit: 'On credit', comp: 'Complimentary', advance: 'Advance' };
+actions.pcAsk = (d) => { ui.pc = { id: d.id, mode: d.m === 'cash' ? 'upi' : 'cash', payAccountId: null }; ui.pcWhy = ''; ui.error = null; rerender(); };
+actions.pcMode = (d) => { ui.pc.mode = d.m; rerender(); };
+actions.pcAcc = (d) => { ui.pc.payAccountId = d.id; rerender(); };
+actions.pcNo = () => { ui.pc = null; rerender(); };
+actions.pcGo = async () => {
+  const p = ui.pc;
+  await api('POST', `${B()}/payments/${p.id}/change`, { mode: p.mode, payAccountId: p.payAccountId ?? undefined, cardApproval: ui.pcAppr, cardLast4: ui.pcLast4, reason: ui.pcWhy });
+  flash = { kind: 'ok', text: 'Payment changed. It shows on the Daily check.' }; route();
+};
 actions.cnAsk = () => { ui.cn = { full: true, qty: {}, mode: 'cash' }; rerender(); };
 actions.cnNo = () => { ui.cn = null; rerender(); };
 actions.cnFull = () => { ui.cn.full = true; rerender(); };
@@ -1071,7 +1138,8 @@ function receipt(b) {
     ${b.guestName ? html`<div>Guest: ${b.guestName}</div>` : ''}
     ${b.printCount > 1 ? html`<div class="c">COPY ${b.printCount - 1}</div>` : ''}
     <hr>${b.items.map((l) => html`<div class="rl"><span>${l.qty} × ${l.name}${l.taxKind === 'exempt' ? ' †' : l.taxKind === 'liquor' || l.taxed === 0 ? ' *' : ''}${b.gstRegistered && l.taxKind === 'gst' && (b.taxes ?? []).filter((r) => r.kind === 'gst').length > 1 ? ` (${l.gstBp / 100}%)` : ''}</span><span>${rs(l.amountPaise)}</span></div>
-      ${(l.options ?? []).map((x) => html`<div style="padding-left:14px">+ ${x.name ?? x}</div>`)}`)}<hr>
+      ${(l.options ?? []).map((x) => html`<div style="padding-left:14px">+ ${x.name ?? x}</div>`)}
+      ${l.discountPaise ? html`<div class="rl"><span style="padding-left:14px">${l.discountPaise >= l.amountPaise ? 'Free' : 'Discount'}</span><span>${rs(-l.discountPaise)}</span></div>` : ''}`)}<hr>
     <div class="rl"><span>Items</span><span>${rs(b.grossPaise)}</span></div>
     ${b.discountPaise ? html`<div class="rl"><span>Discount</span><span>${rs(-b.discountPaise)}</span></div>` : ''}
     ${taxLines(b.taxes ?? [], 'rl', !!b.gstRegistered)}
@@ -1525,7 +1593,7 @@ async function profitTab(head, from, to) {
     const word = ui.pfSt === 'bar' ? 'Drink' : 'Food';
     paint(shell('#/reports', html`${head}
       <section class="panel"><h2>Profit · ${title}</h2>
-        <p class="quiet small">Cost comes from each dish's recipe at the last price paid for its stock. Sales are paid bills, before bill discounts and GST. NC and complimentary bills are on Losses.</p>
+        <p class="quiet small">Cost comes from each dish's recipe at the last price paid for its stock. Sales are paid bills, after item discounts, before bill discounts and GST. NC and complimentary bills are on Losses.</p>
         <div class="chips" role="group" aria-label="Kitchen or bar">${[['kitchen', 'Kitchen'], ['bar', 'Bar']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${ui.pfSt === k}" data-act="pfSt" data-k="${k}">${t}</button>`)}</div>
         ${st.salesPaise ? html`<div class="kpis" style="margin-top:12px">${kpi(`${word} cost`, st.costPct == null ? '—' : `${st.costPct}%`, st.costPct == null ? 'No recipes yet' : `${rs(st.costPaise)} on ${rs(st.costedSalesPaise)} of sales`)}
           ${kpi('Profit', rs(st.profitPaise), `Average ${rs(Math.round(st.avgProfitPaise / 100) * 100)} a plate, on dishes with a recipe`, 'good')}
@@ -1566,7 +1634,7 @@ async function lossesTab(head, from, to) {
     return { name, cells: kinds.map((k) => { const xs = mine.filter((e) => e.kind === k); return { n: xs.length, paise: sumOf(xs) }; }), paise: sumOf(mine) };
   }).sort((a, b) => b.paise - a.paise);
   const reasons = (k) => Object.values(of(k).reduce((acc, e) => { const key = e.reason || 'No reason'; const x = acc[key] ?? (acc[key] = { reason: key, n: 0, paise: 0 }); x.n += 1; x.paise += e.amountPaise ?? 0; return acc; }, {})).sort((a, b) => b.paise - a.paise);
-  const guests = Object.values(of('comp').reduce((acc, e) => { const g = (e.detail ?? '').replace(/^Guest:\s*/, '') || 'Not named'; const x = acc[g] ?? (acc[g] = { guest: g, n: 0, paise: 0 }); x.n += 1; x.paise += e.amountPaise ?? 0; return acc; }, {})).sort((a, b) => b.paise - a.paise);
+  const guests = Object.values(of('comp').reduce((acc, e) => { const g = (e.detail ?? '').split(' · ')[0].replace(/^Guest:\s*/, '') || 'Not named'; const x = acc[g] ?? (acc[g] = { guest: g, n: 0, paise: 0 }); x.n += 1; x.paise += e.amountPaise ?? 0; return acc; }, {})).sort((a, b) => b.paise - a.paise);
   const unit = (x) => (x.unit === 'pcs' ? 'pcs' : x.unit);
   rerender = () => paint(shell('#/reports', html`${head}
     <div class="kpis">${kpi('All losses', rs(total), title, total ? 'bad' : 'good')}
@@ -2383,14 +2451,14 @@ actions.stStore = async () => { await api('POST', `${B()}/stock/stores`, { name:
 
 async function exceptionsScreen(day = me.business.shiftDay) {
   const [{ events }, d] = await Promise.all([api('GET', `${B()}/events?day=${encodeURIComponent(day)}`), api('GET', `${B()}/reports/daily-check?day=${encodeURIComponent(day)}`)]);
-  const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance' };
+  const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance', pay_change: 'Payment type changed' };
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const ev = (k) => d.events[k] ?? { n: 0, paise: 0 };
   const df = (k) => d.differences[k] ?? { n: 0, paise: 0 };
   const flag = (n, text, money) => html`<div><span style="${n ? 'color:var(--warn)' : ''}">${text}</span><span>${n ? `${n}${money !== undefined ? ' · ' + rs(money) : ''}` : 'none'}</span></div>`;
   const broken = d.series.filter((x) => x.missing.length).concat(d.creditNoteSeries.filter((x) => x.missing.length));
   const statusName = { open: 'Open order', tab: 'Tab', billed: 'Bill printed, not paid' };
-  const exCount = ['void', 'discount', 'comp', 'kot_cancel', 'reprint', 'credit_note', 'stock_waste', 'stock_count', 'limit_warning'].reduce((t, k) => t + ev(k).n, 0) + df('discount').n;
+  const exCount = ['void', 'discount', 'comp', 'kot_cancel', 'reprint', 'credit_note', 'stock_waste', 'stock_count', 'limit_warning', 'pay_change'].reduce((t, k) => t + ev(k).n, 0) + df('discount').n;
   const oldUnpaid = d.unpaid.filter((o) => o.old).length;
   // The day in a few lines, to paste into WhatsApp for the owner.
   ui.exSummary = [
@@ -2428,7 +2496,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
       <section class="panel"><h2>Exceptions</h2>
         <div class="sums">${flag(ev('void').n, 'Void bills', ev('void').paise)}${flag(ev('discount').n + df('discount').n, 'Discounts', ev('discount').paise + df('discount').paise)}
           ${flag(ev('comp').n, 'Complimentary', ev('comp').paise)}${flag(ev('kot_cancel').n, 'Cancelled after KOT')}${flag(ev('reprint').n, 'Reprints')}
-          ${flag(ev('credit_note').n, 'Credit notes', ev('credit_note').paise)}${flag(df('tip').n, 'Tips', df('tip').paise)}
+          ${flag(ev('credit_note').n, 'Credit notes', ev('credit_note').paise)}${flag(ev('pay_change').n, 'Payment type changed', ev('pay_change').paise)}${flag(df('tip').n, 'Tips', df('tip').paise)}
           ${flag(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise)}${flag(ev('stock_count').n, 'Stock count differences')}
           <div><span style="${d.bar.missingPaise ? 'color:var(--bad);font-weight:700' : d.bar.counts ? '' : 'color:var(--warn)'}">Bar: missing at count</span>
             <span>${d.bar.counts ? `${d.bar.missingPaise ? rs(d.bar.missingPaise) : 'none'} · ${d.bar.counts} count${d.bar.counts === 1 ? '' : 's'}` : 'bar not counted'}</span></div>${flag(ev('limit_warning').n, 'Billing name limit warnings')}</div>
@@ -2673,7 +2741,11 @@ async function settingsScreen(tab = 'menu') {
         <label class="f">Bookr account id (optional)<input class="in" data-model="aBookr" value="${ui.aBookr ?? ''}"></label>
         ${ui.editAcct ? html`<label class="f">Status<select class="in" data-model="aActive"><option value="yes">In use</option><option value="no" ${ui.aActive === 'no' ? 'selected' : ''}>Not used</option></select></label>` : ''}
         <div class="row"><button class="btn pri" type="submit" data-act="addAccount" data-submit>${ui.editAcct ? 'Save account' : 'Add account'}</button>${ui.editAcct ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
-    if (tab === 'staff') body = html`<section class="panel"><h2>Staff and PINs</h2>${errorBox()}
+    if (tab === 'staff') body = html`<section class="panel" style="margin-bottom:16px"><h2>What a cashier may do alone</h2>
+      <form class="row" style="align-items:end"><label class="f">Discount a cashier may give alone (%)<input class="in" inputmode="numeric" data-model="discLimit" value="${ui.discLimit ?? (me.business.disc_limit_bp ?? 1000) / 100}" style="width:120px"></label>
+        <button class="btn" type="submit" data-act="discLimitSave" data-submit>Save</button></form>
+      <p class="small quiet">Above this, a manager's or owner's PIN is needed. A PIN is always needed to make an item free, give a complimentary bill, open a credit account, give money back, or change how a bill was paid.</p></section>
+      <section class="panel"><h2>Staff and PINs</h2>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
         ${ui.staff.filter((s) => !s.support).map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
           <td class="act">${iconBtn('staffEdit', s.id, 'edit', `Edit ${s.name}`)}</td></tr>`)}</tbody></table></div>

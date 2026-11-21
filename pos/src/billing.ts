@@ -34,7 +34,8 @@ export const creditNoteNo = (prefix: string, printDay: string, n: number) => bil
  */
 export type LineTax = { kind: 'gst'; bp: number } | { kind: 'liquor' } | { kind: 'exempt' };
 /** A bill line. Without `tax`, `taxed: false` = liquor and anything else = GST at the bill's rate. */
-export interface Line { qty: number; pricePaise: number; taxed?: boolean; tax?: LineTax }
+/** `discPaise`: a discount on this line alone (an item made free, or a share off it), taken before the bill's discount. */
+export interface Line { qty: number; pricePaise: number; taxed?: boolean; tax?: LineTax; discPaise?: number }
 /** One row of a bill's tax: all its lines of one kind and rate, after their share of the discount. */
 export interface TaxRow { kind: 'gst' | 'liquor' | 'exempt'; bp: number; valuePaise: number; cgstPaise: number; sgstPaise: number }
 export type Discount = { kind: 'none' } | { kind: 'pct'; bp: number } | { kind: 'amount'; paise: number };
@@ -88,21 +89,25 @@ function sumRows(rows: TaxRow[]) {
  */
 export function billTotals(lines: Line[], discount: Discount, gstRateBp: number): Totals & { taxes: TaxRow[] } {
   const gross = lines.reduce((s, l) => s + l.qty * l.pricePaise, 0);
+  // Line discounts first, each off its own line (so its own tax row); the bill's discount then shares the rest by value.
+  const lineDisc = lines.reduce((s, l) => s + (l.discPaise ?? 0), 0);
+  if (lines.some((l) => (l.discPaise ?? 0) < 0 || (l.discPaise ?? 0) > l.qty * l.pricePaise)) throw new Error('bad_discount');
+  const base = gross - lineDisc;
   let disc = 0;
-  if (discount.kind === 'pct') disc = roundDiv(gross * discount.bp, 10000);
+  if (discount.kind === 'pct') disc = roundDiv(base * discount.bp, 10000);
   if (discount.kind === 'amount') disc = discount.paise;
-  if (disc < 0 || disc > gross) throw new Error('bad_discount');
-  const bs = buckets(lines.map((l) => ({ gross: l.qty * l.pricePaise, tax: taxOf(l, gstRateBp) })));
+  if (disc < 0 || disc > base) throw new Error('bad_discount');
+  const bs = buckets(lines.map((l) => ({ gross: l.qty * l.pricePaise - (l.discPaise ?? 0), tax: taxOf(l, gstRateBp) })));
   let left = disc;
   const taxes = bs.map((b, i) => {
-    const share = i === bs.length - 1 ? left : roundDiv(b.gross * disc, gross);
+    const share = i === bs.length - 1 ? left : roundDiv(b.gross * disc, base);
     left -= share;
     return row(b.tax, b.gross - share);
   });
   const sums = sumRows(taxes);
   const raw = sums.taxablePaise + sums.nonGstPaise + sums.cgstPaise + sums.sgstPaise;
   const total = roundDiv(raw, 100) * 100;
-  return { grossPaise: gross, discountPaise: disc, ...sums, roundOffPaise: total - raw, totalPaise: total, taxes };
+  return { grossPaise: gross, discountPaise: lineDisc + disc, ...sums, roundOffPaise: total - raw, totalPaise: total, taxes };
 }
 
 /**

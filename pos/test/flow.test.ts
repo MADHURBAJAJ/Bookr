@@ -164,9 +164,13 @@ describe('settle', () => {
     const { bill } = await billed(s, [['Masala Chai', 1]]);
     expect((await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'comp', amount: '42', reasonId: s.reasons.comp }] })).json.error).toMatch(/guest's name/);
     expect((await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'comp', amount: '42', compGuest: 'P. Rao' }] })).json.error).toMatch(/reason/);
-    expect((await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'comp', amount: '42', compGuest: 'P. Rao', reasonId: s.reasons.comp }] })).status).toBe(201);
+    // A cashier needs a manager's PIN for a complimentary bill (21 Nov 2026).
+    const noPin = await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'comp', amount: '42', compGuest: 'P. Rao', reasonId: s.reasons.comp }] });
+    expect(noPin).toMatchObject({ status: 403, json: { code: 'approval' } });
+    expect((await s.counter.post(`${s.B}/settlements`, { ...s.mgr, approverPin: '0000', billIds: [bill.id], payments: [{ mode: 'comp', amount: '42', compGuest: 'P. Rao', reasonId: s.reasons.comp }] })).status).toBe(403);
+    expect((await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [bill.id], payments: [{ mode: 'comp', amount: '42', compGuest: 'P. Rao', reasonId: s.reasons.comp }] })).status).toBe(201);
     const e = (await s.owner.get(`${s.B}/events?day=${bill.shiftDay}`)).json.events.find((x: any) => x.kind === 'comp');
-    expect(e).toMatchObject({ reason: "Owner's guest", detail: 'Guest: P. Rao', byName: 'Ravi' });
+    expect(e).toMatchObject({ reason: "Owner's guest", detail: 'Guest: P. Rao · Approved by Sample Manager', byName: 'Ravi' });
   });
 
   it('posts to a room folio, which must be paid before check-out', async () => {
@@ -186,7 +190,7 @@ describe('settle', () => {
   it('creates a credit account at the counter and keeps to its limit; an advance pays a later bill', async () => {
     const s = await setupBusiness();
     const one = (await billed(s, [['Masala Dosa', 1]])).bill;
-    expect((await s.counter.post(`${s.B}/settlements`, { billIds: [one.id], payments: [{ mode: 'credit', amount: '189', newCredit: { name: 'Sunrise Travels', phone: '9800000000' } }] })).status).toBe(201);
+    expect((await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [one.id], payments: [{ mode: 'credit', amount: '189', newCredit: { name: 'Sunrise Travels', phone: '9800000000' } }] })).status).toBe(201);
     const acc = (await s.counter.get(`${s.B}/credit-accounts`)).json.accounts[0];
     expect(acc).toMatchObject({ name: 'Sunrise Travels', balancePaise: 18900 });
     await s.owner.put(`${s.B}/credit-accounts/${acc.id}`, { name: 'Sunrise Travels', creditLimit: '200' });
@@ -243,7 +247,7 @@ describe('money out and reports', () => {
     await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'advance', amount: '378', debtorAccountId: folio }] });
     expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(409); // ₹622 of advance still held
     expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { mode: 'cash', amount: '700' })).json.error).toMatch(/only ₹622/);
-    expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { mode: 'cash', amount: '622' })).json.balancePaise).toBe(0);
+    expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { ...s.mgr, mode: 'cash', amount: '622' })).json.balancePaise).toBe(0);
     expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(200);
 
     expect((await s.counter.post(`${s.B}/drawer-outs`, { amount: '150' })).status).toBe(400); // needs what it was for
@@ -261,7 +265,7 @@ describe('money out and reports', () => {
     const a = (await billed(s, [['Masala Dosa', 2], ['Butter Naan', 1]], { discount: { kind: 'pct', bp: 1000, reasonId: s.reasons.discount } })).bill;
     const b = (await billed(s, [['Beer 650 ml', 1]], { entityId: s.huf })).bill;
     await s.counter.post(`${s.B}/settlements`, { billIds: [a.id], payments: [{ mode: 'cash', amount: rupees(a.totalPaise) }] });
-    await s.counter.post(`${s.B}/settlements`, { billIds: [b.id], payments: [{ mode: 'credit', amount: '320', newCredit: { name: 'Sunrise Travels' } }] });
+    await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [b.id], payments: [{ mode: 'credit', amount: '320', newCredit: { name: 'Sunrise Travels' } }] });
     const day = a.shiftDay;
     expect((await s.counter.get(`${s.B}/reports/sales?from=${day}&to=${day}`)).status).toBe(403); // cashier
     const r = (await s.owner.get(`${s.B}/reports/sales?from=${day}&to=${day}`)).json;
@@ -317,11 +321,11 @@ describe('credit notes', () => {
     await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: '586' }] });
 
     expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], refundMode: 'cash' })).status).toBe(400); // reason
-    const one = (await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' })).json.creditNote;
+    const one = (await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' })).json.creditNote;
     // 180 less its 10% share = 162, GST 8.10 → 170.10, exact to the paisa
     expect(one).toMatchObject({ cnNo: `CCN${ymd()}001`, taxablePaise: 16200, cgstPaise: 405, totalPaise: 17010 });
     expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 3 }], reason: 'x', refundMode: 'cash' })).json.error).toMatch(/more than is left/);
-    const rest = (await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { full: true, reason: 'Guest left', refundMode: 'none' })).json;
+    const rest = (await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, full: true, reason: 'Guest left', refundMode: 'none' })).json;
     expect(rest.creditNote.cnNo).toBe(`CCN${ymd()}002`);
     expect(rest.creditNote.totalPaise + one.totalPaise).toBe(58600); // the bill and its notes come to zero
     expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { full: true, reason: 'again', refundMode: 'none' })).json.error).toMatch(/already been given back/);
@@ -337,9 +341,9 @@ describe('credit notes', () => {
   it('credits a folio or credit account instead of paying out', async () => {
     const s = await setupBusiness();
     const { bill } = await billed(s, [['Masala Chai', 1]]);
-    await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'credit', amount: '42', newCredit: { name: 'Sunrise Travels' } }] });
+    await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [bill.id], payments: [{ mode: 'credit', amount: '42', newCredit: { name: 'Sunrise Travels' } }] });
     const acc = (await s.counter.get(`${s.B}/credit-accounts`)).json.accounts[0];
-    await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { full: true, reason: 'Wrong order', refundMode: 'account', debtorAccountId: acc.id });
+    await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, full: true, reason: 'Wrong order', refundMode: 'account', debtorAccountId: acc.id });
     expect((await s.counter.get(`${s.B}/debtors/${acc.id}`)).json.balancePaise).toBe(0);
   });
 });
@@ -525,7 +529,7 @@ describe('daily check and GSTR-1', () => {
     const v = (await billed(s, [['Butter Naan', 1]])).bill;
     await ok(owner.post(`${B}/bills/${v.id}/void`, { reasonId: s.reasons.void }));
     const dosa = a.items.find((i: any) => i.name === 'Masala Dosa');
-    await ok(counter.post(`${B}/bills/${a.id}/credit-note`, { lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' }));
+    await ok(counter.post(`${B}/bills/${a.id}/credit-note`, { ...s.mgr, lines: [{ lineId: dosa.id, qty: 1 }], reason: 'Cold food', refundMode: 'cash' }));
 
     const month = new Date(a.printedAt + 19_800_000).toISOString().slice(0, 7);
     expect((await owner.get(`${B}/reports/gstr1?month=2026-13`)).status).toBe(400);
@@ -594,7 +598,7 @@ describe('liquor without GST', () => {
 
     // Money back on the beer: no GST in the credit note.
     const beer = bill.items.find((i: any) => i.name === 'Beer 650 ml');
-    const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: beer.id, qty: 1 }], reason: 'Flat beer', refundMode: 'cash' }))).creditNote;
+    const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { ...s.mgr, lines: [{ lineId: beer.id, qty: 1 }], reason: 'Flat beer', refundMode: 'cash' }))).creditNote;
     expect(cn).toMatchObject({ taxablePaise: 0, nonGstPaise: 32000, cgstPaise: 0, totalPaise: 32000 });
     await expect(q('UPDATE bills SET nongst_paise = 0 WHERE id = ?', bill.id)).rejects.toThrow(/bill_frozen/);
   });
@@ -689,7 +693,7 @@ describe('menu v2: add-ons, price at billing, GST by category and item', () => {
     // Money back on the pool table: its own 18%.
     const poolLine = bill.items.find((i: any) => i.name === 'Pool Table');
     expect(poolLine).toMatchObject({ taxKind: 'gst', gstBp: 1800 });
-    const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { lines: [{ lineId: poolLine.id, qty: 1 }], reason: 'Table broken', refundMode: 'cash' }))).creditNote;
+    const cn = (await ok(counter.post(`${B}/bills/${bill.id}/credit-note`, { ...s.mgr, lines: [{ lineId: poolLine.id, qty: 1 }], reason: 'Table broken', refundMode: 'cash' }))).creditNote;
     expect(cn).toMatchObject({ taxablePaise: 20000, cgstPaise: 1800, sgstPaise: 1800, totalPaise: 23600 });
 
     const month = new Date(bill.printedAt + 19_800_000).toISOString().slice(0, 7);

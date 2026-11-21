@@ -6,7 +6,7 @@ import { istDay } from '../../../src/time';
 import { Hono } from 'hono';
 import { all, newId, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
-import { requireAction, requireStaff } from '../auth';
+import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { creditNote, rs, type LineTax, type TaxRow, type Totals } from '../billing';
 import { clock, event, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendSoon } from '../sync';
@@ -34,8 +34,12 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   const reason = text(data, 'reason', 'A reason for the credit note', { max: 120 })!;
 
   // What is credited: every line still left on the bill, or chosen quantities.
-  const lines = await all<{ id: string; name: string; qty: number; rate_paise: number; taxed: number; tax_kind: string | null; gst_bp: number | null }>(db,
-    'SELECT id, name, qty, rate_paise, taxed, tax_kind, gst_bp FROM bill_lines WHERE bill_id = ? ORDER BY rowid', billId);
+  const lines = await all<{ id: string; name: string; qty: number; rate_paise: number; taxed: number; tax_kind: string | null; gst_bp: number | null; discount_paise: number }>(db,
+    'SELECT id, name, qty, rate_paise, taxed, tax_kind, gst_bp, discount_paise FROM bill_lines WHERE bill_id = ? ORDER BY rowid', billId);
+  // Items made free or given a share off: each credited quantity takes its share of its own line's discount, and the
+  // bill's own discount is shared over what is left (so a free item gives nothing back).
+  const lineDisc = lines.reduce((t, l) => t + l.discount_paise, 0);
+  const lineNet = (l: (typeof lines)[number], qty: number) => qty * l.rate_paise - (qty === l.qty ? l.discount_paise : Math.floor((l.discount_paise * qty + Math.floor(l.qty / 2)) / l.qty));
   // Each line's tax as billed (older lines: GST at the bill's rate, or liquor).
   const taxOfLine = (l: (typeof lines)[number]): LineTax => {
     const kind = l.tax_kind ?? (l.taxed ? 'gst' : 'liquor');
@@ -72,9 +76,9 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   const alreadyRows = priorRows.length || !prior.length ? priorRows : [
     { kind: 'gst' as const, bp: bill.gst_rate_bp, valuePaise: already.taxablePaise, cgstPaise: already.cgstPaise, sgstPaise: already.sgstPaise },
     { kind: 'liquor' as const, bp: 0, valuePaise: already.nonGstPaise, cgstPaise: 0, sgstPaise: 0 }];
-  const { taxes: noteRows, ...totals } = creditNote({ grossPaise: bill.gross_paise, discountPaise: bill.discount_paise, taxablePaise: bill.taxable_paise, nonGstPaise: bill.nongst_paise,
+  const { taxes: noteRows, ...totals } = creditNote({ grossPaise: bill.gross_paise - lineDisc, discountPaise: bill.discount_paise - lineDisc, taxablePaise: bill.taxable_paise, nonGstPaise: bill.nongst_paise,
     cgstPaise: bill.cgst_paise, sgstPaise: bill.sgst_paise, roundOffPaise: bill.round_off_paise, totalPaise: bill.total_paise, gstRateBp: bill.gst_rate_bp, taxes: billRows },
-    already, alreadyRows, chosen.map((l) => ({ gross: l.amountPaise, tax: taxOfLine(lines.find((x) => x.id === l.lineId)!) })), lastOne);
+    already, alreadyRows, chosen.map((l) => { const x = lines.find((y) => y.id === l.lineId)!; return { gross: lineNet(x, l.qty), tax: taxOfLine(x) }; }), lastOne);
   if (totals.totalPaise <= 0) fail(409, 'Nothing is left to give back on this bill.');
 
   // How the money goes back.
@@ -91,6 +95,8 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
     if (!debtor) fail(400, 'Choose the folio or credit account to credit.');
   }
 
+  // Money given back: a manager approves (21 Nov 2026).
+  const approver = await approval(c, data, 'Giving money back');
   const b = bizOf(c);
   const { t, shiftDay, fy } = clock(b);
   // Its number: the billing name's letter, CN, the date (YYMMDD, India time) and the next number of that day (CCN261119001).
@@ -117,7 +123,7 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
         id, bid, x.kind, x.bp, x.valuePaise, x.cgstPaise, x.sgstPaise)),
       ...(debtor ? [stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, bill_id, by_staff, at) VALUES (?, ?, ?, 'credit_note', ?, ?, ?, ?)",
         newId(), bid, debtor.id, -totals.totalPaise, billId, staff.id, t)] : []),
-      event(db, bid, 'credit_note', bill.bill_no, totals.totalPaise, reason, `${chosen.map((l) => `${l.qty} × ${l.name}`).join(', ')} · refund ${mode}`, staff.id, shiftDay),
+      event(db, bid, 'credit_note', bill.bill_no, totals.totalPaise, reason, `${chosen.map((l) => `${l.qty} × ${l.name}`).join(', ')} · refund ${mode}${isManager(c) ? '' : ` · Approved by ${approver.name}`}`, staff.id, shiftDay),
       stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) SELECT ?, ?, 'credit_note', json_set(?, '$.cnNo', cn_no), ? FROM credit_notes WHERE id = ?",
         newId(), bid, message, t, id),
     ]);

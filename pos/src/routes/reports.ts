@@ -221,7 +221,7 @@ reportRoutes.get(`${B}/reports/gstr1`, requireAction('reports.view'), async (c) 
       `SELECT id, entity_id, bill_no, seq, status, gst_rate_bp, taxable_paise, nongst_paise, cgst_paise, sgst_paise, total_paise FROM bills
        WHERE business_id = ? AND printed_at >= ? AND printed_at < ? ORDER BY entity_id, seq`, bid, start, end),
     all<{ bill_id: string; sac: string; qty: number; amount_paise: number; bp: number }>(db,
-      `SELECT l.bill_id, l.sac, l.qty, l.amount_paise, coalesce(l.gst_bp, b.gst_rate_bp) AS bp FROM bill_lines l JOIN bills b ON b.id = l.bill_id
+      `SELECT l.bill_id, l.sac, l.qty, l.amount_paise - l.discount_paise AS amount_paise, coalesce(l.gst_bp, b.gst_rate_bp) AS bp FROM bill_lines l JOIN bills b ON b.id = l.bill_id
        WHERE b.business_id = ? AND b.printed_at >= ? AND b.printed_at < ? AND b.status <> 'void'
          AND coalesce(l.tax_kind, CASE WHEN l.taxed = 1 THEN 'gst' ELSE 'liquor' END) = 'gst'`, bid, start, end),
     all<{ id: string; entity_id: string; cn_no: string; seq: number; gst_rate_bp: number; taxable_paise: number; nongst_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number }>(db,
@@ -326,7 +326,7 @@ reportRoutes.get(`${B}/reports/profit`, requireAction('reports.view'), async (c)
   if (from > to) fail(400, 'From must be on or before To.');
   const rows = await all<{ id: string | null; name: string; category: string; station: string; qty: number; salesPaise: number; unitCost: number | null }>(db, `
     SELECT l.item_id AS id, max(l.name) AS name, coalesce(m.category, '') AS category, coalesce(m.station, 'kitchen') AS station,
-      sum(l.qty) AS qty, sum(l.amount_paise) AS salesPaise,
+      sum(l.qty) AS qty, sum(l.amount_paise - l.discount_paise) AS salesPaise,
       (SELECT sum(r.qty * i.cost_per_pack_paise * 1.0 / i.pack_size) FROM recipes r JOIN stock_items i ON i.id = r.stock_item_id WHERE r.menu_item_id = l.item_id) AS unitCost
     FROM bill_lines l JOIN bills b ON b.id = l.bill_id LEFT JOIN menu_items m ON m.id = l.item_id
     WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP}

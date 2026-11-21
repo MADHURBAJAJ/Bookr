@@ -6,7 +6,7 @@ import { CATEGORY_JOIN, isOnline, ITEM_ROUTE } from '../stations';
 import { Hono } from 'hono';
 import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
-import { approverOf, isManager, requireAction, requireStaff } from '../auth';
+import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
 import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
 import { clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
 import { sendSoon } from '../sync';
@@ -389,9 +389,26 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     if (typeof d.paise !== 'number' || !Number.isInteger(d.paise) || d.paise <= 0) fail(400, 'Discount amount must be above zero.');
     discount = { kind: 'amount', paise: d.paise };
   } else if (d.kind !== 'none') fail(400, 'Discount must be none, a percentage or an amount.');
+  // Items made free or given a share off (21 Nov 2026): [{ lineId, bp }], 10000 = free.
+  const lineDisc = new Map<string, number>();
+  if (data.lineDiscounts !== undefined) {
+    if (!Array.isArray(data.lineDiscounts) || data.lineDiscounts.length > 100) fail(400, 'Item discounts are not valid.');
+    for (const raw of data.lineDiscounts) {
+      const r = (raw ?? {}) as Record<string, unknown>;
+      const l = ls.find((x) => x.id === r.lineId);
+      if (!l || typeof r.bp !== 'number' || !Number.isInteger(r.bp) || r.bp <= 0 || r.bp > 10000) fail(400, 'An item discount is not valid: above 0% and at most 100%.');
+      lineDisc.set(l.id, Math.floor((l.qty * l.price_paise * r.bp + 5000) / 10000));
+    }
+  }
   let totals;
-  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, tax: lineTax(l.id) })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
-  const discountReason = totals.discountPaise > 0 ? await reasonLabel(c.env.DB, bid, 'discount', d.reasonId, 'A reason for the discount') : null;
+  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, tax: lineTax(l.id), discPaise: lineDisc.get(l.id) ?? 0 })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
+  if (totals.totalPaise <= 0) fail(400, 'Everything on this bill is free: close it as complimentary instead (no discount, then Complimentary at payment).');
+  const discountReason = totals.discountPaise > 0 ? await reasonLabel(c.env.DB, bid, 'discount', d.reasonId ?? data.discountReasonId, 'A reason for the discount') : null;
+  // A cashier gives up to the business's limit alone; above it, or any item made free, a manager approves.
+  const freeItems = ls.filter((l) => (lineDisc.get(l.id) ?? 0) >= l.qty * l.price_paise);
+  const overLimit = totals.discountPaise * 10000 > totals.grossPaise * b.disc_limit_bp;
+  const approver = overLimit || freeItems.length
+    ? await approval(c, data, freeItems.length ? 'Making an item free' : `A discount above ${b.disc_limit_bp / 100}%`) : null;
 
   const year = yearRow!.s;
   const was = limitState(e, year);
@@ -418,17 +435,19 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
       ...ls.map((l) => {
         const tx = lineTax(l.id);
-        return stmt(c.env.DB, `INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed, options, tax_kind, gst_bp, price_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        return stmt(c.env.DB, `INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed, options, tax_kind, gst_bp, price_by, discount_paise)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise, tx.kind === 'gst' ? 1 : 0, l.options,
-          tx.kind, tx.kind === 'gst' ? tx.bp : null, l.price_by);
+          tx.kind, tx.kind === 'gst' ? tx.bp : null, l.price_by, lineDisc.get(l.id) ?? 0);
       }),
       ...totals.taxes.map((x) => stmt(c.env.DB, 'INSERT INTO bill_taxes (bill_id, business_id, kind, gst_bp, value_paise, cgst_paise, sgst_paise) VALUES (?, ?, ?, ?, ?, ?, ?)',
         id, bid, x.kind, x.bp, x.valuePaise, x.cgstPaise, x.sgstPaise)),
       stmt(c.env.DB, "UPDATE orders SET status = 'billed' WHERE id = ?", o.id),
       // The exceptions report, in the same batch: the discount takes its bill number from the row just written.
       ...(totals.discountPaise > 0 ? [stmt(c.env.DB, `INSERT INTO pos_events (business_id, kind, ref, amount_paise, reason, detail, by_staff, shift_day, at)
-        SELECT ?, 'discount', bill_no, ?, ?, NULL, ?, ?, ? FROM bills WHERE id = ?`, bid, totals.discountPaise, discountReason, staffId, shiftDay, t, id)] : []),
+        SELECT ?, 'discount', bill_no, ?, ?, ?, ?, ?, ? FROM bills WHERE id = ?`, bid, totals.discountPaise, discountReason,
+        [lineDisc.size ? `Items: ${ls.filter((l) => lineDisc.has(l.id)).map((l) => `${l.name} ${freeItems.includes(l) ? 'free' : rs(lineDisc.get(l.id)!) + ' off'}`).join(', ')}` : '',
+          approver ? `Approved by ${approver.name}` : ''].filter(Boolean).join(' · ') || null, staffId, shiftDay, t, id)] : []),
       ...(will !== was ? [event(c.env.DB, bid, 'limit_warning', e.name, year + totals.totalPaise, null, `${e.name} reached ${rs(year + totals.totalPaise)} billed in ${fy}`, staffId, shiftDay)] : []),
     ]);
   } catch (err) {
@@ -449,10 +468,10 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
   const [items, creditNotes, pays, differences, taxRows] = await Promise.all([
-    all<Record<string, unknown> & { options: string | null }>(db, `SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, taxed, options,
+    all<Record<string, unknown> & { options: string | null }>(db, `SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, discount_paise AS discountPaise, taxed, options,
       coalesce(tax_kind, CASE WHEN taxed = 1 THEN 'gst' ELSE 'liquor' END) AS taxKind, gst_bp AS gstBp, price_by IS NOT NULL AS typedPrice FROM bill_lines WHERE bill_id = ? ORDER BY rowid`, id),
     all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id),
-    all(db, `SELECT p.mode, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
+    all(db, `SELECT p.id, p.mode, p.shift_day AS shiftDay, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
       d.name AS debtorAccount, p.comp_guest AS compGuest, p.comp_reason AS compReason, p.tendered_paise AS tenderedPaise
     FROM allocations a JOIN payments p ON p.id = a.payment_id LEFT JOIN pay_accounts pa ON pa.id = p.pay_account_id LEFT JOIN debtor_accounts d ON d.id = p.debtor_account_id
     WHERE a.bill_id = ? ORDER BY p.at, p.rowid`, id),

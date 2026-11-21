@@ -3,6 +3,7 @@
 // - pos_session: the person signed in. Owners and managers sign in with email and password; counter staff with a PIN.
 // Every business route then checks the person's role in that business (requireAction), on every request.
 import type { Context, MiddlewareHandler } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { now, one, run, stmt, type DB } from '../../src/db';
 import { DUMMY_HASH, randomToken, sha256, verifyPassword } from '../../src/crypto';
@@ -52,10 +53,10 @@ export const requireStaff: MiddlewareHandler<AppEnv> = async (c, next) => {
   const deviceToken = getCookie(c, DEVICE_COOKIE);
   // One trip: the session, the person, their business, and (for a PIN session) that it is on its own, unrevoked device.
   const row = await one<{ id: string; name: string; role: string; business_id: string; kind: string; device_id: string | null; sid: string; device_ok: number;
-    b_name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null; b_status: string; support: number; login_id: string | null }>(c.env.DB, `
+    b_name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null; disc_limit_bp: number; b_status: string; support: number; login_id: string | null }>(c.env.DB, `
     SELECT st.id, st.name, st.role, st.business_id, s.kind, s.device_id, s.id AS sid,
       (s.kind <> 'pin' OR EXISTS (SELECT 1 FROM devices d WHERE d.id = s.device_id AND d.token_hash = ? AND d.revoked_at IS NULL)) AS device_ok,
-      b.name AS b_name, b.fy_start_month, b.shift_start_hour, b.tab_age_days, b.tables, b.status AS b_status, st.support, st.login_id
+      b.name AS b_name, b.fy_start_month, b.shift_start_hour, b.tab_age_days, b.tables, b.disc_limit_bp, b.status AS b_status, st.support, st.login_id
     FROM sessions s JOIN staff st ON st.id = s.staff_id JOIN businesses b ON b.id = st.business_id
     WHERE s.id = ? AND s.expires_at > ? AND st.active = 1`, deviceToken ? await sha256(deviceToken) : '', await sha256(token), now());
   if (!row || !isRole(row.role)) {
@@ -69,7 +70,7 @@ export const requireStaff: MiddlewareHandler<AppEnv> = async (c, next) => {
   c.set('loginId', row.login_id);
   c.set('support', !!row.support);
   c.set('staff', { id: row.id, name: row.name, role: row.role, businessId: row.business_id });
-  c.set('business', { id: row.business_id, name: row.b_name, fy_start_month: row.fy_start_month, shift_start_hour: row.shift_start_hour, tab_age_days: row.tab_age_days, tables: row.tables });
+  c.set('business', { id: row.business_id, name: row.b_name, fy_start_month: row.fy_start_month, shift_start_hour: row.shift_start_hour, tab_age_days: row.tab_age_days, tables: row.tables, disc_limit_bp: row.disc_limit_bp });
   c.set('sessionId', row.sid);
   c.set('deviceId', row.device_id);
   await next();
@@ -113,3 +114,12 @@ export async function approverOf(c: Context<AppEnv>, approverId: unknown, pin: u
   return { id: a.id, name: a.name };
 }
 export const isManager = (c: Context<AppEnv>) => ['owner', 'manager'].includes(c.get('staff').role);
+/**
+ * A step a cashier may not take alone (21 Nov 2026): a manager or owner approves it themselves, or with their PIN on this
+ * device. With no PIN sent, the answer is a 403 with code 'approval', and the screen asks for one and tries again.
+ */
+export async function approval(c: Context<AppEnv>, data: Record<string, unknown>, what: string): Promise<{ id: string; name: string }> {
+  if (isManager(c)) return { id: c.get('staff').id, name: c.get('staff').name };
+  if (data.approverId === undefined && data.approverPin === undefined) throw new HTTPException(403, { message: `${what} needs a manager's or owner's PIN.`, cause: { code: 'approval' } });
+  return approverOf(c, data.approverId, data.approverPin);
+}

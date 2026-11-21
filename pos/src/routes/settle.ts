@@ -6,9 +6,9 @@ import { Hono } from 'hono';
 import { all, newId, now, one, stmt, type DB } from '../../../src/db';
 import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
-import { isManager, requireAction, requireStaff } from '../auth';
+import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { allocateLoose, rs } from '../billing';
-import { clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
+import { audit, clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
 import { billOut } from './orders';
 import { sendSoon } from '../sync';
 import { saleMoves } from '../stock';
@@ -48,7 +48,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
     if (out.tenderedPaise < out.amountPaise) fail(400, `Payment ${n}: cash given is less than the amount.`);
   }
   if (mode === 'upi') {
-    const acc = await one<{ id: string; entity_id: string; name: string; bookr_account_id: string | null }>(db, 'SELECT id, entity_id, name, bookr_account_id FROM pay_accounts WHERE id = ? AND business_id = ? AND active = 1', p.payAccountId, bid);
+    const acc = await one<{ id: string; entity_id: string; name: string; bookr_account_id: string | null }>(db, 'SELECT id, entity_id, name, bookr_account_id FROM pay_accounts WHERE id = ? AND business_id = ? AND active = 1', p.payAccountId ?? null, bid);
     if (!acc) fail(400, `Payment ${n}: choose which account's QR was paid.`);
     out.payAccountId = acc.id;
     out.payAccountEntity = acc.entity_id;
@@ -65,7 +65,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
   }
   if (mode === 'room') {
     const a = await one<{ id: string; name: string }>(db, `SELECT d.id, d.name FROM debtor_accounts d JOIN stays s ON s.id = d.stay_id
-      WHERE d.id = ? AND d.business_id = ? AND d.kind = 'room' AND s.checked_out_at IS NULL`, p.debtorAccountId, bid);
+      WHERE d.id = ? AND d.business_id = ? AND d.kind = 'room' AND s.checked_out_at IS NULL`, p.debtorAccountId ?? null, bid);
     if (!a) fail(400, `Payment ${n}: choose an in-house room.`);
     out.debtorAccountId = a.id;
     out.debtorName = a.name;
@@ -78,7 +78,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
       out.debtorName = out.newCredit.name;
     } else {
       const a = await one<{ id: string; credit_limit_paise: number | null; name: string }>(db,
-        "SELECT id, credit_limit_paise, name FROM debtor_accounts WHERE id = ? AND business_id = ? AND kind = 'credit'", p.debtorAccountId, bid);
+        "SELECT id, credit_limit_paise, name FROM debtor_accounts WHERE id = ? AND business_id = ? AND kind = 'credit'", p.debtorAccountId ?? null, bid);
       if (!a) fail(400, `Payment ${n}: choose a credit account, or add a new one.`);
       if (a.credit_limit_paise !== null && (await balance(db, a.id)) + out.amountPaise > a.credit_limit_paise) {
         fail(409, `Payment ${n}: ${a.name} would go over its credit limit of ${rs(a.credit_limit_paise)}.`);
@@ -88,7 +88,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
     }
   }
   if (mode === 'advance') {
-    const a = await one<{ id: string; name: string }>(db, 'SELECT id, name FROM debtor_accounts WHERE id = ? AND business_id = ?', p.debtorAccountId, bid);
+    const a = await one<{ id: string; name: string }>(db, 'SELECT id, name FROM debtor_accounts WHERE id = ? AND business_id = ?', p.debtorAccountId ?? null, bid);
     if (!a) fail(400, `Payment ${n}: choose whose advance to use.`);
     const bal = await balance(db, a.id);
     if (-bal < out.amountPaise) fail(409, `Payment ${n}: ${a.name} has ${rs(Math.max(0, -bal))} of advance left.`);
@@ -153,6 +153,17 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     if (diff?.kind !== 'tip') fail(400, `Payments come to ${rs(paid)}, ${rs(paid - due)} more than the bill. Mark it as a tip, or enter cash given so change is worked out.`);
   }
 
+  // Steps a cashier may not take alone (21 Nov 2026): a complimentary bill (NC tables are closed by a manager already),
+  // a new credit account, or taking less than the bill by more than the discount limit.
+  const b0 = bizOf(c);
+  const needs = [
+    pays.some((p) => p.mode === 'comp') && data.nc !== true ? 'A complimentary bill' : null,
+    pays.some((p) => p.newCredit) ? 'A new credit account' : null,
+    paid < due && (due - paid) * 10000 > due * b0.disc_limit_bp ? `Taking ${rs(due - paid)} less than the bill` : null,
+  ].filter(Boolean) as string[];
+  const approver = needs.length && data.nc !== true ? await approval(c, data, needs.join(' and ')) : null;
+  const approved = approver && !isManager(c) ? ` · Approved by ${approver.name}` : '';
+
   // A UPI payment into another billing name's account is asked about first (the bill and the money should agree).
   const entities = new Set(ordered.map((b) => b.entity_id));
   const mismatch = pays.filter((p) => p.mode === 'upi' && !entities.has(p.payAccountEntity!));
@@ -171,7 +182,8 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   }
   const statements = [
     stmt(db, "INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at) VALUES (?, ?, 'bills', ?, ?, ?)", settlementId, bid, shiftDay, staff.id, t),
-    ...pays.filter((p) => p.newCredit).map((p) => newCreditAccount(db, bid, p, staff.id, t)),
+    ...pays.filter((p) => p.newCredit).flatMap((p) => [newCreditAccount(db, bid, p, staff.id, t),
+      audit(db, bid, staff.id, 'credit_account.create', 'debtor_accounts', p.debtorAccountId!, null, { name: p.newCredit!.name, phone: p.newCredit!.phone, approvedBy: approver?.name ?? null })]),
     ...pays.map((p) => insertPayment(db, bid, settlementId, p, shiftDay, staff.id, t)),
     ...pieces.map((x) => stmt(db, 'INSERT INTO allocations (payment_id, bill_id, business_id, amount_paise) VALUES (?, ?, ?, ?)', x.paymentId, x.billId, bid, x.amountPaise)),
     // Room, credit and advance: what the guest or company owes moves to (or is taken from) their account.
@@ -183,11 +195,11 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     }),
     ...ordered.map((x) => stmt(db, "UPDATE bills SET status = 'settled', settlement_id = ?, settled_at = ? WHERE id = ? AND status = 'printed'", settlementId, t, x.id)),
     ...ordered.map((x) => stmt(db, "UPDATE orders SET status = 'closed' WHERE id = ?", x.order_id)),
-    ...pays.filter((p) => p.mode === 'comp').map((p) => event(db, bid, 'comp', ordered.map((x) => x.bill_no).join(', '), p.amountPaise, p.compReason, `Guest: ${p.compGuest}`, staff.id, shiftDay)),
+    ...pays.filter((p) => p.mode === 'comp').map((p) => event(db, bid, 'comp', ordered.map((x) => x.bill_no).join(', '), p.amountPaise, p.compReason, `Guest: ${p.compGuest}${approved}`, staff.id, shiftDay)),
     ...short.flatMap((x) => [
       stmt(db, "INSERT INTO settle_differences (id, business_id, settlement_id, kind, bill_id, amount_paise, reason, shift_day, by_staff, at) VALUES (?, ?, ?, 'discount', ?, ?, ?, ?, ?, ?)",
         newId(), bid, settlementId, x.billId, x.amountPaise, discountReason, shiftDay, staff.id, t),
-      event(db, bid, 'discount', ordered.find((o) => o.id === x.billId)!.bill_no, x.amountPaise, discountReason, 'At payment (paid less than the bill)', staff.id, shiftDay),
+      event(db, bid, 'discount', ordered.find((o) => o.id === x.billId)!.bill_no, x.amountPaise, discountReason, `At payment (paid less than the bill)${approved}`, staff.id, shiftDay),
     ]),
     ...over.map((x) => stmt(db, "INSERT INTO settle_differences (id, business_id, settlement_id, kind, payment_id, amount_paise, shift_day, by_staff, at) VALUES (?, ?, ?, 'tip', ?, ?, ?, ?, ?)",
       newId(), bid, settlementId, x.paymentId, x.amountPaise, shiftDay, staff.id, t)),
@@ -284,7 +296,10 @@ settleRoutes.post(`${B}/debtors/:id/refund`, requireAction('debtors.receive'), a
   const credit = -(await balance(db, acc.id));
   if (credit <= 0) fail(409, `${acc.name} has no advance to refund.`);
   if (amount > credit) fail(409, `${acc.name} has only ${rs(credit)} of advance to refund.`);
-  const note = text(data, 'note', 'Note', { optional: true, max: 120 }) ?? 'Advance refunded';
+  const note0 = text(data, 'note', 'Note', { optional: true, max: 120 }) ?? 'Advance refunded';
+  // Money out of the drawer: a manager approves (21 Nov 2026).
+  const approver = await approval(c, data, 'A refund');
+  const note = isManager(c) ? note0 : `${note0} · Approved by ${approver.name}`.slice(0, 160);
   const { t, shiftDay } = clock(bizOf(c));
   const id = newId();
   const staff = c.get('staff');
@@ -312,4 +327,53 @@ settleRoutes.get(`${B}/debtors/:id`, requireAction('pos.view'), async (c) => {
     FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id
     WHERE e.account_id = ? ORDER BY e.at, e.id`, c.req.param('id'));
   return c.json({ account: acc, entries, balancePaise: await balance(c.env.DB, c.req.param('id')) });
+});
+
+// Corrects how a payment was taken (cash entered as UPI, the wrong UPI account, a card slip typed wrong) while its shift is
+// open (21 Nov 2026). Only cash, UPI and card; the amount, bills and time stay. A manager does it, or approves with a PIN.
+// The change is on the Daily check, and a bill message for Bookr not yet sent is corrected too; one already sent is not
+// changed here (a credit note and a new bill do that).
+settleRoutes.post(`${B}/payments/:id/change`, requireAction('bills.settle'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Payment not found.');
+  const p = await one<{ id: string; mode: string; amount_paise: number; shift_day: string; pay_account_id: string | null; card_last4: string | null; tendered_paise: number | null }>(db,
+    'SELECT id, mode, amount_paise, shift_day, pay_account_id, card_last4, tendered_paise FROM payments WHERE id = ? AND business_id = ?', id, bid);
+  if (!p) fail(404, 'Payment not found.');
+  if (!['cash', 'upi', 'card'].includes(p.mode)) fail(409, 'Only cash, UPI and card payments can be changed.');
+  if (await one(db, 'SELECT 1 FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, p.shift_day)) fail(409, 'That shift is closed, so its payments cannot change now.');
+  const data = await body(c);
+  const next = await readPayment(db, bid, { ...data, amount: `${Math.floor(p.amount_paise / 100)}.${String(p.amount_paise % 100).padStart(2, '0')}`, tendered: undefined }, 1, ['cash', 'upi', 'card']);
+  if (next.mode === p.mode && next.payAccountId === p.pay_account_id && next.mode !== 'card') fail(400, 'That is how it was taken already.');
+  const reason = text(data, 'reason', 'A reason for the change', { max: 120 })!;
+  const approver = await approval(c, data, 'Changing how a bill was paid');
+  const bills = await all<{ bill_no: string }>(db, 'SELECT b.bill_no FROM allocations a JOIN bills b ON b.id = a.bill_id WHERE a.payment_id = ? ORDER BY b.bill_no', id);
+  const sentAlready = await one(db, "SELECT 1 FROM outbox WHERE business_id = ? AND kind = 'bill_settled' AND sent_at IS NOT NULL AND body LIKE ?", bid, `%${id}%`);
+  if (sentAlready) fail(409, 'This payment has already gone to Bookr. Give the money back with a credit note and bill again.');
+  const pending = await all<{ id: string; body: string }>(db, "SELECT id, body FROM outbox WHERE business_id = ? AND kind = 'bill_settled' AND sent_at IS NULL AND body LIKE ?", bid, `%${id}%`);
+  const name = (m: string, acc: string | null) => (m === 'upi' ? `UPI${acc ? ` (${acc})` : ''}` : m === 'card' ? 'Card' : 'Cash');
+  const fromAcc = p.pay_account_id ? (await one<{ name: string }>(db, 'SELECT name FROM pay_accounts WHERE id = ?', p.pay_account_id))?.name ?? null : null;
+  const staff = c.get('staff');
+  const { t, shiftDay } = clock(bizOf(c));
+  const fixed = pending.map((m) => {
+    const msg = JSON.parse(m.body);
+    for (const x of msg.payments ?? []) if (x.paymentId === id) Object.assign(x, { mode: next.mode, payAccountId: next.payAccountId, payAccountName: next.payAccountName,
+      bookrAccountId: next.bookrAccountId, cardApproval: next.cardApproval, cardLast4: next.cardLast4 });
+    for (const x of msg.tips ?? []) if (x.paymentId === id) x.mode = next.mode;
+    return stmt(db, 'UPDATE outbox SET body = ? WHERE id = ? AND sent_at IS NULL', JSON.stringify(msg), m.id);
+  });
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE payments SET mode = ?, pay_account_id = ?, card_approval = ?, card_last4 = ?, tendered_paise = ? WHERE id = ?',
+        next.mode, next.payAccountId, next.cardApproval, next.cardLast4, next.mode === 'cash' ? p.tendered_paise : null, id),
+      ...fixed,
+      event(db, bid, 'pay_change', bills.map((x) => x.bill_no).join(', '), p.amount_paise, reason,
+        `${name(p.mode, fromAcc)} → ${name(next.mode, next.payAccountName)}${isManager(c) ? '' : ` · Approved by ${approver.name}`}`, staff.id, shiftDay),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'That shift is closed, so its payments cannot change now.');
+    throw e;
+  }
+  return c.json({ ok: true });
 });

@@ -32,10 +32,12 @@ settingsRoutes.put(`${B}/settings`, requireAction('staff.manage'), async (c) => 
     fy_start_month: int(data.fyStartMonth, 'Financial year start month', 1, 12),
     shift_start_hour: int(data.shiftStartHour, 'Shift start hour', 0, 23),
     tab_age_days: int(data.tabAgeDays, 'Tab age limit (days)', 1, 60),
+    // Optional so older screens keep working: the discount a cashier gives alone, in whole percent.
+    disc_limit_bp: data.discLimitPct === undefined ? before.disc_limit_bp : int(data.discLimitPct, 'Discount a cashier may give alone (%)', 0, 100) * 100,
   };
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE businesses SET name = ?, fy_start_month = ?, shift_start_hour = ?, tab_age_days = ? WHERE id = ?',
-      after.name, after.fy_start_month, after.shift_start_hour, after.tab_age_days, id),
+    stmt(c.env.DB, 'UPDATE businesses SET name = ?, fy_start_month = ?, shift_start_hour = ?, tab_age_days = ?, disc_limit_bp = ? WHERE id = ?',
+      after.name, after.fy_start_month, after.shift_start_hour, after.tab_age_days, after.disc_limit_bp, id),
     audit(c.env.DB, id, c.get('staff').id, 'business.update', 'businesses', id, before, after),
   ]);
   return c.json({ ok: true });

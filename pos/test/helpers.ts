@@ -90,7 +90,9 @@ export async function setupBusiness(opts: { huf?: boolean; businessId?: string; 
   counter.cookies.delete('pos_session');
   await ok(counter.post('/auth/pin', { staffId: cashierId, pin: '2468' }));
 
-  return { businessId, B, owner, counter, company, huf, upiCompany, upiHuf, items, reasons, cashierId, captainId, managerId, ok };
+  // A manager's PIN sent with a step a cashier may not take alone (21 Nov 2026).
+  const mgr = { approverId: managerId, approverPin: '9753' };
+  return { businessId, B, owner, counter, company, huf, upiCompany, upiHuf, items, reasons, cashierId, captainId, managerId, mgr, ok };
 }
 
 /** Opens a table order, adds items, sends the KOT and prints the bill. */
