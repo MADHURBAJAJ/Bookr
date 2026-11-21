@@ -5912,7 +5912,45 @@ function sgMiddle(c) {
   const head = c.kind === 'no_bill' || (chips && (c.billNos ?? []).length) ? '' : html`<span class="sg-t">${c.title}</span>`;
   return html`${head}${chips ? html`<span class="sg-chips">${chips}</span>` : ''}${(c.evidence ?? []).length ? html`<details class="sg-why"><summary>Why</summary><ul>${c.evidence.map((e) => html`<li>${e}</li>`)}</ul></details>` : ''}`;
 }
-function sgRow(c, day) {
+// Same sale (approved 21 Nov 2026): the money on one side, the bill on the other, what is wrong now and what the button does.
+const ssDay = (d) => dayLabel(d).replace(/\s\d{4}$/, '');
+const ssWhen = (ms) => `${new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' }).format(new Date(ms))}, ${hhmm(ms)}`;
+const ssRs = (p) => `₹${money(p).replace(/\.00$/, '')}`;
+function sameSaleRow(c, ctx) {
+  const { credit: m, bill: b, counted, trial, others } = c.same;
+  const a = c.actions.find((x) => x.primary) ?? c.actions[0];
+  const ai = c.actions.indexOf(a);
+  const bookedDay = ssDay(m.day);
+  const left = ctx?.billsLeftPaise;
+  const after = [`One sale, on ${bookedDay}, matched to this bill.`,
+    ...(b.headName && m.headName && b.headName !== m.headName ? [`It moves from ${m.headName} to ${b.headName}.`] : []),
+    ...(left != null && left >= b.amountPaise && b.day === ctx.day ? [`${ssDay(b.day)}: not in the bank yet ${ssRs(left)} → ${ssRs(left - b.amountPaise)}.`] : []),
+    ...(trial ? ['Done when you save the shift.'] : [])].join(' ');
+  const amounts = [b.rgPaise != null ? `Register ${ssRs(b.rgPaise)}` : '', b.swPaise != null ? `Software ${ssRs(b.swPaise)}` : ''].filter(Boolean).join(' · ');
+  return html`<div class="ss-card" data-card="${c.key}">
+    <div class="ss-pair">
+      <div class="ss-side"><div class="tiny">${bookedDay} shift · ${m.advance ? 'advance came' : 'money came'}</div>
+        <div class="ss-amt">${ssRs(m.amountPaise)}</div>
+        <div class="tiny">Bank · ${ssWhen(m.postedAt)}</div>${m.accountName ? html`<div class="tiny">${m.accountName}</div>` : ''}
+        <span class="ss-tag">${m.advance ? 'Booked as an advance' : `Booked as ${m.headName ?? 'a sale'}, no bill`}</span></div>
+      <div class="ss-mid"><span>same money?</span><span class="ss-arrow" aria-hidden="true">⇄</span></div>
+      <div class="ss-side"><div class="tiny">${ssDay(b.day)} shift · bill came</div>
+        <div class="ss-amt">${ssRs(b.amountPaise)}</div>
+        <div class="tiny">Bill <button type="button" class="linkbtn mono" data-bill-drawer="${b.billNo}|${b.day}" title="Everything about this bill">${b.billNo}</button>${b.paidAt ? ` · ${hhmm(b.paidAt)}` : ''}</div>
+        ${amounts ? html`<div class="tiny">${amounts}</div>` : ''}
+        <span class="ss-tag wait">Waiting for money</span></div>
+    </div>
+    <div class="ss-now">
+      <div class="ss-bad"><strong>Now</strong>${counted ? `One ${ssRs(b.amountPaise)} sale shows twice. ` : ''}The bill waits for money that already came.</div>
+      <div class="ss-good"><strong>After Same sale</strong>${after}</div>
+    </div>
+    ${others ? html`<div class="tiny error">${others} other bill${others === 1 ? '' : 's'} of this amount on this shift: check the number first.</div>` : ''}
+    <div class="ss-acts"><button class="btn plain dchip" type="button" data-carddismiss="${c.key}" title="Not the same: hide it on this device">Not the same</button>
+      ${a ? html`<button class="btn dchip" type="button" data-cardact="${c.key}" data-i="${ai}">${a.label}</button>` : ''}</div>
+    <div class="form-msg"></div></div>`;
+}
+function sgRow(c, day, ctx) {
+  if (c.kind === 'same_sale' && c.same) return sameSaleRow(c, ctx);
   const bills = (c.billNos ?? []).filter(Boolean);
   const lead = bills.length ? bills.map((b) => html`<button type="button" class="linkbtn mono sg-bill" data-bill-drawer="${b}|${day ?? ''}" title="Everything about this bill">${b}</button>`) : c.kind === 'no_bill' ? html`<span class="sg-t">${c.title.replace(/ with no bill$/, '')}</span>` : '';
   const wait = c.kind === 'no_upi_credit';
@@ -5922,7 +5960,7 @@ function sgRow(c, day) {
       <button class="btn plain dchip sg-x" type="button" data-carddismiss="${c.key}" title="${wait ? 'Leave it for a later bank statement (hidden on this device)' : 'Not this: hide it on this device'}" aria-label="${wait ? 'Wait' : 'Not this'}">${wait ? 'Wait' : '✕'}</button></div>
     <div class="form-msg"></div></div>`;
 }
-function suggestionList(cards, day) {
+function suggestionList(cards, day, ctx) {
   if (!cards.length) return '';
   const known = new Set(SG_GROUPS.flatMap((g) => g[3]));
   const groups = [...SG_GROUPS, ['other', 'Other checks', '', []]].map(([id, title, sub, kinds]) => [id, title, sub,
@@ -5931,7 +5969,7 @@ function suggestionList(cards, day) {
     const all = id === 'bank' && list.length > 1 && list.every((c) => c.actions?.[0] && !c.actions[0].href && c.actions[0].op !== 'pick');
     return html`<section class="sg-group left-box" data-sg="${id}"><div class="sg-h"><strong>${title} (${list.length})</strong>${sub ? html`<span class="tiny">${sub}</span>` : ''}<span class="lo-fill"></span>
       ${all ? html`<button class="btn dchip" type="button" data-cardall="${list.map((c) => c.key).join('|')}">Accept all ${list.length}</button>` : ''}</div>
-      ${list.map((c) => sgRow(c, day))}<div class="form-msg" data-sgmsg></div></section>`;
+      ${list.map((c) => sgRow(c, day, ctx))}<div class="form-msg" data-sgmsg></div></section>`;
   })}`;
 }
 const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist" aria-label="Reconcile">
@@ -6338,7 +6376,7 @@ async function reconcileView(biz, dayArg) {
       <div class="sg-acts"><button class="btn dchip" type="button" data-nearmatch="${i}">${nearLabel(p)}</button>
         <button class="btn plain dchip sg-x" type="button" data-carddismiss="near:${p.bill.id}:${p.credit.id}" title="Not these: keep them apart on this device" aria-label="Not these">✕</button></div>
       <div class="form-msg"></div></div>`)}</section>` : ''}
-    ${isSameCards.length ? suggestionList(isSameCards, day) : ''}
+    ${isSameCards.length ? suggestionList(isSameCards, day, { day, billsLeftPaise: r.strip?.billsLeftPaise }) : ''}
   </section>` : '');
   const view = reconcileViewPref(r.confirmed);
   const creditCell = (x) => html`${when(x.postedAt)}<div class="tiny">${x.accountName}${x.minutes != null ? ` · ${x.minutes} min from the bill` : ' · register only, no bill time'}</div>`;

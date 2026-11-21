@@ -17,7 +17,7 @@ import { cashOver, isMachineUpi, machineLabel, shiftCards, unsettledDays } from 
 import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
-import { bookedTx, joinedBill, planTaken, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
+import { bookedTx, joinedBill, planTaken, plansFor, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
 import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
@@ -1538,7 +1538,16 @@ async function upiBankVsBookr(db: D1Database, bid: string, day: string, strip: {
       ORDER BY t.shift_day, t.bill_no LIMIT 5`, bid, addDays(day, -1), addDays(day, 1), day, bid),
   ]);
   const totalPaise = tot.reduce((t, x) => t + (x.a ?? 0), 0);
-  const booked = tot.find((x) => x.status === 'booked');
+  const booked0 = tot.find((x) => x.status === 'booked');
+  // Same sale chosen, done on save (21 Nov 2026): the booked credit pays its bill now. In the window it counts for the
+  // bills, not as a sale with no bill; from another shift the bill is paid on another day.
+  const plans = await plansFor(db, bid, day);
+  const planned = plans.length ? await all<{ id: string; amountPaise: number; postedAt: number; billNo: string }>(db, `SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt, c.bill_no AS billNo
+    FROM bank_rows r JOIN bill_comparisons c ON c.business_id = r.business_id WHERE r.business_id = ? AND r.status = 'booked' AND (${plans.map(() => '(r.id = ? AND c.id = ?)').join(' OR ')})`,
+    bid, ...plans.flatMap((p) => [p.rowId, p.comparisonId])) : [];
+  const joinIn = planned.filter((x) => x.postedAt >= w.from && x.postedAt < w.to);
+  const joinOut = planned.filter((x) => x.postedAt < w.from || x.postedAt >= w.to);
+  const booked = booked0 ? { ...booked0, n: booked0.n - joinIn.length, a: (booked0.a ?? 0) - joinIn.reduce((t, x) => t + x.amountPaise, 0) } : undefined;
   const otherPaise = other.reduce((t, x) => t + x.amountPaise, 0);
   const forBillsPaise = totalPaise - (booked?.a ?? 0) - strip.creditsLeftPaise - otherPaise - cardPaise;
   return {
@@ -1548,7 +1557,8 @@ async function upiBankVsBookr(db: D1Database, bid: string, day: string, strip: {
     cardPaise,
     bookedPaise: booked?.a ?? 0, booked: booked?.n ?? 0,
     leftPaise: strip.creditsLeftPaise, left: strip.creditsLeft,
-    elsewhere: outside.map((x) => ({ amountPaise: x.amountPaise, postedAt: x.postedAt, bills: x.bills, day: shiftDayOf(x.postedAt) })),
+    elsewhere: [...outside.map((x) => ({ amountPaise: x.amountPaise, postedAt: x.postedAt, bills: x.bills, day: shiftDayOf(x.postedAt) })),
+      ...joinOut.map((x) => ({ amountPaise: x.amountPaise, postedAt: x.postedAt, bills: x.billNo, day: shiftDayOf(x.postedAt) }))],
     waiting,
   };
 }

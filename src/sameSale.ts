@@ -11,7 +11,7 @@ const WATCH = 7;
 const SMALL_PAISE = 10000;
 
 export interface BookedSale { id: string; amountPaise: number; postedAt: number; txId: string; txDay: string; headId: string | null; headName: string | null; accountName: string | null; advance?: number }
-export interface WaitingBill { billNo: string; amountPaise: number; day: string; txId?: string; comparisonId: string; swPaise: number | null; rgPaise: number | null; headName: string | null; txCount?: number }
+export interface WaitingBill { billNo: string; amountPaise: number; day: string; txId?: string; comparisonId: string; swPaise: number | null; rgPaise: number | null; headName: string | null; txCount?: number; paidAt?: number | null }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms));
@@ -66,6 +66,8 @@ export function sameSaleCard(base: string, p: { bill: WaitingBill; credit: Booke
     uses: [...(bill.txId ? [`tx:${bill.txId}`] : []), `cmp:${bill.comparisonId}`],
     witnesses: { software: bill.swPaise != null ? `Bill ${bill.billNo} · ${rs(bill.swPaise)}` : null, register: bill.rgPaise != null ? `Bill ${bill.billNo} · ${rs(bill.rgPaise)}` : null,
       bank: `${rs(credit.amountPaise)} at ${hm(credit.postedAt)}, ${onBook}${credit.accountName ? ` · ${credit.accountName}` : ''}`, odd: null },
+    same: { credit: { amountPaise: credit.amountPaise, postedAt: credit.postedAt, day: credit.txDay, accountName: credit.accountName, headName: credit.headName, advance: !!credit.advance },
+      bill: { billNo: bill.billNo, amountPaise: bill.amountPaise, day: bill.day, swPaise: bill.swPaise, rgPaise: bill.rgPaise, paidAt: bill.paidAt ?? null, headName: bill.headName }, counted, trial, others },
     actions: [{ label: 'Same sale', primary: true, method: 'POST',
       path: trial ? `${base}/comparisons/${bill.comparisonId}/same-sale` : `${base}/sales/${bill.txId}/same-sale`, body: { rowId: credit.id } }],
   };

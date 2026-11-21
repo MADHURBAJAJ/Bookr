@@ -20,7 +20,11 @@ export interface Action { label: string; method?: 'POST' | 'PUT' | 'DELETE'; pat
 export interface Witnesses { software: string | null; register: string | null; bank: string; odd: 'software' | 'register' | 'bank' | null }
 export interface Card { key: string; kind: string; title: string; evidence: string[]; score: number; uses: string[]; actions: Action[]; billNos: string[]; witnesses?: Witnesses;
   /** A bill's amount and time, for the cards about one bill (Reports, 17 Nov 2026). */
-  amountPaise?: number; paidAt?: number | null }
+  amountPaise?: number; paidAt?: number | null;
+  /** Same sale (approved 21 Nov 2026): the money and the bill side by side. */
+  same?: { credit: { amountPaise: number; postedAt: number; day: string; accountName: string | null; headName: string | null; advance: boolean };
+    bill: { billNo: string; amountPaise: number; day: string; swPaise: number | null; rgPaise: number | null; paidAt: number | null; headName: string | null };
+    counted: boolean; trial: boolean; others: number } }
 
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rupees = (p: number) => (p / 100).toFixed(2);

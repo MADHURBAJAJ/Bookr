@@ -213,6 +213,11 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     if (c.decision === 'leave_out' || c.decision === 'carry_forward') return [];
     const side = c.decision === 'use_software' ? c.software : c.decision === 'use_register' || c.difference === 'match' ? c.register
       : c.register?.mode === 'upi' ? c.register : c.software?.mode === 'upi' ? c.software : null;
+    // A register bill paid in two modes (21 Nov 2026): its UPI part is a UPI bill of its own, for that part's amount.
+    if (side && side.mode === 'mixed' && side === c.register && c.register?.rowId) {
+      const upi = paysOf(c.register.rowId as string).filter((p) => p.mode === 'upi').reduce((t, p) => t + p.amountPaise, 0);
+      return upi ? [{ c, amount: upi, grouped: inGroup(c.register?.rowId) }] : [];
+    }
     if (!side || side.mode !== 'upi' || !side.amountPaise) return [];
     return [{ c, amount: side.amountPaise as number, grouped: inGroup(c.register?.rowId) }];
   });
@@ -329,7 +334,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   }
   const single = left.filter((x) => !x.grouped && !billOf.has(x.c.id) && !x.c.bank && !(paysOf(x.c.register?.rowId ?? '').length > 1));
   const waiting: WaitingBill[] = single.map((x) => ({ billNo: x.c.billNo, amountPaise: x.amount, day, comparisonId: x.c.id, swPaise: (x.c.software?.amountPaise as number | null) ?? null, rgPaise: (x.c.register?.amountPaise as number | null) ?? null,
-    headName: headOfType.get((x.c.register?.billType ?? '') as string) ?? null }));
+    headName: headOfType.get((x.c.register?.billType ?? '') as string) ?? null, paidAt: (x.c.paidAt as number | null) ?? null }));
   const fromPlans = new Set(plans.map((x) => x.rowId));
   for (const p of pairBooked(waiting, booked.filter((x) => !fromPlans.has(x.id)), day)) {
     const b = single.find((x) => x.c.id === p.bill.comparisonId)!;

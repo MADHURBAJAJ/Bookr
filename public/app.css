@@ -694,3 +694,24 @@ tr.rd-red td { background: #FCEBEB; }
 .ub-sub td:nth-child(2) { text-align: right; }
 .ub-hand > summary { cursor: pointer; color: var(--muted); font-size: 14px; padding: 4px 2px; list-style: none; }
 .nb-near { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; background: #DCFCE7; color: #166534; border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+
+/* Same sale (approved 21 Nov 2026): the money and the bill side by side. */
+.ss-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
+.ss-pair { display: grid; grid-template-columns: minmax(0, 1fr) 90px minmax(0, 1fr); align-items: stretch; }
+.ss-side { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.ss-side .tiny { color: var(--muted); }
+.ss-amt { font-size: 22px; font-weight: 600; margin: 2px 0; }
+.ss-tag { margin-top: 6px; font-size: 12px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--ground); }
+.ss-tag.wait { background: var(--wait-bg); border-color: var(--wait-bg); color: var(--wait); }
+.ss-mid { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--wait); font-size: 12px; }
+.ss-arrow { font-size: 22px; line-height: 1; }
+.ss-now { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; font-size: 13px; }
+.ss-now strong { display: block; margin-bottom: 2px; }
+.ss-bad { background: #FDECEC; color: var(--danger); border-radius: 8px; padding: 8px 10px; }
+.ss-good { background: var(--ok-bg); color: var(--ok); border-radius: 8px; padding: 8px 10px; }
+.ss-acts { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 640px) {
+  .ss-pair { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .ss-mid { flex-direction: row; gap: 6px; }
+  .ss-now { grid-template-columns: minmax(0, 1fr); }
+}

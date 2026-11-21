@@ -83,12 +83,17 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     let r = (await h.clients.owner.get(url)).json;
     const trialCard = r.fixes.find((c: any) => c.kind === 'same_sale');
     expect(trialCard.billNos).toEqual(['2610318']);
+    // The two sides for the side-by-side card (21 Nov 2026).
+    expect(trialCard.same.bill).toMatchObject({ billNo: '2610318', amountPaise: 65000, day: '2026-10-31' });
+    expect(trialCard.same.credit.amountPaise).toBe(65000);
+    expect(trialCard.same.trial).toBe(true);
     expect((await h.clients.accountant.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).status).toBe(200);
     // Not chosen before confirming: both count, until a person joins them.
     expect((await incomeFor(h.bid, 65000)).length).toBe(2);
     r = (await h.clients.owner.get(url)).json;
     const card = r.fixes.find((c: any) => c.kind === 'same_sale');
     expect(card.title).toContain('2610318');
+    expect(card.same).toMatchObject({ trial: false, bill: { billNo: '2610318' } });
     expect(r.noCredit.some((c: any) => c.billNos.includes('2610318'))).toBe(false);
     const act = card.actions[0];
     expect((await h.clients.entry_staff.post(act.path, act.body)).status).toBe(403);
