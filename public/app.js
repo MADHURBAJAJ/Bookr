@@ -3972,6 +3972,9 @@ function cashPanelHtml(biz, k, opts = {}) {
   const edit = (b) => html`<button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}">Edit</button>${draft && b.state !== 'complimentary' && biz.actions.includes('sales.decide') ? html`<button type="button" class="btn plain dchip" data-makecomp="${b.comparisonId}" data-bill="${b.billNo}">Make complimentary</button>` : ''}`;
   const decide = opts.decide ? html`<button type="button" class="btn plain dchip" data-goto="all">Decide on All bills</button>` : '';
   const other = (b) => b.rgOther.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${money(p.amountPaise)}`).join(' + ');
+  // Plain words on the cash bills (approved 21 Nov 2026): ₹839, not ₹ 839.00.
+  const rr = (p) => `₹${money(p).replace(/\.00$/, '')}`;
+  const otherRs = (b) => b.rgOther.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${rr(p.amountPaise)}`).join(' + ');
   // What could explain the difference: each bill that differs, with what each choice would add to the cash.
   const gap = diff === null ? null : Math.abs(diff);
   const items = [];
@@ -3993,12 +3996,12 @@ function cashPanelHtml(biz, k, opts = {}) {
     } else if (b.rgCashPaise === null) {
       text = html`software Cash ₹ ${money(sw)}, not in the register`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Left out', 0]] : [];
-      if (b.decision === 'use_software') text = html`software Cash ₹ ${money(sw)}, not in the register: counted, may not have reached the drawer`;
+      if (b.decision === 'use_software') text = html`${rr(sw)} cash in the software, not in the register<div class="tiny note">Bookr counts it in the drawer. Was it?</div>`;
     } else if (b.swCashPaise === null) {
       text = html`register Cash ₹ ${money(rg)}, software ${b.swMode ? `${MODE_LABELS[b.swMode] ?? b.swMode} ₹ ${money(b.swAmountPaise ?? 0)}` : 'nothing'}`;
       effects = b.state === 'undecided' ? [['Use register', rg], ['Use software', 0]] : [];
     } else if (b.rgOther.length && !rg) {
-      text = html`software Cash ₹ ${money(sw)}, register ${other(b)}`;
+      text = html`software says cash ${rr(sw)}, register says ${otherRs(b)}`;
       effects = b.state === 'undecided' ? [['Use software', sw], ['Use register', 0]] : [];
     } else {
       text = html`Cash ₹ ${money(sw)} software, ₹ ${money(rg)} register${b.rgOther.length ? ` (+ ${other(b)})` : ''}`;
@@ -4007,7 +4010,7 @@ function cashPanelHtml(biz, k, opts = {}) {
     // Each side as a choice with what it does to the difference (14 Nov 2026): a person can switch the side here.
     const both = b.swAmountPaise != null && b.rgCashPaise !== null && b.state !== 'complimentary' && !b.groupSize && draft && biz.actions.includes('sales.decide');
     const after = (v) => (diff == null ? null : diff - (v - (b.countedPaise ?? 0)));
-    const word = (d) => (d == null ? '' : d === 0 ? 'cash agrees' : d < 0 ? `short ₹ ${money(-d)}` : `₹ ${money(d)} over`);
+    const word = (d) => (d == null ? '' : d === 0 ? 'cash agrees' : d < 0 ? `short ${rr(-d)}` : `${rr(d)} over`);
     const sideName = (which) => (which === 'use_software' ? `${MODE_LABELS[b.swMode] ?? b.swMode ?? 'no mode'} ₹ ${money(b.swAmountPaise ?? 0)}`
       : [...(b.rgCashPaise ? [`Cash ${money(b.rgCashPaise)}`] : []), ...b.rgOther.map((p) => `${MODE_LABELS[p.mode] ?? p.mode} ${money(p.amountPaise)}`)].join(' + ') || 'no payment');
     // Cash in the software, UPI or card in the register with no payment of its own (18 Nov 2026): the cashier says which.
@@ -4016,13 +4019,13 @@ function cashPanelHtml(biz, k, opts = {}) {
     const asked = otherOnly && !b.witness?.found;
     const otherWord = otherOnly ? (MODE_LABELS[b.rgOther[0].mode] ?? b.rgOther[0].mode) : '';
     const switches = both ? [['use_software', sw], ['use_register', rg]].map(([d, v]) => ({ d, v, on: b.decision === d,
-      text: asked ? (d === 'use_software' ? 'Cashier says cash' : `It was ${otherWord}`) : `${d === 'use_software' ? 'Use software' : 'Use register'} (${sideName(d)})`,
-      label: asked ? (d === 'use_software' ? `Cashier says cash ${money(sw)}` : `It was ${otherWord} ${other(b)}`) : null,
+      text: asked ? (d === 'use_software' ? 'It was cash' : `It was ${otherWord}`) : `${d === 'use_software' ? 'Use software' : 'Use register'} (${sideName(d)})`,
+      label: asked ? (d === 'use_software' ? `It was cash ${rr(sw)}` : `It was ${b.rgOther.length === 1 ? `${otherWord} ${rr(b.rgOther[0].amountPaise)}` : otherRs(b)}`) : null,
       note: asked && d === 'use_software' ? `Cashier says cash; the register wrote ${other(b)}` : '', then: word(after(v)) })) : [];
-    if (otherOnly && b.decision === 'use_software') text = html`software Cash ₹ ${money(sw)}, register ${other(b)}: counted as cash`;
+    if (otherOnly && b.decision === 'use_software') text = html`software says cash ${rr(sw)}, register says ${otherRs(b)}: counted as cash`;
     const wit = b.witness ? (b.witness.found ? html`<div class="tiny" style="color:var(--teal)">✓ ${b.witness.found}: ${MODE_LABELS[b.witness.mode] ?? b.witness.mode} ₹ ${money(b.witness.amountPaise)} was received</div>`
       : b.witness.takenBy ? html`<div class="tiny" style="color:#92400E">No UPI credit of its own. The ₹ ${money(b.witness.amountPaise)} credit at ${when(b.witness.takenBy.at)} is bill <span class="mono">${b.witness.takenBy.billNo}</span>'s.</div>`
-      : html`<div class="tiny" style="color:#92400E">No ${b.witness.mode === 'upi' ? 'UPI credit in the bank or UPI on the card machine' : 'card-machine payment'} of ₹ ${money(b.witness.amountPaise)} near this bill</div>`) : '';
+      : html`<div class="tiny" style="color:#92400E">${b.witness.mode === 'upi' ? `No ${rr(b.witness.amountPaise)} UPI in the bank or card machine` : `No ${rr(b.witness.amountPaise)} card payment on the machine`}</div>`) : '';
     // Counted as UPI or card with its payment found (2610302, 18 Nov 2026): settled, told quietly, not a choice.
     if (otherOnly && b.decision === 'use_register' && b.witness?.found && !(b.countedPaise ?? 0)) {
       items.push({ same: false, quiet: true, html: html`<div class="ent-line" style="color:var(--muted)"><div><span class="mono">${b.billNo}</span> · software Cash ₹ ${money(sw)}, register ${other(b)} · ${b.witness.found}</div>
@@ -4110,7 +4113,7 @@ function cashPanelHtml(biz, k, opts = {}) {
   const tillLine = (list, word, paise) => (list.length ? html`<tr><td></td><td class="note" colspan="3"><details><summary style="cursor:pointer">${word} on <u>${list.length} bill${list.length === 1 ? '' : 's'}</u> · ₹ ${money(paise)}</summary>
     ${list.map((b) => html`<div class="tiny"><span class="mono">${b.billNo}</span> · software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)} · ${b.roundedPaise > 0 ? 'discount' : 'extra'} ₹ ${money(Math.abs(b.roundedPaise))}</div>`)}</details></td></tr>` : '');
   const roundedRows = html`${tillLine(rounded.filter((b) => b.roundedPaise > 0), 'Discount at the till', off)}${tillLine(rounded.filter((b) => b.roundedPaise < 0), 'Paid more than the bill', extra)}`;
-  if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'} ₹ ${money(k.expensesWaitingPaise)}, not taken off yet.</div>
+  if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'}, ₹${money(k.expensesWaitingPaise).replace(/\.00$/, '')}: counted once approved</div>
     <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review${k.expensesWaitingUploadId ? `/${k.expensesWaitingUploadId}` : `?day=${k.day}`}">Review</a></div></div>` });
   items.sort((a, b) => Number(!!b.top) - Number(!!a.top) || Number(b.same) - Number(a.same));
   const tops = items.filter((x) => x.top), rest = items.filter((x) => !x.top);
@@ -4150,7 +4153,7 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${diff !== null ? row('Difference', `${diff < 0 ? 'short' : diff > 0 ? 'over' : ''}${wasDiff != null && wasDiff !== diff ? ` · was ${wasDiff < 0 ? `₹ ${money(-wasDiff)} short` : wasDiff > 0 ? `₹ ${money(wasDiff)} over` : '₹ 0'} when saved` : ''}`, diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
     </table></div></details>
     ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px">${tops.map((x) => x.html)}
-      ${rest.filter((x) => !x.quiet).length ? html`<strong>Bills that change the cash</strong><div class="tiny note">Each button shows what the difference becomes. The ticked one is how it stands now.</div>${rest.filter((x) => !x.quiet).map((x) => x.html)}` : ''}
+      ${rest.filter((x) => !x.quiet).length ? html`<strong>Bills that change the cash</strong><div class="tiny note">Each button shows what the shortage becomes. ✓ is how it stands now.</div>${rest.filter((x) => !x.quiet).map((x) => x.html)}` : ''}
       ${rest.filter((x) => x.quiet).length ? html`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px"><strong>Not in the drawer: paid another way</strong><span class="chip ok">${rest.filter((x) => x.quiet).length} · nothing to do</span></div>${rest.filter((x) => x.quiet).map((x) => x.html)}` : ''}
       ${k.reverse ? html`<div class="ent-line"><span class="chip">Came late?</span> Over by ₹ ${money(k.reverse.amountPaise)}: a shortage of the same was booked on ${dayLabel(k.reverse.day)}${k.reverse.billNo ? ` for bill ${k.reverse.billNo}` : ''}.
         ${biz.actions.includes('cash.writeoff') ? html`<button class="btn plain dchip" type="button" id="cashreverse" data-tx="${k.reverse.id}" data-day="${k.reverse.day}">Reverse that shortage</button>` : ''}
