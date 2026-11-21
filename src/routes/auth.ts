@@ -3,19 +3,21 @@ import type { AppEnv } from '../types';
 import { all, one } from '../db';
 import { DUMMY_HASH, verifyPassword } from '../crypto';
 import { endSession, requireUser, startSession } from '../auth';
-import { body, fail, text } from '../http';
+import { body, fail, normalizePhone, text } from '../http';
 import { actionsFor, isRole, type Role } from '../permissions';
 
 export const authRoutes = new Hono<AppEnv>();
 
 authRoutes.post('/auth/login', async (c) => {
   const data = await body(c);
-  const email = text(data, 'email', 'Email', { max: 254 })!;
+  // Email, or a mobile number for people who joined by phone (21 Nov 2026).
+  const login = text(data, 'email', 'Email or mobile number', { max: 254 })!;
   const password = typeof data.password === 'string' ? data.password : '';
+  const phone = login.includes('@') ? null : normalizePhone(login);
   const user = await one<{ id: string; password_hash: string }>(c.env.DB,
-    'SELECT id, password_hash FROM users WHERE lower(email) = lower(?)', email);
+    phone ? 'SELECT id, password_hash FROM users WHERE phone = ?' : 'SELECT id, password_hash FROM users WHERE lower(email) = lower(?)', phone ?? login);
   const ok = await verifyPassword(password, user?.password_hash ?? DUMMY_HASH);
-  if (!user || !ok) fail(401, 'Email or password is incorrect.');
+  if (!user || !ok) fail(401, phone ? 'Mobile number or password is incorrect.' : 'Email or password is incorrect.');
   await startSession(c, c.env.DB, user.id);
   return c.json({ ok: true });
 });

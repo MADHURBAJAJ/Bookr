@@ -56,3 +56,18 @@ export function isUuid(v: string | undefined): v is string {
 export function isEmail(v: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) && v.length <= 254;
 }
+
+// Mobile numbers (21 Nov 2026, cashiers sign in by phone): an Indian mobile as +91 and ten digits, from what a person
+// types (spaces, dashes, a leading 0, 91 or +91 allowed). null when it is not one.
+export function normalizePhone(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  let d = v.replace(/[\s\-().]/g, '');
+  if (d.startsWith('+91')) d = d.slice(3);
+  else if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  else if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  return /^[6-9]\d{9}$/.test(d) ? `+91${d}` : null;
+}
+/** The stand-in email of a person who signs in by phone (never shown; see migration 0032). */
+export const phoneEmail = (phone: string) => `${phone.slice(1)}@phone.bookr.invalid`;
+/** SQL for what to show as a person's sign-in: their mobile number when they joined by phone, else their email. */
+export const signInSql = (t: string) => `CASE WHEN ${t}.phone IS NOT NULL AND ${t}.email LIKE '%@phone.bookr.invalid' THEN ${t}.phone ELSE ${t}.email END`;

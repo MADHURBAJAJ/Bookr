@@ -8,9 +8,10 @@ import { Hono, type Context } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
-import { body, date, fail, isUuid, paise, text } from '../http';
-import { bookDay, bookFor, booksOf, depositCandidates, handovers, inHandThrough, seesAllBooks, type HandoverRow } from '../cashbook';
+import { body, date, fail, isUuid, paise, signInSql, text } from '../http';
+import { bookDay, bookDays, bookFor, booksOf, depositCandidates, feeChecks, handovers, inHandThrough, receiptRange, seesAllBooks, type HandoverRow } from '../cashbook';
 import { can } from '../permissions';
+import { refillAll } from '../fees';
 
 export const cashBookRoutes = new Hono<AppEnv>();
 
@@ -52,16 +53,30 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   const visible = (h: HandoverRow) => seesAllBooks(role) || mine.has(h.fromAccountId) || (h.toKind === 'book' && mine.has(h.toAccountId!));
   const setup = can(role, 'accounts.edit');
   const [members, banks] = setup || can(role, 'rows.approve') ? await Promise.all([
-    setup ? all<{ id: string; name: string; email: string; role: string }>(db, `SELECT u.id, u.name, u.email, m.role FROM memberships m JOIN users u ON u.id = m.user_id
+    setup ? all<{ id: string; name: string; email: string; role: string }>(db, `SELECT u.id, u.name, ${signInSql('u')} AS email, m.role FROM memberships m JOIN users u ON u.id = m.user_id
       WHERE m.business_id = ? ORDER BY u.name`, bid) : Promise.resolve([]),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE business_id = ? AND kind = 'bank' ORDER BY name", bid),
   ]) : [[], []];
+  // Inviting a cashier by phone from their book (21 Nov 2026): the Owner sees each book's pending invite and whether
+  // its cashier has signed in.
+  const invite = can(role, 'members.manage');
+  const [pending, active] = invite ? await Promise.all([
+    all<{ accountId: string; phone: string | null; createdAt: number }>(db, `SELECT account_id AS accountId, phone, created_at AS createdAt FROM invites
+      WHERE business_id = ? AND account_id IS NOT NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?`, bid, now()),
+    all<{ id: string; lastActiveAt: number | null }>(db, `SELECT u.id, u.last_active_at AS lastActiveAt FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.business_id = ?`, bid),
+  ]) : [[], []];
+  const pendingOf = new Map(pending.map((p) => [p.accountId, { phone: p.phone, createdAt: p.createdAt }]));
+  const activeOf = new Map(active.map((a) => [a.id, a.lastActiveAt]));
+  const booksShown = withCash.map((b) => ({ ...b, invite: pendingOf.get(b.id) ?? null,
+    cashierLastActive: b.cashierUserId ? activeOf.get(b.cashierUserId) ?? null : null }));
   const openShown = await Promise.all(open.filter(visible).map(async (h) => ({
     ...h, deposits: h.toKind === 'bank' && can(role, 'rows.approve') ? await depositCandidates(db, bid, h) : [],
   })));
+  const codes = setup ? await all<{ code: string; branchId: string | null }>(db, 'SELECT code, branch_id AS branchId FROM fee_codes WHERE business_id = ? ORDER BY code', bid) : [];
   return c.json({
-    today: t, branches, books: withCash, handovers: openShown, done: done.filter(visible),
-    members, banks, can: { setup, approve: can(role, 'rows.approve'), write: can(role, 'rows.edit') },
+    today: t, branches, codes, books: booksShown, handovers: openShown, done: done.filter(visible),
+    members, banks, can: { setup, invite, approve: can(role, 'rows.approve'), write: can(role, 'rows.edit') },
   });
 });
 
@@ -125,13 +140,27 @@ cashBookRoutes.patch('/businesses/:businessId/cashbooks/:accountId', requireRole
   const bid = c.get('businessId');
   const user = c.get('user');
   const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
-  const { branchId, cashierUserId } = await bookInput(db, bid, await body(c));
+  const data = await body(c);
+  const { branchId, cashierUserId } = await bookInput(db, bid, data);
+  // Schools and cashiers (21 Nov 2026): the name, opening cash and opening date change here too, when sent.
+  const name = data.name !== undefined ? text(data, 'name', 'Cashier name', { max: 120 })! : book.name;
+  const opening = data.openingBalance !== undefined ? paise(data, 'openingBalance', 'Opening cash') : book.openingBalancePaise;
+  const openingDate = data.openingDate !== undefined ? date(data, 'openingDate', 'Opening date') : book.openingDate;
   const t = now();
-  await db.batch([
-    stmt(db, 'UPDATE accounts SET branch_id = ?, cashier_user_id = ? WHERE id = ? AND business_id = ?', branchId, cashierUserId, book.id, bid),
-    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.update', table: 'accounts', rowId: book.id,
-      before: { branchId: book.branchId, cashierUserId: book.cashierUserId }, after: { branchId, cashierUserId }, at: t }),
-  ]);
+  try {
+    await db.batch([
+      stmt(db, `UPDATE accounts SET name = ?, branch_id = ?, cashier_user_id = ?, opening_balance_paise = ?, opening_date = ? WHERE id = ? AND business_id = ?`,
+        name, branchId, cashierUserId, opening, openingDate, book.id, bid),
+      audit(db, { businessId: bid, userId: user.id, action: 'cashbook.update', table: 'accounts', rowId: book.id,
+        before: { name: book.name, branchId: book.branchId, cashierUserId: book.cashierUserId, openingBalancePaise: book.openingBalancePaise, openingDate: book.openingDate },
+        after: { name, branchId, cashierUserId, openingBalancePaise: opening, openingDate }, at: t }),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, 'An account with this name already exists.');
+    throw e;
+  }
+  // A new opening date changes which fee report days fill the book.
+  if (openingDate !== book.openingDate) await refillAll(db, bid, user.id);
   return c.json({ ok: true });
 });
 
@@ -183,10 +212,15 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
   const amount = paise(data, 'amount', 'Amount');
   if (amount <= 0) fail(400, 'Amount must be more than ₹0.');
   const narration = text(data, 'narration', 'Details', { optional: true, max: 200 });
+  // Cashier app (21 Nov 2026): the cashier writes what an expense or an extra receipt was for; the accountant sets the
+  // head later. A head can still be given now.
   let headId: string | null = null;
-  if (kind === 'expense') {
+  if (kind === 'expense' || kind === 'other_in') {
     headId = typeof data.headId === 'string' && data.headId ? data.headId : null;
-    if (!headId || !isUuid(headId) || !(await one(db, "SELECT 1 AS ok FROM heads WHERE id = ? AND business_id = ? AND type = 'expense'", headId, bid))) fail(400, 'Choose the expense head.');
+    if (headId && (!isUuid(headId) || !(await one(db, 'SELECT 1 AS ok FROM heads WHERE id = ? AND business_id = ? AND type = ?', headId, bid, kind === 'expense' ? 'expense' : 'income')))) {
+      fail(400, kind === 'expense' ? 'Choose the expense head.' : 'Choose the income head.');
+    }
+    if (!headId && !narration) fail(400, 'Write what this was for.');
   }
   const entryId = newId();
   const t = now();
@@ -228,10 +262,11 @@ cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:ent
   const user = c.get('user');
   const book = await writableBook(c);
   const entryId = id404(c.req.param('entryId'), 'Line');
-  const e = await one<{ id: string; kind: string; day: string; amountPaise: number; narration: string | null; feeReportId: string | null }>(db,
-    'SELECT id, kind, day, amount_paise AS amountPaise, narration, fee_report_id AS feeReportId FROM cash_entries WHERE id = ? AND account_id = ? AND business_id = ?', entryId, book.id, bid);
+  const e = await one<{ id: string; kind: string; day: string; amountPaise: number; narration: string | null; feeReportId: string | null; reviewStatus: string | null }>(db,
+    'SELECT id, kind, day, amount_paise AS amountPaise, narration, fee_report_id AS feeReportId, review_status AS reviewStatus FROM cash_entries WHERE id = ? AND account_id = ? AND business_id = ?', entryId, book.id, bid);
   if (!e) fail(404, 'Line not found.');
   if (e.feeReportId) fail(409, 'This line comes from the fee report. Bring in the day\'s report again to change it.');
+  if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this line.`);
   const h = await one<{ id: string; status: string }>(db, 'SELECT id, status FROM cash_handovers WHERE from_entry_id = ?', e.id);
   if (h && h.status !== 'sent') fail(409, 'The other side already shows this cash. Undo it there first.');
   const t = now();
@@ -252,16 +287,167 @@ cashBookRoutes.put('/businesses/:businessId/cashbooks/:accountId/count/:day', re
   const book = await writableBook(c);
   const day = dayParam(c.req.param('day'));
   if (day < book.openingDate || day > today()) fail(400, 'Count a day from the book\'s start up to today.');
-  const counted = paise(await body(c), 'counted', 'Cash counted');
+  const data = await body(c);
+  const counted = paise(data, 'counted', 'Cash counted');
   if (counted < 0) fail(400, 'Cash counted cannot be below ₹0.');
+  // A count that is short or extra needs a note (21 Nov 2026); the owner sees it.
+  const note = text(data, 'note', 'Note', { optional: true, max: 300 }) ?? null;
+  const gap = counted - (await inHandThrough(db, book, day));
+  if (gap !== 0 && !note) fail(400, `Cash is ${gap < 0 ? 'short' : 'extra'} ₹ ${(Math.abs(gap) / 100).toLocaleString('en-IN')}. Write why.`);
   const t = now();
-  const was = await one<{ countedPaise: number }>(db, 'SELECT counted_paise AS countedPaise FROM cash_counts WHERE account_id = ? AND day = ?', book.id, day);
+  const was = await one<{ countedPaise: number; note: string | null }>(db, 'SELECT counted_paise AS countedPaise, note FROM cash_counts WHERE account_id = ? AND day = ?', book.id, day);
   await db.batch([
-    stmt(db, `INSERT INTO cash_counts (id, business_id, account_id, day, counted_paise, counted_by, counted_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (account_id, day) DO UPDATE SET counted_paise = excluded.counted_paise, counted_by = excluded.counted_by, counted_at = excluded.counted_at`,
-      newId(), bid, book.id, day, counted, user.id, t),
+    stmt(db, `INSERT INTO cash_counts (id, business_id, account_id, day, counted_paise, counted_by, counted_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (account_id, day) DO UPDATE SET counted_paise = excluded.counted_paise, counted_by = excluded.counted_by, counted_at = excluded.counted_at,
+        note = excluded.note`,
+      newId(), bid, book.id, day, counted, user.id, t, note),
     audit(db, { businessId: bid, userId: user.id, action: 'cashbook.count', table: 'cash_counts', rowId: `${book.id}:${day}`,
-      before: was ?? undefined, after: { countedPaise: counted }, at: t }),
+      before: was ?? undefined, after: { countedPaise: counted, note }, at: t }),
+  ]);
+  return c.json({ ok: true, gapPaise: gap });
+});
+
+// ---- The cashier's fee cash total for a day, and sorting out a difference with the fee day sheet (21 Nov 2026).
+
+cashBookRoutes.put('/businesses/:businessId/cashbooks/:accountId/fee/:day', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await writableBook(c);
+  const day = dayParam(c.req.param('day'));
+  if (day < book.openingDate || day > today()) fail(400, 'Enter fees for a day from the book\'s start up to today.');
+  const data = await body(c);
+  const amount = paise(data, 'amount', 'Total cash fees');
+  if (amount < 0) fail(400, 'Total cash fees cannot be below ₹0.');
+  const rec = data.receipts === undefined || data.receipts === null || data.receipts === '' ? null : Number(data.receipts);
+  if (rec !== null && (!Number.isInteger(rec) || rec <= 0 || rec > 5000)) fail(400, 'Receipts must be a whole number.');
+  const first = text(data, 'first', 'First receipt no.', { optional: true, max: 30 })?.replace(/\s+/g, '').toUpperCase() || null;
+  const last = text(data, 'last', 'Last receipt no.', { optional: true, max: 30 })?.replace(/\s+/g, '').toUpperCase() || null;
+  if ((first || last) && !(first && last)) fail(400, 'Give both the first and the last receipt no., or neither.');
+  if (first && last && !receiptRange(first, last)) fail(400, 'The last receipt no. must come after the first, with the same start.');
+  const [check] = await feeChecks(db, book, day, day, true);
+  if (check?.sheetIn) fail(409, 'The fee day sheet is in for this day: the book uses the sheet. Sort out a difference instead.');
+  const t = now();
+  const id = newId();
+  await db.batch([
+    stmt(db, "DELETE FROM cash_entries WHERE account_id = ? AND day = ? AND kind = 'fee' AND fee_report_id IS NULL", book.id, day),
+    ...(amount > 0 ? [stmt(db, `INSERT INTO cash_entries (id, business_id, account_id, day, kind, amount_paise, narration, entered_by, entered_at, created_at,
+        fee_receipts, fee_first, fee_last) VALUES (?, ?, ?, ?, 'fee', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, bid, book.id, day, amount, 'Fee cash, your total', user.id, t, t, rec, first, last)] : []),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.fee', table: 'cash_entries', rowId: `${book.id}:${day}`,
+      before: check?.typedPaise != null ? { amountPaise: check.typedPaise, receipts: check.receipts, first: check.first, last: check.last } : undefined,
+      after: { amountPaise: amount, receipts: rec, first, last }, at: t }),
+  ]);
+  return c.json({ ok: true });
+});
+
+cashBookRoutes.put('/businesses/:businessId/cashbooks/:accountId/fee/:day/settle', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await writableBook(c);
+  const day = dayParam(c.req.param('day'));
+  const how = (await body(c)).how;
+  if (how !== 'kept' && how !== 'sheet' && how !== null) fail(400, 'Say whether to keep your amount or use the sheet.');
+  const [check] = await feeChecks(db, book, day, day, true);
+  if (!check?.entryId || !check.sheetIn) fail(409, 'There is no difference with the sheet to sort out on this day.');
+  if (how === 'kept' && check.diffPaise <= 0) fail(400, 'Only an amount the sheet does not have can be kept.');
+  const t = now();
+  await db.batch([
+    stmt(db, "UPDATE cash_entries SET fee_settle = ? WHERE account_id = ? AND day = ? AND kind = 'fee' AND fee_report_id IS NULL", how, book.id, day),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.fee.settle', table: 'cash_entries', rowId: `${book.id}:${day}`,
+      before: { settle: check.settle }, after: { settle: how, diffPaise: check.diffPaise, missing: check.missing }, at: t }),
+  ]);
+  return c.json({ ok: true });
+});
+
+// ---- A book's days: what should be in hand, the fee check and the count of each (newest first).
+
+cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/days', requireRole('business.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const through = today();
+  const from = new Date(Date.parse(`${through}T00:00:00Z`) - 44 * 86400000).toISOString().slice(0, 10);
+  const days = await bookDays(db, book, from, through);
+  return c.json({ book, today: through, days: days.reverse() });
+});
+
+// ---- Expenses and extra receipts: the accountant sets the head, the owner approves an expense or rejects it with a note.
+
+const reviewSql = `SELECT e.id, e.account_id AS accountId, a.name AS bookName, b.name AS branchName, e.day, e.kind, e.amount_paise AS amountPaise, e.narration,
+    e.head_id AS headId, h.name AS headName, e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName, e.reviewed_at AS reviewedAt,
+    u.name AS enteredByName, e.entered_at AS enteredAt
+  FROM cash_entries e JOIN accounts a ON a.id = e.account_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN heads h ON h.id = e.head_id
+    LEFT JOIN users u ON u.id = e.entered_by LEFT JOIN users ru ON ru.id = e.reviewed_by
+  WHERE e.business_id = ? AND e.kind IN ('expense', 'other_in')`;
+
+cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/lines', requireRole('business.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const from = new Date(Date.now() + 5.5 * 3600000 - 60 * 86400000).toISOString().slice(0, 10);
+  return c.json({ lines: await all(db, `${reviewSql} AND e.account_id = ? AND e.day >= ? ORDER BY e.day DESC, e.entered_at DESC`, bid, book.id, from) });
+});
+
+cashBookRoutes.get('/businesses/:businessId/cashbook-reviews', requireRole('rows.approve'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const role = c.get('role');
+  const [waiting, heads] = await Promise.all([
+    all(db, `${reviewSql} AND (e.head_id IS NULL OR (e.kind = 'expense' AND e.review_status IS NULL)) ORDER BY e.day, e.entered_at`, bid),
+    all<{ id: string; name: string; type: string }>(db, 'SELECT id, name, type FROM heads WHERE business_id = ? ORDER BY type, name', bid),
+  ]);
+  return c.json({ lines: waiting, heads, can: { approve: can(role, 'members.manage') } });
+});
+
+async function reviewLine(db: DB, bid: string, id: string | undefined) {
+  const e = await one<{ id: string; kind: string; headId: string | null; reviewStatus: string | null; amountPaise: number }>(db,
+    `SELECT id, kind, head_id AS headId, review_status AS reviewStatus, amount_paise AS amountPaise FROM cash_entries
+     WHERE id = ? AND business_id = ? AND kind IN ('expense', 'other_in')`, id404(id, 'Line'), bid);
+  if (!e) fail(404, 'Line not found.');
+  return e;
+}
+
+cashBookRoutes.put('/businesses/:businessId/cashbook-lines/:entryId/head', requireRole('rows.approve'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const e = await reviewLine(db, bid, c.req.param('entryId'));
+  if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this expense.`);
+  const headId = (await body(c)).headId;
+  const type = e.kind === 'expense' ? 'expense' : 'income';
+  if (typeof headId !== 'string' || !isUuid(headId) || !(await one(db, 'SELECT 1 AS ok FROM heads WHERE id = ? AND business_id = ? AND type = ?', headId, bid, type))) {
+    fail(400, `Choose the ${type} head.`);
+  }
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE cash_entries SET head_id = ? WHERE id = ?', headId, e.id),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.head', table: 'cash_entries', rowId: e.id, before: { headId: e.headId }, after: { headId }, at: t }),
+  ]);
+  return c.json({ ok: true });
+});
+
+cashBookRoutes.post('/businesses/:businessId/cashbook-lines/:entryId/review', requireRole('members.manage'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const e = await reviewLine(db, bid, c.req.param('entryId'));
+  if (e.kind !== 'expense') fail(400, 'Only expenses are approved.');
+  const data = await body(c);
+  const status = data.status;
+  if (status !== 'approved' && status !== 'rejected' && status !== null) fail(400, 'Approve or reject.');
+  const note = text(data, 'note', 'Note', { optional: true, max: 300 }) ?? null;
+  if (status === 'approved' && !e.headId) fail(400, 'The accountant sets the head first.');
+  if (status === 'rejected' && !note) fail(400, 'Write why it is rejected.');
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE cash_entries SET review_status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE id = ?',
+      status, status ? user.id : null, status ? t : null, status ? note : null, e.id),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.review', table: 'cash_entries', rowId: e.id,
+      before: { status: e.reviewStatus }, after: { status, note }, at: t }),
   ]);
   return c.json({ ok: true });
 });

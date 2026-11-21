@@ -4,7 +4,7 @@ import type { AppEnv } from './types';
 import { now, one, run, stmt, type DB } from './db';
 import { randomToken, sha256 } from './crypto';
 import { can, isRole, type Action } from './permissions';
-import { fail, isUuid } from './http';
+import { fail, isUuid, signInSql } from './http';
 
 export const SESSION_COOKIE = 'bookr_session';
 const SESSION_DAYS = 30;
@@ -46,7 +46,7 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   // requireRole still checks it for every request.
   const bizInPath = /\/businesses\/([0-9a-f-]{36})(?:\/|$)/i.exec(c.req.path)?.[1] ?? null;
   const row = await one<{ id: string; name: string; email: string; last_seen_at: number; role: string | null }>(db, `
-    SELECT u.id, u.name, u.email, s.last_seen_at, m.role
+    SELECT u.id, u.name, ${signInSql('u')} AS email, s.last_seen_at, m.role
     FROM sessions s JOIN users u ON u.id = s.user_id
     LEFT JOIN memberships m ON m.user_id = u.id AND m.business_id = ?
     WHERE s.id = ? AND s.expires_at > ?`, bizInPath, id, t);

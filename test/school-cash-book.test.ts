@@ -36,12 +36,15 @@ describe('school cash book', () => {
     for (const [amount, narration] of [['5500', 'stationery exam'], ['2000', 'rk tact'], ['1000', 'hardware']]) {
       expect((await s.add(s.cashier, s.sms, { kind: 'expense', amount, narration, headId: s.expenseHead })).status).toBe(201);
     }
-    expect((await s.add(s.cashier, s.sms, { kind: 'expense', amount: '10' })).json.error).toMatch(/expense head/);
+    // An expense needs what it was for, or a head (the accountant sets the head later, 21 Nov 2026).
+    expect((await s.add(s.cashier, s.sms, { kind: 'expense', amount: '10' })).json.error).toMatch(/what this was for/);
     let d = (await s.dayOf(s.cashier, s.sms)).json;
     expect(d).toMatchObject({ openingPaise: 8462800, inPaise: 11418000, outPaise: 850000, shouldPaise: 19030800, count: null });
-    expect((await s.cashier.put(`/businesses/${s.bid}/cashbooks/${s.sms}/count/${DAY}`, { counted: '1,90,000' })).status).toBe(200);
+    // A short count needs a note.
+    expect((await s.cashier.put(`/businesses/${s.bid}/cashbooks/${s.sms}/count/${DAY}`, { counted: '1,90,000' })).json.error).toMatch(/short ₹ 308\. Write why/);
+    expect((await s.cashier.put(`/businesses/${s.bid}/cashbooks/${s.sms}/count/${DAY}`, { counted: '1,90,000', note: 'peon took 308 for gas' })).status).toBe(200);
     d = (await s.dayOf(s.cashier, s.sms)).json;
-    expect(d.count.gapPaise).toBe(-30800);
+    expect(d.count).toMatchObject({ gapPaise: -30800, note: 'peon took 308 for gas' });
     // The next day opens with what should have been in hand.
     expect((await s.dayOf(s.cashier, s.sms, '2026-09-16')).json.openingPaise).toBe(19030800);
     const list = (await s.o.get(`/businesses/${s.bid}/cashbooks`)).json;
