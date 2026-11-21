@@ -99,7 +99,7 @@ describe('KOT stations', () => {
 
     // Cancelling a dosa already sent tells the kitchen with a cancel KOT.
     const line = (await s.ok(s.counter.get(`${s.B}/orders/${o}`))).order.lines.find((l: any) => l.name === 'Masala Dosa');
-    const r = await s.ok(s.counter.post(`${s.B}/orders/${o}/items`, { lineId: line.id, delta: -1, reasonId: s.reasons.kot_cancel }));
+    const r = await s.ok(s.counter.post(`${s.B}/orders/${o}/items`, { lineId: line.id, delta: -1, reasonId: s.reasons.kot_cancel, approverId: s.managerId, approverPin: '9753' }));
     expect(r.kots).toEqual([expect.objectContaining({ station: 'Kitchen', printAt: 'station', lines: [expect.objectContaining({ name: 'Masala Dosa', qty: -1, cancelled: true })] })]);
     expect((await s.ok(kd.get('/station'))).kots[0]).toMatchObject({ toPrint: true, lines: [{ qty: -1, cancelled: true }] });
 

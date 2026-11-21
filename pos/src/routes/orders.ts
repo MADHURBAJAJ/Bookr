@@ -6,9 +6,9 @@ import { CATEGORY_JOIN, isOnline, ITEM_ROUTE } from '../stations';
 import { Hono } from 'hono';
 import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
-import { requireAction, requireStaff } from '../auth';
+import { approverOf, isManager, requireAction, requireStaff } from '../auth';
 import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
-import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel, tableList } from '../util';
+import { clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
 import { sendSoon } from '../sync';
 import { istDay } from '../../../src/time';
 import type { AppEnv } from '../types';
@@ -62,7 +62,13 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   return c.json({ orders: os.map((o) => {
     const b = bills.find((x) => x.order_id === o.id);
     return orderOut(o, ls.filter((l) => l.order_id === o.id), b ? { id: b.id, billNo: b.bill_no, totalPaise: b.total_paise, entityId: b.entity_id } : null);
-  }), tables: fixed ?? used.map((u) => u.place).sort((x, y) => x.localeCompare(y, 'en', { numeric: true })), tablesFixed: !!fixed });
+  }), tables: fixed ?? used.map((u) => u.place).sort((x, y) => x.localeCompare(y, 'en', { numeric: true })), tablesFixed: !!fixed,
+    sections: tableLayout(bizOf(c)) ?? [] });
+});
+
+// Who can approve, with their PIN, cancelling an item already sent to the kitchen: managers and owners with a PIN.
+orderRoutes.get(`${B}/approvers`, requireAction('pos.view'), async (c) => {
+  return c.json({ approvers: await all(c.env.DB, "SELECT id, name, role FROM staff WHERE business_id = ? AND active = 1 AND support = 0 AND role IN ('owner', 'manager') AND pin_hash IS NOT NULL ORDER BY role DESC, name", c.get('businessId')) });
 });
 
 orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
@@ -83,6 +89,19 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
   }
   if (kind === 'table' && (await one(c.env.DB, "SELECT 1 FROM orders WHERE business_id = ? AND kind = 'table' AND lower(place) = lower(?) AND status = 'open'", bid, place))) {
     fail(409, `${place} already has an open order.`);
+  }
+  if (kind === 'table') {
+    const layout = tableLayout(b);
+    const at = placeOf(layout, place);
+    if (at?.section.kind === 'nc' && !isManager(c)) fail(403, 'NC tables are for managers and owners.');
+    // A dorm is sold bed by bed, or whole to one group: not both at once.
+    if (at?.dorm) {
+      const others = at.whole ? sectionTables({ kind: 'dorms', dorms: at.section.dorms!.filter((d) => d.name === at.dorm) }).filter((x) => x !== dormWhole(at.dorm!)) : [dormWhole(at.dorm)];
+      const busy = await all<{ place: string }>(c.env.DB, `SELECT place FROM orders WHERE business_id = ? AND kind = 'table' AND status IN ('open', 'tab', 'billed')
+        AND lower(place) IN (SELECT lower(value) FROM json_each(?))`, bid, JSON.stringify(others));
+      if (busy.length) fail(409, at.whole ? `${busy.map((x) => x.place).join(', ')} already ${busy.length === 1 ? 'has an order' : 'have orders'}: finish ${busy.length === 1 ? 'it' : 'them'} before booking ${at.dorm} whole.`
+        : `${at.dorm} is booked whole: add to the ${dormWhole(at.dorm)} order.`);
+    }
   }
   const covers = typeof data.covers === 'number' && Number.isInteger(data.covers) && data.covers > 0 && data.covers < 100 ? data.covers : null;
   const id = newId();
@@ -119,6 +138,7 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
       : Promise.resolve([]),
   ]);
   const t = now();
+  if (o.kind === 'table' && !isManager(c) && isNcPlace(tableLayout(bizOf(c)), o.place)) fail(403, 'NC tables are for managers and owners.');
   if (data.lineId === undefined && delta > 0) {
     if (!item) fail(400, 'Item not on the menu.');
     // Choices: one from each "choose one" group, any from an "add any" group, nothing from elsewhere.
@@ -171,11 +191,13 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
   let kotIds: string[] = [];
   if (cancelSent > 0) {
     const reason = await reasonLabel(db, bid, 'kot_cancel', data.reasonId, 'A reason for cancelling an item already sent to the kitchen');
+    // Cancelling what the kitchen already has needs a manager or owner (21 Nov 2026): their own sign-in, or their PIN here.
+    const approver = isManager(c) ? { name: c.get('staff').name } : await approverOf(c, data.approverId, data.approverPin);
     const what = [line.name, ...chosenOf(line).map((x) => x.name)].join(' + ');
-    statements.push(event(db, bid, 'kot_cancel', `${o.place} · ${cancelSent} × ${what}`, cancelSent * line.price_paise, reason, null,
+    statements.push(event(db, bid, 'kot_cancel', `${o.place} · ${cancelSent} × ${what}`, cancelSent * line.price_paise, reason, `Approved by ${approver.name}`,
       c.get('staff').id, clock(bizOf(c)).shiftDay));
     // The station is told: a cancel KOT, printed or shown like any other.
-    const k = await kotStatements(db, bid, o.id, [{ ...line, qty: -cancelSent, sent_qty: 0 }], c.get('staff').id, now(), true);
+    const k = await kotStatements(db, bid, o.id, [{ ...line, qty: -cancelSent, sent_qty: 0 }], c.get('staff').id, now(), true, clock(bizOf(c)).shiftDay);
     statements.push(...k.statements);
     kotIds = k.ids;
   }
@@ -189,7 +211,7 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
   const o = await order(c, bid, c.req.param('id'), true);
   const ls = (await lines(c.env.DB, o.id)).filter((l) => l.qty > l.sent_qty);
   if (!ls.length) fail(409, 'Nothing new to send.');
-  const k = await kotStatements(c.env.DB, bid, o.id, ls, c.get('staff').id, now(), false);
+  const k = await kotStatements(c.env.DB, bid, o.id, ls, c.get('staff').id, now(), false, clock(bizOf(c)).shiftDay);
   await c.env.DB.batch([...k.statements, ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id))]);
   return c.json({ kots: await kotsOut(c.env.DB, k.ids, o.place), order: orderOut(o, await lines(c.env.DB, o.id)) }, 201);
 });
@@ -199,7 +221,7 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
  * station's device when it is online and prints, shown on its screen, or, when its device is offline, printed at the
  * counter so nothing is missed. A cancel KOT (negative quantities) goes the same way.
  */
-async function kotStatements(db: D1Database, bid: string, orderId: string, ls: LineRow[], staffId: string, t: number, cancel: boolean) {
+async function kotStatements(db: D1Database, bid: string, orderId: string, ls: LineRow[], staffId: string, t: number, cancel: boolean, shiftDay: string) {
   const send = ls.filter((l) => l.kot !== 0 && l.qty !== l.sent_qty);
   const stations = await all<{ id: string; name: string; how: string; seen: number | null }>(db,
     `SELECT s.id, s.name, s.how, (SELECT max(d.last_seen_at) FROM devices d WHERE d.station_id = s.id AND d.revoked_at IS NULL) AS seen
@@ -215,10 +237,12 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
     const printAt = !online ? 'counter' : s.how === 'screen' ? 'none' : 'station';
     const id = newId();
     ids.push(id);
-    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status)
-      SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ?, ?, ?, ? FROM kots WHERE business_id = ?`,
+    // The printed number starts at 101 each shift day (21 Nov 2026); kot_no keeps running underneath.
+    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no)
+      SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?,
+        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ? AND shift_day = ?), 100) + 1 FROM kots WHERE business_id = ?`,
       id, bid, orderId, s.name, JSON.stringify(gl.map((l) => ({ name: l.name, qty: l.qty - l.sent_qty, options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise,
-        ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', bid);
+        ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid);
   });
   return { ids, statements };
 }
@@ -226,7 +250,7 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
 async function kotsOut(db: D1Database, ids: string[], place: string) {
   if (!ids.length) return [];
   const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null }>(db,
-    `SELECT k.kot_no, k.station, k.lines, k.print_at, s.copies FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
+    `SELECT coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.lines, k.print_at, s.copies FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
   return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1 }));
 }
 

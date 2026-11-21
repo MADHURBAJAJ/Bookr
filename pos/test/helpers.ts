@@ -80,6 +80,8 @@ export async function setupBusiness(opts: { huf?: boolean; businessId?: string; 
   }
   const cashierId = (await ok(owner.post(`${B}/staff`, { name: 'Ravi', role: 'cashier', pin: '2468' }))).id;
   const captainId = (await ok(owner.post(`${B}/staff`, { name: 'Suresh', role: 'captain', pin: '1357' }))).id;
+  // A manager with a PIN: approves cancelling what the kitchen already has (21 Nov 2026).
+  const managerId = (await ok(owner.post(`${B}/staff`, { name: 'Sample Manager', role: 'manager', pin: '9753', email: `manager-${n}@test.local`, password: 'manager-password-1' }))).id;
 
   // The counter: the Owner marks this browser as a counter device, then the cashier signs in with a PIN on it.
   const counter = new Client();
@@ -88,7 +90,7 @@ export async function setupBusiness(opts: { huf?: boolean; businessId?: string; 
   counter.cookies.delete('pos_session');
   await ok(counter.post('/auth/pin', { staffId: cashierId, pin: '2468' }));
 
-  return { businessId, B, owner, counter, company, huf, upiCompany, upiHuf, items, reasons, cashierId, captainId, ok };
+  return { businessId, B, owner, counter, company, huf, upiCompany, upiHuf, items, reasons, cashierId, captainId, managerId, ok };
 }
 
 /** Opens a table order, adds items, sends the KOT and prints the bill. */

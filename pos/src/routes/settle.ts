@@ -6,9 +6,9 @@ import { Hono } from 'hono';
 import { all, newId, now, one, stmt, type DB } from '../../../src/db';
 import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
-import { requireAction, requireStaff } from '../auth';
+import { isManager, requireAction, requireStaff } from '../auth';
 import { allocateLoose, rs } from '../billing';
-import { clock, event, isTrigger, bizOf, loadBusiness, reasonLabel } from '../util';
+import { clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
 import { billOut } from './orders';
 import { sendSoon } from '../sync';
 import { saleMoves } from '../stock';
@@ -97,7 +97,7 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
   }
   if (mode === 'comp') {
     out.compGuest = text(p, 'compGuest', `Payment ${n}: the guest's name for a complimentary bill`, { max: 80 });
-    out.compReason = await reasonLabel(db, bid, 'comp', p.reasonId, `Payment ${n}: a reason for the complimentary bill`);
+    out.compReason = p.nc === true ? 'NC (non-chargeable)' : await reasonLabel(db, bid, 'comp', p.reasonId, `Payment ${n}: a reason for the complimentary bill`);
   }
   return out;
 }
@@ -131,6 +131,14 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   for (const b of ordered) if (b.status !== 'printed') fail(409, `Bill ${b.bill_no} is ${b.status === 'void' ? 'void' : 'already paid'}.`);
   const due = ordered.reduce((s, b) => s + b.total_paise, 0);
 
+  // An NC table (non-chargeable, 21 Nov 2026): a manager or owner closes it as complimentary in the person's name.
+  if (data.nc === true) {
+    if (!isManager(c)) fail(403, 'NC bills are closed by a manager or owner.');
+    const places = await all<{ place: string; kind: string }>(db, 'SELECT place, kind FROM orders WHERE id IN (SELECT value FROM json_each(?))', JSON.stringify(ordered.map((b) => b.order_id)));
+    const layout = tableLayout(bizOf(c));
+    if (!places.length || places.some((p) => p.kind !== 'table' || !isNcPlace(layout, p.place))) fail(400, 'Only bills from NC tables close as NC.');
+    data.payments = [{ mode: 'comp', amount: `${Math.floor(due / 100)}.${String(due % 100).padStart(2, '0')}`, compGuest: places[0].place, nc: true }];
+  }
   if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 10) fail(400, 'Add how the bill was paid.');
   const pays: Pay[] = [];
   for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card', 'room', 'credit', 'comp', 'advance']));

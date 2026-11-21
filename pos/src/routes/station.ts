@@ -25,10 +25,10 @@ stationRoutes.get('/station', async (c) => {
   const t = now();
   const [kots] = await Promise.all([
     all<{ id: string; kot_no: number; place: string; lines: string; by: string | null; at: number; status: string; print_at: string; printed: number | null }>(c.env.DB,
-      `SELECT k.id, k.kot_no, o.place, k.lines, st.name AS by, k.printed_at AS at, k.status, k.print_at, k.station_printed_at AS printed
+      `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, o.place, k.lines, st.name AS by, k.printed_at AS at, k.status, k.print_at, k.station_printed_at AS printed
        FROM kots k JOIN orders o ON o.id = k.order_id LEFT JOIN staff st ON st.id = k.by_staff
        WHERE k.station_id = ? AND k.printed_at > ? AND (k.status <> 'ready' OR (k.print_at = 'station' AND k.station_printed_at IS NULL))
-       ORDER BY k.kot_no`, station.id, t - DAY),
+       ORDER BY k.printed_at, k.kot_no`, station.id, t - DAY),
     stmt(c.env.DB, 'UPDATE devices SET last_seen_at = ? WHERE id = ?', t, device.id).run(),
   ]);
   return c.json({

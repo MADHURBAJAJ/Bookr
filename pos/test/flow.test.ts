@@ -82,7 +82,10 @@ describe('orders, KOT and bills', () => {
     await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: 2 });
     await s.counter.post(`${s.B}/orders/${order}/kot`);
     expect((await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: -1 })).status).toBe(400);
-    const cut = await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: -1, reasonId: s.reasons.kot_cancel });
+    // The cashier cannot cancel what the kitchen has without a manager's PIN; a wrong PIN is refused.
+    expect((await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: -1, reasonId: s.reasons.kot_cancel })).status).toBe(403);
+    expect((await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: -1, reasonId: s.reasons.kot_cancel, approverId: s.managerId, approverPin: '0000' })).status).toBe(403);
+    const cut = await s.counter.post(`${s.B}/orders/${order}/items`, { itemId: s.items['Masala Dosa'], delta: -1, reasonId: s.reasons.kot_cancel, approverId: s.managerId, approverPin: '9753' });
     expect(cut.json.cancelledSent).toBe(1);
 
     expect((await s.counter.post(`${s.B}/orders/${order}/bill`, { entityId: s.company, discount: { kind: 'pct', bp: 1000 } })).status).toBe(400);
@@ -91,6 +94,7 @@ describe('orders, KOT and bills', () => {
     const day = bill.shiftDay;
     const events = (await s.owner.get(`${s.B}/events?day=${day}`)).json.events.map((e: any) => [e.kind, e.reason]);
     expect(events).toEqual(expect.arrayContaining([['kot_cancel', 'Guest changed mind'], ['discount', 'Regular guest']]));
+    expect((await s.owner.get(`${s.B}/events?day=${day}`)).json.events.find((e: any) => e.kind === 'kot_cancel').detail).toBe('Approved by Sample Manager');
   });
 
   it('voids a printed bill with a reason, keeps its number, and bills the order again', async () => {

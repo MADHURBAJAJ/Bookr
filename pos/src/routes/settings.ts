@@ -5,10 +5,10 @@ import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { isRole } from '../permissions';
+import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { isOnline, syncItemStations } from '../stations';
-import { audit, clock, bizOf, loadBusiness, tableList } from '../util';
+import { audit, clock, bizOf, loadBusiness, SECTION_KINDS, sectionTables, tableLayout, tableList, type SectionKind } from '../util';
 import type { AppEnv } from '../types';
 
 export const settingsRoutes = new Hono<AppEnv>();
@@ -44,26 +44,56 @@ settingsRoutes.put(`${B}/settings`, requireAction('staff.manage'), async (c) => 
 // ---------- tables: the counter's grid, in the order given
 
 settingsRoutes.get(`${B}/tables`, requireAction('menu.edit'), async (c) => {
-  return c.json({ tables: tableList(bizOf(c)) ?? [] });
+  return c.json({ tables: tableList(bizOf(c)) ?? [], sections: tableLayout(bizOf(c)) ?? [] });
 });
 
+// The counter's tables in sections (Private Rooms, Dorms, Out House, NC, others), in order. An older plain list
+// ({tables: [...]}) is kept as one section.
 settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
   const id = c.get('businessId');
   const data = await body(c);
-  if (!Array.isArray(data.tables) || data.tables.length > 150) fail(400, 'Tables must be a list of up to 150 names.');
-  const names: string[] = [];
-  for (const raw of data.tables) {
-    const name = typeof raw === 'string' ? raw.trim() : '';
-    if (!name || name.length > 20) fail(400, 'Each table name must be 1 to 20 characters.');
-    if (names.some((n) => n.toLowerCase() === name.toLowerCase())) fail(400, `${name} is in the list twice.`);
-    names.push(name);
+  const raw = Array.isArray(data.sections) ? data.sections : Array.isArray(data.tables) ? [{ name: 'Tables', kind: 'other', tables: data.tables }] : null;
+  if (!raw || raw.length > 20) fail(400, 'Tables must be up to 20 sections.');
+  const seen = new Set<string>();
+  const unique = (name: string) => { if (seen.has(name.toLowerCase())) fail(400, `${name} is in the list twice.`); seen.add(name.toLowerCase()); };
+  const sections: { name: string; kind: SectionKind; tables?: string[]; dorms?: { name: string; beds: number }[] }[] = [];
+  const names = new Set<string>();
+  for (const r of raw as Record<string, unknown>[]) {
+    const name = typeof r?.name === 'string' ? r.name.trim() : '';
+    if (!name || name.length > 30) fail(400, 'Each section needs a name of up to 30 characters.');
+    if (names.has(name.toLowerCase())) fail(400, `Two sections are called ${name}.`);
+    names.add(name.toLowerCase());
+    const kind = (SECTION_KINDS as readonly string[]).includes(r.kind as string) ? (r.kind as SectionKind) : fail(400, `${name}: choose what kind of section it is.`);
+    if (kind === 'dorms') {
+      if (!Array.isArray(r.dorms) || r.dorms.length > 30) fail(400, `${name}: list up to 30 dorms.`);
+      const dorms = (r.dorms as Record<string, unknown>[]).map((d) => {
+        const dn = typeof d?.name === 'string' ? d.name.trim() : '';
+        if (!dn || dn.length > 24) fail(400, `${name}: each dorm needs a name of up to 24 characters.`);
+        const beds = d.beds;
+        if (typeof beds !== 'number' || !Number.isInteger(beds) || beds < 1 || beds > 30) fail(400, `${dn}: beds must be 1 to 30.`);
+        return { name: dn, beds };
+      });
+      for (const t of sectionTables({ kind, dorms })) unique(t);
+      sections.push({ name, kind, dorms });
+    } else {
+      if (!Array.isArray(r.tables) || r.tables.length > 150) fail(400, `${name}: up to 150 tables.`);
+      const tables = (r.tables as unknown[]).map((t) => {
+        const tn = typeof t === 'string' ? t.trim() : '';
+        if (!tn || tn.length > 30) fail(400, `${name}: each table name must be 1 to 30 characters.`);
+        unique(tn);
+        return tn;
+      });
+      sections.push({ name, kind, tables });
+    }
   }
-  const before = tableList(bizOf(c));
+  if (seen.size > 400) fail(400, 'Up to 400 tables in all.');
+  const keep = sections.filter((x) => (x.tables?.length ?? 0) + (x.dorms?.length ?? 0) > 0);
+  const before = tableLayout(bizOf(c));
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE businesses SET tables = ? WHERE id = ?', names.length ? JSON.stringify(names) : null, id),
-    audit(c.env.DB, id, c.get('staff').id, 'tables.update', 'businesses', id, { tables: before }, { tables: names.length ? names : null }),
+    stmt(c.env.DB, 'UPDATE businesses SET tables = ? WHERE id = ?', keep.length ? JSON.stringify({ sections: keep }) : null, id),
+    audit(c.env.DB, id, c.get('staff').id, 'tables.update', 'businesses', id, { sections: before }, { sections: keep.length ? keep : null }),
   ]);
-  return c.json({ tables: names });
+  return c.json({ tables: keep.flatMap((x) => sectionTables(x)), sections: keep });
 });
 
 // ---------- staff
@@ -726,27 +756,61 @@ settingsRoutes.post(`${B}/reasons/:id/retire`, requireAction('menu.edit'), async
 // ---------- in-house stays and credit accounts
 
 settingsRoutes.get(`${B}/stays`, requireAction('pos.view'), async (c) => {
-  return c.json({ stays: await all(c.env.DB, `SELECT s.id, s.room, s.guest_name AS guestName, s.check_in AS checkIn, d.id AS accountId,
+  const rows = await all<{ phone: string | null }>(c.env.DB, `SELECT s.id, s.room, s.guest_name AS guestName, s.check_in AS checkIn, d.id AS accountId, s.phone,
       coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balancePaise
     FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id
-    WHERE s.business_id = ? AND s.checked_out_at IS NULL ORDER BY s.room`, c.get('businessId')) });
+    WHERE s.business_id = ? AND s.checked_out_at IS NULL ORDER BY s.room`, c.get('businessId'));
+  // Phone numbers are for the till (finding a guest to put a bill on their room); a captain sees only the last 4 digits.
+  const full = can(c.get('staff').role, 'stays.edit');
+  return c.json({ stays: rows.map((r) => ({ ...r, phone: r.phone ? (full ? r.phone : `••••${r.phone.slice(-4)}`) : null })) });
+});
+
+/** A phone number as kept: digits only, without India's 91 or a leading 0 in front of a 10-digit mobile. */
+export function phoneKey(v: unknown): string | null {
+  if (typeof v !== 'string' || !v.trim()) return null;
+  let d = v.replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  if (d.length < 6 || d.length > 15) fail(400, 'Phone number must be 6 to 15 digits.');
+  return d;
+}
+
+// A returning guest, found by phone at check-in: their details and earlier stays (room, dates, what was charged).
+settingsRoutes.get(`${B}/guests/lookup`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const phone = phoneKey(c.req.query('phone') ?? '');
+  if (!phone) return c.json({ guest: null });
+  const g = await one<{ id: string; name: string; phone: string; city: string | null }>(c.env.DB, 'SELECT id, name, phone, city FROM guests WHERE business_id = ? AND phone = ?', bid, phone);
+  if (!g) return c.json({ guest: null });
+  const stays = await all(c.env.DB, `SELECT s.room, s.check_in AS checkIn, s.checked_out_at AS checkedOutAt,
+      coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e WHERE e.account_id = d.id AND e.amount_paise > 0), 0) AS chargedPaise
+    FROM stays s LEFT JOIN debtor_accounts d ON d.stay_id = s.id WHERE s.business_id = ? AND s.guest_id = ? ORDER BY s.created_at DESC LIMIT 10`, bid, g.id);
+  return c.json({ guest: { ...g, stays } });
 });
 
 settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const b = bizOf(c);
   const data = await body(c);
-  const room = text(data, 'room', 'Room', { max: 20 })!;
+  const room = text(data, 'room', 'Room', { max: 30 })!;
   const guest = text(data, 'guestName', 'Guest name', { max: 80 })!;
+  const phone = phoneKey(data.phone);
+  const city = text(data, 'city', 'City', { optional: true, max: 60 });
   const id = newId();
   const t = now();
+  // The guest is kept for next time, by phone: a returning guest's name and city are brought up to date.
+  const known = phone ? await one<{ id: string }>(c.env.DB, 'SELECT id FROM guests WHERE business_id = ? AND phone = ?', bid, phone) : null;
+  const guestId = phone ? known?.id ?? newId() : null;
   try {
     await c.env.DB.batch([
-      stmt(c.env.DB, 'INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        id, bid, room, guest, clock(b, t).shiftDay, c.get('staff').id, t),
+      ...(phone ? [known
+        ? stmt(c.env.DB, 'UPDATE guests SET name = ?, city = coalesce(?, city), updated_at = ? WHERE id = ?', guest, city, t, guestId)
+        : stmt(c.env.DB, 'INSERT INTO guests (id, business_id, name, phone, city, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', guestId, bid, guest, phone, city, t, t)] : []),
+      stmt(c.env.DB, 'INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at, guest_id, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        id, bid, room, guest, clock(b, t).shiftDay, c.get('staff').id, t, guestId, phone),
       stmt(c.env.DB, "INSERT INTO debtor_accounts (id, business_id, kind, name, stay_id, created_by, created_at) VALUES (?, ?, 'room', ?, ?, ?, ?)",
         newId(), bid, `Room ${room} · ${guest}`, id, c.get('staff').id, t),
-      audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest }),
+      audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest, returning: !!known }),
     ]);
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, `Room ${room} already has an open stay. Check it out first.`);

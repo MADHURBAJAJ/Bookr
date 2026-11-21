@@ -10,11 +10,53 @@ export async function loadBusiness(db: DB, id: string): Promise<Business> {
   return b;
 }
 
-/** The restaurant's own table list from Settings, or null when it has none (the counter then shows recent tables). */
-export function tableList(b: Business): string[] | null {
-  if (!b.tables) return null;
-  try { const v = JSON.parse(b.tables); return Array.isArray(v) && v.length ? v.map(String) : null; } catch { return null; }
+// ---------- tables in sections (21 Nov 2026): Private Rooms, Dorms, Out House, NC, others
+// Stored in businesses.tables as {"sections": [...]}; an older plain list ["T1", "T2"] reads as one section "Tables".
+// A dorm section lists dorms with their bed count; its tables are made from them: "Dorm A · whole", "Dorm A · Bed 1"...
+export const SECTION_KINDS = ['rooms', 'dorms', 'outhouse', 'nc', 'other'] as const;
+export type SectionKind = (typeof SECTION_KINDS)[number];
+export interface Section { name: string; kind: SectionKind; tables: string[]; dorms?: { name: string; beds: number }[] }
+export const dormWhole = (dorm: string) => `${dorm} · whole`;
+export const dormBed = (dorm: string, n: number) => `${dorm} · Bed ${n}`;
+
+export function sectionTables(s: { kind: string; tables?: unknown; dorms?: { name: string; beds: number }[] }): string[] {
+  if (s.kind === 'dorms') return (s.dorms ?? []).flatMap((d) => [dormWhole(d.name), ...Array.from({ length: d.beds }, (_, i) => dormBed(d.name, i + 1))]);
+  return Array.isArray(s.tables) ? s.tables.map(String) : [];
 }
+
+/** The restaurant's table sections from Settings, or null when it has none (the counter then shows recent tables). */
+export function tableLayout(b: Business): Section[] | null {
+  if (!b.tables) return null;
+  try {
+    const v = JSON.parse(b.tables);
+    if (Array.isArray(v)) return v.length ? [{ name: 'Tables', kind: 'other', tables: v.map(String) }] : null;
+    const secs = Array.isArray(v?.sections) ? (v.sections as Section[]) : [];
+    const out = secs.map((s) => ({ name: String(s.name), kind: (SECTION_KINDS as readonly string[]).includes(s.kind) ? s.kind : 'other',
+      tables: sectionTables(s), ...(s.kind === 'dorms' ? { dorms: s.dorms ?? [] } : {}) }));
+    return out.some((s) => s.tables.length) ? out : null;
+  } catch { return null; }
+}
+
+/** Every table, in order, across the sections; or null when there is no list. */
+export function tableList(b: Business): string[] | null {
+  const l = tableLayout(b);
+  return l ? l.flatMap((s) => s.tables) : null;
+}
+
+/** Which section a table is in, and for a dorm table which dorm and whether it is the whole dorm. */
+export function placeOf(layout: Section[] | null, place: string): { section: Section; dorm?: string; whole?: boolean } | null {
+  const p = place.trim().toLowerCase();
+  for (const s of layout ?? []) {
+    if (s.kind === 'dorms') {
+      for (const d of s.dorms ?? []) {
+        if (dormWhole(d.name).toLowerCase() === p) return { section: s, dorm: d.name, whole: true };
+        for (let i = 1; i <= d.beds; i++) if (dormBed(d.name, i).toLowerCase() === p) return { section: s, dorm: d.name, whole: false };
+      }
+    } else if (s.tables.some((t) => t.toLowerCase() === p)) return { section: s };
+  }
+  return null;
+}
+export const isNcPlace = (layout: Section[] | null, place: string) => placeOf(layout, place)?.section.kind === 'nc';
 
 /** The signed-in person's business, already loaded with their session. */
 export function bizOf(c: { get(k: 'business'): Business }): Business {
