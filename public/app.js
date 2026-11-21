@@ -6060,6 +6060,91 @@ function wireStatement(biz, day, uses, goUpi) {
     draw();
   };
 }
+// Changes tab (approved 21 Nov 2026): every change to the shift, newest first, with who and when. Undo puts back what
+// was there before, through the route that undoes that change; only the latest change to a bill can be undone.
+const CHG_KIND = { decision: ['Decision', 'k-dec'], register: ['Register', 'k-reg'], money: ['Money', 'k-money'], comp: ['Complimentary', 'k-comp'], cash: ['Cash', 'k-cash'], shift: ['Shift', 'k-shift'] };
+const CHG_STATE = { later: 'Changed again later: undo that first', gone: 'Already put back or changed', saved: 'Shift saved: reopen it to undo', none: '' };
+const changesPanel = (open) => html`<div data-rtop="chg" ${open ? '' : 'hidden'}><section class="card" style="gap:6px">
+  <div class="st-bar"><select id="chkind" aria-label="Kind"><option value="">All changes</option><option value="decision">Decisions</option><option value="register">Register edits</option><option value="money">Money (bookings, picks)</option><option value="comp">Complimentary</option><option value="cash">Cash</option></select>
+    <select id="chwho" aria-label="Person"><option value="">Everyone</option></select>
+    <input id="chbill" type="text" placeholder="Bill no." aria-label="Bill number" style="width:130px">
+    <span class="lo-fill"></span><label class="tiny"><input type="checkbox" id="chauto"> Show Bookr's own</label></div>
+  <div id="chrows"><div class="tiny">Loading…</div></div><div class="form-msg" id="chmsg"></div>
+  <div class="tiny note">Newest first. Undo puts back what was there before. Only the latest change to a bill can be undone; a later change to the same bill is undone first.</div>
+</section></div>`;
+function wireChanges(biz, day, reload) {
+  let data = null;
+  const shiftOf = (ms) => new Date(ms + (5.5 - 8) * 3600e3).toISOString().slice(0, 10);
+  const when = (ms) => (shiftOf(ms) === day ? hhmm(ms) : `${dayLabel(shiftOf(ms)).replace(/\s\d{4}$/, '')} ${hhmm(ms)}`);
+  const first = (n) => (n ?? 'Bookr').split(' ')[0];
+  // The same change to several bills at once (e.g. rows ticked together) is one line with Undo ▾.
+  const group = (list) => {
+    const out = [];
+    for (const x of list) {
+      const g = out.at(-1);
+      if (g && g.action === x.action && g.userId === x.userId && g.text === x.text && Math.abs(g.at - x.at) < 3000 && x.bill && !g.items.some((y) => y.bill === x.bill)) g.items.push(x);
+      else out.push({ ...x, items: [x] });
+    }
+    return out;
+  };
+  const undoBtn = (x, label = 'Undo') => html`<button class="btn plain dchip" type="button" data-chundo="${x.id}">${label}</button>`;
+  const right = (g) => {
+    const can = g.items.filter((x) => x.state === 'undo');
+    if (g.items.length > 1 && can.length) return html`<details class="ch-more"><summary class="btn plain dchip">Undo ▾</summary><div class="ch-menu">
+      ${can.map((x) => undoBtn(x, `Undo ${x.bill}`))}${can.length > 1 ? html`<button class="btn dchip" type="button" data-chundoall="${can.map((x) => x.id).join(',')}">Undo all ${can.length}</button>` : ''}</div></details>`;
+    if (can.length) return undoBtn(can[0]);
+    const st = g.items[0].state;
+    return html`<span class="tiny ch-st" title="${CHG_STATE[st] ?? ''}">${st === 'gone' ? 'gone' : st === 'none' ? '—' : st === 'saved' ? 'saved' : 'later'}</span>`;
+  };
+  const draw = () => {
+    const k = document.getElementById('chkind').value;
+    const who = document.getElementById('chwho').value;
+    const q = document.getElementById('chbill').value.trim();
+    const auto = document.getElementById('chauto').checked;
+    const list = data.items.filter((x) => (auto || !x.auto) && (!k || x.kind === k) && (!who || (x.userId ?? '') === who) && (!q || (x.bill ?? '').includes(q)));
+    const rows = group(list);
+    document.getElementById('chrows').innerHTML = rows.length ? html`${rows.map((g) => {
+      const [kw, kc] = CHG_KIND[g.kind] ?? ['Other', 'k-shift'];
+      const bills = g.items.map((x) => x.bill).filter(Boolean);
+      const st = g.items.length === 1 && g.state !== 'undo' ? CHG_STATE[g.state] : '';
+      return html`<div class="ch-row ${g.auto ? 'ch-auto' : ''}"><div class="ch-t">${when(g.at)}<br>${g.auto ? 'Bookr' : first(g.user)}</div>
+        <div><span class="ch-k ${kc}">${kw}</span>${g.items.length > 1 ? html`${g.items.length} lines: ${g.text} <span class="tiny">· ${bills.join(', ')}</span>`
+          : html`${g.bill ? html`<button type="button" class="linkbtn mono" data-bill-drawer="${g.bill}|${day}" title="Everything about this bill">${g.bill}</button> · ` : ''}${g.text}${g.times > 1 ? ` · ${g.times} times` : ''}`}
+          ${g.sub ? html`<div class="tiny">${g.sub}</div>` : ''}${st && g.state !== 'none' ? html`<div class="tiny note">${st}</div>` : ''}</div>
+        <div>${right(g)}</div></div>`; })}`.__html
+      : html`<div class="tiny">${data.items.length ? 'No change fits these filters.' : 'No changes on this shift yet.'}</div>`.__html;
+  };
+  const undo = async (ids) => {
+    const msg = document.getElementById('chmsg');
+    msg.textContent = '';
+    try {
+      for (const id of ids) {
+        const x = data.items.find((y) => y.id === Number(id));
+        if (!x?.undo) continue;
+        await apiFull(x.undo.method, `/businesses/${biz.id}${x.undo.path}`, x.undo.body);
+      }
+      await reload();
+    } catch (err) { showError(msg, err); }
+  };
+  return async () => {
+    if (data) return;
+    try {
+      data = await apiFull('GET', `/businesses/${biz.id}/shifts/${day}/changes`);
+    } catch (err) { document.getElementById('chrows').innerHTML = html`<div class="error">${err.message}</div>`.__html; return; }
+    const people = new Map(data.items.filter((x) => x.userId && !x.auto).map((x) => [x.userId, x.user ?? 'Someone']));
+    document.getElementById('chwho').insertAdjacentHTML('beforeend', html`${[...people].map(([id, n]) => html`<option value="${id}">${n}</option>`)}`.__html);
+    ['chkind', 'chwho', 'chauto'].forEach((id) => document.getElementById(id).addEventListener('change', draw));
+    document.getElementById('chbill').addEventListener('input', draw);
+    document.getElementById('chrows').addEventListener('click', (e) => {
+      const one = e.target.closest('[data-chundo]');
+      const many = e.target.closest('[data-chundoall]');
+      if (!one && !many) return;
+      (one ?? many).disabled = true;
+      undo(one ? [one.dataset.chundo] : many.dataset.chundoall.split(','));
+    });
+    draw();
+  };
+}
 const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist" aria-label="Reconcile">
   <a role="tab" class="${tab === 'shift' ? 'on' : ''}" href="#/b/${biz.id}/reconcile${day ? `/${day}` : ''}">This shift</a>
   <a role="tab" class="${tab === 'all' ? 'on' : ''}" href="#/b/${biz.id}/reconcile/all">All unmatched</a></div>`;
@@ -6776,7 +6861,7 @@ async function reconcileView(biz, dayArg) {
     ${quietSaved ? '' : html`<div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
       ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`}`;
   // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
-  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'stmt' ? 'stmt' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
+  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'stmt' ? 'stmt' : top === 'chg' ? 'chg' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
   const oneTab = (key, label, n) => html`<button type="button" role="tab" data-rtab1="${key}" class="${curTab === key ? 'on' : ''}" aria-selected="${curTab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : ''}</button>`;
   const topBtn = (key, label, n) => html`<button type="button" role="tab" data-rtopbtn="${key}" class="${top === key ? 'on' : ''}" aria-selected="${top === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
@@ -6787,11 +6872,12 @@ async function reconcileView(biz, dayArg) {
       <div style="display:flex;gap:8px;align-items:center">${!r.confirmed && biz.actions.includes('sales.decide') ? html`<button class="btn" type="button" id="savehead">Save shift</button>` : ''}${P.shiftMenu}</div></div>
     <div id="recmsg"></div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
-      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${comp.lines.length ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}</div>
+      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${comp.lines.length ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
     <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
     </div>
     ${comp.lines.length ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
     ${statementPanel(top === 'stmt')}
+    ${changesPanel(top === 'chg')}
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>
       ${P.bar}
       <div id="allmsg"></div>
@@ -6905,10 +6991,12 @@ async function reconcileView(biz, dayArg) {
   };
   app.querySelectorAll('[data-rtopbtn]').forEach((b) => b.addEventListener('click', () => showTop(b.dataset.rtopbtn)));
   const loadStatement = wireStatement(biz, day, statementUses(r, cv, near), () => go('upi'));
+  const loadChanges = wireChanges(biz, day, reload);
   const go = (key) => {
     const pay = ['cash', 'upi', 'card'].includes(key);
     showTop(pay ? 'pay' : key);
     if (key === 'stmt') loadStatement();
+    if (key === 'chg') loadChanges();
     if (pay) {
       try { localStorage.setItem(RECONCILE_TAB_KEY, key); } catch { /* storage unavailable */ }
       app.querySelectorAll('[data-rpanel]').forEach((x) => { x.hidden = x.dataset.rpanel !== key; });
@@ -6917,6 +7005,7 @@ async function reconcileView(biz, dayArg) {
   };
   app.querySelectorAll('[data-rtab1]').forEach((b) => b.addEventListener('click', () => go(b.dataset.rtab1)));
   if (top === 'stmt') loadStatement();
+  if (top === 'chg') loadChanges();
   document.getElementById('savehead')?.addEventListener('click', () => {
     go('todo');
     const btn = document.getElementById('savereconcile');

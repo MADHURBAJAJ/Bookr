@@ -729,4 +729,17 @@ tr.rd-red td { background: #FCEBEB; }
 .st-chip.u-free { background: var(--wait-bg); color: var(--wait); }
 button.st-chip.u-free { cursor: pointer; }
 .st-chip.u-booked { background: var(--chip); color: var(--ink); }
+.ch-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.ch-row.ch-auto { color: var(--muted); }
+.ch-t { font-size: 12px; color: var(--muted); }
+.ch-k { font-size: 11px; padding: 1px 7px; border-radius: 6px; margin-right: 6px; background: var(--chip); color: var(--ink); }
+.ch-k.k-dec { background: var(--income-bg); color: var(--income); }
+.ch-k.k-reg { background: var(--wait-bg); color: var(--wait); }
+.ch-k.k-money { background: var(--ok-bg); color: var(--ok); }
+.ch-st { color: var(--muted); }
+.ch-more { position: relative; }
+.ch-more summary { list-style: none; cursor: pointer; }
+.ch-more summary::-webkit-details-marker { display: none; }
+.ch-menu { position: absolute; right: 0; z-index: 5; display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--card, var(--bg)); border: 1px solid var(--line); border-radius: 8px; min-width: 150px; }
+@media (max-width: 560px) { .ch-row { grid-template-columns: 60px minmax(0, 1fr); } .ch-row > div:last-child { grid-column: 2; } }
 .st-chip.u-none { background: transparent; color: var(--muted); padding-left: 0; }
