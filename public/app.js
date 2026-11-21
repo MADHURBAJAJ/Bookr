@@ -247,6 +247,8 @@ const NAV = [
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
   { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
+  // A new school business (21 Nov 2026): before its first branch, Cash books is reached from Settings to set it up.
+  { key: 'cashbooks', label: 'Cash books', needs: 'accounts.edit', group: 'Settings', screens: ['cashbooks'], when: (b) => !b.cashBooks },
 ];
 // The menu counts: the Today figures, kept a minute so moving between pages does not ask again.
 let navCounts = { bizId: null, at: 0, n: null };
@@ -9023,7 +9025,9 @@ async function cashBooksView(biz, editId) {
   act('[data-cbdeposit]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbdeposit}/deposit`, { bankRowId: b.dataset.row }));
   act('[data-cbundo]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbundo}/undo`, {}));
   const bf = document.getElementById('cb-branch');
-  bf && onSubmit(bf, async (x) => { await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear(); await cashBooksView(biz); });
+  bf && onSubmit(bf, async (x) => { await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+    // The first branch makes it a school: route again so the menu changes over (Cash books under Daily work, no Shift).
+    if (biz.cashBooks) await cashBooksView(biz); else await route(); });
   const kf = document.getElementById('cb-book');
   kf && onSubmit(kf, async (x) => {
     if (editing) await api('PATCH', `/businesses/${biz.id}/cashbooks/${editing.id}`, x);
