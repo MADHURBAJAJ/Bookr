@@ -274,7 +274,7 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
       // no money of its own near it, and the credit is the only one of its amount near it (₹30 six times proves nothing).
       const swAmt = (s.software!.amountPaise as number) ?? 0;
       const rgAmt = (b.c.register?.amountPaise as number) ?? b.amount;
-      if (Math.abs(swAmt - rgAmt) > Math.max(2000, Math.round(swAmt * 0.1))) continue;
+      if (Math.abs(swAmt - rgAmt) > Math.max(2000, Math.round(swAmt * 0.2))) continue;
       if (swAmt !== m.amount && free().some((c) => c.amount === swAmt && nearAt(c.postedAt, s.paidAt, 60))) continue;
       if (free().filter((c) => c.amount === m.amount && nearAt(c.postedAt, s.paidAt, 60)).length > 1) continue;
       used.add(m.id); billOf.add(s.id); billOf.add(b.c.id);

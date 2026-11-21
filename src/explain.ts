@@ -114,7 +114,7 @@ export async function explainShift(db: DB, businessId: string, day: string) {
       if (!alike) continue;
       // Only a real slip (21 Nov 2026): amounts agree or a small discount apart, the software bill has no money of its
       // own near it, and the credit is the only one of its amount near it.
-      if (Math.abs(s.swAmount - r.net) > Math.max(2000, Math.round(s.swAmount * 0.1))) continue;
+      if (Math.abs(s.swAmount - r.net) > Math.max(2000, Math.round(s.swAmount * 0.2))) continue;
       if (s.swAmount !== r.net && credits.some((c) => c.amount === s.swAmount && near(c, s.paidAt))) continue;
       const fits = credits.filter((c) => c.amount === r.net && near(c, s.paidAt));
       if (fits.length > 1) continue;
