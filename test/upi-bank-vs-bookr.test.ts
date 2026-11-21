@@ -26,4 +26,15 @@ describe('UPI bank against Bookr', () => {
     expect(saved.upiBook).toMatchObject({ totalPaise: 68000, payments: 4, forBillsPaise: 53000, bookedPaise: 12000, booked: 1, leftPaise: 3000, left: 1 });
     expect(saved.noBill.map((x: any) => x.creditId)).toEqual([extra]);
   });
+
+  it('after saving, an extra ₹30 is bookable though a cash bill reads ₹32 in the software and ₹30 in the register', async () => {
+    const h = await hotel();
+    await h.account('HUF A', 'UPI XOXO');
+    await h.software([['2610311', '31 15:00', 'UPI', '30'], ['2610312', '31 16:00', 'CASH', '32']]);
+    await h.register([{ no: '2610311', amount: '30', pays: [['upi', '30']] }, { no: '2610312', amount: '32', discount: '2', pays: [['cash', '30']] } as any]);
+    const [, extra] = await h.credits([['31 15:01', 30], ['31 19:00', 30]]);
+    await h.decideRest();
+    await h.confirm();
+    expect((await h.reconcile()).noBill.map((x: any) => x.creditId)).toEqual([extra]);
+  });
 });

@@ -124,10 +124,14 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     });
   // Saved shift (20 Nov 2026): every credit left over can be booked, also one with an unpaid bill of its amount elsewhere.
   const noBillIds = new Set(noBill.map((x) => x.creditId));
+  // A bill whose two sides agree (a discount, complimentary) does not hold a credit back here, paid or not (a cash bill).
+  const openSides = new Set(sides.filter((x) => x.difference !== 'match' && x.difference !== 'complimentary')
+    .flatMap((x) => (rejected(x) != null ? [x.decision === 'use_register' ? x.b : x.a].filter((y) => y !== x.paid) : [x.a, x.b].filter((y) => y !== x.paid)))
+    .filter((x): x is number => x != null));
   // Only the candidate bills are let go, and only bills of other shifts: a side or a group short is still told as such.
   for (const id of leftCredits.filter((x) => !noBillIds.has(x))) {
     const c = creditOf.get(id)!;
-    if (sideAmounts.has(c.amount_paise) || nearGroup(c.amount_paise, groupsWaiting.map((g) => g.total))
+    if (openSides.has(c.amount_paise) || nearGroup(c.amount_paise, groupsWaiting.map((g) => g.total))
       || (sug.candidates.get(id) ?? []).some((k) => k.transactionIds.some((x) => sales.some((y) => y.id === x)))) continue;
     noBill.push({ ...credit(id), extra: sales.filter((x) => x.bankRowId && x.amountPaise === c.amount_paise).length, otherSide: otherSides.get(c.amount_paise) ?? [] });
   }
