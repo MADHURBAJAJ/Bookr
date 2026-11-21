@@ -356,8 +356,13 @@ stockRoutes.post(`${B}/stock/purchases`, requireAction('stock.edit'), async (c) 
   const db = c.env.DB;
   const data = await body(c);
   const s = await store(db, bid, data.storeId);
-  const vendor = text(data, 'vendor', 'Vendor', { max: 80 })!;
-  const invoice = text(data, 'invoiceNo', 'Invoice number', { optional: true, max: 40 });
+  // Opening stock (22 Nov 2026): what is on the shelf when stock-keeping starts, at its price; not a purchase, so it is
+  // left out of spend and of count variances.
+  const opening = data.opening === true;
+  if (opening && data.billId) fail(400, 'Opening stock is not received against a supplier bill.');
+  const vendor = opening ? 'Opening stock' : text(data, 'vendor', 'Vendor', { max: 80 })!;
+  if (!opening && vendor.toLowerCase() === 'opening stock') fail(400, 'Use the Opening stock tick for opening stock.');
+  const invoice = opening ? null : text(data, 'invoiceNo', 'Invoice number', { optional: true, max: 40 });
   if (!Array.isArray(data.lines) || !data.lines.length || data.lines.length > 50) fail(400, 'Add what was received.');
   const { t, shiftDay } = clock(bizOf(c));
   const statements = [];

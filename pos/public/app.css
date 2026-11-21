@@ -696,3 +696,8 @@ table.rt td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-
 form.edit { border: 2px solid var(--pri); border-radius: 12px; padding: 14px; background: var(--panel); }
 .many { border: 1px dashed var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; background: var(--bg); }
 .note { font-size: 13px; color: var(--quiet); font-weight: 400; }
+/* Stock: To buy, Purchases, Consumption */
+.vendorblock { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+details.receipt-row { border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; margin-top: 8px; background: var(--panel); }
+details.receipt-row summary { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; cursor: pointer; font-size: 15px; }
+details.receipt-row[open] summary { border-bottom: 1px solid var(--line); }
