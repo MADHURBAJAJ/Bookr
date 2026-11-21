@@ -484,9 +484,9 @@ function loginView() {
     <form class="card" id="login" style="flex:0 1 400px">
       <div style="font-size:22px;font-weight:600">Bookr</div>
       <h1 style="margin:0;font-size:28px;font-weight:600">Sign in</h1>
-      <div class="field"><label for="e">Email</label><input id="e" name="email" type="email" autocomplete="username" placeholder="name@example.com" required></div>
+      <div class="field"><label for="e">Email or mobile number</label><input id="e" name="email" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="name@example.com or 94120 55555" required></div>
       <div class="field"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
-      <span class="note">Forgot password? Ask the Owner of your business to send a new invite.</span>
+      <span class="note">Forgot your password? Ask the Owner of your business.</span>
       <div class="form-msg"></div>
       <button class="btn big" type="submit">Sign in</button>
       <div class="note">You can only see businesses you have been invited to. Ask the Owner for an invite.</div>
@@ -1876,7 +1876,7 @@ async function inviteView(token) {
     <form class="card" id="accept" style="flex:0 1 440px">
       <div style="font-size:22px;font-weight:600">Bookr</div>
       <h1 style="margin:0;font-size:26px;font-weight:600">Join ${info.businessName}</h1>
-      <div class="sub">You have been invited as <strong>${ROLE_LABELS[info.role]}</strong> using ${info.email}.</div>
+      <div class="sub">You have been invited as <strong>${ROLE_LABELS[info.role]}</strong>${info.phone ? html`. You'll sign in with your mobile number, <strong>${info.phone.slice(3, 8)} ${info.phone.slice(8)}</strong>.` : html` using ${info.email}.`}</div>
       ${info.hasAccount ? html`
         <div class="field"><label for="p">Your Bookr password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
       ` : html`
@@ -1891,7 +1891,8 @@ async function inviteView(token) {
   onSubmit(document.getElementById('accept'), async (d) => {
     await api('POST', `/invites/${encodeURIComponent(token)}/accept`, d);
     me = await api('GET', '/me');
-    go('#/choose');
+    // A cashier with one business opens straight on their book (21 Nov 2026).
+    go(me.businesses.length === 1 ? home(me.businesses[0]) : '#/choose');
   });
 }
 
@@ -8952,18 +8953,23 @@ const cbWhere = (h) => (h.toKind === 'bank' ? `Bank: ${h.toName}` : h.toName);
 /** All the books: cash with each cashier by branch, cash handed over not yet shown on the other side, and set up. */
 async function cashBooksView(biz, editId) {
   const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
-  const byBranch = new Map();
-  for (const b of d.books) { const k = b.branchName ?? 'No branch'; byBranch.set(k, [...(byBranch.get(k) ?? []), b]); }
   const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
   const countChip = (b) => (!b.lastCount ? html`<span class="tiny">not counted yet</span>`
     : b.lastCount.gapPaise === 0 ? html`<span class="chip ok" title="Counted on ${dayLabel(b.lastCount.day)}">count matches</span>`
       : html`<span class="chip bad" title="Counted on ${dayLabel(b.lastCount.day)}">${b.lastCount.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(b.lastCount.gapPaise))} · ${shortDay(b.lastCount.day)}</span>`);
-  const books = [...byBranch].map(([branch, list]) => html`
-    <div class="cb-branch"><span>${branch}</span><span class="amount">₹ ${rs(list.reduce((t, b) => t + b.inHandPaise, 0))}</span></div>
-    ${list.map((b) => html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}">
-      <span><span style="font-weight:500">${b.name}</span>${b.cashierName ? html` <span class="tiny">· ${b.cashierName}</span>` : html` <span class="chip wait">no cashier</span>`}
-        <div>${countChip(b)}</div></span>
-      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`)}`);
+  const phoneText = (p) => (p ? `${p.slice(3, 8)} ${p.slice(8)}` : '');
+  // One line per cashier (21 Nov 2026): the school beside the name, and where the cashier is: invite, invite sent, signed in.
+  const who = (b) => (b.cashierUserId
+    ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span> ${countChip(b)}`
+    : b.invite ? html`<span class="tiny">Invite sent to ${phoneText(b.invite.phone)} on ${shortDay(new Date(b.invite.createdAt + IST_MS).toISOString().slice(0, 10))} · not joined yet ·
+        <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${phoneText(b.invite.phone)}">Send again</button></span>`
+      : d.can.invite ? html`<button type="button" class="btn plain" style="min-height:34px;margin-top:4px" data-cbinvite="${b.id}">Invite cashier by phone</button>`
+        : html`<span class="tiny">no cashier yet</span>`);
+  const books = d.books.map((b) => html`<div class="list-row cb-book" style="align-items:flex-start">
+      <span><a href="#/b/${biz.id}/cashbook/${b.id}/${d.today}" style="font-weight:500;color:inherit">${b.name}</a>${b.branchName ? html` <span class="tiny">· ${b.branchName}</span>` : ''}
+        <div data-cbwho="${b.id}">${who(b)}</div></span>
+      <span style="text-align:right;white-space:nowrap"><span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span>
+        ${d.can.setup ? html` <a href="#/b/${biz.id}/cashbooks/${b.id}" class="linkbtn" title="Change ${b.name}" aria-label="Change ${b.name}">⋯</a>` : ''}</span></div>`);
   const open = d.handovers.map((h) => html`<div class="list-row" style="align-items:flex-start">
     <span><span style="font-weight:500">${h.fromBookName} → ${cbWhere(h)}</span> <span class="tiny">· ${shortDay(h.day)}</span>
       ${h.narration ? html`<div class="tiny">${h.narration}</div>` : ''}<div>${cbStatus(h)}</div>
@@ -8978,8 +8984,9 @@ async function cashBooksView(biz, editId) {
       ${(h.toKind !== 'book' && d.can.approve) ? html`<button type="button" class="linkbtn tiny" data-cbundo="${h.id}">Undo</button>` : ''}</span>
     <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`);
   const editing = d.books.find((b) => b.id === editId);
-  const setup = d.can.setup ? html`<section class="card">
-      <h2>Set up</h2>
+  // Set up is folded behind one button (21 Nov 2026); open when changing a book or when there is nothing yet.
+  const setup = d.can.setup ? html`<details class="card" id="cb-setup" ${editing || !d.books.length ? 'open' : ''}>
+      <summary style="cursor:pointer;font-weight:500">${d.books.length ? '+ Add branch or cash book' : 'Add your first school'}</summary>
       <form id="cb-branch" class="form-row">
         <div class="field"><label for="cbb">New branch</label><input id="cbb" name="name" placeholder="Chilkana Road" required></div>
         <button class="btn plain" type="submit">Add branch</button><div class="form-msg"></div></form>
@@ -8995,19 +9002,19 @@ async function cashBooksView(biz, editId) {
           <div class="field"><label for="cbo">Opening cash (₹)</label><input id="cbo" name="openingBalance" class="mono" inputmode="decimal" value="0" required></div>
           <div class="field"><label for="cbd">Opening date</label><input id="cbd" name="openingDate" type="date" value="${d.today}" required></div></div>
         <div class="tiny">Opening cash: what the cashier holds at the start of the opening date (for a Khatabook book, its balance that morning).</div>`}
-        <div class="tiny">The cashier signs in as Entry staff (invite them on Users and roles) and sees only their own book.</div>
+        <div class="tiny">${editing ? 'Or invite the cashier by phone from their line above: joining makes them its cashier.' : 'Then invite the cashier by phone from the book\'s line: they sign in with their mobile number and see only their own book.'}</div>
         <div class="form-msg"></div>
         <div class="form-row"><button class="btn" type="submit">${editing ? 'Save' : 'Add cash book'}</button>
           ${editing ? html`<a class="btn plain" style="display:inline-flex;align-items:center" href="#/b/${biz.id}/cashbooks">Cancel</a>` : ''}</div>
       </form>
-      ${d.books.length ? html`<div class="tiny">Change a book's branch or cashier: ${d.books.map((b, i) => html`${i ? ' · ' : ''}<a href="#/b/${biz.id}/cashbooks/${b.id}">${b.name}</a>`)}</div>` : ''}`
+      `
         : html`<div class="tiny">Add a branch first, then its cashiers' books.</div>`}
-    </section>` : '';
+    </details>` : '';
   render(shell(biz, 'cashbooks', 'Cash books', 'Cash with each cashier, and cash handed over until the other side shows it.', html`
     <div class="row">
       <section class="card grow3">
         <h2>Cash with cashiers <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
-        ${d.books.length ? books : html`<div class="note">No cash books yet.${d.can.setup ? ' Add a branch and a book under Set up.' : ''}</div>`}
+        ${d.books.length ? books : html`<div class="note">No cash books yet.${d.can.setup ? ' Add a school and its cashier\'s book below.' : ''}</div>`}
       </section>
       <section class="card grow2">
         <h2>Needs a look${d.handovers.length ? html` <span class="chip wait">${d.handovers.length}</span>` : ''}</h2>
@@ -9024,6 +9031,46 @@ async function cashBooksView(biz, editId) {
   act('[data-cbreceive]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbreceive}/receive`, {}));
   act('[data-cbdeposit]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbdeposit}/deposit`, { bankRowId: b.dataset.row }));
   act('[data-cbundo]', (b) => api('POST', `/businesses/${biz.id}/handovers/${b.dataset.cbundo}/undo`, {}));
+  // Invite a cashier by phone: the link opens WhatsApp to that number; joining makes them this book's cashier.
+  app.querySelectorAll('[data-cbinvite]').forEach((btn) => btn.addEventListener('click', () => {
+    const book = d.books.find((b) => b.id === btn.dataset.cbinvite);
+    const box = app.querySelector(`[data-cbwho="${book.id}"]`);
+    box.innerHTML = html`<form class="cb-invite" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:6px">
+        <div class="field" style="margin:0"><label for="cbph-${book.id}">Mobile number</label>
+          <input id="cbph-${book.id}" name="phone" type="tel" inputmode="numeric" autocomplete="off" placeholder="94120 55555" value="${btn.dataset.phone ?? ''}" required style="max-width:170px"></div>
+        <button class="btn" type="submit">Send on WhatsApp</button>
+        <button class="btn plain" type="button" data-copy>Copy link</button>
+        <div class="tiny" style="flex-basis:100%">${book.name} joins as Entry staff, signs in with this number and sees only this book.</div>
+        <div class="form-msg" style="flex-basis:100%"></div></form>`.__html;
+    const f = box.querySelector('form');
+    const msg = f.querySelector('.form-msg');
+    f.querySelector('input').focus();
+    const make = async () => {
+      const res = await api('POST', `/businesses/${biz.id}/invites`, { phone: f.elements.phone.value, role: 'entry_staff', accountId: book.id });
+      return { res, text: `Join ${biz.name} on Bookr to keep your cash book (${book.name}). Open this link, choose a password, then sign in with your mobile number: ${res.link}` };
+    };
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      // Opened at once (a tap is needed to open WhatsApp), then pointed at the chat once the link is made.
+      const w = window.open('about:blank', '_blank');
+      msg.textContent = 'Making the link…'; msg.className = 'form-msg';
+      try {
+        const { res, text } = await make();
+        const wa = `https://wa.me/${res.phone.slice(1)}?text=${encodeURIComponent(text)}`;
+        if (w) w.location.href = wa; else location.href = wa;
+        await cashBooksView(biz, editId);
+      } catch (err) { w?.close(); msg.textContent = err.message; msg.className = 'form-msg error'; }
+    });
+    f.querySelector('[data-copy]').addEventListener('click', async () => {
+      if (!f.reportValidity()) return;
+      try {
+        const { text } = await make();
+        try { await navigator.clipboard.writeText(text); msg.textContent = 'Invite copied. Paste it to them in any chat.'; }
+        catch { msg.textContent = text; }
+        msg.className = 'form-msg';
+      } catch (err) { msg.textContent = err.message; msg.className = 'form-msg error'; }
+    });
+  }));
   const bf = document.getElementById('cb-branch');
   bf && onSubmit(bf, async (x) => { await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
     // The first branch makes it a school: route again so the menu changes over (Cash books under Daily work, no Shift).

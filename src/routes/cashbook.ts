@@ -8,7 +8,7 @@ import { Hono, type Context } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
-import { body, date, fail, isUuid, paise, text } from '../http';
+import { body, date, fail, isUuid, paise, signInSql, text } from '../http';
 import { bookDay, bookFor, booksOf, depositCandidates, handovers, inHandThrough, seesAllBooks, type HandoverRow } from '../cashbook';
 import { can } from '../permissions';
 
@@ -52,16 +52,29 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   const visible = (h: HandoverRow) => seesAllBooks(role) || mine.has(h.fromAccountId) || (h.toKind === 'book' && mine.has(h.toAccountId!));
   const setup = can(role, 'accounts.edit');
   const [members, banks] = setup || can(role, 'rows.approve') ? await Promise.all([
-    setup ? all<{ id: string; name: string; email: string; role: string }>(db, `SELECT u.id, u.name, u.email, m.role FROM memberships m JOIN users u ON u.id = m.user_id
+    setup ? all<{ id: string; name: string; email: string; role: string }>(db, `SELECT u.id, u.name, ${signInSql('u')} AS email, m.role FROM memberships m JOIN users u ON u.id = m.user_id
       WHERE m.business_id = ? ORDER BY u.name`, bid) : Promise.resolve([]),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE business_id = ? AND kind = 'bank' ORDER BY name", bid),
   ]) : [[], []];
+  // Inviting a cashier by phone from their book (21 Nov 2026): the Owner sees each book's pending invite and whether
+  // its cashier has signed in.
+  const invite = can(role, 'members.manage');
+  const [pending, active] = invite ? await Promise.all([
+    all<{ accountId: string; phone: string | null; createdAt: number }>(db, `SELECT account_id AS accountId, phone, created_at AS createdAt FROM invites
+      WHERE business_id = ? AND account_id IS NOT NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?`, bid, now()),
+    all<{ id: string; lastActiveAt: number | null }>(db, `SELECT u.id, u.last_active_at AS lastActiveAt FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.business_id = ?`, bid),
+  ]) : [[], []];
+  const pendingOf = new Map(pending.map((p) => [p.accountId, { phone: p.phone, createdAt: p.createdAt }]));
+  const activeOf = new Map(active.map((a) => [a.id, a.lastActiveAt]));
+  const booksShown = withCash.map((b) => ({ ...b, invite: pendingOf.get(b.id) ?? null,
+    cashierLastActive: b.cashierUserId ? activeOf.get(b.cashierUserId) ?? null : null }));
   const openShown = await Promise.all(open.filter(visible).map(async (h) => ({
     ...h, deposits: h.toKind === 'bank' && can(role, 'rows.approve') ? await depositCandidates(db, bid, h) : [],
   })));
   return c.json({
-    today: t, branches, books: withCash, handovers: openShown, done: done.filter(visible),
-    members, banks, can: { setup, approve: can(role, 'rows.approve'), write: can(role, 'rows.edit') },
+    today: t, branches, books: booksShown, handovers: openShown, done: done.filter(visible),
+    members, banks, can: { setup, invite, approve: can(role, 'rows.approve'), write: can(role, 'rows.edit') },
   });
 });
 
