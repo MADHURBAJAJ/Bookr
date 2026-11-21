@@ -238,6 +238,8 @@ const NAV = [
   // Cash books (approved 20 Nov 2026): shown once the business has a branch (a school); a cashier sees their own book.
   { key: 'cashbooks', label: 'Cash books', group: 'Daily work', screens: ['cashbooks', 'cashbook'], when: (b) => b.cashBooks && (b.role !== 'entry_staff' || b.myBooks > 0) },
   { key: 'fees', label: 'Fee check', needs: 'sales.view', group: 'Daily work', when: (b) => b.cashBooks && b.role !== 'entry_staff' },
+  // A director who is an Owner and keeps a cash holder's book (21 Nov 2026) opens it here.
+  { key: 'mybook', label: 'My book', group: 'Daily work', when: (b) => b.cashBooks && b.role !== 'entry_staff' && b.myBooks > 0 },
   // Bring in, Register and Reconcile are the three steps of one shift (the shift bar at the top of each).
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts', when: (b) => !b.cashBooks },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
@@ -9408,10 +9410,16 @@ async function cashBooksView(biz, oldEditId) {
   if (oldEditId) return location.replace(`#/b/${biz.id}/schools/${oldEditId}`);
   const d = await api('GET', `/businesses/${biz.id}/cashbooks`);
   const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
-  const books = d.books.map((b) => html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}">
+  // Schools' cashiers first, then cash holders (not at a school), each group with its total (21 Nov 2026).
+  const sum = (list) => list.reduce((t, b) => t + b.inHandPaise, 0);
+  const atSchool = d.books.filter((b) => b.branchId);
+  const holding = d.books.filter((b) => !b.branchId);
+  const books = [[atSchool, 'Schools'], [holding, 'Cash holders']].filter(([l]) => l.length).map(([l, label]) => html`
+    ${holding.length ? html`<div class="cb-branch"><span>${label}</span><span class="amount">₹ ${rs(sum(l))}</span></div>` : ''}
+    ${l.map((b) => html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}">
       <span><span style="font-weight:500">${b.name}</span>${b.branchName ? html` <span class="tiny">· ${b.branchName}</span>` : ''}
         <div>${b.cashierUserId || !d.can.setup ? cbCountChip(b) : html`<span class="tiny">${b.invite ? 'invite sent, not joined yet' : 'no cashier yet'}</span> ${cbCountChip(b)}`}</div></span>
-      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`);
+      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`)}`);
   const done = d.done.map((h) => html`<div class="list-row">
     <span>${h.fromBookName} → ${cbWhere(h)} <span class="tiny">· ${shortDay(h.day)}${h.settledByName ? ` · ${h.status === 'deposited' ? 'matched' : 'confirmed'} by ${h.settledByName}` : ''}</span> ${cbStatus(h)}
       ${(h.toKind !== 'book' && d.can.approve) ? html`<button type="button" class="linkbtn tiny" data-cbundo="${h.id}">Undo</button>` : ''}</span>
@@ -9420,7 +9428,7 @@ async function cashBooksView(biz, oldEditId) {
   render(shell(biz, 'cashbooks', 'Cash books', 'Cash with each cashier, and cash handed over until the other side shows it.', html`
     <div class="row">
       <section class="card grow3">
-        <h2>Cash with cashiers <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
+        <h2>${holding.length ? 'Cash in hand' : 'Cash with cashiers'} <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
         ${d.books.length ? books : html`<div class="note">No cashiers yet.${d.can.setup ? html` Add your schools and their cashiers on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.` : ''}</div>`}
         ${d.can.setup && d.books.length ? html`<div class="tiny" style="margin-top:8px">Add a cashier, invite one, or change opening cash on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.</div>` : ''}
       </section>
@@ -9450,9 +9458,31 @@ async function schoolsView(biz, editId) {
       <span style="min-width:0"><span style="font-weight:500">${b.name}</span>
         <span class="tiny">· opening ₹ ${rs(b.openingBalancePaise)} on ${shortDay(b.openingDate)}</span>
         <div data-cbwho="${b.id}" style="margin-top:4px">${who(b)}</div></span>
-      <a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a></div>`;
+      ${b.pending ? '' : html`<a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a>`}</div>`;
+  // Cash holders (21 Nov 2026): people not at a school who keep a cash book, e.g. a director.
+  const holders = [...d.books.filter((b) => !b.branchId), ...(d.pendingHolders ?? []).map((b) => ({ ...b, pending: true }))];
+  const holderSection = html`<section class="card">
+      <h2 style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">Cash holders <span class="tiny" style="font-weight:400">not at a school</span></h2>
+      ${holders.length ? holders.map(cashierRow) : html`<div class="note">A director, trustee or accounts office who receives cash from the cashiers and keeps their own book.</div>`}
+      <details style="margin-top:6px" ${holders.length ? '' : 'open'}><summary class="linkbtn" style="cursor:pointer">+ Add cash holder</summary>
+        <form id="cb-holder" style="display:flex;flex-direction:column;gap:10px;margin-top:8px">
+          <div class="form-row">
+            <div class="field"><label>Name</label><input name="name" placeholder="Anoop Bajaj" required></div>
+            <div class="field"><label>Title (optional)</label><input name="title" placeholder="Director"></div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Cash they hold now (₹)</label><input name="openingBalance" class="mono" inputmode="decimal" value="0" required></div>
+            <div class="field"><label>From</label><input name="openingDate" type="date" value="${d.today}" required></div>
+            <div class="field"><label>Who keeps it</label><select name="cashierUserId"><option value="">Invite them by phone after adding</option>
+              ${d.members.filter((m) => m.role !== 'viewer').map((m) => html`<option value="${m.id}">${m.name} (${ROLE_LABELS[m.role]}), already signs in</option>`)}</select></div>
+          </div>
+          <div class="tiny">They receive cash from cashiers (Got it), spend, hand on to the bank or others, and count, like a cashier, without fees.</div>
+          <div class="form-msg"></div>
+          <div><button class="btn" type="submit">Add cash holder</button></div>
+        </form></details>
+    </section>`;
   const schools = d.branches.map((br) => {
-    const list = d.books.filter((b) => b.branchId === br.id);
+    const list = d.books.filter((b) => b.branchId && b.branchId === br.id);
     const codes = codesOf(br.id);
     return html`<section class="card">
       <h2 style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">${br.name}
@@ -9475,13 +9505,14 @@ async function schoolsView(biz, editId) {
       <h2>Change ${editing.name}</h2>
       <form id="cb-book" style="display:flex;flex-direction:column;gap:12px">
         <div class="form-row">
-          <div class="field"><label for="cbn">Cashier's name</label><input id="cbn" name="name" value="${editing.name}" required></div>
-          <div class="field"><label for="cbbr">School</label><select id="cbbr" name="branchId" required>${d.branches.map((b) => html`<option value="${b.id}" ${editing.branchId === b.id ? 'selected' : ''}>${b.name}</option>`)}</select></div>
+          <div class="field"><label for="cbn">${editing.branchId ? 'Cashier\'s name' : 'Name'}</label><input id="cbn" name="name" value="${editing.name}" required></div>
+          ${editing.branchId ? html`<div class="field"><label for="cbbr">School</label><select id="cbbr" name="branchId" required>${d.branches.map((b) => html`<option value="${b.id}" ${editing.branchId === b.id ? 'selected' : ''}>${b.name}</option>`)}</select></div>`
+            : html`<div class="field"><label>School</label><div class="tiny" style="padding-top:10px">Cash holder, not at a school</div></div>`}
         </div>
         <div class="form-row">
           <div class="field"><label for="cbo">Cash they held at the start (₹)</label><input id="cbo" name="openingBalance" class="mono" inputmode="decimal" value="${rsIn(editing.openingBalancePaise)}" required></div>
           <div class="field"><label for="cbd">On</label><input id="cbd" name="openingDate" type="date" value="${editing.openingDate}" required></div>
-          <div class="field"><label for="cbc">Signs in as</label><select id="cbc" name="cashierUserId"><option value="">Nobody yet</option>
+          <div class="field"><label for="cbc">Signs in as</label><select id="cbc" name="cashierUserId">${editing.branchId ? html`<option value="">Nobody yet</option>` : ''}
             ${d.members.map((m) => html`<option value="${m.id}" ${editing.cashierUserId === m.id ? 'selected' : ''}>${m.name} (${ROLE_LABELS[m.role]})</option>`)}</select></div>
         </div>
         <div class="tiny">Start: the cash in their hand that morning (for a Khatabook book, its balance that day). Fee report days from then on fill the book.</div>
@@ -9492,6 +9523,7 @@ async function schoolsView(biz, editId) {
   render(shell(biz, 'schools', 'Schools and cashiers', 'Each school, its fee report code and its cashiers. Cashiers sign in with their mobile number.', html`
     ${edit}
     ${d.branches.length ? schools : html`<section class="card"><div class="note">Start with your first school, then add its cashiers.</div></section>`}
+    ${d.branches.length ? holderSection : ''}
     <section class="card">
       <form id="cb-branch" class="form-row" style="align-items:flex-end">
         <div class="field"><label for="cbb">${d.branches.length ? 'Add a school' : 'Your first school'}</label><input id="cbb" name="name" placeholder="Chilkana Road" required></div>
@@ -9503,7 +9535,7 @@ async function schoolsView(biz, editId) {
   const again = () => schoolsView(biz, editId);
   // Invite a cashier by phone: the link opens WhatsApp to that number; joining makes them this book's cashier.
   app.querySelectorAll('[data-cbinvite]').forEach((btn) => btn.addEventListener('click', () => {
-    const book = d.books.find((b) => b.id === btn.dataset.cbinvite);
+    const book = holders.find((b) => b.id === btn.dataset.cbinvite) ?? d.books.find((b) => b.id === btn.dataset.cbinvite);
     const box = app.querySelector(`[data-cbwho="${book.id}"]`);
     box.innerHTML = html`<form style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
         <div class="field" style="margin:0"><label for="cbph-${book.id}">${book.name}'s mobile number</label>
@@ -9548,6 +9580,13 @@ async function schoolsView(biz, editId) {
     BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
     await again();
   }));
+  const hf = document.getElementById('cb-holder');
+  hf && onSubmit(hf, async (x) => {
+    const name = x.title?.trim() ? `${x.name.trim()} (${x.title.trim()})` : x.name;
+    await api('POST', `/businesses/${biz.id}/cashbooks`, { holder: true, name, openingBalance: x.openingBalance, openingDate: x.openingDate, cashierUserId: x.cashierUserId || null });
+    BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+    await again();
+  });
   const bf = document.getElementById('cb-branch');
   onSubmit(bf, async (x) => {
     await api('POST', `/businesses/${biz.id}/branches`, x); BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
@@ -9587,13 +9626,13 @@ async function schoolTodayView(biz) {
       <span>${noCashier.length === 1 ? `${noCashier[0].name} has not joined` : `${noCashier.length} cashiers have not joined`} <span class="tiny">· invite them by phone</span></span><span class="chip wait">Schools and cashiers ›</span></a>`] : []),
   ];
   const cashiers = d.books.map((b) => html`<a class="list-row" href="#/b/${biz.id}/cashbook/${b.id}/${d.today}" style="color:inherit">
-      <span><span style="font-weight:500">${b.name}</span> <span class="tiny">· ${b.branchName ?? ''}</span><div>${cbCountChip(b)}</div></span>
+      <span><span style="font-weight:500">${b.name}</span> <span class="tiny">· ${b.branchName ?? 'cash holder'}</span><div>${cbCountChip(b)}</div></span>
       <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`);
   render(shell(biz, 'dashboard', 'Today', '', html`
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
       ${rep ? tile(`Fees, ${lastDay === d.today ? 'today' : shortDay(lastDay)}`, `₹ ${rs(rep.totalPaise)}`, `${rep.report.receipts} receipts · cash ₹ ${rs(rep.totals.cash)}`, `#/b/${biz.id}/fees/${lastDay}`)
         : tile('Fees, today', '—', 'fee report not brought in', `#/b/${biz.id}/fees/${d.today}`)}
-      ${tile('Cash with cashiers', `₹ ${rs(total)}`, `${d.books.length} cashier${d.books.length === 1 ? '' : 's'}`, `#/b/${biz.id}/cashbooks`)}
+      ${tile('Cash in hand', `₹ ${rs(total)}`, `${d.books.length} book${d.books.length === 1 ? '' : 's'}: cashiers and cash holders`, `#/b/${biz.id}/cashbooks`)}
       ${rep ? tile('UPI and card to match', `₹ ${rs((rep.totals.upi ?? 0) + (rep.totals.card ?? 0))}`, 'with the bank, once its accounts are added', `#/b/${biz.id}/fees/${lastDay}`) : ''}
     </div>
     <div class="row" style="margin-top:12px">
@@ -9602,7 +9641,7 @@ async function schoolTodayView(biz) {
         ${look.length ? look : html`<div class="note">Nothing waits on anyone.</div>`}
       </section>
       <section class="card grow2">
-        <h2>Cash with cashiers <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
+        <h2>Cash in hand <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
         ${cashiers.length ? cashiers : html`<div class="note">No cashiers yet.</div>`}
       </section>
     </div>`));
@@ -9624,7 +9663,7 @@ function cbFrame(biz, b, tab, body) {
   if (!cbIsCashier(biz)) return shell(biz, 'cashbook', b.name, `${b.branchName ?? ''}${b.cashierName && b.cashierName !== b.name ? ` · ${b.cashierName}` : ''}`, body);
   const t = (key, label, href) => html`<a class="cbt ${tab === key ? 'on' : ''}" href="${href}" ${tab === key ? html`aria-current="page"` : ''}>${label}</a>`;
   return html`<div class="cbapp">
-    <header class="cbapp-head"><span><b>${b.cashierName ?? b.name}</b> <span class="tiny">· ${b.branchName ?? ''}</span></span>
+    <header class="cbapp-head"><span><b>${b.branchName ? b.cashierName ?? b.name : b.name}</b> <span class="tiny">· ${b.branchName ?? 'Cash holder'}</span></span>
       ${me.businesses.length > 1 ? html`<a class="tiny" href="#/choose">${biz.name} ▾</a>` : html`<span class="tiny">${biz.name}</span>`}</header>
     <main class="cbapp-main">${body}</main>
     <nav class="cbbar" aria-label="Cash book">
@@ -9697,13 +9736,15 @@ async function cashBookDayView(biz, accountId, dayIn) {
   const waiting = d.waiting.map((h) => html`<div class="cb-box wait cb-wait"><span><b>${h.fromBookName}</b> sent you ₹ ${rs(h.amountPaise)}
       <span class="tiny">· ${shortDay(h.day)}${h.narration ? ` · ${h.narration}` : ''}</span></span>
     ${d.can.write && h.day <= day ? html`<button type="button" class="btn" style="min-height:36px" data-cbaccept="${h.id}">Got it</button>` : ''}</div>`);
-  const feeLabel = f?.sheetIn ? '' : typed.length ? 'Change today\'s fee cash' : 'Enter today\'s fee cash';
-  const needCount = !d.count && (typed.length || f?.sheetIn);
+  // A cash holder (no school) takes no fees: money in instead (21 Nov 2026).
+  const holder = !b.branchId;
+  const feeLabel = holder || f?.sheetIn ? '' : typed.length ? 'Change today\'s fee cash' : 'Enter today\'s fee cash';
+  const needCount = !d.count && (holder || typed.length || f?.sheetIn);
   const opts = (list) => list.map((x) => html`<option value="${x}">${x}</option>`);
   const forms = w ? html`
     <div class="cb-btns">
       ${feeLabel ? html`<button type="button" class="btn wide ${typed.length ? 'plain' : ''}" data-cbopen="fee">${feeLabel}</button>` : ''}
-      <button type="button" class="btn plain" data-cbopen="receipt">+ Receipt</button>
+      <button type="button" class="btn plain" data-cbopen="receipt">${holder ? '+ Money in' : '+ Receipt'}</button>
       <button type="button" class="btn plain" data-cbopen="expense">+ Expense</button>
       <button type="button" class="btn plain" data-cbopen="handover">Hand over</button>
       <button type="button" class="btn ${needCount ? '' : 'plain'}" data-cbopen="count">${d.count ? 'Count again' : 'Count cash'}</button>
@@ -9719,12 +9760,12 @@ async function cashBookDayView(biz, accountId, dayIn) {
       <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
     </form>
     <form class="card cb-form" data-cbform="receipt" hidden>
-      <div style="font-weight:500">+ Receipt <span class="tiny">· cash not in the fee software</span></div>
+      <div style="font-weight:500">${holder ? '+ Money in' : html`+ Receipt <span class="tiny">· cash not in the fee software</span>`}</div>
       <div class="field"><label for="cbr-a">Amount (₹)</label><input id="cbr-a" name="amount" class="mono" inputmode="decimal" required placeholder="600"></div>
-      <div class="field"><label for="cbr-w">What for</label><select id="cbr-w" name="what">${opts(CB_WHAT_IN)}<option value="">Something else…</option></select></div>
+      <div class="field"><label for="cbr-w">What for</label><select id="cbr-w" name="what">${holder ? '' : opts(CB_WHAT_IN)}<option value="">${holder ? 'Write what it was' : 'Something else…'}</option></select></div>
       <div class="field" data-cbelse hidden><label for="cbr-o">What was it?</label><input id="cbr-o" name="other" placeholder="Book sale"></div>
       <div class="field"><label for="cbr-s">Slip no. (manual book, optional)</label><input id="cbr-s" name="slip" class="mono" placeholder="M-118"></div>
-      <div class="tiny">The fee sheet never replaces it. The accountant sets its head.</div>
+      <div class="tiny">${holder ? 'For cash from outside, e.g. a gift or a refund. Cash from a cashier comes in with Got it.' : 'The fee sheet never replaces it.'} The accountant sets its head.</div>
       <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save receipt</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
     </form>
     <form class="card cb-form" data-cbform="expense" hidden>
@@ -9740,7 +9781,8 @@ async function cashBookDayView(biz, accountId, dayIn) {
       <div class="field"><label for="cbh-a">Amount (₹)</label><input id="cbh-a" name="amount" class="mono" inputmode="decimal" required placeholder="20,000"></div>
       <div class="field"><label for="cbh-t">To</label><select id="cbh-t" name="to">
         ${d.banks.length ? html`<optgroup label="Bank">${d.banks.map((x) => html`<option value="bank:${x.id}">Bank: ${x.name}</option>`)}</optgroup>` : ''}
-        ${d.targets.length ? html`<optgroup label="Another cashier">${d.targets.map((t) => html`<option value="book:${t.id}">${t.cashierName ?? t.name}${t.branchName ? ` · ${t.branchName}` : ''}</option>`)}</optgroup>` : ''}
+        ${d.targets.some((t) => !t.branchName) ? html`<optgroup label="Cash holder">${d.targets.filter((t) => !t.branchName).map((t) => html`<option value="book:${t.id}">${t.name}</option>`)}</optgroup>` : ''}
+        ${d.targets.some((t) => t.branchName) ? html`<optgroup label="Another cashier">${d.targets.filter((t) => t.branchName).map((t) => html`<option value="book:${t.id}">${t.cashierName ?? t.name} · ${t.branchName}</option>`)}</optgroup>` : ''}
         <optgroup label="A person">${d.people.map((p) => html`<option value="person:${p}">${p}</option>`)}<option value="person:">Someone else…</option></optgroup></select></div>
       <div class="field" data-cbperson hidden><label for="cbh-p">Person's name</label><input id="cbh-p" name="person" placeholder="Anoop"></div>
       <div class="field"><label for="cbh-n">Note (optional)</label><input id="cbh-n" name="narration" placeholder="Deposit slip 4471"></div>
@@ -9769,7 +9811,7 @@ async function cashBookDayView(biz, accountId, dayIn) {
       ${cbFeeBox(f, d.can.write, { bring: `#/b/${biz.id}/cbmore/${b.id}`, view: `#/b/${biz.id}/fees/${day}` })}
       <section class="card cb-card">
         ${row('Opening', '', `₹ ${rs(d.openingPaise)}`, '')}
-        ${feeRows.length ? feeRows : !d.before ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
+        ${feeRows.length ? feeRows : !d.before && !holder ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
         ${others}
         <div class="list-row cb-total"><span>Should be in hand</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
         ${d.count ? html`<div class="list-row"><span>Counted${d.count.countedByName ? html` <span class="tiny">by ${d.count.countedByName}</span>` : ''}</span><span class="amount">₹ ${rs(d.count.countedPaise)}</span></div>
@@ -9807,7 +9849,9 @@ async function cashBookDayView(biz, accountId, dayIn) {
     await reload();
   });
   const what = fm('receipt').querySelector('[name=what]');
-  what.addEventListener('change', () => { fm('receipt').querySelector('[data-cbelse]').hidden = !!what.value; });
+  const showElse = () => { fm('receipt').querySelector('[data-cbelse]').hidden = !!what.value; };
+  what.addEventListener('change', showElse);
+  showElse();
   onSubmit(fm('receipt'), async (x) => {
     const w2 = x.what || x.other?.trim();
     if (!w2) throw new Error('Write what this receipt was for.');
@@ -9896,7 +9940,7 @@ async function cbMoreView(biz, accountId) {
     api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/lines`),
   ]);
   const b = d.book;
-  const canImport = biz.actions.includes('sales.import');
+  const canImport = biz.actions.includes('sales.import') && !!b.branchId;
   const toSet = l.lines.filter((x) => x.kind === 'expense' && !x.reviewStatus).length;
   const lines = l.lines.map((x) => html`<div class="list-row" style="align-items:flex-start"><span>${x.narration || x.headName}
       <div>${cbReviewChip(x)} <span class="tiny">· ${shortDay(x.day)}${x.headName && x.kind === 'expense' ? ` · ${x.headName}` : ''}</span></div>
@@ -10069,6 +10113,11 @@ async function routeInner() {
       if (screen === 'cashbooks') return cashBooksView(biz, parts[3]);
       if (screen === 'cashbook') return cashBookDayView(biz, parts[3], parts[4]);
       // The cashier's phone bar (21 Nov 2026): Days, Handed over, More.
+      if (screen === 'mybook') {
+        const { books } = await api('GET', `/businesses/${biz.id}/cashbooks`);
+        const mine = books.find((x) => x.cashierUserId === me.user.id);
+        return mine ? location.replace(`#/b/${biz.id}/cashbook/${mine.id}/${todayIst()}`) : go(home(biz));
+      }
       if (screen === 'cbdays' && parts[3]) return cbDaysView(biz, parts[3]);
       if (screen === 'cbhanded' && parts[3]) return cbHandedView(biz, parts[3]);
       if (screen === 'cbmore' && parts[3]) return cbMoreView(biz, parts[3]);
