@@ -10,6 +10,9 @@ import type { AppEnv } from '../types';
 
 export const reportRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
+/** A bill settled as NC or complimentary (for a bill aliased b): not a sale. */
+export const COMP = "EXISTS (SELECT 1 FROM payments p WHERE p.settlement_id = b.settlement_id AND p.mode = 'comp')";
+const shiftAdd = (d: string, n: number) => new Date(Date.parse(d) + n * 86_400_000).toISOString().slice(0, 10);
 reportRoutes.use(`${B}/*`, requireStaff);
 
 // Sales of shifts from..to (bills by the shift they were printed in; payments by the shift they were taken in).
@@ -19,8 +22,20 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
   const from = date({ d: c.req.query('from') ?? '' }, 'd', 'From');
   const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
   if (from > to) fail(400, 'From must be on or before To.');
-  const days = await all(db, `SELECT shift_day AS day, count(*) AS bills, sum(total_paise) AS totalPaise FROM bills
-    WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND status <> 'void' GROUP BY shift_day ORDER BY shift_day`, bid, from, to);
+  // Sales leave out NC and complimentary bills (the same rule as every other report); the table by name on the bill keeps
+  // every bill, as GST records need.
+  const days = await all(db, `SELECT b.shift_day AS day, count(*) AS bills, sum(b.taxable_paise + b.nongst_paise) AS netPaise, sum(b.total_paise) AS totalPaise FROM bills b
+    WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP} GROUP BY b.shift_day ORDER BY b.shift_day`, bid, from, to);
+  // Compared with: the same day last week for one shift, else the same number of shifts just before.
+  const span = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1;
+  const back = span === 1 ? 7 : span;
+  const [pFrom, pTo] = [shiftAdd(from, -back), shiftAdd(to, -back)];
+  const totals = (a: string, z: string) => one<{ bills: number; grossPaise: number; discountPaise: number; netPaise: number; totalPaise: number }>(db, `SELECT count(*) AS bills,
+      coalesce(sum(b.gross_paise), 0) AS grossPaise, coalesce(sum(b.discount_paise), 0) AS discountPaise, coalesce(sum(b.taxable_paise + b.nongst_paise), 0) AS netPaise,
+      coalesce(sum(b.total_paise), 0) AS totalPaise FROM bills b WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP}`, bid, a, z);
+  const [paid, prev, nc] = await Promise.all([totals(from, to), totals(pFrom, pTo),
+    one<{ bills: number; menuPaise: number }>(db, `SELECT count(*) AS bills, coalesce(sum(b.gross_paise), 0) AS menuPaise FROM bills b
+      WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND ${COMP}`, bid, from, to)]);
   const byEntity = await all(db, `SELECT e.name, e.gst_registered AS gstRegistered, e.gstin, count(*) AS bills, sum(b.gross_paise) AS grossPaise,
       sum(b.discount_paise) AS discountPaise, sum(b.taxable_paise) AS taxablePaise, sum(b.nongst_paise) AS nonGstPaise, sum(b.cgst_paise) AS cgstPaise, sum(b.sgst_paise) AS sgstPaise,
       sum(b.round_off_paise) AS roundOffPaise, sum(b.total_paise) AS totalPaise, min(b.bill_no) AS firstBill, max(b.bill_no) AS lastBill
@@ -29,7 +44,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
   const byMode = await all(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise FROM payments p JOIN settlements s ON s.id = p.settlement_id
     WHERE p.business_id = ? AND p.shift_day BETWEEN ? AND ? AND s.kind = 'bills' GROUP BY p.mode ORDER BY paise DESC`, bid, from, to);
   const items = await all(db, `SELECT l.name, sum(l.qty) AS qty, sum(l.amount_paise) AS amountPaise FROM bill_lines l JOIN bills b ON b.id = l.bill_id
-    WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' GROUP BY l.name ORDER BY amountPaise DESC`, bid, from, to);
+    WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP} GROUP BY l.name ORDER BY amountPaise DESC`, bid, from, to);
   const discounts = await all(db, `SELECT discount_reason AS reason, count(*) AS n, sum(discount_paise) AS paise FROM bills
     WHERE business_id = ? AND shift_day BETWEEN ? AND ? AND status <> 'void' AND discount_paise > 0 GROUP BY discount_reason ORDER BY paise DESC`, bid, from, to);
   const comps = await all(db, `SELECT p.comp_guest AS guest, p.comp_reason AS reason, p.amount_paise AS paise, p.shift_day AS day, s.name AS byName
@@ -45,7 +60,7 @@ reportRoutes.get(`${B}/reports/sales`, requireAction('reports.view'), async (c) 
     FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, from, to);
   const creditNoteList = await all(db, `SELECT n.cn_no AS cnNo, b.bill_no AS billNo, n.total_paise AS totalPaise, n.reason, n.refund_mode AS refundMode, n.shift_day AS day
     FROM credit_notes n JOIN bills b ON b.id = n.bill_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? ORDER BY n.at`, bid, from, to);
-  return c.json({ from, to, days, byEntity, byMode, items, discounts, comps, voids, creditNotes, creditNoteList, tips, paymentDiscounts });
+  return c.json({ from, to, days, paid, nc, prev: { from: pFrom, to: pTo, ...prev }, byEntity, byMode, items, discounts, comps, voids, creditNotes, creditNoteList, tips, paymentDiscounts });
 });
 
 // When, where and by whom the money came in, and what sold: for shifts from..to, void bills left out.
@@ -57,7 +72,7 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
   const from = date({ d: c.req.query('from') ?? '' }, 'd', 'From');
   const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
   if (from > to) fail(400, 'From must be on or before To.');
-  const live = "b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void'";
+  const live = `b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP}`;
   // The shifts from..to as times: from the shift start hour (India time) on From, to the same hour the day after To.
   const startOf = (d: string) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), bizOf(c).shift_start_hour) - 19_800_000;
   const fromMs = startOf(from);
@@ -79,7 +94,7 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
         sum(CASE WHEN o.covers > 0 THEN b.taxable_paise + b.nongst_paise ELSE 0 END) AS coveredNetPaise, count(DISTINCT lower(o.place) || b.shift_day) AS placeDays
       FROM bills b JOIN orders o ON o.id = b.order_id WHERE ${live} GROUP BY o.kind ORDER BY netPaise DESC`, bid, from, to),
     all(db, `SELECT coalesce(st.name, 'Unknown') AS name, st.role,
-        sum(b.status <> 'void') AS bills, sum(CASE WHEN b.status <> 'void' THEN b.taxable_paise + b.nongst_paise ELSE 0 END) AS netPaise,
+        sum(b.status <> 'void' AND NOT ${COMP}) AS bills, sum(CASE WHEN b.status <> 'void' AND NOT ${COMP} THEN b.taxable_paise + b.nongst_paise ELSE 0 END) AS netPaise,
         sum(b.status <> 'void' AND b.discount_paise > 0) AS discountBills, sum(CASE WHEN b.status <> 'void' THEN b.discount_paise ELSE 0 END) AS discountPaise,
         sum(b.status = 'void') AS voids
       FROM bills b JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = o.opened_by
@@ -105,9 +120,11 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
   const { t } = clock(b);
   const fy = fyOf(day, b.fy_start_month);
   const [sales, byMode, events, diffs, unpaid, series, cnSeries, close, bar, typed] = await Promise.all([
-    one<{ bills: number; net: number; total: number; voids: number }>(db, `SELECT sum(status <> 'void') AS bills,
-        coalesce(sum(CASE WHEN status <> 'void' THEN taxable_paise + nongst_paise END), 0) AS net, coalesce(sum(CASE WHEN status <> 'void' THEN total_paise END), 0) AS total,
-        sum(status = 'void') AS voids FROM bills WHERE business_id = ? AND shift_day = ?`, bid, day),
+    one<{ bills: number; net: number; total: number; voids: number; nc: number; ncMenu: number }>(db, `SELECT sum(b.status <> 'void' AND NOT ${COMP}) AS bills,
+        coalesce(sum(CASE WHEN b.status <> 'void' AND NOT ${COMP} THEN b.taxable_paise + b.nongst_paise END), 0) AS net,
+        coalesce(sum(CASE WHEN b.status <> 'void' AND NOT ${COMP} THEN b.total_paise END), 0) AS total,
+        sum(b.status <> 'void' AND ${COMP}) AS nc, coalesce(sum(CASE WHEN b.status <> 'void' AND ${COMP} THEN b.gross_paise END), 0) AS ncMenu,
+        sum(b.status = 'void') AS voids FROM bills b WHERE b.business_id = ? AND b.shift_day = ?`, bid, day),
     all(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise FROM payments p JOIN settlements s ON s.id = p.settlement_id
       WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'bills' GROUP BY p.mode ORDER BY paise DESC`, bid, day),
     // Count summaries (reason 'Count') mark handovers; they are not exceptions themselves.
@@ -165,7 +182,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
   const HOUR = 3_600_000;
   return c.json({
     day, fy,
-    sales: { bills: sales!.bills ?? 0, netPaise: sales!.net, totalPaise: sales!.total, voids: sales!.voids ?? 0 }, byMode,
+    sales: { bills: sales!.bills ?? 0, netPaise: sales!.net, totalPaise: sales!.total, voids: sales!.voids ?? 0, ncBills: sales!.nc ?? 0, ncMenuPaise: sales!.ncMenu }, byMode,
     events: Object.fromEntries(events.map((e) => [e.kind, { n: e.n, paise: e.paise }])),
     differences: Object.fromEntries(diffs.map((d) => [d.kind, { n: d.n, paise: d.paise }])),
     unpaid: unpaid.filter((o) => o.sent_paise > 0).map((o) => ({
@@ -295,4 +312,73 @@ reportRoutes.get(`${B}/reports/debtors`, requireAction('reports.view'), async (c
     }
     return { id: a.id, kind: a.kind, name: a.name, phone: a.phone, creditLimitPaise: a.limit, balancePaise: a.balance, ...buckets };
   }) });
+});
+
+// Profit per dish for shifts from..to: what each dish sold for (before bill discounts and GST) against what its recipe
+// costs at the last price paid for each stock item. NC, complimentary and void bills left out (they are on Losses).
+// Each dish with a recipe is placed by two questions, kitchen and bar apart: does it sell well (at least 70% of an even
+// share of the dishes sold) and does it earn well (profit per plate at or above the average)?
+reportRoutes.get(`${B}/reports/profit`, requireAction('reports.view'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const from = date({ d: c.req.query('from') ?? '' }, 'd', 'From');
+  const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
+  if (from > to) fail(400, 'From must be on or before To.');
+  const rows = await all<{ id: string | null; name: string; category: string; station: string; qty: number; salesPaise: number; unitCost: number | null }>(db, `
+    SELECT l.item_id AS id, max(l.name) AS name, coalesce(m.category, '') AS category, coalesce(m.station, 'kitchen') AS station,
+      sum(l.qty) AS qty, sum(l.amount_paise) AS salesPaise,
+      (SELECT sum(r.qty * i.cost_per_pack_paise * 1.0 / i.pack_size) FROM recipes r JOIN stock_items i ON i.id = r.stock_item_id WHERE r.menu_item_id = l.item_id) AS unitCost
+    FROM bill_lines l JOIN bills b ON b.id = l.bill_id LEFT JOIN menu_items m ON m.id = l.item_id
+    WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP}
+    GROUP BY coalesce(l.item_id, l.name) ORDER BY salesPaise DESC`, bid, from, to);
+  const discount = (await one<{ d: number }>(db, `SELECT coalesce(sum(b.discount_paise), 0) AS d FROM bills b
+    WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' AND NOT ${COMP}`, bid, from, to))!.d;
+  const dishes = rows.map((r) => {
+    const costed = r.unitCost != null;
+    const costPaise = costed ? Math.round(r.unitCost! * r.qty) : null;
+    return { id: r.id, name: r.name, category: r.category, station: r.station === 'bar' ? 'bar' : 'kitchen', qty: r.qty, salesPaise: r.salesPaise,
+      costPaise, profitPaise: costed ? r.salesPaise - costPaise! : null, costPct: costed && r.salesPaise ? Math.round((costPaise! * 1000) / r.salesPaise) / 10 : null,
+      group: null as null | 'best' | 'popular' | 'profitable' | 'weak' };
+  });
+  const stations = (['kitchen', 'bar'] as const).map((st) => {
+    const all_ = dishes.filter((d) => d.station === st);
+    const costed = all_.filter((d) => d.costPaise != null && d.qty > 0);
+    const qty = costed.reduce((t, d) => t + d.qty, 0);
+    const profit = costed.reduce((t, d) => t + d.profitPaise!, 0);
+    const sales = costed.reduce((t, d) => t + d.salesPaise, 0);
+    const cost = costed.reduce((t, d) => t + d.costPaise!, 0);
+    const popularAt = costed.length ? (0.7 * qty) / costed.length : 0;
+    const avgProfit = qty ? profit / qty : 0;
+    for (const d of costed) {
+      const pop = d.qty >= popularAt;
+      const earns = d.profitPaise! / d.qty >= avgProfit;
+      d.group = pop && earns ? 'best' : pop ? 'popular' : earns ? 'profitable' : 'weak';
+    }
+    const allSales = all_.reduce((t, d) => t + d.salesPaise, 0);
+    return { station: st, salesPaise: allSales, costedSalesPaise: sales, costPaise: cost, profitPaise: profit,
+      costPct: sales ? Math.round((cost * 1000) / sales) / 10 : null, notCosted: all_.length - costed.length, avgProfitPaise: Math.round(avgProfit) };
+  });
+  return c.json({ from, to, discountPaise: discount, stations, dishes });
+});
+
+// What was lost or given away in shifts from..to, each with who and why: cancelled after KOT, voids, discounts, NC and
+// complimentary, refunds; stock broken or found missing at a count (at cost); and cash short or over at shift close.
+reportRoutes.get(`${B}/reports/losses`, requireAction('reports.view'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const from = date({ d: c.req.query('from') ?? '' }, 'd', 'From');
+  const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
+  if (from > to) fail(400, 'From must be on or before To.');
+  const [events, stock, cash] = await Promise.all([
+    all(db, `SELECT e.kind, e.ref, e.amount_paise AS amountPaise, e.reason, e.detail, coalesce(s.name, '') AS byName, e.shift_day AS day, e.at
+      FROM pos_events e LEFT JOIN staff s ON s.id = e.by_staff
+      WHERE e.business_id = ? AND e.shift_day BETWEEN ? AND ? AND e.kind IN ('kot_cancel', 'void', 'discount', 'comp', 'credit_note') ORDER BY e.at`, bid, from, to),
+    all(db, `SELECT i.name, i.unit, m.kind, sum(-m.qty) AS qty, round(sum(-m.qty * i.cost_per_pack_paise * 1.0 / i.pack_size)) AS valuePaise
+      FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
+      WHERE m.business_id = ? AND m.shift_day BETWEEN ? AND ? AND (m.kind = 'waste' OR (m.kind = 'count' AND m.qty < 0))
+      GROUP BY i.id, m.kind ORDER BY valuePaise DESC`, bid, from, to),
+    all(db, `SELECT x.shift_day AS day, x.difference_paise AS differencePaise, x.difference_reason AS reason, coalesce(s.name, '') AS byName
+      FROM shift_closes x LEFT JOIN staff s ON s.id = x.closed_by WHERE x.business_id = ? AND x.shift_day BETWEEN ? AND ? ORDER BY x.shift_day`, bid, from, to),
+  ]);
+  return c.json({ from, to, events, stock, cash });
 });

@@ -21,7 +21,7 @@ function rs(p) {
   return `${neg ? '−' : ''}₹${r}${ps ? '.' + String(ps).padStart(2, '0') : ''}`;
 }
 /** Paise → '1234.50', the form the server reads. */
-const rupees = (p) => `${Math.floor(p / 100)}.${String(p % 100).padStart(2, '0')}`;
+const rupees = (p) => (p < 0 ? '-' : '') + `${Math.floor(Math.abs(p) / 100)}.${String(Math.abs(p) % 100).padStart(2, '0')}`;
 /** Typed rupees → paise, or null. */
 function toPaise(t) {
   const m = /^(\d{1,9})(?:\.(\d{1,2}))?$/.exec(String(t ?? '').replace(/,/g, '').trim());
@@ -1390,7 +1390,6 @@ actions.gstGo = () => go(`#/reports/gst/${ui.gstMonth}`);
 /** The month's GSTR-1 working as one CSV file for the CA (made in the browser from what is on screen). */
 actions.gstCsv = () => {
   const r = ui.gst;
-  const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
   const rows = [['Month', 'Billing name', 'GSTIN', 'Section', 'Rate or SAC or document', 'Quantity or from', 'Taxable value or to', 'CGST or total', 'SGST or cancelled']];
   for (const e of r.entities) {
     if (e.registered) {
@@ -1402,11 +1401,16 @@ actions.gstCsv = () => {
     if (e.invoices) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: invoices', 'Invoices', e.invoices.from, e.invoices.to, e.invoices.total, e.invoices.cancelled]);
     if (e.creditNotes) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: credit notes', 'Credit notes', e.creditNotes.from, e.creditNotes.to, e.creditNotes.total, e.creditNotes.cancelled]);
   }
+  downloadCsv(`gstr1-working-${r.month}.csv`, rows);
+};
+/** Saves rows as a CSV file (opens in Excel). */
+function downloadCsv(name, rows) {
+  const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
   const blob = new Blob([rows.map((row) => row.map(cell).join(',')).join('\n') + '\n'], { type: 'text/csv' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = `gstr1-working-${r.month}.csv`; a.click();
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-};
+}
 
 // ---------- Reports by table section, and by hour for any time range (an evening past midnight), 21 Nov 2026
 const dtLocal = (ms) => new Date(ms + 19_800_000).toISOString().slice(0, 16);      // India time, for a datetime-local box
@@ -1503,6 +1507,102 @@ actions.pevGo = async (d) => {
   flash = { kind: 'ok', text: 'Payment recorded.' }; route();
 };
 
+// ---------- Profit per dish and Losses (21 Nov 2026)
+const GROUPS = {
+  best: ['Best', 'Sells well, earns well', 'Keep it as it is. Guard the recipe and the price.', 'good'],
+  popular: ['Popular, low profit', 'Sells well, earns little', 'Raise the price a little or make it cheaper to cook.', 'warn'],
+  profitable: ['Profitable, slow', 'Earns well, sells little', 'Get staff to suggest it; show it better on the menu.', 'warn'],
+  weak: ['Weak', 'Sells little, earns little', 'Change it or take it off the menu.', 'bad'],
+};
+async function profitTab(head, from, to) {
+  const r = await api('GET', `${B()}/reports/profit?from=${from}&to=${to}`);
+  const title = from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`;
+  ui.pfSt ??= 'kitchen'; ui.pfG ??= '';
+  rerender = () => {
+    const st = r.stations.find((x) => x.station === ui.pfSt);
+    const list = r.dishes.filter((d) => d.station === ui.pfSt && (!ui.pfG || (ui.pfG === 'none' ? d.costPaise == null : d.group === ui.pfG)));
+    const count = (g) => r.dishes.filter((d) => d.station === ui.pfSt && (g === 'none' ? d.costPaise == null : d.group === g)).length;
+    const word = ui.pfSt === 'bar' ? 'Drink' : 'Food';
+    paint(shell('#/reports', html`${head}
+      <section class="panel"><h2>Profit · ${title}</h2>
+        <p class="quiet small">Cost comes from each dish's recipe at the last price paid for its stock. Sales are paid bills, before bill discounts and GST. NC and complimentary bills are on Losses.</p>
+        <div class="chips" role="group" aria-label="Kitchen or bar">${[['kitchen', 'Kitchen'], ['bar', 'Bar']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${ui.pfSt === k}" data-act="pfSt" data-k="${k}">${t}</button>`)}</div>
+        ${st.salesPaise ? html`<div class="kpis" style="margin-top:12px">${kpi(`${word} cost`, st.costPct == null ? '—' : `${st.costPct}%`, st.costPct == null ? 'No recipes yet' : `${rs(st.costPaise)} on ${rs(st.costedSalesPaise)} of sales`)}
+          ${kpi('Profit', rs(st.profitPaise), `Average ${rs(Math.round(st.avgProfitPaise / 100) * 100)} a plate, on dishes with a recipe`, 'good')}
+          ${kpi('Sales', rs(st.salesPaise), 'Before bill discounts')}
+          ${st.notCosted ? kpi('No recipe', String(st.notCosted), 'These dishes have no cost. Add recipes under Stock.', 'warn') : ''}</div>
+          ${r.discountPaise ? html`<p class="small quiet">Bill discounts in these shifts: ${rs(r.discountPaise)} (kitchen and bar together), not taken off the dishes here.</p>` : ''}`
+        : html`<p class="quiet">Nothing from the ${ui.pfSt} was sold in these shifts.</p>`}</section>
+      ${st.salesPaise ? html`<section class="panel" style="margin-top:16px"><h2>Every dish</h2>
+        <div class="chips" role="group" aria-label="Show">${[['', 'All'], ...Object.entries(GROUPS).map(([k, g]) => [k, g[0]]), ['none', 'No recipe']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${ui.pfG === k}" data-act="pfG" data-k="${k}">${t}${k ? ` (${count(k)})` : ''}</button>`)}</div>
+        ${ui.pfG && GROUPS[ui.pfG] ? html`<p class="small" style="margin:8px 0">${GROUPS[ui.pfG][1]}: ${GROUPS[ui.pfG][2]}</p>` : ''}
+        <div class="scroll"><table class="t"><thead><tr><th>Dish</th><th class="num">Sold</th><th class="num">Sales</th><th class="num">Cost</th><th class="num">Cost %</th><th class="num">Profit a plate</th><th>Verdict</th></tr></thead><tbody>
+          ${list.map((d) => html`<tr><td>${d.name}<div class="small quiet">${d.category}</div></td><td class="num">${d.qty}</td><td class="num">${rs(d.salesPaise)}</td>
+            <td class="num">${d.costPaise == null ? '—' : rs(d.costPaise)}</td><td class="num">${d.costPct == null ? '' : `${d.costPct}%`}</td>
+            <td class="num">${d.profitPaise == null ? '' : rs(Math.round(d.profitPaise / d.qty))}</td>
+            <td>${d.group ? html`<span class="pill ${GROUPS[d.group][3]}" title="${GROUPS[d.group][2]}">${GROUPS[d.group][0]}</span>` : html`<span class="small quiet">No recipe</span>`}</td></tr>`)}
+          ${list.length ? '' : html`<tr><td colspan="7" class="quiet">None.</td></tr>`}</tbody></table></div>
+        <p class="small quiet">Sells well = at least 70% of an even share of the plates sold. Earns well = profit a plate at or above the average. Kitchen and bar are judged apart.</p></section>` : ''}`));
+  };
+  rerender();
+}
+actions.pfSt = (d) => { ui.pfSt = d.k; ui.pfG = ''; rerender(); };
+actions.pfG = (d) => { ui.pfG = d.k; rerender(); };
+
+const LOSS = { kot_cancel: 'Cancelled after KOT', void: 'Void bills', discount: 'Discounts', comp: 'NC and complimentary', credit_note: 'Refunds (credit notes)' };
+async function lossesTab(head, from, to) {
+  const r = await api('GET', `${B()}/reports/losses?from=${from}&to=${to}`);
+  ui.lossR = r;
+  const title = from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`;
+  const kinds = Object.keys(LOSS);
+  const of = (k) => r.events.filter((e) => e.kind === k);
+  const sumOf = (xs) => xs.reduce((t, e) => t + (e.amountPaise ?? 0), 0);
+  const stockLost = r.stock.reduce((t, x) => t + x.valuePaise, 0);
+  const short = r.cash.filter((x) => x.differencePaise < 0).reduce((t, x) => t - x.differencePaise, 0);
+  const total = kinds.reduce((t, k) => t + sumOf(of(k)), 0) + stockLost + short;
+  // By person: one row per staff, a column per kind.
+  const people = [...new Set(r.events.map((e) => e.byName || 'Unknown'))].map((name) => {
+    const mine = r.events.filter((e) => (e.byName || 'Unknown') === name);
+    return { name, cells: kinds.map((k) => { const xs = mine.filter((e) => e.kind === k); return { n: xs.length, paise: sumOf(xs) }; }), paise: sumOf(mine) };
+  }).sort((a, b) => b.paise - a.paise);
+  const reasons = (k) => Object.values(of(k).reduce((acc, e) => { const key = e.reason || 'No reason'; const x = acc[key] ?? (acc[key] = { reason: key, n: 0, paise: 0 }); x.n += 1; x.paise += e.amountPaise ?? 0; return acc; }, {})).sort((a, b) => b.paise - a.paise);
+  const guests = Object.values(of('comp').reduce((acc, e) => { const g = (e.detail ?? '').replace(/^Guest:\s*/, '') || 'Not named'; const x = acc[g] ?? (acc[g] = { guest: g, n: 0, paise: 0 }); x.n += 1; x.paise += e.amountPaise ?? 0; return acc; }, {})).sort((a, b) => b.paise - a.paise);
+  const unit = (x) => (x.unit === 'pcs' ? 'pcs' : x.unit);
+  rerender = () => paint(shell('#/reports', html`${head}
+    <div class="kpis">${kpi('All losses', rs(total), title, total ? 'bad' : 'good')}
+      ${kinds.map((k) => { const xs = of(k); return xs.length ? kpi(LOSS[k], rs(sumOf(xs)), plural(xs.length, 'time'), 'warn') : ''; })}
+      ${stockLost ? kpi('Stock broken or missing', rs(stockLost), 'At cost', 'warn') : ''}
+      ${short ? kpi('Cash short at close', rs(short), plural(r.cash.filter((x) => x.differencePaise < 0).length, 'shift'), 'bad') : ''}</div>
+    <p class="small quiet" style="margin:-4px 0 12px">Bills at their value with GST; discounts at the amount taken off; stock at the last price paid.</p>
+    ${total || r.events.length ? '' : html`<section class="panel"><p>Nothing lost or given away in these shifts.</p></section>`}
+    ${people.length ? html`<section class="panel"><div class="row" style="justify-content:space-between"><h2>By person</h2><button class="btn" type="button" data-act="csvLoss">Download for Excel</button></div>
+      <div class="scroll"><table class="t"><thead><tr><th>Staff</th>${kinds.map((k) => html`<th class="num">${LOSS[k]}</th>`)}<th class="num">Total</th></tr></thead><tbody>
+        ${people.map((p) => html`<tr><td>${p.name}</td>${p.cells.map((c) => html`<td class="num">${c.n ? html`${rs(c.paise)}<div class="small quiet">${c.n}×</div>` : ''}</td>`)}<td class="num"><strong>${rs(p.paise)}</strong></td></tr>`)}</tbody></table></div>
+      <p class="small quiet">The person who did it at the till. Cancels after KOT also name who approved them, in the list below.</p></section>` : ''}
+    <div class="grid2" style="margin-top:16px;align-items:start">
+      ${kinds.filter((k) => of(k).length).map((k) => html`<section class="panel"><h2>${LOSS[k]}: why</h2>
+        <div class="sums">${reasons(k).map((x) => html`<div><span>${x.reason} (${x.n})</span><span>${rs(x.paise)}</span></div>`)}</div>
+        ${k === 'comp' ? html`<h3>By guest or table</h3><div class="sums">${guests.map((x) => html`<div><span>${x.guest} (${x.n})</span><span>${rs(x.paise)}</span></div>`)}</div>` : ''}</section>`)}
+      ${r.stock.length ? html`<section class="panel"><h2>Stock broken or missing</h2>
+        <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>How</th><th class="num">Qty</th><th class="num">At cost</th></tr></thead><tbody>
+          ${r.stock.map((x) => html`<tr><td>${x.name}</td><td>${x.kind === 'waste' ? 'Broken or wasted' : 'Missing at count'}</td><td class="num">${x.qty} ${unit(x)}</td><td class="num">${rs(x.valuePaise)}</td></tr>`)}</tbody></table></div></section>` : ''}
+      ${r.cash.some((x) => x.differencePaise) ? html`<section class="panel"><h2>Cash at shift close</h2>
+        <div class="sums">${r.cash.filter((x) => x.differencePaise).map((x) => html`<div><span>${dayName(x.day)} · ${x.reason ?? ''}${x.byName ? ` · ${x.byName}` : ''}</span><span style="color:var(${x.differencePaise < 0 ? '--bad' : '--warn'})">${x.differencePaise < 0 ? 'Short' : 'Over'} ${rs(Math.abs(x.differencePaise))}</span></div>`)}</div>
+        <p class="small quiet">${plural(r.cash.length, 'shift')} closed in these dates; the rest matched.</p></section>` : ''}
+    </div>
+    ${r.events.length ? html`<details class="panel" style="margin-top:16px"><summary><strong>Every one, in order (${r.events.length})</strong></summary>
+      <div class="scroll"><table class="t"><thead><tr><th>When</th><th>What</th><th>Bill or item</th><th class="num">Amount</th><th>By</th><th>Reason</th></tr></thead><tbody>
+        ${r.events.map((e) => html`<tr><td>${dateTime(e.at)}</td><td>${LOSS[e.kind]}</td><td>${e.ref}</td><td class="num">${e.amountPaise == null ? '' : rs(e.amountPaise)}</td><td>${e.byName}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)}</tbody></table></div></details>` : ''}`));
+  rerender();
+}
+actions.csvLoss = () => {
+  const r = ui.lossR;
+  downloadCsv(`losses-${r.from}_to_${r.to}.csv`, [['Shift', 'What', 'Bill or item', 'Amount (Rs)', 'By', 'Reason', 'Detail'],
+    ...r.events.map((e) => [e.day, LOSS[e.kind], e.ref, e.amountPaise == null ? '' : rupees(e.amountPaise), e.byName, e.reason ?? '', e.detail ?? '']),
+    ...r.stock.map((x) => [`${r.from} to ${r.to}`, x.kind === 'waste' ? 'Stock broken or wasted' : 'Stock missing at count', `${x.name} · ${x.qty} ${x.unit}`, rupees(x.valuePaise), '', '', '']),
+    ...r.cash.filter((x) => x.differencePaise).map((x) => [x.day, x.differencePaise < 0 ? 'Cash short' : 'Cash over', 'Shift close', rupees(Math.abs(x.differencePaise)), x.byName, x.reason ?? '', ''])]);
+};
+
 async function reportsScreen(tab = 'sales', range = '') {
   const [qf, qt] = range.split('_');
   const isD = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? '');
@@ -1514,7 +1614,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   const today = me.business.shiftDay;
   const ranges = [['This shift', today, today], ['Last shift', addDays(today, -1), addDays(today, -1)], ['Last 7 shifts', addDays(today, -6), today], ['This month', today.slice(0, 8) + '01', today]];
   const head = html`${pageHead('Reports', tab === 'owed' ? 'Rooms and credit accounts: what is owed right now.' : tab === 'gst' ? `GSTR-1 working for ${ui.gstMonth}` : `Shift ${from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`} · a shift runs 8 am to 8 am`)}
-    ${tabsNav('Reports', [['sales', 'Sales'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
+    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
     ${tab === 'gst' ? html`<form class="row" style="align-items:end;margin-bottom:16px"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
       <button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></form>`
     : tab !== 'owed' && tab !== 'events' ? html`<div class="row" style="align-items:end;margin-bottom:16px;justify-content:space-between">
@@ -1544,18 +1644,41 @@ async function reportsScreen(tab = 'sales', range = '') {
   if (tab === 'when' || tab === 'mix') { await insightsTab(tab, head, from, to); return; }
   if (tab === 'sections') { await sectionsTab(head, from, to); return; }
   if (tab === 'events') { await eventsTab(head); return; }
+  if (tab === 'profit') { await profitTab(head, from, to); return; }
+  if (tab === 'losses') { await lossesTab(head, from, to); return; }
   if (tab === 'gst') { await gstTab(head, ui.gstMonth); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   const cnTotal = r.creditNotes.reduce((t, n) => t + n.totalPaise, 0);
-  const salesBills = sum('bills');
+  const P = r.paid;
+  const vs = (now, was, f = rs) => (was ? `${now >= was ? '+' : '−'}${Math.round((Math.abs(now - was) * 100) / was)}% vs ${f(was)}` : 'nothing to compare');
+  const prevName = r.prev.from === r.prev.to ? `${dayName(r.prev.from)}` : `${dayName(r.prev.from)} to ${dayName(r.prev.to)}`;
+  const up = (now, was) => (!was ? '' : now >= was ? 'good' : 'bad');
+  const weekdays = r.days.length >= 7 ? Object.values(r.days.reduce((acc, d) => {
+    const w = new Date(`${d.day}T00:00:00Z`).getUTCDay();
+    const x = acc[w] ?? (acc[w] = { w, shifts: 0, netPaise: 0, bills: 0 }); x.shifts += 1; x.netPaise += d.netPaise; x.bills += d.bills; return acc;
+  }, {})).sort((a, b) => ((a.w + 6) % 7) - ((b.w + 6) % 7)) : [];
+  const wdName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const wdTop = Math.max(1, ...weekdays.map((x) => x.netPaise / x.shifts));
+  ui.salesR = r;
   rerender = () => paint(shell('#/reports', html`${head}
-    <div class="kpis">${kpi('Sales with GST', rs(sum('totalPaise') - cnTotal), cnTotal ? `After ${rs(cnTotal)} of credit notes` : 'What guests paid for')}
-      ${kpi('Net sales', rs(sum('taxablePaise') + sum('nonGstPaise')), 'After discounts, before GST; liquor included')}
-      ${kpi('Bills', String(salesBills), salesBills ? `Average ${rs(Math.round((sum('taxablePaise') + sum('nonGstPaise')) / salesBills))} before GST` : '')}
-      ${kpi('Discounts', rs(sum('discountPaise')), sum('grossPaise') ? `${pct(sum('discountPaise'), sum('grossPaise'))} of items` : '', sum('discountPaise') ? 'warn' : '')}
+    <div class="kpis">${kpi('Net sales', rs(P.netPaise), vs(P.netPaise, r.prev.netPaise), up(P.netPaise, r.prev.netPaise))}
+      ${kpi('Bills', String(P.bills), P.bills ? `Average ${rs(Math.round(P.netPaise / P.bills))} · ${vs(P.bills, r.prev.bills, String)}` : '')}
+      ${kpi('With GST', rs(P.totalPaise - cnTotal), cnTotal ? `After ${rs(cnTotal)} of credit notes` : 'What guests paid for')}
+      ${kpi('Discounts', rs(P.discountPaise), P.grossPaise ? `${pct(P.discountPaise, P.grossPaise)} of items` : '', P.discountPaise ? 'warn' : '')}
+      ${r.nc.bills ? kpi('NC and complimentary', String(r.nc.bills), `${rs(r.nc.menuPaise)} at menu price · not in sales`, 'warn') : ''}
       ${r.voids.length ? kpi('Void bills', String(r.voids.length), rs(r.voids.reduce((t, v) => t + v.totalPaise, 0)), 'bad') : ''}</div>
+    <p class="small quiet" style="margin:-4px 0 12px">Net sales = after discounts, before GST, liquor included. NC and complimentary bills are not sales. Compared with ${prevName}.</p>
+    <div class="row" style="margin-bottom:12px"><span class="small quiet">Download for Excel:</span>
+      <button class="btn" type="button" data-act="csvSales" data-what="items">Items sold</button>
+      <button class="btn" type="button" data-act="csvSales" data-what="pay">Payments</button>
+      <button class="btn" type="button" data-act="csvSales" data-what="days">Sales by shift</button>
+      <button class="btn" type="button" data-act="csvSales" data-what="gst">Sales by name on the bill</button></div>
+    ${weekdays.length ? html`<section class="panel" style="margin-bottom:16px"><h2>By day of the week</h2>
+      <div class="hours">${weekdays.map((x) => html`<div class="hrow"><span class="small">${wdName[x.w]}</span>${bar(x.netPaise / x.shifts, wdTop)}<span class="num small">${rs(Math.round(x.netPaise / x.shifts))} a day · ${x.shifts} shift${x.shifts === 1 ? '' : 's'}</span></div>`)}</div>
+      <p class="small quiet">Average net sales per shift on each day of the week.</p></section>` : ''}
     <section class="panel"><h2>Sales by name on the bill</h2>
+      <p class="small quiet">For GST: every bill printed, NC and complimentary included.</p>
       <div class="scroll"><table class="t"><thead><tr><th>Name on bill</th><th>Bills</th><th class="num">Items</th><th class="num">Discount</th><th class="num">Taxable</th><th class="num">Liquor, no GST</th><th class="num">CGST</th><th class="num">SGST</th><th class="num">Total</th></tr></thead><tbody>
         ${r.byEntity.map((e) => html`<tr><td>${e.name}<div class="small quiet">${e.gstRegistered ? 'GSTIN ' + e.gstin : 'Not registered for GST'}</div></td><td>${e.bills}<div class="small quiet">${e.firstBill} to ${e.lastBill}</div></td>
           <td class="num">${rs(e.grossPaise)}</td><td class="num">${rs(e.discountPaise)}</td><td class="num">${rs(e.taxablePaise)}</td><td class="num">${rs(e.nonGstPaise)}</td><td class="num">${rs(e.cgstPaise)}</td><td class="num">${rs(e.sgstPaise)}</td><td class="num"><strong>${rs(e.totalPaise)}</strong></td></tr>`)}
@@ -1574,12 +1697,22 @@ async function reportsScreen(tab = 'sales', range = '') {
         ${r.tips.length ? html`<h2>Tips (for staff, not sales)</h2><div class="sums">${r.tips.map((t) => html`<div><span>${modeName[t.mode] ?? t.mode} (${t.n})</span><span>${rs(t.paise)}</span></div>`)}</div><p class="small quiet">By payment above includes these tips.</p>` : ''}
         ${r.creditNoteList.length ? html`<h2>Credit notes</h2><div class="sums">${r.creditNoteList.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(n.totalPaise)}</span></div>`)}</div>` : ''}
         ${r.voids.length ? html`<h2>Void bills</h2><div class="sums">${r.voids.map((v) => html`<div><span>${v.billNo} · ${v.reason}</span><span>${rs(v.totalPaise)}</span></div>`)}</div>` : ''}
-        ${r.days.length > 1 ? html`<h2>By shift</h2><div class="sums">${r.days.map((d) => html`<div><span>${d.day} (${d.bills} bills)</span><span>${rs(d.totalPaise)}</span></div>`)}</div>` : ''}</section>
-      <section class="panel"><h2>Items sold</h2><div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Amount</th></tr></thead><tbody>
+        ${r.days.length > 1 ? html`<h2>By shift (net sales)</h2><div class="sums">${r.days.map((d) => html`<div><span>${dayName(d.day)} (${d.bills} bills)</span><span>${rs(d.netPaise)}</span></div>`)}</div>` : ''}</section>
+      <section class="panel"><h2>Items sold</h2><p class="small quiet">Paid bills only, before bill discounts.</p><div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Amount</th></tr></thead><tbody>
         ${r.items.map((i) => html`<tr><td>${i.name}</td><td class="num">${i.qty}</td><td class="num">${rs(i.amountPaise)}</td></tr>`)}</tbody></table></div></section>
     </div>`));
   rerender();
 }
+actions.csvSales = (d) => {
+  const r = ui.salesR; const m = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
+  const range = `${r.from}_to_${r.to}`;
+  if (d.what === 'items') downloadCsv(`items-sold-${range}.csv`, [['Item', 'Qty', 'Amount (Rs)'], ...r.items.map((i) => [i.name, i.qty, rupees(i.amountPaise)])]);
+  if (d.what === 'pay') downloadCsv(`payments-${range}.csv`, [['Payment', 'Count', 'Amount (Rs)'], ...r.byMode.map((x) => [m[x.mode] ?? x.mode, x.n, rupees(x.paise)])]);
+  if (d.what === 'days') downloadCsv(`sales-by-shift-${range}.csv`, [['Shift', 'Bills', 'Net sales (Rs)', 'With GST (Rs)'], ...r.days.map((x) => [x.day, x.bills, rupees(x.netPaise), rupees(x.totalPaise)])]);
+  if (d.what === 'gst') downloadCsv(`sales-by-billing-name-${range}.csv`, [['Name on bill', 'GSTIN', 'Bills', 'First bill', 'Last bill', 'Items (Rs)', 'Discount (Rs)', 'Taxable (Rs)', 'Liquor, no GST (Rs)', 'CGST (Rs)', 'SGST (Rs)', 'Round off (Rs)', 'Total (Rs)'],
+    ...r.byEntity.map((e) => [e.name, e.gstin ?? '', e.bills, e.firstBill, e.lastBill, rupees(e.grossPaise), rupees(e.discountPaise), rupees(e.taxablePaise), rupees(e.nonGstPaise), rupees(e.cgstPaise), rupees(e.sgstPaise), rupees(e.roundOffPaise), rupees(e.totalPaise)]),
+    ...r.creditNotes.map((n) => [`Less credit notes: ${n.name}`, '', n.n, n.first, n.last, '', '', rupees(-n.taxablePaise), rupees(-n.nonGstPaise), rupees(-n.cgstPaise), rupees(-n.sgstPaise), '', rupees(-n.totalPaise)])]);
+};
 actions.repGo = () => go(`#/reports/${ui.repTab ?? 'sales'}/${ui.from}_${ui.to}`);
 actions.statement = async (d) => { ui.statement = await api('GET', `${B()}/debtors/${d.id}`); rerender(); };
 actions.printStatement = () => {
@@ -2259,8 +2392,20 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   const statusName = { open: 'Open order', tab: 'Tab', billed: 'Bill printed, not paid' };
   const exCount = ['void', 'discount', 'comp', 'kot_cancel', 'reprint', 'credit_note', 'stock_waste', 'stock_count', 'limit_warning'].reduce((t, k) => t + ev(k).n, 0) + df('discount').n;
   const oldUnpaid = d.unpaid.filter((o) => o.old).length;
+  // The day in a few lines, to paste into WhatsApp for the owner.
+  ui.exSummary = [
+    `${me.business.name} · shift ${dayName(day)}`,
+    `Net sales ${rs(d.sales.netPaise)} from ${plural(d.sales.bills, 'bill')} (${rs(d.sales.totalPaise)} with GST)`,
+    d.byMode.filter((m) => m.mode !== 'comp').map((m) => `${modeName[m.mode] ?? m.mode} ${rs(m.paise)}`).join(' · '),
+    d.sales.ncBills ? `NC and complimentary: ${plural(d.sales.ncBills, 'bill')}, ${rs(d.sales.ncMenuPaise)} at menu price` : '',
+    `Voids ${ev('void').n} · Discounts ${rs(ev('discount').paise + df('discount').paise)} · Cancelled after KOT ${ev('kot_cancel').n}`,
+    d.bar.counts ? `Bar count: ${d.bar.missingPaise ? `${rs(d.bar.missingPaise)} missing` : 'nothing missing'}` : 'Bar not counted',
+    d.shiftClose ? `Cash close: ${d.shiftClose.differencePaise === 0 ? 'matched' : `${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`}` : 'Shift not closed yet',
+    `Bill numbers: ${broken.length ? 'gaps found' : 'unbroken'}`,
+    d.unpaid.length ? `Sent to kitchen, not paid: ${d.unpaid.length}${oldUnpaid ? ` (${oldUnpaid} overdue)` : ''}` : '',
+  ].filter(Boolean).join('\n');
   rerender = () => paint(shell('#/exceptions', html`${pageHead(`Daily check · shift ${dayName(day)}`, 'The owner\'s morning page: money, the cash close, bill numbers and anything unusual.',
-      html`<form class="row" style="align-items:end"><label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label><button class="btn" type="submit" data-act="exDay" data-submit>Show</button></form>`)}
+      html`<form class="row" style="align-items:end"><label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label><button class="btn" type="submit" data-act="exDay" data-submit>Show</button><button class="btn pri" type="button" data-act="exCopy">Copy day summary</button></form>`)}
     <div class="kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), `${rs(d.sales.totalPaise)} with GST`)}
       ${d.shiftClose ? kpi('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
         : kpi('Cash close', 'Not closed', 'The shift is not closed yet', 'warn')}
@@ -2271,6 +2416,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
       <section class="panel"><h2>Money</h2>
         <div class="sums"><div class="big"><span>Net sales · ${plural(d.sales.bills, 'bill')}</span><span>${rs(d.sales.netPaise)}</span></div>
           <div><span class="quiet">With GST</span><span>${rs(d.sales.totalPaise)}</span></div>
+          ${d.sales.ncBills ? html`<div><span class="quiet">NC and complimentary (not in sales)</span><span>${plural(d.sales.ncBills, 'bill')} · ${rs(d.sales.ncMenuPaise)} at menu price</span></div>` : ''}
           ${d.byMode.map((m) => html`<div><span>${modeName[m.mode] ?? m.mode} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
         <h2>Shift close</h2>
         ${d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
@@ -2305,6 +2451,11 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   rerender();
 }
 actions.exDay = () => go(`#/exceptions/${ui.day}`);
+actions.exCopy = async () => {
+  try { await navigator.clipboard.writeText(ui.exSummary); flash = { kind: 'ok', text: 'Day summary copied. Paste it into WhatsApp.' }; }
+  catch { flash = { kind: 'warn', text: `Copy this summary: ${ui.exSummary.replace(/\n/g, ' · ')}` }; }
+  rerender();
+};
 
 // ---------- settings (Owner and manager)
 
