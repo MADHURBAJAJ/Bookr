@@ -27,7 +27,8 @@ export async function cashierBooks(db: DB, businessId: string) {
   const [chosen, books] = await Promise.all([
     all<{ nameKey: string; accountId: string | null }>(db, 'SELECT name_key AS nameKey, account_id AS accountId FROM fee_cashiers WHERE business_id = ?', businessId),
     all<BookRef>(db, `SELECT a.id, a.name, u.name AS cashierName, a.opening_date AS openingDate, a.branch_id AS branchId FROM accounts a LEFT JOIN users u ON u.id = a.cashier_user_id
-      WHERE a.business_id = ? AND a.kind = 'cash' AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL) ORDER BY a.name`, businessId),
+      WHERE a.business_id = ? AND a.kind = 'cash' AND a.branch_id IS NOT NULL ORDER BY a.name`, businessId),
+    // A cash holder (no school) never takes fees from the report (21 Nov 2026).
   ]);
   const picked = new Map(chosen.map((c) => [c.nameKey, c.accountId]));
   const byId = new Map(books.map((b) => [b.id, b]));

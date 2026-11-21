@@ -74,8 +74,14 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
     ...h, deposits: h.toKind === 'bank' && can(role, 'rows.approve') ? await depositCandidates(db, bid, h) : [],
   })));
   const codes = setup ? await all<{ code: string; branchId: string | null }>(db, 'SELECT code, branch_id AS branchId FROM fee_codes WHERE business_id = ? ORDER BY code', bid) : [];
+  // Cash holders added and invited by phone, whose person has not joined yet (no school and nobody keeps them yet).
+  const pendingHolders = setup ? (await all<{ id: string; name: string; openingBalancePaise: number; openingDate: string }>(db, `SELECT a.id, a.name,
+      a.opening_balance_paise AS openingBalancePaise, a.opening_date AS openingDate FROM accounts a
+    WHERE a.business_id = ? AND a.kind = 'cash' AND a.branch_id IS NULL AND a.cashier_user_id IS NULL
+      AND (EXISTS (SELECT 1 FROM invites i WHERE i.account_id = a.id)
+        OR EXISTS (SELECT 1 FROM audit_log l WHERE l.business_id = a.business_id AND l.action = 'cashbook.create' AND l.row_id = a.id)) ORDER BY a.name`, bid)).map((a) => ({ ...a, invite: pendingOf.get(a.id) ?? null })) : [];
   return c.json({
-    today: t, branches, codes, books: booksShown, handovers: openShown, done: done.filter(visible),
+    today: t, branches, codes, books: booksShown, pendingHolders, handovers: openShown, done: done.filter(visible),
     members, banks, can: { setup, invite, approve: can(role, 'rows.approve'), write: can(role, 'rows.edit') },
   });
 });
@@ -100,9 +106,18 @@ cashBookRoutes.post('/businesses/:businessId/branches', requireRole('accounts.ed
   return c.json({ id }, 201);
 });
 
-async function bookInput(db: DB, bid: string, data: Record<string, unknown>) {
+// A cash holder (approved 21 Nov 2026) is a book with no school: a director, a trustee, the accounts office. It is a book
+// once someone keeps it (an existing user, or the person who joins by its phone invite).
+async function bookInput(db: DB, bid: string, data: Record<string, unknown>, holder = false) {
   const branchId = typeof data.branchId === 'string' && data.branchId ? data.branchId : null;
   const cashierUserId = typeof data.cashierUserId === 'string' && data.cashierUserId ? data.cashierUserId : null;
+  if (holder) {
+    if (branchId) fail(400, 'A cash holder is not at a school.');
+    if (cashierUserId && (!isUuid(cashierUserId) || !(await one(db, 'SELECT 1 AS ok FROM memberships WHERE user_id = ? AND business_id = ?', cashierUserId, bid)))) {
+      fail(400, 'Choose a user of this business, or invite them by phone after adding.');
+    }
+    return { branchId: null, cashierUserId };
+  }
   if (!branchId) fail(400, 'Choose the branch.');
   if (!isUuid(branchId) || !(await one(db, 'SELECT 1 AS ok FROM branches WHERE id = ? AND business_id = ?', branchId, bid))) fail(400, 'Choose the branch.');
   if (cashierUserId && (!isUuid(cashierUserId) || !(await one(db, 'SELECT 1 AS ok FROM memberships WHERE user_id = ? AND business_id = ?', cashierUserId, bid)))) {
@@ -116,7 +131,7 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks', requireRole('accounts.e
   const db = c.env.DB;
   const bid = c.get('businessId');
   const name = text(data, 'name', 'Book name', { max: 120 })!;
-  const { branchId, cashierUserId } = await bookInput(db, bid, data);
+  const { branchId, cashierUserId } = await bookInput(db, bid, data, data.holder === true);
   const opening = paise(data, 'openingBalance', 'Opening cash');
   const openingDate = date(data, 'openingDate', 'Opening date');
   const id = newId();
@@ -141,7 +156,8 @@ cashBookRoutes.patch('/businesses/:businessId/cashbooks/:accountId', requireRole
   const user = c.get('user');
   const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
   const data = await body(c);
-  const { branchId, cashierUserId } = await bookInput(db, bid, data);
+  const { branchId, cashierUserId } = await bookInput(db, bid, data, !book.branchId);
+  if (!book.branchId && !cashierUserId) fail(400, 'Choose who keeps this cash holder\'s book.');
   // Schools and cashiers (21 Nov 2026): the name, opening cash and opening date change here too, when sent.
   const name = data.name !== undefined ? text(data, 'name', 'Cashier name', { max: 120 })! : book.name;
   const opening = data.openingBalance !== undefined ? paise(data, 'openingBalance', 'Opening cash') : book.openingBalancePaise;
@@ -206,6 +222,7 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
   const data = await body(c);
   const kind = data.kind as (typeof KINDS)[number];
   if (!KINDS.includes(kind)) fail(400, 'Choose what this line is: fee, expense, other money in or out, or hand over.');
+  if (kind === 'fee' && !book.branchId) fail(400, 'A cash holder is not at a school, so takes no fees. Use money in.');
   const day = date(data, 'day', 'Day');
   if (day < book.openingDate) fail(400, `This book starts on ${book.openingDate}.`);
   if (day > today()) fail(400, 'That day has not come yet.');
@@ -315,6 +332,7 @@ cashBookRoutes.put('/businesses/:businessId/cashbooks/:accountId/fee/:day', requ
   const user = c.get('user');
   const book = await writableBook(c);
   const day = dayParam(c.req.param('day'));
+  if (!book.branchId) fail(400, 'A cash holder is not at a school, so takes no fees.');
   if (day < book.openingDate || day > today()) fail(400, 'Enter fees for a day from the book\'s start up to today.');
   const data = await body(c);
   const amount = paise(data, 'amount', 'Total cash fees');
