@@ -65,9 +65,12 @@ describe('fee report', () => {
     d = (await o.get(`/businesses/${h.bid}/fees/2026-11-20`)).json;
     expect(d.totals).toMatchObject({ cash: 743000, upi: 10000, bank: 1275000, card: 0 });
     const anupRow = d.cashiers.find((x: { name: string }) => x.name === 'ANUP MAHESHWARI');
-    expect(anupRow).toMatchObject({ cashPaise: 513000, book: { id: anupBook, how: 'same name' }, filledPaise: 513000 });
-    expect(d.cashiers.find((x: { name: string }) => x.name === "ST.MARY'S SCHOOL")).toMatchObject({ cashPaise: 30000, book: null });
-    // ST.MARY'S SCHOOL is not a person: its cash goes to Anup's book.
+    expect(anupRow).toMatchObject({ cashPaise: 513000, book: { id: anupBook, how: 'same name' }, filledPaise: 543000 });
+    // ST.MARY'S SCHOOL is not a person: its branch has one book, so its cash goes there by default (21 Nov 2026).
+    expect(d.cashiers.find((x: { name: string }) => x.name === "ST.MARY'S SCHOOL")).toMatchObject({ cashPaise: 30000, book: { id: anupBook, how: 'branch' }, filledPaise: 543000 });
+    // A name can be given a separate book: here BIS cash, then back to Anup's.
+    await o.put(`/businesses/${h.bid}/fees/cashiers`, { name: "ST.MARY'S SCHOOL", accountId: raviBook });
+    expect((await o.get(`/businesses/${h.bid}/cashbooks/${raviBook}/day/2026-11-20`)).json.entries.map((e: { amountPaise: number }) => e.amountPaise)).toEqual([230000]);
     await o.put(`/businesses/${h.bid}/fees/cashiers`, { name: "ST.MARY'S SCHOOL", accountId: anupBook });
     await o.put(`/businesses/${h.bid}/fees/cashiers`, { name: 'RAVI KUMAR', accountId: raviBook });
     const book = (await h.clients.owner.get(`/businesses/${h.bid}/cashbooks/${anupBook}/day/2026-11-20`)).json;

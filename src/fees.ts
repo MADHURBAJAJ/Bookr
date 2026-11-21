@@ -17,12 +17,16 @@ export async function codeMap(db: DB, businessId: string) {
   return new Map(rows.map((r) => [r.code, r.branchId]));
 }
 
-interface BookRef { id: string; name: string; cashierName: string | null; openingDate: string }
-/** Which book each report cashier name fills: a person's choice first, else a book whose cashier or name is that name. */
+interface BookRef { id: string; name: string; cashierName: string | null; openingDate: string; branchId: string | null }
+/**
+ * Which book each report cashier name fills: a person's choice first, else a book whose cashier or name is that name,
+ * else (21 Nov 2026) the book of the receipt's branch when the branch has just one, so a branch's receipts go to its cashier
+ * by default and a name is linked to a separate book only when wanted.
+ */
 export async function cashierBooks(db: DB, businessId: string) {
   const [chosen, books] = await Promise.all([
     all<{ nameKey: string; accountId: string | null }>(db, 'SELECT name_key AS nameKey, account_id AS accountId FROM fee_cashiers WHERE business_id = ?', businessId),
-    all<BookRef>(db, `SELECT a.id, a.name, u.name AS cashierName, a.opening_date AS openingDate FROM accounts a LEFT JOIN users u ON u.id = a.cashier_user_id
+    all<BookRef>(db, `SELECT a.id, a.name, u.name AS cashierName, a.opening_date AS openingDate, a.branch_id AS branchId FROM accounts a LEFT JOIN users u ON u.id = a.cashier_user_id
       WHERE a.business_id = ? AND a.kind = 'cash' AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL) ORDER BY a.name`, businessId),
   ]);
   const picked = new Map(chosen.map((c) => [c.nameKey, c.accountId]));
@@ -30,12 +34,15 @@ export async function cashierBooks(db: DB, businessId: string) {
   return {
     books,
     /** The book for a report cashier name: { book, how } or null (no book yet), or 'none' (a person said: no book). */
-    of(name: string | null): { book: BookRef; how: 'chosen' | 'same name' } | 'none' | null {
-      if (!name) return null;
-      const k = nameKey(name);
-      if (picked.has(k)) { const id = picked.get(k); return id && byId.has(id) ? { book: byId.get(id)!, how: 'chosen' } : 'none'; }
-      const same = books.filter((b) => (b.cashierName && nameKey(b.cashierName) === k) || nameKey(b.name) === k);
-      return same.length === 1 ? { book: same[0], how: 'same name' } : null;
+    of(name: string | null, branchId: string | null | undefined): { book: BookRef; how: 'chosen' | 'same name' | 'branch' } | 'none' | null {
+      if (name) {
+        const k = nameKey(name);
+        if (picked.has(k)) { const id = picked.get(k); return id && byId.has(id) ? { book: byId.get(id)!, how: 'chosen' } : 'none'; }
+        const same = books.filter((b) => (b.cashierName && nameKey(b.cashierName) === k) || nameKey(b.name) === k);
+        if (same.length === 1) return { book: same[0], how: 'same name' };
+      }
+      const inBranch = branchId ? books.filter((b) => b.branchId === branchId) : [];
+      return inBranch.length === 1 ? { book: inBranch[0], how: 'branch' } : null;
     },
   };
 }
@@ -53,8 +60,9 @@ export async function refillCash(db: DB, businessId: string, reportId: string, u
   if (!day) return;
   const sums = new Map<string, { paise: number; receipts: Set<string> }>();
   for (const l of lines) {
-    if (!codes.get(l.code)) continue;
-    const m = cb.of(l.cashier);
+    const branchId = codes.get(l.code);
+    if (!branchId) continue;
+    const m = cb.of(l.cashier, branchId);
     if (!m || m === 'none' || day < m.book.openingDate) continue;
     const s = sums.get(m.book.id) ?? { paise: 0, receipts: new Set<string>() };
     s.paise += l.amountPaise;
