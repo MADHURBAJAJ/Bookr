@@ -240,6 +240,8 @@ const NAV = [
   { key: 'fees', label: 'Fee check', needs: 'sales.view', group: 'Daily work', when: (b) => b.cashBooks && b.role !== 'entry_staff' },
   // A director who is an Owner and keeps a cash holder's book (21 Nov 2026) opens it here.
   { key: 'mybook', label: 'My book', group: 'Daily work', when: (b) => b.cashBooks && b.role !== 'entry_staff' && b.myBooks > 0 },
+  // Back to the owner phone app from the PC screens on a phone (21 Nov 2026).
+  { key: 'ophone', label: 'Phone app', group: 'Daily work', when: (b) => b.cashBooks && b.role === 'owner' && window.matchMedia('(max-width: 767px)').matches },
   // Bring in, Register and Reconcile are the three steps of one shift (the shift bar at the top of each).
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts', when: (b) => !b.cashBooks },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
@@ -9063,7 +9065,7 @@ const cbWhere = (h) => (h.toKind === 'bank' ? `Bank: ${h.toName}` : h.toName);
 // School screens on the PC (approved 21 Nov 2026): Cash books shows money only; set up and inviting cashiers live on
 // Settings → Schools and cashiers; Today is the school's day (fees, cash with cashiers, and what needs a look).
 const cbCountChip = (b) => (!b.lastCount ? html`<span class="tiny">not counted yet</span>`
-  : b.lastCount.gapPaise === 0 ? html`<span class="chip ok" title="Counted on ${dayLabel(b.lastCount.day)}">count matches · ${shortDay(b.lastCount.day)}</span>`
+  : b.lastCount.gapPaise === 0 || b.lastCount.settle ? html`<span class="chip ok" title="Counted on ${dayLabel(b.lastCount.day)}">${b.lastCount.gapPaise === 0 ? 'count matches' : 'settled'} · ${shortDay(b.lastCount.day)}</span>`
     : html`<span class="chip bad" title="Counted on ${dayLabel(b.lastCount.day)}">${b.lastCount.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(b.lastCount.gapPaise))} · ${shortDay(b.lastCount.day)}</span>`);
 const cbPhone = (p) => (p ? `${p.slice(3, 8)} ${p.slice(8)}` : '');
 
@@ -9307,7 +9309,7 @@ async function schoolTodayView(biz) {
   const rep = fees?.report ? fees : null;
   const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
   const notCounted = d.books.filter((b) => b.cashierUserId && b.lastCount?.day !== d.today);
-  const gaps = d.books.filter((b) => b.lastCount && b.lastCount.gapPaise !== 0 && b.lastCount.day >= lastDay7(d.today));
+  const gaps = d.books.filter((b) => b.lastCount && b.lastCount.gapPaise !== 0 && !b.lastCount.settle && b.lastCount.day >= lastDay7(d.today));
   const noCashier = d.books.filter((b) => !b.cashierUserId);
   const tile = (label, value, sub, href) => html`<a class="tile" href="${href}" style="padding:12px;color:inherit;text-decoration:none">
       <div class="tiny">${label}</div><div class="amount" style="text-align:left;font-size:22px;font-weight:500">${value}</div>${sub ? html`<div class="tiny">${sub}</div>` : ''}</a>`;
@@ -9356,7 +9358,44 @@ const cbRupees = (v) => { const n = Number(String(v ?? '').replace(/[₹,\s]/g, 
 const cbDayName = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 const CB_WHAT_IN = ['Admission form', 'TC / certificate', 'Fine'];
 
+// Owner phone app (approved 21 Nov 2026): an Owner of a school business on a phone gets the cash book only, with a bar
+// at the bottom: Cash, Approve, My book, More. On a computer, and with "PC screens" chosen in More, the PC screens as before.
+// The Accountant works on the PC only.
+const OWNER_PC_KEY = 'bookr.pcview';
+function ownerPhone(biz) {
+  if (biz.role !== 'owner' || !biz.cashBooks) return false;
+  try { if (localStorage.getItem(OWNER_PC_KEY) === '1') return false; } catch { /* storage blocked: phone screens */ }
+  return window.matchMedia('(max-width: 767px)').matches;
+}
+function ownerFrame(biz, tab, head, body) {
+  const t = (key, label, href, extra = '') => html`<a class="cbt ${tab === key ? 'on' : ''}" href="${href}" ${tab === key ? html`aria-current="page"` : ''}>${label}${extra}</a>`;
+  const tabs = [
+    t('cash', 'Cash', `#/b/${biz.id}/ocash`),
+    t('look', 'Approve', `#/b/${biz.id}/olook`, html`<span class="cbn" data-olookn hidden></span>`),
+    ...(biz.myBooks > 0 ? [t('mybook', 'My book', `#/b/${biz.id}/mybook`)] : []),
+    t('more', 'More', `#/b/${biz.id}/omore`),
+  ];
+  return html`<div class="cbapp">
+    <header class="cbapp-head"><span>${head}</span>
+      ${me.businesses.length > 1 ? html`<a class="tiny" href="#/b/${biz.id}/omore">${biz.name} ▾</a>` : html`<span class="tiny">${biz.name}</span>`}</header>
+    <main class="cbapp-main">${body}</main>
+    <nav class="cbbar" aria-label="Owner" style="grid-template-columns:repeat(${tabs.length},1fr)">${tabs}</nav>
+  </div>`;
+}
+/** How many things wait on the Owner, shown on the Approve tab (fetched after the page is drawn). */
+const lookCount = (l) => l.handovers.length + l.expenses.length + l.fees.filter((f) => f.state !== 'kept').length + l.counts.length;
+function ownerBadge(biz, known) {
+  const set = (n) => app.querySelectorAll('[data-olookn]').forEach((x) => { x.textContent = String(n); x.hidden = !n; });
+  if (known) return set(lookCount(known));
+  api('GET', `/businesses/${biz.id}/owner-look`).then((l) => set(lookCount(l))).catch(() => {});
+}
+
 function cbFrame(biz, b, tab, body) {
+  if (ownerPhone(biz)) {
+    const own = b.cashierUserId === me.user.id;
+    return ownerFrame(biz, own ? 'mybook' : 'cash', own ? html`<b>${b.name}</b> <span class="tiny">· my book</span>`
+      : html`<a href="#/b/${biz.id}/ocash" aria-label="Back to cash">‹</a> <b>${b.branchName ? b.cashierName ?? b.name : b.name}</b> <span class="tiny">· ${b.branchName ?? 'Cash holder'}</span>`, body);
+  }
   if (!cbIsCashier(biz)) return shell(biz, 'cashbook', b.name, `${b.branchName ?? ''}${b.cashierName && b.cashierName !== b.name ? ` · ${b.cashierName}` : ''}`, body);
   const t = (key, label, href) => html`<a class="cbt ${tab === key ? 'on' : ''}" href="${href}" ${tab === key ? html`aria-current="page"` : ''}>${label}</a>`;
   return html`<div class="cbapp">
@@ -9403,7 +9442,11 @@ async function cashBookDayView(biz, accountId, dayIn) {
   const d = await api('GET', `/businesses/${biz.id}/cashbooks/${accountId}/day/${day}`);
   const b = d.book;
   const f = d.fee;
-  const w = d.can.write && !d.before;
+  // The Owner on the phone sees a cashier's day folded and does not write in it; their own book is written as a cashier's.
+  const oPhone = ownerPhone(biz);
+  const fold = oPhone && b.cashierUserId !== me.user.id;
+  const owner = biz.role === 'owner';
+  const w = d.can.write && !d.before && !fold;
   const prev = addDaysIso(day, -1);
   const next = addDaysIso(day, 1);
   const del = (e) => (w && !e.feeReportId && !e.reviewStatus && !(e.kind === 'fee') && !(e.kind === 'handover_out' && e.handover?.status !== 'sent')
@@ -9435,6 +9478,49 @@ async function cashBookDayView(biz, accountId, dayIn) {
     ${d.can.write && h.day <= day ? html`<button type="button" class="btn" style="min-height:36px" data-cbaccept="${h.id}">Got it</button>` : ''}</div>`);
   // A cash holder (no school) takes no fees: money in instead (21 Nov 2026).
   const holder = !b.branchId;
+  // Folded (owner phone): Collection, Expenses, Handed over and Received, each one line with its total; tap to open.
+  const sum = (xs) => xs.reduce((t, e) => t + e.amountPaise, 0);
+  const of = (...kinds) => d.entries.filter((e) => kinds.includes(e.kind));
+  const reviewBtns = (e) => (!owner || e.kind !== 'expense' || e.reviewStatus ? ''
+    : e.headId ? html`<span style="display:flex;gap:6px;margin-top:4px"><button type="button" class="btn" style="min-height:32px" data-oapprove="${e.id}">Approve</button>
+        <button type="button" class="btn plain" style="min-height:32px" data-oreject="${e.id}">Reject</button></span>`
+      : html`<span style="display:block;margin-top:4px" data-oheadbox="${e.id}"><button type="button" class="btn plain" style="min-height:32px" data-ohead="${e.id}">Set head</button></span>`);
+  const subRow = (e) => html`<div class="list-row cb-line cb-sub"><span>${e.kind === 'handover_out' ? html`To ${e.handover ? cbWhere(e.handover) : 'someone'}` : e.narration || e.headName || CB_KIND[e.kind]}
+      <div class="tiny">${e.kind === 'handover_out' ? (e.handover ? cbStatus(e.handover) : '') : e.kind === 'expense' || e.kind === 'other_in' ? cbReviewChip(e) : ''}
+        ${e.kind === 'expense' && e.headName ? ` · ${e.headName}` : ''}${e.reviewStatus === 'rejected' && e.reviewNote ? ` · "${e.reviewNote}"` : ''}</div>${reviewBtns(e)}</span>
+    <span class="cb-amt ${CB_IN.includes(e.kind) ? 'in' : 'out'}">₹ ${rs(e.amountPaise)}</span></div>`;
+  const group = (label, sub, total, sign, rows, open = false) => (rows.length ? html`<details class="cb-fold" ${open ? 'open' : ''}>
+      <summary class="list-row cb-line"><span><span class="cb-tw"></span>${label}<div class="tiny">${sub}</div></span>
+        <span class="cb-amt ${sign === '+' ? 'in' : 'out'}">${sign}₹ ${rs(total)}</span></summary>${rows}</details>` : '');
+  const extras = of('other_in');
+  const feeCash = sum(sheetLines) + (typed.length && f ? f.countsPaise : 0);
+  const feeState = !f ? '' : f.state === 'agrees' ? html`<span class="chip ok">agrees</span>` : f.state === 'waiting' ? html`<span class="chip wait">sheet not in</span>`
+    : f.state === 'less' || f.state === 'more' ? html`<span class="chip wait">sheet ${f.state}</span>` : f.state === 'kept' ? html`<span class="chip bad">kept</span>` : '';
+  const exps = of('expense', 'other_out');
+  const toApprove = exps.filter((e) => e.kind === 'expense' && !e.reviewStatus).length;
+  const outs = of('handover_out');
+  const ins = of('handover_in');
+  const folded = fold ? html`
+    ${group('Collection', html`${feeRows.length ? html`fee ₹ ${rs(feeCash)} ${feeState}` : 'no fee entered'}${extras.length ? ` · ${extras.length} extra receipt${extras.length === 1 ? '' : 's'}` : ''}`,
+      feeCash + sum(extras), '+', [...feeRows.map((r) => html`<div class="cb-sub">${r}</div>`), ...extras.map(subRow)])}
+    ${!feeRows.length && !extras.length && !holder ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
+    ${group('Received', `${ins.length} handed to ${holder ? 'them' : 'this book'}`, sum(ins), '+', ins.map(subRow))}
+    ${group('Expenses', html`${exps.length} line${exps.length === 1 ? '' : 's'}${toApprove ? html` · <span class="chip info">${toApprove} to approve</span>` : ''}`, sum(exps), '−', exps.map(subRow), toApprove > 0)}
+    ${group('Handed over', `${outs.length}${outs.some((e) => e.handover?.status === 'sent') ? ' · waiting' : ''}`, sum(outs), '−', outs.map(subRow))}` : '';
+  // Settling a count short or extra (approved 21 Nov 2026): the Owner only, on the phone and the PC.
+  const settled = d.count?.settle ? html`<div class="cb-box ok"><span>${d.count.settleGapPaise < 0 ? 'Short' : 'Extra'} ₹ ${rs(Math.abs(d.count.settleGapPaise ?? 0))}:
+      ${{ shortage: 'booked as cash shortage', extra: 'booked as cash extra', given_back: 'given back', found: 'found, a line was missed' }[d.count.settle]}
+      <span class="tiny">· ${d.count.settledByName ?? ''}${d.count.settleNote ? ` · "${d.count.settleNote}"` : ''}</span></span>
+      ${owner ? html`<span><button type="button" class="linkbtn" data-ounsettle>Undo</button></span>` : ''}</div>` : '';
+  const settleBox = owner && d.count && !d.count.settle && gap ? html`<form class="cb-settle" id="cb-settle">
+      <b>Settle: cash ${gap < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(gap))}</b>
+      ${gap < 0 ? html`<button type="submit" class="btn plain" name="how" value="shortage"><span><b>Book as shortage</b><br><span class="tiny">An expense "Cash shortage" in this book. The book then agrees.</span></span></button>`
+        : html`<button type="submit" class="btn plain" name="how" value="extra"><span><b>Book as extra</b><br><span class="tiny">Money in "Cash extra" in this book. The book then agrees.</span></span></button>
+          <button type="submit" class="btn plain" name="how" value="given_back"><span><b>Given back</b><br><span class="tiny">Someone else's money, given back. Nothing is written.</span></span></button>`}
+      <button type="submit" class="btn plain" name="how" value="found"><span><b>Found it</b><br><span class="tiny">A line was missed. The cashier adds it; if not, the next count shows it again.</span></span></button>
+      <div class="field" style="margin:0"><label for="cbs-n">Note (optional)</label><input id="cbs-n" name="note" placeholder="Told him to check change"></div>
+      <div class="tiny">A short now and extra later of the same money needs nothing: the later count agrees with the book.</div>
+      <div class="form-msg"></div></form>` : '';
   const feeLabel = holder || f?.sheetIn ? '' : typed.length ? 'Change today\'s fee cash' : 'Enter today\'s fee cash';
   const needCount = !d.count && (holder || typed.length || f?.sheetIn);
   const opts = (list) => list.map((x) => html`<option value="${x}">${x}</option>`);
@@ -9508,15 +9594,18 @@ async function cashBookDayView(biz, accountId, dayIn) {
       ${cbFeeBox(f, d.can.write, { bring: `#/b/${biz.id}/cbmore/${b.id}`, view: `#/b/${biz.id}/fees/${day}` })}
       <section class="card cb-card">
         ${row('Opening', '', `₹ ${rs(d.openingPaise)}`, '')}
-        ${feeRows.length ? feeRows : !d.before && !holder ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
-        ${others}
+        ${fold ? folded : html`${feeRows.length ? feeRows : !d.before && !holder ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
+        ${others}`}
         <div class="list-row cb-total"><span>Should be in hand</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
         ${d.count ? html`<div class="list-row"><span>Counted${d.count.countedByName ? html` <span class="tiny">by ${d.count.countedByName}</span>` : ''}</span><span class="amount">₹ ${rs(d.count.countedPaise)}</span></div>
           <div class="cb-gap ${gap === 0 ? 'ok' : 'bad'}">${gap === 0 ? 'Count matches ✓' : `Cash ${gap < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(gap))}`}
             ${d.count.note ? html`<div class="tiny">"${d.count.note}"</div>` : ''}</div>` : ''}
       </section>
+      ${settled}${settleBox}
       ${forms}
-      ${!cbIsCashier(biz) && biz.role !== 'entry_staff' ? html`<a class="tiny" href="#/b/${biz.id}/cashbooks">All cash books</a>` : ''}
+      ${oPhone ? html`<div class="form-row" style="justify-content:space-between"><a class="tiny" href="#/b/${biz.id}/cbdays/${b.id}">All days of ${b.name} ›</a>
+          ${!fold ? html`<a class="tiny" href="#/b/${biz.id}/cbhanded/${b.id}">Handed over ›</a>` : ''}</div>`
+        : !cbIsCashier(biz) && biz.role !== 'entry_staff' ? html`<a class="tiny" href="#/b/${biz.id}/cashbooks">All cash books</a>` : ''}
     </div>`;
   render(cbFrame(biz, b, day === d.today ? 'today' : 'days', body));
   wireShell();
@@ -9530,6 +9619,25 @@ async function cashBookDayView(biz, accountId, dayIn) {
   act('[data-cbdel]', async (x) => { if (confirm('Remove this line from the book?')) await api('DELETE', `${base}/entries/${x.dataset.cbdel}`); });
   act('[data-cbaccept]', (x) => api('POST', `/businesses/${biz.id}/handovers/${x.dataset.cbaccept}/receive`, { day }));
   act('[data-cbsettle]', (x) => api('PUT', `${base}/fee/${day}/settle`, { how: x.dataset.cbsettle || null }));
+  // The Owner: settle a count, approve or reject an expense, set its head (21 Nov 2026).
+  act('[data-ounsettle]', async () => { if (confirm('Undo this settle? A line written for it is removed.')) await api('DELETE', `${base}/count/${day}/settle`); });
+  act('[data-oapprove]', (x) => api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oapprove}/review`, { status: 'approved' }));
+  act('[data-oreject]', async (x) => {
+    const note = prompt('Why is it rejected? The cashier sees this.');
+    if (note?.trim()) await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreject}/review`, { status: 'rejected', note });
+  });
+  app.querySelectorAll('[data-ohead]').forEach((x) => x.addEventListener('click', () => ownerHeadPicker(biz, x.dataset.ohead, reload)));
+  const sf = document.getElementById('cb-settle');
+  sf?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = sf.querySelector('.form-msg');
+    sf.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+    try {
+      await api('POST', `${base}/count/${day}/settle`, { how: e.submitter?.value, note: sf.elements.note.value });
+      await reload();
+    } catch (err) { msg.textContent = err.message; msg.className = 'form-msg error'; sf.querySelectorAll('button').forEach((x) => { x.disabled = false; }); }
+  });
+  if (oPhone) ownerBadge(biz);
   const forms$ = [...app.querySelectorAll('[data-cbform]')];
   const open = (k) => {
     forms$.forEach((fm) => { fm.hidden = fm.dataset.cbform !== k; });
@@ -9670,6 +9778,132 @@ async function cbMoreView(biz, accountId) {
   });
 }
 
+/** A cashier's start when they keep no book or several: phone page, no PC menu. One book opens straight on today. */
+async function cashierBooksView(biz) {
+  const { books, today } = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  if (books.length === 1) return location.replace(`#/b/${biz.id}/cashbook/${books[0].id}/${today}`);
+  render(html`<div class="cbapp">
+    <header class="cbapp-head"><span><b>${me.user.name}</b></span>
+      ${me.businesses.length > 1 ? html`<a class="tiny" href="#/choose">${biz.name} ▾</a>` : html`<span class="tiny">${biz.name}</span>`}</header>
+    <main class="cbapp-main"><div class="cb">
+      ${books.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Your cash books</div>
+        ${books.map((b) => html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${today}" style="color:inherit">
+          <span><span style="font-weight:500">${b.name}</span> <span class="tiny">· ${b.branchName ?? 'Cash holder'}</span></span>
+          <span class="amount">₹ ${rs(b.inHandPaise)}</span></a>`)}</section>`
+        : html`<div class="cb-box wait"><b>Your login is not linked to a cash book yet.</b>
+          <span>Ask the owner to give you your book: Schools and cashiers → your book → Change → Signs in as ${me.user.name}.</span></div>`}
+      <section class="card" style="gap:8px"><button type="button" class="btn plain" id="signout">Sign out</button>
+        <div class="tiny">Signed in as ${me.user.name} · ${me.user.email}</div></section>
+    </div></main></div>`);
+  wireShell();
+}
+
+/** Set an expense's head in place (Owner on the phone): a list of expense heads and Save. */
+async function ownerHeadPicker(biz, entryId, after) {
+  const box = app.querySelector(`[data-oheadbox="${entryId}"]`);
+  const { heads } = await api('GET', `/businesses/${biz.id}/owner-look`);
+  box.innerHTML = html`<span style="display:flex;gap:6px;flex-wrap:wrap"><select aria-label="Expense head" style="min-width:0;flex:1">
+      ${heads.filter((h) => h.type === 'expense').map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>
+    <button type="button" class="btn" style="min-height:32px">Save</button></span>`.__html;
+  box.querySelector('button').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try { await api('PUT', `/businesses/${biz.id}/cashbook-lines/${entryId}/head`, { headId: box.querySelector('select').value }); await after(); }
+    catch (err) { alert(err.message); e.target.disabled = false; }
+  });
+}
+
+/** Owner phone, Cash: cash in hand in every book today, by cashier, then cash holders; what needs a look. */
+async function ownerCashView(biz) {
+  const [d, l] = await Promise.all([api('GET', `/businesses/${biz.id}/cashbooks`), api('GET', `/businesses/${biz.id}/owner-look`)]);
+  const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
+  const n = lookCount(l);
+  const feeOf = new Map(l.fees.filter((f) => f.state !== 'kept').map((f) => [f.bookId, f]));
+  const line = (b) => {
+    const fee = feeOf.get(b.id);
+    const k = b.lastCount;
+    const chip = k && k.gapPaise && !k.settle ? html`<span class="chip bad">${k.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(k.gapPaise))}</span>`
+      : fee ? html`<span class="chip wait">sheet ${fee.state} ₹ ${rs(Math.abs(fee.diffPaise))}</span>`
+        : !k ? html`<span class="tiny">not counted yet</span>` : k.day !== d.today ? html`<span class="tiny">not counted today</span>`
+          : html`<span class="chip ok">counted, ${k.settle ? 'settled' : 'agrees'}</span>`;
+    return html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${k && k.gapPaise && !k.settle ? k.day : d.today}" style="color:inherit">
+      <span><span style="font-weight:500">${b.branchName ? b.cashierName ?? b.name : b.name}</span>
+        <div class="tiny">${b.branchName ?? (b.cashierUserId === me.user.id ? 'your book' : 'cash holder')} · ${chip}</div></span>
+      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`;
+  };
+  const schools = d.books.filter((b) => b.branchId);
+  const holders = d.books.filter((b) => !b.branchId);
+  render(ownerFrame(biz, 'cash', html`<b>Cash</b> <span class="tiny">· ${cbDayName(d.today)}</span>`, html`<div class="cb">
+    <div><div class="tiny">Cash in hand, all books</div><div class="cb-big">₹ ${rs(total)}</div></div>
+    ${n ? html`<a class="cb-box wait" href="#/b/${biz.id}/olook" style="text-decoration:none">${n} need${n === 1 ? 's' : ''} a look ›</a>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
+    ${schools.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Schools</div>${schools.map(line)}</section>` : ''}
+    ${holders.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Cash holders</div>${holders.map(line)}</section>` : ''}
+    ${!d.books.length ? html`<div class="note">No cash books yet. Add schools and cashiers on the PC.</div>` : ''}
+  </div>`));
+  wireShell();
+  ownerBadge(biz, l);
+}
+
+/** Owner phone, Approve: everything that waits on the Owner. Each line acts here or opens that day of the book. */
+async function ownerLookView(biz) {
+  const l = await api('GET', `/businesses/${biz.id}/owner-look`);
+  const day = (bookId, dd) => `#/b/${biz.id}/cashbook/${bookId}/${dd}`;
+  const hand = l.handovers.map((h) => html`<div class="list-row" style="align-items:flex-start"><span>${h.fromBookName} → ${h.toName}
+      <div class="tiny">${shortDay(h.day)}${h.narration ? ` · ${h.narration}` : ''}</div></span>
+    <span style="text-align:right"><span class="amount">₹ ${rs(h.amountPaise)}</span><br>
+      <button type="button" class="btn" style="min-height:32px;margin-top:4px" data-ogot="${h.id}" data-book="${h.toKind === 'book' ? '1' : ''}">${h.toKind === 'book' ? 'Got it' : `${h.toName} got it`}</button></span></div>`);
+  const exp = l.expenses.map((e) => html`<div class="list-row" style="align-items:flex-start"><span><a href="${day(e.accountId, e.day)}" style="color:inherit">${e.narration || 'Expense'}</a>
+      <div class="tiny">${e.bookName} · ${shortDay(e.day)} · ${e.headName ? e.headName : html`<span class="chip wait">no head yet</span>`}</div></span>
+    <span style="text-align:right"><span class="amount">₹ ${rs(e.amountPaise)}</span><br>
+      ${e.headId ? html`<span style="display:inline-flex;gap:6px;margin-top:4px"><button type="button" class="btn" style="min-height:32px" data-oapprove="${e.id}">Approve</button>
+        <button type="button" class="btn plain" style="min-height:32px" data-oreject="${e.id}">Reject</button></span>`
+        : html`<span style="display:block;margin-top:4px" data-oheadbox="${e.id}"><button type="button" class="btn plain" style="min-height:32px" data-ohead="${e.id}">Set head</button></span>`}</span></div>`);
+  const fees = l.fees.map((f) => html`<a class="list-row" href="${day(f.bookId, f.day)}" style="color:inherit"><span>${f.bookName}, ${shortDay(f.day)}
+      <div class="tiny">typed ₹ ${rs(f.typedPaise ?? 0)} · sheet ₹ ${rs(f.sheetPaise)}${f.state === 'kept' ? ' · kept until a later sheet has it' : ''}</div></span>
+    <span class="chip ${f.state === 'kept' ? 'info' : 'wait'}">${f.state === 'kept' ? 'kept' : `sheet ${f.state}`}</span></a>`);
+  const counts = l.counts.map((k) => html`<a class="list-row" href="${day(k.bookId, k.day)}" style="color:inherit"><span>${k.bookName}, ${shortDay(k.day)}
+      ${k.note ? html`<div class="tiny">"${k.note}"</div>` : ''}</span>
+    <span class="chip bad">${k.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(k.gapPaise))} · Settle ›</span></a>`);
+  const sec = (title, rows) => (rows.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">${title}</div>${rows}</section>` : '');
+  render(ownerFrame(biz, 'look', html`<b>Needs a look</b>`, html`<div class="cb">
+    ${sec('Cash given to you', hand)}${sec('Expenses to approve', exp)}${sec('Fee check', fees)}${sec('Count short or extra', counts)}
+    ${hand.length + exp.length + fees.length + counts.length ? html`<div class="tiny">Tap a line to open that day of the book.</div>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
+  </div>`));
+  wireShell();
+  ownerBadge(biz, l);
+  const again = () => ownerLookView(biz);
+  const act = (sel, fn) => app.querySelectorAll(sel).forEach((x) => x.addEventListener('click', async () => {
+    x.disabled = true;
+    try { await fn(x); await again(); } catch (err) { alert(err.message); x.disabled = false; }
+  }));
+  act('[data-ogot]', (x) => api('POST', `/businesses/${biz.id}/handovers/${x.dataset.ogot}/receive`, x.dataset.book ? { day: todayIst() } : {}));
+  act('[data-oapprove]', (x) => api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oapprove}/review`, { status: 'approved' }));
+  act('[data-oreject]', async (x) => {
+    const note = prompt('Why is it rejected? The cashier sees this.');
+    if (note?.trim()) await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreject}/review`, { status: 'rejected', note });
+  });
+  app.querySelectorAll('[data-ohead]').forEach((x) => x.addEventListener('click', () => ownerHeadPicker(biz, x.dataset.ohead, again)));
+}
+
+/** Owner phone, More: switch business, PC screens on this phone, install, sign out. */
+function ownerMoreView(biz) {
+  render(ownerFrame(biz, 'more', html`<b>More</b>`, html`<div class="cb">
+    ${me.businesses.length > 1 ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Business</div>
+      ${me.businesses.map((x) => html`<a class="list-row" href="${home(x)}" style="color:inherit"><span>${x.name}</span><span class="tiny">${x.id === biz.id ? 'open' : ''}</span></a>`)}</section>` : ''}
+    <section class="card" style="gap:8px">
+      <button type="button" class="btn plain" id="o-pc">Use the PC screens on this phone</button>
+      <div class="tiny">Reports, settings, Schools and cashiers and the rest are on the PC screens. You can come back to this from their menu.</div>
+      ${installButton()}
+      <button type="button" class="btn plain" id="signout">Sign out</button>
+      <div class="tiny">Signed in as ${me.user.name} · ${me.user.email}</div>
+    </section></div>`));
+  wireShell();
+  ownerBadge(biz);
+  document.getElementById('o-pc').addEventListener('click', () => {
+    try { localStorage.setItem(OWNER_PC_KEY, '1'); } catch { /* ignore */ }
+    go(`#/b/${biz.id}/dashboard`);
+  });
+}
+
 // ---------- Fee check (approved 20 Nov 2026): a day's fee report against where its money should be.
 
 const FEE_MODES = [['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card'], ['bank', 'Bank transfer'], ['cheque', 'Cheque'], ['other', 'Other']];
@@ -9803,9 +10037,22 @@ async function routeInner() {
           const { books } = await api('GET', `/businesses/${biz.id}/cashbooks`);
           if (books[0]) return location.replace(`#/b/${biz.id}/cashbook/${books[0].id}/${todayIst()}`);
         }
-        // Owner and Accountant open on the school's Today (21 Nov 2026).
+        // The Owner on a phone opens the phone app (21 Nov 2026); on a computer, Owner and Accountant open on Today.
+        if (ownerPhone(biz)) return location.replace(`#/b/${biz.id}/ocash`);
         return location.replace(`#/b/${biz.id}/${biz.actions.includes('reports.view') ? 'dashboard' : 'cashbooks'}`);
       }
+      // A cashier never gets the PC menu (21 Nov 2026): with no book linked, a phone page saying so; with several, their list.
+      if (biz.role === 'entry_staff' && biz.cashBooks && ['dashboard', 'cashbooks'].includes(screen)) return cashierBooksView(biz);
+      // Owner phone app (21 Nov 2026): Cash, Approve, More; "Phone app" in the PC menu comes back to it.
+      if (screen === 'ophone') {
+        try { localStorage.removeItem(OWNER_PC_KEY); } catch { /* ignore */ }
+        return location.replace(`#/b/${biz.id}/ocash`);
+      }
+      if (['ocash', 'olook', 'omore'].includes(screen)) {
+        if (!ownerPhone(biz)) return location.replace(`#/b/${biz.id}/dashboard`);
+        return screen === 'ocash' ? ownerCashView(biz) : screen === 'olook' ? ownerLookView(biz) : ownerMoreView(biz);
+      }
+      if ((screen === 'dashboard' || (screen === 'cashbooks' && !parts[3])) && ownerPhone(biz)) return location.replace(`#/b/${biz.id}/ocash`);
       if (screen === 'dashboard' && biz.cashBooks && biz.actions.includes('reports.view')) return schoolTodayView(biz);
       if (screen === 'schools' && biz.actions.includes('accounts.edit')) return schoolsView(biz, parts[3]);
       if (screen === 'cashbooks') return cashBooksView(biz, parts[3]);

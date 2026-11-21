@@ -88,8 +88,10 @@ export async function bookDay(db: DB, businessId: string, book: Book, day: strin
       FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
         LEFT JOIN users ru ON ru.id = e.reviewed_by
       WHERE e.account_id = ? AND e.day = ? ORDER BY e.entered_at`, book.id, day),
-    one<{ countedPaise: number; countedAt: number; countedByName: string | null; note: string | null }>(db, `SELECT c.counted_paise AS countedPaise, c.counted_at AS countedAt,
-        u.name AS countedByName, c.note FROM cash_counts c LEFT JOIN users u ON u.id = c.counted_by WHERE c.account_id = ? AND c.day = ?`, book.id, day),
+    one<{ countedPaise: number; countedAt: number; countedByName: string | null; note: string | null; settle: string | null; settleNote: string | null;
+      settleGapPaise: number | null; settledByName: string | null; settledAt: number | null }>(db, `SELECT c.counted_paise AS countedPaise, c.counted_at AS countedAt,
+        u.name AS countedByName, c.note, c.settle, c.settle_note AS settleNote, c.settle_gap_paise AS settleGapPaise, su.name AS settledByName, c.settled_at AS settledAt
+      FROM cash_counts c LEFT JOIN users u ON u.id = c.counted_by LEFT JOIN users su ON su.id = c.settled_by WHERE c.account_id = ? AND c.day = ?`, book.id, day),
     handovers(db, businessId, 'AND o.account_id = ? AND o.day = ?', book.id, day),
     handovers(db, businessId, `AND h.to_kind = 'book' AND h.to_account_id = ? AND (h.status = 'sent' OR (h.to_entry_id IN (SELECT id FROM cash_entries WHERE account_id = ? AND day = ?)))`,
       book.id, book.id, day),
