@@ -138,8 +138,10 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     const tip = !mine.length && purchase && !isMachineUpi(p) ? leftSales.filter((s) => s.paid_at != null && p.amount_paise > s.amount_paise
       && p.amount_paise - s.amount_paise <= s.amount_paise * TIP_SHARE && Math.abs(p.paid_at - s.paid_at) <= TIP_MIN * 60000)
       .sort((a, b) => Math.abs(p.paid_at - a.paid_at!) - Math.abs(p.paid_at - b.paid_at!))[0] ?? null : null;
+    // UPI on the machine is not a UPI bill's when the bank already has that bill's UPI credit (26110738, 21 Nov 2026): it
+    // is another sale, money with no bill, not "paid twice".
     const written = !mine.length && !tip && purchase ? otherWay.filter((b) => !usedOther.has(b.id) && b.amountPaise === p.amount_paise
-      && Math.abs(b.paidAt - p.paid_at) <= NEAR_MIN * 60000)
+      && Math.abs(b.paidAt - p.paid_at) <= NEAR_MIN * 60000 && !(isMachineUpi(p) && b.mode === 'upi' && paidByCredit(b)))
       .sort((a, b) => Math.abs(a.paidAt - p.paid_at) - Math.abs(b.paidAt - p.paid_at))[0] ?? null : null;
     if (written) usedOther.add(written.id);
     // UPI on the machine pays UPI bills: Save matches it to the bill's UPI sale when the bank evidence shows it. One a

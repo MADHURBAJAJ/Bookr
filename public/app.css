@@ -715,3 +715,18 @@ tr.rd-red td { background: #FCEBEB; }
   .ss-mid { flex-direction: row; gap: 6px; }
   .ss-now { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Statement tab (approved 21 Nov 2026). */
+.st-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.st-t { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
+.st-t th, .st-t td { padding: 6px 8px; border-top: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
+.st-t th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.st-t .amount { text-align: right; }
+.st-t tr.st-out td { color: var(--muted); }
+.st-chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 6px; border: 0; white-space: normal; }
+.st-chip.u-bill { background: var(--ok-bg); color: var(--ok); }
+.st-chip.u-pick { background: var(--income-bg); color: var(--income); }
+.st-chip.u-free { background: var(--wait-bg); color: var(--wait); }
+button.st-chip.u-free { cursor: pointer; }
+.st-chip.u-booked { background: var(--chip); color: var(--ink); }
+.st-chip.u-none { background: transparent; color: var(--muted); padding-left: 0; }

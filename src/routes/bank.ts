@@ -585,6 +585,30 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/reconcile', requireRole('ban
   return c.json({ ...r, confirmed: status === 'confirmed', shifts, columnHints: hints, slips, cards, byUpi, paidLater, paidLaterDone, nextShift, upiBook });
 });
 
+// The shift's statement (approved 21 Nov 2026): every bank line of the 8 am to 8 am window, all accounts and kinds, with
+// what a saved match or booking says. A day either side comes too, for finding an amount. The draft's uses (matches made
+// on save) are laid over it on the page from the Reconcile answer.
+bankRoutes.get('/businesses/:businessId/shifts/:day/statement', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Day must be YYYY-MM-DD.');
+  const w = shiftWindow(day);
+  const DAY = 24 * 3600e3;
+  const [accounts, rows] = await Promise.all([
+    all<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE business_id = ? AND kind = 'bank' ORDER BY name", bid),
+    all<{ id: string; accountId: string; accountName: string; postedAt: number; amountPaise: number; direction: string; kind: string; status: string;
+      vpa: string | null; remark: string | null; description: string; note: string | null; headName: string | null; bills: string | null }>(db, `
+      SELECT r.id, r.account_id AS accountId, a.name AS accountName, r.posted_at AS postedAt, r.amount_paise AS amountPaise, r.direction, r.kind, r.status,
+        r.vpa, r.remark, r.description, r.note, h.name AS headName,
+        (SELECT group_concat(t.bill_no, ' + ') FROM bank_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.bank_row_id = r.id) AS bills
+      FROM bank_rows r JOIN accounts a ON a.id = r.account_id LEFT JOIN transactions bt ON bt.id = r.transaction_id LEFT JOIN heads h ON h.id = bt.head_id
+      WHERE r.business_id = ? AND r.posted_at >= ? AND r.posted_at < ? ORDER BY r.posted_at, r.tran_id LIMIT 3000`, bid, w.from - DAY, w.to + DAY),
+  ]);
+  return c.json({ day, from: w.from, to: w.to, accounts,
+    rows: rows.map((r) => ({ ...r, description: r.description.slice(0, 80), inShift: r.postedAt >= w.from && r.postedAt < w.to, shiftDay: shiftDayOf(r.postedAt) })) });
+});
+
 bankRoutes.get('/businesses/:businessId/unmatched', requireRole('bank.link'), async (c) => c.json(await unmatchedEntries(c.env.DB, c.get('businessId'))));
 
 /** Counted twice (20 Nov 2026): the half of a payment written in two columns that never comes is removed, with a reason. */

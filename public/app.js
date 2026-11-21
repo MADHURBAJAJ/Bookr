@@ -5600,6 +5600,15 @@ async function matchNearPair(biz, day, p) {
       const r = await apiFull('POST', `${base}/comparisons/${p.bill.id}/add-paid`, { mode: 'upi', sourceId: p.credit.id, allowGap: Math.abs(p.diff) > TRAY_GAP, fix: false });
       undos.push(() => apiFull('DELETE', `${base}/register-rows/${r.rowId}`, {}));
     }
+    // Writing the payment changes the register row, which clears a decision on the bill (26110819, 21 Nov 2026): a bill
+    // whose software and register still differ takes the register's side, which now holds this UPI payment.
+    if (p.kind !== 'register') {
+      const c = (await api('GET', `${base}/shifts/${day}`)).comparisons.find((x) => x.id === p.bill.id);
+      if (c && !c.decision && c.register && c.difference !== 'match' && c.difference !== 'complimentary') {
+        await apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: 'use_register', note: `Bank ₹ ${money(p.credit.amountPaise)} at ${hhmm(p.credit.postedAt)}` });
+        undos.push(() => apiFull('PUT', `${base}/comparisons/${c.id}`, { decision: null }));
+      }
+    }
     const res = await apiFull('POST', `${base}/shifts/${day}/choices`, { pairs: [{ bankRowId: p.credit.id, comparisonIds: [p.bill.id] }] });
     return async () => {
       await eachAtOnce(res.ids ?? [], (id) => apiFull('DELETE', `${base}/shifts/${day}/choices/${id}`, {}).catch(() => {}));
@@ -5974,6 +5983,82 @@ function suggestionList(cards, day, ctx) {
       ${all ? html`<button class="btn dchip" type="button" data-cardall="${list.map((c) => c.key).join('|')}">Accept all ${list.length}</button>` : ''}</div>
       ${list.map((c) => sgRow(c, day, ctx))}<div class="form-msg" data-sgmsg></div></section>`;
   })}`;
+}
+// Statement tab (approved 21 Nov 2026): every bank line of the shift, all accounts and modes, with what each is used for
+// now, the draft included (matches made on save). An amount is also looked for a day either side.
+const STMT_KIND = { upi_in: 'UPI in', upi_out: 'UPI out', upi_fee: 'UPI fee', reversal: 'Reversal', card_settlement: 'Card settlement', card_purchase: 'Card purchase', other: 'Other' };
+const statementPanel = (open) => html`<div data-rtop="stmt" ${open ? '' : 'hidden'}><section class="card" style="gap:10px">
+  <div class="st-bar"><select id="stacc" aria-label="Account"><option value="">All accounts</option></select>
+    <select id="stmode" aria-label="Mode"><option value="">All modes</option></select>
+    <input id="stamt" type="text" inputmode="decimal" placeholder="Amount, e.g. 550" aria-label="Find an amount" style="width:160px">
+    <span class="lo-fill"></span><span class="tiny" id="stsum"></span></div>
+  <div class="seg" id="stuse" role="group" aria-label="Show"><button type="button" data-u="" class="on">All</button><button type="button" data-u="free">Not used</button><button type="button" data-u="bill">For bills</button><button type="button" data-u="booked">Booked</button><button type="button" data-u="none">Not sales</button></div>
+  <div class="scroll"><table class="st-t"><colgroup><col style="width:96px"><col style="width:150px"><col style="width:120px"><col></colgroup>
+    <thead><tr><th>Time</th><th>Mode</th><th class="amount">Amount</th><th>Used for${''}</th></tr></thead><tbody id="strows"><tr><td colspan="4" class="tiny">Loading…</td></tr></tbody></table></div>
+  <div class="tiny note">From 8 am to 8 am. Matches marked "on save" are made when the shift is saved. An amount you type is also looked for a day either side.</div>
+</section></div>`;
+function statementUses(r, cv, near) {
+  const use = new Map();
+  const set = (id, v) => { if (id && !use.has(id)) use.set(id, v); };
+  for (const k of r.choices ?? []) set(k.bankRowId, { k: 'pick', t: `Bill ${k.billNos.join(' + ')} · you picked, on save` });
+  for (const c of r.fixes ?? []) if (c.key?.startsWith('same-sale-plan:')) set(c.key.slice('same-sale-plan:'.length), { k: 'pick', t: `Same sale as bill ${c.billNos[0]} · on save` });
+  for (const x of r.clear ?? []) set(x.creditId, { k: 'bill', t: `Bill ${x.billNos.join(' + ')}${x.part ? ` · ${x.part}` : ''}${r.confirmed ? '' : ' · on save'}` });
+  for (const g of cv?.paidGroups ?? []) if (g.bank?.creditId) set(g.bank.creditId, { k: 'bill', t: `Bills ${g.billNos.join(' + ')} · paid together${r.confirmed ? '' : ' · on save'}` });
+  for (const p of near ?? []) set(p.credit.id, { k: 'free', t: `Not used · near bill ${p.bill.billNo ?? ''} (₹${money(p.bill.amountPaise).replace(/\.00$/, '')})` });
+  return use;
+}
+function wireStatement(biz, day, uses, goUpi) {
+  let data = null;
+  let U = '';
+  const rr = (p) => `₹${money(p).replace(/\.00$/, '')}`;
+  const useOf = (x) => {
+    const d = x.status === 'unmatched' || x.status === 'booked' ? uses.get(x.id) : null;
+    if (d) return d;
+    if (x.status === 'matched') return { k: 'bill', t: x.bills ? `Bill ${x.bills}` : 'Matched' };
+    if (x.status === 'booked') return { k: 'booked', t: `Booked as ${x.headName ?? 'booked'}${x.note ? ` · ${x.note}` : ''}` };
+    if (x.status === 'ignored') return { k: 'none', t: 'Ignored' };
+    if (x.kind === 'upi_in') return { k: 'free', t: 'Not used · book it' };
+    if (x.kind === 'card_settlement') return { k: 'none', t: 'Card machine payout · Card tab' };
+    if (x.kind === 'upi_fee') return { k: 'none', t: 'UPI fee' };
+    return { k: x.direction === 'DR' ? 'none' : 'free', t: x.direction === 'DR' ? 'Money out · Bank page' : 'Not used' };
+  };
+  const draw = () => {
+    const a = document.getElementById('stacc').value;
+    const m = document.getElementById('stmode').value;
+    const q = document.getElementById('stamt').value.replace(/[₹,\s]/g, '');
+    const fits = (x) => { if (!q) return true; const v = x.amountPaise / 100; return q.includes('.') ? Math.abs(v - Number(q)) < 0.005 : String(Math.floor(v)).startsWith(q); };
+    const rows = data.rows.filter((x) => (x.inShift || q) && (!a || x.accountId === a) && (!m || x.kind === m) && fits(x) && (!U || useOf(x).k === U));
+    const sign = (x) => (x.direction === 'DR' ? -1 : 1);
+    document.getElementById('strows').innerHTML = rows.length ? html`${rows.map((x) => { const u = useOf(x); return html`<tr class="${x.inShift ? '' : 'st-out'}">
+      <td>${hhmm(x.postedAt)}${x.inShift ? '' : html`<div class="tiny">${dayLabel(x.shiftDay).replace(/\s\d{4}$/, '')} shift</div>`}</td>
+      <td>${STMT_KIND[x.kind] ?? x.kind}${a ? '' : html`<div class="tiny">${x.accountName}</div>`}</td>
+      <td class="amount mono">${sign(x) < 0 ? '−' : ''}${rr(x.amountPaise)}</td>
+      <td>${u.k === 'free' && x.inShift && x.kind === 'upi_in' ? html`<button type="button" class="st-chip u-free" data-stbook="1">${u.t}</button>` : html`<span class="st-chip u-${u.k}">${u.t}</span>`}</td></tr>`; })}`.__html
+      : html`<tr><td colspan="4" class="tiny">${q ? `No line of ${q} from a day before the shift to a day after.` : 'No lines.'}</td></tr>`.__html;
+    const inn = rows.filter((x) => x.direction !== 'DR').reduce((t, x) => t + x.amountPaise, 0);
+    const out = rows.filter((x) => x.direction === 'DR').reduce((t, x) => t + x.amountPaise, 0);
+    document.getElementById('stsum').textContent = `${rows.length} line${rows.length === 1 ? '' : 's'} · in ${rr(inn)} · out ${rr(out)}`;
+    document.querySelectorAll('#strows [data-stbook]').forEach((b) => b.addEventListener('click', goUpi));
+  };
+  return async () => {
+    if (data) return;
+    try {
+      data = await api('GET', `/businesses/${biz.id}/shifts/${day}/statement`);
+    } catch (err) { document.getElementById('strows').innerHTML = html`<tr><td colspan="4" class="error">${err.message}</td></tr>`.__html; return; }
+    const accSel = document.getElementById('stacc');
+    accSel.insertAdjacentHTML('beforeend', html`${data.accounts.map((x) => html`<option value="${x.id}">${x.name}</option>`)}`.__html);
+    const kinds = [...new Set(data.rows.filter((x) => x.inShift).map((x) => x.kind))];
+    document.getElementById('stmode').insertAdjacentHTML('beforeend', html`${Object.keys(STMT_KIND).filter((k) => kinds.includes(k)).map((k) => html`<option value="${k}">${STMT_KIND[k]}</option>`)}`.__html);
+    accSel.addEventListener('change', draw);
+    document.getElementById('stmode').addEventListener('change', draw);
+    document.getElementById('stamt').addEventListener('input', draw);
+    document.querySelectorAll('#stuse [data-u]').forEach((b) => b.addEventListener('click', () => {
+      U = b.dataset.u;
+      document.querySelectorAll('#stuse [data-u]').forEach((x) => x.classList.toggle('on', x === b));
+      draw();
+    }));
+    draw();
+  };
 }
 const recTabs = (biz, day, tab) => html`<div class="seg rec-tabs" role="tablist" aria-label="Reconcile">
   <a role="tab" class="${tab === 'shift' ? 'on' : ''}" href="#/b/${biz.id}/reconcile${day ? `/${day}` : ''}">This shift</a>
@@ -6691,7 +6776,7 @@ async function reconcileView(biz, dayArg) {
     ${quietSaved ? '' : html`<div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
       ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`}`;
   // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
-  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
+  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'stmt' ? 'stmt' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
   const oneTab = (key, label, n) => html`<button type="button" role="tab" data-rtab1="${key}" class="${curTab === key ? 'on' : ''}" aria-selected="${curTab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : ''}</button>`;
   const topBtn = (key, label, n) => html`<button type="button" role="tab" data-rtopbtn="${key}" class="${top === key ? 'on' : ''}" aria-selected="${top === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
@@ -6702,10 +6787,11 @@ async function reconcileView(biz, dayArg) {
       <div style="display:flex;gap:8px;align-items:center">${!r.confirmed && biz.actions.includes('sales.decide') ? html`<button class="btn" type="button" id="savehead">Save shift</button>` : ''}${P.shiftMenu}</div></div>
     <div id="recmsg"></div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
-      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${comp.lines.length ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}</div>
+      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${comp.lines.length ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}</div>
     <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
     </div>
     ${comp.lines.length ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
+    ${statementPanel(top === 'stmt')}
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>
       ${P.bar}
       <div id="allmsg"></div>
@@ -6818,9 +6904,11 @@ async function reconcileView(biz, dayArg) {
     app.querySelectorAll('[data-rtop]').forEach((x) => { x.hidden = x.dataset.rtop !== key; });
   };
   app.querySelectorAll('[data-rtopbtn]').forEach((b) => b.addEventListener('click', () => showTop(b.dataset.rtopbtn)));
+  const loadStatement = wireStatement(biz, day, statementUses(r, cv, near), () => go('upi'));
   const go = (key) => {
     const pay = ['cash', 'upi', 'card'].includes(key);
     showTop(pay ? 'pay' : key);
+    if (key === 'stmt') loadStatement();
     if (pay) {
       try { localStorage.setItem(RECONCILE_TAB_KEY, key); } catch { /* storage unavailable */ }
       app.querySelectorAll('[data-rpanel]').forEach((x) => { x.hidden = x.dataset.rpanel !== key; });
@@ -6828,6 +6916,7 @@ async function reconcileView(biz, dayArg) {
     app.querySelectorAll('[data-rtab1]').forEach((x) => { x.classList.toggle('on', x.dataset.rtab1 === key); x.setAttribute('aria-selected', String(x.dataset.rtab1 === key)); });
   };
   app.querySelectorAll('[data-rtab1]').forEach((b) => b.addEventListener('click', () => go(b.dataset.rtab1)));
+  if (top === 'stmt') loadStatement();
   document.getElementById('savehead')?.addEventListener('click', () => {
     go('todo');
     const btn = document.getElementById('savereconcile');
