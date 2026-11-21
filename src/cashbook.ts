@@ -20,9 +20,10 @@ export const seesAllBooks = (role: Role) => role !== 'entry_staff';
 
 export interface Book {
   id: string; name: string; branchId: string | null; branchName: string | null; cashierUserId: string | null; cashierName: string | null;
-  openingBalancePaise: number; openingDate: string;
+  openingBalancePaise: number; openingDate: string; cashierRole?: string | null;
 }
 const BOOK_SQL = `SELECT a.id, a.name, a.branch_id AS branchId, b.name AS branchName, a.cashier_user_id AS cashierUserId, u.name AS cashierName,
+    (SELECT m.role FROM memberships m WHERE m.user_id = a.cashier_user_id AND m.business_id = a.business_id) AS cashierRole,
     a.opening_balance_paise AS openingBalancePaise, a.opening_date AS openingDate
   FROM accounts a LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN users u ON u.id = a.cashier_user_id
   WHERE a.business_id = ? AND a.kind = 'cash' AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL)`;

@@ -489,7 +489,7 @@ function loginView() {
       <h1 style="margin:0;font-size:28px;font-weight:600">Sign in</h1>
       <div class="field"><label for="e">Email or mobile number</label><input id="e" name="email" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="name@example.com or 94120 55555" required></div>
       <div class="field"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
-      <span class="note">Forgot your password? Ask the Owner of your business.</span>
+      <span class="note">Forgot your password? Ask the Owner of your business to send you a reset link.</span>
       <div class="form-msg"></div>
       <button class="btn big" type="submit">Sign in</button>
       <div class="note">You can only see businesses you have been invited to. Ask the Owner for an invite.</div>
@@ -958,6 +958,29 @@ const MATRIX = {
   viewer: [false, false, false, false, false, false, true, false],
 };
 
+/**
+ * Remove a person's login from this business (21 Nov 2026), from Users and roles or a cash book's line. Their cash
+ * books keep every line and lose their keeper. Refused while cash handed over to or from their books is waiting;
+ * cash still in their books is a warning only. Returns true when removed.
+ */
+async function removeLogin(biz, userId, name) {
+  const chk = await api('GET', `/businesses/${biz.id}/members/${userId}/remove-check`);
+  const rs = (p) => (p / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  if (chk.waiting.length) {
+    const w = chk.waiting[0];
+    throw new Error(`Cash handed over is waiting: ₹ ${rs(w.amountPaise)} from ${w.fromBookName} to ${w.toName}. Accept it or undo it first, then remove ${name}.`);
+  }
+  const lines = [`Remove ${name}'s login from ${biz.name}? They can no longer sign in here.`];
+  for (const b of chk.books) {
+    lines.push(`\nCash book "${b.name}" keeps every line and has no cashier until you invite someone.`);
+    if (b.inHandPaise) lines.push(`It should still hold ₹ ${rs(b.inHandPaise)}. Get it handed over and counted, or it stays in the book.`);
+  }
+  if (!confirm(lines.join('\n'))) return false;
+  await api('DELETE', `/businesses/${biz.id}/members/${userId}`, {});
+  BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+  return true;
+}
+
 async function usersView(biz, selectedId) {
   const { members, invites } = await api('GET', `/businesses/${biz.id}/members`);
   const selected = members.find((m) => m.id === selectedId) ?? members.find((m) => m.id !== me.user.id) ?? members[0];
@@ -1010,6 +1033,25 @@ async function usersView(biz, selectedId) {
           ${memberships.map((m) => html`<div class="list-row"><span>${m.name}</span><span style="font-weight:500">${ROLE_LABELS[m.role]}</span></div>`)}
           <div class="note">The same person can hold a different role in each business. Only businesses you own are shown.</div>
         </section>` : ''}
+        ${selected && selected.id !== me.user.id && !selected.ownerAnywhere ? html`
+        <section class="card" style="gap:10px">
+          <h2 style="margin-bottom:0">${selected.name}'s sign-in</h2>
+          <form id="profile" style="display:flex;flex-direction:column;gap:10px">
+            <div class="field"><label for="pfn">Name</label><input id="pfn" name="name" value="${selected.name}" required></div>
+            <div class="field"><label for="pfp">Mobile number</label><input id="pfp" name="phone" type="tel" inputmode="numeric" autocomplete="off" placeholder="94120 55555" value="${selected.phone ? `${selected.phone.slice(3, 8)} ${selected.phone.slice(8)}` : ''}">
+              <span class="note">${selected.phone ? 'They sign in with the new number from now on. Their password stays the same.' : 'They can sign in with this number as well as their email.'}</span></div>
+            <div class="form-msg"></div>
+            <div><button class="btn plain" type="submit">Save name and number</button></div>
+          </form>
+          <div style="border-top:1px solid var(--line, #E5E7EB);padding-top:10px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-weight:500">Forgot their password?</div>
+            <div class="note">Send them a link to set a new one. It works once, for 24 hours. Their old password works until they set the new one; then every other phone is signed out.</div>
+            <div class="form-row">${selected.phone ? html`<button class="btn" type="button" id="reset-wa">Send reset link on WhatsApp</button>` : ''}
+              <button class="btn plain" type="button" id="reset-copy">Copy reset link</button></div>
+            <div class="form-msg" id="reset-msg"></div>
+          </div>
+        </section>` : selected && selected.id !== me.user.id && selected.ownerAnywhere ? html`
+        <section class="card"><div class="note">${selected.name} is an Owner, so only they can change their own password and number.</div></section>` : ''}
       </div>
     </div>
     <section class="card">
@@ -1034,9 +1076,44 @@ async function usersView(biz, selectedId) {
     } catch (e) { flash(e.message); reload(); }
   }));
   app.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm(`Remove ${b.dataset.name} from ${biz.name}?`)) return;
-    try { await api('DELETE', `/businesses/${biz.id}/members/${b.dataset.remove}`, {}); reload(); } catch (e) { flash(e.message); }
+    try {
+      if (!(await removeLogin(biz, b.dataset.remove, b.dataset.name))) return;
+      await usersView(biz);
+      flash(`${b.dataset.name}'s login is removed. Their entries stay.`, true);
+    } catch (e) { flash(e.message); }
   }));
+  const pf = document.getElementById('profile');
+  pf && onSubmit(pf, async (x) => {
+    const payload = { name: x.name };
+    if (x.phone.trim() || selected.phone) payload.phone = x.phone;
+    await api('PATCH', `/businesses/${biz.id}/members/${selected.id}/profile`, payload);
+    GET_CACHE.clear();
+    await usersView(biz, selected.id);
+    flash(`Saved ${x.name}'s name and number.`, true);
+  });
+  const resetMsg = document.getElementById('reset-msg');
+  const makeReset = async () => {
+    const res = await api('POST', `/businesses/${biz.id}/members/${selected.id}/reset`, {});
+    return { res, text: `Set a new Bookr password for ${biz.name}. Open this link within 24 hours (it works once): ${res.link}` };
+  };
+  document.getElementById('reset-wa')?.addEventListener('click', async () => {
+    const w = window.open('about:blank', '_blank');
+    resetMsg.textContent = 'Making the link…'; resetMsg.className = 'form-msg';
+    try {
+      const { res, text } = await makeReset();
+      const wa = `https://wa.me/${res.phone.slice(1)}?text=${encodeURIComponent(text)}`;
+      if (w) w.location.href = wa; else location.href = wa;
+      resetMsg.textContent = `Reset link made for ${selected.name}, valid 24 hours.`;
+    } catch (err) { w?.close(); resetMsg.textContent = err.message; resetMsg.className = 'form-msg error'; }
+  });
+  document.getElementById('reset-copy')?.addEventListener('click', async () => {
+    try {
+      const { text } = await makeReset();
+      try { await navigator.clipboard.writeText(text); resetMsg.textContent = 'Reset link copied. Paste it to them in any chat. Valid 24 hours.'; }
+      catch { resetMsg.textContent = text; }
+      resetMsg.className = 'form-msg';
+    } catch (err) { resetMsg.textContent = err.message; resetMsg.className = 'form-msg error'; }
+  });
   app.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
     try { await api('DELETE', `/businesses/${biz.id}/invites/${b.dataset.revoke}`, {}); reload(); } catch (e) { flash(e.message); }
   }));
@@ -1895,6 +1972,35 @@ async function inviteView(token) {
     await api('POST', `/invites/${encodeURIComponent(token)}/accept`, d);
     me = await api('GET', '/me');
     // A cashier with one business opens straight on their book (21 Nov 2026).
+    go(me.businesses.length === 1 ? home(me.businesses[0]) : '#/choose');
+  });
+}
+
+/** A password reset link from the Owner (21 Nov 2026): set a new password; other phones are signed out. */
+async function resetView(token) {
+  let info;
+  try {
+    info = await api('GET', `/resets/${encodeURIComponent(token)}`);
+  } catch (e) {
+    render(html`<div class="center"><section class="card" style="flex:0 1 440px"><h1 style="margin:0;font-size:24px">New password</h1><div class="error">${e.message}</div><a href="#/login">Go to sign in</a></section></div>`);
+    return;
+  }
+  const signIn = /^\+91\d{10}$/.test(info.signIn) ? `${info.signIn.slice(3, 8)} ${info.signIn.slice(8)}` : info.signIn;
+  render(html`
+  <div class="center">
+    <form class="card" id="reset" style="flex:0 1 440px">
+      <div style="font-size:22px;font-weight:600">Bookr</div>
+      <h1 style="margin:0;font-size:26px;font-weight:600">New password</h1>
+      <div class="sub">For <strong>${info.name}</strong>, who signs in with <strong>${signIn}</strong>.</div>
+      <div class="field"><label for="p">Choose a new password</label><input id="p" name="password" type="password" autocomplete="new-password" minlength="10" required>
+        <span class="note">At least 10 characters. Any other phone or computer signed in as you is signed out.</span></div>
+      <div class="form-msg"></div>
+      <button class="btn big" type="submit">Save and sign in</button>
+    </form>
+  </div>`);
+  onSubmit(document.getElementById('reset'), async (d) => {
+    await api('POST', `/resets/${encodeURIComponent(token)}`, { password: d.password });
+    me = await api('GET', '/me');
     go(me.businesses.length === 1 ? home(me.businesses[0]) : '#/choose');
   });
 }
@@ -9449,7 +9555,8 @@ async function schoolsView(biz, editId) {
   const codesOf = (branchId) => d.codes.filter((c) => c.branchId === branchId).map((c) => c.code);
   const otherCodes = d.codes.filter((c) => !c.branchId).map((c) => c.code);
   const who = (b) => (b.cashierUserId
-    ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span>${b.cashierLastActive ? html` <span class="tiny">last seen ${when(b.cashierLastActive)}</span>` : ''}`
+    ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span>${b.cashierLastActive ? html` <span class="tiny">last seen ${when(b.cashierLastActive)}</span>` : ''}
+        ${d.can.invite && b.cashierRole !== 'owner' && b.cashierUserId !== me.user.id ? html` <button type="button" class="linkbtn tiny" data-cbremove="${b.cashierUserId}" data-name="${b.cashierName ?? b.name}">Remove login</button>` : ''}`
     : b.invite ? html`<span class="chip wait">invite sent</span> <span class="tiny">to ${cbPhone(b.invite.phone)} on ${shortDay(new Date(b.invite.createdAt + IST_MS).toISOString().slice(0, 10))}, not joined yet</span>
         ${d.can.invite ? html` <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${cbPhone(b.invite.phone)}">Send again</button>` : ''}`
       : d.can.invite ? html`<button type="button" class="btn plain" style="min-height:32px" data-cbinvite="${b.id}">Invite by phone</button>`
@@ -9534,6 +9641,17 @@ async function schoolsView(biz, editId) {
   wireShell();
   if (editing) document.getElementById('cb-edit').scrollIntoView({ block: 'start' });
   const again = () => schoolsView(biz, editId);
+  // Remove login (21 Nov 2026): the person can no longer sign in here; the book keeps its lines and waits for a new cashier.
+  app.querySelectorAll('[data-cbremove]').forEach((btn) => btn.addEventListener('click', async () => {
+    const box = btn.closest('[data-cbwho]');
+    try {
+      if (!(await removeLogin(biz, btn.dataset.cbremove, btn.dataset.name))) return;
+      await schoolsView(biz);
+      doneToast(`${btn.dataset.name}'s login is removed. The book keeps every line; invite the new cashier from its line.`);
+    } catch (e) {
+      box.insertAdjacentHTML('beforeend', html`<div class="error" style="margin-top:6px">${e.message}</div>`.__html);
+    }
+  }));
   // Invite a cashier by phone: the link opens WhatsApp to that number; joining makes them this book's cashier.
   app.querySelectorAll('[data-cbinvite]').forEach((btn) => btn.addEventListener('click', () => {
     const book = holders.find((b) => b.id === btn.dataset.cbinvite) ?? d.books.find((b) => b.id === btn.dataset.cbinvite);
@@ -10087,6 +10205,7 @@ async function routeInner() {
   const parts = hash.slice(2).split('/');
   try {
     if (parts[0] === 'invite' && parts[1]) return inviteView(parts[1]);
+    if (parts[0] === 'reset' && parts[1]) return resetView(parts[1]);
     if (!me) {
       try { me = await api('GET', '/me'); } catch { me = null; }
     }

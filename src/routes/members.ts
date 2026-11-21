@@ -5,10 +5,12 @@ import { all, isInviteUnusable, isLastOwner, isUniqueViolation, newId, now, one,
 import { body, fail, isEmail, isUuid, normalizePhone, phoneEmail, signInSql, text } from '../http';
 import { hashPassword, randomToken, sha256, verifyPassword } from '../crypto';
 import { isRole } from '../permissions';
+import { booksOf, handovers, inHandThrough } from '../cashbook';
 
 const INVITE_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_PASSWORD = 10;
+const RESET_HOURS = 24;
 const LAST_OWNER = 'A business needs at least one Owner.';
 
 export const memberRoutes = new Hono<AppEnv>();
@@ -17,7 +19,8 @@ export const memberRoutes = new Hono<AppEnv>();
 memberRoutes.get('/businesses/:businessId/members', requireRole('members.manage'), async (c) => {
   const bid = c.get('businessId');
   const members = await all(c.env.DB, `
-    SELECT u.id, u.name, ${signInSql('u')} AS email, m.role, u.last_active_at AS lastActiveAt
+    SELECT u.id, u.name, ${signInSql('u')} AS email, u.phone, m.role, u.last_active_at AS lastActiveAt,
+      EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = u.id AND x.role = 'owner') AS ownerAnywhere
     FROM memberships m JOIN users u ON u.id = m.user_id
     WHERE m.business_id = ?
     ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'accountant' THEN 1 WHEN 'entry_staff' THEN 2 ELSE 3 END, u.name`, bid);
@@ -62,18 +65,122 @@ memberRoutes.patch('/businesses/:businessId/members/:userId', requireRole('membe
   return c.json({ ok: true });
 });
 
+// What removing a person's login touches (21 Nov 2026): the cash books they keep here, with the cash each should hold
+// today, and cash handed over still waiting to or from those books. Their lines stay; the books lose their keeper.
+async function removeCheck(db: DB, bid: string, userId: string) {
+  const books = (await booksOf(db, bid, userId, 'owner')).filter((b) => b.cashierUserId === userId);
+  const t = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+  const withCash = await Promise.all(books.map(async (b) => ({ id: b.id, name: b.name, inHandPaise: await inHandThrough(db, b, t) })));
+  const ids = books.map((b) => b.id);
+  const marks = ids.map(() => '?').join(',');
+  const waiting = ids.length ? (await handovers(db, bid, `AND h.status = 'sent' AND h.to_kind = 'book'
+    AND (o.account_id IN (${marks}) OR h.to_account_id IN (${marks}))`, ...ids, ...ids))
+    .map((h) => ({ id: h.id, day: h.day, amountPaise: h.amountPaise, fromBookName: h.fromBookName, toName: h.toName })) : [];
+  return { books: withCash, waiting };
+}
+
+memberRoutes.get('/businesses/:businessId/members/:userId/remove-check', requireRole('members.manage'), async (c) => {
+  const userId = c.req.param('userId');
+  if (!isUuid(userId)) fail(404, 'Person not found.');
+  return c.json(await removeCheck(c.env.DB, c.get('businessId'), userId));
+});
+
+// Removing a person (also "Remove login" on a cash book's line, 21 Nov 2026): their books here lose their keeper (the
+// lines stay), their reset links here stop working, and if they are left in no business they are signed out. Refused
+// while cash handed over to or from their books is waiting, so it is never left with nobody to accept it.
 memberRoutes.delete('/businesses/:businessId/members/:userId', requireRole('members.manage'), async (c) => {
   const userId = c.req.param('userId');
   if (!isUuid(userId)) fail(404, 'Person not found.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const check = await removeCheck(db, bid, userId);
+  if (check.waiting.length) {
+    const w = check.waiting[0];
+    fail(409, `Cash handed over is waiting: ₹ ${(w.amountPaise / 100).toLocaleString('en-IN')} from ${w.fromBookName} to ${w.toName}. Accept it or undo it first.`);
+  }
+  const t = now();
+  const me = c.get('user').id;
   try {
-    const res = await stmt(c.env.DB, 'DELETE FROM memberships WHERE business_id = ? AND user_id = ?',
-      c.get('businessId'), userId).run();
-    if (!res.meta.changes) fail(404, 'Person not found.');
+    const res = await db.batch([
+      ...check.books.flatMap((b) => [
+        stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'cashbook.cashier', 'accounts', ?, ?, ?, ?)`,
+          bid, me, b.id, JSON.stringify({ cashierUserId: userId }), JSON.stringify({ cashierUserId: null, loginRemoved: true }), t),
+        stmt(db, 'UPDATE accounts SET cashier_user_id = NULL WHERE id = ? AND business_id = ?', b.id, bid),
+      ]),
+      stmt(db, 'UPDATE password_resets SET revoked_at = ? WHERE user_id = ? AND business_id = ? AND used_at IS NULL AND revoked_at IS NULL', t, userId, bid),
+      stmt(db, 'DELETE FROM memberships WHERE business_id = ? AND user_id = ?', bid, userId),
+      stmt(db, 'DELETE FROM sessions WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM memberships WHERE user_id = ?)', userId, userId),
+    ]);
+    if (!res[res.length - 2].meta.changes) fail(404, 'Person not found.');
   } catch (e) {
     if (isLastOwner(e)) fail(409, LAST_OWNER);
     throw e;
   }
-  return c.json({ ok: true });
+  return c.json({ ok: true, books: check.books.length });
+});
+
+// Only someone who is an Owner nowhere may have their password reset or their number changed by an Owner:
+// otherwise one Owner could take over another business's Owner.
+async function notOwnerMember(db: DB, bid: string, userId: string) {
+  const row = await one<{ role: string; ownerAnywhere: number }>(db, `SELECT m.role,
+      EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = m.user_id AND x.role = 'owner') AS ownerAnywhere
+    FROM memberships m WHERE m.business_id = ? AND m.user_id = ?`, bid, userId);
+  if (!row) fail(404, 'Person not found.');
+  if (row.ownerAnywhere) fail(403, 'An Owner changes their own password and number.');
+}
+
+// Password reset (approved 21 Nov 2026): the Owner makes a link for the person, valid 24 hours, used once.
+// A newer link replaces an older one. The old password works until the new one is set.
+memberRoutes.post('/businesses/:businessId/members/:userId/reset', requireRole('members.manage'), async (c) => {
+  const userId = c.req.param('userId');
+  if (!isUuid(userId)) fail(404, 'Person not found.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  await notOwnerMember(db, bid, userId);
+  const token = randomToken();
+  const t = now();
+  const expiresAt = t + RESET_HOURS * 3600000;
+  await db.batch([
+    stmt(db, 'UPDATE password_resets SET revoked_at = ? WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL', t, userId),
+    stmt(db, `INSERT INTO password_resets (id, user_id, business_id, created_by, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      newId(), userId, bid, c.get('user').id, await sha256(token), t, expiresAt),
+  ]);
+  const who = await one<{ phone: string | null }>(db, 'SELECT phone FROM users WHERE id = ?', userId);
+  return c.json({ expiresAt, phone: who?.phone ?? null, link: `${new URL(c.req.url).origin}/#/reset/${token}` }, 201);
+});
+
+// Fix a person's name or change their mobile number (21 Nov 2026). Someone who joined by phone signs in with the new
+// number from then on; their hidden stand-in email follows the number.
+memberRoutes.patch('/businesses/:businessId/members/:userId/profile', requireRole('members.manage'), async (c) => {
+  const userId = c.req.param('userId');
+  if (!isUuid(userId)) fail(404, 'Person not found.');
+  const db = c.env.DB;
+  const data = await body(c);
+  await notOwnerMember(db, c.get('businessId'), userId);
+  const user = await one<{ name: string; email: string; phone: string | null }>(db, 'SELECT name, email, phone FROM users WHERE id = ?', userId);
+  if (!user) fail(404, 'Person not found.');
+  const name = data.name === undefined ? user.name : text(data, 'name', 'Name', { max: 120 })!;
+  let phone = user.phone;
+  let email = user.email;
+  if (data.phone !== undefined) {
+    phone = normalizePhone(data.phone);
+    if (!phone) fail(400, 'Enter a 10-digit mobile number.');
+    if (user.email.endsWith('@phone.bookr.invalid')) email = phoneEmail(phone);
+  }
+  if (phone !== user.phone && await one(db, 'SELECT 1 AS ok FROM users WHERE phone = ? AND id <> ?', phone, userId)) {
+    fail(409, 'Another person signs in with this number.');
+  }
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE users SET name = ?, phone = ?, email = ? WHERE id = ?', name, phone, email, userId),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'member.profile', 'users', ?, ?, ?, ?)`,
+        c.get('businessId'), c.get('user').id, userId, JSON.stringify({ name: user.name, phone: user.phone }), JSON.stringify({ name, phone }), now()),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, 'Another person signs in with this number.');
+    throw e;
+  }
+  return c.json({ ok: true, name, phone });
 });
 
 // Creates an invite and returns a link for the Owner to share. No email is sent in Phase 1.
@@ -184,5 +291,47 @@ inviteRoutes.post('/invites/:token/accept', async (c) => {
     throw e;
   }
   await startSession(c, db, userId);
+  return c.json({ ok: true });
+});
+
+// Public: a password reset link (approved 21 Nov 2026). Shows whose it is; setting a new password uses it up and signs
+// the person out everywhere, then signs them in here.
+const INVALID_RESET = 'This reset link is not valid. Ask the Owner for a new one.';
+
+async function findReset(db: DB, token: string) {
+  const r = await one<{ id: string; user_id: string; name: string; signIn: string; ownerAnywhere: number }>(db, `
+    SELECT r.id, r.user_id, u.name, ${signInSql('u')} AS signIn,
+      EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = u.id AND x.role = 'owner') AS ownerAnywhere
+    FROM password_resets r JOIN users u ON u.id = r.user_id
+    WHERE r.token_hash = ? AND r.used_at IS NULL AND r.revoked_at IS NULL AND r.expires_at > ?
+      AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = r.user_id AND m.business_id = r.business_id)`, await sha256(token), now());
+  if (!r || r.ownerAnywhere) fail(404, INVALID_RESET);
+  return r;
+}
+
+inviteRoutes.get('/resets/:token', async (c) => {
+  const r = await findReset(c.env.DB, c.req.param('token'));
+  return c.json({ name: r.name, signIn: r.signIn });
+});
+
+inviteRoutes.post('/resets/:token', async (c) => {
+  const db = c.env.DB;
+  const data = await body(c);
+  const password = typeof data.password === 'string' ? data.password : '';
+  const r = await findReset(db, c.req.param('token'));
+  if (password.length < MIN_PASSWORD) fail(400, `Password must be at least ${MIN_PASSWORD} characters.`);
+  const t = now();
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE password_resets SET used_at = ? WHERE id = ?', t, r.id),
+      stmt(db, 'UPDATE password_resets SET revoked_at = ? WHERE user_id = ? AND id <> ? AND used_at IS NULL AND revoked_at IS NULL', t, r.user_id, r.id),
+      stmt(db, 'UPDATE users SET password_hash = ? WHERE id = ?', await hashPassword(password), r.user_id),
+      stmt(db, 'DELETE FROM sessions WHERE user_id = ?', r.user_id),
+    ]);
+  } catch (e) {
+    if (String((e as Error).message).includes('reset_unusable')) fail(404, INVALID_RESET);
+    throw e;
+  }
+  await startSession(c, db, r.user_id);
   return c.json({ ok: true });
 });

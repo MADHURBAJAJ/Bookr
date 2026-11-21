@@ -208,7 +208,14 @@ describe('a business always keeps an Owner', () => {
   it('a removed person loses access at once', async () => {
     const { bid, users, clients } = await businessWithAllRoles();
     expect((await clients.owner.del(`/businesses/${bid}/members/${users.accountant.id}`)).status).toBe(200);
-    expect((await clients.accountant.get(`/businesses/${bid}/accounts`)).status).toBe(404);
+    // In no business any more, so signed out too (21 Nov 2026).
+    expect((await clients.accountant.get(`/businesses/${bid}/accounts`)).status).toBe(401);
+    // Still in another business: stays signed in, but this business is gone.
+    const other = await businessWithAllRoles();
+    await sql`INSERT INTO memberships (business_id, user_id, role, created_at) VALUES (${bid}, ${other.users.viewer.id}, 'viewer', ${Date.now()})`;
+    expect((await clients.owner.del(`/businesses/${bid}/members/${other.users.viewer.id}`)).status).toBe(200);
+    expect((await other.clients.viewer.get(`/businesses/${bid}/accounts`)).status).toBe(404);
+    expect((await other.clients.viewer.get(`/businesses/${other.bid}/accounts`)).status).toBe(200);
   });
 });
 
