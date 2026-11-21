@@ -8,6 +8,8 @@ import { addDays } from './time';
 import { paidLaterLines } from './paidLater';
 
 export const SHORTAGE_HEAD = { name: 'Cash shortage', tally: 'Cash Shortage' };
+/** Extra cash with no reason found (21 Nov 2026): booked as income, kept like a shortage (source cash_shortage, type income). */
+export const EXCESS_HEAD = { name: 'Cash excess', tally: 'Cash Excess' };
 
 /** A bank line that reads as cash moved between the drawer and the bank (Stage 6): a deposit, or cash taken out. */
 export function cashMoveOf(r: { direction: string; kind: string; description: string }): 'deposit' | 'withdrawal' | null {
@@ -60,7 +62,7 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
         coalesce(sum(CASE WHEN status <> 'approved' THEN amount_paise END), 0) AS waitingPaise,
         min(CASE WHEN status <> 'approved' THEN upload_id END) AS waitingUpload
       FROM transactions WHERE business_id = ? AND day = ? AND source = 'cash_photo' AND type = 'expense'`, businessId, day),
-    all<{ id: string; amount_paise: number; narration: string | null; ocr_original: string | null }>(db, `SELECT id, amount_paise, narration, ocr_original FROM transactions
+    all<{ id: string; type: string; amount_paise: number; narration: string | null; ocr_original: string | null; created_at: number }>(db, `SELECT id, type, amount_paise, narration, ocr_original, created_at FROM transactions
       WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage' ORDER BY created_at`, businessId, day),
     one<{ after: string }>(db, `SELECT after FROM audit_log WHERE business_id = ? AND action = 'cash.difference_accepted'
       AND row_table = 'shifts' AND json_extract(after, '$.day') = ? ORDER BY id DESC LIMIT 1`, businessId, day),
@@ -112,8 +114,11 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
   const opening = yesterday?.cash_in_hand_paise ?? today?.opening_paise ?? null;
   const openingFrom = yesterday?.cash_in_hand_paise != null ? 'previous' : today?.opening_paise != null ? 'page' : null;
   const counted = today?.cash_in_hand_paise ?? null;
-  const shortageTotal = shortages.reduce((t, x) => t + x.amount_paise, 0);
-  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortageTotal - moved!.deposited + moved!.drawn + lateInPaise - lateOutPaise : null;
+  const excesses = shortages.filter((x) => x.type === 'income');
+  const shorts = shortages.filter((x) => x.type !== 'income');
+  const shortageTotal = shorts.reduce((t, x) => t + x.amount_paise, 0);
+  const excessTotal = excesses.reduce((t, x) => t + x.amount_paise, 0);
+  const shouldBe = confirmed && opening !== null ? opening + sales!.total - expenses!.approved - shortageTotal + excessTotal - moved!.deposited + moved!.drawn + lateInPaise - lateOutPaise : null;
   const difference = shouldBe !== null && counted !== null ? counted - shouldBe : null;
   const acc = accepted ? (JSON.parse(accepted.after) as { differencePaise: number; note: string }) : null;
   // Changed to card or UPI after saving (20 Nov 2026): the sale is not cash any more, so it is not one of this drawer's bills.
@@ -176,8 +181,11 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
     expensesUploadId: expenses!.anyUpload,
     shortagePaise: shortageTotal,
     // Each shortage booked on this shift, and the bill it was booked for (18 Nov 2026).
-    shortages: shortages.map((x) => { let o: { comparisonId?: string; billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
+    shortages: shorts.map((x) => { let o: { comparisonId?: string; billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
       return { id: x.id, amountPaise: x.amount_paise, note: x.narration, comparisonId: o.comparisonId ?? null, billNo: o.billNo ?? null }; }),
+    excessPaise: excessTotal,
+    excesses: excesses.map((x) => { let o: { note?: string; by?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
+      return { id: x.id, amountPaise: x.amount_paise, note: o.note ?? null, by: o.by ?? null, at: x.created_at }; }),
     depositedPaise: moved!.deposited,
     lateIn, lateOut, lateInPaise, lateOutPaise, lateOffers,
     // The cash page as written, and the register's cash column (20 Nov 2026): set beside Bookr's sums.
@@ -231,7 +239,7 @@ export async function shortageToReverse(db: DB, businessId: string, day: string,
   const over = k.confirmed ? k.differencePaise : null;
   if (over == null || over <= 0 || k.settled) return null;
   const x = await one<{ id: string; shift_day: string; amount_paise: number; ocr_original: string | null }>(db, `SELECT id, shift_day, amount_paise, ocr_original FROM transactions
-    WHERE business_id = ? AND source = 'cash_shortage' AND amount_paise = ? AND shift_day < ? AND shift_day >= ? ORDER BY shift_day DESC LIMIT 1`,
+    WHERE business_id = ? AND source = 'cash_shortage' AND type = 'expense' AND amount_paise = ? AND shift_day < ? AND shift_day >= ? ORDER BY shift_day DESC LIMIT 1`,
     businessId, over, day, addDays(day, -7));
   if (!x) return null;
   let o: { billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }

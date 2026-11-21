@@ -17,7 +17,7 @@ import { waitingPicture } from '../waiting';
 import { pendingBills, pendingRange } from '../pending';
 import { allBills, billsRange } from '../billsReport';
 import { paidLaterLines } from '../paidLater';
-import { cashCheck, cashPairOf, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
+import { cashCheck, cashPairOf, EXCESS_HEAD, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
 import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
 export const salesRoutes = new Hono<AppEnv>();
@@ -785,7 +785,7 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/cash', requireRole('sales.v
   // Before saving, the same sum from what Save would book now (approved 14 Nov 2026). The figures above stay final-only,
   // as other screens use them.
   const draftShould = !k.confirmed && k.openingPaise !== null
-    ? k.openingPaise + cb.plannedCashPaise! - k.expensesPaise - k.shortagePaise - k.depositedPaise + k.drawnPaise + k.lateInPaise - k.lateOutPaise : null;
+    ? k.openingPaise + cb.plannedCashPaise! - k.expensesPaise - k.shortagePaise + k.excessPaise - k.depositedPaise + k.drawnPaise + k.lateInPaise - k.lateOutPaise : null;
   const draft = k.confirmed ? null : { cashSalesPaise: cb.plannedCashPaise, shouldBePaise: draftShould,
     differencePaise: draftShould !== null && k.countedPaise !== null ? k.countedPaise - draftShould : null };
   const [pair, reverse, prevK, here] = await Promise.all([cashPairOf(db, bid, day, k), shortageToReverse(db, bid, day, k), cashCheck(db, bid, addDays(day, -1)),
@@ -911,13 +911,64 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/cash/shortage', requireRol
   return c.json({ ok: true, amountPaise: amount });
 });
 
+// Extra cash with no reason found (approved 21 Nov 2026): an Owner or Accountant books the extra as approved Cash income
+// under "Cash excess", as a shortage is booked as an expense. Kept like a shortage (source cash_shortage, type income), so
+// no table changes. Undo takes it out again.
+salesRoutes.post('/businesses/:businessId/shifts/:day/cash/excess', requireRole('cash.writeoff'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const day = dayParam(c.req.param('day'));
+  const note = text(await body(c), 'note', 'Note', { max: 300 })!;
+  const check = await cashCheck(db, bid, day);
+  if (check.differencePaise === null) fail(409, 'The shift must be confirmed and the cash summary entered first.');
+  if (check.differencePaise <= 0) fail(409, 'There is no extra cash.');
+  const cash = await one<{ id: string }>(db, `SELECT id FROM accounts WHERE business_id = ? AND kind = 'cash' ORDER BY lower(name) = 'cash' DESC, created_at LIMIT 1`, bid);
+  if (!cash) fail(400, 'This business has no cash account.');
+  const t = now();
+  const user = c.get('user');
+  let head = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = lower(?)", bid, EXCESS_HEAD.name);
+  const statements: D1PreparedStatement[] = [];
+  if (!head) {
+    head = { id: newId() };
+    statements.push(stmt(db, `INSERT INTO heads (id, business_id, name, type, tally_ledger, is_custom, created_at) VALUES (?, ?, ?, 'income', ?, 0, ?)`,
+      head.id, bid, EXCESS_HEAD.name, EXCESS_HEAD.tally, t));
+  }
+  const id = newId();
+  const amount = check.differencePaise!;
+  statements.push(
+    stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, shift_day, created_at, ocr_original)
+      VALUES (?, ?, ?, ?, ?, 'income', ?, ?, 'cash_shortage', 'approved', 'cash', ?, ?, ?)`, id, bid, cash!.id, day, amount, head.id, `Cash excess, ${day} shift: ${note}`, day, t,
+      JSON.stringify({ excess: true, note, by: user.name ?? null })),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash.excess_booked', 'transactions', ?, NULL, ?, ?)`, bid, user.id, id,
+      JSON.stringify({ day, amountPaise: amount, shouldBePaise: check.shouldBePaise, countedPaise: check.countedPaise, note }), t),
+  );
+  await db.batch(statements);
+  return c.json({ ok: true, id, amountPaise: amount });
+});
+
+salesRoutes.post('/businesses/:businessId/cash-excess/:txId/undo', requireRole('cash.writeoff'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const x = await one<{ id: string; shift_day: string; amount_paise: number; narration: string | null }>(db,
+    "SELECT id, shift_day, amount_paise, narration FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND type = 'income'", c.req.param('txId'), bid);
+  if (!x) fail(404, 'This cash excess is not in the books.');
+  await db.batch([
+    stmt(db, 'DELETE FROM transactions WHERE id = ? AND business_id = ?', x!.id, bid),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash.excess_undone', 'transactions', ?, ?, NULL, ?)`, bid, c.get('user').id, x!.id,
+      JSON.stringify({ day: x!.shift_day, amountPaise: x!.amount_paise, narration: x!.narration }), now()),
+  ]);
+  return c.json({ ok: true, day: x!.shift_day });
+});
+
 // The cash of a booked shortage came in later (18 Nov 2026): the shortage is taken out of the books, its bill waits again,
 // and the short day and the over day are then settled together as paid late. Owner or Accountant.
 salesRoutes.post('/businesses/:businessId/cash-shortages/:txId/reverse', requireRole('cash.writeoff'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
   const x = await one<{ id: string; shift_day: string; amount_paise: number; narration: string | null; ocr_original: string | null }>(db,
-    "SELECT id, shift_day, amount_paise, narration, ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage'", c.req.param('txId'), bid);
+    "SELECT id, shift_day, amount_paise, narration, ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND type = 'expense'", c.req.param('txId'), bid);
   if (!x) fail(404, 'This shortage is not in the books.');
   const note = text(await body(c), 'note', 'Note', { max: 300, optional: true });
   let o: { comparisonId?: string } = {}; try { o = JSON.parse(x!.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
@@ -1061,7 +1112,7 @@ salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.v
   const cashRevised = sheets.map((x) => { const r = JSON.parse(x.o).revision as { reason: string; note: string | null; fields: string[] }; return { day: x.day, uploadId: x.uploadId, ...r }; });
   // Cash shortages booked in the period, and the bill each was booked for (18 Nov 2026).
   const sh = await all<{ day: string; amountPaise: number; narration: string | null; o: string | null }>(c.env.DB, `SELECT shift_day AS day, amount_paise AS amountPaise, narration, ocr_original AS o
-    FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND shift_day BETWEEN ? AND ? ORDER BY shift_day, created_at`, c.get('businessId'), from, to);
+    FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND type = 'expense' AND shift_day BETWEEN ? AND ? ORDER BY shift_day, created_at`, c.get('businessId'), from, to);
   const shortages = sh.map((x) => { let o: { billNo?: string } = {}; try { o = JSON.parse(x.o ?? '{}') ?? {}; } catch { /* none */ }
     return { day: x.day, amountPaise: x.amountPaise, billNo: o.billNo ?? null, note: (x.narration ?? '').replace(/^Cash shortage, [\d-]+ shift: (bill \S+ not received · )?/, '') }; });
   return c.json({ from, to, lastDay: last?.day ?? null, cashRevised, shortages, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });

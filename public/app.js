@@ -4096,7 +4096,7 @@ function cashPanelHtml(biz, k, opts = {}) {
     ${list.map((b) => html`<div class="tiny"><span class="mono">${b.billNo}</span> · software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)} · ${b.roundedPaise > 0 ? 'discount' : 'extra'} ₹ ${money(Math.abs(b.roundedPaise))}</div>`)}</details></td></tr>` : '');
   const roundedRows = html`${tillLine(rounded.filter((b) => b.roundedPaise > 0), 'Discount at the till', off)}${tillLine(rounded.filter((b) => b.roundedPaise < 0), 'Paid more than the bill', extra)}`;
   if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'} ₹ ${money(k.expensesWaitingPaise)}, not taken off yet.</div>
-    <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review">Review</a></div></div>` });
+    <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review${k.expensesWaitingUploadId ? `/${k.expensesWaitingUploadId}` : `?day=${k.day}`}">Review</a></div></div>` });
   items.sort((a, b) => Number(!!b.top) - Number(!!a.top) || Number(b.same) - Number(a.same));
   const tops = items.filter((x) => x.top), rest = items.filter((x) => !x.top);
   const tint = (b) => (b.rgCashPaise === null || (b.state === 'undecided' && b.swCashPaise !== null && b.rgCashPaise !== null && !b.rgCashPaise) ? 'cash-bad' : b.differs ? 'cash-warn' : '');
@@ -4127,6 +4127,7 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${row('− Cash spent', 'expense page, approved lines', k.expensesPaise)}
       ${k.expensesWaiting ? html`<tr style="color:var(--muted)"><td></td><td>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval (not taken off)</td><td class="amount">${money(k.expensesWaitingPaise ?? 0)}</td><td><a href="#/b/${biz.id}/review${k.expensesWaitingUploadId ? `/${k.expensesWaitingUploadId}` : `?day=${k.day}`}">Review</a></td></tr>` : ''}
       ${k.shortagePaise ? row('− Cash shortage', 'booked by an Owner', k.shortagePaise) : ''}
+      ${k.excessPaise ? row('+ Cash excess', 'extra cash booked as income', k.excessPaise) : ''}
       ${k.depositedPaise ? row('− Cash deposited to bank', 'from the bank statement', k.depositedPaise) : ''}
       ${k.drawnPaise ? row('+ Cash from bank', 'taken out for the drawer', k.drawnPaise) : ''}
       ${row('= Should be there', '', shouldBe, '', true)}
@@ -4162,6 +4163,7 @@ function cashPanelHtml(biz, k, opts = {}) {
       <div class="form-msg"></div>
       <div class="form-row">
         ${biz.actions.includes('sales.decide') ? html`<button class="btn plain" type="submit" data-cashact="accept" title="The cash is there; only the writing is wrong">Accept with a note</button>` : ''}
+        ${diff > 0 && biz.actions.includes('cash.writeoff') ? html`<button class="btn plain" type="submit" data-cashact="excess" title="The extra cash is really there: booked as approved income in Cash under Cash excess">Book ₹ ${money(diff)} as cash excess</button>` : ''}
         ${diff < 0 && biz.actions.includes('cash.writeoff') ? html`<button class="btn danger" type="submit" data-cashact="shortage" title="Cash is missing: booked as an approved expense from Cash under Cash shortage (Owner only)">Book ₹ ${money(-diff)} as cash shortage</button>` : ''}
       </div>
     </form>` : ''}
@@ -4174,9 +4176,10 @@ function cashPanelHtml(biz, k, opts = {}) {
  */
 function pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills }) {
   const pg = k.page;
-  if (!pg || pg.receivedPaise == null || pg.expensesPaise == null || sales == null || shouldBe == null || !diff) return '';
+  const excessP = k.excessPaise ?? 0;
+  if (!pg || pg.receivedPaise == null || pg.expensesPaise == null || sales == null || shouldBe == null || (!diff && !excessP)) return '';
   const lateInP = k.lateInPaise ?? 0, lateOutP = k.lateOutPaise ?? 0;
-  const bkRec = sales + lateInP - lateOutP;
+  const bkRec = sales + lateInP - lateOutP + excessP;
   const bkExp = k.expensesPaise + (k.shortagePaise ?? 0) + (k.depositedPaise ?? 0) - (k.drawnPaise ?? 0);
   const recGap = pg.receivedPaise - bkRec, expGap = pg.expensesPaise - bkExp;
   const ownSum = pg.openingPaise != null && pg.cashInHandPaise != null && pg.openingPaise + pg.receivedPaise - pg.expensesPaise === pg.cashInHandPaise;
@@ -4185,6 +4188,11 @@ function pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills }) {
   const box = (amt, head, body, acts = '') => html`<div class="ent-line" style="border-left:3px solid #F59E0B;padding:8px 10px;background:#FFFBEB;border-radius:0">
     <div style="flex:1"><div style="display:flex;justify-content:space-between;gap:8px"><span>${head}</span><span class="amount" style="color:#92400E">${money(amt)}</span></div>
     <div class="tiny note" style="margin-top:2px">${body}</div>${acts ? html`<div class="form-row" style="gap:6px;margin-top:6px">${acts}</div>` : ''}<div class="form-msg"></div></div></div>`;
+  // Not a mistake (21 Nov 2026): the extra cash is really there, booked as income under Cash excess.
+  const excessForm = !draft && diff > 0 && k.confirmed && biz.actions.includes('cash.writeoff')
+    ? html`<div style="flex-basis:100%;border-top:1px solid #FDE68A;padding-top:8px;margin-top:4px"><div class="tiny">Not a mistake? The cash is really there:</div>
+      <div class="form-row" style="gap:6px;margin-top:4px"><input class="compact" data-excessnote placeholder="Note, e.g. guest left change" style="flex:1;min-width:180px">
+      <button type="button" class="btn plain dchip" data-excess="${diff}">Book ₹ ${money(diff)} as Cash excess</button></div></div>` : '';
   // Received: earlier bills paid here, then what the page has beyond the register.
   const offers = k.lateOffers ?? [];
   const offered = offers.reduce((t, x) => t + x.amountPaise, 0);
@@ -4197,15 +4205,17 @@ function pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills }) {
       can ? html`<button type="button" class="btn plain dchip" data-cashlate="${x.comparisonId}" data-bill="${x.billNo}" data-amt="${x.amountPaise}" data-from="${x.fromDay}">Paid here in cash: count ₹ ${money(x.amountPaise)}</button>` : '')),
     ...(k.lateIn ?? []).map((x) => html`<div class="ent-line" style="border-left:3px solid var(--teal);padding-left:10px"><div><span class="mono">${x.billNo}</span> · ₹ ${money(x.amountPaise)} · a ${dayLabel(x.fromDay)} bill paid here in cash: counted<div class="tiny note">${x.by ? `${x.by}, ` : ''}${when(x.at)}</div></div>
       ${can ? html`<button type="button" class="btn plain dchip" data-cashlateundo="${x.auditId}" data-bill="${x.billNo}">Undo</button>` : ''}</div>`),
+    ...(k.excesses ?? []).map((x) => html`<div class="ent-line" style="border-left:3px solid var(--teal);padding-left:10px"><div>₹ ${money(x.amountPaise)} booked as Cash excess${x.note ? html` · "${x.note}"` : ''}<div class="tiny note">${x.by ? `${x.by}, ` : ''}${when(x.at)}</div></div>
+      ${biz.actions.includes('cash.writeoff') ? html`<button type="button" class="btn plain dchip" data-excessundo="${x.id}" data-amt="${x.amountPaise}">Undo</button>` : ''}</div>`),
     ...(rest ? [box(Math.abs(rest), rest > 0 ? (pageOverReg === rest ? `₹ ${money(rest)} on the page, not in the register` : `₹ ${money(rest)} more on the page than Bookr counts`) : `₹ ${money(-rest)} less on the page than Bookr counts`,
       html`The register's cash column adds up to ₹ ${money(k.registerCashPaise ?? 0)}; the page says ₹ ${money(pg.receivedPaise)}.${likely.length ? html` Likely: ${likely.map((b, i) => html`${i ? ', ' : ''}<span class="mono">${b.billNo}</span> ₹ ${money(Math.abs(rest))}, written as ${b.rgOther.map((p) => MODE_LABELS[p.mode] ?? p.mode).join(' + ').toLowerCase()} in the register`)}, added into cash on the page by mistake.` : ' A slip on the page, or a bill written as cash on the page only.'}`,
-      k.summaryUploadId ? html`<a class="btn plain dchip" href="#/b/${biz.id}/review/${k.summaryUploadId}">Open the cash page</a>` : '')] : []),
+      html`${k.summaryUploadId ? html`<a class="btn plain dchip" href="#/b/${biz.id}/review/${k.summaryUploadId}">Open the cash page</a>` : ''}${excessForm}`)] : []),
   ];
   const expItems = expGap ? [box(Math.abs(expGap), expGap > 0 ? `₹ ${money(expGap)} more on the page than the approved lines` : `₹ ${money(-expGap)} less on the page than the approved lines`,
     k.expensesWaiting ? `${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} of ₹ ${money(k.expensesWaitingPaise)} still waiting approval.` : `The page says ₹ ${money(pg.expensesPaise)}; Bookr's approved lines add up to ₹ ${money(bkExp)}. A line on the photo may be missing or read wrong: check the photo, and add the line, or note the page total is wrong.`,
     (k.expensesWaitingUploadId || k.expensesUploadId) ? html`<a class="btn plain dchip" href="#/b/${biz.id}/review/${k.expensesWaitingUploadId || k.expensesUploadId}">Open the expense page</a>` : '')] : [];
   return html`<div class="inset" style="display:flex;flex-direction:column;gap:8px">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Cash page vs Bookr</strong><span class="chip wait">₹ ${money(Math.abs(diff))} apart</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Cash page vs Bookr</strong>${diff ? html`<span class="chip wait">₹ ${money(Math.abs(diff))} apart</span>` : html`<span class="chip ok">same</span>`}</div>
     <div class="scroll"><table style="min-width:420px"><colgroup><col><col style="width:110px"><col style="width:110px"><col style="width:90px"></colgroup>
       <thead><tr><th>Line</th><th style="text-align:right">Cash page</th><th style="text-align:right">Bookr</th><th style="text-align:right">Gap</th></tr></thead>
       <tbody><tr><td>Cash at the start</td><td class="amount">${pg.openingPaise == null ? '—' : money(pg.openingPaise)}</td><td class="amount">${money(k.openingPaise ?? 0)}</td><td class="amount">${pg.openingPaise == null ? '' : signed(pg.openingPaise - (k.openingPaise ?? 0))}</td></tr>
@@ -4279,6 +4289,23 @@ function wireCashPanel(biz, day, reload, msg, k = null) {
     b.disabled = true;
     try { await apiFull('POST', `/businesses/${biz.id}/cash/paid-late/${b.dataset.cashlateundo}/undo`, {}); reload(); } catch (err) { b.disabled = false; showError(msg, err); }
   }));
+  const bookExcess = async (amt, note, b) => {
+    if (!note) { alert('Write a note: what is the extra cash?'); return; }
+    if (!confirm(`Book ₹ ${money(amt)} as Cash excess? It becomes approved income in Cash.`)) return;
+    if (b) b.disabled = true;
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/cash/excess`, { note });
+      await reload();
+      doneToast(`₹ ${money(r.amountPaise)} booked as Cash excess.`, () => apiFull('POST', `/businesses/${biz.id}/cash-excess/${r.id}/undo`, {}), reload);
+    } catch (err) { if (b) b.disabled = false; showError(msg, err); }
+  };
+  document.querySelectorAll('#cashpanel [data-excess]').forEach((b) => b.addEventListener('click', () =>
+    bookExcess(Number(b.dataset.excess), b.closest('.form-row')?.querySelector('[data-excessnote]')?.value.trim(), b)));
+  document.querySelectorAll('#cashpanel [data-excessundo]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm(`Undo: take the ₹ ${money(Number(b.dataset.amt))} Cash excess out of the books?`)) return;
+    b.disabled = true;
+    try { await apiFull('POST', `/businesses/${biz.id}/cash-excess/${b.dataset.excessundo}/undo`, {}); reload(); } catch (err) { b.disabled = false; showError(msg, err); }
+  }));
   document.getElementById('cashpair')?.addEventListener('click', async (e) => {
     try { await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/cash/pair`, { otherDay: e.currentTarget.dataset.other }); reload(); } catch (err) { showError(msg, err); }
   });
@@ -4287,6 +4314,7 @@ function wireCashPanel(biz, day, reload, msg, k = null) {
   let which = 'accept';
   form.querySelectorAll('[data-cashact]').forEach((b) => b.addEventListener('click', () => { which = b.dataset.cashact; }));
   onSubmit(form, async (d) => {
+    if (which === 'excess') { await bookExcess(Number(k?.differencePaise ?? 0), d.note.trim(), null); return; }
     if (which === 'shortage' && !confirm('Book this as a cash shortage? It becomes an approved expense from Cash.')) return;
     await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/cash/${which === 'shortage' ? 'shortage' : 'accept'}`, { note: d.note });
     reload();

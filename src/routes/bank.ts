@@ -291,7 +291,7 @@ bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'),
       WHERE business_id = ? AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids);
     const total = tx.reduce((t, x) => t + x.amount_paise, 0);
     const row = tx.length && tx.every((x) => x.payment_mode === 'cash' && x.shift_day === tx[0].shift_day)
-      ? await one<Record<string, unknown> & { id: string; amount_paise: number }>(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND shift_day = ?
+      ? await one<Record<string, unknown> & { id: string; amount_paise: number }>(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND type = 'expense' AND shift_day = ?
           ORDER BY amount_paise DESC LIMIT 1`, bid, tx[0].shift_day) : null;
     if (!row) fail(409, 'No cash shortage is booked on that day any more.');
     shortage = { row: row!, fromPaise: row!.amount_paise, toPaise: Math.max(0, row!.amount_paise - total) };
