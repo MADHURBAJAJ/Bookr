@@ -109,4 +109,22 @@ describe('fee report', () => {
     expect((await o.del(`/businesses/${h.bid}/fees/receipts/26BISBIS0005/match`)).status).toBe(200);
     expect((await o.get(`/businesses/${h.bid}/fees/2026-11-20`)).json.bank[0].match).toBeNull();
   });
+
+  it('one file brought into one business is also brought into the other school business it covers', async () => {
+    const h = await businessWithAllRoles('Bgi Saharanpur');
+    const o = h.clients.owner;
+    const sms = (await o.post(`/businesses/${h.bid}/branches`, { name: 'Chilkana Road' })).json.id;
+    await o.put(`/businesses/${h.bid}/fees/codes/SMSSMS`, { branchId: sms });
+    const mumbai = (await o.post('/businesses', { name: 'Bis Mumbai', fyStart: '2026-04-01' })).json.id;
+    const taloja = (await o.post(`/businesses/${mumbai}/branches`, { name: 'Taloja' })).json.id;
+    await o.put(`/businesses/${mumbai}/fees/codes/BISPBIST`, { branchId: taloja });
+    await o.post(`/businesses/${mumbai}/cashbooks`, { name: 'OTHER CASHIER', branchId: taloja, openingBalance: '0', openingDate: '2026-11-01' });
+    const res = await o.post(`/businesses/${h.bid}/fees/import`, { fileName: 'FeeDaySheet.xls', text: sheet(DAY, LINES) });
+    expect(res.status).toBe(201);
+    expect(res.json.also).toEqual([{ businessId: mumbai, name: 'Bis Mumbai', receipts: 1, paise: 900000 }]);
+    expect((await o.get(`/businesses/${mumbai}/fees/2026-11-20`)).json).toMatchObject({ totalPaise: 900000, totals: { card: 900000 } });
+    // A cashier who is only in Bgi Saharanpur fills only Bgi Saharanpur.
+    const only = await h.clients.entry_staff.post(`/businesses/${h.bid}/fees/import`, { text: sheet(DAY, LINES) });
+    expect(only.json.also).toEqual([]);
+  });
 });

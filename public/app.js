@@ -9238,6 +9238,8 @@ async function feesView(biz, dayIn) {
       const res = await api('POST', `/businesses/${biz.id}/fees/import`, { fileName: f.name, text: await f.text() });
       go(`#/b/${biz.id}/fees/${res.day}`);
       if (res.day === day) await reload();
+      // The same file is also brought into your other school businesses (21 Nov 2026).
+      if (res.also?.length) doneToast(`Also brought into ${res.also.map((a) => `${a.name}: ${a.receipts} receipt${a.receipts === 1 ? '' : 's'}, ₹ ${rs(a.paise)}`).join('; ')}.`, null, null);
     } catch (err) { msg.textContent = err.message; msg.className = 'form-msg error'; }
   });
   const act = (sel, ev, f) => app.querySelectorAll(sel).forEach((x) => x.addEventListener(ev, async () => {
