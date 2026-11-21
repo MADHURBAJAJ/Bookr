@@ -83,4 +83,27 @@ describe('cash holders', () => {
     expect((await guest.get(`/businesses/${h.bid}/cashbooks`)).json.books.map((b: { id: string }) => b.id)).toEqual([tr]);
     expect((await guest.post(`/businesses/${h.bid}/cashbooks/${tr}/entries`, { day: D, kind: 'other_in', amount: '500', narration: 'Refund from vendor' })).status).toBe(201);
   });
+
+  it('a holder added before the director joined is given to him once he signs in as Owner; its phone invite is cancelled', async () => {
+    const h = await businessWithAllRoles('Bgi Saharanpur');
+    const o = h.clients.owner;
+    await o.post(`/businesses/${h.bid}/branches`, { name: 'Chilkana Road' });
+    const sb = (await o.post(`/businesses/${h.bid}/cashbooks`, { holder: true, name: 'Saurabh Bajaj', openingBalance: '0', openingDate: '2026-11-19' })).json.id;
+    const inv = await o.post(`/businesses/${h.bid}/invites`, { phone: '94120 88888', role: 'entry_staff', accountId: sb });
+    // Not joined yet: name and opening cash can change, and it stays waiting.
+    expect((await o.patch(`/businesses/${h.bid}/cashbooks/${sb}`, { name: 'Saurabh Bajaj (Director)', openingBalance: '5,000' })).status).toBe(200);
+    let list = (await o.get(`/businesses/${h.bid}/cashbooks`)).json;
+    expect(list.pendingHolders).toMatchObject([{ id: sb, name: 'Saurabh Bajaj (Director)', openingBalancePaise: 500000 }]);
+    // The director joined as an Owner (here: the accountant stands in for him): the book is given to him.
+    const director = h.users.accountant.id;
+    expect((await o.patch(`/businesses/${h.bid}/cashbooks/${sb}`, { cashierUserId: director })).status).toBe(200);
+    list = (await o.get(`/businesses/${h.bid}/cashbooks`)).json;
+    expect(list.pendingHolders).toHaveLength(0);
+    expect(list.books.find((b: { id: string }) => b.id === sb)).toMatchObject({ branchId: null, cashierUserId: director, inHandPaise: 500000 });
+    expect((await h.clients.accountant.get(`/businesses/${h.bid}`)).json.myBooks).toBe(1);
+    // The phone invite no longer works, so he never gets a second login.
+    expect((await new Client().get(`/invites/${tokenOf(inv.json.link)}`)).status).toBe(404);
+    // Other users cannot be given a book they are not members of.
+    expect((await o.patch(`/businesses/${h.bid}/cashbooks/${sb}`, { cashierUserId: '00000000-0000-4000-8000-000000000000' })).status).toBe(400);
+  });
 });
