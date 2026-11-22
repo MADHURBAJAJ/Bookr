@@ -421,8 +421,9 @@ function tableGrid() {
   const used = (t) => busy.has(t.toLowerCase()) || !!stayAt(t);
   const free = all.flatMap((x) => x.tables).filter((t) => !busy.has(t.toLowerCase())).length;
   const total = all.flatMap((x) => x.tables).length;
-  ui.tSec ??= '';
-  // Tabs by kind: All, Private rooms, Dorms, Out House, NC (and Tables for any other section).
+  // Opens on Running tables: every table, room or bed with an order now (22 Nov 2026).
+  ui.tSec ??= tSecMemo;
+  // Tabs: Running tables, then by kind: Private rooms, Dorms, Out House, NC (and Tables for any other section).
   const rooms = all.filter((x) => x.kind === 'rooms');
   const dorms = all.filter((x) => x.kind === 'dorms');
   const bedsOf = (x) => x.tables.filter((t) => !/ · whole$/.test(t));
@@ -435,12 +436,13 @@ function tableGrid() {
     : k === 'dorms' ? `${bedList.length} beds · ${bedList.filter(bedTaken).length} taken`
     : String(all.filter((x) => x.kind === k).reduce((n, x) => n + x.tables.length, 0)));
   const tabList = KIND_TAB.filter(([k]) => all.some((x) => x.kind === k));
-  const tabs = tabList.length > 1 ? html`<div class="secttabs" role="group" aria-label="Sections"><button type="button" data-act="tSec" data-name="" ${ui.tSec ? '' : 'aria-pressed="true"'}>All</button>
-    ${tabList.map(([k, t]) => html`<button type="button" data-act="tSec" data-name="${k}" ${ui.tSec === k ? 'aria-pressed="true"' : ''}>${t}<span class="n">${countOf(k)}</span></button>`)}</div>` : '';
+  const running = all.flatMap((x) => x.tables).filter((t) => busy.has(t.toLowerCase()));
+  const tabs = html`<div class="secttabs" role="group" aria-label="Sections"><button type="button" data-act="tSec" data-name="running" aria-pressed="${ui.tSec === 'running'}">Running tables<span class="n">${running.length}</span></button>
+    ${tabList.map(([k, t]) => html`<button type="button" data-act="tSec" data-name="${k}" aria-pressed="${ui.tSec === k}">${t}<span class="n">${countOf(k)}</span></button>`)}</div>`;
   // Small room types (1 or 2 rooms) share one row, where the first of them comes.
   const groups = [];
   let small = null;
-  for (const x of all.filter((y) => !ui.tSec || y.kind === ui.tSec)) {
+  for (const x of all.filter((y) => ui.tSec === 'running' || y.kind === ui.tSec)) {
     if (x.kind === 'rooms' && x.tables.length <= 2) {
       if (small) { small.names.push(x.name); small.tables.push(...x.tables); continue; }
       small = { ...x, names: [x.name], tables: [...x.tables] }; groups.push(small); continue;
@@ -461,6 +463,15 @@ function tableGrid() {
     const occ = x.kind === 'rooms' ? `${x.tables.filter(used).length} of ${x.tables.length} occupied` : x.kind === 'dorms' ? `${bedsOf(x).filter(bedTaken).length} of ${bedsOf(x).length} beds taken` : SECTION_NOTE[x.kind];
     return html`<div class="grouph"><h3>${x.names.join(', ')}</h3>${occ ? html`<span class="small quiet">${occ}</span>` : ''}</div>`;
   };
+  // Running tables: only what has an order, beds by their full name.
+  if (ui.tSec === 'running') {
+    for (const g of groups) g.tables = g.tables.filter((t) => busy.has(t.toLowerCase()));
+    const live = groups.filter((g) => g.tables.length);
+    return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${total}</span></h2></div>${tabs}
+      ${live.length ? html`<div class="grouph"><span class="small quiet">${plural(running.length, 'running order')}, in the order of your sections</span></div>
+        <div class="tgrid roomgrid">${live.flatMap((x) => x.tables.map((t) => cell(t, x.kind, null)))}</div>`
+        : html`<p class="empty">No table, room or bed has an order right now. Choose Private rooms, Dorms, Out House or NC to start one.</p>`}`;
+  }
   const body = (x) => (x.kind === 'dorms' ? html`<div class="dormcards">${(x.dorms ?? []).map(dormCard)}</div>`
     : html`<div class="tgrid ${x.kind === 'rooms' ? 'roomgrid' : ''}">${x.tables.map((t) => cell(t, x.kind, x.kind === 'nc' && !isMgr() ? 'Managers only' : null))}</div>`);
   return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${total}</span></h2>
@@ -469,7 +480,8 @@ function tableGrid() {
     ${tabs}
     ${groups.map((x) => html`${all.length > 1 ? head(x) : ''}${body(x)}`)}`;
 }
-actions.tSec = (d) => { ui.tSec = d.name; rerender(); };
+let tSecMemo = 'running';   // the Tables tab last chosen, kept while moving between screens
+actions.tSec = (d) => { ui.tSec = tSecMemo = d.name; rerender(); };
 actions.quickTable = async (d) => { const r = await api('POST', B() + '/orders', { kind: 'table', place: d.place }); go(`#/order/${r.id}`); };
 /** In-house guests, found by name, room or phone (21 Nov 2026): for room service and for putting a bill on a room. */
 function stayPicker(act, chosen, idOf) {
