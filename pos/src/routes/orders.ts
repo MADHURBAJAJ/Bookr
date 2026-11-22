@@ -3,7 +3,9 @@
 // is voided with a reason (the order opens again) and billed again, perhaps under another billing name.
 import { optionAdd, readPrices } from '../addons';
 import { CATEGORY_JOIN, isOnline, ITEM_ROUTE } from '../stations';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import { phoneKey } from './settings';
 import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
@@ -17,7 +19,8 @@ export const orderRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
 orderRoutes.use(`${B}/*`, requireStaff);
 
-interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string }
+interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; guest_phone: string | null; guest_id: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string }
+const ORDER_COLS = 'id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day';
 interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number }
 /** What was chosen on a line: [{group, name, addPaise}], in the dish's order of groups. */
 type Chosen = { group: string; name: string; addPaise: number }[];
@@ -26,10 +29,39 @@ const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, 
 
 async function order(c: { env: { DB: D1Database } }, bid: string, id: string, editable = false): Promise<OrderRow> {
   if (!isUuid(id)) fail(404, 'Order not found.');
-  const o = await one<OrderRow>(c.env.DB, 'SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE id = ? AND business_id = ?', id, bid);
+  const o = await one<OrderRow>(c.env.DB, `SELECT ${ORDER_COLS} FROM orders WHERE id = ? AND business_id = ?`, id, bid);
   if (!o) fail(404, 'Order not found.');
   if (editable && o.status !== 'open' && o.status !== 'tab') fail(409, 'This order is already billed. Void the bill first to change it.');
   return o;
+}
+
+/** A phone as shown on screens: only its last 4 digits (••••6789). The full number is never sent to the counter. */
+const maskPhone = (p: string | null) => (p ? `••••${p.slice(-4)}` : null);
+
+/**
+ * The guest typed on an order (22 Nov 2026): a name, a phone, or both, all optional unless `required`. A phone already in
+ * the guest list under another name is asked about (guestChoice 'saved' keeps the saved name, 'update' renames the guest).
+ * A new name with a phone joins the guest list; a phone alone does not.
+ */
+async function readGuest(c: Context<AppEnv>, data: Record<string, unknown>, required = false) {
+  const bid = c.get('businessId');
+  const name = text(data, 'guestName', 'Guest name', { optional: !required, max: 80 });
+  const phone = phoneKey(data.guestPhone);
+  if (required && !phone) fail(400, "Add the guest's phone number.");
+  const t = now();
+  if (!phone) return { name, phone: null, guestId: null, stmts: [] as D1PreparedStatement[] };
+  const g = await one<{ id: string; name: string }>(c.env.DB, 'SELECT id, name FROM guests WHERE business_id = ? AND phone = ?', bid, phone);
+  if (g) {
+    if (name && name.trim().toLowerCase() !== g.name.trim().toLowerCase()) {
+      if (data.guestChoice === 'saved') return { name: g.name, phone, guestId: g.id, stmts: [] };
+      if (data.guestChoice === 'update') return { name, phone, guestId: g.id, stmts: [stmt(c.env.DB, 'UPDATE guests SET name = ?, updated_at = ? WHERE id = ?', name, t, g.id)] };
+      throw new HTTPException(409, { message: `This phone is saved for ${g.name}. Same guest?`, cause: { code: 'guest_differs', savedName: g.name } });
+    }
+    return { name: name ?? g.name, phone, guestId: g.id, stmts: [] };
+  }
+  if (!name) return { name: null, phone, guestId: null, stmts: [] };
+  const id = newId();
+  return { name, phone, guestId: id, stmts: [stmt(c.env.DB, 'INSERT INTO guests (id, business_id, name, phone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', id, bid, name, phone, t, t)] };
 }
 
 const lines = (db: D1Database, orderId: string) =>
@@ -37,7 +69,7 @@ const lines = (db: D1Database, orderId: string) =>
 
 function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
   return {
-    id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, covers: o.covers, status: o.status,
+    id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, guestPhone: maskPhone(o.guest_phone), covers: o.covers, status: o.status,
     openedAt: o.opened_at, openedShiftDay: o.opened_shift_day,
     lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty,
       options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0 })),
@@ -50,7 +82,7 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
   const fixed = tableList(bizOf(c));
   const [os, ls, bills, used] = await Promise.all([
-    all<OrderRow>(c.env.DB, "SELECT id, kind, place, stay_id, guest_name, covers, status, opened_at, opened_shift_day FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at", bid),
+    all<OrderRow>(c.env.DB, `SELECT ${ORDER_COLS} FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at`, bid),
     all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by, l.station_id, l.kot FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
     all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
       "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
@@ -82,13 +114,22 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
   if (kind !== 'table' && kind !== 'room' && kind !== 'takeaway') fail(400, 'Order kind must be table, room or takeaway.');
   let place = kind === 'takeaway' ? 'Takeaway' : text(data, 'place', kind === 'room' ? 'Room' : 'Table', { max: 40 })!;
   let stayId: string | null = null;
-  let guest = text(data, 'guestName', 'Guest name', { optional: true, max: 80 });
+  const typed = await readGuest(c, data);
+  let guest = typed.name;
+  let guestPhone = typed.phone;
+  let guestId = typed.guestId;
+  // A guest staying: their name and phone come from the check-in, unless others were typed.
+  const fromStay = (s: { guest_name: string; phone: string | null; guest_id: string | null }) => {
+    guest ??= s.guest_name;
+    if (!guestPhone) { guestPhone = s.phone; guestId = s.guest_id; }
+  };
   if (kind === 'room') {
     stayId = text(data, 'stayId', 'Stay')!;
-    const s = await one<{ room: string; guest_name: string }>(c.env.DB, 'SELECT room, guest_name FROM stays WHERE id = ? AND business_id = ? AND checked_out_at IS NULL', stayId, bid);
+    const s = await one<{ room: string; guest_name: string; phone: string | null; guest_id: string | null }>(c.env.DB,
+      'SELECT room, guest_name, phone, guest_id FROM stays WHERE id = ? AND business_id = ? AND checked_out_at IS NULL', stayId, bid);
     if (!s) fail(400, 'That room has no open stay.');
     place = `Room ${s.room}`;
-    guest ??= s.guest_name;
+    fromStay(s);
   }
   if (kind === 'table' && (await one(c.env.DB, "SELECT 1 FROM orders WHERE business_id = ? AND kind = 'table' AND lower(place) = lower(?) AND status = 'open'", bid, place))) {
     fail(409, `${place} already has an open order.`);
@@ -100,9 +141,9 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
     // A private room, a dorm bed, or a whole dorm (a group) with a guest staying: the order is theirs, so its bill goes to their folio (21 Nov 2026).
     if (at && (at.section.kind === 'rooms' || at.section.kind === 'dorms')) {
       const key = roomKey(place);
-      const st = (await all<{ id: string; room: string; guest_name: string }>(c.env.DB, 'SELECT id, room, guest_name FROM stays WHERE business_id = ? AND checked_out_at IS NULL', bid))
-        .find((x) => roomKey(x.room) === key);
-      if (st) { stayId = st.id; guest ??= st.guest_name; }
+      const st = (await all<{ id: string; room: string; guest_name: string; phone: string | null; guest_id: string | null }>(c.env.DB,
+        'SELECT id, room, guest_name, phone, guest_id FROM stays WHERE business_id = ? AND checked_out_at IS NULL', bid)).find((x) => roomKey(x.room) === key);
+      if (st) { stayId = st.id; fromStay(st); }
     }
     // A dorm is sold bed by bed, or whole to one group: not both at once.
     if (at?.dorm) {
@@ -116,14 +157,15 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
   const covers = typeof data.covers === 'number' && Number.isInteger(data.covers) && data.covers > 0 && data.covers < 100 ? data.covers : null;
   const id = newId();
   const { t, shiftDay } = clock(b);
-  await stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    id, bid, kind, place, stayId, guest, covers, c.get('staff').id, t, shiftDay).run();
+  await c.env.DB.batch([...typed.stmts,
+    stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      id, bid, kind, place, stayId, guest, guestPhone, guestId, covers, c.get('staff').id, t, shiftDay)]);
   return c.json({ id }, 201);
 });
 
 orderRoutes.get(`${B}/orders/:id`, requireAction('pos.view'), async (c) => {
   const o = await order(c, c.get('businessId'), c.req.param('id'));
-  return c.json({ order: orderOut(o, await lines(c.env.DB, o.id)) });
+  return c.json({ order: { ...orderOut(o, await lines(c.env.DB, o.id)), guest: await guestOut(c.env.DB, c.get('businessId'), o.id, o.guest_name, o.guest_phone, o.guest_id) } });
 });
 
 // Adds a dish, with its choices and add-ons and, for a price-at-billing dish, the typed price; or changes a line on the order
@@ -290,8 +332,9 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
     bid, base, `${base} · %`);
   const id = newId();
   await c.env.DB.batch([
-    stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)',
-      id, bid, o.kind, `${base} · ${(siblings?.n ?? 1) + 1}`, o.stay_id, c.get('staff').id, t, shiftDay),
+    // The new bill keeps the same guest (22 Nov 2026).
+    stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)',
+      id, bid, o.kind, `${base} · ${(siblings?.n ?? 1) + 1}`, o.stay_id, o.guest_name, o.guest_phone, o.guest_id, c.get('staff').id, t, shiftDay),
     ...moves.flatMap(({ line, qty }) => {
       const sentMoved = Math.max(0, qty - (line.qty - line.sent_qty)); // not-yet-sent move first
       return [
@@ -310,12 +353,32 @@ orderRoutes.post(`${B}/orders/:id/tab`, requireAction('orders.edit'), async (c) 
   const bid = c.get('businessId');
   const o = await order(c, bid, c.req.param('id'), true);
   const data = await body(c);
-  const guest = text(data, 'guestName', 'Guest name for the tab', { optional: !!o.guest_name, max: 80 }) ?? o.guest_name!;
+  // A tab carries the guest's name and phone, both required (22 Nov 2026); those on the order already count.
+  const typed = await readGuest(c, { ...data, guestName: data.guestName || o.guest_name || undefined, guestPhone: data.guestPhone || o.guest_phone || undefined }, true);
   const ls = await lines(c.env.DB, o.id);
   if (ls.some((l) => l.qty > l.sent_qty)) fail(409, 'Send the new items to the kitchen first.');
-  await stmt(c.env.DB, "UPDATE orders SET status = 'tab', guest_name = ? WHERE id = ?", guest, o.id).run();
+  await c.env.DB.batch([...typed.stmts,
+    stmt(c.env.DB, "UPDATE orders SET status = 'tab', guest_name = ?, guest_phone = ?, guest_id = ? WHERE id = ?", typed.name, typed.phone, typed.guestId, o.id)]);
   return c.json({ ok: true });
 });
+
+// The guest on an order (22 Nov 2026): name and phone, either or both, set or changed while the order is open or a tab.
+// The answer gives the name, the phone's last 4 digits, and how many times the guest came before (by phone).
+orderRoutes.post(`${B}/orders/:id/guest`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const o = await order(c, bid, c.req.param('id'), true);
+  const data = await body(c);
+  // No phone sent keeps the one on file; an empty one clears it (not on a tab).
+  const g = await readGuest(c, { ...data, guestPhone: data.guestPhone === undefined ? o.guest_phone ?? undefined : data.guestPhone }, o.status === 'tab');
+  if (o.status === 'tab' && !g.name) fail(400, 'A tab needs the guest name.');
+  await c.env.DB.batch([...g.stmts, stmt(c.env.DB, 'UPDATE orders SET guest_name = ?, guest_phone = ?, guest_id = ? WHERE id = ?', g.name, g.phone, g.guestId, o.id)]);
+  return c.json({ guest: await guestOut(c.env.DB, bid, o.id, g.name, g.phone, g.guestId) });
+});
+async function guestOut(db: D1Database, bid: string, orderId: string, name: string | null, phone: string | null, guestId: string | null) {
+  const v = guestId ? await one<{ n: number; last: string | null }>(db, `SELECT count(*) AS n, max(opened_shift_day) AS last FROM orders
+    WHERE business_id = ? AND guest_id = ? AND id <> ? AND status <> 'cancelled'`, bid, guestId, orderId) : null;
+  return { name, phone: maskPhone(phone), visits: v?.n ?? 0, lastVisit: v?.last ?? null };
+}
 
 // An order with nothing sent to the kitchen can be dropped (a table that left before ordering). One with items already
 // sent is cancelled whole (21 Nov 2026): one reason, approved by a manager or owner (their sign-in, or their PIN), a cancel
@@ -426,11 +489,11 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
       // Its number: the billing name's letter, the date printed (YYMMDD, India time) and the next number of that day
       // (C261119001); the yearly running number (seq) is taken too. All in this one batch, so no number is skipped.
       stmt(c.env.DB, `INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise,
-          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq)
-        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n
+          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq, guest_phone)
+        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n, ?
         FROM bill_series s, (SELECT coalesce(max(day_seq), 0) + 1 AS n FROM bills WHERE entity_id = ? AND print_day = ?) d WHERE s.entity_id = ? AND s.fy = ?`,
         id, bid, o.id, e.id, fy, e.series_prefix, yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
-        totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, printDay,
+        totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, printDay, o.guest_phone,
         e.id, printDay, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
       ...ls.map((l) => {

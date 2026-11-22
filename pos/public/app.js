@@ -42,8 +42,8 @@ function since(ms) {
 }
 const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
-class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
-let approvalCreds = null;   // { approverId, approverPin } while a step a manager approved is tried again
+class ApiError extends Error { constructor(message, status, code, data) { super(message); this.status = status; this.code = code; this.data = data; } }
+let approvalCreds = null;   // extra fields while a step is tried again: a manager's { approverId, approverPin }, or { guestChoice }
 async function api(method, path, body, extraHeaders = {}) {
   if (body === undefined && method !== 'GET') body = {};
   if (approvalCreds && method !== 'GET' && body && typeof body === 'object') body = { ...body, ...approvalCreds };
@@ -54,7 +54,7 @@ async function api(method, path, body, extraHeaders = {}) {
   });
   const data = await res.json().catch(() => null);
   if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401, 'signin'); }
-  if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data?.code);
+  if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data?.code, data);
   return data;
 }
 
@@ -144,7 +144,9 @@ const tabsNav = (label, items, current) => html`<nav class="tabs" aria-label="${
 const kpi = (k, v, n, tone = '') => html`<div class="kpi ${tone}"><span class="k">${k}</span><span class="v">${v}</span>${n ? html`<span class="n">${n}</span>` : ''}</div>`;
 
 function paint(view) { root.innerHTML = asHtml(view); flash = null; const f = root.querySelector('[autofocus]'); if (f) f.focus(); }
-const errorBox = () => html`${ui.approval ? approvalBox() : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
+const errorBox = () => html`${ui.guestAsk ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>${ui.guestAsk.message}</strong></p>
+  <div class="row"><button class="btn pri" type="button" data-act="guestChoice" data-c="saved">Yes, ${ui.guestAsk.savedName}</button>
+    <button class="btn" type="button" data-act="guestChoice" data-c="update">Use the name I typed</button><button class="btn ghost" type="button" data-act="guestChoiceNo">Cancel</button></div></div>` : ''}${ui.approval ? approvalBox() : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
 /** The manager's PIN for a step a cashier may not take alone (asked for by the server). */
 const approvalBox = () => {
   const a = ui.approval;
@@ -211,6 +213,10 @@ root.addEventListener('click', async (ev) => {
   try { await fn(el.dataset, el); } catch (e) {
     if (e instanceof ApiError && e.code === 'signin') return; // already sent to the sign-in screen
     // A step a cashier may not take alone: ask for a manager's PIN, then do the same tap again with it.
+    // A phone already saved under another name: ask which name is right, then do the same tap again.
+    if (e instanceof ApiError && e.code === 'guest_differs') {
+      ui.guestAsk = { message: e.message, savedName: e.data?.savedName, act: el.dataset.act, data: { ...el.dataset } }; ui.error = null; rerender(); return;
+    }
     if (e instanceof ApiError && e.code === 'approval') {
       const approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers;
       ui.approval = { message: e.message, act: el.dataset.act, data: { ...el.dataset }, approvers }; ui.apId = approvers[0]?.id; ui.apPin = ''; ui.error = null;
@@ -240,6 +246,12 @@ actions.discLimitSave = async () => {
   const b = me.business;
   await api('PUT', `${B()}/settings`, { name: b.name, fyStartMonth: b.fy_start_month, shiftStartHour: b.shift_start_hour, tabAgeDays: b.tab_age_days, discLimitPct: Number(ui.discLimit ?? b.disc_limit_bp / 100) });
   me = await api('GET', '/me'); flash = { kind: 'ok', text: `Saved: a cashier may give up to ${me.business.disc_limit_bp / 100}% alone.` }; route();
+};
+actions.guestChoiceNo = () => { ui.guestAsk = null; rerender(); };
+actions.guestChoice = async (d) => {
+  const a = ui.guestAsk; ui.guestAsk = null;
+  approvalCreds = { guestChoice: d.c };
+  try { await actions[a.act](a.data); } finally { approvalCreds = null; }
 };
 actions.approveNo = () => { ui.approval = null; ui.apPin = ''; rerender(); };
 actions.approveGo = async () => {
@@ -415,7 +427,7 @@ function tableGrid() {
     }
     const s = orderState(o);
     const who = guest?.guestName ?? o.guestName;
-    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${label}</span>${who && isRoom(kind) ? html`<span class="tg">${who}</span>` : ''}
+    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${label}</span>${who ? html`<span class="tg">${who}</span>` : ''}
       <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
   };
   const used = (t) => busy.has(t.toLowerCase()) || !!stayAt(t);
@@ -508,9 +520,9 @@ function newOrderForm() {
     <h2>${k === 'table' ? 'New table order' : k === 'room' ? 'Room service' : 'Takeaway'}</h2>
     ${k === 'table' ? html`<div class="grid2"><label class="f">Table<input class="in" data-model="place" autofocus placeholder="e.g. T4"></label>
       <label class="f">Guests<input class="in" inputmode="numeric" data-model="covers"></label></div>
-      <label class="f">Guest name (for a tab, optional)<input class="in" data-model="guestName"></label>` : ''}
+      <div class="grid2"><label class="f">Guest name (optional)<input class="in" data-model="guestName"></label><label class="f">Phone (optional)<input class="in" inputmode="tel" data-model="guestPhone"></label></div>` : ''}
     ${k === 'room' ? stayPicker('pickStay', ui.stayId, (s) => s.id) : ''}
-    ${k === 'takeaway' ? html`<label class="f">Guest name (optional)<input class="in" data-model="guestName" autofocus></label>` : ''}
+    ${k === 'takeaway' ? html`<div class="grid2"><label class="f">Guest name (optional)<input class="in" data-model="guestName" autofocus></label><label class="f">Phone (optional)<input class="in" inputmode="tel" data-model="guestPhone"></label></div>` : ''}
     <div class="row"><button class="btn pri" type="submit" data-act="openOrder" data-submit>Start order</button><button class="btn" type="button" data-act="newOrder" data-kind="">Cancel</button></div>
   </form>`;
 }
@@ -521,16 +533,35 @@ actions.openOrder = async () => {
   const covers = Number(ui.covers);
   // The server asks for a place on every order; for room service it is the chosen room (the server then names it from the stay).
   const stay = ui.picking === 'room' ? cache.stays.find((s) => s.id === ui.stayId) : null;
-  const r = await api('POST', B() + '/orders', { kind: ui.picking, place: stay ? `Room ${stay.room}` : ui.place, stayId: ui.stayId, guestName: ui.guestName, covers: Number.isInteger(covers) && covers > 0 ? covers : undefined });
+  const r = await api('POST', B() + '/orders', { kind: ui.picking, place: stay ? `Room ${stay.room}` : ui.place, stayId: ui.stayId, guestName: ui.guestName, guestPhone: ui.picking === 'room' ? undefined : ui.guestPhone, covers: Number.isInteger(covers) && covers > 0 ? covers : undefined });
   go(`#/order/${r.id}`);
 };
 
 // ---------- order
 
+/** The guest on an order (22 Nov 2026): name, last 4 digits of the phone and earlier visits, or a link to add them. */
+function guestLine(o) {
+  const g = ui.guest ?? { name: o.guestName, phone: o.guestPhone, visits: 0 };
+  if (ui.gEdit) return html`<form class="guestedit"><div class="grid2"><label class="f">Guest name<input class="in" data-model="gName" value="${ui.gName ?? g.name ?? ''}" autofocus></label>
+      <label class="f">Phone<input class="in" inputmode="tel" data-model="gPhone" value="${ui.gPhone ?? ''}" placeholder="${g.phone ? `On file ${g.phone}` : 'Optional'}"></label></div>
+    <div class="row"><button class="btn pri" type="submit" data-act="gSave" data-submit>Save guest</button><button class="btn ghost" type="button" data-act="gNo">Cancel</button></div></form>`;
+  if (!g.name && !g.phone) return html`<button class="btn ghost addln" type="button" data-act="gEdit">+ Add guest name or phone</button>`;
+  return html`<p class="small guestl"><strong>${g.name ?? 'Guest'}</strong>${g.phone ? ` · ${g.phone}` : ''}${g.visits ? html` · <span class="quiet">${g.visits === 1 ? 'came once before' : `came ${g.visits} times before`}${g.lastVisit ? `, last ${dayName(g.lastVisit)}` : ''}</span>` : ''}
+    <button class="btn ghost addln" type="button" data-act="gEdit">Change</button></p>`;
+}
+actions.gEdit = () => { ui.gEdit = true; ui.gName = undefined; ui.gPhone = undefined; rerender(); };
+actions.gNo = () => { ui.gEdit = false; rerender(); };
+actions.gSave = async () => {
+  const g = ui.guest ?? {};
+  // A phone left empty keeps the one on file.
+  const r = await api('POST', `${B()}/orders/${ui.order.id}/guest`, { guestName: ui.gName ?? g.name ?? '', guestPhone: ui.gPhone || (g.phone ? undefined : '') });
+  ui.guest = r.guest; ui.order.guestName = r.guest.name; ui.order.guestPhone = r.guest.phone; ui.gEdit = false; rerender();
+};
+
 async function orderScreen(id) {
   await load('menu', 'reasons');
   const [o, ev] = await Promise.all([api('GET', `${B()}/orders/${id}`), api('GET', `${B()}/event-mode/now`).catch(() => ({ event: null }))]);
-  ui.order = o.order; ui.event = ev.event;
+  ui.order = o.order; ui.event = ev.event; ui.guest = o.order.guest;
   ui.cat = 'All'; ui.q = '';
   rerender = () => {
     const o = ui.order;
@@ -581,7 +612,7 @@ async function orderScreen(id) {
       </section>
       <section class="ticket panel" aria-label="Order" id="ticket">
         <div class="tk-head"><div><p class="tiny quiet" style="font-weight:700">${KIND_TEXT[o.kind] ?? o.kind}${o.status === 'tab' ? ` · tab since ${dayName(o.openedShiftDay)}` : ''}</p><h2>${o.place}</h2>
-            <p class="quiet small">${o.guestName ? o.guestName + ' · ' : ''}opened ${time(o.openedAt)}</p></div>
+            <p class="quiet small">opened ${time(o.openedAt)}</p>${guestLine(o)}</div>
           <a class="btn" href="#/">Tables</a></div>
         <div class="tk-body">
           ${errorBox()}
@@ -595,7 +626,9 @@ async function orderScreen(id) {
               <span class="qty">${ui.split[l.id] ?? 0}</span>
               <button class="sq" type="button" data-act="splitMore" data-id="${l.id}" aria-label="Move one more ${l.name}">+</button></div>`)}
             <div class="row" style="margin-top:10px"><button class="btn pri" type="button" data-act="splitGo">Move to a new bill</button><button class="btn" type="button" data-act="splitNo">Cancel</button></div></div>` : ''}
-          ${ui.tabAsk ? html`<form class="msg warn"><label class="f">Guest name for the tab<input class="in" data-model="tabGuest" value="${o.guestName ?? ''}" autofocus></label>
+          ${ui.tabAsk ? html`<form class="msg warn"><p class="small" style="margin:0 0 6px">A tab needs the guest's name and phone.</p>
+            <div class="grid2"><label class="f">Guest name<input class="in" data-model="tabGuest" value="${ui.tabGuest ?? o.guestName ?? ''}" autofocus></label>
+            <label class="f">Phone<input class="in" inputmode="tel" data-model="tabPhone" value="${ui.tabPhone ?? ''}" placeholder="${ui.guest?.phone ? `On file ${ui.guest.phone}` : ''}"></label></div>
             <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
         </div>
         <div class="tk-foot">
@@ -795,7 +828,7 @@ actions.splitGo = async () => {
   flash = { kind: 'ok', text: `Split. This is the new bill; ${ui.order.place} keeps the rest.` };
   go(`#/order/${r.id}`);
 };
-actions.tabGo = async () => { await saved(); await api('POST', `${B()}/orders/${ui.order.id}/tab`, { guestName: ui.tabGuest ?? ui.order.guestName }); flash = { kind: 'ok', text: `${ui.order.place} kept as a tab.` }; go('#/'); };
+actions.tabGo = async () => { await saved(); await api('POST', `${B()}/orders/${ui.order.id}/tab`, { guestName: ui.tabGuest ?? ui.order.guestName, guestPhone: ui.tabPhone || undefined }); flash = { kind: 'ok', text: `${ui.order.place} kept as a tab.` }; go('#/'); };
 actions.dropOrder = async () => { await saved(); await api('POST', `${B()}/orders/${ui.order.id}/cancel`); go('#/'); };
 
 // ---------- bill (choose the billing name and discount, then print)
@@ -982,7 +1015,7 @@ async function settleScreen(billId) {
           ${m === 'room' ? html`<div style="grid-column:1/-1">${stayPicker('pick', ui.debtorAccountId, (s) => s.accountId)}</div>` : ''}
           ${m === 'credit' ? html`<div class="f" style="grid-column:1/-1">Credit account<div class="chips">${cache.credit.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === c.id}" data-act="pick" data-k="debtorAccountId" data-id="${c.id}">${c.name}</button>`)}
               <button type="button" class="chip" aria-pressed="${ui.debtorAccountId === 'new'}" data-act="pick" data-k="debtorAccountId" data-id="new">New account</button></div></div>
-            ${ui.debtorAccountId === 'new' ? html`<label class="f">Name<input class="in" data-model="newName" value="${ui.newName ?? ''}"></label><label class="f">Phone<input class="in" inputmode="tel" data-model="newPhone" value="${ui.newPhone ?? ''}"></label>` : ''}` : ''}
+            ${ui.debtorAccountId === 'new' ? html`<label class="f">Name (required)<input class="in" data-model="newName" value="${ui.newName ?? ui.bill.guestName ?? ''}"></label><label class="f">Phone (required)<input class="in" inputmode="tel" data-model="newPhone" value="${ui.newPhone ?? ''}"></label>` : ''}` : ''}
           ${m === 'comp' ? html`<label class="f">Guest name (required)<input class="in" data-model="compGuest" value="${ui.compGuest ?? ''}"></label>
             <div class="f">Reason (required)<div class="chips">${reasonsOf('comp').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.compReason === r.id}" data-act="pick" data-k="compReason" data-id="${r.id}">${r.label}</button>`)}</div></div>` : ''}
           ${m === 'advance' ? html`<div class="f" style="grid-column:1/-1">Whose advance${advanceAccts.length ? html`<div class="chips">${advanceAccts.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === a.id}" data-act="pick" data-k="debtorAccountId" data-id="${a.id}">${a.name} · ${rs(-a.bal)} left</button>`)}</div>` : html`<span>Nobody has an advance.</span>`}</div>` : ''}
@@ -1047,7 +1080,12 @@ actions.addPay = () => {
   if (m === 'room') { if (!ui.debtorAccountId) throw new Error('Choose the room.'); p.debtorAccountId = ui.debtorAccountId; p.detail = cache.stays.find((s) => s.accountId === ui.debtorAccountId).room; p.detail = 'Room ' + p.detail; }
   if (m === 'credit') {
     if (!ui.debtorAccountId) throw new Error('Choose a credit account, or New account.');
-    if (ui.debtorAccountId === 'new') { if (!(ui.newName ?? '').trim()) throw new Error("Type the new account's name."); p.newCredit = { name: ui.newName.trim(), phone: ui.newPhone }; p.detail = ui.newName.trim() + ' (new)'; }
+    if (ui.debtorAccountId === 'new') {
+      const nm = (ui.newName ?? ui.bill.guestName ?? '').trim();
+      if (!nm) throw new Error("Type the new account's name.");
+      if (!(ui.newPhone ?? '').trim()) throw new Error("Type the new account's phone number.");
+      p.newCredit = { name: nm, phone: ui.newPhone }; p.detail = nm + ' (new)';
+    }
     else { p.debtorAccountId = ui.debtorAccountId; p.detail = cache.credit.find((c) => c.id === ui.debtorAccountId).name; }
   }
   if (m === 'comp') {
@@ -3560,3 +3598,4 @@ actions.revoke = async (d) => {
 };
 
 route();
+

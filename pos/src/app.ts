@@ -51,8 +51,9 @@ app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 
 app.onError((err, c) => {
   if (err instanceof HTTPException) {
-    const code = (err.cause as { code?: unknown } | undefined)?.code;
-    return c.json({ error: err.message, ...(typeof code === 'string' ? { code } : {}) }, err.status);
+    // A refusal may carry a code and other short facts for the screen (e.g. the name a phone is saved under).
+    const extra = Object.fromEntries(Object.entries((err.cause ?? {}) as Record<string, unknown>).filter(([, v]) => typeof v === 'string'));
+    return c.json({ error: err.message, ...extra }, err.status);
   }
   console.error(err);
   return c.json({ error: 'Something went wrong.' }, 500);

@@ -216,7 +216,9 @@ describe('tabs and shift close', () => {
     const close = (body: unknown) => s.counter.post(`${s.B}/shifts/${day}/close`, body);
 
     expect((await close({ openingFloat: '1000' })).json.error).toMatch(/Lounge/);
-    await s.counter.post(`${s.B}/orders/${tab}/tab`, {});
+    // A tab needs the guest's name and phone (22 Nov 2026).
+    expect((await s.counter.post(`${s.B}/orders/${tab}/tab`, {})).json.error).toMatch(/phone/);
+    expect((await s.counter.post(`${s.B}/orders/${tab}/tab`, { guestPhone: '9800000001' })).status).toBe(200);
     expect((await close({ openingFloat: '1000' })).json.error).toMatch(/printed but not paid/);
     await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: '189' }] });
 
@@ -265,7 +267,7 @@ describe('money out and reports', () => {
     const a = (await billed(s, [['Masala Dosa', 2], ['Butter Naan', 1]], { discount: { kind: 'pct', bp: 1000, reasonId: s.reasons.discount } })).bill;
     const b = (await billed(s, [['Beer 650 ml', 1]], { entityId: s.huf })).bill;
     await s.counter.post(`${s.B}/settlements`, { billIds: [a.id], payments: [{ mode: 'cash', amount: rupees(a.totalPaise) }] });
-    await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [b.id], payments: [{ mode: 'credit', amount: '320', newCredit: { name: 'Sunrise Travels' } }] });
+    await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [b.id], payments: [{ mode: 'credit', amount: '320', newCredit: { name: 'Sunrise Travels', phone: '9800000000' } }] });
     const day = a.shiftDay;
     expect((await s.counter.get(`${s.B}/reports/sales?from=${day}&to=${day}`)).status).toBe(403); // cashier
     const r = (await s.owner.get(`${s.B}/reports/sales?from=${day}&to=${day}`)).json;
@@ -341,7 +343,7 @@ describe('credit notes', () => {
   it('credits a folio or credit account instead of paying out', async () => {
     const s = await setupBusiness();
     const { bill } = await billed(s, [['Masala Chai', 1]]);
-    await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [bill.id], payments: [{ mode: 'credit', amount: '42', newCredit: { name: 'Sunrise Travels' } }] });
+    await s.counter.post(`${s.B}/settlements`, { ...s.mgr, billIds: [bill.id], payments: [{ mode: 'credit', amount: '42', newCredit: { name: 'Sunrise Travels', phone: '9800000000' } }] });
     const acc = (await s.counter.get(`${s.B}/credit-accounts`)).json.accounts[0];
     await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, full: true, reason: 'Wrong order', refundMode: 'account', debtorAccountId: acc.id });
     expect((await s.counter.get(`${s.B}/debtors/${acc.id}`)).json.balancePaise).toBe(0);

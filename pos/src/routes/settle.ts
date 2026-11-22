@@ -10,6 +10,7 @@ import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { allocateLoose, rs } from '../billing';
 import { audit, clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
 import { billOut } from './orders';
+import { phoneKey } from './settings';
 import { sendSoon } from '../sync';
 import { saleMoves } from '../stock';
 import type { AppEnv } from '../types';
@@ -73,7 +74,10 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
   if (mode === 'credit') {
     if (p.newCredit && typeof p.newCredit === 'object') {
       const nc = p.newCredit as Record<string, unknown>;
-      out.newCredit = { name: text(nc, 'name', `Payment ${n}: new credit account name`, { max: 80 })!, phone: text(nc, 'phone', 'Phone', { optional: true, max: 20 }) };
+      // A new credit account needs a name and a phone (22 Nov 2026).
+      const phone = phoneKey(nc.phone);
+      if (!phone) fail(400, `Payment ${n}: add the phone number for the new credit account.`);
+      out.newCredit = { name: text(nc, 'name', `Payment ${n}: new credit account name`, { max: 80 })!, phone };
       out.debtorAccountId = newId();
       out.debtorName = out.newCredit.name;
     } else {
