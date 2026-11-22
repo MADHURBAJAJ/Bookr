@@ -113,7 +113,8 @@ describe('bank lines through the API', () => {
     expect((await h.clients.owner.del(`/businesses/${h.bid}/bank-rows/${cr.id}/match`)).status).toBe(200);
     expect((await sql`SELECT match_status FROM transactions WHERE id = ${sale}`)[0].match_status).toBe('awaiting_bank_match');
     // A wrong amount is refused.
-    const other = rows.find((r: any) => r.tranId === 'S10000005');
+    // (S10000005, a failed payment's return, is left out by Bookr on paste: 23 Nov 2026.)
+    const other = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-11-01`)).json.rows.find((r: any) => r.tranId === 'S10000006');
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${other.id}/match`, { transactionIds: [sale] })).status).toBe(400);
   });
 
@@ -133,7 +134,7 @@ describe('bank lines through the API', () => {
     const settle = rows.find((r: any) => r.tranId === 'S10000006');
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${settle.id}/book`, { headId: h.veg })).status).toBe(400);
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${settle.id}/book`, { headId: h.sales, party: 'Card machine' })).status).toBe(200);
-    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/ignore-reversals`)).json.pairs).toBe(1);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/ignore-reversals`)).json.pairs).toBe(0); // left out by Bookr on paste (23 Nov 2026)
     rows = (await h.clients.owner.get(`/businesses/${h.bid}/bank-rows?from=2026-10-31&to=2026-11-01`)).json.rows;
     expect(rows.filter((r: any) => r.status === 'ignored').map((r: any) => r.tranId).sort()).toEqual(['S10000004', 'S10000005']);
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${veg.id}/reopen`)).status).toBe(200);

@@ -42,7 +42,7 @@ export async function importLines(db: DB, businessId: string, accountId: string,
   for (let i = 0; i < statements.length; i += 80) await db.batch(statements.slice(i, i + 80));
   await db.batch(booksStartStatements(db, accountId, t));
   await pairRows(db, accountId);
-  if (fresh.some((l) => l.direction === 'DR')) await leaveOutReturned(db, businessId);
+  if (fresh.length) await leaveOutReturned(db, businessId);
   // A card settlement credit among them is settled by Bookr where safe (its date and exactly its net, a rule set).
   const auto = fresh.some((l) => l.kind === 'card_settlement') ? await runCardAuto(db, businessId) : null;
   return { added: fresh.length, skipped: lines.length - fresh.length, cardSettled: auto?.settled ?? 0 };
@@ -70,9 +70,13 @@ const REFUND_DAYS = 3;
  * - A UPI credit the bank reversed (a DR line "UPI/RVSL<ref>" of the credit's ref and amount): certain.
  * - A refund: a UPI payment to the same UPI ID, of the same amount, within REFUND_DAYS after the credit (the latest
  *   such credit). A credit already matched to a bill is left alone: that sale was refunded, which a person books.
+ * - A payment out that failed: the bank pays it back the same moment as a CR line "UPI/RVSL<ref>" of its ref and amount
+ *   (approved 23 Nov 2026): certain, both left out.
+ * - A ₹1 UPI payment out: a test that a UPI ID works before paying it (approved 23 Nov 2026), left out.
  */
+export const UPI_TEST_PAISE = 100;
 export async function leaveOutReturned(db: DB, businessId: string) {
-  const [reversed, refunds] = await Promise.all([
+  const [reversedAll, refundsAll, failedAll, testsAll, reopened] = await Promise.all([
     all<{ rev: string; cr: string; ref: string | null }>(db, `SELECT r.id AS rev, c.id AS cr, r.upi_ref AS ref FROM bank_rows r JOIN bank_rows c ON c.id = r.pair_row_id
       WHERE r.business_id = ? AND r.kind = 'reversal' AND r.direction = 'DR' AND r.status = 'unmatched' AND c.kind = 'upi_in' AND c.status = 'unmatched'
         AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = c.id)`, businessId),
@@ -82,7 +86,19 @@ export async function leaveOutReturned(db: DB, businessId: string) {
         AND NOT EXISTS (SELECT 1 FROM bank_rows o WHERE o.pair_row_id = c.id) ORDER BY c.posted_at DESC LIMIT 1) AS cr, d.vpa, d.amount_paise AS amount
       FROM bank_rows d WHERE d.business_id = ? AND d.kind = 'upi_out' AND d.direction = 'DR' AND d.status = 'unmatched' AND d.vpa IS NOT NULL AND d.pair_row_id IS NULL`,
       REFUND_DAYS * 86400e3, businessId),
+    all<{ rev: string; out: string; vpa: string | null }>(db, `SELECT r.id AS rev, d.id AS out, d.vpa FROM bank_rows r JOIN bank_rows d ON d.id = r.pair_row_id
+      WHERE r.business_id = ? AND r.kind = 'reversal' AND r.direction = 'CR' AND r.status = 'unmatched' AND d.kind = 'upi_out' AND d.direction = 'DR'
+        AND d.status = 'unmatched' AND d.amount_paise = r.amount_paise`, businessId),
+    all<{ id: string; vpa: string | null }>(db, `SELECT id, vpa FROM bank_rows WHERE business_id = ? AND kind = 'upi_out' AND direction = 'DR'
+      AND status = 'unmatched' AND amount_paise = ?`, businessId, UPI_TEST_PAISE),
+    all<{ row_id: string }>(db, "SELECT DISTINCT row_id FROM audit_log WHERE business_id = ? AND action = 'bank.reopen'", businessId),
   ]);
+  // A line a person reopened stays theirs: Bookr does not leave it out again.
+  const mine = new Set(reopened.map((r) => r.row_id));
+  const reversed = reversedAll.filter((x) => !mine.has(x.rev) && !mine.has(x.cr));
+  const refunds = refundsAll.filter((x) => !mine.has(x.out) && !(x.cr && mine.has(x.cr)));
+  const failed = failedAll.filter((x) => !mine.has(x.rev) && !mine.has(x.out));
+  const tests = testsAll.filter((x) => !mine.has(x.id));
   const t = now();
   const audit = (rowId: string, after: unknown) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
     VALUES (?, NULL, 'bank.left_out_returned', 'bank_rows', ?, ?, ?, ?)`, businessId, rowId, JSON.stringify({ status: 'unmatched' }), JSON.stringify(after), t);
@@ -100,8 +116,15 @@ export async function leaveOutReturned(db: DB, businessId: string) {
     statements.push(stmt(db, 'UPDATE bank_rows SET pair_row_id = ? WHERE id = ?', x.cr, x.out),
       leave([x.out, x.cr], `Refunded to ${x.vpa}: left out by Bookr`), audit(x.cr, { status: 'ignored', refundedBy: x.out }));
   }
+  for (const x of failed) {
+    // The same note as the Bank page's own button, so the statement tags both lines Reversed / Reversal.
+    statements.push(leave([x.out, x.rev], 'Payment reversed'), audit(x.out, { status: 'ignored', failedBackBy: x.rev, vpa: x.vpa }));
+  }
+  for (const x of tests) {
+    statements.push(leave([x.id], `UPI ID test of ₹1${x.vpa ? ` to ${x.vpa}` : ''}: left out by Bookr`), audit(x.id, { status: 'ignored', upiTest: true }));
+  }
   for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
-  return { reversed: reversed.length, refunded: taken.size - reversed.length };
+  return { reversed: reversed.length, refunded: taken.size - reversed.length, failed: failed.length, tests: tests.length };
 }
 
 // ---- Rules

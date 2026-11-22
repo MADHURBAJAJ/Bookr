@@ -92,14 +92,15 @@ describe('bank statement', () => {
     expect(tag(1)).toMatchObject({ kind: 'open', label: 'UPI card fee · not booked' });
     expect(tag(1).hint).toMatch(/^credit S/);
     expect(tag(2)).toMatchObject({ kind: 'open', hint: 'note: salarypankaj' });
-    expect(tag(4)).toMatchObject({ kind: 'open' });
-    expect(tag(4).hint).toMatch(/^reversal of S/);
+    // The failed payment and its return are left out by Bookr on paste (23 Nov 2026).
+    expect(tag(3)).toMatchObject({ kind: 'reversed', label: 'Reversed' });
+    expect(tag(4)).toMatchObject({ kind: 'reversed', label: 'Reversal' });
 
     // The fee booked to Bank charges; the failed payment and its reversal skipped.
     const head = (await o.post(`/businesses/${h.bid}/heads`, { name: 'Bank charges', type: 'expense' })).json.id;
     const booked = await o.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: ids[1], headId: head, item: 'UPI card fee' }] });
     expect(booked.json.booked).toBe(1);
-    expect((await o.post(`/businesses/${h.bid}/bank-rows/ignore-reversals`, {})).json.pairs).toBe(1);
+    expect((await o.post(`/businesses/${h.bid}/bank-rows/ignore-reversals`, {})).json.pairs).toBe(0); // left out by Bookr on paste (23 Nov 2026)
     s = await get();
     expect(tag(1)).toMatchObject({ kind: 'fee', label: 'Bank charges · UPI card fee' });
     expect(tag(3)).toMatchObject({ kind: 'reversed', label: 'Reversed' });

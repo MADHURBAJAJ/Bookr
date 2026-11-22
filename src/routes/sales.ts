@@ -12,6 +12,7 @@ import { can } from '../permissions';
 import { columnHints } from '../columnHints';
 import { autoTick } from '../autoTick';
 import { completeLateNumbers, recheckDay } from '../numberFix';
+import { removeWrittenTwice } from '../writtenTwice';
 import { shiftSlips } from '../slips';
 import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
@@ -215,7 +216,7 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
     throw e;
   }
   // Bill numbers read before the report came: completed now that the software bills are here (approved 22 Nov 2026).
-  for (const d of touched) if (!confirmed.includes(d)) await completeLateNumbers(db, bid, d);
+  for (const d of touched) if (!confirmed.includes(d)) { await completeLateNumbers(db, bid, d); await removeWrittenTwice(db, bid, d); }
   for (const d of new Set([...touched, ...laterFills.filter((f) => f.modeText).map((f) => f.day)])) await refreshComparisons(db, bid, d, c.get('user').id);
   return c.json({ id: reportId, ...summary }, 201);
 });
@@ -1175,9 +1176,12 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/auto-tick', requireRole('r
   try {
     // The page re-check first (numbers, payment cells), then the ticks: a line Bookr just changed is not ticked.
     const fixed = await recheckDay(c.env.DB, c.get('businessId'), day);
-    return c.json({ fixed, ticked: await autoTick(c.env.DB, c.get('businessId'), day) });
+    // Then lines written twice (23 Nov 2026), before anything is ticked.
+    const removed = await removeWrittenTwice(c.env.DB, c.get('businessId'), day);
+    if (fixed || removed) await refreshComparisons(c.env.DB, c.get('businessId'), day, null);
+    return c.json({ fixed, removed, ticked: await autoTick(c.env.DB, c.get('businessId'), day) });
   } catch (e) {
-    if (isShiftConfirmed(e)) return c.json({ fixed: 0, ticked: 0 });
+    if (isShiftConfirmed(e)) return c.json({ fixed: 0, removed: 0, ticked: 0 });
     throw e;
   }
 });

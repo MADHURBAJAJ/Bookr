@@ -31,7 +31,7 @@ async function hotel() {
   const row = async (tran: string) => (await sql`SELECT id FROM bank_rows WHERE tran_id = ${tran}`)[0].id as string;
   // The 1418 payment is booked to Vegetables with a party; the 300 salary and its reversal are left out.
   expect((await o.post(`/businesses/${h.bid}/bank-rows/${await row('S20000003')}/book`, { headId: veg, party: 'Sabzi Wala' })).status).toBe(200);
-  expect((await o.post(`/businesses/${h.bid}/bank-rows/ignore-reversals`, {})).json.pairs).toBe(1);
+  expect((await o.post(`/businesses/${h.bid}/bank-rows/ignore-reversals`, {})).json.pairs).toBe(0); // left out by Bookr on paste (23 Nov 2026)
   // Less came in than billed on the 840 credit: a difference expense on the bank, but nothing was paid out.
   await sql`INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, matched_bank_row, created_at)
     VALUES (${crypto.randomUUID()}, ${h.bid}, ${acc}, '2026-10-31', 4000, 'expense', ${veg}, 'Difference on UPI', 'bank_sheet', 'approved', ${await row('S20000001')}, 0)`;

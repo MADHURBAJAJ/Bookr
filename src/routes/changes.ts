@@ -25,7 +25,7 @@ const MODE: Record<string, string> = { cash: 'Cash', upi: 'UPI', card: 'Card', m
 const LABEL: Record<string, string> = {
   'comparison.decision_cleared': 'Decision cleared by Bookr: the register or software report changed',
   'comparison.keep_waiting': 'Kept waiting for the money', 'comparison.close': 'Closed',
-  'register.auto_discount': 'Group discount filled in by Bookr', 'register.auto_check': 'Ticked by Bookr: register, software and money agree', 'register.number_completed': 'Bill number completed by Bookr from the software report', 'register.recheck': 'Line re-checked by Bookr: number or payment read again', 'register.move_column': 'A payment column moved back one line', 'register.move_column_undone': 'Column move undone', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
+  'register.auto_discount': 'Group discount filled in by Bookr', 'register.auto_check': 'Ticked by Bookr: register, software and money agree', 'register.number_completed': 'Bill number completed by Bookr from the software report', 'register.recheck': 'Line re-checked by Bookr: number or payment read again', 'register.restore': 'Line put back: not written twice', 'register.move_column': 'A payment column moved back one line', 'register.move_column_undone': 'Column move undone', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
   'register.paid_later': 'Paid later by card or UPI', 'register.paid_later_undone': 'Paid later undone', 'register.fill_discounts': 'Discounts filled in',
   'register.column_changed': 'Register column changed', 'register.shift_payments': 'Payments moved to another column',
   'bill.paid_by_undone': 'Paid-by undone', 'bill.complimentary_undone': 'No longer complimentary',

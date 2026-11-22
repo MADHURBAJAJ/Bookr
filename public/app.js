@@ -2143,7 +2143,7 @@ function autoTickBg(biz, day, redraw) {
   const at = location.hash;
   api('POST', `/businesses/${biz.id}/shifts/${day}/auto-tick`).then((r) => {
     const typing = document.activeElement?.matches?.('input:not([type=checkbox]), select, textarea');
-    if (redraw && (r?.ticked || r?.fixed) && location.hash === at && !typing) route();
+    if (redraw && (r?.ticked || r?.fixed || r?.removed) && location.hash === at && !typing) route();
   }).catch(() => { /* the person ticks by hand */ });
 }
 
@@ -2501,6 +2501,16 @@ function rowIssues(r) {
     amber.push(html`${colHintText(ch)} <span class="chips"><button type="button" class="pickchip" data-setcol="${ch.paymentId}" title="Moves this payment to the ${ch.toLabel} column. Nothing else changes.">Change to ${ch.toLabel}</button></span>`);
   }
   if (inf.has('bill_no') && o.completedFrom) { flags.bill_no ??= 'amber'; amber.push(`Completed from "${o.completedFrom}" on the page`); }
+  // B2 (23 Nov 2026): the same bill on another line paid with a group; the group's payment says which is the copy.
+  const tw = regOffers.find((x) => x.rowId === r.id);
+  if (tw && r.status !== 'checked') {
+    flags.payments = 'red';
+    const other = `page ${tw.keep.page} line ${tw.keep.lineNo}`;
+    red.unshift(html`${tw.why === 'covered'
+      ? `Also on ${other}, paid together with other bills. That payment already covers this bill, so this line's money would be counted twice.`
+      : `Also on ${other} with its own payment. The group this line is in is paid in full without it, so this copy is the extra one.`}
+      <span class="chips"><button type="button" class="pickchip" data-twinrm="${r.id}" title="Deletes this line as written twice. Undo with Changes or by adding it again.">Remove this line</button></span>`);
+  }
   // Crossed out on the page (23 Nov 2026): most likely a cancelled entry, not a bill.
   if (o.struck && r.status !== 'checked') red.unshift(html`Crossed out on the page. Remove this line? <span class="chips"><button type="button" class="pickchip" data-copydel title="Deletes this line. If it is a real bill, leave it and tick it instead.">Remove</button></span>`);
   // A payment far larger than the bill was not taken (23 Nov 2026): the cell was misread.
@@ -2594,6 +2604,7 @@ const netOf = (r) => r.amountPaise - (r.discountPaise ?? 0);
 /** A bill whose written payments do not equal its amount after discount (complimentary bills with none are fine). */
 // Rows of the register page on screen, for bills paid together (a group = head row + rows paid with it).
 let regRows = [];
+let regOffers = [];
 /** This page's rows plus the shift's rows on its other pages (bills paid together can run across sheets). */
 const shiftRowsOf = (u) => [...u.rows, ...(u.otherPageRows ?? []).map((x) => ({ ...x, elsewhere: true }))];
 /** "row 4", or "page 2 · row 4" for a row on another page of the shift. */
@@ -2736,7 +2747,7 @@ function regFootHtml(u, locked) {
   return html`<tr class="tot-rows"><td class="ln"></td><td class="c-bn"><strong>Rows add up to</strong><span class="tot-sub">paid in all modes</span></td>${sumTd('amount')}<td class="c-ty"></td>${sumTd('cash')}${sumTd('upi')}${sumTd('upi2')}${sumTd('card')}${sumTd('discount')}<td class="c-rm tot-verdict" colspan="4">${verdict}</td></tr>
     <tr class="tot-written"><td class="ln"></td><td class="c-bn">Written on the page</td>${inTd('amount')}<td class="c-ty"></td>${inTd('cash')}${inTd('upi')}${inTd('upi2')}${inTd('card')}${inTd('discount')}<td class="c-rm" colspan="4"></td></tr>
     ${(u.deletedRows ?? []).length ? html`<tr class="tot-deleted"><td class="ln"></td><td class="c-bn" colspan="12"><span class="tiny">Deleted from this page:
-      ${(u.deletedRows).map((r, i) => html`${i ? ' · ' : ''}row ${r.lineNo}${r.billNo ? ` bill ${r.billNo}` : ''}${r.amountPaise ? ` ₹ ${rs(r.amountPaise)}` : ''}, ${deleteReasonLabel(r.reason)}${r.note ? ` (${r.note})` : ''}${r.by ? ` by ${r.by}` : ''}`)}</span></td></tr>` : ''}`;
+      ${(u.deletedRows).map((r, i) => html`${i ? ' · ' : ''}row ${r.lineNo}${r.billNo ? ` bill ${r.billNo}` : ''}${r.amountPaise ? ` ₹ ${rs(r.amountPaise)}` : ''}, ${deleteReasonLabel(r.reason)}${r.note ? ` (${r.note.replace(/^Bookr: /, '')})` : ''}${r.by ? ` by ${r.by}` : r.auto ? ' by Bookr' : ''}${r.auto && r.restorable && !locked ? html` <button type="button" class="pickchip" data-restore="${r.rowId}" title="Puts the line back on the page. Bookr will not remove it again.">Undo</button>` : ''}`)}</span></td></tr>` : ''}`;
 }
 
 /** Saves the column totals typed on the bottom line; each saves when you leave it. A page read before totals were
@@ -2785,6 +2796,7 @@ function suggestedNumbers(u) {
 function regToolsHtml(u, locked) {
   const slip = !locked && u.slip;
   const sugg = locked ? [] : suggestedNumbers(u);
+  const twice = locked ? [] : (u.deletedRows ?? []).filter((r) => r.auto && r.restorable);
   const cslip = !locked && u.columnSlip;
   return html`
     ${slip ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
@@ -2795,6 +2807,9 @@ function regToolsHtml(u, locked) {
         <span><strong>The ${cslip.column} column looks read one line ${cslip.direction === 'down' ? 'low' : 'high'}</strong> from line ${cslip.lines[0]} to line ${cslip.lines.at(-1)}: on ${cslip.clear} lines its amount is the bill of the line ${cslip.direction === 'down' ? 'above' : 'below'}.
         Lines paid in another column keep their own payment. Each moved line stays in amber for you to tick.</span>
         <button class="btn" type="button" id="mvcol" data-col="${cslip.column}" data-dir="${cslip.direction}">Move ${cslip.column} ${cslip.direction === 'down' ? 'up' : 'down'} one line</button></div>` : ''}
+    ${twice.length ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <span><strong>Bookr removed ${twice.length} line${twice.length === 1 ? '' : 's'} written twice</strong> on this page: ${twice.map((r) => `line ${r.lineNo}${r.billNo ? ` (${r.billNo})` : ''}`).join(', ')}. The paid copy stays; they are listed under the totals and in Changes.</span>
+        <button class="btn plain" type="button" id="restoreall">Undo all</button></div>` : ''}
     ${sugg.length >= 2 ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <span><strong>${sugg.length} lines look like software bills with a digit or two off</strong>, at the same amount: ${sugg.map(([r, b]) => html`line ${r.lineNo} → <span class="mono">${b}</span>`).reduce((a, x, i) => (i ? html`${a}, ${x}` : x), '')}. Check them against the photo.</span>
         <button class="btn" type="button" id="useall">Use all ${sugg.length} suggested numbers</button></div>` : ''}
@@ -3002,6 +3017,7 @@ function regRowsHeadHtml(u) {
 
 function registerPanel(biz, u) {
   regRows = shiftRowsOf(u);
+  regOffers = u.twinOffers ?? [];
   const locked = u.shiftStatus === 'confirmed';
   const written = u.pageWrittenTotalPaise;
   return html`
@@ -3270,6 +3286,7 @@ function wireInlineRows(biz, u, strip) {
       u.slip = fresh.slip; u.columnSlip = fresh.columnSlip;
       u.softwareList = fresh.softwareList;
       u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise; u.columnTotals = fresh.columnTotals; u.deletedRows = fresh.deletedRows;
+      u.twinOffers = fresh.twinOffers; regOffers = u.twinOffers ?? [];
       regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
       redraw();
@@ -3513,7 +3530,27 @@ function wireRegister(biz, u) {
     if (r) strip.show(r);
     document.querySelectorAll('#regtable tbody tr[data-row]').forEach((tr) => tr.addEventListener('click', () => { const x = u.rows.find((y) => y.id === tr.dataset.row); if (x) strip.show(x); }));
   }
-  wireFill = () => { wireUnslip(); wireFillBtn(); wireMoveCol(); wireUseAll(); };
+  wireFill = () => { wireUnslip(); wireFillBtn(); wireMoveCol(); wireUseAll(); wireTwice(); };
+  // Written twice (23 Nov 2026): put back what Bookr removed, or take the one-tap B2 suggestion.
+  const wireTwice = () => {
+    const again = async (fn, btn) => {
+      btn.disabled = true;
+      try { await fn(); await reviewView(biz, u.id); } catch (err) { btn.disabled = false; showError(document.getElementById('rmsg'), err); }
+    };
+    const tb = document.getElementById('regtable');
+    if (tb && !tb.dataset.twwired) {
+      tb.dataset.twwired = '1';
+      tb.addEventListener('click', (e) => {
+        const b = e.target.closest?.('[data-restore], [data-twinrm]');
+        if (!b) return;
+        if (b.dataset.restore) again(() => api('POST', `/businesses/${biz.id}/register-rows/${b.dataset.restore}/restore`), b);
+        else again(() => api('DELETE', `/businesses/${biz.id}/register-rows/${b.dataset.twinrm}`, { reason: 'written_twice', note: 'Suggested by Bookr: paid with a group on the other copy' }), b);
+      });
+    }
+    document.getElementById('restoreall')?.addEventListener('click', (e) => again(async () => {
+      for (const r of (u.deletedRows ?? []).filter((x) => x.auto && x.restorable)) await api('POST', `/businesses/${biz.id}/register-rows/${r.rowId}/restore`);
+    }, e.currentTarget));
+  };
   // Use all suggested numbers (23 Nov 2026): each row's one same-amount suggestion, saved one after another.
   const wireUseAll = () => document.getElementById('useall')?.addEventListener('click', async (e) => {
     e.currentTarget.disabled = true;

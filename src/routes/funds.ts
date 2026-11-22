@@ -5,6 +5,7 @@ import { all, SUMMARY_IN_USE } from '../db';
 import { fail, isUuid } from '../http';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { bankStatement } from '../statement';
+import { leaveOutReturned } from '../bank';
 
 
 export const fundsRoutes = new Hono<AppEnv>();
@@ -51,6 +52,8 @@ const SECTION_ORDER = ['sales', 'advance', 'income', 'left_out', 'open', 'expens
 fundsRoutes.get('/businesses/:businessId/reports/funds-flow', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
+  // Lines statements brought in before a rule existed (failed payments, ₹1 tests: 23 Nov 2026) are left out here too.
+  await leaveOutReturned(db, bid);
   const q = c.req.query();
   const isDay = (v: string | undefined) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '');
   const today = shiftDayOf(Date.now());

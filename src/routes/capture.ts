@@ -12,6 +12,7 @@ import { onPayingRow, spreadDifference } from '../discounts';
 import { columnSlipMoves, findColumnSlip, findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
 import { can, type Role } from '../permissions';
 import { columnHints } from '../columnHints';
+import { restoreRemoved, shiftTwinRows, writtenTwice } from '../writtenTwice';
 
 export const captureRoutes = new Hono<AppEnv>();
 
@@ -228,7 +229,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         WHERE business_id = ? AND shift_day = ? AND upload_id <> ? ORDER BY line_no`, bid, u.business_day, u.id),
       all<{ registerRowId: string }>(db, `SELECT p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel, p.amount_paise AS amountPaise
         FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.business_id = ? AND r.shift_day = ? AND r.upload_id <> ?`, bid, u.business_day, u.id),
-      all<{ before: string; after: string; at: number; by: string | null }>(db, `SELECT a.before, a.after, a.created_at AS at, us.name AS by
+      all<{ before: string; after: string; at: number; by: string | null; rowId: string }>(db, `SELECT a.before, a.after, a.created_at AS at, us.name AS by, a.row_id AS rowId
       FROM audit_log a LEFT JOIN users us ON us.id = a.user_id
       WHERE a.business_id = ? AND a.action = 'register.delete' AND json_extract(a.before, '$.uploadId') = ? ORDER BY a.id`, bid, u.id),
     ]);
@@ -302,7 +303,12 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     const colSlip = shift?.status === 'confirmed' ? null : pageColumnSlip(rows as unknown as SlipRow[], pays as unknown as ColPay[]);
     return c.json({
       columnSlip: colSlip && (!slip || colSlip.lineNos.length > slip.lineNos.length) ? { column: colSlip.column, direction: colSlip.direction, lines: colSlip.lineNos, clear: colSlip.clear } : null,
-      deletedRows: deleted.map((d) => ({ ...JSON.parse(d.before), ...JSON.parse(d.after), at: d.at, by: d.by })),
+      // Lines Bookr removed as written twice (23 Nov 2026) can be put back while they are not on the page again.
+      deletedRows: deleted.filter((d) => !rows.some((r) => r.id === d.rowId)).map((d) => {
+        const { row: _row, pays: _pays, ...after } = JSON.parse(d.after);
+        return { ...JSON.parse(d.before), ...after, at: d.at, by: d.by, rowId: d.rowId, ...(after.auto ? { restorable: shift?.status !== 'confirmed' } : {}) };
+      }),
+      twinOffers: shift?.status === 'confirmed' ? [] : await twinOffersFor(db, bid, u.business_day, new Set(rows.map((r) => r.id))),
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
       slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
       // The shift's software bills, for the bill box's suggestions as you type.
@@ -1098,6 +1104,34 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/fill-discounts', r
 });
 
 const DELETE_REASONS = ['written_twice', 'not_a_bill', 'cancelled', 'misread', 'other'];
+
+/** B2 (23 Nov 2026): a copy with its own payment beside a copy paid with a group, offered for one tap. */
+async function twinOffersFor(db: DB, bid: string, day: string, onPage: Set<string>) {
+  const { rows, restored } = await shiftTwinRows(db, bid, day);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return writtenTwice(rows, restored).offers.filter((o) => onPage.has(o.id)).map((o) => {
+    const k = byId.get(o.keepId)!;
+    return { rowId: o.id, keepId: o.keepId, why: o.why, keep: { page: k.page, lineNo: k.lineNo, uploadId: k.uploadId, amountPaise: k.amountPaise } };
+  });
+}
+
+// Puts back a line Bookr removed as written twice (23 Nov 2026).
+captureRoutes.post('/businesses/:businessId/register-rows/:rowId/restore', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = c.req.param('rowId');
+  if (!isUuid(rowId)) fail(404, 'Row not found.');
+  let day: string | null;
+  try {
+    day = await restoreRemoved(db, bid, rowId, c.get('user').id);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  if (!day) fail(404, 'Nothing to put back.');
+  await refreshComparisons(db, bid, day, c.get('user').id);
+  return c.json({ ok: true });
+});
 
 captureRoutes.delete('/businesses/:businessId/register-rows/:rowId', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
