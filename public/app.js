@@ -9394,7 +9394,7 @@ function cbFrame(biz, b, tab, body) {
   if (ownerPhone(biz)) {
     const own = b.cashierUserId === me.user.id;
     return ownerFrame(biz, own ? 'mybook' : 'cash', own ? html`<b>${b.name}</b> <span class="tiny">· my book</span>`
-      : html`<a href="#/b/${biz.id}/ocash" aria-label="Back to cash">‹</a> <b>${b.branchName ? b.cashierName ?? b.name : b.name}</b> <span class="tiny">· ${b.branchName ?? 'Cash holder'}</span>`, body);
+      : html`<a href="#/b/${biz.id}/ocash" aria-label="Back to cash">‹</a> <b>${b.name}</b> <span class="tiny">· ${b.branchName ?? 'Cash holder'}</span>`, body);
   }
   if (!cbIsCashier(biz)) return shell(biz, 'cashbook', b.name, `${b.branchName ?? ''}${b.cashierName && b.cashierName !== b.name ? ` · ${b.cashierName}` : ''}`, body);
   const t = (key, label, href) => html`<a class="cbt ${tab === key ? 'on' : ''}" href="${href}" ${tab === key ? html`aria-current="page"` : ''}>${label}</a>`;
@@ -9577,6 +9577,7 @@ async function cashBookDayView(biz, accountId, dayIn) {
       <div class="field"><label for="cbc-a">Notes and coins counted (₹)</label><input id="cbc-a" name="counted" class="mono" inputmode="decimal" required value="${d.count ? rsIn(d.count.countedPaise) : ''}" placeholder="24,950"></div>
       <div class="list-row"><span>Should be</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
       <div data-cbgap></div>
+      <div class="cb-box wait" data-cbway hidden></div>
       <div class="field" data-cbnote hidden><label for="cbc-n">Why? (needed when short or extra)</label><textarea id="cbc-n" name="note" rows="2" placeholder="Gave ₹ 300 to the peon for the gas cylinder, bill tomorrow">${d.count?.note ?? ''}</textarea>
         <span class="tiny">The owner sees this note.</span></div>
       <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save count</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
@@ -9686,9 +9687,33 @@ async function cashBookDayView(biz, accountId, dayIn) {
       : `<div class="cb-gap bad">Cash ${g < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(g))}</div>`;
     cf.querySelector('[data-cbnote]').hidden = !g;
   };
-  cf.querySelector('[name=counted]').addEventListener('input', showGap);
+  cf.querySelector('[name=counted]').addEventListener('input', () => { otherwise = false; cf.querySelector('[data-cbway]').hidden = true; showGap(); });
   showGap();
-  onSubmit(cf, async (x) => { await api('PUT', `${base}/count/${day}`, { counted: x.counted, note: x.note }); await reload(); });
+  // Counting extra while cash sent to this book waits (21 Nov 2026): ask to tap Got it first.
+  const sentHere = d.waiting.filter((h) => h.day <= day);
+  const sentTotal = sentHere.reduce((t, h) => t + h.amountPaise, 0);
+  let otherwise = false;
+  const saveCount = async () => { await api('PUT', `${base}/count/${day}`, { counted: cf.elements.counted.value, note: cf.elements.note.value }); await reload(); };
+  onSubmit(cf, async (x) => {
+    const g = cbRupees(x.counted) - d.shouldPaise;
+    if (sentTotal && g > 0 && !otherwise) {
+      const way = cf.querySelector('[data-cbway]');
+      way.innerHTML = html`<b>Cash extra ₹ ${rs(g)}?</b>
+        <span>${sentHere.map((h) => `${h.fromBookName} sent you ₹ ${rs(h.amountPaise)}`).join(', ')}, not accepted yet. If you have it, tap Got it first, then count.</span>
+        <span class="form-row"><button type="button" class="btn" data-cbwayyes>Got it, then count</button><button type="button" class="btn plain" data-cbwayno>It's something else</button></span>`.__html;
+      way.hidden = false;
+      way.querySelector('[data-cbwayyes]').addEventListener('click', async (e) => {
+        e.target.disabled = true;
+        try {
+          for (const h of sentHere) await api('POST', `/businesses/${biz.id}/handovers/${h.id}/receive`, { day });
+          await saveCount();
+        } catch (err) { alert(err.message); await reload(); }
+      });
+      way.querySelector('[data-cbwayno]').addEventListener('click', () => { otherwise = true; way.hidden = true; cf.requestSubmit(); });
+      return;
+    }
+    await saveCount();
+  });
 }
 
 /** Days: each day of the book, newest first, with its count and whether the fee sheet agrees. */
@@ -9815,28 +9840,40 @@ async function ownerHeadPicker(biz, entryId, after) {
 /** Owner phone, Cash: cash in hand in every book today, by cashier, then cash holders; what needs a look. */
 async function ownerCashView(biz) {
   const [d, l] = await Promise.all([api('GET', `/businesses/${biz.id}/cashbooks`), api('GET', `/businesses/${biz.id}/owner-look`)]);
-  const total = d.books.reduce((t, b) => t + b.inHandPaise, 0);
+  const inHand = d.books.reduce((t, b) => t + b.inHandPaise, 0);
+  // Cash on the way (approved 21 Nov 2026): handed over and not yet accepted, ticked or found in the bank. It has left
+  // one book and is in no other yet, so it is shown on its own and in the total.
+  const way = d.handovers.filter((h) => h.status === 'sent');
+  const wayTotal = way.reduce((t, h) => t + h.amountPaise, 0);
+  const toBook = new Map();
+  way.filter((h) => h.toKind === 'book').forEach((h) => toBook.set(h.toAccountId, (toBook.get(h.toAccountId) ?? 0) + h.amountPaise));
   const n = lookCount(l);
   const feeOf = new Map(l.fees.filter((f) => f.state !== 'kept').map((f) => [f.bookId, f]));
   const line = (b) => {
     const fee = feeOf.get(b.id);
     const k = b.lastCount;
+    const coming = toBook.get(b.id);
     const chip = k && k.gapPaise && !k.settle ? html`<span class="chip bad">${k.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(k.gapPaise))}</span>`
       : fee ? html`<span class="chip wait">sheet ${fee.state} ₹ ${rs(Math.abs(fee.diffPaise))}</span>`
-        : !k ? html`<span class="tiny">not counted yet</span>` : k.day !== d.today ? html`<span class="tiny">not counted today</span>`
+        : !k ? html`not counted yet` : k.day !== d.today ? html`not counted today`
           : html`<span class="chip ok">counted, ${k.settle ? 'settled' : 'agrees'}</span>`;
     return html`<a class="list-row cb-book" href="#/b/${biz.id}/cashbook/${b.id}/${k && k.gapPaise && !k.settle ? k.day : d.today}" style="color:inherit">
-      <span><span style="font-weight:500">${b.branchName ? b.cashierName ?? b.name : b.name}</span>
-        <div class="tiny">${b.branchName ?? (b.cashierUserId === me.user.id ? 'your book' : 'cash holder')} · ${chip}</div></span>
-      <span class="amount" style="font-weight:500">₹ ${rs(b.inHandPaise)}</span></a>`;
+      <span><span class="cb-name">${b.name}</span>
+        <div class="tiny">${b.branchName ?? (b.cashierUserId === me.user.id ? 'your book' : 'cash holder')} · ${chip}${coming ? html` <span class="chip info">+ ₹ ${rs(coming)} on the way</span>` : ''}</div></span>
+      <span class="amount">₹ ${rs(b.inHandPaise)}</span></a>`;
   };
   const schools = d.books.filter((b) => b.branchId);
   const holders = d.books.filter((b) => !b.branchId);
+  const wayRows = way.map((h) => html`<div class="list-row cb-book"><span><span class="cb-name">${h.fromBookName} → ${cbWhere(h)}</span>
+      <div class="tiny">sent ${shortDay(h.day)} · ${h.toKind === 'bank' ? 'not in the bank statement yet' : h.toKind === 'person' ? 'not ticked yet' : 'not accepted yet'}</div></span>
+    <span class="amount">₹ ${rs(h.amountPaise)}</span></div>`);
   render(ownerFrame(biz, 'cash', html`<b>Cash</b> <span class="tiny">· ${cbDayName(d.today)}</span>`, html`<div class="cb">
-    <div><div class="tiny">Cash in hand, all books</div><div class="cb-big">₹ ${rs(total)}</div></div>
+    <div><div class="tiny">${wayTotal ? 'All cash' : 'Cash in hand, all books'}</div><div class="cb-big">₹ ${rs(inHand + wayTotal)}</div>
+      ${wayTotal ? html`<div class="tiny">₹ ${rs(inHand)} in hand · ₹ ${rs(wayTotal)} on the way</div>` : ''}</div>
     ${n ? html`<a class="cb-box wait" href="#/b/${biz.id}/olook" style="text-decoration:none">${n} need${n === 1 ? 's' : ''} a look ›</a>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
     ${schools.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Schools</div>${schools.map(line)}</section>` : ''}
     ${holders.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Cash holders</div>${holders.map(line)}</section>` : ''}
+    ${way.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">On the way</div>${wayRows}</section>` : ''}
     ${!d.books.length ? html`<div class="note">No cash books yet. Add schools and cashiers on the PC.</div>` : ''}
   </div>`));
   wireShell();
@@ -9847,10 +9884,15 @@ async function ownerCashView(biz) {
 async function ownerLookView(biz) {
   const l = await api('GET', `/businesses/${biz.id}/owner-look`);
   const day = (bookId, dd) => `#/b/${biz.id}/cashbook/${bookId}/${dd}`;
-  const hand = l.handovers.map((h) => html`<div class="list-row" style="align-items:flex-start"><span>${h.fromBookName} → ${h.toName}
-      <div class="tiny">${shortDay(h.day)}${h.narration ? ` · ${h.narration}` : ''}</div></span>
-    <span style="text-align:right"><span class="amount">₹ ${rs(h.amountPaise)}</span><br>
-      <button type="button" class="btn" style="min-height:32px;margin-top:4px" data-ogot="${h.id}" data-book="${h.toKind === 'book' ? '1' : ''}">${h.toKind === 'book' ? 'Got it' : `${h.toName} got it`}</button></span></div>`);
+  // Cash not accepted (approved 21 Nov 2026): sent to your own book at once, anything else after a day.
+  const waited = (h) => { const n2 = Math.round((Date.parse(`${l.today}T00:00:00Z`) - Date.parse(`${h.day}T00:00:00Z`)) / 86400000); return n2 > 0 ? `waiting ${n2} day${n2 === 1 ? '' : 's'}` : 'today'; };
+  const handAct = (h) => (h.toKind === 'bank'
+    ? (h.deposits.length ? h.deposits.map((r) => html`<button type="button" class="btn plain" style="min-height:32px;margin-top:4px" data-odeposit="${h.id}" data-row="${r.id}">Match ${shortDay(r.day)} deposit</button>`)
+      : html`<div class="tiny" style="margin-top:4px">Not in ${h.toName} yet. Sync the bank.</div>`)
+    : html`<button type="button" class="btn ${h.mine ? '' : 'plain'}" style="min-height:32px;margin-top:4px" data-ogot="${h.id}" data-book="${h.toKind === 'book' ? '1' : ''}" data-mine="${h.mine ? '1' : ''}">${h.mine ? 'Got it' : h.toKind === 'book' ? 'Got it for them' : `${h.toName} got it`}</button>`);
+  const hand = l.handovers.map((h) => html`<div class="list-row cb-book" style="align-items:flex-start"><span><span class="cb-name">${h.fromBookName} → ${h.mine ? 'you' : cbWhere(h)}</span>
+      <div class="tiny">sent ${shortDay(h.day)} · <span class="chip wait">${waited(h)}</span>${h.narration ? ` · ${h.narration}` : ''}</div></span>
+    <span style="text-align:right"><span class="amount">₹ ${rs(h.amountPaise)}</span><br>${handAct(h)}</span></div>`);
   const exp = l.expenses.map((e) => html`<div class="list-row" style="align-items:flex-start"><span><a href="${day(e.accountId, e.day)}" style="color:inherit">${e.narration || 'Expense'}</a>
       <div class="tiny">${e.bookName} · ${shortDay(e.day)} · ${e.headName ? e.headName : html`<span class="chip wait">no head yet</span>`}</div></span>
     <span style="text-align:right"><span class="amount">₹ ${rs(e.amountPaise)}</span><br>
@@ -9865,7 +9907,7 @@ async function ownerLookView(biz) {
     <span class="chip bad">${k.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(k.gapPaise))} · Settle ›</span></a>`);
   const sec = (title, rows) => (rows.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">${title}</div>${rows}</section>` : '');
   render(ownerFrame(biz, 'look', html`<b>Needs a look</b>`, html`<div class="cb">
-    ${sec('Cash given to you', hand)}${sec('Expenses to approve', exp)}${sec('Fee check', fees)}${sec('Count short or extra', counts)}
+    ${sec('Cash not accepted', hand)}${sec('Expenses to approve', exp)}${sec('Fee check', fees)}${sec('Count short or extra', counts)}
     ${hand.length + exp.length + fees.length + counts.length ? html`<div class="tiny">Tap a line to open that day of the book.</div>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
   </div>`));
   wireShell();
@@ -9875,7 +9917,17 @@ async function ownerLookView(biz) {
     x.disabled = true;
     try { await fn(x); await again(); } catch (err) { alert(err.message); x.disabled = false; }
   }));
-  act('[data-ogot]', (x) => api('POST', `/businesses/${biz.id}/handovers/${x.dataset.ogot}/receive`, x.dataset.book ? { day: todayIst() } : {}));
+  // Your own book takes it today; for someone else's book it goes in on the day it was sent, with Undo.
+  app.querySelectorAll('[data-ogot]').forEach((x) => x.addEventListener('click', async () => {
+    x.disabled = true;
+    const id = x.dataset.ogot;
+    try {
+      await api('POST', `/businesses/${biz.id}/handovers/${id}/receive`, x.dataset.mine ? { day: todayIst() } : {});
+      await again();
+      doneToast(x.dataset.mine ? 'Taken into your book.' : 'Accepted for them.', () => api('POST', `/businesses/${biz.id}/handovers/${id}/undo`, {}), again);
+    } catch (err) { alert(err.message); x.disabled = false; }
+  }));
+  act('[data-odeposit]', (x) => api('POST', `/businesses/${biz.id}/handovers/${x.dataset.odeposit}/deposit`, { bankRowId: x.dataset.row }));
   act('[data-oapprove]', (x) => api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oapprove}/review`, { status: 'approved' }));
   act('[data-oreject]', async (x) => {
     const note = prompt('Why is it rejected? The cashier sees this.');

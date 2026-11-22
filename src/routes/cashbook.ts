@@ -418,7 +418,7 @@ cashBookRoutes.get('/businesses/:businessId/owner-look', requireRole('members.ma
   const mine = new Set(books.filter((b) => b.cashierUserId === user.id).map((b) => b.id));
   const from = new Date(Date.parse(`${t}T00:00:00Z`) - 13 * 86400000).toISOString().slice(0, 10);
   const [open, expenses, heads, counts] = await Promise.all([
-    handovers(db, bid, "AND h.status = 'sent' AND h.to_kind <> 'bank'"),
+    handovers(db, bid, "AND h.status = 'sent'"),
     all(db, `${reviewSql} AND e.kind = 'expense' AND e.review_status IS NULL ORDER BY e.day, e.entered_at`, bid),
     all<{ id: string; name: string; type: string }>(db, 'SELECT id, name, type FROM heads WHERE business_id = ? ORDER BY type, name', bid),
     all<{ accountId: string; day: string; countedPaise: number; note: string | null; settle: string | null }>(db, `SELECT account_id AS accountId, day,
@@ -435,11 +435,11 @@ cashBookRoutes.get('/businesses/:businessId/owner-look', requireRole('members.ma
     (await feeChecks(db, b, from > b.openingDate ? from : b.openingDate, t, false))
       .filter((f) => f.state === 'less' || f.state === 'more' || f.state === 'kept')
       .map((f) => ({ bookId: b.id, bookName: b.name, branchName: b.branchName, ...f }))))).flat();
-  return c.json({
-    today: t,
-    handovers: open.filter((h) => h.toKind === 'person' || (h.toKind === 'book' && mine.has(h.toAccountId!))),
-    expenses, heads, fees, counts: gaps,
-  });
+  // Cash on the way (approved 21 Nov 2026): sent to the Owner's own book needs them at once; anything else (another book,
+  // a person, the bank) once it has waited a day. A bank deposit comes with the bank credits it could be.
+  const due = await Promise.all(open.filter((h) => (h.toKind === 'book' && mine.has(h.toAccountId!)) || h.day < t)
+    .map(async (h) => ({ ...h, mine: h.toKind === 'book' && mine.has(h.toAccountId!), deposits: h.toKind === 'bank' ? await depositCandidates(db, bid, h) : [] })));
+  return c.json({ today: t, handovers: due, expenses, heads, fees, counts: gaps });
 });
 
 // ---- The cashier's fee cash total for a day, and sorting out a difference with the fee day sheet (21 Nov 2026).
