@@ -75,6 +75,21 @@ describe('remove login', () => {
   });
 });
 
+describe('cancel invite from the book line', () => {
+  it('the book line carries its invite; cancelling it stops the link and the line goes back to no invite', async () => {
+    const h = await businessWithAllRoles('Bgi Saharanpur');
+    const o = h.clients.owner;
+    const sms = (await o.post(`/businesses/${h.bid}/branches`, { name: 'Chilkana Road' })).json.id;
+    const book = (await o.post(`/businesses/${h.bid}/cashbooks`, { name: 'Anup Maheshwari', branchId: sms, openingBalance: '0', openingDate: '2026-11-21' })).json.id;
+    const inv = await o.post(`/businesses/${h.bid}/invites`, { phone: '81711 56156', role: 'entry_staff', accountId: book });
+    const line = (await o.get(`/businesses/${h.bid}/cashbooks`)).json.books.find((b: { id: string }) => b.id === book);
+    expect(line.invite).toMatchObject({ id: inv.json.id, phone: '+918171156156' });
+    expect((await o.del(`/businesses/${h.bid}/invites/${line.invite.id}`)).status).toBe(200);
+    expect((await new Client().get(`/invites/${inviteToken(inv.json.link)}`)).status).toBe(404);
+    expect((await o.get(`/businesses/${h.bid}/cashbooks`)).json.books.find((b: { id: string }) => b.id === book).invite).toBeNull();
+  });
+});
+
 describe('password reset', () => {
   it('the Owner sends a link; it works once for 24 hours, signs out every phone, and the old password stops working', async () => {
     const { h, o, anup, anupId } = await schoolWithCashier();
