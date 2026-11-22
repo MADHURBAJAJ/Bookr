@@ -62,12 +62,12 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   // its cashier has signed in.
   const invite = can(role, 'members.manage');
   const [pending, active] = invite ? await Promise.all([
-    all<{ accountId: string; phone: string | null; createdAt: number }>(db, `SELECT account_id AS accountId, phone, created_at AS createdAt FROM invites
+    all<{ id: string; accountId: string; phone: string | null; createdAt: number }>(db, `SELECT id, account_id AS accountId, phone, created_at AS createdAt FROM invites
       WHERE business_id = ? AND account_id IS NOT NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?`, bid, now()),
     all<{ id: string; lastActiveAt: number | null }>(db, `SELECT u.id, u.last_active_at AS lastActiveAt FROM memberships m JOIN users u ON u.id = m.user_id
       WHERE m.business_id = ?`, bid),
   ]) : [[], []];
-  const pendingOf = new Map(pending.map((p) => [p.accountId, { phone: p.phone, createdAt: p.createdAt }]));
+  const pendingOf = new Map(pending.map((p) => [p.accountId, { id: p.id, phone: p.phone, createdAt: p.createdAt }]));
   const activeOf = new Map(active.map((a) => [a.id, a.lastActiveAt]));
   const booksShown = withCash.map((b) => ({ ...b, invite: pendingOf.get(b.id) ?? null,
     cashierLastActive: b.cashierUserId ? activeOf.get(b.cashierUserId) ?? null : null }));

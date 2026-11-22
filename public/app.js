@@ -9138,7 +9138,8 @@ async function schoolsView(biz, editId) {
     ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span>${b.cashierLastActive ? html` <span class="tiny">last seen ${when(b.cashierLastActive)}</span>` : ''}
         ${d.can.invite && b.cashierRole !== 'owner' && b.cashierUserId !== me.user.id ? html` <button type="button" class="linkbtn tiny" data-cbremove="${b.cashierUserId}" data-name="${b.cashierName ?? b.name}">Remove login</button>` : ''}`
     : b.invite ? html`<span class="chip wait">invite sent</span> <span class="tiny">to ${cbPhone(b.invite.phone)} on ${shortDay(new Date(b.invite.createdAt + IST_MS).toISOString().slice(0, 10))}, not joined yet</span>
-        ${d.can.invite ? html` <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${cbPhone(b.invite.phone)}">Send again</button>` : ''}`
+        ${d.can.invite ? html` <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${cbPhone(b.invite.phone)}">Send again</button>
+          · <button type="button" class="linkbtn tiny" data-cbcancel="${b.invite.id}" data-phone="${cbPhone(b.invite.phone)}">Cancel invite</button>` : ''}`
       : d.can.invite ? html`<button type="button" class="btn plain" style="min-height:32px" data-cbinvite="${b.id}">Invite by phone</button>`
         : html`<span class="tiny">no cashier yet</span>`);
   const cashierRow = (b) => html`<div class="list-row" style="align-items:flex-start">
@@ -9221,6 +9222,13 @@ async function schoolsView(biz, editId) {
   wireShell();
   if (editing) document.getElementById('cb-edit').scrollIntoView({ block: 'start' });
   const again = () => schoolsView(biz, editId);
+  // Cancel invite (22 Nov 2026): the link stops working and the line goes back to Invite by phone.
+  app.querySelectorAll('[data-cbcancel]').forEach((btn) => btn.addEventListener('click', async () => {
+    if (!confirm(`Cancel the invite sent to ${btn.dataset.phone}? The link they have stops working.`)) return;
+    btn.disabled = true;
+    try { await api('DELETE', `/businesses/${biz.id}/invites/${btn.dataset.cbcancel}`, {}); await again(); doneToast('Invite cancelled.'); }
+    catch (e) { alert(e.message); btn.disabled = false; }
+  }));
   // Remove login (21 Nov 2026): the person can no longer sign in here; the book keeps its lines and waits for a new cashier.
   app.querySelectorAll('[data-cbremove]').forEach((btn) => btn.addEventListener('click', async () => {
     const box = btn.closest('[data-cbwho]');
