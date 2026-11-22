@@ -74,6 +74,35 @@ describe('settling a count', () => {
   });
 });
 
+describe('cash on the way', () => {
+  it('cash sent to another book or the bank needs the Owner after a day; sent to the Owner\'s own book at once; Got it for them goes in on the day sent', async () => {
+    const { o, cashier, base, look, bid, users } = await setup();
+    const today = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+    const sms = (await o.get(`/businesses/${bid}/cashbooks`)).json.branches[0].id;
+    const tt = (await o.post(`/businesses/${bid}/cashbooks`, { name: 'Tiny Tots Pilkhantala', branchId: sms, openingBalance: '0', openingDate: D19 })).json.id;
+    const mine = (await o.post(`/businesses/${bid}/cashbooks`, { holder: true, name: 'Director', cashierUserId: users.owner.id, openingBalance: '0', openingDate: D19 })).json.id;
+    const bank = (await o.post(`/businesses/${bid}/accounts`, { name: 'ICICI 7465', kind: 'bank', openingBalance: '0', openingDate: '2026-04-01' })).json.id;
+    await cashier.post(`${base}/entries`, { day: today, kind: 'handover_out', amount: '1,000', to: { kind: 'book', accountId: tt } });
+    await cashier.post(`${base}/entries`, { day: today, kind: 'handover_out', amount: '2,000', to: { kind: 'book', accountId: mine } });
+    await cashier.post(`${base}/entries`, { day: D19, kind: 'handover_out', amount: '3,000', to: { kind: 'book', accountId: tt } });
+    await cashier.post(`${base}/entries`, { day: D19, kind: 'handover_out', amount: '4,000', to: { kind: 'bank', accountId: bank } });
+    const l = await look();
+    // Today's ₹ 1,000 to another book is only on the way; the rest need a look.
+    expect(l.handovers.map((h: { amountPaise: number }) => h.amountPaise).sort()).toEqual([200000, 300000, 400000]);
+    expect(l.handovers.find((h: { amountPaise: number }) => h.amountPaise === 200000)).toMatchObject({ mine: true });
+    expect(l.handovers.find((h: { amountPaise: number }) => h.amountPaise === 400000)).toMatchObject({ toKind: 'bank', deposits: [] });
+    // Got it for them: into Tiny Tots' book on 19 Nov, the day it was sent.
+    const old = l.handovers.find((h: { amountPaise: number }) => h.amountPaise === 300000);
+    expect((await o.post(`/businesses/${bid}/handovers/${old.id}/receive`, {})).status).toBe(200);
+    const d19 = (await o.get(`/businesses/${bid}/cashbooks/${tt}/day/${D19}`)).json;
+    expect(d19.entries.find((e: { kind: string }) => e.kind === 'handover_in')).toMatchObject({ amountPaise: 300000 });
+    expect((await look()).handovers).toHaveLength(2);
+    // Undo puts it back on the way.
+    expect((await o.post(`/businesses/${bid}/handovers/${old.id}/undo`, {})).status).toBe(200);
+    expect((await look()).handovers).toHaveLength(3);
+  });
+});
+
 describe('owner look', () => {
   it('lists cash given to a person, expenses to approve with or without a head, and nothing for the accountant', async () => {
     const { o, cashier, base, look, clients, bid } = await setup();

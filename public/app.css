@@ -705,6 +705,31 @@ tr.rd-red td { background: #FCEBEB; }
 .cb-opts { display: flex; flex-direction: column; gap: 6px; }
 .cb-opts .btn { justify-content: flex-start; text-align: left; height: auto; min-height: 44px; padding: 8px 12px; white-space: normal; }
 .cb-strike { text-decoration: line-through; color: var(--muted); }
+/* Phone screens (cashier and owner) made as compact as the approved mocks (21 Nov 2026): smaller type, amounts in the
+   body font with even figures and always on the right, slimmer cards and chips. The PC screens are unchanged. */
+.cbapp { font-size: 14px; line-height: 1.45; }
+.cbapp .cbapp-head { padding: 10px 16px; font-size: 15px; }
+.cbapp .cbapp-head > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cbapp .cbapp-head > :last-child { flex-shrink: 0; white-space: nowrap; }
+.cbapp .cb { gap: 12px; }
+.cbapp .card { padding: 6px 14px; gap: 0; }
+.cbapp .cb-hd { font-size: 12px; color: var(--muted); font-weight: 500; padding: 8px 0 4px; }
+.cbapp .list-row { flex-wrap: nowrap; align-items: flex-start; gap: 10px; padding: 9px 0; font-size: 14px; }
+.cbapp .list-row > :first-child { min-width: 0; flex: 1; }
+.cbapp .list-row > :last-child { flex-shrink: 0; }
+.cbapp .cb-hd + .list-row { border-top: 0; }
+.cbapp .cb-name { font-weight: 500; }
+.cbapp .amount, .cbapp .cb-amt, .cbapp .mono { font-family: inherit; font-variant-numeric: tabular-nums; }
+.cbapp .amount { font-weight: 500; }
+.cbapp .cb-big { font-family: inherit; font-variant-numeric: tabular-nums; font-size: 28px; font-weight: 600; letter-spacing: -0.01em; }
+.cbapp .tiny { font-size: 12px; }
+.cbapp .chip { padding: 1px 7px; border-radius: 10px; font-size: 11px; vertical-align: 1px; }
+.cbapp .btn { min-height: 40px; font-size: 14px; }
+.cbapp .cb-box { font-size: 13px; padding: 9px 12px; }
+.cbapp .cb-day .btn { min-height: 40px; }
+.cbapp .cbt { min-height: 52px; font-size: 12px; }
+.cbapp .cb-total { font-weight: 600; }
+
 /* Owner phone app (21 Nov 2026): a cashier's day folded into Collection, Expenses and Handed over. */
 .cb-fold > summary { list-style: none; cursor: pointer; }
 .cb-fold > summary::-webkit-details-marker { display: none; }
