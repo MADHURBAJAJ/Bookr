@@ -1,0 +1,37 @@
+# Builds the Bookr POS Windows app's installer on a Windows machine GitHub provides (22 Nov 2026), whenever desktop/ changes
+# on this branch, or by hand (Actions → Desktop app → Run workflow). The installer and its update files are kept as the
+# run's "bookr-pos-windows" download; they are then put online with `wrangler r2 object put` (see desktop/README.md).
+# No secret is used: the installer is not signed.
+name: Desktop app
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/hotel-restaurant-pos-plan-398aom]
+    paths: [desktop/**, .github/workflows/desktop.yml]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bookr-pos-windows
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.blockmap
+            desktop/dist/latest.yml
+          if-no-files-found: error
+          retention-days: 30

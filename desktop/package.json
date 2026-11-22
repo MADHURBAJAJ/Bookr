@@ -1,0 +1,53 @@
+{
+  "name": "bookr-pos-desktop",
+  "productName": "Bookr POS",
+  "version": "1.0.0",
+  "description": "Bookr POS for a Windows counter PC: full screen, and each print straight to its own printer.",
+  "main": "main.js",
+  "private": true,
+  "author": "Bookr POS",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.js && node --check preload.js && node --check settings-preload.js && node --check printers.js && node --check print.js",
+    "dist": "electron-builder --win nsis --x64 --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "6.3.9"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "co.thebajajgroup.bookrpos",
+    "productName": "Bookr POS",
+    "files": [
+      "main.js",
+      "print.js",
+      "preload.js",
+      "settings-preload.js",
+      "printers.html",
+      "printers.js",
+      "offline.html",
+      "icon.png"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Bookr POS",
+      "artifactName": "Bookr-POS-Setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://pos.thebajajgroup.co/api/desktop"
+      }
+    ]
+  }
+}

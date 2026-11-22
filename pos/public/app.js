@@ -275,6 +275,7 @@ actions.guestChoice = async (d) => {
   approvalCreds = { guestChoice: d.c };
   try { await actions[a.act](a.data); } finally { approvalCreds = null; }
 };
+actions.deskPrinters = () => window.bookrDesktop?.openPrinters();
 actions.approveNo = () => { ui.approval = null; ui.apPin = ''; rerender(); };
 actions.approveGo = async () => {
   const a = ui.approval;
@@ -1249,12 +1250,11 @@ actions.cnGo = async () => {
   flash = { kind: 'ok', text: r.creditNote.message }; route();
 };
 function printCreditNote(b, n) {
-  printArea.innerHTML = asHtml(html`<div class="receipt"><div class="hd">${b.entityName}</div>${b.gstRegistered ? html`<div class="c">GSTIN ${b.gstin}</div>` : ''}
+  printJobs([{ kind: 'bill', html: asHtml(html`<div class="receipt"><div class="hd">${b.entityName}</div>${b.gstRegistered ? html`<div class="c">GSTIN ${b.gstin}</div>` : ''}
     <div class="c">CREDIT NOTE</div><div class="rl"><span>${n.cnNo}</span><span>${dateTime(Date.now())}</span></div><div>Against bill ${b.billNo}</div><hr>
     <div class="rl"><span>Value</span><span>${rs(n.taxablePaise)}</span></div>
     ${n.cgstPaise ? html`<div class="rl"><span>CGST</span><span>${rs(n.cgstPaise)}</span></div><div class="rl"><span>SGST</span><span>${rs(n.sgstPaise)}</span></div>` : ''}
-    <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(n.totalPaise)}</span></div></div>`);
-  window.print();
+    <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(n.totalPaise)}</span></div></div>`) }]);
 }
 actions.printDone = () => printReceipt(ui.done);
 
@@ -1282,7 +1282,27 @@ function receipt(b) {
     ${b.status === 'void' ? html`<div class="c" style="font-weight:700">VOID</div>` : ''}
   </div>`;
 }
-function printReceipt(b) { printArea.innerHTML = asHtml(receipt(b)); window.print(); }
+function printReceipt(b) { printJobs([{ kind: 'bill', html: asHtml(receipt(b)) }]); }
+/**
+ * Prints slips (22 Nov 2026). In the Bookr POS Windows app each goes straight to its own printer, chosen on that PC:
+ * bills to the bill printer, each station's KOTs to that station's printer. In a browser: the print window, as before.
+ * If the app cannot print one (no printer chosen, printer off), the print window opens for it so nothing is lost.
+ */
+async function printJobs(jobs) {
+  if (!jobs.length) return;
+  const browserPrint = (list) => { printArea.innerHTML = list.map((j) => Array.from({ length: j.copies ?? 1 }, () => j.html).join('')).join(''); window.print(); };
+  if (!window.bookrDesktop?.print) { browserPrint(jobs); return; }
+  const failed = [];
+  for (const j of jobs) {
+    const r = await window.bookrDesktop.print(j).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    if (!r?.ok) failed.push({ j, error: r?.error });
+  }
+  if (failed.length) {
+    flash = { kind: 'warn', text: `Not printed: ${failed[0].error ?? 'the printer did not answer'}. Choose printers in Printers (Ctrl+Shift+P). The print window opens instead.` };
+    rerender();
+    browserPrint(failed.map((f) => f.j));
+  }
+}
 /** One KOT slip (counter or station printer). A cancel KOT says CANCEL in large type. */
 const kotSlip = (k) => {
   const cancel = k.lines.some((l) => l.cancelled);
@@ -1292,8 +1312,7 @@ const kotSlip = (k) => {
 };
 function printKots(kots) {
   if (!kots.length) return;
-  printArea.innerHTML = asHtml(html`${kots.flatMap((k) => Array.from({ length: k.copies ?? 1 }, () => kotSlip(k)))}`);
-  window.print();
+  printJobs(kots.map((k) => ({ kind: 'kot', station: k.station, copies: k.copies ?? 1, html: asHtml(kotSlip(k)) })));
 }
 /** Where each KOT went, for the counter: "KOT 12 Kitchen (printed there), 13 Tandoor (on its screen), 14 Bar (printed here)". */
 const kotSummary = (kots) => `KOT ${kots.map((k) => `${k.kotNo} ${k.station} (${k.printAt === 'counter' ? 'printed here' : k.printAt === 'station' ? 'printed there' : 'on its screen'})`).join(', ')}.`;
@@ -1916,10 +1935,9 @@ actions.repGo = () => go(`#/reports/${ui.repTab ?? 'sales'}/${ui.from}_${ui.to}`
 actions.statement = async (d) => { ui.statement = await api('GET', `${B()}/debtors/${d.id}`); rerender(); };
 actions.printStatement = () => {
   const st = ui.statement; let bal = 0;
-  printArea.innerHTML = asHtml(html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">STATEMENT</div><div>${st.account.name}</div><hr>
+  printJobs([{ kind: 'bill', html: asHtml(html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">STATEMENT</div><div>${st.account.name}</div><hr>
     ${st.entries.map((e) => { bal += e.amountPaise; return html`<div class="rl"><span>${dateTime(e.at)} ${e.billNo ?? e.kind}</span><span>${rs(e.amountPaise)}</span></div>`; })}
-    <hr><div class="rl" style="font-weight:700"><span>Balance</span><span>${rs(bal)}</span></div></div>`);
-  window.print();
+    <hr><div class="rl" style="font-weight:700"><span>Balance</span><span>${rs(bal)}</span></div></div>`) }]);
 };
 
 // ---------- stock (Owner and manager)
@@ -2887,7 +2905,9 @@ async function settingsScreen(tab = 'menu') {
         ${['manager', 'owner'].includes(ui.sRole) ? html`<label class="f">Email<input class="in" type="email" data-model="sEmail" value="${ui.sEmail ?? ''}"></label><label class="f">Password (12+ characters)<input class="in" type="password" data-model="sPassword" autocomplete="new-password"></label>` : ''}
         ${ui.editStaff ? html`<label class="f">Status<select class="in" data-model="sActive"><option value="yes">Active</option><option value="no" ${ui.sActive === 'no' ? 'selected' : ''}>Inactive (cannot sign in)</option></select></label>` : ''}
         <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
-    if (tab === 'device') body = html`<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}
+    if (tab === 'device') body = html`${window.bookrDesktop ? html`<section class="panel" style="margin-bottom:16px"><h2>Printers on this PC</h2>
+      <p class="quiet small">This PC runs the Bookr POS Windows app (version ${window.bookrDesktop.version || '1'}): bills and each station's KOTs print straight to their own printers.</p>
+      <button class="btn pri" type="button" data-act="deskPrinters">Choose printers</button></section>` : ''}<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Device</th><th>Added</th><th></th></tr></thead><tbody>
         ${ui.devices.map((d) => html`<tr><td>${d.name}</td><td>${dateTime(d.createdAt)}</td><td>${d.revokedAt ? 'Removed' : iconBtn('revoke', d.id, 'trash', `Remove ${d.name}`, 'danger')}</td></tr>`)}</tbody></table></div>
       <form class="row"><label class="f grow">Name for this device<input class="in" data-model="dName" placeholder="Billing counter"></label><button class="btn pri" type="submit" data-act="addDevice" data-submit>Make this a counter device</button></form></section>`;
