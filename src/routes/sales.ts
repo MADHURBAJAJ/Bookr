@@ -11,7 +11,7 @@ import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
 import { autoTick } from '../autoTick';
-import { completeLateNumbers } from '../numberFix';
+import { completeLateNumbers, recheckDay } from '../numberFix';
 import { shiftSlips } from '../slips';
 import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
@@ -1173,9 +1173,11 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/auto-tick', requireRole('r
   const day = c.req.param('day');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Day must be YYYY-MM-DD.');
   try {
-    return c.json({ ticked: await autoTick(c.env.DB, c.get('businessId'), day) });
+    // The page re-check first (numbers, payment cells), then the ticks: a line Bookr just changed is not ticked.
+    const fixed = await recheckDay(c.env.DB, c.get('businessId'), day);
+    return c.json({ fixed, ticked: await autoTick(c.env.DB, c.get('businessId'), day) });
   } catch (e) {
-    if (isShiftConfirmed(e)) return c.json({ ticked: 0 });
+    if (isShiftConfirmed(e)) return c.json({ fixed: 0, ticked: 0 });
     throw e;
   }
 });

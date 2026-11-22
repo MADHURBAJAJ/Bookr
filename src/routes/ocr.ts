@@ -6,7 +6,8 @@ import { fail, isUuid } from '../http';
 import { HTTPException } from 'hono/http-exception';
 import { istDay, istToMs } from '../time';
 import { DEFAULT_OCR_MODEL, OcrError, readWithClaude, type PageImage } from '../claude';
-import { asReading, columnTotals, type ColumnTotals, draftRegisterRows, TOTALS_INSTRUCTIONS, TotalsReading, expenseStatements, INSTRUCTIONS, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
+import { numberContext } from '../numberFix';
+import { asReading, columnTotals, type ColumnTotals, draftRegisterRows, TOTALS_INSTRUCTIONS, TotalsReading, expenseStatements, INSTRUCTIONS, registerInstructions, registerStatements, SCHEMAS, summaryStatement, type ReadableKind } from '../ocr';
 import { refreshComparisons } from '../sales';
 import { parsePaise } from '../money';
 import { loadHistory, loadItemHistory, loadParties } from '../parties';
@@ -133,7 +134,7 @@ async function readOnce(env: Env, bid: string, user: string, id: string): Promis
     const obj = await env.UPLOADS.get(u.storage_key);
     if (!obj) throw new OcrError(502, 'The stored file is missing. Delete this upload and upload the page again.');
     const page: PageImage = { bytes: new Uint8Array(await obj.arrayBuffer()), mediaType: (obj.httpMetadata?.contentType ?? 'image/jpeg') as PageImage['mediaType'] };
-    const { data, model } = await readWithClaude(env, page, INSTRUCTIONS[kind], SCHEMAS[kind]);
+    const { data, model } = await readWithClaude(env, page, kind === 'bill_register' ? registerInstructions(u.business_day) : INSTRUCTIONS[kind], SCHEMAS[kind]);
     const ctx = { db, businessId: bid, uploadId: u.id, day: u.business_day, model };
 
     if (!data.legible) {
@@ -147,11 +148,7 @@ async function readOnce(env: Env, bid: string, user: string, id: string): Promis
     let rows = 0;
     if (kind === 'bill_register') {
       // The shift's software bills, to complete short bill numbers; numbers already on the shift's other pages are taken.
-      const [sw, taken] = await Promise.all([
-        all<{ bill_no: string; amount_paise: number }>(db, 'SELECT bill_no, max(amount_paise) AS amount_paise FROM software_bills WHERE business_id = ? AND shift_day = ? GROUP BY bill_no', bid, u.business_day),
-        all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ? AND upload_id <> ?', bid, u.business_day, u.id),
-      ]);
-      const r = registerStatements(ctx, data as never, { softwareBills: sw.map((b) => b.bill_no), takenBills: taken.map((b) => b.bill_no), softwareAmounts: Object.fromEntries(sw.map((b) => [b.bill_no, b.amount_paise])) });
+      const r = registerStatements(ctx, data as never, await numberContext(db, bid, u.business_day, u.id));
       ({ statements, written, columns } = r);
       rows = asReading(data as never).rows.length;
     } else if (kind === 'expense_list') {
@@ -274,12 +271,8 @@ ocrRoutes.post('/businesses/:businessId/ocr/accuracy/:uploadId', requireRole('bu
     const obj = await c.env.UPLOADS.get(u.storage_key);
     if (!obj) throw new OcrError(502, 'The stored file is missing.');
     const page: PageImage = { bytes: new Uint8Array(await obj.arrayBuffer()), mediaType: (obj.httpMetadata?.contentType ?? 'image/jpeg') as PageImage['mediaType'] };
-    const { data, model } = await readWithClaude(c.env, page, INSTRUCTIONS.bill_register, SCHEMAS.bill_register);
-    const [sw, taken] = await Promise.all([
-      all<{ bill_no: string; amount_paise: number }>(db, 'SELECT bill_no, max(amount_paise) AS amount_paise FROM software_bills WHERE business_id = ? AND shift_day = ? GROUP BY bill_no', bid, u.business_day),
-      all<{ bill_no: string }>(db, 'SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ? AND upload_id <> ?', bid, u.business_day, u.id),
-    ]);
-    const fresh = draftRegisterRows(asReading(data as never), { softwareBills: sw.map((b) => b.bill_no), takenBills: taken.map((b) => b.bill_no), softwareAmounts: Object.fromEntries(sw.map((b) => [b.bill_no, b.amount_paise])) });
+    const { data, model } = await readWithClaude(c.env, page, registerInstructions(u.business_day), SCHEMAS.bill_register);
+    const fresh = draftRegisterRows(asReading(data as never), await numberContext(db, bid, u.business_day, u.id));
     const byLine = new Map(fresh.map((x) => [x.line, x]));
     const ids = new Map(fresh.map((x) => [x.id, x]));
     const payKey = (ps: string[]) => JSON.stringify([...ps].sort());

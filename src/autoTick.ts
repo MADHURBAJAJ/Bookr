@@ -9,7 +9,7 @@ import { shiftView } from './sales';
  * - the line pays exactly what it says;
  * - for UPI or card, a bank credit or card machine payment equals the register's amount, and the software is at most
  *   ₹50 away (more than that is a discount someone has to explain); for cash, the software is at most ₹5 away (rounding).
- * A line a person has unticked is never ticked again by Bookr. Nothing on a saved shift changes.
+ * A line a person has unticked is never ticked again by Bookr, nor one whose number Bookr completed (23 Nov 2026). Nothing on a saved shift changes.
  */
 export const UPI_GAP_PAISE = 5000;
 export const CASH_GAP_PAISE = 500;
@@ -50,6 +50,10 @@ export async function linesToTick(db: DB, businessId: string, day: string): Prom
   // A person unticked it: theirs from then on.
   const ids = out.map((x) => x.rowId);
   const untouchable = new Set<string>();
+  // A number Bookr completed, a payment it took off, or a line crossed out on the page: a person checks it first.
+  (await all<{ id: string }>(db, `SELECT id FROM register_rows WHERE business_id = ? AND shift_day = ? AND status = 'draft'
+    AND (json_extract(ocr_original, '$.completedFrom') IS NOT NULL OR json_extract(ocr_original, '$.struck') = 1 OR json_extract(ocr_original, '$.dropped') IS NOT NULL)`,
+    businessId, day)).forEach((r) => untouchable.add(r.id));
   for (let i = 0; i < ids.length; i += 90) {
     const part = ids.slice(i, i + 90);
     const rows = await all<{ rowId: string }>(db, `SELECT DISTINCT row_id AS rowId FROM audit_log

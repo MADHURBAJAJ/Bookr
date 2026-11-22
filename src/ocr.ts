@@ -33,6 +33,8 @@ export const RegisterReading = z.object({
     unclear: Unclear,
     /** Bookr's own (never asked of Claude): words or a discount found in a payment cell and taken out of the payment. */
     payment_notes: z.array(z.string()).optional(),
+    /** Bookr's own: the whole line is crossed out on the page. */
+    struck: z.boolean().optional(),
   })),
 });
 
@@ -49,6 +51,7 @@ export const RegisterGrid = z.object({
     cells: z.array(z.string().nullable()).describe('One entry per heading, in the same order: the cell exactly as written. null if the cell is blank or holds only a dash.'),
     paid_with_line: z.number().int().nullable().describe('If this bill has no payment of its own because one amount written on another line (often joined by a bracket or brace across rows) pays for several bills, the "line" where that amount is written. Otherwise null.'),
     unclear_columns: z.array(z.string()).describe('Headings of the cells on this line you could not read with confidence.'),
+    struck: z.boolean().describe('true only if the whole line is crossed out or struck through on the page (a cancelled entry). Otherwise false.'),
   })),
   total_cells: z.array(z.string().nullable()).nullable().describe('The total line at the bottom of the page (often marked "Total"), one entry per heading in the same order: the total exactly as written under that heading, null where none is written. null if the page has no total line. Do not include it in "lines".'),
 });
@@ -89,6 +92,8 @@ Write the bill type cell as written (for example "F&B", "Room"). A discount writ
 Sometimes one amount pays for several bills: it is written once, often with a bracket or brace joining those lines. Keep the amount in the cell where it is written, leave the other lines' payment cells null, and set their "paid_with_line" to the line where it is written. Otherwise "paid_with_line" is null.
 List in "unclear_columns" the headings of any cells on that line you could not read with confidence.
 For every line also give "y": where the middle of that line is, as a percentage of the page height from the top of the upright page.
+Bill numbers are copied as one run of digits, never as a date: write 26111115, not 26/11/15. Count repeated digits (such as 1111) one by one.
+If a whole line is crossed out or struck through, still give it, with "struck" true.
 If the page ends with a total line, it is not a bill: leave it out of "lines" and give its cells in "total_cells", one per heading (null where no total is written under that heading). Put the overall total of the payments in "page_total".
 ${COMMON}`,
   expense_list: `This is a handwritten list of cash expenses for one day. Each line has an item and an amount.
@@ -102,6 +107,20 @@ ${COMMON}`,
 } as const;
 
 export type ReadableKind = keyof typeof INSTRUCTIONS;
+
+/**
+ * The shift's dates, told to Claude before it reads a register page (approved 23 Nov 2026): new POS numbers are the
+ * date as YYMMDD and a running number with no leading zeros, so on the 11 Nov shift they start 261111, or 261112 after
+ * midnight. Most misread numbers on 11 Nov dropped a 1 of "1111" or were written as dates.
+ */
+export function registerInstructions(day: string): string {
+  const yymmdd = (d: string) => d.slice(2, 4) + d.slice(5, 7) + d.slice(8, 10);
+  const next = new Date(`${day}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const a = yymmdd(day), b = yymmdd(next.toISOString().slice(0, 10));
+  return `${INSTRUCTIONS.bill_register}
+On this page most bill numbers are the date followed by a running number with no leading zeros: they start ${a}, or ${b} for bills after midnight (for example ${a}15, or ${a}2 for the second bill of the day). Some older bills have 6-digit numbers starting 14 or 15. Copy each number digit for digit as written; this is only to help you count repeated digits.`;
+}
 // Only the total line of a register page, for pages read before totals were read with the rest.
 export const TotalsReading = z.object({
   legible: z.boolean(),
@@ -122,7 +141,9 @@ interface Ctx { db: DB; businessId: string; uploadId: string; day: string; model
 const base = (ctx: Ctx, orientation: string) => ({ engine: 'claude_vision', model: ctx.model, orientation, readAt: now() });
 
 type Reading = z.infer<typeof RegisterReading>;
-type Grid = z.infer<typeof RegisterGrid>;
+type GridStrict = z.infer<typeof RegisterGrid>;
+// Grids read before 23 Nov 2026 have no "struck".
+type Grid = Omit<GridStrict, 'lines'> & { lines: (Omit<GridStrict['lines'][number], 'struck'> & { struck?: boolean })[] };
 type Role = 'line' | 'bill_no' | 'amount' | 'type' | 'discount' | 'cash' | 'upi' | 'card' | 'remarks' | null;
 
 /** What a printed register heading holds. Unknown headings (closure time and the like) are ignored. */
@@ -157,8 +178,15 @@ const blank = (v: string | null | undefined) => v == null || /^[\s\-–—_.]*$/
  * "Paid"): only a number is a payment. "Disc"/"Dis" with a number is a discount, other words are remarks. A cell of
  * digits and signs only is left as it was (e.g. "1000+500", two payments in one column).
  */
-export function splitPaymentCell(raw: string): { amount: string | null; discount: string | null; note: string | null } {
+export function splitPaymentCell(raw: string, bill?: string | null): { amount: string | null; discount: string | null; note: string | null } {
   const v = raw.replace(/₹|rs\.?/gi, '').trim();
+  // "4k" or "4ok" is ₹4,000 only when that is the bill: otherwise left for a person (23 Nov 2026).
+  const k = v.match(/^(\d+(?:\.\d+)?)\s*(?:k|ok|0k)$/i);
+  if (k) {
+    const thousands = Math.round(Number(k[1]) * 1000);
+    const b = bill ? parsePaise(bill) : null;
+    return b !== null && b === thousands * 100 ? { amount: String(thousands), discount: null, note: null } : { amount: null, discount: null, note: raw };
+  }
   if (!/[a-z()]/i.test(v)) return { amount: raw, discount: null, note: null };
   let rest = v;
   let discount: string | null = null;
@@ -200,7 +228,7 @@ export function gridToReading(g: Grid): Reading {
         if (r !== 'cash' && r !== 'upi' && r !== 'card') return [];
         const v = l.cells[i];
         if (blank(v)) return [];
-        const cut = splitPaymentCell(v!.trim());
+        const cut = splitPaymentCell(v!.trim(), cell('amount'));
         if (cut.discount) cellDiscount ??= cut.discount;
         if (cut.note) notes.push(cut.note);
         if (cut.discount && !cut.note) notes.push(`Disc ${cut.discount}`);
@@ -215,7 +243,7 @@ export function gridToReading(g: Grid): Reading {
       const inRemark = remarks?.match(/\bdis(?:c(?:ount)?)?\.?\s*[:=\-]?\s*(?:rs\.?|₹)?\s*(\d+(?:\.\d+)?)/i);
       if (!discount && inRemark) discount = inRemark[1];
       return { line: l.line, bill_no: cell('bill_no'), bill_type: typeOf(cell('type')), amount: cell('amount'), discount, payments,
-        remarks, paid_with_line: l.paid_with_line, unclear: [...unclear], ...(notes.length ? { payment_notes: notes } : {}) };
+        remarks, paid_with_line: l.paid_with_line, unclear: [...unclear], ...(notes.length ? { payment_notes: notes } : {}), ...(l.struck ? { struck: true } : {}) };
     }),
   };
 }
@@ -251,7 +279,14 @@ export interface DraftRow {
   id: string; line: number; read: Reading['rows'][number]; billNo: string; amt: number | null; disc: number | null; tip: number;
   pays: { column: string; mode: 'cash' | 'upi' | 'card'; paise: number | null }[];
   unclear: Set<string>; inferred: string[]; paidWith: string | null; completedFrom?: string;
+  /** Payments far larger than the bill (a cell misread, "100815" on a ₹2,700 bill): not taken, shown to a person. */
+  dropped?: { column: string; paise: number }[];
 }
+
+/** A payment more than this many times the bill is not taken as a payment (23 Nov 2026). */
+export const IMPOSSIBLE_TIMES = 5;
+/** A tip larger than this is never filled in by Bookr: someone has to explain it (23 Nov 2026). */
+export const MAX_FILLED_TIP_PAISE = 5000;
 
 export interface Slip { direction: 'down' | 'up'; lines: number[] }
 
@@ -357,21 +392,68 @@ export function droppedRepeat(full: string, read: string): boolean {
   return false;
 }
 
-/**
- * The software bill a number read off the page stands for, when exactly one fits and is not on the register yet:
- * the end of a number ("3114" for 26103114), or a number missing one of a doubled digit, for the same amount.
- */
-export function completeBillNo(read: string, amounts: number[], software: Map<string, number>, used: Set<string>): { billNo: string } | 'several' | null {
-  if (!/^\d{2,}$/.test(read) || software.has(read)) return null;
-  const free = [...software.keys()].filter((b) => !used.has(b));
-  const ends = free.filter((b) => b.length > read.length && b.endsWith(read));
-  if (ends.length === 1) return { billNo: ends[0] };
-  if (ends.length > 1) return 'several';
-  const dropped = free.filter((b) => droppedRepeat(b, read) && amounts.includes(software.get(b)!));
-  return dropped.length === 1 ? { billNo: dropped[0] } : null;
+/** The digits of a number as read: "26/11/15" and "2611 115" are 261115. */
+export const billDigits = (read: string) => read.replace(/\D/g, '');
+
+/** True when every digit of `read` appears in `full` in the same order, with only digits missing. */
+export function onlyDigitsMissing(read: string, full: string): boolean {
+  let i = 0;
+  for (const ch of full) if (ch === read[i]) i++;
+  return i === read.length;
 }
 
-export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number> } = {}): DraftRow[] {
+/** One digit different, compared with the end of the full number ("1158" against 26111151). */
+export function oneDigitOff(read: string, full: string): boolean {
+  if (full.length < read.length) return false;
+  const tail = full.slice(full.length - read.length);
+  let d = 0;
+  for (let i = 0; i < read.length; i++) if (tail[i] !== read[i]) d++;
+  return d === 1;
+}
+
+export type NumberHit = { billNo: string; how: 'end' | 'missing' | 'digit' } | 'several' | null;
+
+/**
+ * The software bill a number read off the page stands for (approved 22 and 23 Nov 2026), when exactly one free bill fits:
+ * 1. the end of a number ("1131" for 26111131), the software at most ₹50 from the line's amount or payment;
+ * 2. digits missing, at most two (a doubled 1 read once, "26/11/15" for 26111115), the same amount;
+ * 3. one digit read wrong ("1158" for 26111151), the same amount.
+ * "Free" bills are the shift's software bills on no register line yet, and the previous shift's bills still missing
+ * on the register (a room paid the next day). Several bills fitting one step: left for a person.
+ * Without the software amounts (old callers), the end of a number is enough, as before.
+ */
+export function completeBillNo(read: string, amounts: number[], software: Map<string, number>, used: Set<string>, previous: Map<string, number> = new Map()): NumberHit {
+  const digits = billDigits(read);
+  if (digits.length < 2 || software.has(read) || software.has(digits)) return null;
+  const free = [...software].filter(([b]) => !used.has(b));
+  for (const [b, a] of previous) if (!used.has(b) && !software.has(b)) free.push([b, a]);
+  const near = (a: number, tol: number) => a < 0 || amounts.some((x) => x > 0 && Math.abs(x - a) <= tol);
+  const pick = (hits: [string, number][], how: 'end' | 'missing' | 'digit'): NumberHit => (hits.length === 1 ? { billNo: hits[0][0], how } : hits.length > 1 ? 'several' : null);
+  const ends = free.filter(([b, a]) => b.length > digits.length && b.endsWith(digits) && near(a, 5000));
+  if (ends.length) return pick(ends, 'end');
+  if (digits.length >= 5) {
+    const missing = free.filter(([b, a]) => b.length > digits.length && b.length - digits.length <= 2 && onlyDigitsMissing(digits, b) && a >= 0 && near(a, 100));
+    if (missing.length) return pick(missing, 'missing');
+  }
+  if (digits.length >= 4) {
+    const off = free.filter(([b, a]) => b.length >= digits.length && b.length - digits.length <= 4 && oneDigitOff(digits, b) && a >= 0 && near(a, 100));
+    if (off.length) return pick(off, 'digit');
+  }
+  return null;
+}
+
+/** "26/11/15" read on the 11 Nov shift, matching no bill: the shift's date and the running number, 26111115. */
+export function dateFormNumber(read: string, day: string | undefined): string | null {
+  const m = read.match(/^(\d{2})\s*[/.\-]\s*(\d{1,2})\s*[/.\-]\s*(\d{1,4})$/);
+  if (!m || !day) return null;
+  const [y, mo, d] = day.split('-');
+  if (m[1] !== y.slice(2) || Number(m[2]) !== Number(mo)) return null;
+  return `${y.slice(2)}${mo}${d}${Number(m[3])}`;
+}
+
+export interface DraftOpts { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number>; previousBills?: Record<string, number>; day?: string }
+
+export function draftRegisterRows(r: Reading, opts: DraftOpts = {}): DraftRow[] {
   const rows: DraftRow[] = r.rows.map((row) => {
     const unclear = new Set(row.unclear);
     const amt = amount(row.amount);
@@ -382,41 +464,39 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
     if (!row.bill_no) unclear.add('bill_no');
     // Most sales are F&B: an unreadable type is taken as F&B and shown as assumed, for a person to change if wrong.
     const assumedType = row.bill_type === 'unclear';
-    const pays = row.payments.map((p) => ({ column: p.column, mode: p.mode, paise: amount(p.amount) }));
+    let pays = row.payments.map((p) => ({ column: p.column, mode: p.mode, paise: amount(p.amount) }));
+    const dropped = amt !== null && amt > 0 ? pays.filter((p) => p.paise !== null && p.paise > IMPOSSIBLE_TIMES * amt).map((p) => ({ column: p.column, paise: p.paise! })) : [];
+    if (dropped.length) { pays = pays.filter((p) => !(p.paise !== null && p.paise > IMPOSSIBLE_TIMES * amt!)); unclear.add('payments'); }
     if (pays.some((p) => p.paise === null)) unclear.add('payments');
     // Words or a discount taken out of a payment cell: shown in amber for a person to check against the photo.
     const inferred = [...(assumedType ? ['bill_type'] : []), ...(row.payment_notes?.length ? ['payments'] : [])];
     return { id: newId(), line: row.line, read: row, billNo: row.bill_no?.replace(/\s+/g, '') ?? '' /* "26110 1103" is 261101103 */, amt, disc, tip: 0, pays, unclear,
-      inferred, paidWith: null };
+      inferred, paidWith: null, ...(dropped.length ? { dropped } : {}) };
   });
 
-  // Short bill numbers ("3114" for 26103114): completed when exactly one bill of the shift's software report ends
-  // with them and no other register line has it. Several candidates: left as written and marked unclear.
+  // Bill numbers that are not in the software report as read: completed to the one software bill they stand for
+  // (see completeBillNo), shown in amber. Several candidates: left as written and marked unclear.
   const sw = new Set(opts.softwareBills ?? []);
   if (sw.size) {
+    const amounts = new Map([...sw].map((b) => [b, opts.softwareAmounts?.[b] ?? -1]));
+    const previous = new Map(Object.entries(opts.previousBills ?? {}));
     const used = new Set([...(opts.takenBills ?? []), ...rows.map((x) => x.billNo).filter((b) => sw.has(b))]);
     for (const x of rows) {
-      if (!/^\d{2,}$/.test(x.billNo) || sw.has(x.billNo)) continue;
-      const found = [...sw].filter((b) => b.length > x.billNo.length && b.endsWith(x.billNo) && !used.has(b));
-      if (found.length === 1) {
-        x.completedFrom = x.billNo; x.billNo = found[0]; used.add(found[0]);
+      if (!x.billNo || sw.has(x.billNo)) continue;
+      const paid = x.pays.reduce((t, p) => t + (p.paise ?? 0), 0);
+      const hit = completeBillNo(x.billNo, [x.amt ?? -1, paid], amounts, used, previous);
+      if (hit && hit !== 'several') {
+        x.completedFrom = x.billNo; x.billNo = hit.billNo; used.add(hit.billNo);
+        x.unclear.delete('bill_no');
         x.inferred.push('bill_no');
-      } else if (found.length > 1) x.unclear.add('bill_no');
+      } else if (hit === 'several') x.unclear.add('bill_no');
     }
-    // A doubled digit read once ("261115" for 2611115): completed only to a software bill of the same amount.
-    if (opts.softwareAmounts) {
-      const amounts = new Map(Object.entries(opts.softwareAmounts));
-      for (const x of rows) {
-        if (x.completedFrom || !/^\d{3,}$/.test(x.billNo) || sw.has(x.billNo)) continue;
-        const paid = x.pays.reduce((t, p) => t + (p.paise ?? 0), 0);
-        const hit = completeBillNo(x.billNo, [x.amt ?? -1, paid], amounts, used);
-        if (hit && hit !== 'several') {
-          x.completedFrom = x.billNo; x.billNo = hit.billNo; used.add(hit.billNo);
-          x.unclear.delete('bill_no');
-          x.inferred.push('bill_no');
-        }
-      }
-    }
+  }
+  // A number written as a date ("26/11/15") that matched nothing: the shift's date and the running number, unclear.
+  for (const x of rows) {
+    if (x.completedFrom) continue;
+    const d = dateFormNumber(x.billNo, opts.day);
+    if (d) { x.completedFrom = x.billNo; x.billNo = d; x.unclear.add('bill_no'); x.inferred.push('bill_no'); }
   }
 
   // Bills paid together: a row pointing at the line where one shared payment is written. No chains.
@@ -466,6 +546,8 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
     const spread = onPayingRow({ id: x.id, amountPaise: x.amt }, members.map((m) => ({ id: m.id, amountPaise: m.amt! })), paid);
     if (!spread) continue;
     const gap = billed - paid;
+    // More paid than the bill by over ₹50: never filled in as a tip.
+    if (-gap > MAX_FILLED_TIP_PAISE) { x.unclear.add('payments'); continue; }
     const large = gap > 0 ? gap * 100 > LARGE_DISCOUNT_PCT * billed : -gap * 100 > LARGE_TIP_PCT * billed;
     if (large && !group.some((m) => explainedInRemark(m.read.remarks))) x.unclear.add('payments');
     for (const m of group) {
@@ -487,18 +569,19 @@ const gridOf = (data: Grid | Reading, line: number) => {
 };
 
 /** Statements that replace the page's draft register rows with the reading. */
-export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number> } = {}): { statements: D1PreparedStatement[]; written: number | null; columns: ColumnTotals | null } {
+export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: DraftOpts = {}): { statements: D1PreparedStatement[]; written: number | null; columns: ColumnTotals | null } {
   const t = now();
   const r = asReading(data);
   const statements: D1PreparedStatement[] = [stmt(ctx.db, 'DELETE FROM register_rows WHERE upload_id = ? AND status = ?', ctx.uploadId, 'draft')];
-  const rows = draftRegisterRows(r, opts);
+  const rows = draftRegisterRows(r, { day: ctx.day, ...opts });
   rows.forEach((x, i) => {
     statements.push(stmt(ctx.db, `INSERT INTO register_rows (id, business_id, upload_id, line_no, shift_day, bill_no, bill_type, amount_paise, discount_paise, tip_paise,
       paid_with_row_id, remarks, status, ocr_original, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
       x.id, ctx.businessId, ctx.uploadId, i + 1, ctx.day, x.billNo, x.read.bill_type === 'unclear' ? 'fnb' : x.read.bill_type,
       x.amt ?? 0, x.disc ?? 0, x.tip, null, x.read.remarks,
       JSON.stringify({ ...base(ctx, r.orientation), line: x.line, read: x.read, ...gridOf(data, x.line),
-        unclear: [...x.unclear], inferred: x.inferred, ...(x.completedFrom ? { completedFrom: x.completedFrom } : {}) }), t));
+        unclear: [...x.unclear], inferred: x.inferred, ...(x.completedFrom ? { completedFrom: x.completedFrom } : {}),
+        ...(x.dropped ? { dropped: x.dropped } : {}), ...(x.read.struck ? { struck: true } : {}) }), t));
     for (const p of x.pays) {
       if (p.paise === null) continue;
       statements.push(stmt(ctx.db, `INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at)

@@ -2143,7 +2143,7 @@ function autoTickBg(biz, day, redraw) {
   const at = location.hash;
   api('POST', `/businesses/${biz.id}/shifts/${day}/auto-tick`).then((r) => {
     const typing = document.activeElement?.matches?.('input:not([type=checkbox]), select, textarea');
-    if (redraw && r?.ticked && location.hash === at && !typing) route();
+    if (redraw && (r?.ticked || r?.fixed) && location.hash === at && !typing) route();
   }).catch(() => { /* the person ticks by hand */ });
 }
 
@@ -2501,6 +2501,14 @@ function rowIssues(r) {
     amber.push(html`${colHintText(ch)} <span class="chips"><button type="button" class="pickchip" data-setcol="${ch.paymentId}" title="Moves this payment to the ${ch.toLabel} column. Nothing else changes.">Change to ${ch.toLabel}</button></span>`);
   }
   if (inf.has('bill_no') && o.completedFrom) { flags.bill_no ??= 'amber'; amber.push(`Completed from "${o.completedFrom}" on the page`); }
+  // Crossed out on the page (23 Nov 2026): most likely a cancelled entry, not a bill.
+  if (o.struck && r.status !== 'checked') red.unshift(html`Crossed out on the page. Remove this line? <span class="chips"><button type="button" class="pickchip" data-copydel title="Deletes this line. If it is a real bill, leave it and tick it instead.">Remove</button></span>`);
+  // A payment far larger than the bill was not taken (23 Nov 2026): the cell was misread.
+  if (o.dropped?.length && r.status !== 'checked') {
+    flags.payments = 'red';
+    const short = r.amountPaise - (r.discountPaise ?? 0) - paidOf(r);
+    red.push(`${o.dropped.map((d) => `${d.column} read as ${rs(d.paise)}`).join(', ')}: far more than the bill, so not taken.${short > 0 ? ` ₹ ${rs(short)} is still to be paid on this line.` : ''} Check the photo.`);
+  }
   if (inf.has('bill_type')) flags.bill_type ??= 'amber'; // assumed F&B: only tinted
   // A group's discount filled by itself (13 Nov 2026): said in words, with Undo (a person's 0 then stays).
   if (o.autoGroupDiscount && r.discountPaise && !member) {
@@ -2758,8 +2766,25 @@ function wireFoot(biz, u) {
 }
 
 /** Fill button and the amber note: redrawn after every inline save. */
+/** The one bill number Bookr suggests for a row with the same amount (23 Nov 2026), or null. */
+function suggestedNumber(r) {
+  if (r.status === 'checked' || r.billMatch?.exact) return null;
+  const c = new Set([
+    ...(r.numberFlags ?? []).filter((f) => (f.kind === 'pending' || f.kind === 'pending_typo') && f.billNo).map((f) => f.billNo),
+    ...(r.billMatch?.options ?? []).filter((x) => x.amountMatches && !x.taken).map((x) => x.billNo),
+  ]);
+  c.delete(r.billNo);
+  return c.size === 1 ? [...c][0] : null;
+}
+/** Rows whose one suggestion is wanted by no other row. */
+function suggestedNumbers(u) {
+  const picks = u.rows.map((r) => [r, suggestedNumber(r)]).filter(([, b]) => b);
+  return picks.filter(([, b]) => picks.filter(([, x]) => x === b).length === 1);
+}
+
 function regToolsHtml(u, locked) {
   const slip = !locked && u.slip;
+  const sugg = locked ? [] : suggestedNumbers(u);
   const cslip = !locked && u.columnSlip;
   return html`
     ${slip ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
@@ -2770,6 +2795,9 @@ function regToolsHtml(u, locked) {
         <span><strong>The ${cslip.column} column looks read one line ${cslip.direction === 'down' ? 'low' : 'high'}</strong> from line ${cslip.lines[0]} to line ${cslip.lines.at(-1)}: on ${cslip.clear} lines its amount is the bill of the line ${cslip.direction === 'down' ? 'above' : 'below'}.
         Lines paid in another column keep their own payment. Each moved line stays in amber for you to tick.</span>
         <button class="btn" type="button" id="mvcol" data-col="${cslip.column}" data-dir="${cslip.direction}">Move ${cslip.column} ${cslip.direction === 'down' ? 'up' : 'down'} one line</button></div>` : ''}
+    ${sugg.length >= 2 ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <span><strong>${sugg.length} lines look like software bills with a digit or two off</strong>, at the same amount: ${sugg.map(([r, b]) => html`line ${r.lineNo} → <span class="mono">${b}</span>`).reduce((a, x, i) => (i ? html`${a}, ${x}` : x), '')}. Check them against the photo.</span>
+        <button class="btn" type="button" id="useall">Use all ${sugg.length} suggested numbers</button></div>` : ''}
     ${!locked && [...new Set(u.rows.map((r) => headOf(r) ?? r))].some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
         && [r, ...membersOf(r)].every((m) => (!m.discountPaise && !m.tipPaise) || inferredOf(m.ocrOriginal).has('discount')))
         ? html`<div class="form-row" style="align-items:center;gap:8px"><button class="btn plain" type="button" id="filldisc" style="min-height:32px;font-size:13px"
@@ -3269,6 +3297,7 @@ function wireInlineRows(biz, u, strip) {
   const bind = (tr) => {
     tr.querySelectorAll('[data-f]').forEach((el) => el.addEventListener('change', () => save(tr, el)));
     tr.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', () => { const bn = val(tr, 'billNo'); bn.value = b.dataset.pick; save(tr, bn); }));
+    tr.addEventListener('bookr-save', (e) => save(tr, e.detail));
     tr.querySelector('[data-unlink]')?.addEventListener('click', () => { tr.dataset.unlinked = '1'; save(tr, val(tr, 'amount')); });
     tr.querySelector('[data-usehint]')?.addEventListener('click', (e) => {
       const b = e.currentTarget;
@@ -3484,7 +3513,19 @@ function wireRegister(biz, u) {
     if (r) strip.show(r);
     document.querySelectorAll('#regtable tbody tr[data-row]').forEach((tr) => tr.addEventListener('click', () => { const x = u.rows.find((y) => y.id === tr.dataset.row); if (x) strip.show(x); }));
   }
-  wireFill = () => { wireUnslip(); wireFillBtn(); wireMoveCol(); };
+  wireFill = () => { wireUnslip(); wireFillBtn(); wireMoveCol(); wireUseAll(); };
+  // Use all suggested numbers (23 Nov 2026): each row's one same-amount suggestion, saved one after another.
+  const wireUseAll = () => document.getElementById('useall')?.addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    const picks = suggestedNumbers(u);
+    for (const [r, b] of picks) {
+      const tr = document.querySelector(`#regtable tr[data-row="${r.id}"]`);
+      const bn = tr && tr.querySelector('[data-f="billNo"]');
+      if (!bn) continue;
+      bn.value = b;
+      tr.dispatchEvent(new CustomEvent('bookr-save', { detail: bn }));
+    }
+  });
   const wireMoveCol = () => document.getElementById('mvcol')?.addEventListener('click', async (e) => {
     const { col, dir } = e.currentTarget.dataset;
     e.currentTarget.disabled = true;

@@ -35,10 +35,11 @@ describe('Bill numbers missing a doubled digit', () => {
     expect(droppedRepeat('26111110', '2611110')).toBe(true);
     expect(droppedRepeat('2612345', '261345')).toBe(false);
     const sw = new Map([['2611115', 47000], ['26111114', 55600], ['26111112', 23000]]);
-    expect(completeBillNo('261115', [47000], sw, new Set())).toEqual({ billNo: '2611115' });
+    expect(completeBillNo('261115', [47000], sw, new Set())).toMatchObject({ billNo: '2611115' });
     expect(completeBillNo('2611114', [23000], sw, new Set())).toBeNull(); // 26111114 is ₹556
     expect(completeBillNo('2611114', [55600], sw, new Set(['26111114']))).toBeNull(); // already on the register
-    expect(completeBillNo('1115', [1], sw, new Set())).toEqual({ billNo: '2611115' }); // the end of a number
+    expect(completeBillNo('1115', [47000], sw, new Set())).toMatchObject({ billNo: '2611115' }); // the end of a number, near amount
+    expect(completeBillNo('1115', [1], sw, new Set())).toBeNull(); // far amount: a suggestion only
   });
 });
 
