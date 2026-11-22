@@ -31,6 +31,8 @@ export const RegisterReading = z.object({
     remarks: z.string().nullable(),
     paid_with_line: z.number().int().nullable().describe('If this bill has no payment of its own because one amount written on another line (often joined by a bracket or brace across rows) pays for several bills, the line number where that amount is written. Otherwise null.'),
     unclear: Unclear,
+    /** Bookr's own (never asked of Claude): words or a discount found in a payment cell and taken out of the payment. */
+    payment_notes: z.array(z.string()).optional(),
   })),
 });
 
@@ -150,6 +152,27 @@ const typeOf = (v: string | null): Reading['rows'][number]['bill_type'] => {
 };
 const blank = (v: string | null | undefined) => v == null || /^[\s\-–—_.]*$/.test(v) || /^nil$/i.test(v.trim());
 
+/**
+ * A payment cell with writing besides the amount (audit of 2-9 Nov 2026: "(Disc 71)", "2700 Discont", "1000 Azim",
+ * "Paid"): only a number is a payment. "Disc"/"Dis" with a number is a discount, other words are remarks. A cell of
+ * digits and signs only is left as it was (e.g. "1000+500", two payments in one column).
+ */
+export function splitPaymentCell(raw: string): { amount: string | null; discount: string | null; note: string | null } {
+  const v = raw.replace(/₹|rs\.?/gi, '').trim();
+  if (!/[a-z()]/i.test(v)) return { amount: raw, discount: null, note: null };
+  let rest = v;
+  let discount: string | null = null;
+  const d = rest.match(/\bdis(?:c(?:ount|ont|nt)?)?\b\.?\s*[-:=]?\s*(\d[\d,]*(?:\.\d+)?)/i);
+  if (d) { discount = d[1].replace(/,/g, ''); rest = (rest.slice(0, d.index) + rest.slice(d.index! + d[0].length)); }
+  // A number in brackets alone, e.g. "(81)", is not a payment: kept as a remark for a person.
+  const lead = /^\(/.test(rest.trim()) ? null : rest.trim().match(/^(\d[\d,]*(?:\.\d+)?)(?![\d])/);
+  let amount: string | null = null;
+  if (lead) { amount = lead[1].replace(/,/g, ''); rest = rest.trim().slice(lead[0].length); }
+  const note = rest.replace(/[()]/g, ' ').replace(/^[\s\-–=:,.]+|[\s\-–=:,.]+$/g, '').replace(/\s+/g, ' ').trim();
+  const keep = note && !/^dis(c(ount|ont|nt)?)?\.?$/i.test(note) ? (/^\d/.test(note) && !amount && !discount ? `(${note})` : note) : null;
+  return { amount, discount, note: keep || (!amount && !discount ? raw : null) };
+}
+
 /** The grid Claude read → bill rows: each cell is taken from the column whose heading names it. */
 export function gridToReading(g: Grid): Reading {
   let headings = g.headings;
@@ -171,20 +194,28 @@ export function gridToReading(g: Grid): Reading {
         if (f) unclear.add(f);
       }
       const cell = (r: Role) => { const i = roles.indexOf(r); const v = i >= 0 ? l.cells[i] ?? null : null; return blank(v) ? null : v!.trim(); };
+      const notes: string[] = [];
+      let cellDiscount: string | null = null;
       const payments = roles.flatMap((r, i) => {
         if (r !== 'cash' && r !== 'upi' && r !== 'card') return [];
         const v = l.cells[i];
         if (blank(v)) return [];
-        const paise = parsePaise(v!.trim());
+        const cut = splitPaymentCell(v!.trim());
+        if (cut.discount) cellDiscount ??= cut.discount;
+        if (cut.note) notes.push(cut.note);
+        if (cut.discount && !cut.note) notes.push(`Disc ${cut.discount}`);
+        if (!cut.amount) return [];
+        const paise = parsePaise(cut.amount);
         if (paise === 0) return [];
-        return [{ column: headings[i], mode: r, amount: v!.trim() }];
+        return [{ column: headings[i], mode: r, amount: cut.amount }];
       });
-      const remarks = cell('remarks');
-      let discount = cell('discount');
+      const written = cell('remarks');
+      const remarks = [written, ...notes.filter((n) => !/^Disc \d/.test(n))].filter(Boolean).join(' · ') || null;
+      let discount = cell('discount') ?? cellDiscount;
       const inRemark = remarks?.match(/\bdis(?:c(?:ount)?)?\.?\s*[:=\-]?\s*(?:rs\.?|₹)?\s*(\d+(?:\.\d+)?)/i);
       if (!discount && inRemark) discount = inRemark[1];
       return { line: l.line, bill_no: cell('bill_no'), bill_type: typeOf(cell('type')), amount: cell('amount'), discount, payments,
-        remarks, paid_with_line: l.paid_with_line, unclear: [...unclear] };
+        remarks, paid_with_line: l.paid_with_line, unclear: [...unclear], ...(notes.length ? { payment_notes: notes } : {}) };
     }),
   };
 }
@@ -254,8 +285,93 @@ export function findSlip(rows: { line: number; amt: number | null; paid: number 
   return best;
 }
 
+export interface ColumnSlip { column: string; direction: 'down' | 'up'; holders: number[]; clear: number }
+
+/**
+ * One payment column read a line off (audit of 10 Nov 2026, page 4: from line 4 to 21 each "UPI Bank 2" amount was the
+ * bill of the line above). Unlike findSlip, only that column moves: a line paid in another column, or with nothing in
+ * this one, does not break the run. Needs at least three lines whose amount there fits the neighbour's bill and not
+ * their own. Rows are in page order; "holders" are the indexes whose value belongs to the neighbour.
+ */
+export function findColumnSlip(rows: { amt: number | null; cols: Record<string, number>; grouped: boolean }[]): ColumnSlip | null {
+  const fits = (paid: number | undefined, amt: number | null) => paid !== undefined && amt !== null && amt > 0
+    && paid * 100 >= amt * (100 - LARGE_DISCOUNT_PCT) && paid * 100 <= amt * (100 + LARGE_TIP_PCT);
+  const labels = [...new Set(rows.flatMap((r) => Object.keys(r.cols)))];
+  let best: ColumnSlip | null = null;
+  for (const column of labels) {
+    for (const direction of ['down', 'up'] as const) {
+      let holders: number[] = [];
+      let clear = 0;
+      const close = () => {
+        if (clear >= 3 && (!best || clear > best.clear)) best = { column, direction, holders: [...holders], clear };
+        holders = []; clear = 0;
+      };
+      for (let i = 0; i < rows.length; i++) {
+        const j = direction === 'down' ? i - 1 : i + 1;
+        const bill = rows[j];
+        const h = rows[i];
+        if (!bill || h.grouped || bill.grouped) { close(); continue; }
+        const v = h.cols[column];
+        if (v === undefined) { if (holders.length) continue; else continue; }
+        if (fits(v, bill.amt)) { holders.push(i); if (!fits(v, h.amt)) clear++; }
+        else close();
+      }
+      close();
+    }
+  }
+  return best;
+}
+
+/**
+ * The column's amounts after moving them back one line: each line of the run takes the one read on its neighbour,
+ * except a line already paid in full in another column, which takes none. Index → new amount (undefined: none).
+ */
+export function columnSlipMoves(rows: { amt: number | null; cols: Record<string, number> }[], slip: ColumnSlip): Map<number, number | undefined> {
+  const { column, direction, holders } = slip;
+  const lo = Math.min(...holders), hi = Math.max(...holders);
+  const range = direction === 'down' ? [lo - 1, hi] : [lo, hi + 1];
+  const paidElsewhere = (r: (typeof rows)[number]) => {
+    const other = Object.entries(r.cols).filter(([k]) => k !== column).reduce((t, [, v]) => t + v, 0);
+    return other > 0 && r.amt !== null && other * 100 >= r.amt * 80 && other * 100 <= r.amt * 125;
+  };
+  const out = new Map<number, number | undefined>();
+  for (let k = range[0]; k <= range[1]; k++) {
+    const src = direction === 'down' ? k + 1 : k - 1;
+    const v = src >= range[0] && src <= range[1] ? rows[src]?.cols[column] : undefined;
+    out.set(k, paidElsewhere(rows[k]) ? undefined : v);
+  }
+  return out;
+}
+
 /** Bill rows for a reading: values, bills paid together, short bill numbers completed, differences filled or marked. */
-export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; takenBills?: string[] } = {}): DraftRow[] {
+/**
+ * A bill number read with one digit too few where the same digit is written twice in a row (audit of 30 Oct-10 Nov
+ * 2026: "261115" for 2611115, "2611110" for 26111110, "26110102" for 261101102): the software number it can be.
+ */
+export function droppedRepeat(full: string, read: string): boolean {
+  if (full.length !== read.length + 1) return false;
+  for (let i = 0; i < full.length; i++) {
+    if (full[i] !== full[i - 1] && full[i] !== full[i + 1]) continue;
+    if (full.slice(0, i) + full.slice(i + 1) === read) return true;
+  }
+  return false;
+}
+
+/**
+ * The software bill a number read off the page stands for, when exactly one fits and is not on the register yet:
+ * the end of a number ("3114" for 26103114), or a number missing one of a doubled digit, for the same amount.
+ */
+export function completeBillNo(read: string, amounts: number[], software: Map<string, number>, used: Set<string>): { billNo: string } | 'several' | null {
+  if (!/^\d{2,}$/.test(read) || software.has(read)) return null;
+  const free = [...software.keys()].filter((b) => !used.has(b));
+  const ends = free.filter((b) => b.length > read.length && b.endsWith(read));
+  if (ends.length === 1) return { billNo: ends[0] };
+  if (ends.length > 1) return 'several';
+  const dropped = free.filter((b) => droppedRepeat(b, read) && amounts.includes(software.get(b)!));
+  return dropped.length === 1 ? { billNo: dropped[0] } : null;
+}
+
+export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number> } = {}): DraftRow[] {
   const rows: DraftRow[] = r.rows.map((row) => {
     const unclear = new Set(row.unclear);
     const amt = amount(row.amount);
@@ -268,8 +384,10 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
     const assumedType = row.bill_type === 'unclear';
     const pays = row.payments.map((p) => ({ column: p.column, mode: p.mode, paise: amount(p.amount) }));
     if (pays.some((p) => p.paise === null)) unclear.add('payments');
+    // Words or a discount taken out of a payment cell: shown in amber for a person to check against the photo.
+    const inferred = [...(assumedType ? ['bill_type'] : []), ...(row.payment_notes?.length ? ['payments'] : [])];
     return { id: newId(), line: row.line, read: row, billNo: row.bill_no?.replace(/\s+/g, '') ?? '' /* "26110 1103" is 261101103 */, amt, disc, tip: 0, pays, unclear,
-      inferred: assumedType ? ['bill_type'] : [], paidWith: null };
+      inferred, paidWith: null };
   });
 
   // Short bill numbers ("3114" for 26103114): completed when exactly one bill of the shift's software report ends
@@ -284,6 +402,20 @@ export function draftRegisterRows(r: Reading, opts: { softwareBills?: string[]; 
         x.completedFrom = x.billNo; x.billNo = found[0]; used.add(found[0]);
         x.inferred.push('bill_no');
       } else if (found.length > 1) x.unclear.add('bill_no');
+    }
+    // A doubled digit read once ("261115" for 2611115): completed only to a software bill of the same amount.
+    if (opts.softwareAmounts) {
+      const amounts = new Map(Object.entries(opts.softwareAmounts));
+      for (const x of rows) {
+        if (x.completedFrom || !/^\d{3,}$/.test(x.billNo) || sw.has(x.billNo)) continue;
+        const paid = x.pays.reduce((t, p) => t + (p.paise ?? 0), 0);
+        const hit = completeBillNo(x.billNo, [x.amt ?? -1, paid], amounts, used);
+        if (hit && hit !== 'several') {
+          x.completedFrom = x.billNo; x.billNo = hit.billNo; used.add(hit.billNo);
+          x.unclear.delete('bill_no');
+          x.inferred.push('bill_no');
+        }
+      }
     }
   }
 
@@ -355,7 +487,7 @@ const gridOf = (data: Grid | Reading, line: number) => {
 };
 
 /** Statements that replace the page's draft register rows with the reading. */
-export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softwareBills?: string[]; takenBills?: string[] } = {}): { statements: D1PreparedStatement[]; written: number | null; columns: ColumnTotals | null } {
+export function registerStatements(ctx: Ctx, data: Grid | Reading, opts: { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number> } = {}): { statements: D1PreparedStatement[]; written: number | null; columns: ColumnTotals | null } {
   const t = now();
   const r = asReading(data);
   const statements: D1PreparedStatement[] = [stmt(ctx.db, 'DELETE FROM register_rows WHERE upload_id = ? AND status = ?', ctx.uploadId, 'draft')];

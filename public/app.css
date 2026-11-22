@@ -202,6 +202,7 @@ body.photo-side .strip { display: none; }
 .pickchip { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 1px 8px; font-size: 12px; cursor: pointer; min-height: 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 .pickchip:hover { border-color: var(--teal); background: #F0FDFA; }
 .regtable td.tick { text-align: center; }
+.regtable td.tick .autotick { display: block; font-size: 10px; color: #15803D; line-height: 1; }
 .regtable td.tick input { width: 22px; height: 22px; min-height: 0; cursor: pointer; accent-color: #16A34A; }
 .regtable td.paidwith { font-size: 12px; color: var(--muted, #6B7280); }
 .regtable tr.row-checked td { background: #F7FAF8; }

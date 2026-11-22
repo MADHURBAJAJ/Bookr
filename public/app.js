@@ -2131,6 +2131,22 @@ async function readPages(biz, items) {
 
 // ---------- Review
 
+// Ticked by Bookr (approved 22 Nov 2026): lines where the register, the software and the money agree are ticked on the
+// server, in the background, so the page opens at once. The page is drawn again only when something was ticked and
+// nobody is typing in it; otherwise the ticks show the next time it opens.
+const autoTickAt = new Map();
+function autoTickBg(biz, day, redraw) {
+  if (!biz.actions.includes('rows.edit')) return;
+  const key = `${biz.id}/${day}`;
+  if (Date.now() - (autoTickAt.get(key) ?? 0) < 60000) return;
+  autoTickAt.set(key, Date.now());
+  const at = location.hash;
+  api('POST', `/businesses/${biz.id}/shifts/${day}/auto-tick`).then((r) => {
+    const typing = document.activeElement?.matches?.('input:not([type=checkbox]), select, textarea');
+    if (redraw && r?.ticked && location.hash === at && !typing) route();
+  }).catch(() => { /* the person ticks by hand */ });
+}
+
 async function reviewView(biz, uploadId, highlightRow) {
   if (!uploadId) return reviewListView(biz);
   const [u, { heads }, list, { parties }] = await Promise.all([
@@ -2140,6 +2156,7 @@ async function reviewView(biz, uploadId, highlightRow) {
     api('GET', `/businesses/${biz.id}/parties`),
   ]);
   rememberDay(biz.id, u.day);
+  if (u.kind === 'bill_register' && u.shiftStatus !== 'confirmed') autoTickBg(biz, u.day, true);
   // Pages of the same type in day order, then upload order: for Previous and Next.
   const same = list.uploads.filter((x) => x.kind === u.kind).sort((a, b) => a.day.localeCompare(b.day) || a.createdAt - b.createdAt);
   const at = same.findIndex((x) => x.id === u.id);
@@ -2493,6 +2510,8 @@ function rowIssues(r) {
       <span class="chips"><button type="button" class="pickchip" data-undodisc="${r.id}" title="Takes the discount off. It is not filled again for this group.">Undo</button></span>`);
   } else if (inf.has('discount') && !largePct(r)) flags.discount ??= 'amber'; // a worked-out discount is only tinted, not spelled out
   if (inf.has('payments') && !r.paidWithRowId && o.movedFromRow) { flags.payments ??= 'amber'; amber.push('Payment moved from the next line'); }
+  if (inf.has('payments') && o.movedColumn) { flags.payments ??= 'amber'; amber.push(`${o.movedColumn} moved back one line: check against the photo`); }
+  if (inf.has('payments') && o.read?.payment_notes?.length) { flags.payments ??= 'amber'; amber.push(`Writing in a payment column taken out: ${o.read.payment_notes.join(', ')}`); }
   if (r.bankAdjusted) info.push('Adjusted from bank on Reconcile');
   const sp = splitOffer(r, o);
   if (sp) red.unshift(html`Two bills on this line: ${sp.bills[0]} ₹ ${rs(sp.amounts[0])} and ${sp.bills[1]} ₹ ${rs(sp.amounts[1])}
@@ -2557,7 +2576,7 @@ function regLineHtml(r, locked, x, cols, head, cls) {
     <td data-l="Disc" class="c-dc"><input class="cell mono ${flagClass(x.flags.discount)}" data-f="discount" value="${r.discountPaise ? rsIn(r.discountPaise) : ''}" placeholder="0" style="width:100%;text-align:right" inputmode="decimal" aria-label="Discount; a tip is negative" title="Discount; a tip is negative"></td>
     <td data-l="Remarks" class="c-rm"><input class="cell ${flagClass(x.flags.remarks)}" data-f="remarks" value="${r.remarks ?? ''}" style="width:100%" aria-label="Remarks"></td>
     <td class="issue c-is">${issueHtml(x, r)}</td>
-    <td class="tick c-tk"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Looks right" title="Looks right (Enter)"></td>
+    <td class="tick c-tk"><input type="checkbox" data-f="checked" ${r.status === 'checked' ? 'checked' : ''} aria-label="Looks right" title="${r.autoChecked && r.status === 'checked' ? 'Ticked by Bookr: the register, the software and the money agree. Untick if the photo says otherwise.' : 'Looks right (Enter)'}">${r.autoChecked && r.status === 'checked' ? html`<span class="autotick">Bookr</span>` : ''}</td>
     <td class="c-ed" style="white-space:nowrap"><button class="iconbtn" type="button" data-edit="${r.id}" title="More: paid together with another bill" aria-label="Edit row">✎</button><button class="iconbtn" type="button" data-addbelow="${r.id}" title="Add a line below: two bills written on one line" aria-label="Add a line below">＋</button><button class="iconbtn" type="button" data-delrow="${r.id}" title="Delete this line" aria-label="Delete this line">🗑</button></td>
   </tr>`;
 }
@@ -2741,11 +2760,16 @@ function wireFoot(biz, u) {
 /** Fill button and the amber note: redrawn after every inline save. */
 function regToolsHtml(u, locked) {
   const slip = !locked && u.slip;
+  const cslip = !locked && u.columnSlip;
   return html`
     ${slip ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <span><strong>Payments look shifted by one line</strong> on lines ${slip.lines.join(', ')}: each payment equals the bill amount of the line ${slip.direction === 'up' ? 'below' : 'above'} it.
         Move them back? Line ${slip.receiver} gets the odd one out and stays red for you to check.</span>
         <button class="btn" type="button" id="unslip" data-dir="${slip.direction}">Shift them back</button></div>` : ''}
+    ${cslip ? html`<div class="demo-band" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <span><strong>The ${cslip.column} column looks read one line ${cslip.direction === 'down' ? 'low' : 'high'}</strong> from line ${cslip.lines[0]} to line ${cslip.lines.at(-1)}: on ${cslip.clear} lines its amount is the bill of the line ${cslip.direction === 'down' ? 'above' : 'below'}.
+        Lines paid in another column keep their own payment. Each moved line stays in amber for you to tick.</span>
+        <button class="btn" type="button" id="mvcol" data-col="${cslip.column}" data-dir="${cslip.direction}">Move ${cslip.column} ${cslip.direction === 'down' ? 'up' : 'down'} one line</button></div>` : ''}
     ${!locked && [...new Set(u.rows.map((r) => headOf(r) ?? r))].some((r) => !r.paidWithRowId && r.payments.length && paidOf(r) > 0 && payDiffers(r)
         && [r, ...membersOf(r)].every((m) => (!m.discountPaise && !m.tipPaise) || inferredOf(m.ocrOriginal).has('discount')))
         ? html`<div class="form-row" style="align-items:center;gap:8px"><button class="btn plain" type="button" id="filldisc" style="min-height:32px;font-size:13px"
@@ -2820,6 +2844,7 @@ function billSuggest(input, u, rowOf, pick) {
 /** The top bar: how far checking has got, and whether the page adds up. */
 function regBarHtml(u) {
   const done = u.rows.filter((r) => r.status === 'checked').length;
+  const auto = u.rows.filter((r) => r.status === 'checked' && r.autoChecked).length;
   const needs = u.rows.filter((r) => rowIssues(r).needsYou).length;
   const bills = u.rows.reduce((s2, r) => s2 + r.amountPaise, 0);
   const net = u.rows.reduce((s2, r) => s2 + r.amountPaise - (r.discountPaise ?? 0), 0);
@@ -2828,7 +2853,7 @@ function regBarHtml(u) {
   const pct = u.rows.length ? Math.round((100 * done) / u.rows.length) : 0;
   const chip = (ok, text, title = '') => html`<span class="tchip ${ok ? 'ok' : 'bad'}" title="${title}">${text}</span>`;
   return html`
-    <div class="rv-prog"><span class="bar"><span style="width:${pct}%"></span></span><span><strong>${done} of ${u.rows.length}</strong> checked${needs ? html` · <strong style="color:#B91C1C">${needs} need${needs === 1 ? 's' : ''} you</strong>` : ''}</span></div>
+    <div class="rv-prog"><span class="bar"><span style="width:${pct}%"></span></span><span><strong>${done} of ${u.rows.length}</strong> checked${auto ? html` <span class="tiny" title="The register, the software and the money agree on these lines">(${auto} by Bookr)</span>` : ''}${needs ? html` · <strong style="color:#B91C1C">${needs} need${needs === 1 ? 's' : ''} you</strong>` : ''}</span></div>
     <span class="rv-chips">
       ${w == null ? html`<span class="tchip" title="Type the total written at the foot of the page, below the table">No page total</span>`
         : chip(w === bills || w === net || w === paid, w === bills || w === net ? `Bills ₹ ${rs(bills)} = page total ✓` : w === paid ? `Paid = page total ✓` : `Page says ₹ ${rs(w)} · bills ₹ ${rs(bills)}`)}
@@ -3183,7 +3208,7 @@ function wireInlineRows(biz, u, strip) {
         if (err.code === 'stale_row') {
           // Changed on another screen: show the row as it is saved now, with the reason.
           const fresh = await api('GET', `/businesses/${biz.id}/uploads/${u.id}`).catch(() => null);
-          if (fresh) { Object.assign(u, { rows: fresh.rows, otherPageRows: fresh.otherPageRows, slip: fresh.slip, softwareList: fresh.softwareList }); regRows = shiftRowsOf(u); redraw(); }
+          if (fresh) { Object.assign(u, { rows: fresh.rows, otherPageRows: fresh.otherPageRows, slip: fresh.slip, columnSlip: fresh.columnSlip, softwareList: fresh.softwareList }); regRows = shiftRowsOf(u); redraw(); }
           showError(document.getElementById('rmsg'), err);
           return;
         }
@@ -3214,7 +3239,7 @@ function wireInlineRows(biz, u, strip) {
       if (!fresh || pending > 1) return; // another save started meanwhile: it redraws
       u.rows = fresh.rows;
       u.otherPageRows = fresh.otherPageRows;
-      u.slip = fresh.slip;
+      u.slip = fresh.slip; u.columnSlip = fresh.columnSlip;
       u.softwareList = fresh.softwareList;
       u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise; u.columnTotals = fresh.columnTotals; u.deletedRows = fresh.deletedRows;
       regRows = shiftRowsOf(u);
@@ -3459,7 +3484,21 @@ function wireRegister(biz, u) {
     if (r) strip.show(r);
     document.querySelectorAll('#regtable tbody tr[data-row]').forEach((tr) => tr.addEventListener('click', () => { const x = u.rows.find((y) => y.id === tr.dataset.row); if (x) strip.show(x); }));
   }
-  wireFill = () => { wireUnslip(); wireFillBtn(); };
+  wireFill = () => { wireUnslip(); wireFillBtn(); wireMoveCol(); };
+  const wireMoveCol = () => document.getElementById('mvcol')?.addEventListener('click', async (e) => {
+    const { col, dir } = e.currentTarget.dataset;
+    e.currentTarget.disabled = true;
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/move-column`, { column: col, direction: dir });
+      await reviewView(biz, u.id);
+      const box = document.getElementById('rmsg');
+      box.innerHTML = html`<div class="ok-msg">${col} moved back one line on ${r.moved} line${r.moved === 1 ? '' : 's'} (${r.lines[0]}–${r.lines.at(-1)}). Check them against the photo, then tick. <button class="btn plain" type="button" id="mvcolundo" style="min-height:28px">Undo</button></div>`.__html;
+      document.getElementById('mvcolundo')?.addEventListener('click', async () => {
+        try { await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/move-column/undo`, { key: r.key }); await reviewView(biz, u.id); document.getElementById('rmsg').innerHTML = html`<div class="ok-msg">Put back as read.</div>`.__html; }
+        catch (err) { showError(document.getElementById('rmsg'), err); }
+      });
+    } catch (err) { showError(document.getElementById('rmsg'), err); }
+  });
   const wireUnslip = () => document.getElementById('unslip')?.addEventListener('click', async (e) => {
     try {
       const r = await apiFull('POST', `/businesses/${biz.id}/uploads/${u.id}/shift-payments`, { direction: e.currentTarget.dataset.dir });
@@ -6643,6 +6682,7 @@ async function reconcileView(biz, dayArg) {
     day = shifts.find((s) => s.day === lastDay(biz.id))?.day ?? shifts.find((s) => s.status === 'confirmed')?.day ?? shifts[0]?.day;
   }
   rememberDay(biz.id, day);
+  if (day) autoTickBg(biz, day, false);
   if (!day) {
     render(shell(biz, 'reconcile', 'Reconcile', '', html`<section class="card"><div class="note">No sales yet. <a href="#/b/${biz.id}/bringin">Bring in a software sales report</a>.</div></section>`));
     return wireShell();
@@ -6737,14 +6777,14 @@ async function reconcileView(biz, dayArg) {
     mates.forEach((y) => nbInPair.add(y.creditId));
     nbPairs.push(mates);
   }
-  const nbSmall = noBillLeft.filter((x) => !nbInPair.has(x.creditId) && x.amountPaise <= 5000);
-  const nbRest = noBillLeft.filter((x) => !nbInPair.has(x.creditId) && x.amountPaise > 5000);
+  const nbSmall = noBillLeft.filter((x) => !nbInPair.has(x.creditId) && x.amountPaise <= 7000);
+  const nbRest = noBillLeft.filter((x) => !nbInPair.has(x.creditId) && x.amountPaise > 7000);
   const fnbHead = r.unbilledHeads.find((h) => h.billType === 'fnb');
   const nbSum = (l) => l.reduce((t, x) => t + x.amountPaise, 0);
   const nbGroupHtml = html`${nbPairs.length ? html`<div class="nb-grp"><strong>Same payer, minutes apart (${nbPairs.length})</strong><div class="tiny">Payments from one UPI id: one bill paid in parts, or a room advance.</div>
       ${nbPairs.map((g) => html`<div class="tiny nb-sum">${ssRs(nbSum(g))} = ${g.map((x) => ssRs(x.amountPaise)).join(' + ')} from <span class="mono">${g[0].vpa}</span>, ${hhmm(g[0].postedAt)}${g.length > 1 ? `–${hhmm(g.at(-1).postedAt)}` : ''}</div>${g.map(nbRow)}`)}</div>` : ''}
-    ${nbSmall.length ? html`<div class="nb-grp"><strong>Small amounts, ₹50 or less (${nbSmall.length} · ${ssRs(nbSum(nbSmall))})</strong>
-      ${fnbHead && nbSmall.length > 1 ? html`<div class="form-row" style="justify-content:flex-end"><button class="btn" type="button" data-nbsmall="${nbSmall.map((x) => x.creditId).join(',')}">Book all ${nbSmall.length} as Unbilled F&amp;B</button></div>` : ''}
+    ${nbSmall.length ? html`<div class="nb-grp"><strong>Small amounts, ₹70 or less (${nbSmall.length} · ${ssRs(nbSum(nbSmall))})</strong>
+      ${fnbHead ? html`<div class="tiny">Up to ₹70 with no bill: every one booked from 30 Oct to 10 Nov was ${fnbHead.headName ?? 'F&B'}.</div><div class="form-row" style="justify-content:flex-end"><button class="btn" type="button" data-nbsmall="${nbSmall.map((x) => x.creditId).join(',')}">Book ${nbSmall.length === 1 ? 'it' : `all ${nbSmall.length}`} as ${fnbHead.headName ?? 'Unbilled F&B'}, no bill</button></div>` : ''}
       ${nbSmall.map(nbRow)}</div>` : ''}
     ${nbRest.length ? html`<div class="nb-grp">${nbPairs.length || nbSmall.length ? html`<strong>The rest (${nbRest.length} · ${ssRs(nbSum(nbRest))})</strong>` : ''}${nbRest.map(nbRow)}</div>` : ''}`;
   const noBillSection = noBillLeft.length ? html`<section class="card" id="nobill" style="gap:0">
@@ -7370,7 +7410,7 @@ async function reconcileView(biz, dayArg) {
     const ids = b.dataset.nbsmall.split(',');
     b.disabled = true;
     act(async () => { const res = await nbMany(ids.map((id) => ({ rowId: id, billType: 'fnb', item: nbWhat(id) }))); if (res.skipped.length) alert(`Not booked: ${res.skipped.join(' ')}`); },
-      { text: `${ids.length} small amounts booked as Unbilled F&B.`, undo: nbReopen(ids) }).finally(() => { b.disabled = false; });
+      { text: `${ids.length} small amount${ids.length === 1 ? '' : 's'} booked as ${b.textContent.replace(/^Book (it|all \d+) as /, '').replace(/, no bill$/, '')}.`, undo: nbReopen(ids) }).finally(() => { b.disabled = false; });
   }));
   app.querySelectorAll('[data-nbadvance]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.nbadvance;

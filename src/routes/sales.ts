@@ -10,6 +10,8 @@ import { paidOtherwise, settledHere } from '../settledHere';
 import { storageKey } from '../files';
 import { can } from '../permissions';
 import { columnHints } from '../columnHints';
+import { autoTick } from '../autoTick';
+import { completeLateNumbers } from '../numberFix';
 import { shiftSlips } from '../slips';
 import { isMachineUpi, runCardAuto, shiftCards } from '../cards';
 import { missedEntries } from '../missed';
@@ -212,6 +214,8 @@ salesRoutes.post('/businesses/:businessId/sales-reports', requireRole('sales.imp
     if (isUniqueViolation(e)) fail(409, 'Another import changed these bills at the same moment. Try again.');
     throw e;
   }
+  // Bill numbers read before the report came: completed now that the software bills are here (approved 22 Nov 2026).
+  for (const d of touched) if (!confirmed.includes(d)) await completeLateNumbers(db, bid, d);
   for (const d of new Set([...touched, ...laterFills.filter((f) => f.modeText).map((f) => f.day)])) await refreshComparisons(db, bid, d, c.get('user').id);
   return c.json({ id: reportId, ...summary }, 201);
 });
@@ -1162,4 +1166,16 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/register-only', requireRol
     }
   }
   return c.json({ decided: ok.length, skipped });
+});
+
+/** Ticked by Bookr (approved 22 Nov 2026): register lines where the register, the software and the money agree. */
+salesRoutes.post('/businesses/:businessId/shifts/:day/auto-tick', requireRole('rows.edit'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Day must be YYYY-MM-DD.');
+  try {
+    return c.json({ ticked: await autoTick(c.env.DB, c.get('businessId'), day) });
+  } catch (e) {
+    if (isShiftConfirmed(e)) return c.json({ ticked: 0 });
+    throw e;
+  }
 });

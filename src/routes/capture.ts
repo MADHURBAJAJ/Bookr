@@ -9,7 +9,7 @@ import { cashSummaryChecks, LARGE_DISCOUNT_PCT, numberContext, numberFlags, refr
 import { headFromItem, headFromWords, loadHistory, loadItemHistory, loadParties, markLearned, resolveVendor } from '../parties';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { onPayingRow, spreadDifference } from '../discounts';
-import { findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
+import { columnSlipMoves, findColumnSlip, findSlip, TOTAL_KEYS, type ColumnTotals, type Slip } from '../ocr';
 import { can, type Role } from '../permissions';
 import { columnHints } from '../columnHints';
 
@@ -203,7 +203,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
          AND NOT EXISTS (SELECT 1 FROM register_bank_adjustments x WHERE x.reverses_id = a.id)) > 0 AS bankAdjusted,
       (SELECT CASE WHEN c.decision = 'leave_out' THEN 'Left out' ELSE c.close_note END FROM bill_comparisons c
          WHERE c.register_row_id = register_rows.id AND (c.closed_at IS NOT NULL OR c.decision = 'leave_out') LIMIT 1) AS numberSettled,
-      (SELECT 1 FROM bill_comparisons c WHERE c.register_row_id = register_rows.id AND c.decided_by IS NOT NULL LIMIT 1) AS numberDecided
+      (SELECT 1 FROM bill_comparisons c WHERE c.register_row_id = register_rows.id AND c.decided_by IS NOT NULL LIMIT 1) AS numberDecided,
+      status = 'checked' AND (SELECT a.action FROM audit_log a WHERE a.row_table = 'register_rows' AND a.row_id = register_rows.id ORDER BY a.id DESC LIMIT 1) = 'register.auto_check' AS autoChecked
       FROM register_rows WHERE upload_id = ? ORDER BY line_no`, u.id),
     all<{ registerRowId: string }>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.mode, p.column_label AS columnLabel,
       p.amount_paise AS amountPaise FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ? ORDER BY p.created_at, p.id`, u.id),
@@ -298,7 +299,9 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     }));
     const pageNo = new Map(pages.map((p, i) => [p.id, i + 1]));
     const slip = pageSlip(rows as unknown as SlipRow[], pays as unknown as { registerRowId: string; amountPaise: number }[]);
+    const colSlip = shift?.status === 'confirmed' ? null : pageColumnSlip(rows as unknown as SlipRow[], pays as unknown as ColPay[]);
     return c.json({
+      columnSlip: colSlip && (!slip || colSlip.lineNos.length > slip.lineNos.length) ? { column: colSlip.column, direction: colSlip.direction, lines: colSlip.lineNos, clear: colSlip.clear } : null,
       deletedRows: deleted.map((d) => ({ ...JSON.parse(d.before), ...JSON.parse(d.after), at: d.at, by: d.by })),
       ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
       slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
@@ -842,6 +845,26 @@ function rowEditAudit(old: { bill_no: string; bill_type: string | null; amount_p
 }
 
 interface SlipRow { id: string; lineNo: number; amountPaise: number; paidWithRowId: string | null; status: string }
+interface ColPay { id: string; registerRowId: string; amountPaise: number; mode: 'cash' | 'upi' | 'card'; columnLabel: string | null }
+
+/** One payment column read a line off on this page (see findColumnSlip), with what each line of the run gets. */
+function pageColumnSlip<R extends SlipRow>(rows: R[], pays: ColPay[]) {
+  const sorted = [...rows].sort((a, b) => a.lineNo - b.lineNo);
+  const heads = new Set(sorted.map((r) => r.paidWithRowId).filter(Boolean));
+  const view = sorted.map((r) => {
+    const cols: Record<string, number> = {};
+    for (const p of pays.filter((x) => x.registerRowId === r.id)) { const k = p.columnLabel ?? p.mode; cols[k] = (cols[k] ?? 0) + p.amountPaise; }
+    return { amt: r.amountPaise, cols, grouped: !!r.paidWithRowId || heads.has(r.id) };
+  });
+  const slip = findColumnSlip(view);
+  if (!slip) return null;
+  const moves = columnSlipMoves(view, slip);
+  const slice = [...moves.keys()].map((k) => sorted[k]);
+  if (slice.some((r) => r.status === 'checked')) return null;
+  const mode = pays.find((p) => (p.columnLabel ?? p.mode) === slip.column)?.mode ?? 'upi';
+  return { column: slip.column, direction: slip.direction, clear: slip.clear, mode, lineNos: slice.map((r) => r.lineNo),
+    moves: [...moves].map(([k, v]) => ({ row: sorted[k], before: view[k].cols[slip.column], after: v })) };
+}
 
 /**
  * Payments read a line off on this page (see findSlip), as the rows involved: "slice" is every row whose payments
@@ -922,6 +945,99 @@ captureRoutes.post('/businesses/:businessId/uploads/:uploadId/shift-payments', r
   }
   await refreshComparisons(db, bid, u.business_day, user);
   return c.json({ moved: done.length, checkLine: slip!.receiverLineNo });
+});
+
+// Moves one payment column back one line (approved 22 Nov 2026). Unticked rows only; discounts Bookr worked out are
+// worked out again; every row of the run is shown in amber. Logged with what it was, so one Undo puts it back.
+captureRoutes.post('/businesses/:businessId/uploads/:uploadId/move-column', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const u = await getUpload(db, bid, c.req.param('uploadId'));
+  if (u.kind !== 'bill_register') fail(400, 'This page is not a bill register.');
+  const b = await body(c);
+  const rows = await all<SlipRow & { discountPaise: number; tipPaise: number; ocrOriginal: string | null }>(db, `SELECT id, line_no AS lineNo, amount_paise AS amountPaise,
+    paid_with_row_id AS paidWithRowId, status, discount_paise AS discountPaise, tip_paise AS tipPaise, ocr_original AS ocrOriginal FROM register_rows WHERE upload_id = ?`, u.id);
+  const pays = await all<ColPay>(db, `SELECT p.id, p.register_row_id AS registerRowId, p.amount_paise AS amountPaise, p.mode, p.column_label AS columnLabel
+    FROM register_payments p JOIN register_rows r ON r.id = p.register_row_id WHERE r.upload_id = ?`, u.id);
+  const slip = pageColumnSlip(rows, pays);
+  if (!slip || slip.column !== b.column || slip.direction !== b.direction) fail(409, 'This column no longer looks moved. Reload the page.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  const log: { rowId: string; lineNo: number; before: { id: string; amountPaise: number }[]; after: number | null; discountPaise: number; tipPaise: number; ocrOriginal: string | null }[] = [];
+  for (const m of slip!.moves) {
+    const r = m.row;
+    const mine = pays.filter((p) => p.registerRowId === r.id && (p.columnLabel ?? p.mode) === slip!.column);
+    if ((m.before ?? null) === (m.after ?? null)) continue;
+    for (const p of mine) statements.push(stmt(db, 'DELETE FROM register_payments WHERE id = ?', p.id));
+    if (m.after !== undefined) statements.push(stmt(db, `INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`, newId(), bid, r.id, slip!.mode, slip!.column, m.after, t));
+    const paid = pays.filter((p) => p.registerRowId === r.id && (p.columnLabel ?? p.mode) !== slip!.column).reduce((x, p) => x + p.amountPaise, 0) + (m.after ?? 0);
+    const o = r.ocrOriginal ? JSON.parse(r.ocrOriginal) : {};
+    const inferred = new Set<string>(o.inferred ?? []);
+    let disc = r.discountPaise, tip = r.tipPaise;
+    if ((!disc && !tip) || stillInferred(r.ocrOriginal, 'discount')) {
+      const v = paid > 0 ? spreadDifference({ id: r.id, amountPaise: r.amountPaise }, [], paid)?.get(r.id) : undefined;
+      disc = v?.discountPaise ?? 0; tip = v?.tipPaise ?? 0;
+      inferred.delete('discount');
+      if (disc || tip) inferred.add('discount');
+    }
+    inferred.add('payments');
+    Object.assign(o, { inferred: [...inferred], resolved: (o.resolved ?? []).filter((f: string) => f !== 'payments'), movedColumn: slip!.column });
+    statements.push(stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?',
+      disc, tip, JSON.stringify(o), user, t, r.id));
+    log.push({ rowId: r.id, lineNo: r.lineNo, before: mine.map((p) => ({ id: p.id, amountPaise: p.amountPaise })), after: m.after ?? null,
+      discountPaise: r.discountPaise, tipPaise: r.tipPaise, ocrOriginal: r.ocrOriginal });
+  }
+  if (!log.length) return c.json({ moved: 0 });
+  const auditId = newId();
+  try {
+    await db.batch([...statements, stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'register.move_column', 'uploads', ?, ?, ?, ?)`, bid, user, u.id, JSON.stringify({ key: auditId, rows: log }),
+      JSON.stringify({ key: auditId, column: slip!.column, direction: slip!.direction, mode: slip!.mode, lines: log.map((x) => x.lineNo) }), t)]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, u.business_day, user);
+  return c.json({ moved: log.length, key: auditId, lines: log.map((x) => x.lineNo) });
+});
+
+// Undo of a column move: each row gets back what it had in that column, its discount and its marks, if nobody has
+// ticked it since.
+captureRoutes.post('/businesses/:businessId/uploads/:uploadId/move-column/undo', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const u = await getUpload(db, bid, c.req.param('uploadId'));
+  const b = await body(c);
+  const key = typeof b.key === 'string' ? b.key : '';
+  const a = await one<{ before: string; after: string }>(db, `SELECT before, after FROM audit_log WHERE business_id = ? AND action = 'register.move_column'
+    AND row_id = ? AND json_extract(after, '$.key') = ?`, bid, u.id, key);
+  if (!a) fail(404, 'Nothing to undo.');
+  const before = JSON.parse(a!.before) as { rows: { rowId: string; lineNo: number; before: { id: string; amountPaise: number }[]; after: number | null; discountPaise: number; tipPaise: number; ocrOriginal: string | null }[] };
+  const after = JSON.parse(a!.after) as { column: string; mode: 'cash' | 'upi' | 'card' };
+  const ids = before.rows.map((r) => r.rowId);
+  const now2 = await all<{ id: string; status: string }>(db, `SELECT id, status FROM register_rows WHERE id IN (SELECT value FROM json_each(?)) AND business_id = ?`, JSON.stringify(ids), bid);
+  if (now2.some((r) => r.status === 'checked')) fail(409, 'A line of this move has been ticked since. Change it by hand.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  for (const r of before.rows) {
+    statements.push(stmt(db, 'DELETE FROM register_payments WHERE register_row_id = ? AND coalesce(column_label, mode) = ?', r.rowId, after.column));
+    for (const p of r.before) statements.push(stmt(db, `INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`, newId(), bid, r.rowId, after.mode, after.column, p.amountPaise, t));
+    statements.push(stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, ocr_original = ?, edited_by = ?, edited_at = ? WHERE id = ?',
+      r.discountPaise, r.tipPaise, r.ocrOriginal, user, t, r.rowId));
+  }
+  try {
+    await db.batch([...statements, stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'register.move_column_undone', 'uploads', ?, NULL, ?, ?)`, bid, user, u.id, JSON.stringify({ key }), t)]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    throw e;
+  }
+  await refreshComparisons(db, bid, u.business_day, user);
+  return c.json({ undone: before.rows.length });
 });
 
 // Fills discount = bill amount - payments on this page's rows with no discount or tip yet: a discount
