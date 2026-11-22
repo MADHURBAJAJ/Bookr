@@ -739,3 +739,6 @@ tr.rd-red td { background: #FCEBEB; }
 .cb-settle .btn { justify-content: flex-start; text-align: left; height: auto; min-height: 44px; padding: 8px 12px; white-space: normal; }
 .cbt .cbn { display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 5px; border-radius: 9px; background: var(--wait-bg); color: var(--wait); font-size: 11px; }
 .menu .menu-install { width: calc(100% - 24px); margin: 4px 12px 8px; min-height: 36px; }
+
+/* "edited" chip is a button: tap to see what the line was (22 Nov 2026). */
+.cb-chipbtn { border: 0; cursor: pointer; font-family: inherit; line-height: inherit; }

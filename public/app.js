@@ -9302,6 +9302,10 @@ async function schoolsView(biz, editId) {
   });
   const kf = document.getElementById('cb-book');
   kf && onSubmit(kf, async (x) => {
+    // Changing the start cash moves what should be in hand on every day since (22 Nov 2026).
+    const was = editing.openingBalancePaise;
+    if ((cbRupees(x.openingBalance) !== was || x.openingDate !== editing.openingDate)
+      && !confirm(`This changes what should be in hand on every day since ${shortDay(x.openingDate < editing.openingDate ? x.openingDate : editing.openingDate)}, and the short or extra of counts already made. Save?`)) return;
     await api('PATCH', `/businesses/${biz.id}/cashbooks/${editing.id}`, x);
     BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
     go(`#/b/${biz.id}/schools`);
@@ -9457,8 +9461,17 @@ async function cashBookDayView(biz, accountId, dayIn) {
   const w = d.can.write && !d.before && !fold;
   const prev = addDaysIso(day, -1);
   const next = addDaysIso(day, 1);
-  const del = (e) => (w && !e.feeReportId && !e.reviewStatus && !(e.kind === 'fee') && !(e.kind === 'handover_out' && e.handover?.status !== 'sent')
-    ? html`<button type="button" class="linkbtn tiny" data-cbdel="${e.id}" aria-label="Remove this line">✕</button>` : '');
+  // Changing a line (approved 22 Nov 2026): a cashier changes their own lines of today and yesterday; the Owner and the
+  // Accountant any day. Not a fee sheet line, an approved or rejected expense, a settle line, cash the other side already
+  // shows, or a day the Owner has settled.
+  const yest = addDaysIso(d.today, -1);
+  const changeable = (e) => w && !e.feeReportId && !e.reviewStatus && !e.fromSettle && !d.count?.settle && e.kind !== 'fee'
+    && !(e.kind === 'handover_out' && e.handover?.status !== 'sent') && (d.can.approve || e.day >= yest);
+  const del = (e) => (changeable(e) ? html`${e.kind !== 'handover_in' ? html`<button type="button" class="linkbtn tiny" data-cbedit="${e.id}" aria-label="Change this line">✎</button>` : ''}
+    <button type="button" class="linkbtn tiny" data-cbdel="${e.id}" aria-label="Remove this line">✕</button>` : '');
+  const marks = (e) => html`${e.editedAt ? html` <button type="button" class="chip info cb-chipbtn" data-cbhist="${e.id}" title="See what changed">edited</button>` : ''}${e.changedAfterCount ? html` <span class="chip wait">changed after count</span>` : ''}`;
+  const reopen = (e) => (owner && e.kind === 'expense' && e.reviewStatus && !e.fromSettle
+    ? html` <button type="button" class="linkbtn tiny" data-oreopen="${e.id}">Reopen</button>` : '');
   const row = (label, sub, amt, sign, cls = '', extra = '') => html`<div class="list-row cb-line ${cls}"><span>${label}${sub ? html`<div class="tiny">${sub}</div>` : ''}</span>
     <span class="cb-amt ${sign === '+' ? 'in' : sign === '−' ? 'out' : ''}">${sign}${amt}${extra}</span></div>`;
   const typed = d.entries.filter((e) => e.kind === 'fee' && !e.feeReportId);
@@ -9476,9 +9489,9 @@ async function cashBookDayView(biz, accountId, dayIn) {
     const inn = CB_IN.includes(e.kind);
     const label = e.kind === 'handover_out' ? html`To ${e.handover ? cbWhere(e.handover) : 'someone'} ${e.handover ? cbStatus(e.handover) : ''}`
       : e.kind === 'handover_in' ? html`${e.narration || 'Cash received'}`
-        : html`${e.narration || e.headName || CB_KIND[e.kind]} ${e.kind === 'expense' || e.kind === 'other_in' ? cbReviewChip(e) : ''}`;
+        : html`${e.narration || e.headName || CB_KIND[e.kind]} ${e.kind === 'expense' || e.kind === 'other_in' ? cbReviewChip(e) : ''}${reopen(e)}`;
     const sub = e.kind === 'handover_out' ? e.narration : e.reviewStatus === 'rejected' && e.reviewNote ? `Owner: ${e.reviewNote}` : e.kind === 'expense' && e.headName ? e.headName : '';
-    return row(label, sub, `₹ ${rs(e.amountPaise)}`, inn ? '+' : '−', '', del(e));
+    return html`<div data-cbline="${e.id}">${row(html`${label}${marks(e)}`, sub, `₹ ${rs(e.amountPaise)}`, inn ? '+' : '−', '', del(e))}</div>`;
   });
   const gap = d.count?.gapPaise ?? null;
   const waiting = d.waiting.map((h) => html`<div class="cb-box wait cb-wait"><span><b>${h.fromBookName}</b> sent you ₹ ${rs(h.amountPaise)}
@@ -9489,11 +9502,11 @@ async function cashBookDayView(biz, accountId, dayIn) {
   // Folded (owner phone): Collection, Expenses, Handed over and Received, each one line with its total; tap to open.
   const sum = (xs) => xs.reduce((t, e) => t + e.amountPaise, 0);
   const of = (...kinds) => d.entries.filter((e) => kinds.includes(e.kind));
-  const reviewBtns = (e) => (!owner || e.kind !== 'expense' || e.reviewStatus ? ''
+  const reviewBtns = (e) => (!owner || e.kind !== 'expense' ? '' : e.reviewStatus ? reopen(e)
     : e.headId ? html`<span style="display:flex;gap:6px;margin-top:4px"><button type="button" class="btn" style="min-height:32px" data-oapprove="${e.id}">Approve</button>
         <button type="button" class="btn plain" style="min-height:32px" data-oreject="${e.id}">Reject</button></span>`
       : html`<span style="display:block;margin-top:4px" data-oheadbox="${e.id}"><button type="button" class="btn plain" style="min-height:32px" data-ohead="${e.id}">Set head</button></span>`);
-  const subRow = (e) => html`<div class="list-row cb-line cb-sub"><span>${e.kind === 'handover_out' ? html`To ${e.handover ? cbWhere(e.handover) : 'someone'}` : e.narration || e.headName || CB_KIND[e.kind]}
+  const subRow = (e) => html`<div class="list-row cb-line cb-sub" data-cbline="${e.id}"><span>${e.kind === 'handover_out' ? html`To ${e.handover ? cbWhere(e.handover) : 'someone'}` : e.narration || e.headName || CB_KIND[e.kind]}${marks(e)}
       <div class="tiny">${e.kind === 'handover_out' ? (e.handover ? cbStatus(e.handover) : '') : e.kind === 'expense' || e.kind === 'other_in' ? cbReviewChip(e) : ''}
         ${e.kind === 'expense' && e.headName ? ` · ${e.headName}` : ''}${e.reviewStatus === 'rejected' && e.reviewNote ? ` · "${e.reviewNote}"` : ''}</div>${reviewBtns(e)}</span>
     <span class="cb-amt ${CB_IN.includes(e.kind) ? 'in' : 'out'}">₹ ${rs(e.amountPaise)}</span></div>`;
@@ -9589,6 +9602,15 @@ async function cashBookDayView(biz, accountId, dayIn) {
       <div class="field" data-cbnote hidden><label for="cbc-n">Why? (needed when short or extra)</label><textarea id="cbc-n" name="note" rows="2" placeholder="Gave ₹ 300 to the peon for the gas cylinder, bill tomorrow">${d.count?.note ?? ''}</textarea>
         <span class="tiny">The owner sees this note.</span></div>
       <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save count</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
+    </form>
+    <form class="card cb-form" data-cbform="edit" hidden>
+      <input type="hidden" name="id">
+      <div style="font-weight:500" data-cbedittitle>Change line</div>
+      <div class="field"><label for="cbx-a">Amount (₹)</label><input id="cbx-a" name="amount" class="mono" inputmode="decimal" required></div>
+      <div class="field"><label for="cbx-n">What for</label><input id="cbx-n" name="narration" maxlength="200"></div>
+      <div class="field"><label for="cbx-d">Day</label><input id="cbx-d" name="day" type="date" required min="${d.can.approve || yest < b.openingDate ? b.openingDate : yest}" max="${d.today}"></div>
+      <div class="tiny">${d.can.approve ? 'The old amount stays in the line\'s history.' : 'You can change today\'s and yesterday\'s lines. The old amount stays in the line\'s history.'}${d.count ? ' This day is counted: the owner sees the change.' : ''}</div>
+      <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save change</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
     </form>` : '';
   const body = html`
     <div class="cb">
@@ -9636,6 +9658,29 @@ async function cashBookDayView(biz, accountId, dayIn) {
     if (note?.trim()) await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreject}/review`, { status: 'rejected', note });
   });
   app.querySelectorAll('[data-ohead]').forEach((x) => x.addEventListener('click', () => ownerHeadPicker(biz, x.dataset.ohead, reload)));
+  act('[data-oreopen]', async (x) => {
+    if (confirm('Reopen this expense? It goes back to waiting for your approval, and the cashier or accountant can change it.')) {
+      await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreopen}/review`, { status: null });
+    }
+  });
+  // "edited": what the line was, one tap away (from the audit log).
+  app.querySelectorAll('[data-cbhist]').forEach((x) => x.addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    const line = x.closest('[data-cbline]');
+    const open = line.nextElementSibling?.matches('[data-cbhistbox]') ? line.nextElementSibling : null;
+    if (open) { open.remove(); return; }
+    try {
+      const { history } = await api('GET', `${base}/entries/${x.dataset.cbhist}/history`);
+      const when = (ms) => new Date(ms).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+      const what = (v) => [`₹ ${rs(v.amountPaise)}`, v.narration, shortDay(v.day)].filter(Boolean).join(' · ');
+      const box = document.createElement('div');
+      box.className = 'cb-box info';
+      box.dataset.cbhistbox = '';
+      box.innerHTML = html`<div style="display:grid;gap:4px">${history.map((h) => html`<div class="tiny">${h.action === 'added' ? html`Written: <b>${what(h.after)}</b>`
+        : html`Changed <b>${what(h.before)}</b> → <b>${what(h.after)}</b>`} · ${h.byName ?? ''}, ${when(h.at)}</div>`)}</div>`.__html;
+      line.after(box);
+    } catch (err) { alert(err.message); }
+  }));
   const sf = document.getElementById('cb-settle');
   sf?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -9658,6 +9703,22 @@ async function cashBookDayView(biz, accountId, dayIn) {
   app.querySelectorAll('[data-cbclose]').forEach((x) => x.addEventListener('click', () => { forms$.forEach((fm) => { fm.hidden = true; }); }));
   const fm = (k) => forms$.find((x) => x.dataset.cbform === k);
   if (!forms$.length) return;
+  const ef = fm('edit');
+  app.querySelectorAll('[data-cbedit]').forEach((x) => x.addEventListener('click', () => {
+    const e = d.entries.find((y) => y.id === x.dataset.cbedit);
+    ef.elements.id.value = e.id;
+    ef.elements.amount.value = rsIn(e.amountPaise);
+    ef.elements.narration.value = e.narration ?? '';
+    ef.elements.day.value = e.day;
+    ef.querySelector('[data-cbedittitle]').textContent = `Change: ${e.kind === 'handover_out' ? 'cash handed over' : CB_KIND[e.kind] ?? 'line'}`;
+    ef.querySelector('label[for=cbx-n]').textContent = e.kind === 'handover_out' ? 'Note' : 'What for';
+    open('edit');
+  }));
+  onSubmit(ef, async (x) => {
+    const r = await api('PATCH', `${base}/entries/${x.id}`, { amount: x.amount, narration: x.narration, day: x.day });
+    if (r.changed && x.day !== day) doneToast(`Moved to ${shortDay(x.day)}`);
+    await reload();
+  });
   onSubmit(fm('fee'), async (x) => {
     await api('PUT', `${base}/fee/${day}`, { amount: x.amount, receipts: x.receipts || null, first: x.first, last: x.last });
     await reload();
@@ -9913,10 +9974,20 @@ async function ownerLookView(biz) {
   const counts = l.counts.map((k) => html`<a class="list-row" href="${day(k.bookId, k.day)}" style="color:inherit"><span>${k.bookName}, ${shortDay(k.day)}
       ${k.note ? html`<div class="tiny">"${k.note}"</div>` : ''}</span>
     <span class="chip bad">${k.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(k.gapPaise))} · Settle ›</span></a>`);
+  // Changed after count (22 Nov 2026): lines written, changed or removed after that day was counted, last 7 days. To see only.
+  const cv = (v) => `₹ ${rs(v.amountPaise)}${v.narration ? ` ${v.narration}` : ''}`;
+  const changed = (l.changed ?? []).map((x) => {
+    const dd = (x.after ?? x.before).day;
+    const what = x.what === 'add' ? `Added ${cv(x.after)}` : x.what === 'remove' ? `Removed ${cv(x.before)}`
+      : `${cv(x.before)} → ₹ ${rs(x.after.amountPaise)}${x.before.day !== x.after.day ? `, moved ${shortDay(x.before.day)} → ${shortDay(x.after.day)}` : ''}`;
+    return html`<a class="list-row" href="${day(x.bookId, dd)}" style="color:inherit"><span>${x.bookName}, ${shortDay(dd)}
+      <div class="tiny">${what} · ${x.byName ?? ''}</div></span><span class="chip wait">changed after count</span></a>`;
+  });
   const sec = (title, rows) => (rows.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">${title}</div>${rows}</section>` : '');
   render(ownerFrame(biz, 'look', html`<b>Needs a look</b>`, html`<div class="cb">
     ${sec('Cash not accepted', hand)}${sec('Expenses to approve', exp)}${sec('Fee check', fees)}${sec('Count short or extra', counts)}
     ${hand.length + exp.length + fees.length + counts.length ? html`<div class="tiny">Tap a line to open that day of the book.</div>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
+    ${sec('Changed after count · last 7 days', changed)}
   </div>`));
   wireShell();
   ownerBadge(biz, l);

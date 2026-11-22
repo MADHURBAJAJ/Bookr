@@ -85,7 +85,9 @@ describe('school cash book', () => {
     expect((await s.cashier.del(`/businesses/${s.bid}/cashbooks/${s.sms}/entries/${out.id}`)).status).toBe(409);
     expect((await s.cashier2.post(`/businesses/${s.bid}/handovers/${hd.waiting[0].id}/undo`, {})).status).toBe(200);
     expect((await s.dayOf(s.cashier2, s.haji)).json).toMatchObject({ inPaise: 0 });
-    expect((await s.cashier.del(`/businesses/${s.bid}/cashbooks/${s.sms}/entries/${out.id}`)).status).toBe(200);
+    // An older day than yesterday: only the Owner or Accountant removes it (22 Nov 2026).
+    expect((await s.cashier.del(`/businesses/${s.bid}/cashbooks/${s.sms}/entries/${out.id}`)).status).toBe(403);
+    expect((await s.o.del(`/businesses/${s.bid}/cashbooks/${s.sms}/entries/${out.id}`)).status).toBe(200);
     expect((await s.o.get(`/businesses/${s.bid}/cashbooks`)).json.handovers).toHaveLength(0);
   });
 
