@@ -282,6 +282,82 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
   return c.json({ id: entryId }, 201);
 });
 
+// Changing a book after the fact (approved 22 Nov 2026): a cashier changes or removes their own lines of today and
+// yesterday only; older days are changed by the Owner or the Accountant. Nobody changes a day whose count the Owner has
+// settled (undo the settle first).
+const yesterday = () => new Date(Date.parse(`${today()}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+
+async function changeWindow(c: Context<AppEnv>, bookId: string, ...days: string[]) {
+  if (!can(c.get('role'), 'rows.approve') && days.some((d) => d < yesterday())) {
+    fail(403, 'You can change only today\'s and yesterday\'s lines. Ask the owner or the accountant to change an older day.');
+  }
+  const ph = days.map(() => '?').join(', ');
+  if (await one(c.env.DB, `SELECT 1 AS ok FROM cash_counts WHERE account_id = ? AND day IN (${ph}) AND settle IS NOT NULL`, bookId, ...days)) {
+    fail(409, 'The owner has settled the count of this day. Undo the settle first.');
+  }
+}
+
+type LineRow = { id: string; kind: string; day: string; amountPaise: number; narration: string | null; feeReportId: string | null; reviewStatus: string | null; settled: number };
+
+async function lineOf(c: Context<AppEnv>, bookId: string) {
+  const entryId = id404(c.req.param('entryId'), 'Line');
+  const e = await one<LineRow>(c.env.DB, `SELECT id, kind, day, amount_paise AS amountPaise, narration, fee_report_id AS feeReportId, review_status AS reviewStatus,
+      EXISTS (SELECT 1 FROM cash_counts k WHERE k.settle_entry_id = cash_entries.id) AS settled
+    FROM cash_entries WHERE id = ? AND account_id = ? AND business_id = ?`, entryId, bookId, c.get('businessId'));
+  if (!e) fail(404, 'Line not found.');
+  if (e.feeReportId) fail(409, 'This line comes from the fee report. Bring in the day\'s report again to change it.');
+  if (e.settled) fail(409, 'This line came from settling a count. Undo the settle to change it.');
+  if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this line.`);
+  return e;
+}
+
+// Changing a line: the amount, what it was for, or its day. Each change is kept in the audit log (the "edited" history).
+cashBookRoutes.patch('/businesses/:businessId/cashbooks/:accountId/entries/:entryId', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await writableBook(c);
+  const e = await lineOf(c, book.id);
+  if (e.kind === 'fee') fail(409, 'Change the day\'s fee cash in the fee box.');
+  if (e.kind === 'handover_in') fail(409, 'This is cash accepted from another book. Remove it, and accept it again if needed.');
+  const h = await one<{ status: string }>(db, 'SELECT status FROM cash_handovers WHERE from_entry_id = ?', e.id);
+  if (h && h.status !== 'sent') fail(409, 'The other side already shows this cash. Undo it there first.');
+  const data = await body(c);
+  const day = data.day === undefined ? e.day : date(data, 'day', 'Day');
+  if (day < book.openingDate) fail(400, `This book starts on ${book.openingDate}.`);
+  if (day > today()) fail(400, 'That day has not come yet.');
+  const amount = data.amount === undefined ? e.amountPaise : paise(data, 'amount', 'Amount');
+  if (amount <= 0) fail(400, 'Amount must be more than ₹0.');
+  const narration = data.narration === undefined ? e.narration : text(data, 'narration', 'Details', { optional: true, max: 200 });
+  if ((e.kind === 'expense' || e.kind === 'other_in') && !narration
+    && !(await one(db, 'SELECT 1 AS ok FROM cash_entries WHERE id = ? AND head_id IS NOT NULL', e.id))) fail(400, 'Write what this was for.');
+  if (day === e.day && amount === e.amountPaise && (narration ?? null) === (e.narration ?? null)) return c.json({ ok: true, changed: false });
+  await changeWindow(c, book.id, e.day, day);
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE cash_entries SET day = ?, amount_paise = ?, narration = ? WHERE id = ?', day, amount, narration ?? null, e.id),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.entry.edit', table: 'cash_entries', rowId: e.id,
+      before: { bookId: book.id, kind: e.kind, day: e.day, amountPaise: e.amountPaise, narration: e.narration },
+      after: { bookId: book.id, kind: e.kind, day, amountPaise: amount, narration: narration ?? null }, at: t }),
+  ]);
+  return c.json({ ok: true, changed: true });
+});
+
+// A line's history: when it was written and each change since, newest last.
+cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/entries/:entryId/history', requireRole('business.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const entryId = id404(c.req.param('entryId'), 'Line');
+  if (!(await one(db, 'SELECT 1 AS ok FROM cash_entries WHERE id = ? AND account_id = ?', entryId, book.id))) fail(404, 'Line not found.');
+  const rows = await all<{ action: string; before: string | null; after: string | null; at: number; byName: string | null }>(db,
+    `SELECT l.action, l.before, l.after, l.created_at AS at, u.name AS byName FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
+      WHERE l.business_id = ? AND l.row_table = 'cash_entries' AND l.row_id = ? AND l.action IN ('cashbook.entry.add', 'cashbook.entry.edit') ORDER BY l.id`, bid, entryId);
+  return c.json({ history: rows.map((r) => ({ action: r.action === 'cashbook.entry.add' ? 'added' : 'edited', at: r.at, byName: r.byName,
+    before: r.before ? JSON.parse(r.before) : null, after: r.after ? JSON.parse(r.after) : null })) });
+});
+
 // Removing a line. Cash handed over that the other side already shows is undone there first. A line accepting cash from
 // another book can be removed: the handover goes back to waiting.
 cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:entryId', requireRole('rows.edit'), async (c) => {
@@ -289,14 +365,10 @@ cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:ent
   const bid = c.get('businessId');
   const user = c.get('user');
   const book = await writableBook(c);
-  const entryId = id404(c.req.param('entryId'), 'Line');
-  const e = await one<{ id: string; kind: string; day: string; amountPaise: number; narration: string | null; feeReportId: string | null; reviewStatus: string | null }>(db,
-    'SELECT id, kind, day, amount_paise AS amountPaise, narration, fee_report_id AS feeReportId, review_status AS reviewStatus FROM cash_entries WHERE id = ? AND account_id = ? AND business_id = ?', entryId, book.id, bid);
-  if (!e) fail(404, 'Line not found.');
-  if (e.feeReportId) fail(409, 'This line comes from the fee report. Bring in the day\'s report again to change it.');
-  if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this line.`);
+  const e = await lineOf(c, book.id);
   const h = await one<{ id: string; status: string }>(db, 'SELECT id, status FROM cash_handovers WHERE from_entry_id = ?', e.id);
   if (h && h.status !== 'sent') fail(409, 'The other side already shows this cash. Undo it there first.');
+  await changeWindow(c, book.id, e.day);
   const t = now();
   await db.batch([
     stmt(db, "UPDATE cash_handovers SET to_entry_id = NULL, status = 'sent', settled_by = NULL, settled_at = NULL WHERE to_entry_id = ?", e.id),
@@ -439,7 +511,23 @@ cashBookRoutes.get('/businesses/:businessId/owner-look', requireRole('members.ma
   // a person, the bank) once it has waited a day. A bank deposit comes with the bank credits it could be.
   const due = await Promise.all(open.filter((h) => (h.toKind === 'book' && mine.has(h.toAccountId!)) || h.day < t)
     .map(async (h) => ({ ...h, mine: h.toKind === 'book' && mine.has(h.toAccountId!), deposits: h.toKind === 'bank' ? await depositCandidates(db, bid, h) : [] })));
-  return c.json({ today: t, handovers: due, expenses, heads, fees, counts: gaps });
+  // Lines written, changed or removed by someone else after that day was counted, in the last 7 days (22 Nov 2026): to
+  // see, not to act on. A day whose count was settled cannot be changed, so it never shows.
+  const since = Date.parse(`${t}T00:00:00Z`) - 7 * 86400000 - 5.5 * 3600000;
+  const changed = (await all<{ action: string; before: string | null; after: string | null; at: number; byName: string | null }>(db,
+    `SELECT l.action, l.before, l.after, l.created_at AS at, u.name AS byName FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
+      WHERE l.business_id = ? AND l.row_table = 'cash_entries' AND l.action IN ('cashbook.entry.add', 'cashbook.entry.edit', 'cashbook.entry.remove')
+        AND l.created_at >= ? AND (l.user_id IS NULL OR l.user_id <> ?)
+        AND EXISTS (SELECT 1 FROM cash_counts k WHERE k.account_id = json_extract(coalesce(l.after, l.before), '$.bookId') AND k.counted_at < l.created_at AND k.settle IS NULL
+          AND k.day IN (json_extract(l.before, '$.day'), json_extract(l.after, '$.day')))
+      ORDER BY l.id DESC LIMIT 50`, bid, since, user.id))
+    .map((r) => {
+      const before = r.before ? JSON.parse(r.before) : null;
+      const after = r.after ? JSON.parse(r.after) : null;
+      const b = byId.get((after ?? before).bookId);
+      return b ? { bookId: b.id, bookName: b.name, branchName: b.branchName, what: r.action.split('.').pop(), at: r.at, byName: r.byName, before, after } : null;
+    }).filter((x) => x);
+  return c.json({ today: t, handovers: due, expenses, heads, fees, counts: gaps, changed });
 });
 
 // ---- The cashier's fee cash total for a day, and sorting out a difference with the fee day sheet (21 Nov 2026).
@@ -572,6 +660,7 @@ cashBookRoutes.post('/businesses/:businessId/cashbook-lines/:entryId/review', re
   const user = c.get('user');
   const e = await reviewLine(db, bid, c.req.param('entryId'));
   if (e.kind !== 'expense') fail(400, 'Only expenses are approved.');
+  if (await one(db, 'SELECT 1 AS ok FROM cash_counts WHERE settle_entry_id = ?', e.id)) fail(409, 'This line came from settling a count. Undo the settle instead.');
   const data = await body(c);
   const status = data.status;
   if (status !== 'approved' && status !== 'rejected' && status !== null) fail(400, 'Approve or reject.');

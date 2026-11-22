@@ -59,7 +59,12 @@ export interface EntryRow {
   feeReportId: string | null;
   /** An expense or other money in: the owner's review (null = waiting), who and the note. */
   reviewStatus: 'approved' | 'rejected' | null; reviewNote: string | null; reviewedByName: string | null;
+  /** Last change (audit log), if the line was edited. */
+  editedAt: number | null; editedByName: string | null;
+  /** Written by the Owner settling a count (changed only by undoing the settle). */
+  fromSettle: number;
   handover: HandoverRow | null;
+  changedAfterCount: boolean;
 }
 export interface HandoverRow {
   id: string; fromEntryId: string; fromAccountId: string; fromBookName: string; day: string; amountPaise: number; narration: string | null;
@@ -82,9 +87,13 @@ export async function bookDay(db: DB, businessId: string, book: Book, day: strin
   const prev = new Date(Date.parse(`${day}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
   const [opening, lines, count, sent, incoming, fee] = await Promise.all([
     day <= book.openingDate ? Promise.resolve(book.openingBalancePaise) : inHandThrough(db, book, prev),
-    all<Omit<EntryRow, 'handover'>>(db, `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, e.head_id AS headId, h.name AS headName,
+    all<Omit<EntryRow, 'handover' | 'changedAfterCount'>>(db, `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, e.head_id AS headId, h.name AS headName,
         p.name AS partyName, e.entered_by AS enteredBy, u.name AS enteredByName, e.entered_at AS enteredAt, e.fee_report_id AS feeReportId,
-        e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName
+        e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName,
+        EXISTS (SELECT 1 FROM cash_counts k WHERE k.settle_entry_id = e.id) AS fromSettle,
+        (SELECT l.created_at FROM audit_log l WHERE l.row_table = 'cash_entries' AND l.row_id = e.id AND l.action = 'cashbook.entry.edit' ORDER BY l.id DESC LIMIT 1) AS editedAt,
+        (SELECT lu.name FROM audit_log l LEFT JOIN users lu ON lu.id = l.user_id
+          WHERE l.row_table = 'cash_entries' AND l.row_id = e.id AND l.action = 'cashbook.entry.edit' ORDER BY l.id DESC LIMIT 1) AS editedByName
       FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
         LEFT JOIN users ru ON ru.id = e.reviewed_by
       WHERE e.account_id = ? AND e.day = ? ORDER BY e.entered_at`, book.id, day),
@@ -99,7 +108,9 @@ export async function bookDay(db: DB, businessId: string, book: Book, day: strin
   ]);
   const byFrom = new Map(sent.map((h) => [h.fromEntryId, h]));
   const byTo = new Map(incoming.filter((h) => h.toEntryId).map((h) => [h.toEntryId!, h]));
-  const entries: EntryRow[] = lines.map((e) => ({ ...e, handover: byFrom.get(e.id) ?? byTo.get(e.id) ?? null }));
+  // Written or changed after the day was counted (22 Nov 2026): the count no longer matches what was checked.
+  const entries: EntryRow[] = lines.map((e) => ({ ...e, handover: byFrom.get(e.id) ?? byTo.get(e.id) ?? null,
+    changedAfterCount: !!count && !count.settle && Math.max(e.enteredAt, e.editedAt ?? 0) > count.countedAt }));
   const total = (kinds: readonly string[]) => entries.filter((e) => kinds.includes(e.kind)).reduce((t, e) => t + e.amountPaise, 0);
   const inPaise = total(IN_KINDS);
   const outPaise = total(OUT_KINDS);
