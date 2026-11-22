@@ -726,5 +726,15 @@ details.receipt-row[open] summary { border-bottom: 1px solid var(--line); }
 .dormcard .wholebtn .tcell { min-height: 0; flex-direction: row; align-items: center; gap: 10px; padding: 8px 12px; }
 .dormcard .wholebtn .tcell .tn { font-size: 14px; }
 @media (max-width: 760px) { .dormcards { grid-template-columns: 1fr; } }
-.guestl { margin: 4px 0 0; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.guestedit { margin-top: 8px; display: grid; gap: 8px; }
+.guestedit { display: grid; gap: 6px; padding: 10px 16px 6px; border-bottom: 1px solid var(--line); }
+.guestedit .f { font-size: 13px; }
+.guestl.ret { margin: 0; padding: 6px 10px; border-radius: 8px; background: var(--go-tint); border: 1px solid var(--go-line); }
+.phint { margin: 0; font-size: 13px; font-weight: 650; }
+.phint.bad { color: var(--bad); } .phint.ok { color: var(--go-dark); }
+.results { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 10px 12px; margin-bottom: 16px; display: grid; gap: 4px; }
+.results .rh { margin: 8px 0 2px; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--quiet); }
+.rrow { display: grid; grid-template-columns: 1fr 1.4fr 1.2fr .7fr 1.2fr; gap: 10px; align-items: center; padding: 8px 6px; border-top: 1px solid var(--line); color: var(--ink); text-decoration: none; }
+.rrow:hover { background: var(--pri-tint); }
+.badge.void { color: var(--bad); background: var(--bad-tint); border-color: var(--bad-line); }
+.badge.paid { color: var(--go-dark); background: var(--go-tint); border-color: var(--go-line); }
+@media (max-width: 760px) { .rrow { grid-template-columns: 1fr 1fr; } }

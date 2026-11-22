@@ -12,9 +12,9 @@ describe('guests on orders', () => {
     const { B, counter, ok } = s;
     // A walk-in with no guest, then the guest added on the order.
     const a = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T1' }))).id;
-    expect((await ok(counter.get(`${B}/orders/${a}`))).order.guest).toEqual({ name: null, phone: null, visits: 0, lastVisit: null });
+    expect((await ok(counter.get(`${B}/orders/${a}`))).order.guest).toEqual({ name: null, phone: null, visits: 0, lastVisit: null, usualPaise: null });
     const g1 = (await ok(counter.post(`${B}/orders/${a}/guest`, { guestName: 'Sample Guest', guestPhone: '+91 98000 11111' }))).guest;
-    expect(g1).toEqual({ name: 'Sample Guest', phone: '••••1111', visits: 0, lastVisit: null });
+    expect(g1).toEqual({ name: 'Sample Guest', phone: '••••1111', visits: 0, lastVisit: null, usualPaise: null });
     expect((await ok(counter.get(`${B}/orders`))).orders.find((o: any) => o.id === a)).toMatchObject({ guestName: 'Sample Guest', guestPhone: '••••1111' });
     // The full number is kept, and goes on the bill when it is printed.
     await ok(counter.post(`${B}/orders/${a}/items`, { itemId: s.items['Masala Chai'], delta: 1 }));
@@ -68,5 +68,37 @@ describe('guests on orders', () => {
     const stay = (await ok(counter.get(`${B}/stays`))).stays[0];
     const r = (await ok(counter.post(`${B}/orders`, { kind: 'room', place: 'Room 101', stayId: stay.id }))).id;
     expect((await ok(counter.get(`${B}/orders/${r}`))).order).toMatchObject({ guestName: 'Room Guest', guestPhone: '••••5555' });
+  });
+});
+
+describe('phone check and the counter search', () => {
+  it('accepts Indian mobiles and foreign numbers, refuses the rest', async () => {
+    const { phoneProblem } = await import('../src/routes/settings');
+    for (const ok of ['9800011111', '+91 98000 11111', '098000 11111', '919800011111', '6000012345', '+44 7700 900123', '+1 (650) 555-0123'])
+      expect(phoneProblem(ok), ok).toBeNull();
+    for (const bad of ['98000 1111', '1234567890', '5800011111', '9999999999', '9876543210', '+44 12', '98000-11111x'])
+      expect(phoneProblem(bad), bad).not.toBeNull();
+  });
+
+  it('finds open orders and bills by bill number, name, phone or table, with the phone hidden', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'Terrace 2', guestName: 'Sample Seeker', guestPhone: '9800077777' }))).id;
+    await ok(counter.post(`${B}/orders/${o}/items`, { itemId: s.items['Masala Chai'], delta: 1 }));
+    await ok(counter.post(`${B}/orders/${o}/kot`));
+    const bill = (await ok(counter.post(`${B}/orders/${o}/bill`, { entityId: s.company }))).bill;
+    // Unpaid: shown as open, with its bill.
+    let r = await ok(counter.get(`${B}/search?q=seeker`));
+    expect(r.open).toMatchObject([{ place: 'Terrace 2', guestName: 'Sample Seeker', phone: '••••7777', billNo: bill.billNo }]);
+    await ok(counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: String(bill.totalPaise / 100) }] }));
+    for (const q of ['7777', bill.billNo.slice(-4), 'terrace', 'Sample Seeker']) {
+      r = await ok(counter.get(`${B}/search?q=${encodeURIComponent(q)}`));
+      expect(r.bills.map((b: any) => b.billNo), q).toContain(bill.billNo);
+    }
+    expect(r.bills[0]).toMatchObject({ phone: '••••7777', modes: ['cash'], status: 'settled' });
+    expect(JSON.stringify(r)).not.toContain('9800077777');
+    expect((await ok(counter.get(`${B}/search?q=777`))).bills.filter((b: any) => b.phone)).toEqual([]);   // 3 digits: not a phone search
+    expect(r.days).toBe(90);
+    expect((await ok(owner.get(`${B}/search?q=seeker`))).days).toBeNull();
   });
 });

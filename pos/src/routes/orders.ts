@@ -375,9 +375,10 @@ orderRoutes.post(`${B}/orders/:id/guest`, requireAction('orders.edit'), async (c
   return c.json({ guest: await guestOut(c.env.DB, bid, o.id, g.name, g.phone, g.guestId) });
 });
 async function guestOut(db: D1Database, bid: string, orderId: string, name: string | null, phone: string | null, guestId: string | null) {
-  const v = guestId ? await one<{ n: number; last: string | null }>(db, `SELECT count(*) AS n, max(opened_shift_day) AS last FROM orders
-    WHERE business_id = ? AND guest_id = ? AND id <> ? AND status <> 'cancelled'`, bid, guestId, orderId) : null;
-  return { name, phone: maskPhone(phone), visits: v?.n ?? 0, lastVisit: v?.last ?? null };
+  const v = guestId ? await one<{ n: number; last: string | null; avg: number | null }>(db, `SELECT count(*) AS n, max(opened_shift_day) AS last,
+      (SELECT round(avg(b.total_paise)) FROM bills b JOIN orders x ON x.id = b.order_id WHERE x.business_id = ?1 AND x.guest_id = ?2 AND x.id <> ?3 AND b.status = 'settled') AS avg
+    FROM orders WHERE business_id = ?1 AND guest_id = ?2 AND id <> ?3 AND status <> 'cancelled'`, bid, guestId, orderId) : null;
+  return { name, phone: maskPhone(phone), visits: v?.n ?? 0, lastVisit: v?.last ?? null, usualPaise: v?.avg ?? null };
 }
 
 // An order with nothing sent to the kitchen can be dropped (a table that left before ordering). One with items already
@@ -548,6 +549,42 @@ export async function billOut(db: D1Database, bid: string, id: string) {
   return { ...rest, entityId: entity_id, items: items.map((i) => ({ ...i, gstBp: i.gstBp ?? (i.taxKind === 'gst' ? b.gstRateBp : null), options: i.options ? JSON.parse(i.options) : [] })),
     taxes, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
+
+// One search for the counter (22 Nov 2026): a bill number (or its end), a guest name, 4 or more digits of a phone, or a
+// table or room. Open orders, tabs and unpaid bills first; then bills, newest first: the last 90 days for cashiers, all
+// for managers and owners. Phones come back as their last 4 digits only.
+orderRoutes.get(`${B}/search`, requireAction('bills.print'), async (c) => {
+  const bid = c.get('businessId');
+  const raw = (c.req.query('q') ?? '').trim();
+  if (raw.length < 2 || raw.length > 40) fail(400, 'Type at least 2 letters or digits.');
+  const like = `%${raw.toLowerCase().replace(/[%_]/g, '')}%`;
+  const digits = raw.replace(/\D/g, '');
+  const phone = digits.length >= 4 ? `%${digits}%` : null;
+  const since = isManager(c) ? 0 : Date.now() - 90 * 86_400_000;
+  const [open, bills] = await Promise.all([
+    all<{ id: string; place: string; status: string; guest_name: string | null; guest_phone: string | null; opened_at: number; bill_id: string | null; bill_no: string | null; total: number | null; items: number }>(c.env.DB, `
+      SELECT o.id, o.place, o.status, o.guest_name, o.guest_phone, o.opened_at, b.id AS bill_id, b.bill_no, b.total_paise AS total,
+        (SELECT coalesce(sum(l.qty * l.price_paise), 0) FROM order_lines l WHERE l.order_id = o.id) AS items
+      FROM orders o LEFT JOIN bills b ON b.order_id = o.id AND b.status = 'printed'
+      WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed')
+        AND (lower(o.place) LIKE ? OR lower(coalesce(o.guest_name, '')) LIKE ? OR lower(coalesce(b.bill_no, '')) LIKE ? OR (? IS NOT NULL AND o.guest_phone LIKE ?))
+      ORDER BY o.opened_at DESC LIMIT 20`, bid, like, like, like, phone, phone),
+    all<{ id: string; bill_no: string; status: string; total: number; printed_at: number; place: string; guest_name: string | null; guest_phone: string | null; modes: string | null }>(c.env.DB, `
+      SELECT b.id, b.bill_no, b.status, b.total_paise AS total, b.printed_at, o.place, coalesce(b.guest_name, o.guest_name) AS guest_name,
+        coalesce(b.guest_phone, o.guest_phone) AS guest_phone,
+        (SELECT group_concat(DISTINCT p.mode) FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = b.id) AS modes
+      FROM bills b JOIN orders o ON o.id = b.order_id
+      WHERE b.business_id = ? AND b.printed_at >= ? AND b.status <> 'printed'
+        AND (lower(b.bill_no) LIKE ? OR lower(o.place) LIKE ? OR lower(coalesce(b.guest_name, o.guest_name, '')) LIKE ?
+          OR (? IS NOT NULL AND coalesce(b.guest_phone, o.guest_phone) LIKE ?))
+      ORDER BY b.printed_at DESC LIMIT 30`, bid, since, like, like, like, phone, phone),
+  ]);
+  return c.json({ days: isManager(c) ? null : 90,
+    open: open.map((o) => ({ id: o.id, place: o.place, status: o.status, guestName: o.guest_name, phone: maskPhone(o.guest_phone), openedAt: o.opened_at,
+      billId: o.bill_id, billNo: o.bill_no, amountPaise: o.total ?? o.items })),
+    bills: bills.map((b) => ({ id: b.id, billNo: b.bill_no, status: b.status, totalPaise: b.total, printedAt: b.printed_at, place: b.place, guestName: b.guest_name,
+      phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [] })) });
+});
 
 // Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.
 orderRoutes.get(`${B}/bills`, requireAction('bills.print'), async (c) => {

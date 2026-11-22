@@ -64,15 +64,15 @@ describe('hostel', () => {
   it('keeps a guest by phone for their next stay, and finds stays by phone', async () => {
     const s = await setupBusiness();
     const { B, owner, counter, ok } = s;
-    const first = (await ok(owner.post(`${B}/stays`, { room: '101', guestName: 'Sample Guest', phone: '+91 98765 43210', city: 'Sample City' }))).id;
-    expect((await ok(owner.get(`${B}/stays`))).stays[0]).toMatchObject({ room: '101', guestName: 'Sample Guest', phone: '9876543210' });
-    expect((await ok(counter.get(`${B}/stays`))).stays[0].phone).toBe('9876543210');   // the till sees the number to search by
+    const first = (await ok(owner.post(`${B}/stays`, { room: '101', guestName: 'Sample Guest', phone: '+91 98765 00210', city: 'Sample City' }))).id;
+    expect((await ok(owner.get(`${B}/stays`))).stays[0]).toMatchObject({ room: '101', guestName: 'Sample Guest', phone: '9876500210' });
+    expect((await ok(counter.get(`${B}/stays`))).stays[0].phone).toBe('9876500210');   // the till sees the number to search by
     await ok(owner.post(`${B}/stays/${first}/check-out`, {}));
-    const back = (await ok(owner.get(`${B}/guests/lookup?phone=09876543210`))).guest;
-    expect(back).toMatchObject({ name: 'Sample Guest', phone: '9876543210', city: 'Sample City', stays: [{ room: '101' }] });
-    await ok(owner.post(`${B}/stays`, { room: '102', guestName: 'Sample Guest K', phone: '9876543210' }));
+    const back = (await ok(owner.get(`${B}/guests/lookup?phone=09876500210`))).guest;
+    expect(back).toMatchObject({ name: 'Sample Guest', phone: '9876500210', city: 'Sample City', stays: [{ room: '101' }] });
+    await ok(owner.post(`${B}/stays`, { room: '102', guestName: 'Sample Guest K', phone: '9876500210' }));
     expect(await q('SELECT name, city FROM guests WHERE business_id = ?', s.businessId)).toEqual([{ name: 'Sample Guest K', city: 'Sample City' }]);
-    expect((await ok(owner.get(`${B}/guests/lookup?phone=9876543210`))).guest.stays.map((x: any) => x.room)).toEqual(['102', '101']);
+    expect((await ok(owner.get(`${B}/guests/lookup?phone=9876500210`))).guest.stays.map((x: any) => x.room)).toEqual(['102', '101']);
     expect((await owner.post(`${B}/stays`, { room: '103', guestName: 'X', phone: '12' })).status).toBe(400);
   });
 

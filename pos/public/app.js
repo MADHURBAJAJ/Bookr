@@ -210,21 +210,25 @@ root.addEventListener('click', async (ev) => {
   // Taps that only change the screen finish at once; one that waits on the server shows it is working, and a second tap is ignored.
   el.classList.add('busy');
   const wait = setTimeout(() => el.setAttribute('aria-busy', 'true'), 150);
-  try { await fn(el.dataset, el); } catch (e) {
+  try { await fn(el.dataset, el); } catch (e) { await actionError(e, el.dataset.act, el.dataset); } finally { clearTimeout(wait); el.classList.remove('busy'); el.removeAttribute('aria-busy'); }
+});
+/** What a failed tap shows: a sign-in, a question (same guest? a manager's PIN?) that retries the tap, or the error. */
+async function actionError(e, act, dataset) {
+  {
     if (e instanceof ApiError && e.code === 'signin') return; // already sent to the sign-in screen
     // A step a cashier may not take alone: ask for a manager's PIN, then do the same tap again with it.
     // A phone already saved under another name: ask which name is right, then do the same tap again.
     if (e instanceof ApiError && e.code === 'guest_differs') {
-      ui.guestAsk = { message: e.message, savedName: e.data?.savedName, act: el.dataset.act, data: { ...el.dataset } }; ui.error = null; rerender(); return;
+      ui.guestAsk = { message: e.message, savedName: e.data?.savedName, act, data: { ...dataset } }; ui.error = null; rerender(); return;
     }
     if (e instanceof ApiError && e.code === 'approval') {
       const approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers;
-      ui.approval = { message: e.message, act: el.dataset.act, data: { ...el.dataset }, approvers }; ui.apId = approvers[0]?.id; ui.apPin = ''; ui.error = null;
+      ui.approval = { message: e.message, act, data: { ...dataset }, approvers }; ui.apId = approvers[0]?.id; ui.apPin = ''; ui.error = null;
       rerender(); return;
     }
     ui.error = e.message; rerender();
-  } finally { clearTimeout(wait); el.classList.remove('busy'); el.removeAttribute('aria-busy'); }
-});
+  }
+}
 root.addEventListener('input', (ev) => {
   const el = ev.target;
   if (el.dataset.model) {
@@ -238,10 +242,28 @@ root.addEventListener('input', (ev) => {
 root.addEventListener('change', (ev) => {
   const el = ev.target;
   if (el.dataset.model && el.tagName === 'SELECT') { ui[el.dataset.model] = el.value; rerender(); }
-  if (el.dataset.actChange) Promise.resolve(actions[el.dataset.actChange](el.dataset, el)).catch((e) => { ui.error = e.message; rerender(); });
+  if (el.dataset.actChange) Promise.resolve(actions[el.dataset.actChange](el.dataset, el)).catch((e) => actionError(e, el.dataset.actChange, el.dataset));
 });
 root.addEventListener('submit', (ev) => { ev.preventDefault(); const b = ev.target.querySelector('[data-submit]'); if (b) b.click(); });
 let rerender = () => {};
+/** Why a typed phone is not valid, or null: the same check the server makes (Indian mobile, or + and a country code). */
+function phoneProblem(v) {
+  const t = String(v ?? '').trim();
+  if (!t) return null;
+  if (/[^\d\s+()-]/.test(t)) return 'Phone: use digits only.';
+  let d = t.replace(/\D/g, '');
+  const foreign = t.startsWith('+') && !/^\+\s*91/.test(t);
+  if (foreign) return d.length < 8 || d.length > 15 ? `Phone: ${d.length} digits. A foreign number has 8 to 15 digits with its country code.` : null;
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  if (d.length !== 10) return `Phone: ${d.length} digit${d.length === 1 ? '' : 's'}. A mobile has 10, starting 6, 7, 8 or 9. A foreign number starts with + and the country code.`;
+  if (!/^[6-9]/.test(d)) return 'Phone: a mobile starts with 6, 7, 8 or 9. A foreign number starts with + and the country code.';
+  if (/^(\d)\1+$/.test(d) || d === '9876543210' || d === '6789012345') return 'Phone: that does not look like a real number.';
+  return null;
+}
+/** The check under a phone box, as it is typed: why it is wrong, or a tick once it is a full valid number. */
+const phoneHint = (v) => { const t = String(v ?? '').trim(); if (!t) return ''; const p = phoneProblem(t);
+  return p ? html`<p class="phint bad" role="status">✗ ${p}</p>` : html`<p class="phint ok" role="status">✓ Valid number</p>`; };
 actions.discLimitSave = async () => {
   const b = me.business;
   await api('PUT', `${B()}/settings`, { name: b.name, fyStartMonth: b.fy_start_month, shiftStartHour: b.shift_start_hour, tabAgeDays: b.tab_age_days, discLimitPct: Number(ui.discLimit ?? b.disc_limit_bp / 100) });
@@ -386,10 +408,10 @@ async function tablesScreen() {
           <span class="badge billed">${n('billed')} to pay</span><span class="badge new">${n('new')} not sent</span>
           <span class="badge open">${n('open')} with kitchen</span><span class="badge tab">${plural(n('tab'), 'tab')}</span>
           <span class="small quiet" style="align-self:center">Running total ${rs(onFloor)}</span></div>
-        ${can('bills.print') ? html`<form class="findbill" role="search"><label class="vh" for="findNo">Find a bill</label><input class="in" id="findNo" data-model="findNo" placeholder="Find a bill: number or its end" value="${ui.findNo ?? ''}" inputmode="search">
-          <button class="btn" type="submit" data-act="findBill" data-submit>Find bill</button></form>` : ''}
+        ${can('bills.print') ? html`<form class="findbill" role="search"><label class="vh" for="findNo">Search</label><input class="in" id="findNo" data-model="findNo" placeholder="Search: bill no., guest name, phone, table or room" value="${ui.findNo ?? ''}" inputmode="search" autocomplete="off">
+          <button class="btn" type="submit" data-act="findBill" data-submit>Search</button></form>` : ''}
       </div>
-      ${ui.found ? html`<div class="found" role="status">${ui.found.length ? ui.found.map((b) => html`<a class="chip" href="#/${b.status === 'printed' ? 'settle' : 'done'}/${b.id}">${b.billNo} · ${b.place} · ${rs(b.totalPaise)} · ${b.status === 'settled' ? 'paid' : b.status}</a>`) : html`<span class="quiet">No bill with that number.</span>`}</div>` : ''}
+      ${ui.found ? searchResults(ui.found) : ''}
       ${showGrid ? tableGrid() : ''}
       <div class="sect"><h2>${showGrid ? 'Room service, takeaway and tabs' : 'Open orders'}</h2>
         ${rest.length ? html`<span class="small quiet">Bills to pay first, then oldest</span>` : ''}</div>
@@ -520,13 +542,25 @@ function newOrderForm() {
     <h2>${k === 'table' ? 'New table order' : k === 'room' ? 'Room service' : 'Takeaway'}</h2>
     ${k === 'table' ? html`<div class="grid2"><label class="f">Table<input class="in" data-model="place" autofocus placeholder="e.g. T4"></label>
       <label class="f">Guests<input class="in" inputmode="numeric" data-model="covers"></label></div>
-      <div class="grid2"><label class="f">Guest name (optional)<input class="in" data-model="guestName"></label><label class="f">Phone (optional)<input class="in" inputmode="tel" data-model="guestPhone"></label></div>` : ''}
+      <div class="grid2"><label class="f">Guest name (optional)<input class="in" data-model="guestName"></label><label class="f">Phone (optional)<input class="in" inputmode="tel" data-model="guestPhone" data-live value="${ui.guestPhone ?? ''}"></label></div>${phoneHint(ui.guestPhone)}` : ''}
     ${k === 'room' ? stayPicker('pickStay', ui.stayId, (s) => s.id) : ''}
-    ${k === 'takeaway' ? html`<div class="grid2"><label class="f">Guest name (optional)<input class="in" data-model="guestName" autofocus></label><label class="f">Phone (optional)<input class="in" inputmode="tel" data-model="guestPhone"></label></div>` : ''}
+    ${k === 'takeaway' ? html`<div class="grid2"><label class="f">Guest name (optional)<input class="in" data-model="guestName" autofocus></label><label class="f">Phone (optional)<input class="in" inputmode="tel" data-model="guestPhone" data-live value="${ui.guestPhone ?? ''}"></label></div>${phoneHint(ui.guestPhone)}` : ''}
     <div class="row"><button class="btn pri" type="submit" data-act="openOrder" data-submit>Start order</button><button class="btn" type="button" data-act="newOrder" data-kind="">Cancel</button></div>
   </form>`;
 }
-actions.findBill = async () => { ui.found = (await api('GET', `${B()}/bills?no=${encodeURIComponent(ui.findNo ?? '')}`)).bills; rerender(); };
+actions.findBill = async () => { ui.found = await api('GET', `${B()}/search?q=${encodeURIComponent((ui.findNo ?? '').trim())}`); rerender(); };
+actions.findClose = () => { ui.found = null; ui.findNo = ''; rerender(); };
+const PAID_BY = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'To room', credit: 'On credit', comp: 'Complimentary', advance: 'Advance' };
+/** The counter's search results (22 Nov 2026): what is open now, then bills, each a link to the order or the receipt. */
+function searchResults(r) {
+  const who = (x) => [x.guestName, x.phone].filter(Boolean).join(' · ') || html`<span class="quiet">No guest</span>`;
+  const openState = (o) => (o.billNo ? `Bill ${o.billNo} · to pay` : o.status === 'tab' ? 'Tab' : 'Open');
+  const billState = (b) => (b.status === 'void' ? 'Void' : `Paid${b.modes.length ? ` · ${b.modes.map((m) => PAID_BY[m] ?? m).join(', ')}` : ''}`);
+  return html`<div class="results" role="status"><div class="row between"><strong>${plural(r.open.length + r.bills.length, 'result')}</strong><button class="btn ghost" type="button" data-act="findClose">Close</button></div>
+    ${r.open.length ? html`<p class="rh">Open now</p>${r.open.map((o) => html`<a class="rrow" href="${o.billId ? `#/settle/${o.billId}` : `#/order/${o.id}`}"><b>${o.place}</b><span>${who(o)}</span><span class="quiet">opened ${time(o.openedAt)}</span><span class="num">${rs(o.amountPaise)}</span><span><span class="badge ${o.billNo ? 'billed' : o.status === 'tab' ? 'tab' : 'open'}">${openState(o)}</span></span></a>`)}` : ''}
+    ${r.bills.length ? html`<p class="rh">Bills${r.days ? ` (last ${r.days} days)` : ''}</p>${r.bills.map((b) => html`<a class="rrow" href="#/done/${b.id}"><b>${b.billNo}</b><span>${who(b)}</span><span class="quiet">${dateTime(b.printedAt)} · ${b.place}</span><span class="num">${rs(b.totalPaise)}</span><span><span class="badge ${b.status === 'void' ? 'void' : 'paid'}">${billState(b)}</span></span></a>`)}` : ''}
+    ${r.open.length || r.bills.length ? '' : html`<p class="quiet">Nothing matches “${ui.findNo}”. Phone numbers need at least 4 digits.</p>`}</div>`;
+}
 actions.newOrder = (d) => { ui.picking = d.kind || null; ui.stayId = null; ui.error = null; rerender(); };
 actions.pickStay = (d) => { ui.stayId = d.id; rerender(); };
 actions.openOrder = async () => {
@@ -539,23 +573,35 @@ actions.openOrder = async () => {
 
 // ---------- order
 
-/** The guest on an order (22 Nov 2026): name, last 4 digits of the phone and earlier visits, or a link to add them. */
+/** The guest on an order (22 Nov 2026): name and phone boxes, always shown, saved when you leave them; a returning guest's visits. */
 function guestLine(o) {
   const g = ui.guest ?? { name: o.guestName, phone: o.guestPhone, visits: 0 };
-  if (ui.gEdit) return html`<form class="guestedit"><div class="grid2"><label class="f">Guest name<input class="in" data-model="gName" value="${ui.gName ?? g.name ?? ''}" autofocus></label>
-      <label class="f">Phone<input class="in" inputmode="tel" data-model="gPhone" value="${ui.gPhone ?? ''}" placeholder="${g.phone ? `On file ${g.phone}` : 'Optional'}"></label></div>
-    <div class="row"><button class="btn pri" type="submit" data-act="gSave" data-submit>Save guest</button><button class="btn ghost" type="button" data-act="gNo">Cancel</button></div></form>`;
-  if (!g.name && !g.phone) return html`<button class="btn ghost addln" type="button" data-act="gEdit">+ Add guest name or phone</button>`;
-  return html`<p class="small guestl"><strong>${g.name ?? 'Guest'}</strong>${g.phone ? ` · ${g.phone}` : ''}${g.visits ? html` · <span class="quiet">${g.visits === 1 ? 'came once before' : `came ${g.visits} times before`}${g.lastVisit ? `, last ${dayName(g.lastVisit)}` : ''}</span>` : ''}
-    <button class="btn ghost addln" type="button" data-act="gEdit">Change</button></p>`;
+  return html`<form class="guestedit"><div class="grid2">
+      <label class="f">Guest name<input class="in" data-model="gName" data-guest-box value="${ui.gName ?? g.name ?? ''}" placeholder="${o.status === 'tab' ? 'Required for a tab' : 'Optional'}" autocomplete="off"></label>
+      <label class="f">Phone<input class="in" inputmode="tel" data-model="gPhone" data-guest-box data-live value="${ui.gPhone ?? ''}" placeholder="${g.phone ? `${g.phone} on file` : '10-digit mobile'}" autocomplete="off"></label></div>
+    ${phoneHint(ui.gPhone)}
+    ${g.visits ? html`<p class="small guestl ret"><strong>Returning guest</strong> · ${g.visits === 1 ? 'came once before' : `came ${g.visits} times before`}${g.lastVisit ? `, last ${dayName(g.lastVisit)}` : ''}${g.usualPaise ? ` · usually ${rs(g.usualPaise)}` : ''}</p>` : ''}
+    <button class="vh" type="submit" data-act="gSave" data-submit tabindex="-1">Save guest</button></form>`;
 }
-actions.gEdit = () => { ui.gEdit = true; ui.gName = undefined; ui.gPhone = undefined; rerender(); };
-actions.gNo = () => { ui.gEdit = false; rerender(); };
+// Saved when the cursor leaves the name and phone boxes (not when moving from one to the other), or on Enter.
+// The screen redraws as a phone is typed (for its check), which also moves the cursor: wait a moment and save only if the
+// cursor is really outside both boxes.
+root.addEventListener('focusout', (ev) => {
+  if (ev.target.dataset?.guestBox === undefined) return;
+  setTimeout(() => {
+    if (document.activeElement?.dataset?.guestBox !== undefined || !ui.order) return;
+    Promise.resolve(actions.gSave({})).catch((e) => actionError(e, 'gSave', {}));
+  }, 0);
+});
 actions.gSave = async () => {
   const g = ui.guest ?? {};
-  // A phone left empty keeps the one on file.
-  const r = await api('POST', `${B()}/orders/${ui.order.id}/guest`, { guestName: ui.gName ?? g.name ?? '', guestPhone: ui.gPhone || (g.phone ? undefined : '') });
-  ui.guest = r.guest; ui.order.guestName = r.guest.name; ui.order.guestPhone = r.guest.phone; ui.gEdit = false; rerender();
+  const name = (ui.gName ?? g.name ?? '').trim();
+  const phone = (ui.gPhone ?? '').trim();
+  if (phone && phoneProblem(phone)) return;                       // the box already says why; nothing is saved
+  if (name === (g.name ?? '') && !phone) return;                  // nothing changed
+  const r = await api('POST', `${B()}/orders/${ui.order.id}/guest`, { guestName: name, ...(phone ? { guestPhone: phone } : {}) });
+  ui.guest = r.guest; ui.order.guestName = r.guest.name; ui.order.guestPhone = r.guest.phone; ui.gName = undefined; ui.gPhone = undefined;
+  flash = null; rerender();
 };
 
 async function orderScreen(id) {
@@ -612,8 +658,9 @@ async function orderScreen(id) {
       </section>
       <section class="ticket panel" aria-label="Order" id="ticket">
         <div class="tk-head"><div><p class="tiny quiet" style="font-weight:700">${KIND_TEXT[o.kind] ?? o.kind}${o.status === 'tab' ? ` · tab since ${dayName(o.openedShiftDay)}` : ''}</p><h2>${o.place}</h2>
-            <p class="quiet small">opened ${time(o.openedAt)}</p>${guestLine(o)}</div>
+            <p class="quiet small">opened ${time(o.openedAt)}</p></div>
           <a class="btn" href="#/">Tables</a></div>
+        ${guestLine(o)}
         <div class="tk-body">
           ${errorBox()}
           ${ui.kotDone ? html`<div class="msg ok" role="status">${ui.kotDone}</div>` : ''}
@@ -628,7 +675,7 @@ async function orderScreen(id) {
             <div class="row" style="margin-top:10px"><button class="btn pri" type="button" data-act="splitGo">Move to a new bill</button><button class="btn" type="button" data-act="splitNo">Cancel</button></div></div>` : ''}
           ${ui.tabAsk ? html`<form class="msg warn"><p class="small" style="margin:0 0 6px">A tab needs the guest's name and phone.</p>
             <div class="grid2"><label class="f">Guest name<input class="in" data-model="tabGuest" value="${ui.tabGuest ?? o.guestName ?? ''}" autofocus></label>
-            <label class="f">Phone<input class="in" inputmode="tel" data-model="tabPhone" value="${ui.tabPhone ?? ''}" placeholder="${ui.guest?.phone ? `On file ${ui.guest.phone}` : ''}"></label></div>
+            <label class="f">Phone<input class="in" inputmode="tel" data-model="tabPhone" data-live value="${ui.tabPhone ?? ''}" placeholder="${ui.guest?.phone ? `On file ${ui.guest.phone}` : ''}"></label></div>${phoneHint(ui.tabPhone)}
             <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
         </div>
         <div class="tk-foot">

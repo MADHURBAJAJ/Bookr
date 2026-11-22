@@ -778,14 +778,34 @@ settingsRoutes.get(`${B}/stays`, requireAction('pos.view'), async (c) => {
   return c.json({ stays: rows.map((r) => ({ ...r, phone: r.phone ? (full ? r.phone : `••••${r.phone.slice(-4)}`) : null })) });
 });
 
-/** A phone number as kept: digits only, without India's 91 or a leading 0 in front of a 10-digit mobile. */
+/**
+ * A phone number as kept (22 Nov 2026): an Indian mobile as its 10 digits (a typed +91 or leading 0 is dropped), which
+ * must start 6, 7, 8 or 9; a foreign number typed with + and its country code, as 8 to 15 digits. Obvious fakes
+ * (one digit repeated, 1234567890) are refused. Empty: no phone.
+ */
 export function phoneKey(v: unknown): string | null {
   if (typeof v !== 'string' || !v.trim()) return null;
+  const problem = phoneProblem(v);
+  if (problem) fail(400, problem);
+  return phoneDigits(v);
+}
+const phoneDigits = (v: string) => {
   let d = v.replace(/\D/g, '');
+  if (v.trim().startsWith('+')) return d.startsWith('91') && d.length === 12 ? d.slice(2) : d;
   if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
   if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
-  if (d.length < 6 || d.length > 15) fail(400, 'Phone number must be 6 to 15 digits.');
   return d;
+};
+/** Why a typed phone is not valid, in plain words; null when it is. The counter screen runs the same check as it is typed. */
+export function phoneProblem(v: string): string | null {
+  const foreign = v.trim().startsWith('+') && !/^\+\s*91/.test(v.trim());
+  const d = phoneDigits(v);
+  if (/[^\d\s+()-]/.test(v.trim())) return 'Phone: use digits only.';
+  if (foreign) return d.length < 8 || d.length > 15 ? `Phone: ${d.length} digits. A foreign number has 8 to 15 digits with its country code.` : null;
+  if (d.length !== 10) return `Phone: ${d.length} digit${d.length === 1 ? '' : 's'}. A mobile has 10, starting 6, 7, 8 or 9. A foreign number starts with + and the country code.`;
+  if (!/^[6-9]/.test(d)) return 'Phone: a mobile starts with 6, 7, 8 or 9. A foreign number starts with + and the country code.';
+  if (/^(\d)\1+$/.test(d) || d === '9876543210' || d === '6789012345') return 'Phone: that does not look like a real number.';
+  return null;
 }
 
 // A returning guest, found by phone at check-in: their details and earlier stays (room, dates, what was charged).
