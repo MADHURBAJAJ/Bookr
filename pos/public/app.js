@@ -398,42 +398,76 @@ function tableGrid() {
   const listed = new Set(secs.flatMap((x) => x.tables).map((t) => t.toLowerCase()));
   const extra = [...busy.values()].filter((o) => !listed.has(o.place.toLowerCase())).map((o) => o.place);
   const all = [...secs, ...(extra.length ? [{ name: 'Other tables', kind: 'other', tables: extra }] : [])];
-  const cell = (t, kind, blocked) => {
+  // Who is staying in a room or bed, and which night of their stay it is (22 Nov 2026).
+  const stayAt = (t) => cache.stays?.find((x) => roomKeyOf(x.room) === roomKeyOf(t)) ?? null;
+  const nightOf = (st) => Math.max(1, Math.round((Date.parse(me.business.shiftDay) - Date.parse(st.checkIn)) / 86_400_000) + 1);
+  const isRoom = (kind) => kind === 'rooms' || kind === 'dorms';
+  const cell = (t, kind, blocked, label = t) => {
     const o = busy.get(t.toLowerCase());
     const nc = kind === 'nc';
-    if (!o && blocked) return html`<span class="tcell free blocked" aria-label="${t}: ${blocked}"><span class="tn">${t}</span><span class="ts">${blocked}</span></span>`;
-    const guest = (kind === 'rooms' || kind === 'dorms') && !o ? cache.stays?.find((x) => roomKeyOf(x.room) === roomKeyOf(t)) : null;
-    if (!o) return html`<button type="button" class="tcell free ${nc ? 'nc' : ''} ${guest ? 'stay' : ''}" data-act="quickTable" data-place="${t}" aria-label="${t}, free${guest ? `, ${guest.guestName} staying` : ''}: start an order"><span class="tn">${t}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${guest ? guest.guestName : 'Free'}</span></button>`;
+    if (!o && blocked) return html`<span class="tcell free blocked" aria-label="${t}: ${blocked}"><span class="tn">${label}</span><span class="ts">${blocked}</span></span>`;
+    const guest = isRoom(kind) ? stayAt(t) : null;
+    if (!o) {
+      // A guest staying: the order goes on their folio. An empty room or bed: a walk-in order.
+      return html`<button type="button" class="tcell free ${nc ? 'nc' : ''} ${guest ? 'stay' : ''}" data-act="quickTable" data-place="${t}" aria-label="${t}, ${guest ? `${guest.guestName} staying` : 'empty'}: start an order">
+        <span class="tn">${label}</span>${guest ? html`<span class="tg">${guest.guestName}</span><span class="ts">Staying · night ${nightOf(guest)}</span>`
+          : html`<span class="ts">${nc ? html`<span class="ncbadge">NC</span> Free` : label !== t ? 'Empty' : isRoom(kind) ? 'Empty · tap for walk-in' : 'Free'}</span>`}</button>`;
+    }
     const s = orderState(o);
-    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${t}</span>
+    const who = guest?.guestName ?? o.guestName;
+    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${label}</span>${who && isRoom(kind) ? html`<span class="tg">${who}</span>` : ''}
       <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
   };
+  const used = (t) => busy.has(t.toLowerCase()) || !!stayAt(t);
   const free = all.flatMap((x) => x.tables).filter((t) => !busy.has(t.toLowerCase())).length;
   const total = all.flatMap((x) => x.tables).length;
   ui.tSec ??= '';
-  // Room categories share one Rooms tab (grouped by category inside); other sections have a tab each.
-  const roomCats = all.filter((x) => x.kind === 'rooms' || x.kind === 'dorms');
-  const shown = all.filter((x) => !ui.tSec || (ui.tSec === '__rooms' ? roomCats.includes(x) : x.name === ui.tSec));
-  const tabList = [...(roomCats.length ? [['__rooms', 'Rooms', roomCats.reduce((t, x) => t + x.tables.length, 0)]] : []), ...all.filter((x) => !roomCats.includes(x)).map((x) => [x.name, x.name, x.tables.length])];
+  // Tabs by kind: All, Private rooms, Dorms, Out House, NC (and Tables for any other section).
+  const rooms = all.filter((x) => x.kind === 'rooms');
+  const dorms = all.filter((x) => x.kind === 'dorms');
+  const bedsOf = (x) => x.tables.filter((t) => !/ · whole$/.test(t));
+  const roomList = rooms.flatMap((x) => x.tables);
+  const bedList = dorms.flatMap(bedsOf);
+  const KIND_TAB = [['rooms', 'Private rooms'], ['dorms', 'Dorms'], ['outhouse', 'Out House'], ['nc', 'NC'], ['other', 'Tables']];
+  // A bed is taken when someone stays in it, it has an order, or its dorm room has a whole-room order.
+  const bedTaken = (t) => used(t) || busy.has(`${t.replace(/ · Bed \d+$/, '')} · whole`.toLowerCase());
+  const countOf = (k) => (k === 'rooms' ? `${roomList.length} · ${roomList.filter(used).length} occupied`
+    : k === 'dorms' ? `${bedList.length} beds · ${bedList.filter(bedTaken).length} taken`
+    : String(all.filter((x) => x.kind === k).reduce((n, x) => n + x.tables.length, 0)));
+  const tabList = KIND_TAB.filter(([k]) => all.some((x) => x.kind === k));
   const tabs = tabList.length > 1 ? html`<div class="secttabs" role="group" aria-label="Sections"><button type="button" data-act="tSec" data-name="" ${ui.tSec ? '' : 'aria-pressed="true"'}>All</button>
-    ${tabList.map(([k, t, n]) => html`<button type="button" data-act="tSec" data-name="${k}" ${ui.tSec === k ? 'aria-pressed="true"' : ''}>${t}<span class="n">${n}</span></button>`)}</div>` : '';
-  const body = (x) => {
-    if (x.kind === 'dorms') {
-      return html`${(x.dorms ?? []).map((d) => {
-        const whole = `${d.name} · whole`;
-        const beds = Array.from({ length: d.beds }, (_, i) => `${d.name} · Bed ${i + 1}`);
-        const wholeBusy = busy.has(whole.toLowerCase());
-        const bedBusy = beds.some((b) => busy.has(b.toLowerCase()));
-        return html`<div class="dormrow">${cell(whole, 'dorms', bedBusy ? 'Beds in use' : null)}<div class="tgrid">${beds.map((b) => cell(b, 'dorms', wholeBusy ? 'In the whole-dorm order' : null))}</div></div>`;
-      })}`;
+    ${tabList.map(([k, t]) => html`<button type="button" data-act="tSec" data-name="${k}" ${ui.tSec === k ? 'aria-pressed="true"' : ''}>${t}<span class="n">${countOf(k)}</span></button>`)}</div>` : '';
+  // Small room types (1 or 2 rooms) share one row, where the first of them comes.
+  const groups = [];
+  let small = null;
+  for (const x of all.filter((y) => !ui.tSec || y.kind === ui.tSec)) {
+    if (x.kind === 'rooms' && x.tables.length <= 2) {
+      if (small) { small.names.push(x.name); small.tables.push(...x.tables); continue; }
+      small = { ...x, names: [x.name], tables: [...x.tables] }; groups.push(small); continue;
     }
-    return html`<div class="tgrid">${x.tables.map((t) => cell(t, x.kind, x.kind === 'nc' && !isMgr() ? 'Managers only' : null))}</div>`;
+    groups.push({ ...x, names: [x.name], tables: [...x.tables] });
+  }
+  const dormCard = (d) => {
+    const whole = `${d.name} · whole`;
+    const beds = Array.from({ length: d.beds }, (_, i) => `${d.name} · Bed ${i + 1}`);
+    const wholeBusy = busy.has(whole.toLowerCase());
+    const bedBusy = beds.some((b) => busy.has(b.toLowerCase()));
+    const taken = beds.filter(bedTaken).length;
+    return html`<div class="dormcard ${wholeBusy ? 'whole' : ''}"><div class="dh"><b>${d.name}</b><span class="small quiet">${wholeBusy ? 'Whole room order' : taken ? `${taken} of ${d.beds} beds` : 'Empty'}</span></div>
+      <div class="tgrid ${d.beds === 4 ? 'four' : ''}">${beds.map((b, i) => cell(b, 'dorms', wholeBusy ? 'In the whole-room order' : null, `Bed ${i + 1}`))}</div>
+      <div class="wholebtn">${cell(whole, 'dorms', bedBusy ? 'Beds have their own orders' : null, 'Order for the whole room')}</div></div>`;
   };
+  const head = (x) => {
+    const occ = x.kind === 'rooms' ? `${x.tables.filter(used).length} of ${x.tables.length} occupied` : x.kind === 'dorms' ? `${bedsOf(x).filter(bedTaken).length} of ${bedsOf(x).length} beds taken` : SECTION_NOTE[x.kind];
+    return html`<div class="grouph"><h3>${x.names.join(', ')}</h3>${occ ? html`<span class="small quiet">${occ}</span>` : ''}</div>`;
+  };
+  const body = (x) => (x.kind === 'dorms' ? html`<div class="dormcards">${(x.dorms ?? []).map(dormCard)}</div>`
+    : html`<div class="tgrid ${x.kind === 'rooms' ? 'roomgrid' : ''}">${x.tables.map((t) => cell(t, x.kind, x.kind === 'nc' && !isMgr() ? 'Managers only' : null))}</div>`);
   return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${total}</span></h2>
-      <div class="legend" aria-hidden="true"><span><i class="free"></i>Free</span><span><i class="new"></i>Not sent</span><span><i class="open"></i>With kitchen</span><span><i class="billed"></i>To pay</span><span><i class="tab"></i>Tab</span></div></div>
+      <div class="legend" aria-hidden="true"><span><i class="free"></i>Free</span>${roomList.length || bedList.length ? html`<span><i class="stay"></i>Guest staying, no order</span>` : ''}<span><i class="new"></i>Not sent</span><span><i class="open"></i>With kitchen</span><span><i class="billed"></i>To pay</span><span><i class="tab"></i>Tab</span></div></div>
     ${ui.tablesFixed ? '' : html`<p class="small quiet" style="margin:-4px 0 10px">Showing tables used lately. Set your own tables, in sections, in Settings, Rooms and tables.</p>`}
     ${tabs}
-    ${shown.map((x) => html`${all.length > 1 ? html`<div class="grouph"><h3>${x.name}</h3>${SECTION_NOTE[x.kind] ? html`<span class="small quiet">${SECTION_NOTE[x.kind]}</span>` : ''}</div>` : ''}${body(x)}`)}`;
+    ${groups.map((x) => html`${all.length > 1 ? head(x) : ''}${body(x)}`)}`;
 }
 actions.tSec = (d) => { ui.tSec = d.name; rerender(); };
 actions.quickTable = async (d) => { const r = await api('POST', B() + '/orders', { kind: 'table', place: d.place }); go(`#/order/${r.id}`); };

@@ -9,6 +9,7 @@
   --warn: #8a4b00; --warn-tint: #fbefdd; --warn-line: #e8c48f;
   --bad: #a52a1f; --bad-tint: #fbe9e6; --bad-line: #e6aaa3;
   --tab: #66379b; --tab-tint: #f3edfb; --tab-line: #cbb3ea;
+  --stay: #2b4590; --stay-tint: #eef2fd; --stay-line: #b9c8ef;
   --top: #0f4f4f; --top-ink: #eef6f5; --top-quiet: #b6d3d0; --top-hover: #1a6363; --top-line: #5d9393; --top-active: #eef6f5; --top-active-ink: #0f4f4f;
   --on-ink: #fffdfa; --hover: #f6f2ec; --hover-line: #8b8274; --disabled: #e6e0d7; --disabled-ink: #5f594f; --placeholder: #776f63;
   --soft: #f7f3ed; --paper: #fbfaf6; --paper-rule: #a39a8c; --dash: #8b8274; --scrim: rgba(20, 30, 30, .45); --shadow: rgba(0, 0, 0, .25);
@@ -25,6 +26,7 @@
   --warn: #f0b264; --warn-tint: #33260f; --warn-line: #6b4b1c;
   --bad: #f08a80; --bad-tint: #3a1714; --bad-line: #7a3a33;
   --tab: #c3a3ee; --tab-tint: #2b2140; --tab-line: #5b4683;
+  --stay: #a9bdf5; --stay-tint: #1c2540; --stay-line: #3e5185;
   --top: #081010; --top-ink: #e6f0ef; --top-quiet: #8fa6a4; --top-hover: #1a2b2b; --top-line: #3a5454; --top-active: #2a4545; --top-active-ink: #ffffff;
   --on-ink: #0e1717; --hover: #1b2a2a; --hover-line: #6b8686; --disabled: #1d2a2a; --disabled-ink: #93a6a4; --placeholder: #849a98;
   --soft: #132020; --paper: #172525; --paper-rule: #557070; --dash: #6b8686; --scrim: rgba(0, 0, 0, .6); --shadow: rgba(0, 0, 0, .5);
@@ -704,3 +706,23 @@ details.receipt-row[open] summary { border-bottom: 1px solid var(--line); }
 .pill.good { background: var(--go-tint); color: var(--go-dark); border-color: var(--go-line); }
 .pill.warn { background: var(--warn-tint); color: var(--warn); border-color: var(--warn-line); }
 .pill.bad { background: var(--bad-tint); color: var(--bad); border-color: var(--bad); }
+
+/* Tables by room type (22 Nov 2026): a guest staying with no order, dorm rooms as one card with their beds. */
+.tcell.free.stay { border-style: solid; border-color: var(--stay-line); background: var(--stay-tint); }
+.tcell.free.stay .ts, .tcell .tg { color: var(--stay); font-weight: 700; }
+.tcell .tg { font-size: 13px; }
+.legend i.stay { background: var(--stay-tint); border-color: var(--stay-line); }
+.tgrid.roomgrid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+@media (max-width: 760px) { .tgrid.roomgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.dormcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.dormcard { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--panel); display: grid; gap: 10px; align-content: start; }
+.dormcard.whole { border-color: var(--pri-line); background: var(--pri-tint); }
+.dormcard .dh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.dormcard .dh b { font-size: 18px; }
+.dormcard .tgrid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; gap: 8px; }
+.dormcard .tgrid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dormcard .tgrid .tcell { min-height: 66px; padding: 7px 9px; }
+.dormcard .tgrid .tcell .tn { font-size: 15px; }
+.dormcard .wholebtn .tcell { min-height: 0; flex-direction: row; align-items: center; gap: 10px; padding: 8px 12px; }
+.dormcard .wholebtn .tcell .tn { font-size: 14px; }
+@media (max-width: 760px) { .dormcards { grid-template-columns: 1fr; } }
