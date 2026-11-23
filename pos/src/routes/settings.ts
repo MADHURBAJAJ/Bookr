@@ -846,6 +846,10 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
       if (busy.length) fail(409, at.whole ? `${busy.map((x) => x.room).join(', ')} already ${busy.length === 1 ? 'has a guest' : 'have guests'}: the whole dorm cannot be booked.` : `${at.dorm} is booked whole for a group.`);
     }
   }
+  // Housekeeping (25 Nov 2026): a room still marked dirty is asked about first.
+  if (data.dirtyOk !== true && await one(c.env.DB, "SELECT 1 FROM room_status WHERE business_id = ? AND room = ? AND status = 'dirty'", bid, room)) {
+    return c.json({ error: `${room} is marked dirty (not cleaned since the last guest). Check in anyway?`, code: 'room_dirty' }, 409);
+  }
   const phone = phoneKey(data.phone);
   const city = text(data, 'city', 'City', { optional: true, max: 60 });
   const id = newId();
@@ -949,7 +953,7 @@ settingsRoutes.get(`${B}/stays/:id/grc`, requireAction('stays.edit'), async (c) 
 
 // ---------- the room's bill (24 Nov 2026): rent from the booking, charges added by hand, food, payments, the invoice
 
-async function openStay(c: Context<AppEnv>, id: string) {
+export async function openStay(c: Context<AppEnv>, id: string) {
   if (!isUuid(id)) fail(404, 'Stay not found.');
   const s = await one<{ id: string; room: string; guest_name: string; phone: string | null; check_in: string; checked_out_at: number | null; account_id: string }>(c.env.DB,
     `SELECT s.id, s.room, s.guest_name, s.phone, s.check_in, s.checked_out_at, d.id AS account_id FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id
@@ -960,17 +964,21 @@ async function openStay(c: Context<AppEnv>, id: string) {
 
 /** The stay's tax invoice as printed, or null before check-out. */
 async function invoiceOut(c: Context<AppEnv>, stayId: string) {
-  const r = await one<Record<string, unknown> & { lines: string; entity_id: string }>(c.env.DB, `SELECT i.invoice_no AS invoiceNo, i.at, i.guest_name AS guestName, i.phone, i.room,
+  const r = await one<Record<string, unknown> & { lines: string; entity_id: string; id: string }>(c.env.DB, `SELECT i.id, i.invoice_no AS invoiceNo, i.at, i.guest_name AS guestName, i.phone, i.room,
+      i.bill_to_name AS billToName, i.bill_to_gstin AS billToGstin, i.bill_to_address AS billToAddress,
       i.check_in AS checkIn, i.check_out AS checkOut, i.nights, i.lines, i.gst_rate_bp AS gstRateBp, i.taxable_paise AS taxablePaise, i.cgst_paise AS cgstPaise,
       i.sgst_paise AS sgstPaise, i.total_paise AS totalPaise, i.entity_id, e.name AS entityName, e.gstin, e.gst_registered AS gstRegistered
     FROM room_invoices i JOIN billing_entities e ON e.id = i.entity_id WHERE i.stay_id = ? AND i.business_id = ?`, stayId, c.get('businessId'));
   if (!r) return null;
   const { entity_id: _e, lines, ...rest } = r;
-  return { ...rest, lines: JSON.parse(lines) as { name: string; amountPaise: number }[] };
+  // Room credit notes against it (25 Nov 2026).
+  const creditNotes = await all(c.env.DB, `SELECT cn_no AS cnNo, reason, taxable_paise AS taxablePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise, total_paise AS totalPaise,
+    refund_mode AS refundMode, at FROM room_credit_notes WHERE invoice_id = ? ORDER BY seq`, r.id);
+  return { ...rest, lines: JSON.parse(lines) as { name: string; amountPaise: number }[], creditNotes };
 }
 
 /** What the room bill shows: the stay, its booking, every line on the folio, the balance, and the invoice once made. */
-async function stayBill(c: Context<AppEnv>, id: string) {
+export async function stayBill(c: Context<AppEnv>, id: string) {
   const db = c.env.DB;
   const s = await openStay(c, id);
   const [lines, booking, invoice] = await Promise.all([
@@ -981,7 +989,11 @@ async function stayBill(c: Context<AppEnv>, id: string) {
     invoiceOut(c, s.id),
   ]);
   const sum = (k: string[]) => lines.filter((l) => k.includes(l.kind)).reduce((t, l) => t + l.amountPaise, 0);
-  return { stay: { id: s.id, room: s.room, guestName: s.guest_name, phone: s.phone, checkIn: s.check_in, checkedOutAt: s.checked_out_at, accountId: s.account_id },
+  const extra = await one<{ plan: string | null; foreign_info: string | null; form_c_at: number | null; company: string | null; gstin: string | null }>(db, `SELECT
+      coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id)) AS plan, s.foreign_info, s.form_c_at, r.company, r.gstin
+    FROM stays s LEFT JOIN reservations r ON r.id = s.reservation_id WHERE s.id = ?`, s.id);
+  return { stay: { id: s.id, room: s.room, guestName: s.guest_name, phone: s.phone, checkIn: s.check_in, checkedOutAt: s.checked_out_at, accountId: s.account_id,
+      checkOutPlan: extra?.plan ?? null, foreign: !!extra?.foreign_info, formCAt: extra?.form_c_at ?? null, company: extra?.company ?? null, gstin: extra?.gstin ?? null },
     booking, lines, invoice, balancePaise: lines.reduce((t, l) => t + l.amountPaise, 0),
     rentPaise: sum(['room_rent']), prepaidPaise: -sum(['prepaid']), foodPaise: sum(['charge']), paidPaise: -sum(['receipt', 'advance', 'deposit', 'credit_note']) - sum(['refund']) };
 }
@@ -1027,6 +1039,15 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   if (!row) fail(404, 'Open stay not found.');
   if (row.balance > 0) fail(409, `${rupeesText(row.balance)} is still to pay on this room. Take the guest's payment first.`);
   if (row.balance < 0) fail(409, `${rupeesText(-row.balance)} of the guest's deposit or advance is left. Refund it first.`);
+  // Who the invoice is made out to (25 Nov 2026): a company that pays or claims GST, typed at check-out or from the reservation.
+  let data: Record<string, unknown> = {};
+  try { data = await c.req.json(); } catch { /* no body */ }
+  const res = await one<{ company: string | null; gstin: string | null }>(db, 'SELECT r.company, r.gstin FROM stays s JOIN reservations r ON r.id = s.reservation_id WHERE s.id = ?', id);
+  const billTo = (data.billTo && typeof data.billTo === 'object' ? data.billTo : {}) as Record<string, unknown>;
+  const toName = (typeof billTo.name === 'string' && billTo.name.trim() ? billTo.name.trim().slice(0, 120) : res?.company) ?? null;
+  const toGstin = ((typeof billTo.gstin === 'string' && billTo.gstin.trim() ? billTo.gstin.trim() : res?.gstin) ?? '').toUpperCase() || null;
+  if (toGstin && !/^\d{2}[A-Z0-9]{13}$/.test(toGstin)) fail(400, 'GSTIN has 15 characters, starting with 2 digits.');
+  const toAddress = typeof billTo.address === 'string' && billTo.address.trim() ? billTo.address.trim().slice(0, 200) : null;
   // The stay's tax invoice for its room rent (24 Nov 2026): made once, here, in its own series per billing name and year.
   const rent = await all<{ amount_paise: number; note: string | null; booking_id: string | null }>(db,
     "SELECT amount_paise, note, booking_id FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent' ORDER BY at, id", row.account_id);
@@ -1037,7 +1058,9 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   if (total > 0) {
     const bk = await one<{ check_in: string | null; check_out: string | null; rooms: number | null; room_labels: string | null }>(db,
       "SELECT check_in, check_out, rooms, room_labels FROM bookings WHERE stay_id = ? AND status <> 'cancelled' ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1", id);
-    const checkOut = shiftDay > row.check_in ? shiftDay : bk?.check_out ?? shiftDay;
+    const plan = (await one<{ p: string | null }>(db, 'SELECT check_out_plan AS p FROM stays WHERE id = ?', id))?.p ?? null;
+    // Leaving on the day of arrival (a day use, or a check-out after midnight within the shift): the planned date, else the next day.
+    const checkOut = shiftDay > row.check_in ? shiftDay : bk?.check_out ?? (plan && plan > row.check_in ? plan : new Date(Date.parse(row.check_in) + 86_400_000).toISOString().slice(0, 10));
     const nights = bk?.check_in && bk.check_out ? nightsBetween(bk.check_in, bk.check_out) : nightsBetween(row.check_in, checkOut);
     const ent = await one<{ id: string; gst_registered: number; series_prefix: string }>(db,
       'SELECT id, gst_registered, series_prefix FROM billing_entities WHERE business_id = ? AND active = 1 ORDER BY is_default DESC, created_at LIMIT 1', bid);
@@ -1051,17 +1074,20 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
     batch.push(
       stmt(db, 'INSERT OR IGNORE INTO room_invoice_series (entity_id, fy, next_no) VALUES (?, ?, 1)', ent.id, fy),
       stmt(db, `INSERT INTO room_invoices (id, business_id, stay_id, entity_id, fy, seq, invoice_no, shift_day, guest_name, phone, room, check_in, check_out, nights, lines,
-          gst_rate_bp, taxable_paise, cgst_paise, sgst_paise, total_paise, by_staff, at)
-        SELECT ?, ?, ?, ?, ?, next_no, ? || 'R' || substr(?, 3, 2) || substr(?, 6, 2) || '-' || printf('%04d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          gst_rate_bp, taxable_paise, cgst_paise, sgst_paise, total_paise, by_staff, at, bill_to_name, bill_to_gstin, bill_to_address)
+        SELECT ?, ?, ?, ?, ?, next_no, ? || 'R' || substr(?, 3, 2) || substr(?, 6, 2) || '-' || printf('%04d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM room_invoice_series WHERE entity_id = ? AND fy = ?`,
         newId(), bid, id, ent.id, fy, ent.series_prefix, fy, fy, shiftDay, row.guest_name, row.phone, row.room, bk?.check_in ?? row.check_in, bk?.check_out ?? checkOut, nights,
-        JSON.stringify(lines), tax.bp, tax.taxablePaise, tax.cgstPaise, tax.sgstPaise, total, c.get('staff').id, t, ent.id, fy),
+        JSON.stringify(lines), tax.bp, tax.taxablePaise, tax.cgstPaise, tax.sgstPaise, total, c.get('staff').id, t, toName, toGstin, toAddress, ent.id, fy),
       stmt(db, 'UPDATE room_invoice_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', ent.id, fy),
     );
   }
   await db.batch([
     ...batch,
     stmt(db, 'UPDATE stays SET checked_out_at = ? WHERE id = ?', t, id),
+    // Housekeeping (25 Nov 2026): the room is dirty until cleaned.
+    stmt(db, `INSERT INTO room_status (business_id, room, status, by_staff, at) VALUES (?, ?, 'dirty', ?, ?)
+      ON CONFLICT (business_id, room) DO UPDATE SET status = 'dirty', note = NULL, by_staff = excluded.by_staff, at = excluded.at`, bid, row.room, c.get('staff').id, t),
     audit(db, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, null),
   ]);
   return c.json({ ok: true, bill: await stayBill(c, id) });
@@ -1073,7 +1099,7 @@ settingsRoutes.get(`${B}/credit-accounts`, requireAction('pos.view'), async (c) 
     FROM debtor_accounts d WHERE d.business_id = ? AND d.kind = 'credit' ORDER BY d.name`, c.get('businessId'));
   // How old the oldest unpaid bill is (25 Nov 2026): what is owed is taken to be the newest charges.
   const charges = await all<{ account_id: string; amount_paise: number; at: number }>(c.env.DB, `SELECT e.account_id, e.amount_paise, e.at FROM debtor_entries e
-    JOIN debtor_accounts d ON d.id = e.account_id WHERE d.business_id = ? AND d.kind = 'credit' AND e.amount_paise > 0 AND e.kind IN ('charge', 'advance_used') ORDER BY e.at DESC`, c.get('businessId'));
+    JOIN debtor_accounts d ON d.id = e.account_id WHERE d.business_id = ? AND d.kind = 'credit' AND e.amount_paise > 0 AND e.kind IN ('charge', 'advance_used', 'transfer') ORDER BY e.at DESC`, c.get('businessId'));
   const t = now();
   return c.json({ accounts: accounts.map((a) => {
     let left = a.balancePaise;

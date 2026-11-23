@@ -10,6 +10,7 @@ import { audit, bizOf, clock, dormBed, dormWhole, tableLayout, type Business } f
 import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
 import { deskPending } from '../rooms';
+import { formCPending } from './roomdesk';
 import type { AppEnv } from '../types';
 
 export const frontDeskRoutes = new Hono<AppEnv>();
@@ -36,7 +37,7 @@ function roomsOf(b: Business) {
 export interface Bar { room: string; from: string; to: string; kind: 'occ' | 'arr' | 'hold' | 'pos' | 'ooo'; label: string; ref: { type: string; id: string } }
 
 /** Everything on the chart from `from` for `days` nights: Djubo / MakeMyTrip bookings, guests in house, reservations made here, rooms out of order. */
-export async function chartData(db: DB, b: Business, from: string, days: number) {
+export async function chartData(db: DB, b: Business, from: string, days: number, excludeReservation: string | null = null) {
   const to = addDays(from, days);
   const t = now();
   const today = clock(b, t).shiftDay;
@@ -67,7 +68,7 @@ export async function chartData(db: DB, b: Business, from: string, days: number)
       FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL`, b.id),
     all<{ id: string; guest_name: string; check_in: string; check_out: string; lines: string; status: string; hold_until: number | null; stay_id: string | null; source: string }>(db,
       `SELECT id, guest_name, check_in, check_out, lines, status, hold_until, stay_id, source FROM reservations WHERE business_id = ? AND status IN ('confirmed', 'hold')
-       AND booking_id IS NULL AND stay_id IS NULL AND check_in < ? AND check_out > ?`, b.id, to, from),
+       AND booking_id IS NULL AND stay_id IS NULL AND check_in < ? AND check_out > ? AND id IS NOT ?`, b.id, to, from, excludeReservation),
     all<{ id: string; room: string; from_day: string; to_day: string; note: string }>(db, 'SELECT id, room, from_day, to_day, note FROM room_blocks WHERE business_id = ? AND from_day < ? AND to_day >= ?', b.id, to, from),
   ]);
   for (const s of stays) {
@@ -91,8 +92,8 @@ export async function chartData(db: DB, b: Business, from: string, days: number)
 }
 
 /** Rooms of each type free on every night from..to (a room with any bar on those nights is taken). Unplaced bookings of a type take one each. */
-export async function freeRooms(db: DB, b: Business, from: string, to: string) {
-  const c = await chartData(db, b, from, nights(from, to));
+export async function freeRooms(db: DB, b: Business, from: string, to: string, excludeReservation: string | null = null) {
+  const c = await chartData(db, b, from, nights(from, to), excludeReservation);
   const busy = new Set(c.bars.filter((x) => x.from < to && x.to > from).map((x) => x.room));
   return c.sections.map((s) => {
     const free = s.rooms.filter((r) => !busy.has(r));
@@ -122,7 +123,8 @@ export async function notInDjubo(db: DB, bid: string, today: string, t = now()) 
   const rows = await all<{ id: string; guest_name: string; phone: string; check_in: string; check_out: string; lines: string; status: string; hold_until: number | null;
     remind_from: number; created_at: number; made_by_name: string | null }>(db, `SELECT r.id, r.guest_name, r.phone, r.check_in, r.check_out, r.lines, r.status, r.hold_until,
       r.remind_from, r.created_at, s.name AS made_by_name FROM reservations r LEFT JOIN staff s ON s.id = r.made_by
-    WHERE r.business_id = ? AND r.status IN ('confirmed', 'hold') AND r.booking_id IS NULL AND r.check_out > ? ORDER BY r.created_at`, bid, today);
+    WHERE r.business_id = ? AND r.status IN ('confirmed', 'hold') AND r.booking_id IS NULL AND r.check_out > ?
+      AND (r.stay_id IS NULL OR EXISTS (SELECT 1 FROM stays st WHERE st.id = r.stay_id AND st.checked_out_at IS NULL)) ORDER BY r.created_at`, bid, today);
   return rows.filter((r) => !(r.status === 'hold' && (r.hold_until ?? 0) < t)).map((r) => {
     const mins = Math.floor((t - r.remind_from) / 60_000);
     const level = mins >= 60 || r.check_in <= today ? 'red' : mins >= 15 ? 'amber' : null;
@@ -179,7 +181,7 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
     inHouse: stays,
     leaving: stays.filter((s) => s.plan && s.plan <= today),
     stats: { arriving: arrivals.length + live.length, inHouse: stays.length, leaving: stays.filter((s) => s.plan && s.plan <= today).length, freeTonight: Math.max(0, rooms - busy), toCollectPaise: toCollect },
-    alerts: { notInDjubo: alerts, deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0 },
+    alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0 },
   });
 });
 
@@ -282,17 +284,17 @@ frontDeskRoutes.get(`${B}/reservations/:id`, requireAction('stays.edit'), async 
 });
 
 /** Reads and checks a reservation as typed: dates, rooms per type (free on those nights), guest, rate and total. */
-async function readReservation(c: Context<AppEnv>, data: Record<string, unknown>) {
+async function readReservation(c: Context<AppEnv>, data: Record<string, unknown>, editing: { id: string; checkIn: string } | null = null) {
   const b = bizOf(c);
   const db = c.env.DB;
   const { shiftDay: today } = clock(b);
   const checkIn = typeof data.checkIn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.checkIn) ? data.checkIn : fail(400, 'Check-in must be a date.');
   const checkOut = typeof data.checkOut === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.checkOut) ? data.checkOut : fail(400, 'Check-out must be a date.');
   if (checkOut <= checkIn) fail(400, 'Check-out must be after check-in.');
-  if (checkIn < today) fail(400, 'Check-in cannot be before today.');
+  if (checkIn < today && checkIn !== editing?.checkIn) fail(400, 'Check-in cannot be before today.');
   const n = nights(checkIn, checkOut);
   if (!Array.isArray(data.lines) || !data.lines.length || data.lines.length > 10) fail(400, 'Choose at least one room.');
-  const free = await freeRooms(db, b, checkIn, checkOut);
+  const free = await freeRooms(db, b, checkIn, checkOut, editing?.id ?? null);
   const rates = await ratesOf(db, b.id);
   const lines: { type: string; rooms: number; roomNames: string[]; adults: number; children: number; ratePaise: number }[] = [];
   let lowRate = false;
@@ -378,6 +380,30 @@ frontDeskRoutes.post(`${B}/reservations/:id/advance`, requireAction('debtors.rec
   const adv = await deskAdvance(c, await body(c), { id: r.id, guest: r.guest_name, phone: r.phone, checkIn: r.check_in, checkOut: r.check_out });
   if (r.status === 'hold') await stmt(c.env.DB, "UPDATE reservations SET status = 'confirmed', hold_until = NULL WHERE id = ? AND status = 'hold'", r.id).run();
   return c.json(adv, 201);
+});
+
+// Changing a reservation made here (25 Nov 2026): dates, rooms, rate, guest, notes. Checked again for free rooms, without
+// counting its own. Its advances stay with it. If Djubo already has it, Djubo must be changed too (said on screen).
+frontDeskRoutes.put(`${B}/reservations/:id`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const cur = await openReservation(c);
+  if (cur.status === 'cancelled' || cur.stay_id) fail(409, cur.status === 'cancelled' ? 'This reservation was cancelled.' : 'This guest is checked in: change the stay instead.');
+  if (cur.status === 'linked') fail(409, "Djubo has this booking now: change it in Djubo, and its revised mail brings the change here.");
+  const data = await body(c);
+  const r = await readReservation(c, data, { id: cur.id, checkIn: cur.check_in });
+  const approver = r.lowRate ? await approval(c, data, 'A rate below the room rate') : null;
+  const before = await one(db, 'SELECT guest_name, phone, check_in, check_out, lines, total_paise, status FROM reservations WHERE id = ?', cur.id);
+  const status = cur.status === 'linked' ? 'linked' : r.hold ? 'hold' : 'confirmed';
+  await db.batch([
+    stmt(db, `UPDATE reservations SET guest_name = ?, phone = ?, email = ?, city = ?, nationality = ?, company = ?, gstin = ?, check_in = ?, check_out = ?, arrival_time = ?, lines = ?,
+        meal_plan = ?, extras = ?, source = ?, requests = ?, staff_note = ?, policy = ?, status = ?, hold_until = CASE WHEN ? = 'hold' THEN coalesce(hold_until, ?) ELSE NULL END, total_paise = ? WHERE id = ?`,
+      r.guest, r.phone, r.email, r.city, r.nationality, r.company, r.gstin, r.checkIn, r.checkOut, r.arrivalTime, JSON.stringify(r.lines), r.mealPlan, r.extras, r.source, r.requests,
+      approver && !isManager(c) ? `${r.staffNote ? `${r.staffNote} · ` : ''}Rate approved by ${approver.name}` : r.staffNote, r.policy, status, status, now() + r.holdHours * 3_600_000, r.totalPaise, cur.id),
+    stmt(db, 'UPDATE desk_advances SET check_in = ?, phone = ? WHERE reservation_id = ? AND status = \'held\'', r.checkIn, r.phone, cur.id),
+    audit(db, bid, c.get('staff').id, 'reservation.change', 'reservations', cur.id, before, { checkIn: r.checkIn, checkOut: r.checkOut, totalPaise: r.totalPaise }),
+  ]);
+  return c.json({ id: cur.id, totalPaise: r.totalPaise, inDjubo: cur.status === 'linked' });
 });
 
 // Entered in Djubo, mail not here yet: remind again in 15 minutes.

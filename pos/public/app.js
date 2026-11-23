@@ -231,6 +231,11 @@ async function actionError(e, act, dataset) {
     if (e instanceof ApiError && e.code === 'guest_differs') {
       ui.guestAsk = { message: e.message, savedName: e.data?.savedName, act, data: { ...dataset } }; ui.error = null; rerender(); return;
     }
+    // A room still marked dirty (25 Nov 2026): asked, then the same tap again.
+    if (e instanceof ApiError && e.code === 'room_dirty') {
+      if (confirm(e.message)) { await Promise.resolve(actions[act]({ ...dataset, dirtyOk: '1' })).catch((x) => actionError(x, act, dataset)); }
+      return;
+    }
     if (e instanceof ApiError && e.code === 'approval') {
       const approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers;
       ui.approval = { message: e.message, act, data: { ...dataset }, approvers }; ui.apId = approvers[0]?.id; ui.apPin = ''; ui.error = null;
@@ -1402,7 +1407,9 @@ const payFields = (amountKey = 'recvAmount') => html`<div class="chips">${[['cas
     ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>`;
 const payOf = (amountKey = 'recvAmount') => ({ mode: ui.recvMode ?? 'cash', amount: ui[amountKey] ?? '', payAccountId: ui.payAccountId, cardApproval: ui.cardApproval, cardLast4: ui.cardLast4 });
 
-const ROOM_VIEWS = [['today', 'Today'], ['chart', 'Room chart'], ['list', 'Reservations'], ['new', '+ New reservation'], ['checkin', 'Check-in']];
+const ROOM_VIEWS = [['today', 'Today'], ['chart', 'Room chart'], ['list', 'Reservations'], ['new', '+ New reservation'], ['checkin', 'Check-in'], ['house', 'Housekeeping'],
+  ['audit', 'Night audit'], ['register', 'Guest register']];
+let pendingEdit = null;   // a reservation to change, opened in the reservation form
 async function roomsScreen(view) {
   const v = ROOM_VIEWS.some(([k]) => k === view) ? view : 'today';
   const [o] = await Promise.all([api('GET', B() + '/orders'), load('stays', 'payAccounts')]);
@@ -1415,10 +1422,22 @@ async function roomsScreen(view) {
       v === 'today' || v === 'checkin' ? api('GET', B() + '/frontdesk/today').catch(() => null) : null]);
     if (v === 'chart') { ui.chartFrom = today; await loadChart(); }
     if (v === 'list') ui.res = await api('GET', `${B()}/reservations`);
+    if (v === 'audit') ui.audit = await api('GET', `${B()}/frontdesk/audit`);
+    if (v === 'house' || v === 'checkin') ui.hk = await api('GET', `${B()}/frontdesk/housekeeping`).catch(() => null);
+    if (v === 'register') { ui.regFrom = addDays(today, -6); ui.regTo = today; ui.reg = await api('GET', `${B()}/frontdesk/register?from=${ui.regFrom}&to=${ui.regTo}`); }
     if (v === 'new') {
       ui.nrIn = pendingNew?.day ?? today; ui.nrOut = addDays(ui.nrIn, 1); ui.nrStatus = 'confirmed'; ui.nrSource = 'Phone'; ui.nrMeal = 'Room only (EP)'; ui.nrPolicy = 'Non-refundable';
       ui.nrPicks = pendingNew ? { [pendingNew.type]: [pendingNew.room] } : {};
       pendingNew = null;
+      // Changing a reservation (25 Nov 2026): the form opens with it filled in.
+      if (pendingEdit) {
+        const r = pendingEdit; pendingEdit = null;
+        Object.assign(ui, { nrEdit: r.id, nrIn: r.checkIn, nrOut: r.checkOut, nrTime: r.arrivalTime ?? '', nrMeal: r.mealPlan ?? ui.nrMeal, nrExtras: r.extras ?? '', gPhone: r.phone, guest: r.guestName,
+          nrEmail: r.email ?? '', gCity: r.city ?? '', nrNat: r.nationality ?? 'Indian', nrCo: r.company ?? '', nrGstin: r.gstin ?? '', nrSource: r.source, nrReq: r.requests ?? '', nrNote: r.staffNote ?? '',
+          nrStatus: r.status === 'hold' ? 'hold' : 'confirmed', nrPolicy: r.policy ?? ui.nrPolicy });
+        ui.nrPicks = {};
+        for (const l of r.lines) { ui.nrPicks[l.type] = l.roomNames; ui[`nrRooms_${l.type}`] = l.roomNames.length ? undefined : String(l.rooms); ui[`nrAdults_${l.type}`] = String(l.adults); ui[`nrKids_${l.type}`] = String(l.children); ui[`nrRate_${l.type}`] = rupees(l.ratePaise); }
+      }
       await loadFree();
     }
     if (v === 'checkin' && pendingCheckin) {
@@ -1433,7 +1452,8 @@ async function roomsScreen(view) {
     ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, t, k]), v) : ''}
     ${moneyForms()}
     ${ui.roomBill ? roomBillPanel(ui.roomBill) : ''}
-    ${!can('stays.edit') ? inHouseTable() : v === 'today' ? todayView() : v === 'chart' ? chartView() : v === 'list' ? listView() : v === 'new' ? newResView() : checkinView()}`));
+    ${!can('stays.edit') ? inHouseTable() : v === 'today' ? todayView() : v === 'chart' ? chartView() : v === 'list' ? listView() : v === 'new' ? newResView()
+      : v === 'audit' ? auditView() : v === 'house' ? houseView() : v === 'register' ? registerView() : checkinView()}`));
   rerender();
 }
 
@@ -1462,6 +1482,8 @@ function todayView() {
   const leaving = new Set(fd.leaving.map((x) => x.id));
   return html`<div class="kpis">${kpi('Arriving today', String(s.arriving))}${kpi('In house', String(s.inHouse))}${kpi('Leaving today', String(s.leaving))}${kpi('Free tonight', String(s.freeTonight))}${kpi('To collect today', rs(s.toCollectPaise), '', s.toCollectPaise ? 'warn' : '')}</div>
     <div style="margin-top:14px">${errorBox()}${notInDjuboBox(fd.alerts.notInDjubo)}
+    ${(fd.alerts.formC ?? []).map((x) => html`<div class="msg ${x.level === 'red' ? 'bad' : 'warn'}" style="margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow"><strong>Form C not filed: ${x.room} · ${x.guestName}</strong> · checked in ${x.hours} h ago (due within 24 h)</span>
+      <button class="btn" type="button" data-act="formC" data-id="${x.stayId}">Form C filed</button></div>`)}
     ${fd.alerts.unplaced ? html`<div class="msg bad" role="alert" style="margin-bottom:10px">Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}: create ${fd.alerts.unplaced === 1 ? 'it' : 'them'} in Djubo by hand. See <a href="#/rooms/list">Reservations</a>.</div>` : ''}</div>
     ${ui.bk ? deskMoneyPanel(ui.bk) : ''}
     <div class="cols3">
@@ -1607,12 +1629,28 @@ function reservationCard(r, now) {
     ${open ? html`<div class="row" style="flex-wrap:wrap">
       ${r.checkIn <= me.business.shiftDay ? html`<button class="btn pri" type="button" data-act="goCheckin" data-kind="reservation" data-id="${r.id}">Check in</button>` : ''}
       <button class="btn" type="button" data-act="resAdv" data-id="${r.id}" data-n="${r.guestName}">Take advance</button>
+      ${r.status !== 'linked' ? html`<button class="btn" type="button" data-act="resEdit" data-id="${r.id}">Change</button>` : ''}
+      ${r.checkIn <= me.business.shiftDay ? html`<button class="btn ghost" type="button" data-act="noShow" data-kind="reservation" data-id="${r.id}" data-held="${r.advancePaise}">No-show</button>` : ''}
       ${r.status === 'hold' ? html`<button class="btn" type="button" data-act="resConfirm" data-id="${r.id}">Confirm (no money yet)</button>` : ''}
       ${r.status !== 'linked' ? html`<button class="btn" type="button" data-act="resLater" data-id="${r.id}">Entered in Djubo · remind me in 15 min</button>` : ''}
       <a class="btn" href="${waLink(r)}" target="_blank" rel="noopener noreferrer">Send confirmation on WhatsApp</a>
       <button class="btn ghost" type="button" data-act="resCancel" data-id="${r.id}">Cancel reservation</button></div>` : ''}
   </section>`;
 }
+actions.resEdit = async (d) => { pendingEdit = (await api('GET', `${B()}/reservations/${d.id}`)).reservation; go('#/rooms/new'); };
+/** A guest who never came: the booking or reservation leaves the board; an advance taken here is kept (the no-show charge) or given back. */
+actions.noShow = async (d) => {
+  const held = Number(d.held) || 0;
+  let advance = 'refund';
+  if (held) {
+    const keep = confirm(`Mark as no-show. Keep the advance of ${rs(held)} as the no-show charge? (Cancel to choose giving it back.)`);
+    advance = keep ? 'keep' : 'refund';
+    if (!keep && !confirm(`Mark as no-show and give the advance of ${rs(held)} back later (Money at reception)?`)) return;
+  } else if (!confirm('Mark this guest as a no-show?')) return;
+  await api('POST', `${B()}/${d.kind === 'booking' ? 'bookings' : 'reservations'}/${d.id}/no-show`, { advance });
+  flash = { kind: 'ok', text: advance === 'keep' ? 'No-show marked; the advance is kept as the no-show charge.' : held ? 'No-show marked; give the advance back under Money at reception.' : 'No-show marked.' };
+  await refreshDeskAlerts(); route();
+};
 actions.resConfirm = async (d) => { await api('POST', `${B()}/reservations/${d.id}/confirm`); flash = { kind: 'ok', text: 'Confirmed.' }; route(); };
 actions.resAdv = (d) => { ui.adv = { reservationId: d.id, name: d.n }; ui.recvMode = 'cash'; ui.recvAmount = undefined; ui.error = null; rerender(); scrollTo(0, 0); };
 
@@ -1645,6 +1683,7 @@ function newResView() {
   const taxable = Math.round(total * 10000 / (10000 + bp));
   const chip = (k, v, t = v) => html`<button type="button" class="chip" aria-pressed="${ui[k] === v}" data-act="pick" data-k="${k}" data-id="${v}">${t}</button>`;
   return html`<form class="panel" style="max-width:1000px">${errorBox()}
+    ${ui.nrEdit ? html`<div class="msg warn">Changing a reservation. Its advance stays with it.</div>` : ''}
     <h2>1 · Dates and rooms</h2>
     <div class="grid3"><label class="f">Check-in<input class="in" type="date" data-model="nrIn" data-act-change="nrDates" value="${ui.nrIn}"></label>
       <label class="f">Check-out · ${plural(n, 'night')}<input class="in" type="date" data-model="nrOut" data-act-change="nrDates" value="${ui.nrOut}"></label>
@@ -1684,17 +1723,17 @@ function newResView() {
     <div class="grid2"><div class="sums"><div><span>${lines.map((l) => `${l.type} × ${l.rooms}`).join(', ') || 'No rooms yet'} · ${plural(n, 'night')}</span><span>${rs(total)}</span></div>
         <div><span class="quiet">Value</span><span>${rs(taxable)}</span></div><div><span class="quiet">GST ${bp / 100}% (CGST + SGST)</span><span>${rs(total - taxable)}</span></div>
         <div class="big"><span>Total</span><span>${rs(total)}</span></div></div>
-      <div><p class="label">Advance now (optional)</p>${payFields('nrAdv')}
-        <p class="small">Balance at check-in: <strong>${rs(Math.max(0, total - (toPaise(ui.nrAdv) ?? 0)))}</strong></p></div></div>
+      ${ui.nrEdit ? html`<div class="small quiet">Take any further advance from the reservation (Take advance).</div>` : html`<div><p class="label">Advance now (optional)</p>${payFields('nrAdv')}`}
+        ${ui.nrEdit ? '' : html`<p class="small">Balance at check-in: <strong>${rs(Math.max(0, total - (toPaise(ui.nrAdv) ?? 0)))}</strong></p></div>`}</div>
     <div class="msg warn" style="margin-top:10px">Then enter it in Djubo: Djubo is the master for rooms. Until Djubo's confirmation mail arrives, this shows as "Not in Djubo yet" and reception is reminded.</div>
-    <div class="row" style="margin-top:10px"><button class="btn pri" type="submit" data-act="nrSave" data-submit>Save reservation${toPaise(ui.nrAdv) ? ' and print advance receipt' : ''}</button><a class="btn" href="#/rooms">Cancel</a></div>
+    <div class="row" style="margin-top:10px"><button class="btn pri" type="submit" data-act="nrSave" data-submit>${ui.nrEdit ? 'Save the change' : `Save reservation${toPaise(ui.nrAdv) ? ' and print advance receipt' : ''}`}</button><a class="btn" href="#/rooms">Cancel</a></div>
   </form>`;
 }
 actions.nrSave = async () => {
   const lines = nrLines();
   if (!lines.length) throw new Error('Choose at least one room or bed.');
-  const adv = toPaise(ui.nrAdv);
-  const r = await api('POST', `${B()}/reservations`, {
+  const adv = ui.nrEdit ? null : toPaise(ui.nrAdv);
+  const r = await api(ui.nrEdit ? 'PUT' : 'POST', `${B()}/reservations${ui.nrEdit ? `/${ui.nrEdit}` : ''}`, {
     checkIn: ui.nrIn, checkOut: ui.nrOut, arrivalTime: ui.nrTime || undefined, lines, mealPlan: ui.nrMeal, extras: ui.nrExtras || undefined,
     guestName: ui.guest ?? '', phone: ui.gPhone ?? '', email: ui.nrEmail || undefined, city: ui.gCity || undefined, nationality: ui.nrNat ?? 'Indian', company: ui.nrCo || undefined, gstin: ui.nrGstin || undefined,
     source: ui.nrSource, requests: ui.nrReq || undefined, staffNote: ui.nrNote || undefined, status: ui.nrStatus, holdHours: ui.nrHold ? Number(ui.nrHold) : undefined, policy: ui.nrPolicy,
@@ -1702,6 +1741,7 @@ actions.nrSave = async () => {
   });
   if (r.receipt) printJobs([{ kind: 'bill', html: asHtml(receiptSlip(r.receipt)) }]);
   const full = (await api('GET', `${B()}/reservations/${r.id}`)).reservation;
+  if (ui.nrEdit) { flash = { kind: 'ok', text: `Reservation changed for ${full.guestName}: ${rs(r.totalPaise)}. Change it in Djubo too if it is there.`, link: [waLink(full), 'Send the change on WhatsApp'] }; go('#/rooms/list'); return; }
   flash = { kind: 'ok', text: `Reservation saved for ${full.guestName}: ${rs(r.totalPaise)}${r.receipt ? `, advance ${rs(r.receipt.totalPaise)} (${r.receipt.receiptNo})` : ''}. Now enter it in Djubo.`, link: [waLink(full), 'Send confirmation on WhatsApp'] };
   go('#/rooms/list');
 };
@@ -1728,6 +1768,76 @@ async function pickReservation(id) {
   if (first) ui.room = first; else ui.roomQ = r.lines[0]?.type ?? '';
 }
 actions.pickRes = async (d) => { await pickReservation(d.id); rerender(); };
+// ----- night audit (25 Nov 2026): what is left before the day is closed
+function auditView() {
+  const a = ui.audit;
+  if (!a) return '';
+  const box = (title, n, body, tone = '') => html`<section class="panel" style="margin-bottom:12px${tone ? `;border-color:var(--${tone}-line)` : ''}"><h2>${title} (${n})</h2>${n ? body : html`<p class="quiet small">Nothing here.</p>`}</section>`;
+  const line = (left, right) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:8px 0;flex-wrap:wrap;align-items:center"><div class="grow" style="min-width:180px">${left}</div><div class="row">${right}</div></div>`;
+  return html`${errorBox()}<p class="quiet small" style="margin-bottom:12px">Work through these before the day ends: every guest due has arrived or is marked a no-show, every guest due out has left or is extended, and nothing is left unpaid by mistake.</p>
+    ${notInDjuboBox(a.notInDjubo)}
+    ${box('Due to arrive, not checked in', a.notArrived.length, a.notArrived.map((x) => line(html`<strong>${x.guestName ?? 'No name'}</strong><div class="small quiet">${x.kind === 'reservation' ? 'made here' : x.channel ?? 'Djubo'} · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}${x.checkIn < a.today ? html` · <strong style="color:var(--bad)">was due ${dayName(x.checkIn)}</strong>` : ''}${x.heldPaise ? ` · advance ${rs(x.heldPaise)}` : ''}</div>`,
+      html`<button class="btn" type="button" data-act="goCheckin" data-kind="${x.kind}" data-id="${x.id}">Check in</button><button class="btn ghost" type="button" data-act="noShow" data-kind="${x.kind}" data-id="${x.id}" data-held="${x.heldPaise}">No-show</button>`)), 'warn')}
+    ${box('Past their check-out date (overstay)', a.overstays.length, a.overstays.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">was due out ${dayName(x.plan)}${x.balancePaise ? ` · owes ${rs(x.balancePaise)}` : ''}</div>`,
+      html`<button class="btn pri" type="button" data-act="roomBill" data-id="${x.id}">Room bill: extend or check out</button>`)), 'bad')}
+    ${box('Due out today', a.dueOut.length, a.dueOut.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">${x.balancePaise > 0 ? `owes ${rs(x.balancePaise)}` : x.balancePaise < 0 ? `holds ${rs(-x.balancePaise)}` : 'nothing due'}</div>`,
+      html`<button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`)))}
+    ${box('Form C not filed', a.formC.length, a.formC.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">checked in ${x.hours} h ago (due within 24 h)</div>`,
+      html`<button class="btn" type="button" data-act="formC" data-id="${x.stayId}">Form C filed</button>`)), a.formC.some((x) => x.level === 'red') ? 'bad' : '')}
+    ${box('In house with money owed or held', a.balances.length, a.balances.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">${x.balancePaise > 0 ? `owes ${rs(x.balancePaise)}` : `holds ${rs(-x.balancePaise)}`}</div>`,
+      html`<button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`)))}
+    ${box('In house with no check-out date', a.noDate.length, a.noDate.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong>`, html`<button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill: set the date (Extend stay)</button>`)))}
+    ${box('Rooms not ready (housekeeping)', a.dirty.length, html`<div class="chips">${a.dirty.map((x) => html`<span class="badge ${x.status === 'dirty' ? 'bad' : 'new'}">${x.room} · ${x.status}</span>`)}</div><p class="small"><a href="#/rooms/house">Housekeeping</a></p>`)}
+    ${box(`Arriving tomorrow (${dayName(a.tomorrow)})`, a.tomorrow_.length, html`<div class="small">${a.tomorrow_.map((x) => `${x.guestName ?? 'No name'}${x.roomLabels ? ` · ${x.roomLabels}` : x.roomType ? ` · ${x.roomType}` : ''}`).join(' · ')}</div>`)}`;
+}
+
+// ----- housekeeping (25 Nov 2026): dirty after a check-out or a move; clean; inspected (ready to sell)
+function houseView() {
+  const h = ui.hk;
+  if (!h) return '';
+  const tone = { dirty: 'bad', clean: 'new', inspected: 'open' };
+  const sel = new Set(ui.hkSel ?? []);
+  return html`${errorBox()}<p class="quiet small" style="margin-bottom:10px">A room is marked dirty when a guest checks out or moves. Tap rooms, then mark them. Checking a guest into a dirty room is asked about first.</p>
+    ${h.sections.map((sec) => html`<section class="panel" style="margin-bottom:12px"><h2>${sec.name}</h2><div class="chips">
+      ${sec.rooms.map((r) => html`<button type="button" class="chip" aria-pressed="${sel.has(r.room)}" data-act="hkPick" data-r="${r.room}" title="${r.by ? `${r.status} · ${r.by}` : r.status}">${r.room}
+        <span class="badge ${tone[r.status]}" style="margin-left:6px">${r.status === 'inspected' ? 'ready' : r.status}</span>${r.guest ? html`<span class="small"> · ${r.guest}</span>` : ''}</button>`)}</div></section>`)}
+    <div class="row" style="position:sticky;bottom:0;background:var(--bg);padding:10px 0"><span class="grow">${sel.size ? `${plural(sel.size, 'room')} chosen` : 'Choose rooms'}</span>
+      <button class="btn" type="button" data-act="hkSet" data-s="dirty" ${sel.size ? '' : 'disabled'}>Dirty</button><button class="btn" type="button" data-act="hkSet" data-s="clean" ${sel.size ? '' : 'disabled'}>Clean</button>
+      <button class="btn pri" type="button" data-act="hkSet" data-s="inspected" ${sel.size ? '' : 'disabled'}>Inspected · ready</button></div>`;
+}
+actions.hkPick = (d) => { const s0 = new Set(ui.hkSel ?? []); if (s0.has(d.r)) s0.delete(d.r); else s0.add(d.r); ui.hkSel = [...s0]; rerender(); };
+actions.hkSet = async (d) => {
+  await api('POST', `${B()}/frontdesk/housekeeping`, { rooms: ui.hkSel ?? [], status: d.s });
+  ui.hk = await api('GET', `${B()}/frontdesk/housekeeping`); flash = { kind: 'ok', text: `${plural((ui.hkSel ?? []).length, 'room')} marked ${d.s === 'inspected' ? 'ready' : d.s}.` }; ui.hkSel = []; rerender();
+};
+
+// ----- guest register and past stays (25 Nov 2026): who stayed, with ID (type and last 4) and address, for police checks
+function registerView() {
+  const r = ui.reg;
+  if (!r) return '';
+  return html`<form class="row" style="align-items:end;margin-bottom:10px;flex-wrap:wrap"><label class="f">From<input class="in" type="date" data-model="regFrom" value="${ui.regFrom}"></label><label class="f">To<input class="in" type="date" data-model="regTo" value="${ui.regTo}"></label>
+      <label class="f" style="flex:1 1 220px">Or search name, phone, room or card number<input class="in" type="search" data-model="regQ" value="${ui.regQ ?? ''}"></label>
+      <button class="btn" type="submit" data-act="regGo" data-submit>Show</button><button class="btn" type="button" data-act="regCsv">Download (CSV)</button></form>
+    ${errorBox()}
+    <section class="panel"><div class="scroll"><table class="t cards"><thead><tr><th>Card</th><th>Room</th><th>Guest</th><th>Arrived</th><th>Left</th><th>ID</th><th>From / address</th><th></th></tr></thead><tbody>
+      ${r.stays.length ? r.stays.map((x) => html`<tr><td data-label="Card">${x.grcNo ?? '—'}</td><td data-label="Room">${x.room}</td>
+        <td data-label="Guest"><strong>${x.guestName}</strong><div class="small quiet">${x.phone ?? ''}${x.nationality ? ` · ${x.nationality}` : ''}${x.adults ? ` · ${x.adults} adult${x.adults === 1 ? '' : 's'}` : ''}</div></td>
+        <td data-label="Arrived">${dateTime(x.arrivedAt)}</td><td data-label="Left">${x.leftAt ? dateTime(x.leftAt) : html`<span class="badge open">in house</span>`}</td>
+        <td data-label="ID">${x.idDocs.map((d) => html`<div class="small">${d.type} ••${d.last4}${d.name ? ` · ${d.name}` : ''}</div>`)}${x.foreign ? html`<div class="small">Passport ••${x.foreign.passportLast4 ?? ''} · Form C ${x.formCAt || x.foreign.formC ? 'filed' : html`<strong style="color:var(--bad)">not filed</strong>`}</div>` : ''}</td>
+        <td data-label="From">${x.comingFrom ?? ''}${x.address ? html`<div class="small quiet">${x.address}</div>` : ''}</td>
+        <td class="act"><div class="row"><button class="btn" type="button" data-act="roomBill" data-id="${x.id}">${x.invoiceNo ? `Bill · ${x.invoiceNo}` : 'Room bill'}</button><button class="btn ghost" type="button" data-act="rbGrc" data-id="${x.id}">Card</button></div></td></tr>`)
+        : html`<tr><td colspan="8" class="quiet">No stays in these dates.</td></tr>`}
+    </tbody></table></div></section>`;
+}
+actions.regGo = async () => {
+  ui.reg = await api('GET', `${B()}/frontdesk/register?${ui.regQ ? `q=${encodeURIComponent(ui.regQ)}` : `from=${ui.regFrom}&to=${ui.regTo}`}`); rerender();
+};
+actions.regCsv = () => downloadCsv(`guest-register-${ui.regFrom}-to-${ui.regTo}.csv`, [
+  ['Card', 'Room', 'Guest', 'Phone', 'Nationality', 'Adults', 'Arrived', 'Left', 'IDs (type, last 4)', 'Passport (last 4)', 'Form C', 'Address', 'Coming from', 'Going to', 'Invoice'],
+  ...ui.reg.stays.map((x) => [x.grcNo ?? '', x.room, x.guestName, x.phone ?? '', x.nationality ?? '', x.adults ?? '', dateTime(x.arrivedAt), x.leftAt ? dateTime(x.leftAt) : 'in house',
+    x.idDocs.map((d) => `${d.type} ${d.last4}${d.name ? ` (${d.name})` : ''}`).join('; '), x.foreign?.passportLast4 ?? '', x.foreign ? (x.formCAt || x.foreign.formC ? 'filed' : 'not filed') : '',
+    x.address ?? '', x.comingFrom ?? '', x.goingTo ?? '', x.invoiceNo ?? '']),
+]);
 const ID_TYPES = ['Aadhaar', 'Driving licence', 'Passport', 'Voter ID', 'PAN', 'Other'];
 function checkinView() {
   const resArr = (ui.fd?.arrivals ?? []).filter((a) => a.kind === 'reservation');
@@ -1809,36 +1919,109 @@ function folioLabel(l) {
 function roomBillPanel(r) {
   const st = r.stay;
   const name = `Room ${st.room} · ${st.guestName}`;
-  const ch = ui.rbCharge;
-  return html`<section class="panel" style="margin-bottom:16px;max-width:760px;border-color:var(--pri-line)">
-    <div class="line"><h2 class="grow" style="margin:0">${name}</h2><button class="btn ghost" type="button" data-act="rbClose">Close</button></div>${ui.recv || ui.refund || ui.adv ? '' : errorBox()}
-    ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">No booking from Djubo on this room: add the room rent by hand (Add charge).</p>`}
+  const f = ui.rbForm;   // which form is open on the bill: charge, lower, transfer, move, extend, checkout, cn
+  const out = !!st.checkedOutAt;
+  const inv = r.invoice;
+  const stays = (cache.stays ?? []).filter((x) => x.id !== st.id);
+  const form = () => {
+    if (f === 'charge' || f === 'lower') return html`<form class="grid2" style="margin-top:10px"><label class="f">${f === 'lower' ? 'Take off (₹)' : 'Amount (₹, GST included)'}<input class="in" inputmode="decimal" data-model="rbAmt" value="${ui.rbAmt ?? ''}" autofocus></label>
+      <label class="f">${f === 'lower' ? 'Why' : 'What for'}<input class="in" data-model="rbNote" value="${ui.rbNote ?? ''}" placeholder="${f === 'lower' ? 'e.g. Discount at the desk' : 'e.g. Room rent, Extra bed, Late check-out'}"></label>
+      <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="rbChargeGo" data-submit>${f === 'lower' ? 'Take off' : 'Add to the room bill'}</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    if (f === 'transfer') return html`<form class="panel" style="margin-top:10px"><h3>Move ${rs(r.balancePaise)} off this room's bill</h3>
+      <div class="chips"><button type="button" class="chip" aria-pressed="${ui.tfTo !== 'room'}" data-act="pick" data-k="tfTo" data-id="credit">To a company or credit account</button>
+        <button type="button" class="chip" aria-pressed="${ui.tfTo === 'room'}" data-act="pick" data-k="tfTo" data-id="room">To another room (one pays for the group)</button></div>
+      ${ui.tfTo === 'room' ? html`<label class="f">Room that pays<select class="in" data-model="tfStay"><option value="">Choose</option>${stays.map((x) => html`<option value="${x.id}" ${ui.tfStay === x.id ? 'selected' : ''}>${x.room} · ${x.guestName}</option>`)}</select></label>`
+        : html`<div class="chips">${(cache.credit ?? []).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.tfAcc === a.id}" data-act="pick" data-k="tfAcc" data-id="${a.id}">${a.name}</button>`)}
+            <button type="button" class="chip" aria-pressed="${ui.tfAcc === 'new'}" data-act="pick" data-k="tfAcc" data-id="new">New account</button></div>
+          ${ui.tfAcc === 'new' ? html`<div class="grid2"><label class="f">Company or person<input class="in" data-model="tfName" value="${ui.tfName ?? st.company ?? ''}"></label><label class="f">Phone<input class="in" inputmode="tel" data-model="tfPhone" value="${ui.tfPhone ?? ''}"></label></div>` : ''}`}
+      <label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="tfAmt" value="${ui.tfAmt ?? rupees(r.balancePaise)}"></label>
+      <div class="row"><button class="btn pri" type="submit" data-act="rbTransfer" data-submit>Move it</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    if (f === 'move') return html`<form class="panel" style="margin-top:10px"><h3>Move the guest to another room</h3>
+      <div class="grid2"><label class="f">New room or bed<select class="in" data-model="mvRoom"><option value="">Choose</option>${ui.roomSecs.flatMap((x) => x.tables ?? []).filter((t) => t !== st.room && !/· whole$/.test(t) && !(cache.stays ?? []).some((y) => y.room === t)).map((t) => html`<option ${ui.mvRoom === t ? 'selected' : ''}>${t}</option>`)}</select></label>
+        <label class="f">Why<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. AC not working, upgrade"></label></div>
+      <p class="small quiet">The bill, open food orders and history go with the guest. ${st.room} is marked dirty. Change the room in Djubo too.</p>
+      <div class="row"><button class="btn pri" type="submit" data-act="rbMove" data-submit>Move guest</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    if (f === 'extend') return html`<form class="panel" style="margin-top:10px"><h3>Extend the stay</h3>
+      <div class="grid2"><label class="f">New check-out<input class="in" type="date" data-model="exTo" value="${ui.exTo ?? addDays(st.checkOutPlan ?? me.business.shiftDay, 1)}"></label>
+        <label class="f">Rate per extra night (₹, GST incl.; empty if Djubo will send it)<input class="in" inputmode="decimal" data-model="exRate" value="${ui.exRate ?? ''}"></label></div>
+      ${r.booking ? html`<p class="small quiet">This guest came through Djubo: extend it in Djubo too. Leave the rate empty if Djubo's revised mail will add the rent.</p>` : ''}
+      <div class="row"><button class="btn pri" type="submit" data-act="rbExtend" data-submit>Extend</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    if (f === 'checkout') return html`<form class="panel" style="margin-top:10px"><h3>Check out and print the room invoice</h3>
+      <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-model="coCo" data-live ${ui.coCo ?? !!st.company ? 'checked' : ''}> Invoice in a company's name (GST claim)</label>
+      ${ui.coCo ?? !!st.company ? html`<div class="grid3"><label class="f">Company<input class="in" data-model="coName" value="${ui.coName ?? st.company ?? ''}"></label>
+        <label class="f">GSTIN<input class="in" data-model="coGstin" maxlength="15" value="${ui.coGstin ?? st.gstin ?? ''}"></label><label class="f">Address<input class="in" data-model="coAddr" value="${ui.coAddr ?? ''}"></label></div>` : ''}
+      <div class="row"><button class="btn pri" type="submit" data-act="checkOut" data-id="${st.id}" data-submit>Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    if (f === 'cn') return html`<form class="panel" style="margin-top:10px"><h3>Room credit note on ${inv.invoiceNo}</h3>
+      <div class="grid2"><label class="f">Amount given back (₹, GST included)<input class="in" inputmode="decimal" data-model="cnAmt" value="${ui.cnAmt ?? ''}"></label><label class="f">Reason<input class="in" data-model="cnWhy" value="${ui.cnWhy ?? ''}"></label></div>
+      <div class="chips">${[['none', 'No money back (lowers the invoice)'], ['cash', 'Cash from the drawer'], ['upi', 'UPI']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.cnMode ?? 'none') === k}" data-act="pick" data-k="cnMode" data-id="${k}">${t}</button>`)}</div>
+      <div class="row"><button class="btn pri" type="submit" data-act="rbCn" data-submit>Make credit note</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    return '';
+  };
+  return html`<section class="panel" style="margin-bottom:16px;max-width:820px;border-color:var(--pri-line)">
+    <div class="line"><h2 class="grow" style="margin:0">${name}${out ? html` <span class="badge bad">checked out ${dateTime(st.checkedOutAt)}</span>` : ''}</h2><button class="btn ghost" type="button" data-act="rbClose">Close</button></div>${ui.recv || ui.refund || ui.adv ? '' : errorBox()}
+    ${!out && st.foreign && !st.formCAt ? html`<div class="msg warn" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow">Foreign guest: Form C is due within 24 hours of arrival.</span><button class="btn" type="button" data-act="formC" data-id="${st.id}">Form C filed</button></div>` : ''}
+    ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
       ${r.lines.map((l) => html`<tr><td>${folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
       <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
     </tbody></table>
-    ${ch ? html`<form class="grid2" style="margin-top:10px"><label class="f">${ch.lower ? 'Take off (₹)' : 'Amount (₹, GST included)'}<input class="in" inputmode="decimal" data-model="rbAmt" value="${ui.rbAmt ?? ''}" autofocus></label>
-        <label class="f">${ch.lower ? 'Why' : 'What for'}<input class="in" data-model="rbNote" value="${ui.rbNote ?? ''}" placeholder="${ch.lower ? 'e.g. Discount at the desk' : 'e.g. Room rent, Extra bed, Late check-out'}"></label>
-        <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="rbChargeGo" data-submit>${ch.lower ? 'Take off' : 'Add to the room bill'}</button><button class="btn" type="button" data-act="rbChargeNo">Cancel</button></div></form>` : html`
+    ${inv ? html`<div class="msg ok" style="margin-top:8px;display:block">Invoice <strong>${inv.invoiceNo}</strong> · ${rs(inv.totalPaise)}${inv.billToName ? ` · to ${inv.billToName}${inv.billToGstin ? ` (${inv.billToGstin})` : ''}` : ''}
+      ${(inv.creditNotes ?? []).map((n) => html`<div class="small">Credit note ${n.cnNo} · ${n.reason} · ${rs(-n.totalPaise)}</div>`)}
+      <div class="row" style="margin-top:6px"><button class="btn" type="button" data-act="rbReprint">Reprint invoice</button><button class="btn" type="button" data-act="rbGrc" data-id="${st.id}">Reprint registration card</button>
+        ${can('bills.refund') ? html`<button class="btn ghost" type="button" data-act="rbForm" data-f="cn">Credit note</button>` : ''}</div></div>` : ''}
+    ${f ? form() : out ? '' : html`
     <div class="row" style="margin-top:10px;flex-wrap:wrap">
       ${r.balancePaise > 0 ? html`<button class="btn pri" type="button" data-act="recv" data-id="${st.accountId}" data-n="${name}" data-room="1" data-amount="${rupees(r.balancePaise)}">Take payment ${rs(r.balancePaise)}</button>` : ''}
       <button class="btn" type="button" data-act="recv" data-id="${st.accountId}" data-n="${name}" data-room="1" data-kind="deposit">Take deposit</button>
-      <button class="btn" type="button" data-act="rbCharge">Add charge</button>
-      ${r.rentPaise > 0 ? html`<button class="btn ghost" type="button" data-act="rbCharge" data-lower="1">Take rent off</button>` : ''}
+      <button class="btn" type="button" data-act="rbForm" data-f="charge">Add charge</button>
+      ${r.rentPaise > 0 ? html`<button class="btn ghost" type="button" data-act="rbForm" data-f="lower">Take rent off</button>` : ''}
+      ${r.balancePaise > 0 ? html`<button class="btn" type="button" data-act="rbForm" data-f="transfer">Bill to company / another room</button>` : ''}
+      <button class="btn" type="button" data-act="rbForm" data-f="move">Move room</button>
+      <button class="btn" type="button" data-act="rbForm" data-f="extend">Extend stay</button>
+      <button class="btn ghost" type="button" data-act="rbGrc" data-id="${st.id}">Registration card</button>
       ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
-      ${r.balancePaise === 0 ? html`<button class="btn pri" type="button" data-act="checkOut" data-id="${st.id}">Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button>` : ''}
+      ${r.balancePaise === 0 ? html`<button class="btn pri" type="button" data-act="rbForm" data-f="checkout">Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button>` : ''}
     </div>`}
     <p class="small quiet" style="margin-top:8px">Room rent comes from Djubo's booking (GST included). Food bills are invoiced on their own; the room invoice prints at check-out.</p>
   </section>`;
 }
-actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbCharge = null; ui.error = null; rerender(); scrollTo(0, 0); };
-actions.rbClose = () => { ui.roomBill = null; ui.rbCharge = null; rerender(); };
-actions.rbCharge = (d) => { ui.rbCharge = { lower: !!d.lower }; ui.rbAmt = ui.rbNote = undefined; ui.error = null; rerender(); };
-actions.rbChargeNo = () => { ui.rbCharge = null; rerender(); };
+actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbForm = null; ui.error = null; if (!cache.credit) await load('credit'); rerender(); scrollTo(0, 0); };
+actions.rbClose = () => { ui.roomBill = null; ui.rbForm = null; rerender(); };
+actions.rbForm = async (d) => { ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.error = null; if (d.f === 'transfer') await load('credit'); rerender(); };
+actions.rbFormNo = () => { ui.rbForm = null; rerender(); };
 actions.rbChargeGo = async () => {
-  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/charges`, { amount: ui.rbAmt ?? '', note: ui.rbNote ?? '', lower: ui.rbCharge.lower });
-  ui.rbCharge = null; flash = { kind: 'ok', text: 'Room bill updated.' }; rerender();
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/charges`, { amount: ui.rbAmt ?? '', note: ui.rbNote ?? '', lower: ui.rbForm === 'lower' });
+  ui.rbForm = null; flash = { kind: 'ok', text: 'Room bill updated.' }; rerender();
 };
+actions.rbTransfer = async () => {
+  const body = ui.tfTo === 'room' ? { to: 'room', stayId: ui.tfStay, amount: ui.tfAmt } : ui.tfAcc === 'new' ? { to: 'credit', newCredit: { name: ui.tfName ?? ui.roomBill.stay.company ?? '', phone: ui.tfPhone ?? '' }, amount: ui.tfAmt }
+    : { to: 'credit', debtorAccountId: ui.tfAcc, amount: ui.tfAmt };
+  if (ui.tfTo === 'room' ? !ui.tfStay : !ui.tfAcc) throw new Error(ui.tfTo === 'room' ? 'Choose the room that pays.' : 'Choose a credit account, or New account.');
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/transfer`, body);
+  ui.rbForm = null; flash = { kind: 'ok', text: 'Moved off the room bill.' }; await load('stays', 'credit'); rerender();
+};
+actions.rbMove = async (d) => {
+  if (!ui.mvRoom) throw new Error('Choose the new room.');
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/move`, { room: ui.mvRoom, reason: ui.mvWhy ?? '', dirtyOk: d.dirtyOk === '1' || undefined });
+  ui.rbForm = null; flash = { kind: 'ok', text: `Moved to ${ui.mvRoom}. Change it in Djubo too.` }; reopenStay = ui.roomBill.stay.id; route();
+};
+actions.rbExtend = async () => {
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/extend`, { to: ui.exTo ?? addDays(ui.roomBill.stay.checkOutPlan ?? me.business.shiftDay, 1), rate: ui.exRate || undefined });
+  ui.rbForm = null; flash = { kind: 'ok', text: `Stay extended to ${dayName(ui.roomBill.stay.checkOutPlan)}.` }; rerender();
+};
+actions.rbCn = async () => {
+  const r = await api('POST', `${B()}/room-invoices/${ui.roomBill.invoice.id}/credit-note`, { amount: ui.cnAmt ?? '', reason: ui.cnWhy ?? '', refundMode: ui.cnMode ?? 'none' });
+  ui.roomBill = r.bill; ui.rbForm = null;
+  const n = r.bill.invoice.creditNotes.find((x) => x.cnNo === r.cnNo);
+  printJobs([{ kind: 'bill', html: asHtml(html`<div class="receipt"><div class="hd">${r.bill.invoice.entityName}</div>${r.bill.invoice.gstRegistered ? html`<div class="c">GSTIN ${r.bill.invoice.gstin}</div>` : ''}
+    <div class="c">CREDIT NOTE</div><div class="rl"><span>${n.cnNo}</span><span>${dateTime(n.at)}</span></div><div>Against room invoice ${r.bill.invoice.invoiceNo}</div><div>${n.reason}</div><hr>
+    <div class="rl"><span>Value</span><span>${rs(n.taxablePaise)}</span></div><div class="rl"><span>CGST</span><span>${rs(n.cgstPaise)}</span></div><div class="rl"><span>SGST</span><span>${rs(n.sgstPaise)}</span></div>
+    <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(n.totalPaise)}</span></div></div>`) }]);
+  flash = { kind: 'ok', text: `${r.cnNo} made.` }; rerender();
+};
+actions.rbReprint = () => printJobs([{ kind: 'bill', html: asHtml(roomInvoiceSlip(ui.roomBill)) }]);
+actions.rbGrc = async (d) => printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${d.id}/grc`)).grc)) }]);
+actions.formC = async (d) => { await api('POST', `${B()}/stays/${d.id}/form-c`); if (ui.roomBill) ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); flash = { kind: 'ok', text: 'Form C marked filed.' }; if (ui.audit) ui.audit = await api('GET', `${B()}/frontdesk/audit`); rerender(); };
 /** A payment receipt slip (24 Nov 2026): its number, the room and guest, how it was paid, and what is left to pay. */
 const receiptSlip = (r) => html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">${r.kind === 'deposit' ? 'DEPOSIT RECEIPT (REFUNDABLE)' : r.kind === 'advance' ? 'ADVANCE RECEIPT' : 'PAYMENT RECEIPT'}</div>
   <div class="rl"><span>${r.receiptNo}</span><span>${dateTime(r.at)}</span></div>
@@ -1922,6 +2105,7 @@ function roomInvoiceSlip(bill) {
   const food = bill.lines.filter((l) => l.kind === 'charge');
   return html`<div class="receipt"><div class="hd">${inv.entityName}</div>${inv.gstRegistered ? html`<div class="c">GSTIN ${inv.gstin}</div><div class="c">TAX INVOICE</div>` : html`<div class="c">INVOICE</div>`}
     <div class="rl"><span>${inv.invoiceNo}</span><span>${dateTime(inv.at)}</span></div>
+    ${inv.billToName ? html`<div>Billed to: ${inv.billToName}</div>${inv.billToGstin ? html`<div>GSTIN: ${inv.billToGstin}</div>` : ''}${inv.billToAddress ? html`<div>${inv.billToAddress}</div>` : ''}` : ''}
     <div>Guest: ${inv.guestName}</div><div>Room ${inv.room} · ${dayName(inv.checkIn)} → ${dayName(inv.checkOut)} (${plural(inv.nights, 'night')})</div><hr>
     ${inv.lines.map((l) => html`<div class="rl"><span>${l.name}</span><span>${rs(l.amountPaise)}</span></div>`)}<hr>
     ${inv.gstRateBp ? html`<div class="rl"><span>Value</span><span>${rs(inv.taxablePaise)}</span></div><div class="rl"><span>CGST ${inv.gstRateBp / 200}%</span><span>${rs(inv.cgstPaise)}</span></div>
@@ -1929,6 +2113,8 @@ function roomInvoiceSlip(bill) {
     <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(inv.totalPaise)}</span></div><hr>
     ${prepaid.map((l) => html`<div class="rl"><span>${l.note}</span><span>${rs(l.amountPaise)}</span></div>`)}
     ${atHotel ? html`<div class="rl"><span>Paid at the hotel</span><span>${rs(-atHotel)}</span></div>` : ''}
+    ${bill.lines.filter((l) => l.kind === 'transfer' && l.amountPaise < 0).map((l) => html`<div class="rl"><span>${l.note}</span><span>${rs(l.amountPaise)}</span></div>`)}
+    ${(inv.creditNotes ?? []).map((n) => html`<div class="rl"><span>Credit note ${n.cnNo}</span><span>${rs(-n.totalPaise)}</span></div>`)}
     ${food.length ? html`<div class="small">Food bills ${food.map((l) => l.billNo).join(', ')} (${rs(food.reduce((t, l) => t + l.amountPaise, 0))}) are invoiced on their own.</div>` : ''}
     <div class="rl" style="font-weight:700"><span>BALANCE</span><span>${rs(0)}</span></div>
     <div class="c small">Thank you for staying with us</div></div>`;
@@ -2033,7 +2219,7 @@ actions.openStay = async (d = {}) => {
     .filter((x) => String(x.number).trim());
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
   const r = await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
-    reservationId: ui.resPicked?.id, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut, idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
+    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut, idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
     goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign });
   if (!d.noprint) printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${r.id}/grc`)).grc)) }]);
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
@@ -2088,8 +2274,9 @@ function roomChooser() {
   const match = (t) => !q || catHit || t.toLowerCase().includes(q);
   const tile = (t, blockedBy) => {
     const g = who(t);
+    const dirty = ui.hk?.sections?.flatMap((x) => x.rooms).find((x) => x.room === t)?.status === 'dirty';
     const taken = g ? g.guestName : blockedBy;
-    return html`<button type="button" class="chip roomchip ${taken ? 'taken' : ''}" aria-pressed="${ui.room === t}" ${taken ? 'disabled' : ''} data-act="pickRoom" data-name="${t}" title="${taken ? `${t}: ${taken}` : t}">${t}${taken ? html`<span class="small"> · ${taken}</span>` : ''}</button>`;
+    return html`<button type="button" class="chip roomchip ${taken ? 'taken' : ''}" aria-pressed="${ui.room === t}" ${taken ? 'disabled' : ''} data-act="pickRoom" data-name="${t}" title="${taken ? `${t}: ${taken}` : t}">${t}${taken ? html`<span class="small"> · ${taken}</span>` : dirty ? html`<span class="small"> · dirty</span>` : ''}</button>`;
   };
   const group = (x) => {
     catHit = !!q && !/^\d/.test(q) && (x.name.toLowerCase().includes(q) || loose(x.name));
@@ -2122,7 +2309,9 @@ actions.gLookup = async (_d, el) => {
   rerender();
 };
 actions.checkOut = async (d) => {
-  const r = await api('POST', `${B()}/stays/${d.id}/check-out`);
+  const st = ui.roomBill?.stay;
+  const co = ui.coCo ?? !!st?.company;
+  const r = await api('POST', `${B()}/stays/${d.id}/check-out`, co ? { billTo: { name: ui.coName ?? st?.company ?? '', gstin: ui.coGstin ?? st?.gstin ?? '', address: ui.coAddr ?? '' } } : {});
   // The stay's tax invoice for the room rent prints at check-out (24 Nov 2026).
   if (r.bill?.invoice) printJobs([{ kind: 'bill', html: asHtml(roomInvoiceSlip(r.bill)) }]);
   ui.roomBill = null;
@@ -2308,14 +2497,38 @@ async function insightsTab(tab, head, from, to) {
   rerender();
 }
 
+/** Room sales (25 Nov 2026): each room invoice, room credit notes and no-show charges kept, with GST. */
+async function roomsReportTab(head, from, to) {
+  const r = await api('GET', `${B()}/reports/rooms?from=${from}&to=${to}`);
+  const t = r.totals;
+  rerender = () => paint(shell('#/reports', html`${head}
+    <div class="kpis">${kpi('Room invoices', String(t.invoices))}${kpi('Room nights', String(t.nights))}${kpi('Room sales (before GST)', rs(t.taxablePaise))}${kpi('GST on rooms', rs(t.gstPaise))}${kpi('No-show charges kept', rs(t.noShowPaise))}</div>
+    <section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Room invoices</h2>${r.invoices.length ? html`<button class="btn" type="button" data-act="roomsCsv">Download (CSV)</button>` : ''}</div>
+      <div class="scroll"><table class="t"><thead><tr><th>Invoice</th><th>Day</th><th>Guest / company</th><th>Room</th><th class="num">Nights</th><th>Rate</th><th class="num">Value</th><th class="num">GST</th><th class="num">Total</th></tr></thead><tbody>
+        ${r.invoices.length ? r.invoices.map((x) => html`<tr><td>${x.invoiceNo}</td><td>${dayName(x.day)}</td><td>${x.guestName}${x.billToName ? html`<div class="small quiet">${x.billToName}${x.billToGstin ? ` · ${x.billToGstin}` : ''}</div>` : ''}</td><td>${x.room}</td>
+          <td class="num">${x.nights}</td><td>${x.gstRateBp / 100}%</td><td class="num">${rs(x.taxablePaise)}</td><td class="num">${rs(x.cgstPaise + x.sgstPaise)}</td><td class="num">${rs(x.totalPaise)}</td></tr>`) : html`<tr><td colspan="9" class="quiet">No room invoices in these shifts.</td></tr>`}</tbody></table></div></section>
+    ${r.creditNotes.length ? html`<section class="panel" style="margin-top:16px"><h2>Room credit notes</h2><div class="sums">${r.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.invoiceNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div></section>` : ''}
+    ${r.noShowsKept.length ? html`<section class="panel" style="margin-top:16px"><h2>No-show charges kept</h2><div class="sums">${r.noShowsKept.map((n) => html`<div><span>${n.guestName} · ${n.receiptNo}</span><span>${rs(n.amountPaise)}</span></div>`)}</div></section>` : ''}`));
+  ui.roomsRep = r;
+  rerender();
+}
+actions.roomsCsv = () => downloadCsv(`room-invoices-${ui.roomsRep.from}-to-${ui.roomsRep.to}.csv`, [['Invoice', 'Shift day', 'Guest', 'Company', 'GSTIN', 'Room', 'Check-in', 'Check-out', 'Nights', 'GST rate', 'Value', 'CGST', 'SGST', 'Total'],
+  ...ui.roomsRep.invoices.map((x) => [x.invoiceNo, x.day, x.guestName, x.billToName ?? '', x.billToGstin ?? '', x.room, x.checkIn, x.checkOut, x.nights, `${x.gstRateBp / 100}%`, rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise), rupees(x.totalPaise)])]);
 async function gstTab(head, month) {
   const r = await api('GET', `${B()}/reports/gstr1?month=${month}`);
   ui.gst = r;
   const money = (p) => rupees(p);
   rerender = () => paint(shell('#/reports', html`${head}
     <section class="panel"><div class="row" style="justify-content:space-between"><h2>GSTR-1 working · ${month}</h2>${r.entities.length ? html`<button class="btn" type="button" data-act="gstCsv">Download for CA (CSV)</button>` : ''}</div>
-      <p class="quiet small">By bill date (when printed, India time), not shift. All sales are shown as B2C small (unregistered buyers): the POS does not take a guest's GSTIN yet. Credit notes are netted off in B2C. Check with your CA before filing.</p>
-      ${r.entities.length ? '' : html`<p class="quiet">No bills in this month.</p>`}</section>
+      <p class="quiet small">By bill date (when printed, India time), not shift. Food bills are B2C small (unregistered buyers). Room invoices made out to a company with a GSTIN are B2B; the rest are B2C. Credit notes are netted off in B2C. Check with your CA before filing.</p>
+      ${r.entities.length || r.rooms?.length ? '' : html`<p class="quiet">No bills in this month.</p>`}</section>
+    ${(r.rooms ?? []).map((e) => html`<section class="panel" style="margin-top:16px"><h2>Rooms · ${e.name}</h2><p class="small">GSTIN ${e.gstin ?? '—'} · SAC 996311 (accommodation)</p>
+      ${e.b2b.length ? html`<h3>B2B (Table 4): room invoices to registered companies</h3><div class="scroll"><table class="t"><thead><tr><th>GSTIN</th><th>Company</th><th>Invoice</th><th>Date</th><th>Rate</th><th class="num">Taxable (₹)</th><th class="num">CGST (₹)</th><th class="num">SGST (₹)</th><th class="num">Invoice value (₹)</th></tr></thead><tbody>
+        ${e.b2b.map((x) => html`<tr><td>${x.gstin}</td><td>${x.name ?? ''}</td><td>${x.invoiceNo}</td><td>${dateTime(x.at)}</td><td>${x.ratePct}%</td><td class="num">${money(x.taxablePaise)}</td><td class="num">${money(x.cgstPaise)}</td><td class="num">${money(x.sgstPaise)}</td><td class="num">${money(x.totalPaise)}</td></tr>`)}</tbody></table></div>` : ''}
+      <h3>B2C small (Table 7) and SAC 996311</h3><div class="scroll"><table class="t"><thead><tr><th>Rate</th><th class="num">Nights</th><th class="num">Taxable value (₹)</th><th class="num">CGST (₹)</th><th class="num">SGST (₹)</th></tr></thead><tbody>
+        ${e.b2cs.map((x) => html`<tr><td>${x.ratePct}%</td><td class="num">${x.nights}</td><td class="num">${money(x.taxablePaise)}</td><td class="num">${money(x.cgstPaise)}</td><td class="num">${money(x.sgstPaise)}</td></tr>`)}</tbody></table></div>
+      <h3>Documents issued (Table 13)</h3><div class="scroll"><table class="t"><thead><tr><th>Document</th><th>From</th><th>To</th><th class="num">Total</th></tr></thead><tbody>
+        ${[['Room invoices', e.invoices], ['Room credit notes', e.creditNotes]].filter(([, x]) => x).map(([name, x]) => html`<tr><td>${name}</td><td>${x.from}</td><td>${x.to}</td><td class="num">${x.total}</td></tr>`)}</tbody></table></div></section>`)}
     ${r.entities.map((e) => html`<section class="panel" style="margin-top:16px"><h2>${e.name}</h2>
       ${e.registered ? html`<p class="small">GSTIN ${e.gstin}</p>
         <h3>B2C small (Table 7)</h3>
@@ -2348,6 +2561,12 @@ actions.gstCsv = () => {
     }
     if (e.invoices) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: invoices', 'Invoices', e.invoices.from, e.invoices.to, e.invoices.total, e.invoices.cancelled]);
     if (e.creditNotes) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: credit notes', 'Credit notes', e.creditNotes.from, e.creditNotes.to, e.creditNotes.total, e.creditNotes.cancelled]);
+  }
+  for (const e of r.rooms ?? []) {
+    for (const x of e.b2b) rows.push([r.month, e.name, e.gstin ?? '', `Rooms B2B ${x.gstin} ${x.name ?? ''}`, `${x.invoiceNo} at ${x.ratePct}%`, '', rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise)]);
+    for (const x of e.b2cs) rows.push([r.month, e.name, e.gstin ?? '', 'Rooms B2C small (SAC 996311)', `${x.ratePct}%`, x.nights, rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise)]);
+    if (e.invoices) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: room invoices', 'Room invoices', e.invoices.from, e.invoices.to, e.invoices.total, 0]);
+    if (e.creditNotes) rows.push([r.month, e.name, e.gstin ?? '', 'Documents: room credit notes', 'Room credit notes', e.creditNotes.from, e.creditNotes.to, e.creditNotes.total, 0]);
   }
   downloadCsv(`gstr1-working-${r.month}.csv`, rows);
 };
@@ -2562,7 +2781,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   const today = me.business.shiftDay;
   const ranges = [['This shift', today, today], ['Last shift', addDays(today, -1), addDays(today, -1)], ['Last 7 shifts', addDays(today, -6), today], ['This month', today.slice(0, 8) + '01', today]];
   const head = html`${pageHead('Reports', tab === 'owed' ? 'Rooms and credit accounts: what is owed right now.' : tab === 'gst' ? `GSTR-1 working for ${ui.gstMonth}` : `Shift ${from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`} · a shift runs 8 am to 8 am`)}
-    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
+    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['rooms', 'Rooms'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
     ${tab === 'gst' ? html`<form class="row" style="align-items:end;margin-bottom:16px"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
       <button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></form>`
     : tab !== 'owed' && tab !== 'events' ? html`<div class="row" style="align-items:end;margin-bottom:16px;justify-content:space-between">
@@ -2595,6 +2814,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   if (tab === 'profit') { await profitTab(head, from, to); return; }
   if (tab === 'losses') { await lossesTab(head, from, to); return; }
   if (tab === 'gst') { await gstTab(head, ui.gstMonth); return; }
+  if (tab === 'rooms') { await roomsReportTab(head, from, to); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   const cnTotal = r.creditNotes.reduce((t, n) => t + n.totalPaise, 0);

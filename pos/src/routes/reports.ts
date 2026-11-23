@@ -285,7 +285,57 @@ reportRoutes.get(`${B}/reports/gstr1`, requireAction('reports.view'), async (c) 
       totalPaise: live.reduce((t, x) => t + x.total_paise, 0) - en.reduce((t, n) => t + n.total_paise, 0),
     };
   }).filter((e) => e.invoices || e.creditNotes);
-  return c.json({ month, entities: out });
+  // Room invoices and room credit notes (25 Nov 2026): rent at 5% or 18%, SAC 996311, under each billing name; an invoice
+  // made out to a company with a GSTIN is B2B.
+  const [rooms, roomCns] = await Promise.all([
+    all<{ entity_id: string; invoice_no: string; at: number; gst_rate_bp: number; taxable_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number; nights: number;
+      bill_to_name: string | null; bill_to_gstin: string | null }>(db, `SELECT entity_id, invoice_no, at, gst_rate_bp, taxable_paise, cgst_paise, sgst_paise, total_paise, nights, bill_to_name, bill_to_gstin
+      FROM room_invoices WHERE business_id = ? AND at >= ? AND at < ? ORDER BY seq`, bid, start, end),
+    all<{ entity_id: string; cn_no: string; gst_rate_bp: number; taxable_paise: number; cgst_paise: number; sgst_paise: number; total_paise: number }>(db, `SELECT i.entity_id, n.cn_no,
+      i.gst_rate_bp, n.taxable_paise, n.cgst_paise, n.sgst_paise, n.total_paise FROM room_credit_notes n JOIN room_invoices i ON i.id = n.invoice_id
+      WHERE n.business_id = ? AND n.at >= ? AND n.at < ? ORDER BY n.seq`, bid, start, end),
+  ]);
+  const roomOut = entities.map((e) => {
+    const inv = rooms.filter((r) => r.entity_id === e.id);
+    const cns = roomCns.filter((r) => r.entity_id === e.id);
+    if (!inv.length && !cns.length) return null;
+    const rates = new Map<number, { taxable: number; cgst: number; sgst: number; nights: number }>();
+    for (const r of inv.filter((x) => !x.bill_to_gstin)) { const x = rates.get(r.gst_rate_bp) ?? { taxable: 0, cgst: 0, sgst: 0, nights: 0 }; x.taxable += r.taxable_paise; x.cgst += r.cgst_paise; x.sgst += r.sgst_paise; x.nights += r.nights; rates.set(r.gst_rate_bp, x); }
+    for (const r of cns) { const x = rates.get(r.gst_rate_bp) ?? { taxable: 0, cgst: 0, sgst: 0, nights: 0 }; x.taxable -= r.taxable_paise; x.cgst -= r.cgst_paise; x.sgst -= r.sgst_paise; rates.set(r.gst_rate_bp, x); }
+    return { name: e.name, gstin: e.gstin,
+      b2cs: [...rates].sort((a, b) => a[0] - b[0]).map(([bp, x]) => ({ ratePct: bp / 100, sac: '996311', nights: x.nights, taxablePaise: x.taxable, cgstPaise: x.cgst, sgstPaise: x.sgst })),
+      b2b: inv.filter((x) => x.bill_to_gstin).map((x) => ({ gstin: x.bill_to_gstin, name: x.bill_to_name, invoiceNo: x.invoice_no, at: x.at, ratePct: x.gst_rate_bp / 100,
+        taxablePaise: x.taxable_paise, cgstPaise: x.cgst_paise, sgstPaise: x.sgst_paise, totalPaise: x.total_paise })),
+      invoices: inv.length ? { from: inv[0].invoice_no, to: inv[inv.length - 1].invoice_no, total: inv.length, cancelled: 0 } : null,
+      creditNotes: cns.length ? { from: cns[0].cn_no, to: cns[cns.length - 1].cn_no, total: cns.length, cancelled: 0 } : null,
+      totalPaise: inv.reduce((t, x) => t + x.total_paise, 0) - cns.reduce((t, x) => t + x.total_paise, 0) };
+  }).filter(Boolean);
+  return c.json({ month, entities: out, rooms: roomOut });
+});
+
+// Room sales for shifts from..to (25 Nov 2026): each room invoice (rent, GST), room credit notes, no-show charges kept,
+// and totals by GST rate.
+reportRoutes.get(`${B}/reports/rooms`, requireAction('reports.view'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const today = clock(bizOf(c)).shiftDay;
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('from') ?? '') ? c.req.query('from')! : today;
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('to') ?? '') ? c.req.query('to')! : from;
+  const hour = bizOf(c).shift_start_hour * 3_600_000;   // a shift day starts at the shift's hour, India time
+  const [invoices, cns, kept] = await Promise.all([
+    all(db, `SELECT invoice_no AS invoiceNo, shift_day AS day, guest_name AS guestName, room, check_in AS checkIn, check_out AS checkOut, nights, gst_rate_bp AS gstRateBp,
+      taxable_paise AS taxablePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise, total_paise AS totalPaise, bill_to_name AS billToName, bill_to_gstin AS billToGstin
+      FROM room_invoices WHERE business_id = ? AND shift_day BETWEEN ? AND ? ORDER BY seq`, bid, from, to),
+    all(db, `SELECT n.cn_no AS cnNo, n.shift_day AS day, i.invoice_no AS invoiceNo, n.reason, n.taxable_paise AS taxablePaise, n.cgst_paise AS cgstPaise, n.sgst_paise AS sgstPaise,
+      n.total_paise AS totalPaise, n.refund_mode AS refundMode FROM room_credit_notes n JOIN room_invoices i ON i.id = n.invoice_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? ORDER BY n.seq`, bid, from, to),
+    all(db, `SELECT d.guest_name AS guestName, d.amount_paise AS amountPaise, d.kept_at AS at, s.receipt_no AS receiptNo FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id
+      WHERE d.business_id = ? AND d.status = 'kept' AND d.kept_at >= ? AND d.kept_at < ?`, bid, Date.parse(from) + hour - 19_800_000, Date.parse(to) + 86_400_000 + hour - 19_800_000),
+  ]);
+  const sum = (rows: Record<string, unknown>[], k: string) => rows.reduce((t, r) => t + Number(r[k] ?? 0), 0);
+  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept,
+    totals: { invoices: invoices.length, nights: sum(invoices, 'nights'), taxablePaise: sum(invoices, 'taxablePaise') - sum(cns, 'taxablePaise'),
+      gstPaise: sum(invoices, 'cgstPaise') + sum(invoices, 'sgstPaise') - sum(cns, 'cgstPaise') - sum(cns, 'sgstPaise'),
+      totalPaise: sum(invoices, 'totalPaise') - sum(cns, 'totalPaise'), noShowPaise: sum(kept, 'amountPaise') } });
 });
 
 // Who owes what, aged: what is owed is taken to be the newest charges (older ones were paid first).
@@ -298,7 +348,7 @@ reportRoutes.get(`${B}/reports/debtors`, requireAction('reports.view'), async (c
       (d.kind = 'credit' OR EXISTS (SELECT 1 FROM stays s WHERE s.id = d.stay_id AND s.checked_out_at IS NULL)) AS open
     FROM debtor_accounts d LEFT JOIN debtor_entries e ON e.account_id = d.id WHERE d.business_id = ? GROUP BY d.id ORDER BY balance DESC, d.name`, bid);
   const charges = await all<{ account_id: string; amount_paise: number; at: number }>(db,
-    "SELECT account_id, amount_paise, at FROM debtor_entries WHERE business_id = ? AND amount_paise > 0 AND kind IN ('charge', 'advance_used', 'room_rent') ORDER BY at DESC", bid);
+    "SELECT account_id, amount_paise, at FROM debtor_entries WHERE business_id = ? AND amount_paise > 0 AND kind IN ('charge', 'advance_used', 'room_rent', 'transfer') ORDER BY at DESC", bid);
   const DAY = 86400000;
   return c.json({ accounts: accounts.filter((a) => a.balance !== 0 || a.open).map((a) => {
     const buckets = { d0_30: 0, d31_60: 0, d61_90: 0, d90: 0 };
