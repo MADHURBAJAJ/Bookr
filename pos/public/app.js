@@ -1439,7 +1439,8 @@ function bookingsPanel(r) {
       <span class="grow small"><strong>${m.subject || '(no subject)'}</strong> · ${dateTime(m.receivedAt)}<br><span class="quiet">${link ? 'Gmail asks to confirm forwarding to Bookr POS.' : m.note}</span></span>
       ${link ? html`<a class="btn" href="${link}" target="_blank" rel="noopener noreferrer">Confirm forwarding</a>`
         : m.source !== 'gmail' ? html`<button class="btn" type="button" data-act="bkReread" data-id="${m.id}">Read again</button>` : ''}</div>`; })}` : ''}
-    <p class="small quiet" style="margin-top:8px">${plural(r.mails.length, 'mail')} received lately.</p></section>`;
+    <div class="line" style="gap:8px;margin-top:8px"><p class="small quiet grow" style="margin:0">${plural(r.mails.length, 'mail')} received lately.</p>
+      <button class="btn" type="button" data-act="bkRereadAll"${ui.bkRereading ? ' disabled' : ''}>${ui.bkRereading ? `Reading… ${ui.bkRereading}` : 'Read all again'}</button></div></section>`;
 }
 actions.bkFix = (d) => { ui.bkFix = d.id; ui.bkName = ui.bkType = ui.bkIn = ui.bkOut = ui.bkPhone = undefined; rerender(); };
 actions.bkFixNo = () => { ui.bkFix = null; rerender(); };
@@ -1451,7 +1452,20 @@ actions.bkApprove = async (d) => {
 actions.bkCancel = async (d) => { if (!confirm('Cancel this booking?')) return; await api('POST', `${B()}/bookings/${d.id}/cancel`); route(); };
 actions.bkHandled = async (d) => { await api('POST', `${B()}/bookings/${d.id}/cancel`); flash = { kind: 'ok', text: 'Marked as done in Djubo.' }; route(); };
 actions.bkReread = async (d) => { await api('POST', `${B()}/mails/${d.id}/read-again`); flash = { kind: 'ok', text: 'Read again.' }; route(); };
-actions.bkAutoSave = async () => { await api('PUT', `${B()}/bookings/auto`, { from: ui.bkAuto ?? addDays(ui.bk.today, 10) }); flash = { kind: 'ok', text: 'Automatic saved.' }; route(); };
+// Every Djubo and MakeMyTrip mail read again, oldest first, a few per call.
+actions.bkRereadAll = async () => {
+  if (!confirm('Read all Djubo and MakeMyTrip mails again? Bookings are brought up to date from the mails; a change you made by hand with Fix may be replaced.')) return;
+  let from = 0;
+  try {
+    for (;;) {
+      const r = await api('POST', `${B()}/mails/read-all-again`, { from });
+      ui.bkRereading = `${r.done} of ${r.total}`; rerender();
+      if (r.next === null) { flash = { kind: 'ok', text: `${plural(r.done, 'mail')} read again.` }; break; }
+      from = r.next;
+    }
+  } finally { ui.bkRereading = null; route(); }
+};
+actions.bkAutoSave =async () => { await api('PUT', `${B()}/bookings/auto`, { from: ui.bkAuto ?? addDays(ui.bk.today, 10) }); flash = { kind: 'ok', text: 'Automatic saved.' }; route(); };
 actions.bkAutoOff = async () => { await api('PUT', `${B()}/bookings/auto`, { from: null }); flash = { kind: 'ok', text: 'Automatic is off: a person approves each booking.' }; route(); };
 actions.openStay = async () => {
   await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined });

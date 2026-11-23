@@ -48,6 +48,23 @@ describe('booking mails', () => {
     expect((await s.ok(s.counter.get(`${s.B}/bookings`))).waiting).toMatchObject([{ extRef: 'X1', guestName: 'A', phone: '••••1111', status: 'new' }]);
   });
 
+  it('"Read all again" reads every booking mail, oldest first, a few per call', async () => {
+    const s = await setupBusiness();
+    const e = mailEnv(s.businessId);
+    setReader('mmt', () => []);
+    // Ten mails for one booking, the room type changing each time; read by a reader that finds nothing yet.
+    for (let i = 1; i <= 10; i++) await receiveMail(message('bookings@mail.example.test', raw('new@mmt.example.test', `Booking ${i}`, `ra${i}`,
+      `Booking Y1 | B | 9800022222 | Type ${i} | 2026-12-01 | 2026-12-02`).replace('Date: Mon, 23 Nov 2026 10:00:00', `Date: Mon, 23 Nov 2026 10:${String(60 - i * 5).padStart(2, '0')}:00`)).msg, e as never);
+    expect((await s.ok(s.counter.get(`${s.B}/bookings`))).waiting).toEqual([]);
+    setReader('mmt', fake);
+    let r = await s.ok(s.counter.post(`${s.B}/mails/read-all-again`, {}));
+    expect(r).toEqual({ done: 8, total: 10, next: 8 });
+    r = await s.ok(s.counter.post(`${s.B}/mails/read-all-again`, { from: r.next }));
+    expect(r).toEqual({ done: 10, total: 10, next: null });
+    // Mail 1 was sent last (10:55), so its room type has the last word.
+    expect((await s.ok(s.counter.get(`${s.B}/bookings`))).waiting).toMatchObject([{ extRef: 'Y1', roomType: 'Type 1' }]);
+  });
+
   it('a person approves or fixes; automatic later; linked across the two sources; offered at check-in', async () => {
     const s = await setupBusiness();
     const { B, owner, counter, ok } = s;

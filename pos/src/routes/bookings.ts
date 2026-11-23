@@ -97,6 +97,21 @@ bookingRoutes.post(`${B}/mails/:id/read-again`, requireAction('stays.edit'), asy
   return c.json({ ok: true });
 });
 
+// Reads every kept Djubo and MakeMyTrip mail again, oldest first (so a later, revised mail has the last word), a few per
+// call to stay within the Worker's limits: `from` is how many are done; `next` is null when all are.
+const PER_CALL = 8;
+bookingRoutes.post(`${B}/mails/read-all-again`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const from = Number.isInteger(data.from) && (data.from as number) >= 0 ? (data.from as number) : 0;
+  const total = (await one<{ n: number }>(c.env.DB, "SELECT count(*) AS n FROM inbound_mails WHERE business_id = ? AND source IN ('mmt', 'djubo')", bid))!.n;
+  const ids = await all<{ id: string }>(c.env.DB, `SELECT id FROM inbound_mails WHERE business_id = ? AND source IN ('mmt', 'djubo')
+    ORDER BY received_at, created_at, id LIMIT ? OFFSET ?`, bid, PER_CALL, from);
+  for (const m of ids) await readAgain(c.env, bid, m.id);
+  const done = from + ids.length;
+  return c.json({ done, total, next: ids.length === PER_CALL && done < total ? done : null });
+});
+
 // Automatic: from a date (e.g. 10 days on), clean bookings go in by themselves. Off: a person approves every one.
 bookingRoutes.put(`${B}/bookings/auto`, requireAction('stays.edit'), async (c) => {
   if (!isManager(c)) fail(403, 'A manager or owner switches automatic on or off.');
