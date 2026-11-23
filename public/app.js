@@ -6561,7 +6561,7 @@ function suggestionCard(c, day) {
 // Suggestions grouped by what you do (approved 20 Nov 2026): one heading and one reason per kind, one line per bill,
 // the three sources as chips (the odd one struck), a button that names the result, and a quiet ✕.
 const SG_GROUPS = [
-  ['bank', 'The bank settles it', "the bank's credit shows which side is right", ['bank_backs']],
+  ['bank', 'The bank settles it', "the bank's credit shows which side is right", ['bank_is_bill', 'bank_backs']],
   ['number', 'Wrong bill number', 'check the number against the photo first', ['number_typo', 'register_slip']],
   ['written', 'Register written differently', 'the money came in another way than the register says', ['wrong_column', 'discount_not_given', 'change_in_cash', 'payment_written_wrong', 'split_cash_upi']],
   ['together', 'Paid together or in parts', 'one payment for several bills, or one bill in several payments', ['one_credit_many_bills', 'paid_in_parts', 'group_parts', 'clear_matches']],
@@ -6734,6 +6734,13 @@ function shortCard(c, chip, colour, figures, right) {
     <div class="form-msg"></div></div>`;
 }
 const okMark = html`<span style="color:var(--teal-ink)">✓</span>`;
+/** Bank = the bill, not the register (approved 24 Nov 2026): bill ✓ · bank ✓ · minutes ✓ · register ✗ (tip or discount). */
+function tipRow(c) {
+  const L = c.look;
+  const bad = html`<span style="color:#B42318">✗</span>`;
+  const fig = html`bill ₹${rs(L.billPaise)} ${okMark} · bank ₹${rs(L.creditPaise)} at ${hhmm(L.postedAt)} ${okMark} · ${L.minutes} min ${okMark} · register ₹${rs(L.receivedPaise)} ${bad} (${L.tipPaise > 0 ? `₹${rs(L.tipPaise)} tip` : `₹${rs(-L.tipPaise)} off`})`;
+  return { __html: shortCard(c, 'Bank = bill, not register', SC_AMBER, fig, null).__html.replace('>Not these</button>', `>Keep ₹${rs(L.receivedPaise)}</button>`) };
+}
 function groupPartsRow(c) {
   const L = c.look;
   const credits = L.parts.map((p) => `₹${rs(p.amountPaise)} ${hhmm(p.postedAt)}`);
@@ -6756,6 +6763,7 @@ function sgRow(c, day, ctx) {
   if (c.kind === 'same_sale' && c.same) return sameSaleRow(c, ctx);
   if (c.kind === 'no_upi_credit' && c.look) return noCreditRow(c);
   if (c.kind === 'bank_backs' && c.look) return bankBacksRow(c);
+  if (c.kind === 'bank_is_bill' && c.look) return tipRow(c);
   const bills = (c.billNos ?? []).filter(Boolean);
   const lead = bills.length ? bills.map((b) => html`<button type="button" class="linkbtn mono sg-bill" data-bill-drawer="${b}|${day ?? ''}" title="Everything about this bill">${b}</button>`) : c.kind === 'no_bill' ? html`<span class="sg-t">${c.title.replace(/ with no bill$/, '')}</span>` : '';
   const wait = c.kind === 'no_upi_credit';
@@ -7276,7 +7284,9 @@ async function reconcileView(biz, dayArg) {
   const explained = (c) => (c.billNos ?? []).some((b) => hinted.some((h) => h.billNo === b)) || (c.uses ?? []).some((u) => hinted.some((h) => h.credits.some((id) => u === `cr:${id}`)));
   const fixes = r.fixes.filter((c) => !gone.has(c.key) && !(c.kind === 'paid_in_parts' && explained(c)));
   // Probably the same payment (17 Nov 2026), before saving: told once, so its bill and credit leave the lists below.
-  const hintSkip = new Set([...hinted.flatMap((h) => h.credits), ...(r.open?.bills ?? []).filter((b) => hinted.some((h) => h.billNo === b.billNo)).map((b) => b.id)]);
+  const hintSkip = new Set([...hinted.flatMap((h) => h.credits), ...(r.open?.bills ?? []).filter((b) => hinted.some((h) => h.billNo === b.billNo)).map((b) => b.id),
+    // A bank = bill card (24 Nov 2026) is told once, as that card.
+    ...(r.noCredit ?? []).filter((c) => c.kind === 'bank_is_bill').flatMap((c) => c.uses.map((u) => u.slice(u.indexOf(':') + 1)))]);
   const near = !r.confirmed && r.open && biz.actions.includes('sales.decide')
     ? nearPairs(r.open, hintSkip).filter((p) => !gone.has(`near:${p.bill.id}:${p.credit.id}`)) : [];
   const nearBills = new Set(near.map((p) => p.bill.id));
@@ -7517,7 +7527,7 @@ async function reconcileView(biz, dayArg) {
   // register slips and Same sale cards, each told once here and not again on the list.
   const listedCredit = new Set([...loCredits, ...(r.open?.credits ?? [])].map((c) => `cr:${c.id}`));
   let isSameCards = r.confirmed || !r.open ? [] : [...cols, ...fixes.filter((c) => !(c.kind === 'no_bill' && noBillLeft.length)),
-    ...noCredit.filter((k) => !(k.billNos ?? []).some((b) => loBills.some((x) => x.billNo === b)))]
+    ...noCredit.filter((k) => k.kind === 'bank_is_bill' || !(k.billNos ?? []).some((b) => loBills.some((x) => x.billNo === b)))]
     // A credit with no bill is a line of the list below, with its choices in its ⋯ (18 Nov 2026): not a card too.
     .filter((k) => !(k.kind === 'no_bill' && (k.uses ?? []).some((u) => listedCredit.has(u))));
   // Left on top, done below in green (approved 20 Nov 2026): a Same sale a person chose is not a question; it is told

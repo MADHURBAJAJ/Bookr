@@ -547,7 +547,10 @@ const REISSUE_MIN = 30;
 function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>, paysByRow: Map<string, RgPay[]>): EvidenceBill[] {
   return comps.map((c) => ({
     id: c.id, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
-    swAmount: c.software_bill_id ? c.sw_amount_paise : null, swMode: c.sw_mode, rgAmount: c.register_row_id ? c.rg_amount_paise : null, rgMode: c.rg_mode,
+    // Sides that agree after a discount or tip (24 Nov 2026): saving books what the register says was received, so only
+    // that amount can pair. Pairing the software's bill amount here showed the bill as paid, and saving then dropped it.
+    swAmount: c.software_bill_id && !(c.difference === 'match' && c.register_row_id && c.sw_amount_paise !== c.rg_amount_paise) ? c.sw_amount_paise : null,
+    swMode: c.sw_mode, rgAmount: c.register_row_id ? c.rg_amount_paise : null, rgMode: c.rg_mode,
     labels: c.register_row_id ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'upi').map((p) => p.column_label).filter(Boolean).join(',') || null : null,
     parts: c.register_row_id && !grouped.has(c.register_row_id) && (paysByRow.get(c.register_row_id) ?? []).length > 1
       ? (paysByRow.get(c.register_row_id) ?? []).filter((p) => p.mode === 'upi').map((p) => p.amount_paise) : undefined,
@@ -1134,6 +1137,10 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
   const link = (creditId: string, machine: unknown, txs: { id: string; amount: number }[], at: number) => (machine
     ? (machineTaken.has(creditId) ? [] : machineUpiStatements(db, businessId, creditId, txs.map((x) => x.id), userId, at, 'matched on confirming the shift'))
     : confirmMatchStatements(db, businessId, creditId, txs, userId, at));
+  // Never dropped quietly (24 Nov 2026): a bill shown as paid by a credit that saving cannot match stops the save, named.
+  const dropped: string[] = [];
+  const rsx = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  const drop = (bills: string, sale: number, credit: number) => dropped.push(`Bill ${bills} is shown as paid by the ${rsx(credit)} credit, but saving books ${rsx(sale)} for it. Match it or change the bill on the UPI tab, then save.`);
   // The credits shown as evidence are matched to the bills they paid (approved 5 Nov 2026), by the person confirming.
   // Only a bill counted as one UPI payment of the credit's amount. Each match gets its own time, so Unmatch undoes one.
   for (const c of view.comparisons) {
@@ -1142,7 +1149,10 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     // Paid in several goes: each UPI payment is matched to its own credit, only when every one has its credit.
     // One payment the guest paid in several credits: each credit is matched to that one payment for its own amount.
     if (c.bank.split && c.bank.parts) {
-      if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
+      if (upi.length !== 1 || upi[0].r.amount !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) {
+        if (upi.length) drop(c.billNo ?? '?', upi.reduce((a, x) => a + x.r.amount, 0), c.bank.amountPaise);
+        continue;
+      }
       for (const p of c.bank.parts) {
         statements.push(...link(p.creditId, p.machine, [{ id: upi[0].id, amount: p.amountPaise }], t + 1 + matched));
         matched += 1;
@@ -1152,7 +1162,10 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     if (c.bank.parts) {
       const free = [...upi];
       const pairs = c.bank.parts.map((p) => { const i = free.findIndex((x) => x.r.amount === p.amountPaise); return i < 0 ? null : { p, x: free.splice(i, 1)[0] }; });
-      if (free.length || pairs.some((x) => !x)) continue;
+      if (free.length || pairs.some((x) => !x)) {
+        if (upi.length) drop(c.billNo ?? '?', upi.reduce((a, x) => a + x.r.amount, 0), c.bank.parts.reduce((a, p) => a + p.amountPaise, 0));
+        continue;
+      }
       for (const { p, x } of pairs as { p: { creditId: string; amountPaise: number; machine?: unknown }; x: (typeof upi)[number] }[]) {
         statements.push(...link(p.creditId, p.machine, [{ id: x.id, amount: x.r.amount }], t + 1 + matched));
         matched += 1;
@@ -1160,7 +1173,11 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       continue;
     }
     // One credit for the bill's UPI: one payment, or several written that the one credit covers (audit, 9 Nov 2026).
-    if (!upi.length || upi.reduce((a, x) => a + x.r.amount, 0) !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) continue;
+    if (!upi.length || upi.reduce((a, x) => a + x.r.amount, 0) !== c.bank.amountPaise || rows.some((r) => r.c.id === c.id && r.mode !== 'upi')) {
+      // Not when a person decided the side the credit does not equal: that bill was not shown as paid by it.
+      if (upi.length && (c.difference === 'match' || c.bank.fits === 'both') && upi.reduce((a, x) => a + x.r.amount, 0) !== c.bank.amountPaise) drop(c.billNo ?? '?', upi.reduce((a, x) => a + x.r.amount, 0), c.bank.amountPaise);
+      continue;
+    }
     statements.push(...link(c.bank.creditId, c.bank.machine, upi.map((x) => ({ id: x.id, amount: x.r.amount })), t + 1 + matched));
     matched += 1;
   }
@@ -1172,7 +1189,10 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     if (!g.bank) continue;
     const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && x.r.c.register_row_id && paidWith.get(x.r.c.register_row_id) === g.id);
     if (upi.some((x) => chosen.has(x.r.c.id))) continue;
-    if (!upi.length || upi.reduce((a, x) => a + x.amount, 0) !== g.bank.amountPaise) continue;
+    if (!upi.length || upi.reduce((a, x) => a + x.amount, 0) !== g.bank.amountPaise) {
+      if (upi.length) drop(upi.map((x) => x.r.c.bill_no).join(' + '), upi.reduce((a, x) => a + x.amount, 0), g.bank.amountPaise);
+      continue;
+    }
     // Paid in parts: only once a person pressed Match all; each credit pays the sales in turn.
     if ('parts' in g.bank && g.bank.parts) {
       if (!g.bank.accepted) continue;
@@ -1194,12 +1214,16 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     if (at < 0 || rows.filter((r) => r.c.id === plan.comparisonId && r.mode === 'upi').length !== 1) continue;
     const [booked, row] = await Promise.all([bookedTx(db, businessId, plan.rowId),
       one<{ id: string; note: string | null; done_by: string | null; done_at: number | null }>(db, 'SELECT id, note, done_by, done_at FROM bank_rows WHERE id = ?', plan.rowId)]);
-    if (!booked || !row || booked.amount_paise !== rows[at].amount) continue;
+    if (!booked || !row || booked.amount_paise !== rows[at].amount) {
+      if (booked && row) drop(rows[at].c.bill_no ?? "?", rows[at].amount, Number(booked.amount_paise));
+      continue;
+    }
     const r = rows[at];
     statements.push(...sameSaleStatements(db, businessId, row, booked, { id: ids[at], day, status: onCredit(r) ? 'reviewed' : 'approved',
       ocr_original: onCredit(r) ? JSON.stringify({ countOnCredit: true }) : null, head_id: headFor.get(r.billType) ?? null }, userId, t + 100 + matched));
     matched += 1;
   }
+  if (dropped.length) return { blockers: dropped };
   if (matched) statements.push(...settleOnCredit(db, businessId));
   await db.batch(statements);
   return { rows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0), matched, skipped };

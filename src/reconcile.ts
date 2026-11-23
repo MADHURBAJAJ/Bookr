@@ -97,6 +97,21 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
     o.k.transactionIds.forEach((x) => used.add(`tx:${x}`));
   }
 
+  // Bank = the bill, not the register (approved 24 Nov 2026): a credit equal to the bill's amount where the register
+  // says a tip or discount was received. One card, never ticked; Match corrects the register to the bank.
+  const tips: Card[] = [];
+  for (const c of sug.credits) {
+    if (used.has(`cr:${c.id}`) || c.posted_at < w.from - 3600e3 || c.posted_at >= w.to + 3600e3) continue;
+    const ks = (sug.candidates.get(c.id) ?? []).filter((k) => k.adjust && mine(k.transactionIds) && !k.transactionIds.some((x) => used.has(`tx:${x}`)) && (k.minutes ?? 999) <= 60);
+    if (ks.length !== 1) continue;
+    const k = ks[0];
+    tips.push(tipCard(k.billNos, k.adjust!.billPaise, k.adjust!.receivedPaise, c.amount_paise, c.posted_at, k.minutes,
+      { label: `Match · register → ${rr(c.amount_paise)}`, primary: true, method: 'POST', path: `/businesses/${businessId}/bank-rows/match-many`, body: { pairs: [{ rowId: c.id, transactionIds: k.transactionIds, adjust: true }], rowIds: [c.id] } },
+      [`cr:${c.id}`, ...k.transactionIds.map((x) => `tx:${x}`)], `tip:${c.id}`));
+    used.add(`cr:${c.id}`);
+    k.transactionIds.forEach((x) => used.add(`tx:${x}`));
+  }
+
   // A credit booked directly whose bill came later. Bills that have a free credit to try are left to that.
   const same = await sameSaleCards(db, businessId, day, new Set([...clear, ...likely].flatMap((x) => x.transactionIds)));
 
@@ -167,9 +182,10 @@ export async function reconcileShift(db: DB, businessId: string, day: string) {
       creditsNoBill: noBill.length,
     },
     clear,
-    fixes: [...same, ...ex.cards.filter((c) => c.kind !== 'clear_matches' && c.kind !== 'no_upi_credit')],
+    fixes: [...tips, ...same, ...ex.cards.filter((c) => c.kind !== 'clear_matches' && c.kind !== 'no_upi_credit' && !c.uses.some((u) => tips.some((x) => x.uses.includes(u))))],
     likely,
-    noCredit: ex.cards.filter((c) => c.kind === 'no_upi_credit' && !c.uses.some((u) => same.some((x) => x.uses.includes(u)))),
+    noCredit: ex.cards.filter((c) => c.kind === 'no_upi_credit' && !c.uses.some((u) => [...same, ...tips].some((x) => x.uses.includes(u)))
+      && !c.billNos.some((b) => tips.some((x) => x.billNos.includes(b)))),
     noBill,
     left: leftCredits,
     unbilledHeads: typeHeads,
@@ -205,6 +221,15 @@ const hm = (ms: number) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Ko
  * and never saved, so an edit just changes the picture. Its income does not exist until confirming, so it reads the
  * shift's bills. Confirming still matches the clear pairs. It is optional: it warns, and never stops a confirm.
  */
+/** The card for a credit equal to the bill's amount where the register says a tip or discount was received. */
+function tipCard(billNos: string[], billPaise: number, receivedPaise: number, creditPaise: number, postedAt: number, minutes: number | null, act: Card['actions'][number], uses: string[], key: string): Card {
+  const d = receivedPaise - billPaise;
+  return { key, kind: 'bank_is_bill', billNos, amountPaise: billPaise, title: `Bill ${billNos.join(' + ')}: the bank shows the bill's ${rr(billPaise)}, the register ${rr(receivedPaise)}`,
+    evidence: [`${rr(creditPaise)} came in ${minutes ?? '?'} min from the bill.`, `The register says ${rr(receivedPaise)} received (${d > 0 ? `a ${rr(d)} tip` : `${rr(-d)} off`}).`],
+    score: 80, uses, actions: [act],
+    look: { billPaise, receivedPaise, creditPaise, postedAt, minutes, tipPaise: d } };
+}
+
 export async function trialReconcile(db: DB, businessId: string, day: string) {
   const w = shiftWindow(day);
   const base = `/businesses/${businessId}`;
@@ -343,16 +368,27 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   // The bank got the bill before its discount (14 Nov 2026): the credit equals the register's amount before the
   // discount, so the discount was probably not given. Save books the bill after the discount and matches only a credit
   // of that amount, so this is settled now: paid in full (the discount goes), or the line is opened to check.
-  for (const b of bills.filter((x) => x.c.bank && !x.grouped && x.c.register?.rowId && (x.c.bank.parts?.length ?? 1) <= 1)) {
+  // Sides that agree after the discount no longer pair the bill's full amount (24 Nov 2026), so the credit is looked
+  // for here: the nearest free one of the bill before its discount, within an hour.
+  const discounted = new Set<string>();
+  for (const b of bills.filter((x) => !x.grouped && x.c.register?.rowId && (x.c.bank ? (x.c.bank.parts?.length ?? 1) <= 1 : x.c.difference === 'match' && x.c.paidAt != null))) {
     const disc = (b.c.register!.discountPaise as number) ?? 0;
-    const got = b.c.bank!.amountPaise;
-    if (disc <= 0 || got === b.amount || got !== b.amount + disc) continue;
+    if (disc <= 0) continue;
+    const bank = b.c.bank ?? (() => {
+      const c = credits.filter((x) => x.amount === b.amount + disc && !used.has(x.id) && nearAt(x.postedAt, b.c.paidAt, 60))
+        .sort((x, y) => Math.abs(x.postedAt - (b.c.paidAt as number)) - Math.abs(y.postedAt - (b.c.paidAt as number)))[0];
+      return c ? { amountPaise: c.amount, postedAt: c.postedAt, creditId: c.id } : null;
+    })();
+    if (!bank) continue;
+    const got = bank.amountPaise;
+    if (got === b.amount || got !== b.amount + disc) continue;
+    if (!b.c.bank) { used.add(bank.creditId); discounted.add(b.c.id); }
     const one = paysOf(b.c.register!.rowId as string).length === 1;
     cards.push({ key: `trial-discount:${b.c.id}`, kind: 'discount_not_given', billNos: [b.c.billNo], title: `Bill ${b.c.billNo}: the bank got ${rs(got)}, the register says ${rs(b.amount)} after a ${rs(disc)} discount`,
-      evidence: [`A UPI credit of ${rs(got)} came in at ${hm(b.c.bank!.postedAt)}: the bill before its discount.`,
+      evidence: [`A UPI credit of ${rs(got)} came in at ${hm(bank.postedAt)}: the bill before its discount.`,
         `Saving books ${rs(b.amount)} and matches only a credit of ${rs(b.amount)}, so this credit and bill would stay open. Was the discount given?`],
-      score: 82, uses: [`cmp:${b.c.id}`, `cr:${b.c.bank!.creditId}`],
-      witnesses: { software: b.c.software ? `${rs(b.c.software.amountPaise as number)} · ${b.c.software.mode}` : null, register: `${rs(b.amount + disc)} − ${rs(disc)} discount = ${rs(b.amount)}`, bank: `${rs(got)} at ${hm(b.c.bank!.postedAt)}`, odd: 'register' },
+      score: 82, uses: [`cmp:${b.c.id}`, `cr:${bank.creditId}`],
+      witnesses: { software: b.c.software ? `${rs(b.c.software.amountPaise as number)} · ${b.c.software.mode}` : null, register: `${rs(b.amount + disc)} − ${rs(disc)} discount = ${rs(b.amount)}`, bank: `${rs(got)} at ${hm(bank.postedAt)}`, odd: 'register' },
       actions: [
         ...(one ? [{ label: `Paid in full ${rs(got)}`, primary: true, op: 'noDiscount' as const, rowId: b.c.register!.rowId as string, uploadId: b.c.register!.uploadId as string }] : []),
         { label: 'Open the line', href: `#/b/${businessId}/review/${b.c.register!.uploadId}/${b.c.register!.rowId}` }] });
@@ -448,6 +484,23 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   if (cov.covered) {
     for (const b of left.filter((x) => !x.grouped && !billOf.has(x.c.id))) {
       if (credits.some((c) => c.amount === b.amount && nearAt(c.postedAt, b.c.paidAt, 180))) continue;
+      // Bank = the bill, not the register (approved 24 Nov 2026): the sides agree after a tip or discount, the guest paid
+      // the bill's amount. Match sets the register to the bank (its discount goes); Not this keeps it as written.
+      const swT = b.c.software as { mode: string; amountPaise: number } | null;
+      const rowT = b.c.register?.rowId as string | undefined;
+      if (discounted.has(b.c.id)) continue;
+      if (b.c.difference === 'match' && swT && swT.amountPaise !== b.amount && rowT && paysOf(rowT).length === 1 && b.c.paidAt != null) {
+        const near = credits.filter((c) => c.amount === swT.amountPaise && !used.has(c.id) && nearAt(c.postedAt, b.c.paidAt, 60))
+          .sort((x, y) => Math.abs(x.postedAt - (b.c.paidAt as number)) - Math.abs(y.postedAt - (b.c.paidAt as number)));
+        if (near.length) {
+          const c = near[0];
+          noCredit.push(tipCard([b.c.billNo], swT.amountPaise, b.amount, c.amount, c.postedAt, Math.round(Math.abs(c.postedAt - (b.c.paidAt as number)) / 60000),
+            { label: `Match · register → ${rr(c.amount)}`, primary: true, op: 'noDiscount', rowId: rowT, uploadId: b.c.register!.uploadId as string },
+            [`cmp:${b.c.id}`, `cr:${c.id}`], `tip:${b.c.id}`));
+          used.add(c.id);
+          continue;
+        }
+      }
       const cashFits = cash.differencePaise != null && cash.differencePaise === b.amount;
       const rowId = b.c.register?.rowId as string | undefined;
       const onePay = rowId && paysOf(rowId).length === 1 && b.c.register?.mode === 'upi';
