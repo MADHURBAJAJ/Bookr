@@ -1411,9 +1411,13 @@ function bookingsPanel(r) {
       <button class="btn" type="submit" data-act="bkAutoSave" data-submit>Save</button>${auto ? html`<button class="btn ghost" type="button" data-act="bkAutoOff">Turn off</button>` : ''}</form>` : ''}
     <h3>Waiting for you (${r.waiting.length})</h3>${r.waiting.length ? r.waiting.map(row) : html`<p class="quiet small">Nothing waiting.</p>`}
     <h3 style="margin-top:12px">Arriving (${r.arriving.length})</h3>${r.arriving.length ? r.arriving.map(row) : html`<p class="quiet small">No approved bookings ahead.</p>`}
-    ${problems.length ? html`<h3 style="margin-top:12px">Mails to look at</h3>${problems.map((m) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:8px 0">
-      <span class="grow small"><strong>${m.subject || '(no subject)'}</strong> · ${dateTime(m.receivedAt)}<br><span class="quiet">${m.note}</span></span>
-      ${m.source !== 'gmail' ? html`<button class="btn" type="button" data-act="bkReread" data-id="${m.id}">Read again</button>` : ''}</div>`)}` : ''}
+    ${problems.length ? html`<h3 style="margin-top:12px">Mails to look at</h3>${problems.map((m) => {
+      // Gmail's forwarding confirmation: its link as a button (only a Google mail-settings link, opened in a new tab).
+      const link = m.source === 'gmail' ? /https:\/\/(?:mail-settings\.google\.com|mail\.google\.com)\/\S+/.exec(m.note ?? '')?.[0] : null;
+      return html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:8px 0">
+      <span class="grow small"><strong>${m.subject || '(no subject)'}</strong> · ${dateTime(m.receivedAt)}<br><span class="quiet">${link ? 'Gmail asks to confirm forwarding to Bookr POS.' : m.note}</span></span>
+      ${link ? html`<a class="btn" href="${link}" target="_blank" rel="noopener noreferrer">Confirm forwarding</a>`
+        : m.source !== 'gmail' ? html`<button class="btn" type="button" data-act="bkReread" data-id="${m.id}">Read again</button>` : ''}</div>`; })}` : ''}
     <p class="small quiet" style="margin-top:8px">${plural(r.mails.length, 'mail')} received lately.</p></section>`;
 }
 actions.bkFix = (d) => { ui.bkFix = d.id; ui.bkName = ui.bkType = ui.bkIn = ui.bkOut = ui.bkPhone = undefined; rerender(); };
