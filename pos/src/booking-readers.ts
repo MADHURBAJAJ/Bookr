@@ -30,6 +30,12 @@ export interface ReadBooking {
   channel?: string;
   /** Djubo could not place this OTA booking on its room chart: a person must create it in Djubo by hand. */
   unplaced?: boolean;
+  /** When the booking was made and last changed, as the mail says it (India time, 'YYYY-MM-DD HH:MM'). */
+  bookedAt?: string;
+  changedAt?: string;
+  mealPlan?: string;
+  /** The guest's special requests (the OTA's own booking numbers, which Djubo puts there too, left out). */
+  requests?: string;
 }
 
 /** A phone from a mail: digits only, an Indian 91 or leading 0 dropped; null when it is not a usable number. */
@@ -70,6 +76,14 @@ export function dateOf(s: string | undefined): string | undefined {
   if (mi < 0) return undefined;
   const year = y.length === 2 ? `20${y}` : y;
   return `${year}-${String(mi + 1).padStart(2, '0')}-${d.padStart(2, '0')}`;
+}
+
+/** "23 Nov, 2026 15:51" → '2026-11-23 15:51' (India time, as the mail says it); a date alone keeps its date. */
+export function stampOf(s: string | undefined): string | undefined {
+  const d = dateOf(s);
+  if (!d) return undefined;
+  const t = /(\d{1,2}):(\d{2})/.exec(s!.replace(/^.*?\d{4}/, ''));
+  return t ? `${d} ${t[1].padStart(2, '0')}:${t[2]}` : d;
 }
 
 /** "₹ 1,609.51" or "2,190.48" → paise. */
@@ -178,7 +192,7 @@ export function readDjubo(mail: Email): ReadBooking[] {
   const hi = rows.findIndex((r) => /^S\.?\s*No/i.test(r[0]));
   const header = hi >= 0 ? rows[hi].map((c) => c.toLowerCase()) : [];
   const col = (name: string) => header.findIndex((c) => c.startsWith(name));
-  const [cRoom, cAdults, cChildren] = [col('rooms'), col('adults'), col('children')];
+  const [cRoom, cAdults, cChildren, cMeal] = [col('rooms'), col('adults'), col('children'), col('meal')];
   const roomRows: string[][] = [];
   for (let i = hi + 1; hi >= 0 && i < rows.length && /^\d+$/.test(rows[i][0]) && rows[i].length >= header.length - 1; i++) roomRows.push(rows[i]);
   const types = roomRows.map((r) => roomTypeOf(r[cRoom] ?? ''));
@@ -193,7 +207,14 @@ export function readDjubo(mail: Email): ReadBooking[] {
   const cLabel = header.findIndex((c) => /^rooms\s*no/.test(c));
   const labels = cLabel >= 0 ? roomRows.map((r) => (r[cLabel] ?? '').trim()).filter((x) => x && !/^x$/i.test(x) && !/^-+$/.test(x)) : [];
   const type = /Type of Reservation:\s*([A-Za-z ]+?)(?:\s*\||$)/i.exec(all)?.[1]?.trim();
+  const meals = cMeal >= 0 ? [...new Set(roomRows.map((r) => (r[cMeal] ?? '').trim()).filter(Boolean))] : [];
+  const requests = /SPECIAL REQUESTS\s*(.*?)\s*(?:\|\s*)?(?:Modified By|Created By|Type of Reservation|$)/i.exec(all)?.[1]
+    ?.replace(/Booking Reference No\.?:?\s*\S*/gi, '').replace(/Vendor Booking Id:?\s*\S*/gi, '').replace(/^[\s|#:-]+|[\s|#:-]+$/g, '').replace(/\s*\|\s*/g, ' ').trim();
   return [{
+    bookedAt: stampOf(/Created On:?\s*([^|]+?)(?:\s*\||$)/i.exec(all)?.[1]),
+    changedAt: stampOf(/Modified On:?\s*([^|]+?)(?:\s*\||$)/i.exec(all)?.[1]),
+    mealPlan: meals.join(', ').slice(0, 60) || undefined,
+    requests: requests ? requests.slice(0, 300) : undefined,
     extRef: ref,
     pnr: /Reference ID\s*(\d{6,})/i.exec(head)?.[1],
     otaRef: /Vendor Booking Id:?\s*([A-Z]{2}\d{8,})/i.exec(all)?.[1],

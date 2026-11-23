@@ -62,6 +62,7 @@ async function api(method, path, body, extraHeaders = {}) {
 
 let me = null;          // { staff, business, actions }
 let cache = {};         // menu, reasons, entities, payAccounts, stays, credit (loaded per screen)
+let reopenStay = null;  // the room bill to show again after the rooms screen reloads (a payment or refund taken on it)
 let ui = {};            // the current screen's own state; reset on every route change
 let flash = null;       // { kind, text, link?: [href, text] } shown once at the top
 const can = (a) => !!me?.actions.includes(a);
@@ -1337,7 +1338,10 @@ async function roomsScreen() {
   // Bookings read from Djubo and MakeMyTrip mails (23 Nov 2026): to approve, and today's arrivals for check-in.
   if (can('stays.edit')) {
     [ui.bk, ui.arrivals] = await Promise.all([api('GET', B() + '/bookings').catch(() => null), api('GET', B() + '/bookings/arrivals').then((r) => r.arrivals).catch(() => [])]);
+    // A room bill open before a payment or refund stays open after it.
+    if (reopenStay) ui.roomBill = await api('GET', `${B()}/stays/${reopenStay}/bill`).catch(() => null);
   }
+  reopenStay = null;
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms and credit', 'In-house guests and credit accounts: what each owes, payments, advances and refunds.')}
     ${ui.bk?.alerts?.length ? html`<div class="msg bad" role="alert" style="margin-bottom:12px"><strong>Djubo could not place ${plural(ui.bk.alerts.length, 'booking')}</strong>: see Bookings from mail, below.</div>` : ''}
     ${ui.refund ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Refund advance to ${ui.refund.name}</h2>${errorBox()}
@@ -1348,23 +1352,25 @@ async function roomsScreen() {
       <div class="row"><button class="btn pri" type="submit" data-act="refundGo" data-submit>Refund</button><button class="btn" type="button" data-act="refundNo">Cancel</button></div></form>` : ''}
     ${ui.recv ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Payment from ${ui.recv.name}</h2>${errorBox()}
       <div class="chips"><button type="button" class="chip" aria-pressed="${ui.recvKind !== 'advance'}" data-act="pick" data-k="recvKind" data-id="receipt">Against what is owed</button>
-        <button type="button" class="chip" aria-pressed="${ui.recvKind === 'advance'}" data-act="pick" data-k="recvKind" data-id="advance">Advance</button></div>
+        <button type="button" class="chip" aria-pressed="${ui.recvKind === 'advance'}" data-act="pick" data-k="recvKind" data-id="advance">Advance</button>
+        ${ui.recv.room ? html`<button type="button" class="chip" aria-pressed="${ui.recvKind === 'deposit'}" data-act="pick" data-k="recvKind" data-id="deposit">Deposit (refundable)</button>` : ''}</div>
       <div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
       <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="recvAmount" value="${ui.recvAmount ?? ''}" autofocus></label>
         ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
         ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
       <div class="row"><button class="btn pri" type="submit" data-act="recvGo" data-submit>Take payment</button><button class="btn" type="button" data-act="recvNo">Cancel</button></div></form>` : ''}
+  ${ui.roomBill ? roomBillPanel(ui.roomBill) : ''}
   <div class="grid2" style="align-items:start">
-    <section class="panel"><h2>In-house rooms</h2>${ui.recv || ui.refund ? '' : errorBox()}
+    <section class="panel"><h2>In-house rooms</h2>${ui.recv || ui.refund || ui.roomBill ? '' : errorBox()}
       <div class="scroll"><table class="t cards"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
         ${cache.stays.map((s) => html`<tr><td data-label="Room"><strong>${s.room}</strong></td><td data-label="Guest">${s.guestName}</td><td data-label="Since">${s.checkIn}</td><td class="num" data-label="Owes">${rs(s.balancePaise)}</td>
-          <td class="act"><div class="row"><button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}">Take payment</button>
+          <td class="act"><div class="row">${can('stays.edit') ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${s.id}">Room bill</button>` : ''}<button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-room="1">Take payment</button>
           ${s.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-max="${-s.balancePaise}">Refund advance</button>` : ''}
           <button class="btn" type="button" data-act="checkOut" data-id="${s.id}">Check out</button></div></td></tr>`)}
       </tbody></table></div>
       ${can('stays.edit') && ui.arrivals?.length ? html`<div class="f" style="margin-top:12px">Arriving today (from bookings): tap to fill check-in
         <div class="chips">${ui.arrivals.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.bookingId === a.id}" data-act="pickArrival" data-id="${a.id}">${a.guestName} · ${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'}${a.rooms > 1 ? ` × ${a.rooms}` : ''} · till ${dayName(a.checkOut)}${dueOf(a) ? html` · <strong>collect ${rs(dueOf(a))}</strong>` : ''}</button>`)}</div>
-        ${ui.bookingId && dueOf(ui.arrivals.find((a) => a.id === ui.bookingId)) ? html`<div class="msg warn" style="margin-top:8px">Still to pay on this booking (from Djubo): <strong>${rs(dueOf(ui.arrivals.find((a) => a.id === ui.bookingId)))}</strong>. Take it at check-in under Take payment.</div>` : ''}</div>` : ''}
+        ${ui.bookingId && ui.arrivals.find((a) => a.id === ui.bookingId) ? bookingCard(ui.arrivals.find((a) => a.id === ui.bookingId)) : ''}</div>` : ''}
       ${can('stays.edit') ? html`<form class="grid2"><label class="f">Phone<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" placeholder="Finds a returning guest" autocomplete="off"></label>
         ${ui.roomSecs.length ? '' : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`}
         ${ui.roomSecs.length ? roomChooser() : ''}
@@ -1385,6 +1391,104 @@ async function roomsScreen() {
 }
 /** What is still to pay on a booking (Djubo's total less its advance), or 0. */
 const dueOf = (b) => (b && b.amountPaise && b.paidPaise !== null && b.paidPaise !== undefined ? Math.max(0, b.amountPaise - b.paidPaise) : 0);
+/** '2026-11-23 15:51' (India time, as the booking mail says it) → '23 Nov, 3:51 pm'. */
+const stampText = (v) => {
+  if (!v) return '';
+  const [d, t] = String(v).split(' ');
+  if (!t) return dayName(d);
+  const [h, m] = t.split(':').map(Number);
+  return `${dayName(d)}, ${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`;
+};
+/** The booking card (24 Nov 2026): who, how long, where it was booked, when, the room, and what is still to collect. */
+function bookingCard(a, onBill = false) {
+  const nights = a.checkIn && a.checkOut ? Math.max(1, Math.round((Date.parse(a.checkOut) - Date.parse(a.checkIn)) / 86400000)) : null;
+  // On the room bill, the bill itself says what is left to collect; the card shows only what the booking says.
+  const due = onBill ? 0 : dueOf(a);
+  const refs = [a.source === 'djubo' ? `Djubo ${a.extRef}` : `MakeMyTrip ${a.extRef}`, a.source === 'djubo' && a.otaRef ? `OTA ${a.otaRef}` : '', a.pnr ? `PNR ${a.pnr}` : ''].filter(Boolean).join(' · ');
+  return html`<div class="msg ${due ? 'warn' : 'ok'}" style="margin-top:8px;display:block">
+    <div><strong>${a.guestName ?? 'No name'}</strong>${a.guests ? ` · ${plural(a.guests, 'guest')}` : ''}${nights ? ` · ${plural(nights, 'night')} (${dayName(a.checkIn)} → ${dayName(a.checkOut)})` : ''}</div>
+    <div class="small">Booked via ${a.channel ?? (a.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')} · ${refs}</div>
+    ${a.bookedAt ? html`<div class="small">Booked on ${stampText(a.bookedAt)}${a.changedAt ? ` · changed ${stampText(a.changedAt)}` : ''}</div>` : ''}
+    <div class="small">Room: ${a.roomType ?? '?'}${a.roomLabels ? ` ${a.roomLabels}` : ''}${a.rooms > 1 ? ` × ${a.rooms}` : ''}${a.mealPlan ? ` · ${a.mealPlan}` : ''}</div>
+    ${a.requests ? html`<div class="small">Requests: ${a.requests}</div>` : ''}
+    ${a.amountPaise ? html`<div style="margin-top:4px">Total ${rs(a.amountPaise)}${a.paidPaise ? ` · Paid before arrival ${rs(a.paidPaise)}` : ''} ${onBill ? '' : html` · ${due ? html`<strong>To collect ${rs(due)}</strong>` : html`<strong>To collect: nothing ✓</strong>`}`}</div>` : ''}
+  </div>`;
+}
+/** One line of the room bill in plain words. */
+const MODE_NAME = { cash: 'Cash', upi: 'UPI', card: 'Card' };
+function folioLabel(l) {
+  const no = l.receiptNo ? ` ${l.receiptNo}` : '';
+  const how = l.mode ? ` · ${MODE_NAME[l.mode] ?? l.mode}` : '';
+  return ({
+    room_rent: l.bookingRef ? `Room rent (Djubo ${l.bookingRef})` : l.note ?? 'Room charge',
+    prepaid: l.note ?? 'Paid before arrival',
+    charge: `Food bill ${l.billNo ?? ''}`,
+    receipt: `Payment${no}${how}`, advance: `Advance${no}${how}`, deposit: `Deposit${no}${how}`,
+    refund: 'Refunded', advance_used: `Advance used on bill ${l.billNo ?? ''}`, credit_note: `Credit note on bill ${l.billNo ?? ''}`,
+  })[l.kind] ?? l.kind;
+}
+/** The room's bill (24 Nov 2026): rent, charges, food, payments, what is still to collect, and check-out with the invoice. */
+function roomBillPanel(r) {
+  const st = r.stay;
+  const name = `Room ${st.room} · ${st.guestName}`;
+  const ch = ui.rbCharge;
+  return html`<section class="panel" style="margin-bottom:16px;max-width:760px;border-color:var(--pri-line)">
+    <div class="line"><h2 class="grow" style="margin:0">${name}</h2><button class="btn ghost" type="button" data-act="rbClose">Close</button></div>${ui.recv || ui.refund ? '' : errorBox()}
+    ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">No booking from Djubo on this room: add the room rent by hand (Add charge).</p>`}
+    <table class="t" style="margin-top:10px"><tbody>
+      ${r.lines.map((l) => html`<tr><td>${folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
+      <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
+    </tbody></table>
+    ${ch ? html`<form class="grid2" style="margin-top:10px"><label class="f">${ch.lower ? 'Take off (₹)' : 'Amount (₹, GST included)'}<input class="in" inputmode="decimal" data-model="rbAmt" value="${ui.rbAmt ?? ''}" autofocus></label>
+        <label class="f">${ch.lower ? 'Why' : 'What for'}<input class="in" data-model="rbNote" value="${ui.rbNote ?? ''}" placeholder="${ch.lower ? 'e.g. Discount at the desk' : 'e.g. Room rent, Extra bed, Late check-out'}"></label>
+        <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="rbChargeGo" data-submit>${ch.lower ? 'Take off' : 'Add to the room bill'}</button><button class="btn" type="button" data-act="rbChargeNo">Cancel</button></div></form>` : html`
+    <div class="row" style="margin-top:10px;flex-wrap:wrap">
+      ${r.balancePaise > 0 ? html`<button class="btn pri" type="button" data-act="recv" data-id="${st.accountId}" data-n="${name}" data-room="1" data-amount="${rupees(r.balancePaise)}">Take payment ${rs(r.balancePaise)}</button>` : ''}
+      <button class="btn" type="button" data-act="recv" data-id="${st.accountId}" data-n="${name}" data-room="1" data-kind="deposit">Take deposit</button>
+      <button class="btn" type="button" data-act="rbCharge">Add charge</button>
+      ${r.rentPaise > 0 ? html`<button class="btn ghost" type="button" data-act="rbCharge" data-lower="1">Take rent off</button>` : ''}
+      ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
+      ${r.balancePaise === 0 ? html`<button class="btn pri" type="button" data-act="checkOut" data-id="${st.id}">Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button>` : ''}
+    </div>`}
+    <p class="small quiet" style="margin-top:8px">Room rent comes from Djubo's booking (GST included). Food bills are invoiced on their own; the room invoice prints at check-out.</p>
+  </section>`;
+}
+actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbCharge = null; ui.error = null; rerender(); scrollTo(0, 0); };
+actions.rbClose = () => { ui.roomBill = null; ui.rbCharge = null; rerender(); };
+actions.rbCharge = (d) => { ui.rbCharge = { lower: !!d.lower }; ui.rbAmt = ui.rbNote = undefined; ui.error = null; rerender(); };
+actions.rbChargeNo = () => { ui.rbCharge = null; rerender(); };
+actions.rbChargeGo = async () => {
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/charges`, { amount: ui.rbAmt ?? '', note: ui.rbNote ?? '', lower: ui.rbCharge.lower });
+  ui.rbCharge = null; flash = { kind: 'ok', text: 'Room bill updated.' }; rerender();
+};
+/** A payment receipt slip (24 Nov 2026): its number, the room and guest, how it was paid, and what is left to pay. */
+const receiptSlip = (r) => html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">${r.kind === 'deposit' ? 'DEPOSIT RECEIPT (REFUNDABLE)' : r.kind === 'advance' ? 'ADVANCE RECEIPT' : 'PAYMENT RECEIPT'}</div>
+  <div class="rl"><span>${r.receiptNo}</span><span>${dateTime(r.at)}</span></div>
+  <div>${r.room ? `Room ${r.room} · ` : ''}${r.name}</div><hr>
+  ${r.payments.map((p) => html`<div class="rl"><span>${MODE_NAME[p.mode] ?? p.mode}${p.payAccountName ? ` (${p.payAccountName})` : ''}${p.cardLast4 ? ` ****${p.cardLast4}` : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}
+  <div class="rl" style="font-weight:700"><span>RECEIVED</span><span>${rs(r.totalPaise)}</span></div><hr>
+  <div class="rl"><span>${r.balancePaise > 0 ? 'Still to pay' : r.balancePaise < 0 ? 'Held for you' : 'Nothing more to pay'}</span><span>${r.balancePaise ? rs(Math.abs(r.balancePaise)) : ''}</span></div>
+  <div class="c small">Thank you</div></div>`;
+/** The stay's tax invoice for room rent, with what was paid and the food bills paid on their own. */
+function roomInvoiceSlip(bill) {
+  const inv = bill.invoice;
+  const sum = (kinds) => bill.lines.filter((l) => kinds.includes(l.kind)).reduce((t, l) => t + l.amountPaise, 0);
+  const prepaid = bill.lines.filter((l) => l.kind === 'prepaid');
+  const atHotel = -sum(['receipt', 'advance', 'deposit']) - sum(['refund']);
+  const food = bill.lines.filter((l) => l.kind === 'charge');
+  return html`<div class="receipt"><div class="hd">${inv.entityName}</div>${inv.gstRegistered ? html`<div class="c">GSTIN ${inv.gstin}</div><div class="c">TAX INVOICE</div>` : html`<div class="c">INVOICE</div>`}
+    <div class="rl"><span>${inv.invoiceNo}</span><span>${dateTime(inv.at)}</span></div>
+    <div>Guest: ${inv.guestName}</div><div>Room ${inv.room} · ${dayName(inv.checkIn)} → ${dayName(inv.checkOut)} (${plural(inv.nights, 'night')})</div><hr>
+    ${inv.lines.map((l) => html`<div class="rl"><span>${l.name}</span><span>${rs(l.amountPaise)}</span></div>`)}<hr>
+    ${inv.gstRateBp ? html`<div class="rl"><span>Value</span><span>${rs(inv.taxablePaise)}</span></div><div class="rl"><span>CGST ${inv.gstRateBp / 200}%</span><span>${rs(inv.cgstPaise)}</span></div>
+      <div class="rl"><span>SGST ${inv.gstRateBp / 200}%</span><span>${rs(inv.sgstPaise)}</span></div><div class="small">SAC 996311</div>` : ''}
+    <div class="rl" style="font-weight:700"><span>TOTAL</span><span>${rs(inv.totalPaise)}</span></div><hr>
+    ${prepaid.map((l) => html`<div class="rl"><span>${l.note}</span><span>${rs(l.amountPaise)}</span></div>`)}
+    ${atHotel ? html`<div class="rl"><span>Paid at the hotel</span><span>${rs(-atHotel)}</span></div>` : ''}
+    ${food.length ? html`<div class="small">Food bills ${food.map((l) => l.billNo).join(', ')} (${rs(food.reduce((t, l) => t + l.amountPaise, 0))}) are invoiced on their own.</div>` : ''}
+    <div class="rl" style="font-weight:700"><span>BALANCE</span><span>${rs(0)}</span></div>
+    <div class="c small">Thank you for staying with us</div></div>`;
+}
 actions.pickArrival = (d) => {
   const a = ui.arrivals.find((x) => x.id === d.id);
   ui.bookingId = a.id; ui.guest = a.guestName; ui.gPhone = a.phone ?? ''; ui.gFound = null;
@@ -1407,7 +1511,9 @@ function bookingsPanel(r) {
     return html`<div class="line" style="flex-wrap:wrap;gap:8px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)">
       <div class="grow"><strong>${b.guestName ?? 'No name'}</strong> <span class="small quiet">${src[b.source]} ${b.extRef}${b.phone ? ` · ${b.phone}` : ''}</span>
         <div class="small">${b.roomType ?? 'Room type?'}${b.rooms > 1 ? ` × ${b.rooms}` : ''}${b.roomLabels ? ` (Djubo ${b.roomLabels})` : ''} · ${b.checkIn ? dayName(b.checkIn) : '?'} → ${b.checkOut ? dayName(b.checkOut) : '?'}${b.guests ? ` · ${plural(b.guests, 'guest')}` : ''}${b.amountPaise ? ` · ${rs(b.amountPaise)}` : ''}${b.channel ? ` · ${b.channel}` : ''}</div>
-        ${dueOf(b) ? html`<div class="small"><strong>Still to pay: ${rs(dueOf(b))}</strong> (advance ${rs(b.paidPaise)})</div>` : ''}
+        ${b.bookedAt || b.mealPlan ? html`<div class="small quiet">${b.bookedAt ? `Booked ${stampText(b.bookedAt)}${b.changedAt ? ` · changed ${stampText(b.changedAt)}` : ''}` : ''}${b.bookedAt && b.mealPlan ? ' · ' : ''}${b.mealPlan ?? ''}</div>` : ''}
+        ${b.requests ? html`<div class="small">Requests: ${b.requests}</div>` : ''}
+        ${dueOf(b) ? html`<div class="small"><strong>Still to pay: ${rs(dueOf(b))}</strong> (advance ${rs(b.paidPaise)})</div>` : b.amountPaise && b.paidPaise ? html`<div class="small">Paid before arrival: ${rs(b.paidPaise)} · nothing to collect</div>` : ''}
         ${b.problem ? html`<div class="small" style="color:var(--warn)">Check: ${b.problem}</div>` : ''}
         ${matched ? html`<div class="small quiet">Same stay in ${src[matched.source]} ${matched.extRef}</div>` : ''}
         ${b.status !== 'new' ? html`<div class="small quiet">${b.status === 'checked_in' ? 'Checked in' : b.how === 'auto' ? 'Approved by Bookr' : 'Approved'}</div>` : ''}
@@ -1468,9 +1574,11 @@ actions.bkRereadAll = async () => {
 actions.bkAutoSave =async () => { await api('PUT', `${B()}/bookings/auto`, { from: ui.bkAuto ?? addDays(ui.bk.today, 10) }); flash = { kind: 'ok', text: 'Automatic saved.' }; route(); };
 actions.bkAutoOff = async () => { await api('PUT', `${B()}/bookings/auto`, { from: null }); flash = { kind: 'ok', text: 'Automatic is off: a person approves each booking.' }; route(); };
 actions.openStay = async () => {
-  await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined });
+  const r = await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined });
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
-  flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in to ${ui.room}.${due ? ` Collect ${rs(due)} still to pay on the booking (Take payment).` : ''}` }; route();
+  // From a booking: its room bill opens, ready to take what is still to pay (24 Nov 2026).
+  if (ui.bookingId) reopenStay = r.id;
+  flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in to ${ui.room}.${due ? ` Collect ${rs(due)} still to pay (Take payment, below).` : ''}` }; route();
 };
 /** Check-in's room or bed, from Settings: free ones to pick, taken ones show who is there; a whole dorm for a group. */
 function roomChooser() {
@@ -1515,19 +1623,30 @@ actions.gLookup = async (_d, el) => {
   if (r.guest) { ui.guest = r.guest.name; ui.gCity = r.guest.city ?? ''; }
   rerender();
 };
-actions.checkOut = async (d) => { await api('POST', `${B()}/stays/${d.id}/check-out`); flash = { kind: 'ok', text: 'Checked out.' }; route(); };
-actions.recv = (d) => { ui.recv = { id: d.id, name: d.n }; ui.refund = null; ui.recvMode = 'cash'; ui.recvKind = 'receipt'; ui.error = null; rerender(); };
+actions.checkOut = async (d) => {
+  const r = await api('POST', `${B()}/stays/${d.id}/check-out`);
+  // The stay's tax invoice for the room rent prints at check-out (24 Nov 2026).
+  if (r.bill?.invoice) printJobs([{ kind: 'bill', html: asHtml(roomInvoiceSlip(r.bill)) }]);
+  ui.roomBill = null;
+  flash = { kind: 'ok', text: `Checked out.${r.bill?.invoice ? ` Invoice ${r.bill.invoice.invoiceNo} printed.` : ''}` }; route();
+};
+actions.recv = (d) => { ui.recv = { id: d.id, name: d.n, room: !!d.room }; ui.refund = null; ui.recvMode = 'cash'; ui.recvKind = d.kind ?? 'receipt'; ui.recvAmount = d.amount ?? undefined; ui.error = null; rerender(); scrollTo(0, 0); };
 actions.recvNo = () => { ui.recv = null; rerender(); };
 actions.refundAsk = (d) => { ui.refund = { id: d.id, name: d.n, max: Number(d.max) }; ui.recv = null; ui.refundAmount = undefined; ui.refundMode = 'cash'; ui.error = null; rerender(); };
 actions.refundNo = () => { ui.refund = null; rerender(); };
 actions.refundGo = async () => {
   const r = await api('POST', `${B()}/debtors/${ui.refund.id}/refund`, { mode: ui.refundMode ?? 'cash', amount: ui.refundAmount ?? rupees(ui.refund.max), note: ui.refundNote });
+  reopenStay = ui.roomBill?.stay.id ?? null;
   flash = { kind: 'ok', text: `Refunded. ${ui.refund.name} now ${r.balancePaise < 0 ? 'holds ' + rs(-r.balancePaise) + ' of advance' : 'owes ' + rs(r.balancePaise)}.` }; route();
 };
 actions.recvGo = async () => {
   const p = { mode: ui.recvMode ?? 'cash', amount: ui.recvAmount ?? '', payAccountId: ui.payAccountId, cardApproval: ui.cardApproval, cardLast4: ui.cardLast4 };
   const r = await api('POST', `${B()}/debtors/${ui.recv.id}/receipts`, { kind: ui.recvKind ?? 'receipt', payments: [p] });
-  flash = { kind: 'ok', text: `${ui.recv.name} now owes ${rs(r.balancePaise)}.` }; route();
+  // Every payment on a room or account gets its numbered receipt (24 Nov 2026).
+  if (r.receipt) printJobs([{ kind: 'bill', html: asHtml(receiptSlip(r.receipt)) }]);
+  flash = { kind: 'ok', text: `${r.receipt?.receiptNo ? r.receipt.receiptNo + ': ' : ''}${ui.recv.name} ${r.balancePaise < 0 ? 'holds ' + rs(-r.balancePaise) : 'now owes ' + rs(r.balancePaise)}.` };
+  reopenStay = ui.roomBill?.stay.id ?? null;
+  route();
 };
 
 // ---------- shift close

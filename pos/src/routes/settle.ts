@@ -248,7 +248,9 @@ function settledMessage(billId: string, bills: { id: string; bill_no: string }[]
   };
 }
 
-// Money received against a folio or credit account (kind 'receipt'), or paid in before any bill (kind 'advance').
+// Money received against a folio or credit account (kind 'receipt'), paid in before any bill (kind 'advance'), or a
+// refundable deposit on a room (kind 'deposit', 24 Nov 2026: kept apart from rent, refunded at check-out). Each gets a
+// receipt number (RCPT/26-27/0001), running per business and financial year, for the printed receipt.
 settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
@@ -256,7 +258,8 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   if (!acc) fail(404, 'Account not found.');
   const data = await body(c);
   const kind = data.kind;
-  if (kind !== 'receipt' && kind !== 'advance') fail(400, 'Kind must be receipt or advance.');
+  if (kind !== 'receipt' && kind !== 'advance' && kind !== 'deposit') fail(400, 'Kind must be receipt, advance or deposit.');
+  if (kind === 'deposit' && acc.kind !== 'room') fail(400, 'A deposit is taken on a room.');
   if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 5) fail(400, 'Add how it was paid.');
   const pays: Pay[] = [];
   for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card']));
@@ -264,17 +267,22 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   const owed = await balance(db, acc.id);
   if (kind === 'receipt' && total > owed) fail(400, owed > 0 ? `${acc.name} owes ${rs(owed)}. Take the rest as an advance.` : `${acc.name} owes nothing. Take it as an advance.`);
   const b = bizOf(c);
-  const { t, shiftDay } = clock(b);
+  const { t, shiftDay, fy } = clock(b);
   const staff = c.get('staff');
   const settlementId = newId();
   try {
     await db.batch([
-      stmt(db, "INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at) VALUES (?, ?, 'receipt', ?, ?, ?)", settlementId, bid, shiftDay, staff.id, t),
+      stmt(db, 'INSERT OR IGNORE INTO receipt_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
+      stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no)
+        SELECT ?, ?, 'receipt', ?, ?, ?, 'RCPT/' || substr(?, 3) || '/' || printf('%04d', next_no) FROM receipt_series WHERE business_id = ? AND fy = ?`,
+        settlementId, bid, shiftDay, staff.id, t, fy, bid, fy),
+      stmt(db, 'UPDATE receipt_series SET next_no = next_no + 1 WHERE business_id = ? AND fy = ?', bid, fy),
       ...pays.map((p) => insertPayment(db, bid, settlementId, { ...p, debtorAccountId: null }, shiftDay, staff.id, t)),
       ...pays.map((p) => stmt(db, 'INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, by_staff, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         newId(), bid, acc.id, kind, -p.amountPaise, p.id, staff.id, t)),
       stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
-        settlementId, kind, account: { id: acc.id, kind: acc.kind, name: acc.name }, shiftDay, at: t, by: staff.name,
+        // Bookr knows receipts and advances: a deposit is money held, as an advance is.
+        settlementId, kind: kind === 'deposit' ? 'advance' : kind, account: { id: acc.id, kind: acc.kind, name: acc.name }, shiftDay, at: t, by: staff.name,
         payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, payAccountName: p.payAccountName,
           bookrAccountId: p.bookrAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4 })),
       }), t),
@@ -284,7 +292,11 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
     throw e;
   }
   sendSoon(c, bid);
-  return c.json({ settlementId, balancePaise: await balance(db, acc.id) }, 201);
+  const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
+  const room = acc.kind === 'room' ? await one<{ room: string; guest_name: string }>(db, 'SELECT s.room, s.guest_name FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id WHERE d.id = ?', acc.id) : null;
+  const balancePaise = await balance(db, acc.id);
+  return c.json({ settlementId, balancePaise, receipt: { receiptNo, kind, at: t, name: room?.guest_name ?? acc.name, room: room?.room ?? null, totalPaise: total, balancePaise,
+    payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } }, 201);
 });
 
 // An unused advance paid back (at check-out, or a credit account closing): by cash from the drawer or by UPI.
@@ -298,8 +310,8 @@ settleRoutes.post(`${B}/debtors/:id/refund`, requireAction('debtors.receive'), a
   if (mode !== 'cash' && mode !== 'upi') fail(400, 'A refund is paid by cash or UPI.');
   const amount = amountOf(data.amount, 'Refund amount');
   const credit = -(await balance(db, acc.id));
-  if (credit <= 0) fail(409, `${acc.name} has no advance to refund.`);
-  if (amount > credit) fail(409, `${acc.name} has only ${rs(credit)} of advance to refund.`);
+  if (credit <= 0) fail(409, `${acc.name} has no advance or deposit to refund.`);
+  if (amount > credit) fail(409, `${acc.name} has only ${rs(credit)} to refund.`);
   const note0 = text(data, 'note', 'Note', { optional: true, max: 120 }) ?? 'Advance refunded';
   // Money out of the drawer: a manager approves (21 Nov 2026).
   const approver = await approval(c, data, 'A refund');

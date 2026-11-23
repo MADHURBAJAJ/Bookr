@@ -16,7 +16,7 @@ bookingRoutes.use(`${B}/*`, requireStaff);
 
 const COLS = `id, source, ext_ref AS extRef, guest_name AS guestName, phone, room_type AS roomType, rooms, guests, check_in AS checkIn, check_out AS checkOut,
   amount_paise AS amountPaise, paid_paise AS paidPaise, status, how, problem, match_id AS matchId, mail_id AS mailId, stay_id AS stayId, created_at AS createdAt,
-  ota_ref AS otaRef, pnr, room_labels AS roomLabels, channel, unplaced`;
+  ota_ref AS otaRef, pnr, room_labels AS roomLabels, channel, unplaced, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests`;
 const masked = <T extends { phone: string | null }>(x: T) => ({ ...x, phone: x.phone ? `••••${x.phone.slice(-4)}` : null });
 
 // The Bookings screen: waiting for a person, arriving soon, and the mails received lately (with any problem).

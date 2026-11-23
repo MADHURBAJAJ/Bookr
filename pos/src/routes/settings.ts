@@ -4,7 +4,8 @@ import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
-import { requireAction, requireStaff } from '../auth';
+import { approval, isManager, requireAction, requireStaff } from '../auth';
+import { folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
 import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { isOnline, syncItemStations } from '../stations';
@@ -871,22 +872,129 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
     if (isUniqueViolation(e)) fail(409, `${/^\d/.test(room) ? 'Room ' : ''}${room} already has a guest. Check them out first.`);
     throw e;
   }
+  // From a booking: its room rent and what was paid before arrival go on the room's bill (24 Nov 2026).
+  if (typeof data.bookingId === 'string') await syncStay(c.env.DB, bid, id);
   return c.json({ id }, 201);
 });
+
+// ---------- the room's bill (24 Nov 2026): rent from the booking, charges added by hand, food, payments, the invoice
+
+async function openStay(c: Context<AppEnv>, id: string) {
+  if (!isUuid(id)) fail(404, 'Stay not found.');
+  const s = await one<{ id: string; room: string; guest_name: string; phone: string | null; check_in: string; checked_out_at: number | null; account_id: string }>(c.env.DB,
+    `SELECT s.id, s.room, s.guest_name, s.phone, s.check_in, s.checked_out_at, d.id AS account_id FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id
+     WHERE s.id = ? AND s.business_id = ?`, id, c.get('businessId'));
+  if (!s) fail(404, 'Stay not found.');
+  return s;
+}
+
+/** The stay's tax invoice as printed, or null before check-out. */
+async function invoiceOut(c: Context<AppEnv>, stayId: string) {
+  const r = await one<Record<string, unknown> & { lines: string; entity_id: string }>(c.env.DB, `SELECT i.invoice_no AS invoiceNo, i.at, i.guest_name AS guestName, i.phone, i.room,
+      i.check_in AS checkIn, i.check_out AS checkOut, i.nights, i.lines, i.gst_rate_bp AS gstRateBp, i.taxable_paise AS taxablePaise, i.cgst_paise AS cgstPaise,
+      i.sgst_paise AS sgstPaise, i.total_paise AS totalPaise, i.entity_id, e.name AS entityName, e.gstin, e.gst_registered AS gstRegistered
+    FROM room_invoices i JOIN billing_entities e ON e.id = i.entity_id WHERE i.stay_id = ? AND i.business_id = ?`, stayId, c.get('businessId'));
+  if (!r) return null;
+  const { entity_id: _e, lines, ...rest } = r;
+  return { ...rest, lines: JSON.parse(lines) as { name: string; amountPaise: number }[] };
+}
+
+/** What the room bill shows: the stay, its booking, every line on the folio, the balance, and the invoice once made. */
+async function stayBill(c: Context<AppEnv>, id: string) {
+  const db = c.env.DB;
+  const s = await openStay(c, id);
+  const [lines, booking, invoice] = await Promise.all([
+    folioLines(db, s.account_id),
+    one(db, `SELECT ext_ref AS extRef, source, guest_name AS guestName, channel, room_type AS roomType, room_labels AS roomLabels, rooms, guests, check_in AS checkIn, check_out AS checkOut,
+        amount_paise AS amountPaise, paid_paise AS paidPaise, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests, ota_ref AS otaRef, pnr
+      FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1`, s.id),
+    invoiceOut(c, s.id),
+  ]);
+  const sum = (k: string[]) => lines.filter((l) => k.includes(l.kind)).reduce((t, l) => t + l.amountPaise, 0);
+  return { stay: { id: s.id, room: s.room, guestName: s.guest_name, phone: s.phone, checkIn: s.check_in, checkedOutAt: s.checked_out_at, accountId: s.account_id },
+    booking, lines, invoice, balancePaise: lines.reduce((t, l) => t + l.amountPaise, 0),
+    rentPaise: sum(['room_rent']), prepaidPaise: -sum(['prepaid']), foodPaise: sum(['charge']), paidPaise: -sum(['receipt', 'advance', 'deposit', 'credit_note']) - sum(['refund']) };
+}
+
+settingsRoutes.get(`${B}/stays/:id/bill`, requireAction('stays.edit'), async (c) => c.json(await stayBill(c, c.req.param('id'))));
+
+// A charge on the room by hand: rent when no booking mail came (a direct guest), an extra bed, a late check-out. Taking
+// rent off (a discount at the desk, a mistake) needs a manager.
+settingsRoutes.post(`${B}/stays/:id/charges`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const s = await openStay(c, c.req.param('id'));
+  if (s.checked_out_at) fail(409, 'This guest has checked out.');
+  const data = await body(c);
+  const amount = paise(data, 'amount', 'Amount');
+  if (amount <= 0) fail(400, 'Amount must be above zero.');
+  const note = text(data, 'note', 'What the charge is for', { max: 80 })!;
+  const lower = data.lower === true;
+  let noteOut = note;
+  if (lower) {
+    const rent = (await one<{ r: number }>(c.env.DB, "SELECT coalesce(sum(amount_paise), 0) AS r FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent'", s.account_id))!.r;
+    if (amount > rent) fail(409, `Only ${rupeesText(rent)} of room rent is on this bill.`);
+    const approver = await approval(c, data, 'Taking rent off a room bill');
+    if (!isManager(c)) noteOut = `${note} · Approved by ${approver.name}`.slice(0, 120);
+  }
+  const t = now();
+  await c.env.DB.batch([
+    stmt(c.env.DB, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, by_staff, at) VALUES (?, ?, ?, 'room_rent', ?, ?, ?, ?)",
+      newId(), bid, s.account_id, lower ? -amount : amount, noteOut, c.get('staff').id, t),
+    audit(c.env.DB, bid, c.get('staff').id, lower ? 'stay.rent_off' : 'stay.charge', 'stays', s.id, null, { amountPaise: lower ? -amount : amount, note: noteOut }),
+  ]);
+  return c.json(await stayBill(c, s.id), 201);
+});
+const rupeesText = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // Check-out: the folio must be settled first (a receipt against its account), so nothing owed is forgotten.
 settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const row = await one<{ balance: number }>(c.env.DB, `SELECT coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balance
+  const db = c.env.DB;
+  const row = await one<{ balance: number; account_id: string; room: string; guest_name: string; phone: string | null; check_in: string }>(db,
+    `SELECT coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balance, d.id AS account_id, s.room, s.guest_name, s.phone, s.check_in
     FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id WHERE s.id = ? AND s.business_id = ? AND s.checked_out_at IS NULL`, id, bid);
   if (!row) fail(404, 'Open stay not found.');
-  if (row.balance !== 0) fail(409, `The folio still has a balance. Take the guest's payment (or refund an advance) first.`);
-  await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE stays SET checked_out_at = ? WHERE id = ?', now(), id),
-    audit(c.env.DB, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, null),
+  if (row.balance > 0) fail(409, `${rupeesText(row.balance)} is still to pay on this room. Take the guest's payment first.`);
+  if (row.balance < 0) fail(409, `${rupeesText(-row.balance)} of the guest's deposit or advance is left. Refund it first.`);
+  // The stay's tax invoice for its room rent (24 Nov 2026): made once, here, in its own series per billing name and year.
+  const rent = await all<{ amount_paise: number; note: string | null; booking_id: string | null }>(db,
+    "SELECT amount_paise, note, booking_id FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent' ORDER BY at, id", row.account_id);
+  const total = rent.reduce((t, r) => t + r.amount_paise, 0);
+  const b = bizOf(c);
+  const { t, shiftDay, fy } = clock(b);
+  const batch = [];
+  if (total > 0) {
+    const bk = await one<{ check_in: string | null; check_out: string | null; rooms: number | null; room_labels: string | null }>(db,
+      "SELECT check_in, check_out, rooms, room_labels FROM bookings WHERE stay_id = ? AND status <> 'cancelled' ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1", id);
+    const checkOut = shiftDay > row.check_in ? shiftDay : bk?.check_out ?? shiftDay;
+    const nights = bk?.check_in && bk.check_out ? nightsBetween(bk.check_in, bk.check_out) : nightsBetween(row.check_in, checkOut);
+    const ent = await one<{ id: string; gst_registered: number; series_prefix: string }>(db,
+      'SELECT id, gst_registered, series_prefix FROM billing_entities WHERE business_id = ? AND active = 1 ORDER BY is_default DESC, created_at LIMIT 1', bid);
+    if (!ent) fail(409, 'Add a billing name in Settings first: the room invoice is made in it.');
+    const tax = roomTax(total, Math.round(total / nights / Math.max(1, bk?.rooms ?? 1)), ent.gst_registered === 1);
+    const fromBooking = rent.filter((r) => r.booking_id).reduce((s0, r) => s0 + r.amount_paise, 0);
+    const lines = [
+      ...(fromBooking ? [{ name: `Room ${row.room} · ${nights} night${nights === 1 ? '' : 's'}`, amountPaise: fromBooking }] : []),
+      ...rent.filter((r) => !r.booking_id).map((r) => ({ name: r.note ?? 'Room charge', amountPaise: r.amount_paise })),
+    ];
+    batch.push(
+      stmt(db, 'INSERT OR IGNORE INTO room_invoice_series (entity_id, fy, next_no) VALUES (?, ?, 1)', ent.id, fy),
+      stmt(db, `INSERT INTO room_invoices (id, business_id, stay_id, entity_id, fy, seq, invoice_no, shift_day, guest_name, phone, room, check_in, check_out, nights, lines,
+          gst_rate_bp, taxable_paise, cgst_paise, sgst_paise, total_paise, by_staff, at)
+        SELECT ?, ?, ?, ?, ?, next_no, ? || 'R' || substr(?, 3, 2) || substr(?, 6, 2) || '-' || printf('%04d', next_no), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        FROM room_invoice_series WHERE entity_id = ? AND fy = ?`,
+        newId(), bid, id, ent.id, fy, ent.series_prefix, fy, fy, shiftDay, row.guest_name, row.phone, row.room, bk?.check_in ?? row.check_in, bk?.check_out ?? checkOut, nights,
+        JSON.stringify(lines), tax.bp, tax.taxablePaise, tax.cgstPaise, tax.sgstPaise, total, c.get('staff').id, t, ent.id, fy),
+      stmt(db, 'UPDATE room_invoice_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', ent.id, fy),
+    );
+  }
+  await db.batch([
+    ...batch,
+    stmt(db, 'UPDATE stays SET checked_out_at = ? WHERE id = ?', t, id),
+    audit(db, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, null),
   ]);
-  return c.json({ ok: true });
+  return c.json({ ok: true, bill: await stayBill(c, id) });
 });
 
 settingsRoutes.get(`${B}/credit-accounts`, requireAction('pos.view'), async (c) => {

@@ -298,7 +298,7 @@ reportRoutes.get(`${B}/reports/debtors`, requireAction('reports.view'), async (c
       (d.kind = 'credit' OR EXISTS (SELECT 1 FROM stays s WHERE s.id = d.stay_id AND s.checked_out_at IS NULL)) AS open
     FROM debtor_accounts d LEFT JOIN debtor_entries e ON e.account_id = d.id WHERE d.business_id = ? GROUP BY d.id ORDER BY balance DESC, d.name`, bid);
   const charges = await all<{ account_id: string; amount_paise: number; at: number }>(db,
-    "SELECT account_id, amount_paise, at FROM debtor_entries WHERE business_id = ? AND amount_paise > 0 AND kind IN ('charge', 'advance_used') ORDER BY at DESC", bid);
+    "SELECT account_id, amount_paise, at FROM debtor_entries WHERE business_id = ? AND amount_paise > 0 AND kind IN ('charge', 'advance_used', 'room_rent') ORDER BY at DESC", bid);
   const DAY = 86400000;
   return c.json({ accounts: accounts.filter((a) => a.balance !== 0 || a.open).map((a) => {
     const buckets = { d0_30: 0, d31_60: 0, d61_90: 0, d90: 0 };
