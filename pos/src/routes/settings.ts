@@ -861,6 +861,10 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
       stmt(c.env.DB, "INSERT INTO debtor_accounts (id, business_id, kind, name, stay_id, created_by, created_at) VALUES (?, ?, 'room', ?, ?, ?, ?)",
         newId(), bid, `${/^\d/.test(room) ? 'Room ' : ''}${room} · ${guest}`, id, c.get('staff').id, t),
       audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest, returning: !!known }),
+      // Checked in from a booking read from mail (23 Nov 2026): the booking is marked checked in, with its stay.
+      ...(typeof data.bookingId === 'string' && isUuid(data.bookingId)
+        ? [stmt(c.env.DB, `UPDATE bookings SET status = 'checked_in', stay_id = ?, updated_at = ? WHERE business_id = ? AND status IN ('approved', 'new')
+            AND (id = ?4 OR id = (SELECT match_id FROM bookings WHERE id = ?4))`, id, t, bid, data.bookingId)] : []),
     ]);
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, `${/^\d/.test(room) ? 'Room ' : ''}${room} already has a guest. Check them out first.`);

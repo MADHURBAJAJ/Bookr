@@ -17,6 +17,10 @@ export interface Env {
   CLAUDE_OCR_MODEL?: string;
   /** Most bill photos read per business per day (cost guard). */
   BILL_READS_PER_DAY?: string;
+  /** Which business each mail address belongs to, JSON {"bookings@mail.thebajajgroup.co": "<business id>"} (a setting). */
+  MAIL_ROUTES?: string;
+  /** Who may send booking mails, JSON {"mmt": "@go-mmt.com", "djubo": "@djubo.com"}: addresses or "@domain", comma-separated. */
+  BOOKING_MAIL_FROM?: string;
 }
 
 export interface Staff {

@@ -1,5 +1,6 @@
 import { app } from './app';
 import { sendAll } from './sync';
+import { receiveMail } from './mail';
 import type { Env } from './types';
 
 // The POS Worker: /api/* here, the counter screens as static assets (see pos/wrangler.jsonc).
@@ -7,6 +8,10 @@ import type { Env } from './types';
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return app.fetch(request, env, ctx);
+  },
+  // Booking mails forwarded from Gmail (Cloudflare Email Routing → here).
+  async email(message: ForwardableEmailMessage, env: Env) {
+    await receiveMail(message, env);
   },
   scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(sendAll(env));

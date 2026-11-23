@@ -1330,6 +1330,10 @@ async function roomsScreen() {
   const [o] = await Promise.all([api('GET', B() + '/orders'), load('stays', 'credit', 'payAccounts')]);
   // Rooms and beds as set in Settings, Rooms and tables: check-in picks from them (none set up: the room is typed).
   ui.roomSecs = (o.sections ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms');
+  // Bookings read from Djubo and MakeMyTrip mails (23 Nov 2026): to approve, and today's arrivals for check-in.
+  if (can('stays.edit')) {
+    [ui.bk, ui.arrivals] = await Promise.all([api('GET', B() + '/bookings').catch(() => null), api('GET', B() + '/bookings/arrivals').then((r) => r.arrivals).catch(() => [])]);
+  }
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms and credit', 'In-house guests and credit accounts: what each owes, payments, advances and refunds.')}
     ${ui.refund ? html`<form class="panel" style="margin-bottom:16px;max-width:720px;border-color:var(--pri-line)"><h2>Refund advance to ${ui.refund.name}</h2>${errorBox()}
       <p class="quiet small">${rs(ui.refund.max)} of advance is held.</p>
@@ -1353,6 +1357,8 @@ async function roomsScreen() {
           ${s.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-max="${-s.balancePaise}">Refund advance</button>` : ''}
           <button class="btn" type="button" data-act="checkOut" data-id="${s.id}">Check out</button></div></td></tr>`)}
       </tbody></table></div>
+      ${can('stays.edit') && ui.arrivals?.length ? html`<div class="f" style="margin-top:12px">Arriving today (from bookings): tap to fill check-in
+        <div class="chips">${ui.arrivals.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.bookingId === a.id}" data-act="pickArrival" data-id="${a.id}">${a.guestName} · ${a.roomType ?? 'room?'}${a.rooms > 1 ? ` × ${a.rooms}` : ''} · till ${dayName(a.checkOut)}</button>`)}</div></div>` : ''}
       ${can('stays.edit') ? html`<form class="grid2"><label class="f">Phone<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" placeholder="Finds a returning guest" autocomplete="off"></label>
         ${ui.roomSecs.length ? '' : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`}
         ${ui.roomSecs.length ? roomChooser() : ''}
@@ -1367,11 +1373,62 @@ async function roomsScreen() {
           ${a.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${a.id}" data-n="${a.name}" data-max="${-a.balancePaise}">Refund advance</button>` : ''}</div></td></tr>`)}
       </tbody></table></div><p class="small quiet">New credit accounts are made at the settle screen. A negative amount owed is an advance.</p>
     </section>
-  </div>`));
+  </div>
+  ${ui.bk ? bookingsPanel(ui.bk) : ''}`));
   rerender();
 }
+actions.pickArrival = (d) => {
+  const a = ui.arrivals.find((x) => x.id === d.id);
+  ui.bookingId = a.id; ui.guest = a.guestName; ui.gPhone = a.phone ?? ''; ui.roomQ = a.roomType ?? ''; ui.gFound = null;
+  rerender();
+};
+/** Bookings from mail: waiting for a person (approve, fix, cancel), arriving soon, the mails received, and automatic. */
+function bookingsPanel(r) {
+  const src = { mmt: 'MakeMyTrip', djubo: 'Djubo' };
+  const types = ui.roomSecs.map((x) => x.name);
+  const row = (b) => {
+    const fixing = ui.bkFix === b.id;
+    const matched = b.matchId ? [...r.waiting, ...r.arriving].find((x) => x.id === b.matchId) : null;
+    return html`<div class="line" style="flex-wrap:wrap;gap:8px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)">
+      <div class="grow"><strong>${b.guestName ?? 'No name'}</strong> <span class="small quiet">${src[b.source]} ${b.extRef}${b.phone ? ` · ${b.phone}` : ''}</span>
+        <div class="small">${b.roomType ?? 'Room type?'}${b.rooms > 1 ? ` × ${b.rooms}` : ''} · ${b.checkIn ? dayName(b.checkIn) : '?'} → ${b.checkOut ? dayName(b.checkOut) : '?'}${b.guests ? ` · ${plural(b.guests, 'guest')}` : ''}${b.amountPaise ? ` · ${rs(b.amountPaise)}` : ''}</div>
+        ${b.problem ? html`<div class="small" style="color:var(--warn)">Check: ${b.problem}</div>` : ''}
+        ${matched ? html`<div class="small quiet">Same stay in ${src[matched.source]} ${matched.extRef}</div>` : ''}
+        ${b.status !== 'new' ? html`<div class="small quiet">${b.status === 'checked_in' ? 'Checked in' : b.how === 'auto' ? 'Approved by Bookr' : 'Approved'}</div>` : ''}
+        ${fixing ? html`<form class="grid2" style="margin-top:8px"><label class="f">Guest name<input class="in" data-model="bkName" value="${ui.bkName ?? b.guestName ?? ''}"></label>
+          <label class="f">Room type<select class="in" data-model="bkType"><option value="">Choose</option>${types.map((t) => html`<option ${(ui.bkType ?? b.roomType) === t ? 'selected' : ''}>${t}</option>`)}</select></label>
+          <label class="f">Check-in<input class="in" type="date" data-model="bkIn" value="${ui.bkIn ?? b.checkIn ?? ''}"></label><label class="f">Check-out<input class="in" type="date" data-model="bkOut" value="${ui.bkOut ?? b.checkOut ?? ''}"></label>
+          <label class="f">Phone (only to change it)<input class="in" inputmode="tel" data-model="bkPhone" data-live value="${ui.bkPhone ?? ''}"></label>${phoneHint(ui.bkPhone)}
+          <div class="row"><button class="btn pri" type="submit" data-act="bkApprove" data-id="${b.id}" data-fix="1" data-submit>Save and approve</button><button class="btn ghost" type="button" data-act="bkFixNo">Cancel</button></div></form>` : ''}</div>
+      ${b.status === 'new' && !fixing ? html`<div class="row"><button class="btn pri" type="button" data-act="bkApprove" data-id="${b.id}">Approve</button><button class="btn" type="button" data-act="bkFix" data-id="${b.id}">Fix</button>
+        <button class="btn ghost" type="button" data-act="bkCancel" data-id="${b.id}">Cancel booking</button></div>` : ''}</div>`;
+  };
+  const problems = r.mails.filter((m) => m.status === 'failed' || (m.source === 'gmail'));
+  const auto = r.autoFrom ? new Date(r.autoFrom + 19_800_000).toISOString().slice(0, 10) : null;
+  return html`<section class="panel" style="margin-top:16px"><h2>Bookings from mail</h2>
+    <p class="small quiet">Read from the Djubo and MakeMyTrip mails forwarded by Gmail. ${auto ? (auto <= r.today ? `Automatic since ${dayName(auto)}: clean bookings go in by themselves; odd ones wait here.` : `Automatic from ${dayName(auto)}; until then a person approves each one.`) : 'A person approves each one.'}</p>
+    ${isMgr() ? html`<form class="row" style="align-items:end;margin-bottom:8px"><label class="f">Automatic from<input class="in" type="date" data-model="bkAuto" value="${ui.bkAuto ?? auto ?? addDays(r.today, 10)}"></label>
+      <button class="btn" type="submit" data-act="bkAutoSave" data-submit>Save</button>${auto ? html`<button class="btn ghost" type="button" data-act="bkAutoOff">Turn off</button>` : ''}</form>` : ''}
+    <h3>Waiting for you (${r.waiting.length})</h3>${r.waiting.length ? r.waiting.map(row) : html`<p class="quiet small">Nothing waiting.</p>`}
+    <h3 style="margin-top:12px">Arriving (${r.arriving.length})</h3>${r.arriving.length ? r.arriving.map(row) : html`<p class="quiet small">No approved bookings ahead.</p>`}
+    ${problems.length ? html`<h3 style="margin-top:12px">Mails to look at</h3>${problems.map((m) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:8px 0">
+      <span class="grow small"><strong>${m.subject || '(no subject)'}</strong> · ${dateTime(m.receivedAt)}<br><span class="quiet">${m.note}</span></span>
+      ${m.source !== 'gmail' ? html`<button class="btn" type="button" data-act="bkReread" data-id="${m.id}">Read again</button>` : ''}</div>`)}` : ''}
+    <p class="small quiet" style="margin-top:8px">${plural(r.mails.length, 'mail')} received lately.</p></section>`;
+}
+actions.bkFix = (d) => { ui.bkFix = d.id; ui.bkName = ui.bkType = ui.bkIn = ui.bkOut = ui.bkPhone = undefined; rerender(); };
+actions.bkFixNo = () => { ui.bkFix = null; rerender(); };
+actions.bkApprove = async (d) => {
+  const fix = d.fix ? { guestName: ui.bkName, roomType: ui.bkType, checkIn: ui.bkIn, checkOut: ui.bkOut, phone: ui.bkPhone || undefined } : {};
+  await api('POST', `${B()}/bookings/${d.id}/approve`, fix);
+  flash = { kind: 'ok', text: 'Booking approved.' }; route();
+};
+actions.bkCancel = async (d) => { if (!confirm('Cancel this booking?')) return; await api('POST', `${B()}/bookings/${d.id}/cancel`); route(); };
+actions.bkReread = async (d) => { await api('POST', `${B()}/mails/${d.id}/read-again`); flash = { kind: 'ok', text: 'Read again.' }; route(); };
+actions.bkAutoSave = async () => { await api('PUT', `${B()}/bookings/auto`, { from: ui.bkAuto ?? addDays(ui.bk.today, 10) }); flash = { kind: 'ok', text: 'Automatic saved.' }; route(); };
+actions.bkAutoOff = async () => { await api('PUT', `${B()}/bookings/auto`, { from: null }); flash = { kind: 'ok', text: 'Automatic is off: a person approves each booking.' }; route(); };
 actions.openStay = async () => {
-  await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined });
+  await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined });
   flash = { kind: 'ok', text: `${ui.guest} checked in to ${ui.room}.` }; route();
 };
 /** Check-in's room or bed, from Settings: free ones to pick, taken ones show who is there; a whole dorm for a group. */
