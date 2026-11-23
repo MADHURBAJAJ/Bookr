@@ -429,6 +429,9 @@ async function tablesScreen() {
 /** The tables, by section (Private Rooms, Dorms, Out House, NC…): a busy one opens its order or bill, a free one starts an order. */
 const roomKeyOf = (x) => String(x).toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '');
 const isMgr = () => ['owner', 'manager'].includes(me?.staff.role);
+/** A dorm bed's name: by letter as in Djubo ("II B") when the dorm says so, else "II · Bed 2" (23 Nov 2026). */
+const bedName = (d, i) => (d.letters ? `${d.name} ${String.fromCharCode(65 + i)}` : `${d.name} · Bed ${i + 1}`);
+const bedLabel = (d, i) => (d.letters ? `${d.name} ${String.fromCharCode(65 + i)}` : `Bed ${i + 1}`);
 const SECTION_NOTE = { rooms: "Orders go on the room's folio or are paid at the table", dorms: 'Each bed is sold on its own; “whole” is for a group that books all of it',
   outhouse: 'Guests not staying with us', nc: 'Non-chargeable: closes as complimentary in the person’s name · managers and owners only', other: '' };
 const eventStrip = (e) => html`<div class="msg warn evstrip" role="status"><span class="evtag">EVENT ON</span><span><strong>${e.name}</strong> · ${e.organiser} · until ${time(e.endsAt)} · ${e.sections.join(', ')} bills count towards ${e.commissionBp / 100}% commission${e.menu ? ` · menu: ${e.menu.join(', ')}` : ''}</span></div>`;
@@ -472,7 +475,8 @@ function tableGrid() {
   const bedList = dorms.flatMap(bedsOf);
   const KIND_TAB = [['rooms', 'Private rooms'], ['dorms', 'Dorms'], ['outhouse', 'Out House'], ['nc', 'NC'], ['other', 'Tables']];
   // A bed is taken when someone stays in it, it has an order, or its dorm room has a whole-room order.
-  const bedTaken = (t) => used(t) || busy.has(`${t.replace(/ · Bed \d+$/, '')} · whole`.toLowerCase());
+  const dormOfBed = new Map(dorms.flatMap((x) => (x.dorms ?? []).flatMap((d) => Array.from({ length: d.beds }, (_, i) => [bedName(d, i).toLowerCase(), d.name]))));
+  const bedTaken = (t) => used(t) || busy.has(`${dormOfBed.get(t.toLowerCase()) ?? t} · whole`.toLowerCase());
   const countOf = (k) => (k === 'rooms' ? `${roomList.length} · ${roomList.filter(used).length} occupied`
     : k === 'dorms' ? `${bedList.length} beds · ${bedList.filter(bedTaken).length} taken`
     : String(all.filter((x) => x.kind === k).reduce((n, x) => n + x.tables.length, 0)));
@@ -492,12 +496,12 @@ function tableGrid() {
   }
   const dormCard = (d) => {
     const whole = `${d.name} · whole`;
-    const beds = Array.from({ length: d.beds }, (_, i) => `${d.name} · Bed ${i + 1}`);
+    const beds = Array.from({ length: d.beds }, (_, i) => bedName(d, i));
     const wholeBusy = busy.has(whole.toLowerCase());
     const bedBusy = beds.some((b) => busy.has(b.toLowerCase()));
     const taken = beds.filter(bedTaken).length;
     return html`<div class="dormcard ${wholeBusy ? 'whole' : ''}"><div class="dh"><b>${d.name}</b><span class="small quiet">${wholeBusy ? 'Whole room order' : taken ? `${taken} of ${d.beds} beds` : 'Empty'}</span></div>
-      <div class="tgrid ${d.beds === 4 ? 'four' : ''}">${beds.map((b, i) => cell(b, 'dorms', wholeBusy ? 'In the whole-room order' : null, `Bed ${i + 1}`))}</div>
+      <div class="tgrid ${d.beds === 4 ? 'four' : ''}">${beds.map((b, i) => cell(b, 'dorms', wholeBusy ? 'In the whole-room order' : null, bedLabel(d, i)))}</div>
       <div class="wholebtn">${cell(whole, 'dorms', bedBusy ? 'Beds have their own orders' : null, 'Order for the whole room')}</div></div>`;
   };
   const head = (x) => {
@@ -1385,9 +1389,12 @@ actions.pickArrival = (d) => {
   const a = ui.arrivals.find((x) => x.id === d.id);
   ui.bookingId = a.id; ui.guest = a.guestName; ui.gPhone = a.phone ?? ''; ui.gFound = null;
   // Djubo's room or bed number when a room here is named the same; else the room type, to narrow the list.
-  const label = (a.roomLabels ?? '').split(',')[0].trim();
-  const names = ui.roomSecs.flatMap((x) => x.tables ?? []).map((t) => t.toLowerCase());
-  ui.roomQ = label && names.some((t) => t.includes(label.toLowerCase())) ? label : a.roomType ?? '';
+  // Djubo writes "XIVA" or "XIV A": compared without spaces.
+  const flat = (t) => String(t).toLowerCase().replace(/\s+/g, '');
+  const label = flat((a.roomLabels ?? '').split(',')[0]);
+  const hit = label ? ui.roomSecs.flatMap((x) => x.tables ?? []).find((t) => flat(t) === label) : null;
+  ui.roomQ = hit ?? a.roomType ?? '';
+  if (hit) ui.room = hit;
   rerender();
 };
 /** Bookings from mail: waiting for a person (approve, fix, cancel), arriving soon, the mails received, and automatic. */
@@ -1469,7 +1476,7 @@ function roomChooser() {
     if (x.kind === 'dorms') {
       return html`${(x.dorms ?? []).map((d) => {
         const whole = `${d.name} · whole`;
-        const beds = Array.from({ length: d.beds }, (_, i) => `${d.name} · Bed ${i + 1}`);
+        const beds = Array.from({ length: d.beds }, (_, i) => bedName(d, i));
         const wholeTaken = !!who(whole);
         const bedTaken = beds.some((b) => who(b));
         const shown = [whole, ...beds].filter(match);
@@ -2793,7 +2800,8 @@ function tablesSettings() {
   const editForm = (x, i) => html`<tr><td colspan="4"><form class="edit"><strong>${i === -1 ? (ui.editRow.room ? 'Add room type' : 'Add table group') : `Edit ${x.name}`}</strong>
     <div class="grid3" style="margin-top:10px"><label class="f">Name<input class="in" data-model="erName" value="${ui.erName ?? ''}" maxlength="30" autofocus></label>
       <label class="f">Kind<select class="in" data-model="erKind">${(ui.editRow.room ? [['rooms', 'Private room'], ['dorms', 'Dorm (sold per bed)']] : GROUP_KINDS).map(([k, t]) => html`<option value="${k}" ${ui.erKind === k ? 'selected' : ''}>${t}</option>`)}</select></label>
-      ${ui.erKind === 'dorms' ? html`<label class="f">Beds in each room<input class="in" inputmode="numeric" data-model="erBeds" value="${ui.erBeds ?? '4'}"></label>` : html`<span></span>`}
+      ${ui.erKind === 'dorms' ? html`<div><label class="f">Beds in each room<input class="in" inputmode="numeric" data-model="erBeds" value="${ui.erBeds ?? '4'}"></label>
+        <label class="chk small"><input type="checkbox" data-model="erLetters" ${ui.erLetters ? 'checked' : ''}> Beds named A, B, C (as in Djubo: "II B")</label></div>` : html`<span></span>`}
       <label class="f" style="grid-column:1/-1">${ui.editRow.room ? 'Room numbers' : 'Tables'} (comma between)${ui.erKind === 'dorms' ? html` <span class="note">· a room with other beds: Q5:8</span>` : ''}<input class="in" data-model="erList" value="${ui.erList ?? ''}"></label></div>
     <div class="row" style="margin-top:10px"><button class="btn pri" type="submit" data-act="editSave" data-submit>${i === -1 ? 'Add' : 'Done'}</button><button class="btn ghost" type="button" data-act="editNo">Cancel</button>
       ${i >= 0 ? html`<button class="btn danger" type="button" data-act="rowDel" data-i="${i}" style="margin-left:auto">Remove ${x.name}</button>` : ''}</div></form></td></tr>`;
@@ -2834,11 +2842,11 @@ actions.roomDel = (d) => {
   if (x.kind === 'dorms') x.dorms.splice(j, 1); else if (x.kind === 'rooms') x.rooms.splice(j, 1); else { const l = splitTables(x.text); l.splice(j, 1); x.text = l.join(', '); }
   rerender();
 };
-actions.rowNew = (d) => { ui.editRow = { i: -1, room: !!d.room }; Object.assign(ui, { erName: '', erKind: d.room ? 'rooms' : 'outhouse', erBeds: '4', erList: '' }); ui.error = null; rerender(); };
+actions.rowNew = (d) => { ui.editRow = { i: -1, room: !!d.room }; Object.assign(ui, { erName: '', erKind: d.room ? 'rooms' : 'outhouse', erBeds: '4', erList: '', erLetters: false }); ui.error = null; rerender(); };
 actions.rowEdit = (d) => {
   const x = ui.secs[Number(d.i)];
   ui.editRow = { i: Number(d.i), room: isRoomCat(x) };
-  Object.assign(ui, { erName: x.name, erKind: x.kind, erBeds: String(x.beds ?? 4), erList: roomsText(x) }); ui.error = null; rerender();
+  Object.assign(ui, { erName: x.name, erKind: x.kind, erBeds: String(x.beds ?? 4), erList: roomsText(x), erLetters: !!x.letters }); ui.error = null; rerender();
 };
 actions.editNo = () => { ui.editRow = null; ui.error = null; rerender(); };
 actions.rowDel = (d) => { const x = ui.secs[Number(d.i)]; if (!confirm(`Remove ${x.name} and its ${isRoomCat(x) ? 'rooms' : 'tables'}? This happens when you press Save.`)) return; ui.secs.splice(Number(d.i), 1); ui.editRow = null; rerender(); };
@@ -2857,7 +2865,7 @@ actions.editSave = () => {
     if (r.beds !== undefined && !(r.beds >= 1 && r.beds <= 30)) throw new Error(`${r.name}: beds must be 1 to 30.`);
     seen.add(r.name.toLowerCase());
   }
-  const x = { name, kind: ui.erKind, beds: beds || 4, rooms: ui.erKind === 'rooms' ? list.map((r) => r.name) : [], dorms: ui.erKind === 'dorms' ? list : [], text: isRoomCat({ kind: ui.erKind }) ? '' : list.map((r) => r.name).join(', ') };
+  const x = { name, kind: ui.erKind, beds: beds || 4, letters: ui.erKind === 'dorms' && !!ui.erLetters, rooms: ui.erKind === 'rooms' ? list.map((r) => r.name) : [], dorms: ui.erKind === 'dorms' ? list : [], text: isRoomCat({ kind: ui.erKind }) ? '' : list.map((r) => r.name).join(', ') };
   if (old) ui.secs[e.i] = x; else ui.secs.push(x);
   ui.editRow = null; ui.error = null; rerender();
 };
@@ -2883,7 +2891,7 @@ actions.quickRooms = () => {
   ui.quickList = ''; ui.many = false; ui.error = null; rerender();
 };
 actions.tablesSave = async () => {
-  const sections = ui.secs.map((x) => (x.kind === 'dorms' ? { name: x.name, kind: x.kind, dorms: x.dorms.map((d) => ({ name: d.name, beds: Number(d.beds) })) }
+  const sections = ui.secs.map((x) => (x.kind === 'dorms' ? { name: x.name, kind: x.kind, dorms: x.dorms.map((d) => ({ name: d.name, beds: Number(d.beds), ...(x.letters ? { letters: true } : {}) })) }
     : { name: x.name, kind: x.kind, tables: x.kind === 'rooms' ? x.rooms : splitTables(x.text) }));
   await api('PUT', B() + '/tables', { sections });
   flash = { kind: 'ok', text: 'Saved. The counter and check-in use these now.' }; route();
@@ -2903,7 +2911,7 @@ async function settingsScreen(tab = 'menu') {
     ui.tableList = t.tables;
     // Editable copy: each section with its tables as text, or its dorms.
     ui.secs = t.sections.map((x) => ({ name: x.name, kind: x.kind, text: x.kind === 'dorms' || x.kind === 'rooms' ? '' : x.tables.join(', '),
-      rooms: x.kind === 'rooms' ? [...x.tables] : [], dorms: (x.dorms ?? []).map((d) => ({ ...d })), beds: x.dorms?.[0]?.beds ?? 4 }));
+      rooms: x.kind === 'rooms' ? [...x.tables] : [], dorms: (x.dorms ?? []).map((d) => ({ ...d })), beds: x.dorms?.[0]?.beds ?? 4, letters: !!x.dorms?.[0]?.letters }));
   }
   const head = html`${pageHead('Settings', 'Changes here reach every counter device at once.')}${tabsNav('Settings', tabs.map(([k, t]) => [`#/settings/${k}`, t, k]), tab)}`;
   const kinds = { discount: 'Discount', comp: 'Complimentary', void: 'Void', kot_cancel: 'Cancelled KOT line' };

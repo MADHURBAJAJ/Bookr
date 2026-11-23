@@ -73,7 +73,8 @@ settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
         if (!dn || dn.length > 24) fail(400, `${name}: each dorm needs a name of up to 24 characters.`);
         const beds = d.beds;
         if (typeof beds !== 'number' || !Number.isInteger(beds) || beds < 1 || beds > 30) fail(400, `${dn}: beds must be 1 to 30.`);
-        return { name: dn, beds };
+        if (d.letters === true && beds > 26) fail(400, `${dn}: beds named by letter go up to Z (26).`);
+        return { name: dn, beds, ...(d.letters === true ? { letters: true } : {}) };
       });
       for (const t of sectionTables({ kind, dorms })) unique(t);
       sections.push({ name, kind, dorms });

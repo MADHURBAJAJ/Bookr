@@ -15,12 +15,14 @@ export async function loadBusiness(db: DB, id: string): Promise<Business> {
 // A dorm section lists dorms with their bed count; its tables are made from them: "Dorm A · whole", "Dorm A · Bed 1"...
 export const SECTION_KINDS = ['rooms', 'dorms', 'outhouse', 'nc', 'other'] as const;
 export type SectionKind = (typeof SECTION_KINDS)[number];
-export interface Section { name: string; kind: SectionKind; tables: string[]; dorms?: { name: string; beds: number }[] }
+/** A dorm: its name and bed count; `letters`: beds named by letter as in Djubo ("II B"), else "II · Bed 2" (23 Nov 2026). */
+export interface Dorm { name: string; beds: number; letters?: boolean }
+export interface Section { name: string; kind: SectionKind; tables: string[]; dorms?: Dorm[] }
 export const dormWhole = (dorm: string) => `${dorm} · whole`;
-export const dormBed = (dorm: string, n: number) => `${dorm} · Bed ${n}`;
+export const dormBed = (dorm: string, n: number, letters = false) => (letters ? `${dorm} ${String.fromCharCode(64 + n)}` : `${dorm} · Bed ${n}`);
 
-export function sectionTables(s: { kind: string; tables?: unknown; dorms?: { name: string; beds: number }[] }): string[] {
-  if (s.kind === 'dorms') return (s.dorms ?? []).flatMap((d) => [dormWhole(d.name), ...Array.from({ length: d.beds }, (_, i) => dormBed(d.name, i + 1))]);
+export function sectionTables(s: { kind: string; tables?: unknown; dorms?: Dorm[] }): string[] {
+  if (s.kind === 'dorms') return (s.dorms ?? []).flatMap((d) => [dormWhole(d.name), ...Array.from({ length: d.beds }, (_, i) => dormBed(d.name, i + 1, d.letters))]);
   return Array.isArray(s.tables) ? s.tables.map(String) : [];
 }
 
@@ -50,7 +52,7 @@ export function placeOf(layout: Section[] | null, place: string): { section: Sec
     if (s.kind === 'dorms') {
       for (const d of s.dorms ?? []) {
         if (dormWhole(d.name).toLowerCase() === p) return { section: s, dorm: d.name, whole: true };
-        for (let i = 1; i <= d.beds; i++) if (dormBed(d.name, i).toLowerCase() === p) return { section: s, dorm: d.name, whole: false };
+        for (let i = 1; i <= d.beds; i++) if (dormBed(d.name, i, d.letters).toLowerCase() === p) return { section: s, dorm: d.name, whole: false };
       }
     } else if (s.tables.some((t) => t.toLowerCase() === p)) return { section: s };
   }

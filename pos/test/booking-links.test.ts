@@ -102,3 +102,16 @@ describe('matching, check-in and alerts', () => {
     expect((await ok(counter.get(`${B}/bookings`))).alerts).toEqual([]);
   });
 });
+
+describe('beds named by letter, as in Djubo', () => {
+  it('names a dorm\'s beds "II A", "II B"…, orders on them, and keeps a whole-room order apart', async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    await ok(owner.call('PUT', `${B}/tables`, { sections: [{ name: 'Quad Sharing', kind: 'dorms', dorms: [{ name: 'II', beds: 4, letters: true }, { name: 'IX', beds: 2 }] }] }));
+    const t = await ok(owner.get(`${B}/tables`));
+    expect(t.tables).toEqual(['II · whole', 'II A', 'II B', 'II C', 'II D', 'IX · whole', 'IX · Bed 1', 'IX · Bed 2']);
+    await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'II B' }));
+    expect((await counter.post(`${B}/orders`, { kind: 'table', place: 'II · whole' })).json.error).toMatch(/II B already has an order/);
+    expect((await owner.call('PUT', `${B}/tables`, { sections: [{ name: 'Q', kind: 'dorms', dorms: [{ name: 'Z', beds: 27, letters: true }] }] })).status).toBe(400);
+  });
+});
