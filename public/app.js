@@ -986,9 +986,22 @@ async function removeLogin(biz, userId, name) {
 // Also sign in with a mobile number (approved 23 Nov 2026): someone who signs in by email adds a mobile number to their
 // own login, with their password. Either then signs in; a phone invite to that number joins this same login.
 const fmtPhone = (p) => (p ? `${p.slice(3, 8)} ${p.slice(8)}` : '');
+// Change password (approved 23 Nov 2026): with the current password, or without it on a sign-in from the last 7 days.
+const myPasswordCard = () => html`<section class="card" style="gap:10px">
+    <h2 style="margin-bottom:0">Change password</h2>
+    <form id="mypass" style="display:flex;flex-direction:column;gap:10px">
+      <div class="field"><label for="mcp">Current password</label><input id="mcp" name="current" type="password" autocomplete="current-password">
+        <span class="note">Forgot it? Leave this empty: it works if you signed in on this device in the last 7 days.</span></div>
+      <div class="field"><label for="mnp">New password</label><input id="mnp" name="password" type="password" autocomplete="new-password" minlength="10" required>
+        <span class="note">At least 10 characters.</span></div>
+      <div class="field"><label for="mnp2">New password again</label><input id="mnp2" name="again" type="password" autocomplete="new-password" minlength="10" required></div>
+      <div class="note">Every other phone and PC is signed out. You stay signed in here.</div>
+      <div class="form-msg"></div>
+      <div><button class="btn plain" type="submit">Change password</button></div>
+    </form></section>`;
 function myPhoneCard() {
-  if (me.user.phoneLogin) return html`<section class="card"><div class="note">You sign in with your mobile number, ${fmtPhone(me.user.phone)}. The owner can change it.</div></section>`;
-  return html`<section class="card" style="gap:10px">
+  if (me.user.phoneLogin) return html`<section class="card"><div class="note">You sign in with your mobile number, ${fmtPhone(me.user.phone)}. The owner can change it.</div></section>${myPasswordCard()}`;
+  return html`${myPasswordCard()}<section class="card" style="gap:10px">
     <h2 style="margin-bottom:0">Your sign-in</h2>
     <div class="note">You sign in with ${me.user.email}${me.user.phone ? html`, or your mobile number <b>${fmtPhone(me.user.phone)}</b>` : ''}. Same password either way.</div>
     <form id="myphone" style="display:flex;flex-direction:column;gap:10px">
@@ -1001,6 +1014,13 @@ function myPhoneCard() {
     </form></section>`;
 }
 function wireMyPhone(after) {
+  const pw = document.getElementById('mypass');
+  pw && onSubmit(pw, async (x) => {
+    if (x.password !== x.again) throw new Error('The two new passwords are not the same.');
+    await api('PUT', '/me/password', { current: x.current, password: x.password });
+    await after();
+    doneToast('Password changed. Other phones and PCs are signed out.');
+  });
   const f = document.getElementById('myphone');
   f && onSubmit(f, async (x) => {
     await api('PUT', '/me/phone', { phone: x.phone.trim() || null, password: x.password });

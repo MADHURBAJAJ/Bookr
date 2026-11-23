@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { all, isUniqueViolation, now, one, stmt } from '../db';
-import { DUMMY_HASH, verifyPassword } from '../crypto';
+import { DUMMY_HASH, hashPassword, verifyPassword } from '../crypto';
 import { endSession, requireUser, startSession } from '../auth';
 import { body, fail, normalizePhone, text } from '../http';
 import { actionsFor, isRole, type Role } from '../permissions';
@@ -54,6 +54,38 @@ authRoutes.put('/me/phone', requireUser, async (c) => {
     throw e;
   }
   return c.json({ ok: true, phone });
+});
+
+// Change password (approved 23 Nov 2026). With the current password, any time. Forgotten: allowed without it only on a
+// sign-in made in the last 7 days (that recent sign-in is the proof). Every other phone and PC is signed out.
+const FRESH_SIGN_IN_MS = 7 * 86400000;
+authRoutes.put('/me/password', requireUser, async (c) => {
+  const db = c.env.DB;
+  const user = c.get('user');
+  const sessionId = c.get('sessionId');
+  const data = await body(c);
+  const password = typeof data.password === 'string' ? data.password : '';
+  const current = typeof data.current === 'string' ? data.current : '';
+  const row = await one<{ password_hash: string }>(db, 'SELECT password_hash FROM users WHERE id = ?', user.id);
+  if (current) {
+    if (!(await verifyPassword(current, row!.password_hash))) fail(401, 'Current password is incorrect.');
+  } else {
+    const s = await one<{ created_at: number }>(db, 'SELECT created_at FROM sessions WHERE id = ?', sessionId);
+    if (!s || s.created_at < now() - FRESH_SIGN_IN_MS) {
+      fail(403, 'You signed in here more than 7 days ago, so the current password is needed. If you forgot it, ask for an owner reset link from the server.');
+    }
+  }
+  if (password.length < 10) fail(400, 'Password must be at least 10 characters.');
+  const t = now();
+  const businesses = await all<{ id: string }>(db, 'SELECT business_id AS id FROM memberships WHERE user_id = ?', user.id);
+  await db.batch([
+    stmt(db, 'UPDATE users SET password_hash = ? WHERE id = ?', await hashPassword(password), user.id),
+    stmt(db, 'DELETE FROM sessions WHERE user_id = ? AND id <> ?', user.id, sessionId),
+    stmt(db, 'UPDATE password_resets SET revoked_at = ? WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL', t, user.id),
+    ...businesses.map((b) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'me.password', 'users', ?, NULL, ?, ?)`, b.id, user.id, user.id, JSON.stringify({ withCurrent: !!current }), t)),
+  ]);
+  return c.json({ ok: true });
 });
 
 authRoutes.get('/me', requireUser, async (c) => {

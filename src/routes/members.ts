@@ -315,9 +315,11 @@ inviteRoutes.post('/invites/:token/accept', async (c) => {
 const INVALID_RESET = 'This reset link is not valid. Ask the Owner for a new one.';
 
 async function findReset(db: DB, token: string) {
+  // A link made from the server for an Owner who is locked out (scripts/owner-reset.ts, 23 Nov 2026) is marked as made
+  // by the person themselves (no one can do that in the app) and works for an Owner too.
   const r = await one<{ id: string; user_id: string; name: string; signIn: string; ownerAnywhere: number }>(db, `
     SELECT r.id, r.user_id, u.name, ${signInSql('u')} AS signIn,
-      EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = u.id AND x.role = 'owner') AS ownerAnywhere
+      (r.created_by IS NOT r.user_id AND EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = u.id AND x.role = 'owner')) AS ownerAnywhere
     FROM password_resets r JOIN users u ON u.id = r.user_id
     WHERE r.token_hash = ? AND r.used_at IS NULL AND r.revoked_at IS NULL AND r.expires_at > ?
       AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = r.user_id AND m.business_id = r.business_id)`, await sha256(token), now());
