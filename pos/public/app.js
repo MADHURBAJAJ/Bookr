@@ -1464,7 +1464,7 @@ async function roomsScreen(view) {
       v === 'today' || v === 'checkin' ? api('GET', B() + '/frontdesk/today').catch(() => null) : null]);
     if (v === 'chart') { ui.chartFrom = today; await loadChart(); }
     if (v === 'list') ui.res = await api('GET', `${B()}/reservations`);
-    if (v === 'audit') ui.audit = await api('GET', `${B()}/frontdesk/audit`);
+    if (v === 'audit' || v === 'today') ui.audit = await api('GET', `${B()}/frontdesk/audit`).catch(() => null);
     if (v === 'house' || v === 'checkin') ui.hk = await api('GET', `${B()}/frontdesk/housekeeping`).catch(() => null);
     if (v === 'register') { ui.regFrom = addDays(today, -6); ui.regTo = today; ui.reg = await api('GET', `${B()}/frontdesk/register?from=${ui.regFrom}&to=${ui.regTo}`); }
     if (v === 'new') {
@@ -1490,7 +1490,7 @@ async function roomsScreen(view) {
     if (reopenStay) ui.roomBill = await api('GET', `${B()}/stays/${reopenStay}/bill`).catch(() => null);
   }
   reopenStay = null;
-  rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms', 'The front desk: arrivals, guests in house, departures, the room chart and reservations.')}
+  rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms', '')}
     ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, t, k]), v) : ''}
     ${drawerOpen() ? html`<aside class="drawer" aria-label="Details">${moneyForms()}${ui.roomBill ? roomBillPanel(ui.roomBill) : ui.chartSel ? chartSelPanel() : ui.drawer ? ui.drawer() : ''}</aside>` : moneyForms()}
     ${!can('stays.edit') ? inHouseTable() : v === 'today' ? todayView() : v === 'chart' ? chartView() : v === 'list' ? listView() : v === 'new' ? newResView()
@@ -1516,35 +1516,63 @@ const notInDjuboBox = (list) => (list?.length ? html`${list.map((x) => html`<div
       <button class="btn" type="button" data-act="resLater" data-id="${x.id}">Entered in Djubo · remind me in 15 min</button>
       <button class="btn ghost" type="button" data-act="resCancel" data-id="${x.id}">Cancel reservation</button></div></div>`)}` : '');
 
+/** Today (25 Nov 2026 redesign): the day in figures, what needs attention, then arrivals, guests in house and departures.
+ *  Rows open the side panel; the only filled button is in the panel. */
 function todayView() {
   const fd = ui.fd;
   if (!fd) return html`<p class="quiet">Could not load today's board.</p>`;
   const s = fd.stats;
-  const pill = (tone, t) => html`<span class="badge ${tone}">${t}</span>`;
-  const row = (left, right) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:8px 0;flex-wrap:wrap;align-items:flex-start"><div class="grow" style="min-width:150px">${left}</div><div class="row">${right}</div></div>`;
-  const leaving = new Set(fd.leaving.map((x) => x.id));
-  return html`<div class="kpis">${kpi('Arriving today', String(s.arriving))}${kpi('In house', String(s.inHouse))}${kpi('Leaving today', String(s.leaving))}${kpi('Free tonight', String(s.freeTonight))}${kpi('To collect today', rs(s.toCollectPaise), '', s.toCollectPaise ? 'warn' : '')}</div>
-    <div style="margin-top:14px">${errorBox()}${notInDjuboBox(fd.alerts.notInDjubo)}
-    ${(fd.alerts.formC ?? []).map((x) => html`<div class="msg ${x.level === 'red' ? 'bad' : 'warn'}" style="margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow"><strong>Form C not filed: ${x.room} · ${x.guestName}</strong> · checked in ${x.hours} h ago (due within 24 h)</span>
-      <button class="btn" type="button" data-act="formC" data-id="${x.stayId}">Form C filed</button></div>`)}
-    ${fd.alerts.unplaced ? html`<div class="msg bad" role="alert" style="margin-bottom:10px">Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}: create ${fd.alerts.unplaced === 1 ? 'it' : 'them'} in Djubo by hand. See <a href="#/rooms/list">Reservations</a>.</div>` : ''}</div>
-    ${ui.bk ? deskMoneyPanel(ui.bk) : ''}
-    <div class="cols3">
-      <section class="panel"><h2>Arriving today (${fd.arrivals.length})</h2>
-        ${fd.arrivals.length ? fd.arrivals.map((a) => row(html`<strong>${a.guestName ?? 'No name'}</strong><div class="small quiet">${a.kind === 'reservation' ? a.rooms : `${a.roomType ?? '?'}${a.roomLabels ? ` ${a.roomLabels}` : ''}`} · till ${dayName(a.checkOut)} · ${a.kind === 'reservation' ? a.source : a.channel ?? (a.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}</div>`,
-          html`${a.kind === 'reservation' ? pill('new', a.status === 'hold' ? 'hold' : 'not in Djubo') : ''}${a.duePaise ? pill('new', `collect ${rs(a.duePaise)}`) : pill('open', 'prepaid')}
-            <button class="btn pri" type="button" data-act="goCheckin" data-kind="${a.kind}" data-id="${a.id}">Check in</button>`)) : html`<p class="quiet small">Nobody else is due today.</p>`}</section>
-      <section class="panel"><h2>In house (${fd.inHouse.length})</h2>
-        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">${x.plan ? `till ${dayName(x.plan)}` : `since ${dayName(x.checkIn)}`}</div>`,
-          html`${x.balancePaise > 0 ? pill('new', `owes ${rs(x.balancePaise)}`) : x.balancePaise < 0 ? pill('open', `holds ${rs(-x.balancePaise)}`) : pill('open', 'nothing due')}
-            <button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`)) : html`<p class="quiet small">No guests in house.</p>`}</section>
-      <section class="panel"><h2>Leaving today (${fd.leaving.length})</h2>
-        ${fd.leaving.length ? fd.leaving.map((x) => row(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">check-out today</div>`,
-          html`${x.balancePaise > 0 ? pill('new', `${rs(x.balancePaise)} to pay`) : x.balancePaise < 0 ? pill('open', `refund ${rs(-x.balancePaise)}`) : pill('open', 'ready')}
-            <button class="btn ${x.balancePaise === 0 ? 'pri' : ''}" type="button" data-act="roomBill" data-id="${x.id}">${x.balancePaise === 0 ? 'Check out' : 'Room bill'}</button>`)) : html`<p class="quiet small">Nobody is due to leave today.</p>`}
-        ${leaving.size ? '' : ''}</section>
+  const a = ui.audit;
+  const today = fd.today;
+  // Needs attention: each item says what is wrong, where, and opens the place to fix it.
+  const items = [
+    ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
+    ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
+    ...(fd.alerts.deskToTake ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.deskToTake, 'payment')} entered in Djubo by reception`, sub: 'Take it here so a receipt prints', act: 'deskPanel' }] : []),
+    ...(fd.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: 'C', title: `Form C not filed: ${x.room} · ${x.guestName}`, sub: `checked in ${x.hours} h ago · due within 24 h`, act: 'roomBill', id: x.stayId })),
+    ...(a?.overstays ?? []).map((x) => ({ tone: 'bad', icon: '⏱', title: `Past check-out: ${x.room} · ${x.guestName}`, sub: `was due out ${dayName(x.plan)}`, act: 'roomBill', id: x.id })),
+    ...(a?.notArrived ?? []).filter((x) => x.checkIn < today).map((x) => ({ tone: 'warn', icon: '?', title: `Did not arrive: ${x.guestName ?? 'No name'}`, sub: `was due ${dayName(x.checkIn)} · no-show?`, act: 'goTo', href: '#/rooms/audit' })),
+    ...(a?.noDate ?? []).map((x) => ({ tone: 'mute', icon: '?', title: `No check-out date: ${x.room} · ${x.guestName}`, sub: 'Set it with Extend stay', act: 'roomBill', id: x.id })),
+    ...(a?.dirty?.length ? [{ tone: 'mute', icon: '◆', title: `${plural(a.dirty.length, 'room')} not ready`, sub: a.dirty.slice(0, 6).map((x) => `${x.room} ${x.status}`).join(' · '), act: 'goTo', href: '#/rooms/house' }] : []),
+  ];
+  const row = (attrs, left, right) => html`<button type="button" class="drow" ${attrs}><span class="grow">${left}</span><span class="dright">${right}</span></button>`;
+  const due = (p, prepaidText = 'Prepaid') => (p ? html`<span class="status warn">Collect ${rs(p)}</span>` : html`<span class="status ok">${prepaidText}</span>`);
+  const owes = (b) => (b > 0 ? html`<span class="status warn">Owes ${rs(b)}</span>` : b < 0 ? html`<span class="status info">Holds ${rs(-b)}</span>` : html`<span class="status ok">Settled</span>`);
+  return html`<div class="kpis">${kpi('Arriving today', String(s.arriving))}${kpi('In house', String(s.inHouse))}${kpi('Leaving today', String(s.leaving))}${kpi('Free tonight', String(s.freeTonight), 'rooms and beds')}${kpi('To collect today', rs(s.toCollectPaise), '', s.toCollectPaise ? 'warn' : '')}</div>
+    ${errorBox()}
+    <div class="today4">
+      <section class="dcol attn"><div class="dch"><h2>Needs attention</h2>${items.length ? html`<span class="status ${items.some((x) => x.tone === 'bad') ? 'bad' : 'warn'}">${items.length}</span>` : html`<span class="status ok">All clear</span>`}</div>
+        ${items.length ? items.map((x) => row(html`data-act="${x.act}" data-id="${x.id ?? ''}" data-href="${x.href ?? ''}"`,
+          html`<span class="ico t-${x.tone}" aria-hidden="true">${x.icon}</span><span><strong>${x.title}</strong><small>${x.sub}</small></span>`, '')) : html`<p class="empty">Nothing needs you right now.</p>`}
+        <div class="dfoot"><button class="btn sm" type="button" data-act="advNew">Take advance (no booking yet)</button></div></section>
+      <section class="dcol"><div class="dch"><h2>Arriving</h2><span class="faint">${fd.arrivals.length}</span></div>
+        ${fd.arrivals.length ? fd.arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
+          html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}</small>`,
+          due(x.duePaise))) : html`<p class="empty">No more arrivals today.</p>`}</section>
+      <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${fd.inHouse.length}</span></div>
+        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}</small>`, owes(x.balancePaise)))
+          : html`<p class="empty">No guests in house.</p>`}</section>
+      <section class="dcol"><div class="dch"><h2>Leaving today</h2><span class="faint">${fd.leaving.length}</span></div>
+        ${fd.leaving.length ? fd.leaving.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>check-out 11 am</small>`,
+          x.balancePaise === 0 ? html`<span class="status ok">Ready to check out</span>` : owes(x.balancePaise))) : html`<p class="empty">Nobody is due to leave today.</p>`}</section>
     </div>`;
 }
+actions.goTo = (d) => go(d.href);
+actions.deskPanel = () => { ui.roomBill = null; ui.chartSel = null; ui.drawer = () => html`<div class="dhead"><h2>Money at reception</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${deskMoneyPanel(ui.bk)}`; rerender(); };
+/** An arrival on Today, in the side panel: the booking card and Check in. */
+actions.todayArrival = async (d) => {
+  ui.roomBill = null; ui.chartSel = null;
+  if (d.kind === 'reservation') {
+    const r = (await api('GET', `${B()}/reservations/${d.id}`)).reservation;
+    ui.drawer = () => html`<div class="dhead"><h2>${r.guestName}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${reservationCard(r, Date.now())}`;
+  } else {
+    const a = (ui.arrivals ?? []).find((x) => x.id === d.id);
+    ui.drawer = () => html`<div class="dhead"><h2>${a?.guestName ?? 'Arrival'}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+      <section class="panel">${a ? bookingCard(a) : html`<p class="quiet">Booking not found.</p>`}<div class="row"><button class="btn pri" type="button" data-act="goCheckin" data-kind="booking" data-id="${d.id}">Check in</button>
+        ${a && dueOf(a) && can('debtors.receive') ? html`<button class="btn" type="button" data-act="advTake" data-id="${d.id}" data-n="${a.guestName ?? ''}" data-amount="${rupees(dueOf(a))}">Take advance now</button>` : ''}</div></section>`;
+  }
+  rerender();
+};
 actions.goCheckin = (d) => { pendingCheckin = { kind: d.kind, id: d.id }; go('#/rooms/checkin'); };
 actions.resLater = async (d) => { await api('POST', `${B()}/reservations/${d.id}/remind-later`); flash = { kind: 'ok', text: 'Reminder again in 15 minutes if Djubo has not confirmed it.' }; await refreshDeskAlerts(); route(); };
 actions.resCancel = async (d) => {

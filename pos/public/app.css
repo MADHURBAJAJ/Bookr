@@ -900,3 +900,23 @@ body.desk .legend { font-size: 12.5px; margin-top: 8px; align-items: center; }
 .ctool .in[type="search"] { width: 200px; }
 main:has(> .drawer) .ctool { gap: 6px 10px; }
 body.desk main:has(> .drawer) { max-width: none; }
+
+/* ---------- Rooms › Today (25 Nov 2026 redesign) */
+.today4 { display: grid; grid-template-columns: minmax(260px, 1.05fr) repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+@media (max-width: 1250px) { .today4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.dcol { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; overflow: hidden; }
+.dcol .dch { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.dcol .dch h2 { font-size: 14px; margin: 0; }
+.dcol .faint { color: var(--quiet); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dcol .empty { margin: 12px; }
+.drow { display: flex; gap: 10px; align-items: center; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--rule); background: transparent; color: var(--ink); text-align: left; cursor: pointer; font: inherit; }
+.drow:last-of-type { border-bottom: 0; }
+.drow:hover { background: var(--pri-tint); }
+.drow strong { display: block; font-size: 13.5px; font-weight: 600; }
+.drow small { display: block; color: var(--quiet); font-size: 12px; margin-top: 1px; }
+.drow .dright { flex: none; }
+.attn .drow { align-items: flex-start; }
+.attn .drow > .grow { display: flex; gap: 10px; align-items: flex-start; }
+.ico { width: 22px; height: 22px; flex: none; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; }
+.ico.t-bad { color: var(--bad); background: var(--bad-tint); } .ico.t-warn { color: var(--warn); background: var(--warn-tint); } .ico.t-mute { color: var(--quiet); background: var(--soft); }
+.dfoot { padding: 10px 12px; border-top: 1px solid var(--line); }
