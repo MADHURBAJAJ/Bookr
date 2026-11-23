@@ -4,9 +4,10 @@
  * - taken: cash a director took from the drawer (the cash line stays; the ledger says whose it was);
  * - stock taken: goods from the hotel's stock (a gas cylinder): no cash left, so the cash line goes;
  * - NC: a complimentary bill eaten by the family, at 50% of the bill; the other side is income under "Director NC";
- * - given / repaid: money paid to a director, e.g. paying back stock or bills he paid for the hotel;
+ * - repaid: the hotel paying a director back for stock or bills they paid for it earlier: cash to them, so it adds;
+ * - given ("Paid for the hotel"): money a director brings in, or a hotel bill they pay themselves: the only kind that lowers;
  * - opening: each person's balance on the day the ledger starts, typed in.
- * Balance = taken − given; above zero the person owes the hotel.
+ * Balance = taken + stock + NC + repaid − paid for the hotel; above zero the person owes the hotel (fixed 23 Nov 2026).
  * Names on complimentary bills are sorted once (director's family member, staff, someone else); a director's NC lines
  * follow their bills by themselves (a bill no longer complimentary loses its line).
  */
@@ -17,8 +18,8 @@ import { istDay } from './time';
 
 export const KINDS = ['opening', 'taken', 'stock_taken', 'nc', 'given', 'repaid'] as const;
 export type Kind = (typeof KINDS)[number];
-export const TAKES: Kind[] = ['taken', 'stock_taken', 'nc'];
-export const KIND_WORD: Record<Kind, string> = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Given', repaid: 'Repaid' };
+export const TAKES: Kind[] = ['taken', 'stock_taken', 'nc', 'repaid'];
+export const KIND_WORD: Record<Kind, string> = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Paid for the hotel', repaid: 'Repaid' };
 export const NC_HEAD = 'Director NC';
 
 /** A name as a key: lower case, letters only, "sir", "madam", "ji" and "mr" dropped. */
@@ -132,7 +133,7 @@ export async function toMove(db: DB, bid: string, from: string) {
     const family = ppl.filter((p) => r.head.toUpperCase().includes(p.family.toUpperCase()));
     const person = guessDirector(`${r.party ?? ''} ${r.narration ?? ''}`, family.length ? family : ppl) ?? guessDirector(r.party, ppl);
     // "11th Sep bar stock", "1st Oct electricity": paying back what the person paid earlier (approved 23 Nov 2026).
-    const repaid = /\b\d{1,2}(st|nd|rd|th)?\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(r.narration ?? '');
+    const repaid = /\b\d{1,2}(st|nd|rd|th)?\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\b\d{1,2}(st|nd|rd|th)\b/i.test(r.narration ?? '');
     return { transactionId: r.id, day: r.day, amountPaise: r.amount_paise, narration: r.narration, party: r.party, head: r.head, status: r.status,
       directorId: person?.id ?? null, kind: (repaid ? 'repaid' : 'taken') as Kind };
   });
@@ -157,7 +158,7 @@ export async function ledgers(db: DB, bid: string) {
         const own = ls.filter((l) => l.director_id === p.id);
         return { id: p.id, name: p.name, opening: own.find((l) => l.kind === 'opening')?.amount_paise ?? null,
           takenPaise: own.filter((l) => TAKES.includes(l.kind)).reduce((t, l) => t + l.amount_paise, 0),
-          givenPaise: own.filter((l) => l.kind === 'given' || l.kind === 'repaid').reduce((t, l) => t + l.amount_paise, 0),
+          givenPaise: own.filter((l) => l.kind === 'given').reduce((t, l) => t + l.amount_paise, 0),
           balancePaise: own.reduce((t, l) => t + signed(l), 0) };
       }),
       balancePaise: ls.reduce((t, l) => t + signed(l), 0),

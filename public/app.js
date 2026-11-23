@@ -3812,7 +3812,7 @@ function wireRegister(biz, u) {
 
 /** The last approved line edited or removed on a page, for its Undo. */
 let expenseUndo = null;
-const DIR_KIND = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Given', repaid: 'Repaid' };
+const DIR_KIND = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Paid for the hotel', repaid: 'Repaid' };
 const dirOf = (r) => { try { return r.director ? (typeof r.director === 'string' ? JSON.parse(r.director) : r.director) : null; } catch { return null; } };
 
 function expensePanel(biz, u, heads, parties = []) {
@@ -3849,7 +3849,8 @@ function expensePanel(biz, u, heads, parties = []) {
             : dirOf(r) ? html`<span class="chip">${dirOf(r).person} · ${DIR_KIND[dirOf(r).kind] ?? dirOf(r).kind}</span>` : ''}</td>
         </tr>${r.status === 'approved' && canApprove ? html`<tr class="emore" data-emorerow="${r.id}" hidden><td colspan="7"><div class="form-row" style="gap:6px;align-items:center">
           <button class="btn plain dchip" type="button" data-eedit="${r.id}">Edit</button>
-          ${dirOf(r) ? '' : html`<button class="btn plain dchip" type="button" data-edir="${r.id}">Director's account</button>`}
+          ${dirOf(r) ? html`<button class="btn plain dchip" type="button" data-edirout="${dirOf(r).id}" title="Takes it out of ${dirOf(r).person}'s account, so it can be put back as another kind (e.g. Stock taken)">Take out of ${dirOf(r).person}'s account</button>`
+            : html`<button class="btn plain dchip" type="button" data-edir="${r.id}">Director's account</button>`}
           ${dirOf(r) ? '' : html`<button class="btn plain dchip danger" type="button" data-eremove="${r.id}">Remove</button>`}
           <span class="edirbox" data-edirbox="${r.id}"></span></div></td></tr>` : ''}`; })}</tbody>
       </table></div>
@@ -3953,8 +3954,9 @@ function wireExpense(biz, u, parties = []) {
     form.headId.value = r.headId ?? '';
     form.vendor.value = r.vendor ?? readVendor(r) ?? '';
     onVendor();
-    document.getElementById('etitle').textContent = `Edit line ${r.lineNo}`;
-    document.getElementById('edel').hidden = false;
+    document.getElementById('etitle').textContent = `Edit line ${r.lineNo}${r.status === 'approved' ? ' (approved: the change can be undone)' : ''}`;
+    // An approved line is removed from its ⋯ menu, not with Delete line.
+    document.getElementById('edel').hidden = r.status === 'approved';
     document.getElementById('enew').hidden = false;
     form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }));
@@ -3979,9 +3981,13 @@ function wireExpense(biz, u, parties = []) {
     } catch (err) { showError(document.getElementById('rmsg'), err); }
   }));
   document.getElementById('edel').addEventListener('click', async () => {
-    await api('DELETE', `/businesses/${biz.id}/expense-rows/${editing}`, {});
-    reviewView(biz, u.id);
+    try { await api('DELETE', `/businesses/${biz.id}/expense-rows/${editing}`, {}); reviewView(biz, u.id); }
+    catch (err) { showError(form.querySelector('.form-msg'), err); }
   });
+  app.querySelectorAll('[data-edirout]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('DELETE', `/businesses/${biz.id}/director-entries/${b.dataset.edirout}`, {}); expenseUndo = null; reviewView(biz, u.id); }
+    catch (err) { showError(document.getElementById('rmsg'), err); }
+  }));
   // Approved lines (approved 23 Nov 2026): ⋯ opens Edit, Director's account, Remove. Owner and Accountant only.
   app.querySelectorAll('[data-emore]').forEach((b) => b.addEventListener('click', () => {
     const row = app.querySelector(`[data-emorerow="${b.dataset.emore}"]`);
@@ -4003,7 +4009,7 @@ function wireExpense(biz, u, parties = []) {
       const ppl = d.families.flatMap((f) => f.people.map((p) => ({ ...p, family: f.family })));
       if (!ppl.length) { box.innerHTML = html`<span class="note">No directors yet: set them up on the Directors page.</span>`.__html; return; }
       box.innerHTML = html`<select data-edirp>${ppl.map((p) => html`<option value="${p.id}">${p.family} · ${p.name}</option>`)}</select>
-        <select data-edirk><option value="taken">Taken (cash)</option><option value="stock_taken">Stock taken (removes this cash line)</option><option value="given">Given</option><option value="repaid">Repaid</option></select>
+        <select data-edirk><option value="taken">Taken (cash)</option><option value="stock_taken">Stock taken (removes this cash line)</option><option value="repaid">Repaid (paying them back)</option><option value="given">Paid for the hotel</option></select>
         <button class="btn dchip" type="button" data-edirsave>Save</button>`.__html;
       box.querySelector('[data-edirsave]').addEventListener('click', async () => {
         try {
@@ -5442,6 +5448,112 @@ function bankTop(biz, b, active) {
     ${bankTabs(biz, b, active)}`;
 }
 
+/** Booked lines from first-time UPI IDs, offered once as "Remember …?" (approved 23 Nov 2026). */
+let rememberAfter = [];
+function showRemember(biz, pills) {
+  const box = document.getElementById('bmsg');
+  if (!box) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = pills.map((p, i) => html`<div class="sg-row" style="display:block;margin-top:6px" data-remember="${i}"><span class="mono"><strong>${p.vpa}</strong></span> <span class="chip ok">Booked</span>
+    <div class="tiny" style="color:var(--ink);margin-top:4px">Remember as ${p.party ? `${p.party} · ` : ''}${p.headName}? Next time it fills in ${okMark}</div>
+    <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn dchip" type="button" data-remyes="${i}">Remember</button><button class="btn plain dchip" type="button" data-remno="${i}">Only this once</button></div><div class="form-msg"></div></div>`.__html).join('');
+  box.appendChild(wrap);
+  wrap.querySelectorAll('[data-remno]').forEach((b) => b.addEventListener('click', () => b.closest('[data-remember]').remove()));
+  wrap.querySelectorAll('[data-remyes]').forEach((b) => b.addEventListener('click', async () => {
+    const p = pills[Number(b.dataset.remyes)];
+    const row = b.closest('[data-remember]');
+    try {
+      await api('POST', `/businesses/${biz.id}/rules`, { name: p.party || p.vpa, direction: 'DR', vpa: p.vpa, headId: p.headId });
+      row.innerHTML = html`<span class="ok-msg">Remembered: ${p.vpa} → ${p.headName}.</span>`.__html;
+    } catch (err) { showError(row.querySelector('.form-msg'), err); }
+  }));
+}
+
+/** Repeats on Money out (approved 23 Nov 2026): one card per kind of line that keeps coming; opened, its lines ticked. */
+const REP_OPEN = 'bookr.repOpen';
+const repOpenSet = () => { try { return new Set(JSON.parse(localStorage.getItem(REP_OPEN) || '[]')); } catch { return new Set(); } };
+function repeatsHtml(rep, heads, canRules) {
+  const list = rep.repeats ?? [];
+  if (!list.length) return '';
+  const open = repOpenSet();
+  const span = (x) => (x.from === x.to ? shortDay(x.from) : `${shortDay(x.from)}–${shortDay(x.to)}`);
+  const chip = (x) => (x.kind === 'fee' || x.kind === 'charges' ? html`<span class="chip" style="${SC_AMBER}">×${x.count}</span>`
+    : x.headId ? html`<span class="chip" style="${x.headFrom === 'item' ? 'background:#FCEBEB;color:#791F1F' : SC_BLUE}">${x.headName}?${x.headFrom === 'item' ? ' check' : ''}</span>`
+    : html`<span class="chip" style="${SC_AMBER}">Repeats ×${x.count}</span>`);
+  const fig = (x) => `₹${rs(x.totalPaise)} · ${x.count} line${x.count === 1 ? '' : 's'}${x.payees > 1 && x.kind === 'word' ? ` · ${x.payees} payees` : ''} · ${span(x)}${x.headFrom === 'item' ? ' · head from the same item booked before' : ''}`;
+  const lineRow = (x, l) => html`<label class="rep-l" style="display:grid;grid-template-columns:22px 110px minmax(0,1fr) 90px;gap:8px;align-items:center;padding:3px 0;border-top:1px solid var(--line-soft);${l.maybe ? 'color:var(--muted)' : ''}">
+    <input type="checkbox" data-repline="${x.key}" value="${l.id}" data-amt="${l.amountPaise}" data-party="${l.party ?? ''}" data-item="${l.remark ?? ''}" ${l.maybe ? '' : 'checked'} style="width:16px;height:16px;min-height:0">
+    <span class="tiny">${shortDay(l.day)} · ${hhmm(l.postedAt)}</span>
+    <span class="tiny" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.kind === 'vpa' ? (l.remark ?? 'UPI Pay') : html`${l.vpa ? html`<span class="mono">${l.vpa}</span> · ` : ''}${l.remark ?? ''}`}${l.party ? html` → <strong>${l.party}${l.maybe ? '?' : ''}</strong>` : ''}${l.maybe ? html` <span class="chip" style="${SC_AMBER}">maybe</span>` : ''} · ${l.accountName}</span>
+    <span class="amount">${money(l.amountPaise)}</span></label>`;
+  const card = (x) => html`<div class="sg-row" data-rep="${x.key}" style="display:block">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;cursor:pointer" data-reptoggle="${x.key}"><span><span class="mono"><strong>${x.label}</strong></span> ${chip(x)}</span>
+      <span class="tiny note">${open.has(x.key) ? 'Close ▴' : `Open ${x.count} ▾`}</span></div>
+    <div class="tiny" style="color:var(--ink);margin-top:4px">${fig(x)}</div>
+    <div data-replist="${x.key}" ${open.has(x.key) ? '' : 'hidden'}>${x.lines.map((l) => lineRow(x, l))}${x.maybe.map((l) => lineRow(x, l))}
+      <div class="tiny" style="margin-top:6px;font-weight:600" data-reptot="${x.key}"></div></div>
+    <div class="form-row" style="gap:6px;margin-top:6px;align-items:center">
+      <select class="compact" data-rephead="${x.key}" aria-label="Head" style="max-width:200px"><option value="">${x.kind === 'vpa' ? 'Who is this? Head…' : 'Head…'}</option>${heads.map((h) => html`<option value="${h.id}" ${h.id === x.headId ? 'selected' : ''}>${h.name}</option>`)}</select>
+      ${x.kind === 'vpa' || x.kind === 'card' ? html`<input class="compact" data-repparty="${x.key}" list="bankparties" placeholder="Party" style="width:150px" autocomplete="off">` : ''}
+      ${canRules ? html`<button class="btn dchip" type="button" data-repbook="${x.key}" data-rule="1">Book ticked + rule</button>` : ''}
+      <button class="btn plain dchip" type="button" data-repbook="${x.key}">Book ticked</button>
+      <button class="btn plain dchip" type="button" data-rephide="${x.key}">Not these</button></div>
+    <div class="form-msg"></div></div>`;
+  return html`<div class="sg-group" style="display:flex;flex-direction:column;gap:8px">
+    <div class="lane-h"><strong>Repeats</strong><span class="tchip">${list.length} card${list.length === 1 ? '' : 's'} · ${list.reduce((t, x) => t + x.count, 0)} lines · all open dates</span></div>
+    ${list.map(card)}
+    ${rep.hidden?.length ? html`<div class="tiny note">Hidden: ${rep.hidden.map((k) => html`<button type="button" class="linkbtn tiny" data-repunhide="${k}">${k.replace(/^\w+:/, '')} · show</button> `)}</div>` : ''}</div>`;
+}
+
+function wireRepeats(biz, rep, rows, reload, msg, canRules) {
+  const list = rep.repeats ?? [];
+  const tot = (key) => {
+    const on = [...app.querySelectorAll(`[data-repline="${CSS.escape(key)}"]`)].filter((c) => c.checked);
+    const el = app.querySelector(`[data-reptot="${CSS.escape(key)}"]`);
+    if (el) el.textContent = `${on.length} ticked · ₹${rs(on.reduce((t, c) => t + Number(c.dataset.amt), 0))}`;
+    return on;
+  };
+  list.forEach((x) => tot(x.key));
+  app.querySelectorAll('[data-repline]').forEach((c) => c.addEventListener('change', () => tot(c.dataset.repline)));
+  app.querySelectorAll('[data-reptoggle]').forEach((t) => t.addEventListener('click', () => {
+    const k = t.dataset.reptoggle;
+    const box = app.querySelector(`[data-replist="${CSS.escape(k)}"]`);
+    box.hidden = !box.hidden;
+    const x = list.find((y) => y.key === k);
+    t.querySelector('.tiny').textContent = box.hidden ? `Open ${x.count} ▾` : 'Close ▴';
+    const s = repOpenSet(); if (box.hidden) s.delete(k); else s.add(k);
+    try { localStorage.setItem(REP_OPEN, JSON.stringify([...s])); } catch { /* storage unavailable */ }
+  }));
+  const say = (card, err) => showError(card.querySelector('.form-msg'), err);
+  app.querySelectorAll('[data-repbook]').forEach((b) => b.addEventListener('click', async () => {
+    const k = b.dataset.repbook;
+    const x = list.find((y) => y.key === k);
+    const card = b.closest('[data-rep]');
+    const headId = card.querySelector('[data-rephead]').value;
+    if (!headId) return say(card, new Error('Choose the head first.'));
+    const shared = card.querySelector('[data-repparty]')?.value.trim() || null;
+    const on = tot(k);
+    if (!on.length) return say(card, new Error('Tick the lines to book.'));
+    const itemOf = (c) => (x.kind === 'fee' ? 'UPI card fee' : x.kind === 'word' && c.dataset.party ? x.contains : c.dataset.item || (x.kind === 'word' ? x.contains : null));
+    const items = on.map((c) => ({ rowId: c.value, headId, party: c.dataset.party || shared, item: itemOf(c) }));
+    b.disabled = true;
+    try {
+      const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items });
+      if (b.dataset.rule) await api('POST', `/businesses/${biz.id}/rules`, { name: shared || x.label.replace(/"/g, ''), direction: 'DR', headId,
+        ...(x.vpa ? { vpa: x.vpa } : { contains: x.contains }) });
+      await reload();
+      const head = card.querySelector('[data-rephead]').selectedOptions[0]?.textContent ?? '';
+      document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${r.booked} line${r.booked === 1 ? '' : 's'} booked to ${head}${b.dataset.rule ? '; the rule is saved, so the next ones come with this head' : ''}.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}</div>`.__html;
+    } catch (err) { b.disabled = false; say(card, err); }
+  }));
+  app.querySelectorAll('[data-rephide]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('POST', `/businesses/${biz.id}/bank-repeats/hide`, { key: b.dataset.rephide }); await reload(); } catch (err) { say(b.closest('[data-rep]'), err); }
+  }));
+  app.querySelectorAll('[data-repunhide]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('POST', `/businesses/${biz.id}/bank-repeats/unhide`, { key: b.dataset.repunhide }); await reload(); } catch (err) { showError(msg, err); }
+  }));
+}
+
 async function bankView(biz, query = '') {
   const q = new URLSearchParams(query);
   const to = q.get('to') || addDaysIso(todayIst(), -1);
@@ -5458,6 +5570,8 @@ async function bankView(biz, query = '') {
     api('GET', `/businesses/${biz.id}/parties`),
     tab === 'statements' || !tab ? api('GET', `/businesses/${biz.id}/cards`).catch(() => null) : Promise.resolve(null),
   ]);
+  // Repeats (approved 23 Nov 2026): over every open paid-out line, not only the dates shown.
+  const rep = tab === 'out' ? await api('GET', `/businesses/${biz.id}/bank-repeats`).catch(() => ({ repeats: [] })) : { repeats: [] };
   if (!tab) tab = bankBehind(b) ? 'statements' : 'in';
   const canRules = biz.actions.includes('rules.edit');
   const headsOf = (dir) => heads.filter((h) => h.type === (dir === 'CR' ? 'income' : 'expense'));
@@ -5471,7 +5585,7 @@ async function bankView(biz, query = '') {
   const reversals = all.filter((r) => r.kind === 'reversal' && r.status === 'unmatched' && r.pairRowId).length;
   // UPI card fees go to Bank charges (19 Nov 2026), booked by a person in one press.
   const fees = all.filter((r) => r.kind === 'upi_fee' && r.status === 'unmatched' && r.direction === 'DR');
-  const feeHead = heads.find((h) => h.type === 'expense' && /^bank charges?$/i.test(h.name.trim())) ?? heads.find((h) => h.type === 'expense' && /bank charge/i.test(h.name));
+  const feeHead = heads.find((h) => h.type === 'expense' && /^(upi|bank) charges?$/i.test(h.name.trim())) ?? heads.find((h) => h.type === 'expense' && /(upi|bank) charge/i.test(h.name));
   const link = (over) => { const p = new URLSearchParams({ from, to, account, tab, ...over }); return `#/b/${biz.id}/bank?${p}`; };
   const OPEN_KEY = 'bookr.bankOpen';
   let openShifts;
@@ -5546,8 +5660,9 @@ async function bankView(biz, query = '') {
   const SMALL = 'min-height:34px;padding:0 12px;font-size:14px';
   const payer = (r) => {
     const note = r.remark && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay)$/i.test(r.remark) ? r.remark : '';
-    return html`<div style="min-width:0"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px">${note ? html`<strong>${note}</strong> ` : ''}<span class="mono note">${r.vpa ?? BANK_KIND[r.kind]}</span></div>
-      <div class="tiny">${hhmm(r.postedAt)} · ${r.accountName}${r.kind !== 'upi_in' && r.kind !== 'upi_out' ? ` · ${BANK_KIND[r.kind]}` : ''}</div></div>`;
+    // One line each (approved 23 Nov 2026): the payee, then time and account small beside it.
+    return html`<div style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.description ?? ''}">${note ? html`<strong>${note}</strong> ` : ''}<span class="mono note">${r.vpa ?? BANK_KIND[r.kind]}</span>
+      <span class="tiny"> · ${hhmm(r.postedAt)} · ${r.accountName}</span></div>`;
   };
   const amt = (r) => html`<div class="amount" style="white-space:nowrap;font-weight:600;color:${r.direction === 'CR' ? 'var(--teal)' : 'inherit'}">${r.direction === 'CR' ? '+' : '−'}₹ ${money(r.amountPaise)}</div>`;
   const headSelect = (r, chosen) => html`<select class="compact" data-head="${r.id}" aria-label="Head" style="max-width:190px"><option value="">Choose head</option>
@@ -5555,11 +5670,12 @@ async function bankView(biz, query = '') {
   // Item, party and head on one line, as on cash expense lines; the party's remembered head fills in.
   const lineFields = (r) => {
     const sg = r.suggest ?? {};
+    if (r.kind === 'upi_fee') return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center"><input type="hidden" data-item="${r.id}" value="UPI card fee">${headSelect(r, sg.headId ?? feeHead?.id)}<span class="tiny">UPI card fee</span></div>`;
     return html`<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
-      <input class="compact" data-item="${r.id}" value="${sg.item ?? ''}" placeholder="Item" aria-label="Item" style="width:150px">
-      <input class="compact" data-party="${r.id}" value="${sg.party ?? ''}" list="bankparties" placeholder="Party" aria-label="Party" style="width:150px" autocomplete="off">
+      <input class="compact" data-item="${r.id}" value="${sg.item ?? ''}" placeholder="Item" aria-label="Item" style="width:120px">
+      <input class="compact" data-party="${r.id}" value="${sg.party ?? ''}" list="bankparties" placeholder="Party" aria-label="Party" style="width:120px" autocomplete="off">
       ${headSelect(r, sg.headId)}${headFromChip(sg, sg.party)}
-      ${r.kind === 'upi_fee' ? html`<span class="tiny">Fee on a credit card paid through UPI</span>` : r.kind === 'reversal' ? (r.pairStatus === 'matched'
+      ${r.kind === 'reversal' ? (r.pairStatus === 'matched'
         ? html`<span class="tiny error">Gives back a payment already matched to a bill</span> <button class="btn plain dchip" type="button" data-revunpaid="${r.id}">Bill unpaid again</button>`
         : html`<span class="tiny">Gives back a failed payment</span>`) : ''}</div>`;
   };
@@ -5576,8 +5692,8 @@ async function bankView(biz, query = '') {
         <span style="display:flex;gap:8px;align-items:center"><span class="tiny">${help}</span>
           <button class="btn" type="button" style="${SMALL}" data-bulk="${id}" data-action="${action}" disabled>${action === 'match' ? 'Match' : 'Book'} 0 selected</button></span>
       </div>
-      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:28px minmax(170px,1.2fr) 110px minmax(240px,2.4fr) auto;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--line-soft);${r.candidates?.[0]?.adjust ? 'background:#FFFBEB;box-shadow:inset 3px 0 0 #F59E0B' : ''}">
-        <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.suggest?.headId && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
+      ${items.map((r) => html`<div data-line="${r.id}" style="display:grid;grid-template-columns:24px minmax(150px,1.3fr) 100px minmax(240px,2.4fr) auto;gap:8px;align-items:center;padding:4px 12px;border-top:1px solid var(--line-soft);${r.candidates?.[0]?.adjust ? 'background:#FFFBEB;box-shadow:inset 3px 0 0 #F59E0B' : ''}">
+        <input type="checkbox" data-pick="${id}" value="${r.id}" ${r.clear || (r.suggest?.headId && r.suggest.from !== 'note' && action === 'book') ? 'checked' : ''} aria-label="Select this line" style="width:18px;height:18px;min-height:0">
         ${payer(r)}${amt(r)}${rowHtml(r)}</div>`)}
     </div>`;
   const skipLink = (r) => html`<button class="btn plain" type="button" style="${SMALL}" data-ignore="${r.id}" title="Not business money">Skip</button>`;
@@ -5599,7 +5715,7 @@ async function bankView(biz, query = '') {
           <button class="btn plain dchip" type="button" data-nottr="${r.id}">Not a transfer: book as ${r.direction === 'DR' ? 'expense' : 'income'}</button></div></details></div></div>`)}</div>` : '';
   };
   // Cash moved between the drawer and the bank (Stage 6): offered first where the description says so.
-  const cashLink = (r) => r.kind === 'upi_in' || r.kind === 'upi_out' || r.kind === 'card_settlement' ? ''
+  const cashLink = (r) => r.kind === 'upi_in' || r.kind === 'upi_out' || r.kind === 'card_settlement' || r.kind === 'upi_fee' || (r.direction === 'DR' && !r.cashMove) ? ''
     : html`<button class="btn ${r.cashMove ? '' : 'plain'}" type="button" style="${SMALL}" data-cashmove="${r.id}" data-dir="${r.direction}" data-shift="${shiftOfMs(r.postedAt)}"
       title="${r.direction === 'CR' ? 'Cash from the drawer paid into the bank: not income' : 'Cash taken out of the bank for the drawer: not an expense'}">${r.direction === 'CR' ? 'Cash deposited' : 'Cash for the drawer'}</button>`;
   const rulePill = (r) => canRules && r.kind !== 'upi_in' ? html`<button class="btn plain" type="button" style="${SMALL}" data-mkrule="${r.id}" title="Remember this payee's head">Rule</button>` : '';
@@ -5623,10 +5739,14 @@ async function bankView(biz, query = '') {
     }
     const known = list.filter((r) => r.suggest?.headId && !isTr(r));
     const rest = list.filter((r) => !r.suggest?.headId && !isTr(r));
-    return html`${transferCards(list)}${section('ruled', 'Head suggested', 'From the party\'s past lines or a rule; change anything that is wrong', known, (r) => html`
-        ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${ownLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}
+    // Only the buttons that fit (approved 23 Nov 2026): Cash for the drawer on cash withdrawals; the rest under ⋯.
+    const outActs = (r) => r.kind === 'upi_fee' ? html`<div style="display:flex;gap:4px">${skipLink(r)}</div>`
+      : html`<div style="display:flex;gap:4px;align-items:center">${cashLink(r)}<details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary>
+        <div class="menu-pop" style="min-width:160px;gap:6px">${ownLink(r)}${rulePill(r)}${skipLink(r)}</div></details></div>`;
+    return html`${transferCards(list)}${section('ruled', 'Head suggested', 'From the party\'s past lines, a rule or the note; change anything that is wrong', known, (r) => html`
+        ${lineFields(r)}${outActs(r)}`, 'book')}
       ${section('needs', 'Needs a head', 'Give the item, party and head once: next time the party fills in its head', rest, (r) => html`
-        ${lineFields(r)}<div style="display:flex;gap:4px">${cashLink(r)}${ownLink(r)}${rulePill(r)}${skipLink(r)}</div>`, 'book')}`;
+        ${lineFields(r)}${outActs(r)}`, 'book')}`;
   };
 
   render(shell(biz, 'bank', 'Bank', '', html`
@@ -5655,10 +5775,11 @@ async function bankView(biz, query = '') {
       <div class="note">${tab === 'in' ? html`<strong>Match to bill</strong>: the credit is the payment for a bill already counted in sales (nothing new is booked). <strong>Book under a head</strong>: money received that is not a bill, e.g. hostel rent. <strong>Own account</strong>: money from another account of the business, not income.`
         : tab === 'out' ? html`<strong>Book under a head</strong>: a payment for the business, e.g. vegetables, salary. <strong>Own account</strong>: money moved to another account of the business, not an expense.`
         : 'Lines already matched, booked or skipped. Undo puts a line back.'}</div>
-      ${tab === 'out' && fees.length ? html`<div>${feeHead ? html`<button class="btn plain" type="button" id="gofees">Book ${fees.length} UPI card fee${fees.length > 1 ? 's' : ''} to ${feeHead.name} · ₹ ${money(fees.reduce((t, r) => t + r.amountPaise, 0))}</button>`
+      ${tab === 'out' && fees.length && !rep.repeats.some((x) => x.kind === 'fee') ? html`<div>${feeHead ? html`<button class="btn plain" type="button" id="gofees">Book ${fees.length} UPI card fee${fees.length > 1 ? 's' : ''} to ${feeHead.name} · ₹ ${money(fees.reduce((t, r) => t + r.amountPaise, 0))}</button>`
         : html`<span class="note">${fees.length} UPI card fee${fees.length > 1 ? 's' : ''} to book: add a Bank charges expense head on Heads and rules to book them in one go.</span>`}</div>` : ''}
       ${tab === 'out' && reversals ? html`<div><button class="btn plain" type="button" id="gorev">Skip ${reversals} failed payment${reversals > 1 ? 's' : ''} and ${reversals > 1 ? 'their' : 'its'} reversal</button></div>` : ''}
       <datalist id="bankparties">${parties.map((p) => html`<option value="${p.name}">`)}</datalist>
+      ${tab === 'out' ? repeatsHtml(rep, headsOf('DR'), canRules) : ''}
       <form class="inset" id="ruleform" hidden>
         <div style="font-weight:600">New rule</div>
         <div class="form-row">
@@ -5696,7 +5817,12 @@ async function bankView(biz, query = '') {
   wireShell();
   const msg = document.getElementById('bmsg');
   const run = async (fn, okText) => {
-    try { const r = await fn(); await bankView(biz, query); if (okText) document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${typeof okText === 'function' ? okText(r) : okText}</div>`.__html; }
+    try {
+      const r = await fn(); const pills = rememberAfter; rememberAfter = [];
+      await bankView(biz, query);
+      if (okText) document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">${typeof okText === 'function' ? okText(r) : okText}</div>`.__html;
+      if (pills.length) showRemember(biz, pills);
+    }
     catch (err) { showError(msg, err); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   };
   if (document.getElementById('bfilter')) onSubmit(document.getElementById('bfilter'), async (d) => go(link({ from: d.from, to: d.to, account: d.account })));
@@ -5878,10 +6004,17 @@ async function bankView(biz, query = '') {
           party: sec.querySelector(`[data-party="${id}"]`)?.value.trim() || null, item: sec.querySelector(`[data-item="${id}"]`)?.value.trim() || null }));
         const missing = items.filter((x) => !x.headId && !x.party).length;
         if (missing) { showError(msg, new Error(`Choose a head (or a known party) for ${missing} ticked line${missing > 1 ? 's' : ''} first.`)); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+        // After a first-time UPI ID is booked (approved 23 Nov 2026): offer to remember it, so the next one comes with its head.
+        const firsts = canRules ? items.filter((x) => x.headId).map((x) => ({ ...x, r: rows.find((y) => y.id === x.rowId) }))
+          .filter((x) => x.r?.vpa && x.r.kind === 'upi_out' && !x.r.suggest?.learned && !x.r.rule && !rules.some((u) => u.vpa === x.r.vpa)) : [];
+        const seen = new Set();
+        rememberAfter = firsts.filter((x) => !seen.has(x.r.vpa) && seen.add(x.r.vpa)).slice(0, 5)
+          .map((x) => ({ vpa: x.r.vpa, party: x.party, headId: x.headId, headName: heads.find((h) => h.id === x.headId)?.name ?? '' }));
         run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`);
       }
     });
   });
+  wireRepeats(biz, rep, rows, () => bankView(biz, query), msg, canRules);
   document.getElementById('gofees')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: fees.map((r) => ({ rowId: r.id, headId: feeHead.id, item: 'UPI card fee' })) }),
     (r) => `${r.booked} UPI card fee${r.booked === 1 ? '' : 's'} booked to ${feeHead.name}.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`));
   document.getElementById('gorev')?.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/ignore-reversals`, {}), (r) => `${r.pairs} failed payment${r.pairs === 1 ? '' : 's'} skipped with ${r.pairs === 1 ? 'its' : 'their'} reversal.`));
@@ -9622,13 +9755,13 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-/** Directors' accounts (approved 23 Nov 2026): each family's ledger, a person on every line. Balance = taken − given. */
+/** Directors' accounts (approved 23 Nov 2026): each family's ledger, a person on every line. Balance = took or got − paid for the hotel. */
 async function directorsView(biz) {
   const d = await api('GET', `/businesses/${biz.id}/directors`);
   const ed = d.editor;
   const ppl = d.families.flatMap((f) => f.people.map((p) => ({ ...p, family: f.family })));
   const bal = (p) => (p > 0 ? html`owes ₹${rs(p)}` : p < 0 ? html`hotel owes ₹${rs(-p)}` : html`₹0`);
-  const KINDS = [['taken', 'Taken (cash)'], ['stock_taken', 'Stock taken'], ['given', 'Given'], ['repaid', 'Repaid']];
+  const KINDS = [['taken', 'Taken (cash)'], ['stock_taken', 'Stock taken'], ['repaid', 'Repaid (paying them back)'], ['given', 'Paid for the hotel']];
   const opts = (sel) => ppl.map((p) => html`<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${p.family} · ${p.name}</option>`);
   const setup = html`<form id="dirsetup" class="inset">
     <div style="font-size:15px;font-weight:600">${d.from ? 'Add a family or people' : 'Start the ledger'}</div>
@@ -9640,18 +9773,18 @@ async function directorsView(biz) {
   const KW = DIR_KIND;
   const family = (f) => html`<section class="card" style="gap:10px">
     <div class="lane-h"><strong>${f.family}</strong><span class="tchip">${bal(f.balancePaise)}</span></div>
-    <div class="scroll"><table style="min-width:520px"><thead><tr><th>Person</th><th style="text-align:right">Opening ₹</th><th style="text-align:right">Taken ₹</th><th style="text-align:right">Given ₹</th><th style="text-align:right">Balance</th></tr></thead>
+    <div class="scroll"><table style="min-width:520px"><thead><tr><th>Person</th><th style="text-align:right">Opening ₹</th><th style="text-align:right">Took / got ₹</th><th style="text-align:right">Paid for the hotel ₹</th><th style="text-align:right">Balance</th></tr></thead>
     <tbody>${f.people.map((p) => html`<tr><td>${p.name}</td>
       <td class="amount">${ed ? html`<form class="form-row" data-opening="${p.id}" style="gap:4px;justify-content:flex-end;flex-wrap:nowrap">
           <input name="amount" class="mono" style="width:90px" value="${p.opening == null ? '' : rupeesForInput(Math.abs(p.opening))}" placeholder="0">
           <select name="side"><option value="owes" ${p.opening < 0 ? '' : 'selected'}>owes</option><option value="owed" ${p.opening < 0 ? 'selected' : ''}>owed</option></select>
           <button class="btn plain dchip" type="submit">Save</button><span class="form-msg"></span></form>` : p.opening == null ? '–' : bal(p.opening)}</td>
       <td class="amount">${money(p.takenPaise)}</td><td class="amount">${money(p.givenPaise)}</td><td class="amount">${bal(p.balancePaise)}</td></tr>`)}</tbody></table></div>
-    ${f.lines.filter((l) => l.kind !== 'opening').length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Day</th><th>Person</th><th>What</th><th style="text-align:right">Taken ₹</th><th style="text-align:right">Given ₹</th><th></th></tr></thead>
+    ${f.lines.filter((l) => l.kind !== 'opening').length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Day</th><th>Person</th><th>What</th><th style="text-align:right">Took / got ₹</th><th style="text-align:right">Paid for the hotel ₹</th><th></th></tr></thead>
     <tbody>${f.lines.filter((l) => l.kind !== 'opening').map((l) => html`<tr><td>${dayLabel(l.day)}</td><td>${l.person}</td>
       <td><span class="chip">${KW[l.kind]}</span> ${l.note ?? ''}${l.uploadId ? html` <a class="tiny" href="#/b/${biz.id}/review/${l.uploadId}">page</a>` : ''}</td>
-      <td class="amount">${['taken', 'stock_taken', 'nc'].includes(l.kind) ? money(l.amountPaise) : ''}</td>
-      <td class="amount">${['given', 'repaid'].includes(l.kind) ? money(l.amountPaise) : ''}</td>
+      <td class="amount">${l.kind !== 'given' ? money(l.amountPaise) : ''}</td>
+      <td class="amount">${l.kind === 'given' ? money(l.amountPaise) : ''}</td>
       <td>${ed && !l.auto ? html`<button class="btn plain dchip" type="button" data-dirrm="${l.id}" title="Take it out of the ledger${l.kind === 'stock_taken' ? '; its cash line comes back' : ''}">Remove</button>` : ''}</td></tr>`)}</tbody></table></div>` : html`<div class="note">No lines yet.</div>`}
   </section>`;
   const addLine = ed && ppl.length ? html`<form id="diradd" class="inset">
@@ -9669,7 +9802,7 @@ async function directorsView(biz) {
     <tbody>${d.toMove.map((m) => html`<tr data-mv="${m.transactionId}"><td><input type="checkbox" data-mvon checked></td><td>${dayLabel(m.day)}</td>
       <td>${m.narration ?? ''}${m.party ? html` <span class="tiny">· ${m.party}</span>` : ''} <span class="tiny note">${m.head}</span></td><td class="amount">${money(m.amountPaise)}</td>
       <td><select data-mvp><option value="">Choose</option>${opts(m.directorId)}</select></td>
-      <td><select data-mvk>${[['taken', 'Taken'], ['given', 'Given'], ['repaid', 'Repaid']].map(([k, w]) => html`<option value="${k}" ${k === m.kind ? 'selected' : ''}>${w}</option>`)}</select></td></tr>`)}</tbody></table></div>
+      <td><select data-mvk>${[['taken', 'Taken'], ['repaid', 'Repaid'], ['given', 'Paid for the hotel']].map(([k, w]) => html`<option value="${k}" ${k === m.kind ? 'selected' : ''}>${w}</option>`)}</select></td></tr>`)}</tbody></table></div>
     <div class="form-msg" id="mvmsg"></div><div><button class="btn" type="button" id="mvgo">Move ticked lines</button></div></section>` : '';
   const names = ed && d.newNames.length ? html`<section class="card" style="gap:10px">
     <div class="lane-h"><strong>Whose bills?</strong><span class="tchip">${d.newNames.length} new name${d.newNames.length === 1 ? '' : 's'}</span></div>
@@ -9685,7 +9818,7 @@ async function directorsView(biz) {
     <div class="scroll"><table style="min-width:380px"><tbody>${d.names.map((n) => html`<tr><td class="mono">${n.key}</td>
       <td>${n.kind === 'director' ? (() => { const p = ppl.find((x) => x.id === n.directorId); return p ? `${p.family} · ${p.name}` : 'Director'; })() : NC_KIND[n.kind]}</td>
       <td>${ed ? html`<button class="btn plain dchip" type="button" data-ncunsort="${n.key}" title="Ask again for this name">Change</button>` : ''}</td></tr>`)}</tbody></table></div></details>` : '';
-  render(shell(biz, 'directors', 'Directors', d.from ? `Ledger from ${dayLabel(d.from)} · balance = taken − given; above zero the person owes the hotel` : '', html`
+  render(shell(biz, 'directors', 'Directors', d.from ? `Ledger from ${dayLabel(d.from)} · balance = took or got − paid for the hotel; above zero the person owes the hotel` : '', html`
     <div id="dirmsg"></div>
     ${!d.from || !ppl.length ? (ed ? setup : html`<section class="card"><div class="note">An Owner or Accountant starts the ledger here.</div></section>`) : ''}
     ${names}${move}${d.families.map(family)}${addLine}${sorted}
@@ -9782,7 +9915,8 @@ document.addEventListener('click', async (e) => {
 // Where a head came from, on a bank or cash expense line (approved 14 Nov 2026); hover says exactly.
 const headFromChip = (sg, party) => (sg.from === 'party' || (!sg.from && sg.learned) ? html`<span class="chip wait" title="From party ${party ?? ''}: booked under this head before">Learned</span>`
   : sg.from === 'rule' ? html`<span class="chip wait" title="Rule: ${sg.ruleName ?? ''}">Rule</span>`
-  : sg.from === 'item' ? html`<span class="chip wait" title="The same item was booked under this head before">From item</span>` : '');
+  : sg.from === 'item' ? html`<span class="chip wait" title="The same item was booked under this head before">From item</span>`
+  : sg.fromNote ? html`<span class="chip" style="${SC_BLUE}" title="Read from the note on the line: check it">From note</span>` : '');
 // Paid by ▾: the three modes in a small menu, the hinted one first and marked (approved 14 Nov 2026).
 const paidByMenu = (c, pick = null) => html`<details class="menu"><summary class="btn plain dchip">Paid by ▾</summary><div class="menu-pop" style="min-width:140px;gap:6px">${[...(pick ? [pick] : []), ...['cash', 'upi', 'card'].filter((m) => m !== pick)].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}</div></details>`;
 const paidByChips = (c, pick = null) => html`<span class="tiny note">Paid by</span>${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="btn ${m === pick ? '' : 'plain'} dchip" data-paidby="${c.comparisonId}" data-bill="${c.billNo}" data-mode="${m}">${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[m]}</button>`)}`;

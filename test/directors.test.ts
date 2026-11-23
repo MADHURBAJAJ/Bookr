@@ -67,7 +67,7 @@ describe('the ledger', () => {
     expect((await sql`SELECT count(*) AS n FROM transactions WHERE id = ${gas}`)[0].n).toBe(0);
     d = (await acc.get(`/businesses/${h.bid}/directors`)).json;
     const bajaj = d.families.find((f: any) => f.family === 'Bajaj');
-    expect(bajaj.people.find((p: any) => p.id === mohak)).toMatchObject({ opening: 100000, takenPaise: 50000, givenPaise: 30000, balancePaise: 120000 });
+    expect(bajaj.people.find((p: any) => p.id === mohak)).toMatchObject({ opening: 100000, takenPaise: 80000, givenPaise: 0, balancePaise: 180000 });
     expect(d.families.find((f: any) => f.family === 'Kharbanda').balancePaise).toBe(120000);
     expect((await acc.call('DELETE', `/businesses/${h.bid}/director-entries/${st.json.id}`, {})).status).toBe(200);
     expect((await sql`SELECT amount_paise FROM transactions WHERE id = ${gas}`)[0].amount_paise).toBe(120000);
@@ -76,6 +76,11 @@ describe('the ledger', () => {
     expect((await acc.post(`/businesses/${h.bid}/director-entries`, { directorId: vikas, kind: 'given', day: '2026-11-02', amount: '200', note: 'Cash to Vikas sir' })).status).toBe(200);
     d = (await acc.get(`/businesses/${h.bid}/directors`)).json;
     expect(d.families.find((f: any) => f.family === 'Kharbanda').people[0].balancePaise).toBe(-20000);
+    // Repaid pays a director back: what the hotel owes them goes down (fixed 23 Nov 2026).
+    expect((await acc.put(`/businesses/${h.bid}/directors/${vikas}/opening`, { amount: '1000', side: 'owed' })).status).toBe(200);
+    expect((await acc.post(`/businesses/${h.bid}/director-entries`, { directorId: vikas, kind: 'repaid', day: '2026-11-03', amount: '700' })).status).toBe(200);
+    d = (await acc.get(`/businesses/${h.bid}/directors`)).json;
+    expect(d.families.find((f: any) => f.family === 'Kharbanda').people[0]).toMatchObject({ opening: -100000, givenPaise: 20000, balancePaise: -50000 });
     // Entry staff cannot read the ledger.
     expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/directors`)).status).toBe(403);
   });

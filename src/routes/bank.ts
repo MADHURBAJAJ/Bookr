@@ -30,6 +30,7 @@ import { paidByUpi } from '../paidByUpi';
 import { ADVANCE_TAG, creditChecks, HELD, heldKindOf, heldList, isHeldDone, OWED_PREFIX, type HeldKind } from '../extra';
 import { cardReportsStatus, syncCardFolder } from '../cardDrive';
 import { shiftEntries } from '../entries';
+import { hiddenKeys, readNote, repeatsFor } from '../repeats';
 
 export const bankRoutes = new Hono<AppEnv>();
 
@@ -204,6 +205,7 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
   const refundHead = refundOf.size ? await one<{ id: string }>(db, `SELECT id FROM heads WHERE business_id = ? AND type = 'expense'
     AND (lower(name) LIKE '%refund%' OR lower(name) LIKE '%sales return%') ORDER BY name LIMIT 1`, bid) : null;
   const plainNote = (v: string | null) => (v && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay|Paid securely v|Navi UPI|Paid in seconds)$/i.test(v.trim()) ? v.trim() : '');
+  const expenseHeads = rows.some((r) => r.status === 'unmatched' && r.direction === 'DR') ? await all<{ id: string; name: string }>(db, "SELECT id, name FROM heads WHERE business_id = ? AND type = 'expense'", bid) : [];
   return c.json({
     from, to,
     rows: rows.map((r) => {
@@ -224,8 +226,12 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           if (rf && !head?.headId && !rule) return { item: `Refund: bill ${rf.bills} cancelled`, party: party?.name ?? null, headId: refundHead?.id ?? null, headChoices: head?.choices ?? [], learned: false };
           // Where the head came from, told on the line (approved 14 Nov 2026): the party, a rule, or the same item booked before.
           const fromItem = !head?.headId && !rule && item && r.direction === 'DR' ? headFromItem(itemHistory, item) : null;
-          return { item, party: party?.name ?? null, headId: head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null), headChoices: head?.choices ?? [], learned: !!head?.headId,
-            from: head?.headId ? 'party' : rule?.head_id ? 'rule' : fromItem ? 'item' : null, ruleName: rule?.name ?? null };
+          // A note that runs words together (approved 23 Nov 2026): "hemantsalary" → salary, Hemant, Salaries.
+          const read = !party && !rule && r.direction === 'DR' ? readNote(r.remark, expenseHeads) : null;
+          const guessHead = head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null);
+          return { item: read?.item ?? item, party: party?.name ?? read?.party ?? null, headId: guessHead ?? read?.headId ?? null, headChoices: head?.choices ?? [], learned: !!head?.headId,
+            from: head?.headId ? 'party' : rule?.head_id ? 'rule' : fromItem ? 'item' : read?.headId ? 'note' : null, ruleName: rule?.name ?? null,
+            fromNote: read ? { item: read.item, party: read.party } : null };
         })() : null,
         clear: sug.clear.has(r.id),
         cashMove: r.status === 'unmatched' ? cashMoveOf(r) : null,
@@ -1513,6 +1519,20 @@ async function checkRuleRefs(db: D1Database, bid: string, r: ReturnType<typeof r
   if (r.accountId && !(await one(db, "SELECT 1 AS ok FROM accounts WHERE id = ? AND business_id = ? AND kind = 'bank'", r.accountId, bid))) fail(400, 'Unknown bank account.');
   if (r.partyId && !(await one(db, 'SELECT 1 AS ok FROM parties WHERE id = ? AND business_id = ?', r.partyId, bid))) fail(400, 'Unknown party.');
 }
+
+// Repeats on Money out (approved 23 Nov 2026): see src/repeats.ts. Counted over every open line, not only the dates shown.
+bankRoutes.get('/businesses/:businessId/bank-repeats', requireRole('bank.link'), async (c) => c.json({ repeats: await repeatsFor(c.env.DB, c.get('businessId')),
+  hidden: [...(await hiddenKeys(c.env.DB, c.get('businessId')))] }));
+
+/** "Not these": the card is hidden for everyone; Undo shows it again. */
+bankRoutes.post('/businesses/:businessId/bank-repeats/:action{hide|unhide}', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const key = text(await body(c), 'key', 'Card', { max: 200 })!;
+  await db.batch([stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, 'bank_rows', ?, NULL, ?, ?)`,
+    bid, c.get('user').id, `repeats.${c.req.param('action')}`, key, JSON.stringify({ changes: c.req.param('action') === 'hide' ? `Repeats card hidden: ${key}` : `Repeats card shown again: ${key}` }), now())]);
+  return c.json({ ok: true });
+});
 
 bankRoutes.get('/businesses/:businessId/rules', requireRole('heads.view'), async (c) => {
   const rules = await all(c.env.DB, `SELECT r.id, r.position, r.name, r.direction, r.account_id AS accountId, r.contains, r.vpa, r.min_paise AS minPaise,
