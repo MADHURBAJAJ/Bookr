@@ -972,3 +972,6 @@ body.desk main:has(> .drawer) { max-width: none; }
 .arow .grow { display: flex; flex-direction: column; min-width: 180px; }
 .arow small { color: var(--quiet); }
 .arow .dright { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.blockers { margin-bottom: 14px; border-color: var(--bad-line); } .blockers .msg { margin-top: 8px; }
+.blockers > .bh { display: flex; align-items: center; gap: 10px; } .blockers > .bh h2 { margin: 0; } .blockers .msg { padding: 8px 12px; }
+.blockers-n > .bh { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; } .blockers-n > .bh h2 { margin: 0; font-size: 14.5px; }

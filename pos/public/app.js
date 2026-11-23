@@ -2003,7 +2003,7 @@ function auditView() {
     <ol class="achk">${steps.map((x) => html`<li id="au-${x.id}" class="astep ${x.list.length ? '' : 'done'}"><div class="ash"><span class="atick" aria-hidden="true">${x.list.length ? '' : '✓'}</span><h2>${x.title}</h2>
       <span class="status ${x.list.length ? x.tone : 'ok'}">${x.list.length ? x.list.length : 'Done'}</span></div>
       ${x.rows.map(([l, r]) => html`<div class="arow"><span class="grow">${l}</span><span class="dright">${r}</span></div>`)}</li>`)}</ol>
-    <section class="panel"><div class="dch"><h2>Arriving tomorrow · ${dayName(a.tomorrow)}</h2><span class="status mute">${a.tomorrow_.length}</span></div>
+    <section class="panel blockers-n"><div class="bh"><h2>Arriving tomorrow · ${dayName(a.tomorrow)}</h2><span class="status mute">${a.tomorrow_.length}</span></div>
       ${a.tomorrow_.length ? html`<div class="small">${a.tomorrow_.map((x) => `${x.guestName ?? 'No name'}${x.roomLabels ? ` · ${x.roomLabels}` : x.roomType ? ` · ${x.roomType}` : ''}`).join(' · ')}</div>` : html`<p class="empty">No arrivals tomorrow yet.</p>`}</section>`;
 }
 actions.jump = (d) => { document.getElementById(d.to)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
@@ -2542,13 +2542,17 @@ function grcSlip(g) {
 async function creditScreen() {
   await load('credit', 'payAccounts');
   rerender = () => paint(shell('#/credit', html`${pageHead('Credit', 'Credit accounts: what each owes, how old it is, and payments.')}
+    ${cache.credit.length ? html`<div class="kpis">${kpi('Owed to you', rs(cache.credit.reduce((t, a) => t + Math.max(0, a.balancePaise), 0)), plural(cache.credit.filter((a) => a.balancePaise > 0).length, 'account'))}
+      ${kpi('Unpaid over 30 days', String(cache.credit.filter((a) => (a.oldestDays ?? 0) > 30).length), 'accounts', cache.credit.some((a) => (a.oldestDays ?? 0) > 30) ? 'bad' : '')}
+      ${kpi('Advances held', rs(cache.credit.reduce((t, a) => t + Math.max(0, -a.balancePaise), 0)))}</div>` : ''}
     ${moneyForms()}
     <section class="panel">${ui.recv || ui.refund ? '' : errorBox()}
       <div class="row" style="margin-bottom:8px"><input class="in" type="search" data-model="crQ" data-live value="${ui.crQ ?? ''}" placeholder="Search name or phone" aria-label="Search credit accounts" style="flex:0 1 320px"></div>
-      <div class="scroll"><table class="t cards"><thead><tr><th>Name</th><th class="num">Owes</th><th class="num">Oldest unpaid</th><th class="num">Limit</th><th></th></tr></thead><tbody>
+      <div class="scroll"><table class="t cards"><thead><tr><th data-sort>Name</th><th class="num" data-sort>Owes</th><th class="num" data-sort>Oldest unpaid</th><th class="num" data-sort>Limit</th><th></th></tr></thead><tbody>
+        ${cache.credit.length ? '' : html`<tr><td colspan="5"><p class="empty">No credit accounts yet. One is made when a bill is settled on credit.</p></td></tr>`}
         ${cache.credit.filter((a) => !ui.crQ || `${a.name} ${a.phone ?? ''}`.toLowerCase().includes(String(ui.crQ).toLowerCase())).map((a) => html`<tr>
-          <td data-label="Name"><strong>${a.name}</strong>${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num" data-label="Owes">${rs(a.balancePaise)}</td>
-          <td class="num" data-label="Oldest unpaid">${a.oldestDays === null || a.oldestDays === undefined ? '—' : html`<span class="badge ${a.oldestDays > 30 ? 'bad' : a.oldestDays > 7 ? 'new' : 'open'}">${plural(a.oldestDays, 'day')}</span>`}</td>
+          <td data-label="Name"><strong>${a.name}</strong>${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num" data-label="Owes" data-v="${a.balancePaise}">${rs(a.balancePaise)}</td>
+          <td class="num" data-label="Oldest unpaid" data-v="${a.oldestDays ?? -1}">${a.oldestDays === null || a.oldestDays === undefined ? '—' : html`<span class="status ${a.oldestDays > 30 ? 'bad' : a.oldestDays > 7 ? 'warn' : 'mute'}">${plural(a.oldestDays, 'day')}</span>`}</td>
           <td class="num" data-label="Limit">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td>
           <td class="act"><div class="row">${can('debtors.receive') ? html`<button class="btn pri" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button>` : ''}
             ${a.balancePaise < 0 && can('debtors.receive') ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${a.id}" data-n="${a.name}" data-max="${-a.balancePaise}">Refund advance</button>` : ''}</div></td></tr>`)}
@@ -2607,11 +2611,23 @@ async function shiftScreen() {
     const float = toPaise(ui.float || '0') ?? 0;
     const expected = float + s.cashInPaise - s.cashOutPaise;
     const diff = counted - expected;
+    // Short or over only once counting has started (display only; the close still sends the same numbers).
+    const started = !!(ui.float || ui.loose || Object.values(ui.counts).some((v) => v));
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
     paint(shell('#/shift', html`${pageHead(`Shift close · ${dayName(s.shiftDay)}`, 'A shift runs 8 am to 8 am. Check the takings, count the drawer, then close.')}
       <div class="kpis">${kpi('Should be in the drawer', rs(expected), 'Float plus cash in, less cash out')}${kpi('Counted', rs(counted))}
-        ${kpi(diff === 0 ? 'Drawer agrees' : diff < 0 ? 'Drawer short' : 'Drawer over', rs(Math.abs(diff)), ui.closed ? 'Shift closed' : 'Before closing', diff === 0 ? 'good' : 'bad')}
+        ${started || ui.closed ? kpi(diff === 0 ? 'Drawer agrees' : diff < 0 ? 'Drawer short' : 'Drawer over', rs(Math.abs(diff)), ui.closed ? 'Shift closed' : 'Before closing', diff === 0 ? 'good' : 'bad') : kpi('Drawer', 'Not counted yet', 'Count the notes to compare')}
         ${s.openOrders.length || s.unpaidBills.length ? kpi('Still open', String(s.openOrders.length + s.unpaidBills.length), 'Orders or bills to finish first', 'warn') : ''}</div>
+      ${s.openOrders.length || s.unpaidBills.length || s.notInDjubo?.length || s.deskMissing?.length ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${s.openOrders.length + s.unpaidBills.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0)}</span></div>
+        ${s.openOrders.length ? html`<div class="msg bad">Bill these orders or keep them as a tab first: ${s.openOrders.map((o) => o.place).join(', ')}.</div>` : ''}
+        ${s.unpaidBills.length ? html`<div class="msg bad">Printed but not paid: ${s.unpaidBills.map((b) => b.bill_no).join(', ')}.</div>` : ''}
+        ${s.notInDjubo?.length ? html`<div class="msg bad" style="display:block"><strong>Reservations made here, not in Djubo yet: ${s.notInDjubo.length}</strong>
+          ${s.notInDjubo.map((x) => html`<div class="small">${x.guestName} · ${x.rooms} · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}${x.madeBy ? ` · made by ${x.madeBy}` : ''}</div>`)}
+          <div class="small">Enter them in Djubo, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+        ${s.deskMissing?.length ? html`<div class="msg bad" style="display:block"><strong>Taken at reception in Djubo, not in the POS: ${rs(s.deskMissing.reduce((t, x) => t + x.pendingPaise, 0))}</strong>
+          ${s.deskMissing.map((x) => html`<div class="small">Djubo ${x.extRef} · ${x.guestName ?? ''} · ${x.enteredBy ?? ''}, ${time(x.at)} · ${rs(x.pendingPaise)}</div>`)}
+          <div class="small">Take it in Rooms so a receipt prints, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+      </section>` : ''}
       <div class="two rev">
       <section class="panel"><h2>Takings</h2>
         ${ui.closed ? html`<div class="msg ok">Closed at ${dateTime(ui.closed.closedAt)} · counted ${rs(ui.closed.countedPaise)} · difference ${rs(ui.closed.differencePaise)}</div>` : ''}
@@ -2628,22 +2644,14 @@ async function shiftScreen() {
         ${ui.closed ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
           <label class="f">What for<input class="in" data-model="outNote" value="${ui.outNote ?? ''}" placeholder="e.g. Vegetables"></label>
           <button class="btn" type="submit" data-act="paidOut" data-submit>Record paid out</button></form>`}
-        ${s.openOrders.length ? html`<div class="msg bad">Bill these orders or keep them as a tab first: ${s.openOrders.map((o) => o.place).join(', ')}.</div>` : ''}
-        ${s.unpaidBills.length ? html`<div class="msg bad">Printed but not paid: ${s.unpaidBills.map((b) => b.bill_no).join(', ')}.</div>` : ''}
-        ${s.notInDjubo?.length ? html`<div class="msg bad" style="display:block"><strong>Reservations made here, not in Djubo yet: ${s.notInDjubo.length}</strong>
-          ${s.notInDjubo.map((x) => html`<div class="small">${x.guestName} · ${x.rooms} · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}${x.madeBy ? ` · made by ${x.madeBy}` : ''}</div>`)}
-          <div class="small">Enter them in Djubo, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
-        ${s.deskMissing?.length ? html`<div class="msg bad" style="display:block"><strong>Taken at reception in Djubo, not in the POS: ${rs(s.deskMissing.reduce((t, x) => t + x.pendingPaise, 0))}</strong>
-          ${s.deskMissing.map((x) => html`<div class="small">Djubo ${x.extRef} · ${x.guestName ?? ''} · ${x.enteredBy ?? ''}, ${time(x.at)} · ${rs(x.pendingPaise)}</div>`)}
-          <div class="small">Take it in Rooms so a receipt prints, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
       </section>
       ${ui.closed ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
         <label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" data-live value="${ui.float ?? ''}"></label>
         <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="c${n}" data-note="${n}" value="${ui.counts[n] ?? ''}"></label>`)}
           <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="loose" data-live value="${ui.loose ?? ''}"></label></div>
         <div class="sums"><div><span>Should be in the drawer</span><span>${rs(expected)}</span></div><div><span>Counted</span><span>${rs(counted)}</span></div>
-          <div class="big" style="color:${diff ? 'var(--bad)' : 'var(--go-dark)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div></div>
-        ${diff ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}"></label>` : ''}
+          ${started ? html`<div class="big" style="color:${diff ? 'var(--bad)' : 'var(--go-dark)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div>` : html`<div><span class="quiet">Enter the float and the notes to compare</span><span></span></div>`}</div>
+        ${diff && (started || ui.error) ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}"></label>` : ''}
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}" placeholder="e.g. Entered in Djubo, mail not come yet"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
         <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift</button></form>`}
