@@ -811,3 +811,20 @@ button.st-chip.u-free { cursor: pointer; }
 
 /* "edited" chip is a button: tap to see what the line was (22 Nov 2026). */
 .cb-chipbtn { border: 0; cursor: pointer; font-family: inherit; line-height: inherit; }
+
+/* Install Bookr on a cashier's phone (approved 23 Nov 2026). */
+.inst-full { align-items: center; text-align: center; gap: 10px; }
+.inst-full .btn { width: 100%; justify-content: center; }
+.inst-full .cb-box { text-align: left; }
+.inst-icon { width: 56px; height: 56px; border-radius: 14px; background: var(--teal); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 22px; }
+.inst-step { display: flex; gap: 10px; align-items: center; text-align: left; width: 100%; }
+.inst-n { width: 24px; height: 24px; border-radius: 50%; background: var(--ink); color: var(--card); display: grid; place-items: center; font-size: 12px; flex: none; }
+.inst-sym { display: inline-block; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; background: var(--card); white-space: nowrap; }
+.inst-slim { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 12px; border-radius: 10px; background: var(--income-bg); color: var(--income); }
+details.inst-slim { display: block; }
+details.inst-slim summary { display: flex; justify-content: space-between; align-items: center; list-style: none; cursor: pointer; }
+details.inst-slim[open] { display: grid; gap: 8px; }
+/* Show "open in Chrome" only if the phone has not offered Install within 2 seconds. */
+.inst-late { visibility: hidden; animation: inst-show 0s 2s forwards; }
+@keyframes inst-show { to { visibility: visible; } }
+.inst-slim .linkbtn { color: inherit; }
