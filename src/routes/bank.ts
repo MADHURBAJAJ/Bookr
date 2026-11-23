@@ -18,7 +18,7 @@ import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
 import { bookedTx, joinedBill, planTaken, plansFor, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
-import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, WATCH_DAYS } from '../sales';
+import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, shiftView, WATCH_DAYS } from '../sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
 import { shiftSlips, slipFixStatements } from '../slips';
@@ -371,6 +371,43 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
     throw e;
   }
   return c.json({ ok: true, id: ids[0], ids });
+});
+
+// Paid in parts (approved 23 Nov 2026): Match all on a group's two to four credits. Matched when the shift is saved.
+bankRoutes.post('/businesses/:businessId/shifts/:day/group-parts', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose the bills.');
+  const creditIds = Array.isArray(data.creditIds) ? data.creditIds.filter((x): x is string => typeof x === 'string' && isUuid(x)) : [];
+  const view = await shiftView(db, bid, day);
+  if (view.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
+  const g = view.paidGroups.find((x) => x.id === headId);
+  const parts = g?.bank && 'parts' in g.bank ? g.bank.parts : undefined;
+  if (!g || !parts || parts.length !== creditIds.length || !parts.every((p) => creditIds.includes(p.creditId))) fail(409, 'These credits no longer add up to these bills: reload.');
+  if (g!.bank && 'accepted' in g!.bank && g!.bank.accepted) return c.json({ ok: true, unchanged: true });
+  const r = await one<{ id: number }>(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'bank.group_parts', 'register_rows', ?, NULL, ?, ?) RETURNING id`, bid, c.get('user').id, headId,
+    JSON.stringify({ shiftDay: day, billNos: g!.billNos, creditIds, amounts: parts!.map((p) => p.amountPaise) }), now());
+  return c.json({ ok: true, auditId: r!.id });
+});
+
+bankRoutes.post('/businesses/:businessId/group-parts/:auditId/undo', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = Number(c.req.param('auditId'));
+  if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
+  const a = await one<{ id: number; after: string }>(db, "SELECT id, after FROM audit_log WHERE id = ? AND business_id = ? AND action = 'bank.group_parts'", id, bid);
+  if (!a) fail(404, 'Not found.');
+  const day = (JSON.parse(a!.after) as { shiftDay: string }).shiftDay;
+  const s = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  if (s?.status === 'confirmed') fail(409, 'This shift is saved: unmatch the credits on Reconcile.');
+  if (await one(db, "SELECT 1 AS x FROM audit_log WHERE business_id = ? AND action = 'bank.group_parts_undone' AND row_id = ?", bid, String(id))) return c.json({ ok: true, unchanged: true });
+  await db.prepare(`INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'bank.group_parts_undone', 'audit_log', ?, NULL, NULL, ?)`).bind(bid, c.get('user').id, String(id), now()).run();
+  return c.json({ ok: true });
 });
 
 // A card machine payment matched to its bill(s) before saving (approved 10 Nov 2026), made on Save like a UPI match.

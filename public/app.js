@@ -681,6 +681,9 @@ async function dashboardView(biz) {
       ${legend}
     </section>` : ''}
     ${tiles.length ? html`<section class="card" style="gap:10px"><h2>Money</h2><div class="td-tiles">${tiles}</div></section>` : ''}
+    ${h.creditRed?.length ? html`<section class="card td-row" style="border-left:3px solid #DC2626"><div><h2 style="margin:0"><span class="chip bad">Credit 30+ days</span> ${h.creditRed.map((k) => `${k.guestName} ₹ ${rs(k.amountPaise)}`).join(' · ')}</h2>
+      <div class="note">${h.creditRed.map((k) => `${k.billNo}: ${k.days} days`).join(' · ')}</div></div>
+      <a class="btn plain" href="#/b/${biz.id}/reports">Open ›</a></section>` : ''}
     ${h.photos?.count ? html`<section class="card td-row"><div><h2 style="margin:0">Approve · ${nOf(h.photos.count, 'expense line')} · ₹ ${rs(h.photos.paise)}</h2>
       <div class="note">${nOf(h.photos.pages.length, 'cash page')}: ${daysText([...new Set(h.photos.pages.map((p) => p.day))].sort())}</div></div>
       <a class="btn plain" href="#/b/${biz.id}/review/${h.photos.pages[0]?.uploadId ?? ''}">Approve ›</a></section>` : ''}
@@ -1337,6 +1340,38 @@ const timeOf = (ms) => (ms == null ? '' : new Intl.DateTimeFormat('en-IN', { tim
  * not in: it is listed at the top.
  */
 const reportLastDay = new Map();
+/** Reports → Credit (approved 23 Nov 2026): who owes what and for how long; a credit of the amount since is offered. */
+const CREDIT_RED_DAYS = 30;
+function creditReport(biz, cr) {
+  const learn = html`<span class="tiny" style="float:right;color:var(--muted)">auto after 10 right · ${cr.right ?? 0}/10</span>`;
+  const line = (l) => html`<div class="ent-line" ${l.red ? 'style="border-left:3px solid #DC2626;padding-left:10px"' : ''}>
+    <div><span>${l.guestName}</span> <span class="mono">${l.billNo}</span> <span class="tiny note">${dayLabel(l.day)}</span>
+      <span style="float:right"><strong>₹ ${money(l.amountPaise)}</strong> · ${l.paid ? html`<span class="chip ok">paid ${l.paid.postedAt ? when(l.paid.postedAt) : ''}</span>` : html`<span class="${l.red ? 'error' : ''}">${l.days} day${l.days === 1 ? '' : 's'}</span>`}</span></div>
+    ${!l.saved && !l.paid ? html`<div class="tiny note">Counted as a sale when ${dayLabel(l.day)} is saved.</div>` : ''}
+    ${l.offers.map((o, i) => html`<div style="margin-top:6px"><span class="mono">${l.billNo}</span> <span class="chip" style="${SC_BLUE}">Credit paid?</span>${i === 0 ? learn : ''}
+      <div class="tiny" style="color:var(--ink);margin-top:4px">credit ₹${rs(l.amountPaise)} ${when(o.postedAt)}${o.vpa ? ` · ${o.vpa}` : ''} ${okMark} · ${l.guestName} owes ₹${rs(l.amountPaise)} ${okMark}</div>
+      <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn dchip" type="button" data-crpay="${l.id}" data-row="${o.bankRowId}" data-bill="${l.billNo}">Match</button></div></div>`)}
+    ${l.paid && biz.actions.includes('bank.link') ? html`<div class="form-row" style="gap:6px;margin-top:4px"><button class="btn plain dchip" type="button" data-crunpay="${l.id}" data-bill="${l.billNo}">Undo</button></div>` : ''}
+    <div class="form-msg"></div></div>`;
+  const open = cr.lines.filter((l) => !l.paid);
+  const paid = cr.lines.filter((l) => l.paid);
+  return html`${open.map(line)}${paid.length ? html`<div class="tiny note" style="margin-top:8px">Paid</div>${paid.map(line)}` : ''}`;
+}
+function wireCredit(biz, reload) {
+  document.querySelectorAll('[data-crpay],[data-crunpay]').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      if (b.dataset.crpay) {
+        await apiFull('POST', `/businesses/${biz.id}/credit-bills/${b.dataset.crpay}/pay`, { bankRowId: b.dataset.row });
+        await reload();
+        doneToast(`Bill ${b.dataset.bill}: credit paid, matched to the bank.`, async () => { await apiFull('POST', `/businesses/${biz.id}/credit-bills/${b.dataset.crpay}/unpay`, {}); }, reload);
+      } else {
+        await apiFull('POST', `/businesses/${biz.id}/credit-bills/${b.dataset.crunpay}/unpay`, {});
+        await reload();
+      }
+    } catch (err) { b.disabled = false; showError(b.closest('.ent-line')?.querySelector('.form-msg'), err); }
+  }));
+}
 async function reportDayView(biz, dayIn) {
   let day = /^\d{4}-\d{2}-\d{2}$/.test(dayIn ?? '') ? dayIn : null;
   // The last shift with bills, asked once per session (19 Nov 2026): it used to work out a month of missed bills first.
@@ -1351,7 +1386,8 @@ async function reportDayView(biz, dayIn) {
   // In one trip (19 Nov 2026), like the Shift page.
   const parts = apiMany([`/businesses/${biz.id}/reports/missed?${range}`, `/businesses/${biz.id}/reports/large-discounts?${range}`,
     `/businesses/${biz.id}/reports/complimentary?${range}`, `/businesses/${biz.id}/shifts/${day}/cash`, ...(canBank ? [`/businesses/${biz.id}/shifts/${day}/reconcile`] : [])]);
-  const [m, d, cp, cash, rc] = await Promise.all([parts[0], parts[1], parts[2], parts[3].catch(() => null), canBank ? parts[4].catch(() => null) : null]);
+  const crP = api('GET', `/businesses/${biz.id}/reports/credit`).catch(() => null);
+  const [m, d, cp, cash, rc, cr] = await Promise.all([parts[0], parts[1], parts[2], parts[3].catch(() => null), canBank ? parts[4].catch(() => null) : null, crP]);
   const bankIn = !!rc?.coverage?.covered;
   const cardsIn = !!rc?.cards?.covered;
   // Payments not received, the same rule as To do's Waiting card (18 Nov 2026): UPI bills with no credit, card bills with
@@ -1441,7 +1477,9 @@ async function reportDayView(biz, dayIn) {
             <td class="amount">${rs(l.billsPaise)}</td><td class="amount">${rs(l.discountPaise)}</td><td class="amount">${l.pct}</td><td class="amount">${rs(l.paidPaise)}</td><td class="note">${l.remarks ?? ''}</td></tr>`)}</tbody></table></div>` : ''}
       </details>
       <details class="rd-more"><summary>Complimentary · ${cp.count ? `${cp.count} · ₹ ${rs(cp.valuePaise)}` : 'none'}</summary>${cp.count ? complimentaryReport(biz, cp) : ''}</details>
+      ${cr?.lines?.length ? html`<details class="rd-more" id="credits" ${cr.red.length ? 'open' : ''}><summary>Credit · ${cr.owed ? `${cr.owed} owed · ₹ ${rs(cr.owedPaise)}` : 'all paid'}${cr.red.length ? html` <span class="chip bad">${cr.red.length} over ${CREDIT_RED_DAYS} days</span>` : ''}</summary>${creditReport(biz, cr)}</details>` : ''}
     </section>`));
+  wireCredit(biz, () => reportDayView(biz, day));
   wireShell();
   document.getElementById('rdday')?.addEventListener('change', (e) => { if (e.target.value) location.hash = `#/b/${biz.id}/reports?day=${e.target.value}`; });
   document.querySelectorAll('#comps .repdates').forEach((f) => f.addEventListener('submit', (e) => {
@@ -4622,18 +4660,32 @@ function compPanelHtml(biz, comp, canAct) {
     ${l.hint ? html`<div class="tiny" style="color:var(--teal-ink)">Maybe: ${l.hint.text}</div>` : ''}
     ${canAct ? html`<div class="form-row" style="gap:6px;margin-top:4px;align-items:center">
       ${l.why === 'unknown' ? html`${paidByChips(l, l.hint?.mode)}
+        ${makeCreditMenu(l)}
         <button type="button" class="btn plain dchip" data-makecomp="${l.comparisonId}" data-bill="${l.billNo}" data-name="${l.name ?? ''}">Complimentary</button>
         <button type="button" class="btn plain dchip" data-leaveunk="${l.comparisonId}" data-bill="${l.billNo}">Leave out…</button>`
       : html`<button type="button" class="btn ${l.status === 'look' ? '' : 'plain'} dchip" data-makecomp="${l.comparisonId}" data-bill="${l.billNo}" data-name="${l.guestName ?? l.name ?? ''}" ${l.guestName ? 'data-had="1"' : ''}>${l.guestName ? 'Change guest name' : 'Complimentary ✓'}</button>
       ${paidByChips(l)}`}</div>` : ''}
   </div>`;
+  // Credit bills (approved 23 Nov 2026): U/N bills the guest will pay later. Counted as a sale on saving; Reports → Credit.
+  const credit = comp.credit ?? [];
+  const creditLine = (k) => html`<div class="ent-line"><div><span class="mono"><strong>${k.billNo}</strong></span> <span class="chip" style="${SC_PURPLE}">Credit · ${k.guestName}</span>
+      <span class="amount" style="float:right">₹ ${money(k.amountPaise)}</span></div>
+    <div class="tiny">${k.paidAt ? `settled ${when(k.paidAt)} · ` : ''}no payment ✗ · counted as a sale on saving · Reports → Credit${k.madeBy ? ` · by ${k.madeBy}` : ''}</div>
+    ${canAct && k.comparisonId ? html`<div class="form-row" style="gap:6px;margin-top:4px"><button type="button" class="btn plain dchip" data-uncredit="${k.comparisonId}" data-bill="${k.billNo}">Undo</button></div>` : ''}</div>`;
   return html`<section class="card" style="gap:10px">
+    ${credit.length ? html`<div class="lane-h"><strong>Credit</strong><span class="tchip">${credit.length} · ₹ ${money(credit.reduce((t, k) => t + k.amountPaise, 0))} owed</span></div>${credit.map(creditLine)}` : ''}
     <div class="lane-h"><strong>Complimentary bills</strong><span class="tchip">${oks.length} · ₹ ${money(comp.valuePaise)} given free</span></div>
     <div class="note">Not counted as sales. Bills the software calls U/N that the register does not have wait here too, until you say how they were paid. PREPAID bills in the software and ₹0 bills come here by themselves; any other bill can be made complimentary from All bills, Cash or its details. A bill that was paid after all: choose how under "Paid by", and it moves to that tab.</div>
     ${looks.length ? html`<strong style="font-size:15px">Needs a look (${looks.length})</strong>${looks.map(line)}` : ''}
     ${oks.length ? html`${looks.length ? html`<strong style="font-size:15px">Complimentary (${oks.length})</strong>` : ''}${oks.map(line)}` : html`<div class="note">None in this shift yet.</div>`}
   </section>`;
 }
+
+/** Make credit ▾: the guest's name and the bill's type, then Save (approved 23 Nov 2026). */
+const makeCreditMenu = (l) => html`<details class="menu"><summary class="btn plain dchip">Make credit</summary><div class="menu-pop" style="min-width:220px;gap:6px">
+  <label class="tiny">Guest who owes <input type="text" data-crname value="${l.name ?? ''}" maxlength="120" placeholder="PARI"></label>
+  <div class="form-row" style="gap:6px"><button type="button" class="btn dchip" data-mkcredit="${l.comparisonId}" data-bill="${l.billNo}" data-type="fnb">Credit · F&amp;B</button>
+  <button type="button" class="btn plain dchip" data-mkcredit="${l.comparisonId}" data-bill="${l.billNo}" data-type="room">Credit · Room</button></div></div></details>`;
 
 /** Set by the Cash panel: the drawer's register editor shows what a change does to the cash (approved 14 Nov 2026). */
 let drawerCash = null;
@@ -6244,8 +6296,8 @@ function suggestionCard(c, day) {
 const SG_GROUPS = [
   ['bank', 'The bank settles it', "the bank's credit shows which side is right", ['bank_backs']],
   ['number', 'Wrong bill number', 'check the number against the photo first', ['number_typo', 'register_slip']],
-  ['written', 'Register written differently', 'the money came in another way than the register says', ['wrong_column', 'discount_not_given', 'change_in_cash', 'payment_written_wrong']],
-  ['together', 'Paid together or in parts', 'one payment for several bills, or one bill in several payments', ['one_credit_many_bills', 'paid_in_parts', 'clear_matches']],
+  ['written', 'Register written differently', 'the money came in another way than the register says', ['wrong_column', 'discount_not_given', 'change_in_cash', 'payment_written_wrong', 'split_cash_upi']],
+  ['together', 'Paid together or in parts', 'one payment for several bills, or one bill in several payments', ['one_credit_many_bills', 'paid_in_parts', 'group_parts', 'clear_matches']],
   ['same', 'Booked directly earlier', 'money booked before its bill came', ['same_sale']],
   ['nocredit', 'UPI bill, no credit in the bank', 'paid another way, or still on its way', ['no_upi_credit']],
   ['nobill', 'Money with no bill', 'a sale not written down, or money that is not a sale', ['no_bill']],
@@ -6403,7 +6455,37 @@ function bankBacksRow(c) {
       ${c.actions.map((a, i) => (a.href ? '' : html`<button class="btn ${a.primary ? '' : 'plain'} dchip" type="button" data-cardact="${c.key}" data-i="${i}">${labels[i]}</button>`)).reverse()}</div>
     <div class="form-msg"></div></div>`;
 }
+// Short cards (approved 23 Nov 2026): bill no + chip + one line of figures with ✓/✗ + short buttons.
+const SC_BLUE = 'background:#DBEAFE;color:#1E3A8A', SC_AMBER = 'background:#FEF3C7;color:#92400E', SC_PURPLE = 'background:#EDE9FE;color:#5B21B6';
+function shortCard(c, chip, colour, figures, right) {
+  const acts = c.actions.map((a, i) => (a.href ? html`<a class="btn plain dchip" href="${a.href}">${a.label}</a>`
+    : html`<button class="btn ${a.primary ? '' : 'plain'} dchip" type="button" data-cardact="${c.key}" data-i="${i}">${a.label}</button>`));
+  return html`<div class="sg-row" data-card="${c.key}" style="display:block">
+    <div><span class="mono"><strong>${(c.billNos ?? []).join(' + ')}</strong></span> <span class="chip" style="${colour}">${chip}</span>${right != null ? html`<span class="tiny" style="float:right;color:var(--muted)">auto after 10 right · ${right}/10</span>` : ''}</div>
+    <div class="tiny" style="color:var(--ink);margin-top:4px">${figures}</div>
+    <div class="form-row" style="gap:6px;margin-top:6px">${acts}<button class="btn plain dchip" type="button" data-carddismiss="${c.key}" title="Not these: hide it on this device">${c.look?.accepted ? 'Hide' : 'Not these'}</button></div>
+    <div class="form-msg"></div></div>`;
+}
+const okMark = html`<span style="color:var(--teal-ink)">✓</span>`;
+function groupPartsRow(c) {
+  const L = c.look;
+  const credits = L.parts.map((p) => `₹${rs(p.amountPaise)} ${hhmm(p.postedAt)}`);
+  const bills = L.bills.map((b) => `₹${rs(b.amountPaise)}`).join(' + ');
+  const fig = html`${credits.map((x, i) => html`${i ? ' + ' : ''}${x} ${okMark}`)} = ₹${rs(L.totalPaise)} = ${bills} ${okMark}${L.accepted ? html` · <strong>matched on save</strong>` : ''}`;
+  return shortCard(c, 'Paid in parts', SC_BLUE, fig, L.accepted ? null : L.right);
+}
+function splitRow(c) {
+  const L = c.look;
+  const word = { cash: 'cash', upi: 'UPI', card: 'card' };
+  const parts = L.pays.map((p) => `${word[p.mode] ?? p.mode} ₹${rs(p.amountPaise)}`).join(' + ');
+  const sum = L.pays.reduce((t, p) => t + p.amountPaise, 0) + L.discountPaise;
+  const fig = html`software ${word[L.software.mode] ?? L.software.mode} ₹${rs(L.software.amountPaise)} · register ${parts}${L.discountPaise ? ` + disc ₹${rs(L.discountPaise)}` : ''} = ₹${rs(sum)} ${sum === L.software.amountPaise ? okMark : html`<span class="error">✗</span>`}
+    · credit ${L.credits.map((x) => `₹${rs(x.amountPaise)} ${hhmm(x.postedAt)}`).join(' + ')} ${okMark} · no ₹${rs(L.software.amountPaise)} credit ${okMark}`;
+  return shortCard(c, 'Split cash + UPI', SC_AMBER, fig, L.right);
+}
 function sgRow(c, day, ctx) {
+  if (c.kind === 'group_parts' && c.look) return groupPartsRow(c);
+  if (c.kind === 'split_cash_upi' && c.look) return splitRow(c);
   if (c.kind === 'same_sale' && c.same) return sameSaleRow(c, ctx);
   if (c.kind === 'no_upi_credit' && c.look) return noCreditRow(c);
   if (c.kind === 'bank_backs' && c.look) return bankBacksRow(c);
@@ -6905,7 +6987,7 @@ async function reconcileView(biz, dayArg) {
   const tab0 = recKeep?.day === day && recKeep.tab ? recKeep.tab : reconcileTabPref();
   const tab = tab0 === 'comp' ? 'cash' : tab0;
   const top0 = recKeep?.day === day ? recKeep.top : 'todo';
-  const top = top0 === 'wait' || (top0 === 'comp' && !comp.lines.length) ? 'todo' : top0;
+  const top = top0 === 'wait' || (top0 === 'comp' && !(comp.lines.length || comp.credit?.length)) ? 'todo' : top0;
   recKeep = null;
   recTopNow = top;
   const reload = () => { recKeep = { day, top: recTopNow }; return reconcileView(biz, `${day}?more=${v.moreHours}`); };
@@ -7329,7 +7411,7 @@ async function reconcileView(biz, dayArg) {
     ${quietSaved ? '' : html`<div class="todo-other"><span class="note">${leftLines.length ? 'On the other tabs:' : 'Nothing left on the other tabs.'}</span>
       ${leftLines.map(([t, go]) => html`<button type="button" class="btn plain dchip" data-goto="${go}">${t} ›</button>`)}</div>`}`;
   // One row of tabs (approved 14 Nov 2026): To do · Cash · UPI · Card · All bills. Waiting and Complimentary are sections of To do.
-  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'stmt' ? 'stmt' : top === 'chg' ? 'chg' : top === 'comp' && comp.lines.length ? 'comp' : 'todo';
+  const curTab = top === 'pay' ? (['cash', 'upi', 'card'].includes(tab) ? tab : 'cash') : top === 'all' ? 'all' : top === 'stmt' ? 'stmt' : top === 'chg' ? 'chg' : top === 'comp' && (comp.lines.length || comp.credit?.length) ? 'comp' : 'todo';
   const oneTab = (key, label, n) => html`<button type="button" role="tab" data-rtab1="${key}" class="${curTab === key ? 'on' : ''}" aria-selected="${curTab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : ''}</button>`;
   const topBtn = (key, label, n) => html`<button type="button" role="tab" data-rtopbtn="${key}" class="${top === key ? 'on' : ''}" aria-selected="${top === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
   const tabBtn = (key, label, n) => html`<button type="button" role="tab" data-rtab="${key}" class="${tab === key ? 'on' : ''}" aria-selected="${tab === key}">${label}${n ? html` <span class="chip wait">${n}</span>` : html` <span class="chip ok">✓</span>`}</button>`;
@@ -7340,10 +7422,10 @@ async function reconcileView(biz, dayArg) {
       <div style="display:flex;gap:8px;align-items:center">${!r.confirmed && biz.actions.includes('sales.decide') ? html`<button class="btn" type="button" id="savehead">Save shift</button>` : ''}${P.shiftMenu}</div></div>
     <div id="recmsg"></div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
-      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${comp.lines.length ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
+      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${(comp.lines.length || comp.credit?.length) ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
     <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
     </div>
-    ${comp.lines.length ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
+    ${(comp.lines.length || comp.credit?.length) ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
     ${statementPanel(top === 'stmt')}
     ${changesPanel(top === 'chg')}
     <div data-rtop="all" ${top === 'all' ? '' : 'hidden'}>
@@ -8731,6 +8813,7 @@ function undoFor(biz, a, res) {
     return path.includes('/comparisons/') ? () => apiFull('DELETE', path, a.body) : () => apiFull('DELETE', `${base}/bank-rows/${a.body.rowId}/match`, {});
   }
   if (path.endsWith('/sales/repay')) return res?.auditId ? () => apiFull('POST', `${base}/sales/repay/${res.auditId}/undo`, {}) : null;
+  if (path.endsWith('/group-parts')) return res?.auditId ? () => apiFull('POST', `${base}/group-parts/${res.auditId}/undo`, {}) : null;
   if (!path.includes('/bank-rows/')) return null;
   const inPath = path.match(/\/bank-rows\/([0-9a-f-]{36})\//)?.[1];
   const ids = [...(a.body?.ids ?? []), ...(a.body?.rowIds ?? []), ...(a.body?.rowId ? [a.body.rowId] : []), ...(inPath ? [inPath] : [])];
@@ -9457,16 +9540,33 @@ document.addEventListener('click', async (e) => {
   const lo = e.target.closest?.('[data-leaveunk]');
   const sw = e.target.closest?.('[data-cashswitch]');
   const pl = e.target.closest?.('[data-paidlater2]');
-  if (!mk && !pb && !lo && !sw && !pl) return;
+  const kr = e.target.closest?.('[data-mkcredit]');
+  const ku = e.target.closest?.('[data-uncredit]');
+  if (!mk && !pb && !lo && !sw && !pl && !kr && !ku) return;
   e.preventDefault(); e.stopPropagation();
   // One click at a time (17 Nov 2026): the button stays off until the change is saved, so it is never sent twice.
-  const btn = mk ?? pb ?? lo ?? sw ?? pl;
+  const btn = mk ?? pb ?? lo ?? sw ?? pl ?? kr ?? ku;
   if (btn.dataset.busy) return;
   btn.dataset.busy = '1'; btn.disabled = true;
   const bizId = currentBizId();
   const reload = async () => { await (drawerReload ?? route)(); if (document.getElementById('billdrawer') && drawerReopen) await drawerReopen(); };
   const where = document.getElementById('recmsg') ?? document.getElementById('rmsg') ?? document.getElementById('allmsg');
   try {
+    if (kr) {
+      const name = (kr.closest('.menu-pop')?.querySelector('[data-crname]')?.value ?? '').trim();
+      if (!name) { kr.closest('.menu-pop')?.querySelector('[data-crname]')?.focus(); return; }
+      const id = kr.dataset.mkcredit;
+      await apiFull('POST', `/businesses/${bizId}/comparisons/${id}/credit`, { guestName: name, billType: kr.dataset.type });
+      await reload();
+      doneToast(`Bill ${kr.dataset.bill}: credit, ${name} owes it. Counted as a sale on saving.`, async () => { await apiFull('DELETE', `/businesses/${bizId}/comparisons/${id}/credit`, {}); }, reload);
+      return;
+    }
+    if (ku) {
+      await apiFull('DELETE', `/businesses/${bizId}/comparisons/${ku.dataset.uncredit}/credit`, {});
+      await reload();
+      doneToast(`Bill ${ku.dataset.bill}: no longer credit.`, null, reload);
+      return;
+    }
     if (pl) {
       const id = pl.dataset.paidlater2;
       await apiFull('POST', `/businesses/${bizId}/comparisons/${id}/paid-later`, {});

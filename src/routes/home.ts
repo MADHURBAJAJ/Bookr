@@ -8,6 +8,7 @@ import { NEEDS_DECISION, NOT_BILLED_NOTE, WATCH_DAYS } from '../sales';
 import { waitingPicture } from '../waiting';
 import { booksStart } from '../bank';
 import { shiftCards, unsettledDays } from '../cards';
+import { creditList } from '../credit';
 import { cashCheck } from '../cash';
 import { cardReportsStatus } from '../cardDrive';
 import { daysWithoutReport } from '../reportDays';
@@ -106,6 +107,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     cards: null as null | { days: number; netPaise: number; oldestDay: string | null },
     cash: null as null | { day: string; differencePaise: number | null; counted: boolean }[],
     photos: null as null | { count: number; paise: number; pages: { uploadId: string; day: string; count: number; paise: number }[] },
+    // Credit bills still owed 30 days or more after their bill (approved 23 Nov 2026), in red.
+    creditRed: [] as { guestName: string; amountPaise: number; days: number; billNo: string }[],
   };
 
   // The shift that ended at 8 am this morning, while its files are still missing (Today, approved 14 Nov 2026).
@@ -180,7 +183,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     result.photos = { count: pages.reduce((t, p) => t + p.count, 0), paise: pages.reduce((t, p) => t + p.paise, 0), pages };
   }
   })();
-  const [list, notBilled, [sw, reg, saved]] = await Promise.all([listP, notBilledP, bringInP, bankP, decideP, approveP, missingP]);
+  const creditP = (async () => { result.creditRed = (await creditList(db, businessId)).red; })();
+  const [list, notBilled, [sw, reg, saved]] = await Promise.all([listP, notBilledP, bringInP, bankP, decideP, approveP, missingP, creditP]);
   const open = list.filter((s) => s.status !== 'confirmed' || (s.bank && s.bank.billsLeft + s.bank.creditsLeft + s.bank.cardsLeft > 0));
   // Every shift to finish, for the strip of days on Today (18 Nov 2026).
   result.shifts = { count: open.length, list: open.slice(0, MAX_SHIFTS) };

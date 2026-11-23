@@ -27,6 +27,13 @@ const rejected = (x: { a: number | null; b: number | null; difference: string; d
   x.a != null && x.b != null && x.a !== x.b && x.difference !== 'match' && x.difference !== 'complimentary' && (x.decision === 'use_register' || x.decision === 'use_software')
     ? (x.decision === 'use_register' ? x.a : x.b) : null;
 
+/** How many in a row a person accepted since the last Undo of this kind, up to 10 ("auto after 10 right · n/10"). */
+export async function learnedRight(db: DB, businessId: string, action: string, undone: string) {
+  const r = await all<{ n: number }>(db, `SELECT count(*) AS n FROM audit_log WHERE business_id = ? AND action = ?
+    AND id > coalesce((SELECT max(id) FROM audit_log WHERE business_id = ? AND action = ?), 0)`, businessId, action, businessId, undone);
+  return Math.min(10, r[0]?.n ?? 0);
+}
+
 /** Likely: a credit and a bill of the same amount up to three hours apart that the clear pairing did not take. */
 export async function reconcileShift(db: DB, businessId: string, day: string) {
   const w = shiftWindow(day);
@@ -254,14 +261,31 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
   // Bills paid together have one credit for the whole group: the one Compare sales shows on the group's line, which
   // confirming matches (the same pairing everywhere).
   const groupsFit = new Set<string>();
+  const cards: Card[] = [];
+  const partsRight = await learnedRight(db, businessId, 'bank.group_parts', 'bank.group_parts_undone');
   for (const g of view.paidGroups) {
+    const parts = g.bank && 'parts' in g.bank ? g.bank.parts : undefined;
+    if (g.bank && parts) {
+      // Paid in parts (approved 23 Nov 2026): offered; Match all makes it a match on save.
+      parts.forEach((p) => used.add(p.creditId));
+      groupsFit.add(g.id);
+      const members = view.comparisons.filter((c) => c.groupId === g.id);
+      const accepted = 'accepted' in g.bank && !!g.bank.accepted;
+      cards.push({ key: `group-parts:${g.id}:${parts.map((p) => p.creditId).join(',')}`, kind: 'group_parts', billNos: g.billNos,
+        title: `Bills ${g.billNos.join(' + ')} paid in ${parts.length} parts`, evidence: [], score: 85, uses: parts.map((p) => `cr:${p.creditId}`), witnesses: undefined,
+        look: { accepted, right: partsRight, parts: parts.map((p) => ({ amountPaise: p.amountPaise, postedAt: p.postedAt })), totalPaise: g.bank.amountPaise,
+          bills: members.map((c) => ({ billNo: c.billNo, amountPaise: (c.register?.amountPaise ?? c.software?.amountPaise ?? 0) as number })) },
+        actions: accepted ? [{ label: 'Undo', method: 'POST', path: `/businesses/${businessId}/group-parts/${'acceptId' in g.bank ? g.bank.acceptId : ''}/undo`, body: {} }]
+          : [{ label: 'Match all', method: 'POST', path: `/businesses/${businessId}/shifts/${day}/group-parts`, primary: true,
+            body: { headId: g.id, creditIds: parts.map((p) => p.creditId) } }] });
+      continue;
+    }
     if (g.bank && !used.has(g.bank.creditId)) { used.add(g.bank.creditId); groupsFit.add(g.id); }
   }
   const settled = new Set(used);
   const headOf = (id: string | null | undefined) => rows.find((r) => r.id === id)?.paidWith ?? id ?? null;
   const left = bills.filter((b) => !chosen.has(b.c.id) && !b.c.bank && !(b.grouped && groupsFit.has(headOf(b.c.register?.rowId) as string)));
   const billOf = new Set<string>();
-  const cards: Card[] = [];
 
   // A number one slip from a software bill, with a credit that fits: correct the row now, while edits are free.
   const softwareOnly = view.comparisons.filter((c) => c.difference === 'missing_in_register' && c.software && c.decision !== 'leave_out');
@@ -287,8 +311,24 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
     }
   }
 
+  // Split cash + UPI against one software mode (approved 23 Nov 2026): the UPI part's credit came (up to 3 h before the
+  // bill was closed) and no credit of the whole amount did, so the register's split is right.
+  const isSplit = (c: typeof view.comparisons[number]) => !!c.bank?.parts && c.register?.mode === 'mixed' && !!c.software && c.software.mode !== 'mixed' && c.software.mode !== 'unknown'
+    && c.bank.suggest === 'use_register';
+  const splitRight = Math.min(10, (await all<{ n: number }>(db, `SELECT count(*) AS n FROM audit_log WHERE business_id = ? AND action = 'comparison.decide' AND after LIKE '%Split cash + UPI%'`, businessId))[0]?.n ?? 0);
+  for (const b of bills.filter((x) => isSplit(x.c) && !x.c.decision)) {
+    const pays = paysOf(b.c.register!.rowId as string);
+    cards.push({ key: `split:${b.c.id}`, kind: 'split_cash_upi', billNos: [b.c.billNo], title: `Bill ${b.c.billNo}: split cash + UPI`, evidence: [], score: 82,
+      uses: [`cmp:${b.c.id}`, ...b.c.bank!.parts!.map((p) => `cr:${p.creditId}`)],
+      look: { right: splitRight, software: { amountPaise: b.c.software!.amountPaise, mode: b.c.software!.mode },
+        pays: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise })), discountPaise: (b.c.register!.discountPaise as number) ?? 0,
+        credits: b.c.bank!.parts!.map((p) => ({ amountPaise: p.amountPaise, postedAt: p.postedAt })) },
+      actions: [{ label: 'Use register', primary: true, method: 'PUT', path: `${base}/comparisons/${b.c.id}`, body: { decision: 'use_register', note: 'Split cash + UPI: the UPI part is in the bank' } },
+        ...(b.c.register?.uploadId ? [{ label: 'Open', href: `#/b/${businessId}/review/${b.c.register.uploadId}/${b.c.register.rowId}` }] : [])] });
+  }
+
   // The bank settles a difference between the software and the register.
-  for (const b of bills.filter((x) => x.c.bank?.suggest && !x.c.decision)) {
+  for (const b of bills.filter((x) => x.c.bank?.suggest && !x.c.decision && !isSplit(x.c))) {
     const useSoftware = b.c.bank!.suggest === 'use_software';
     cards.push({ key: `trial-bank:${b.c.id}`, kind: 'bank_backs', billNos: [b.c.billNo], title: `Bill ${b.c.billNo}: the bank agrees with the ${useSoftware ? 'software' : 'register'}`,
       evidence: [`A UPI credit of ${rs(b.c.bank!.amountPaise)} came in at ${hm(b.c.bank!.postedAt)}.`], score: 80, uses: [`cmp:${b.c.id}`, `cr:${b.c.bank!.creditId}`],

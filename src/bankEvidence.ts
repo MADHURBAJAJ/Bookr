@@ -44,6 +44,11 @@ export interface Evidence {
   byNote?: boolean;
 }
 
+/** A bill the register splits (cash + UPI) where the software has one mode, for a different amount than the UPI part. */
+export const splitBill = (b: EvidenceBill) => !!b.swMode && b.swMode !== 'mixed' && b.swMode !== 'unknown' && b.rgMode === 'mixed'
+  && (b.difference === 'mode' || b.difference === 'amount_and_mode');
+/** How far before the bill's time the UPI part of a split cash + UPI bill is looked for (approved 23 Nov 2026). */
+export const SPLIT_BACK_MIN = 180;
 /** A guest splitting one payment: credits this close together, two or three of them. */
 const SPLIT_SPAN_MIN = 30;
 /** A UPI note naming a bill is believed this far from the bill's time (a guest paying ahead, or late). */
@@ -152,8 +157,11 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     if (!b.parts?.length || out.has(b.id) || b.grouped || b.decision === 'leave_out' || b.decision === 'carry_forward') continue;
     const picks: { c: EvidenceCredit; minutes: number | null }[] = [];
     for (const amount of [...b.parts].sort((x, y) => y - x)) {
+      // Split cash + UPI against one software mode (approved 23 Nov 2026): the guest pays the UPI part first, often well
+      // before the bill is closed, so that part looks back SPLIT_BACK_MIN.
+      const back = (splitBill(b) ? SPLIT_BACK_MIN : NEAR_MIN) * 60000;
       const fits = credits.filter((c) => c.amount === amount && !used.has(c.id) && !picks.some((x) => x.c.id === c.id) && labelFits(b.labels ?? null, c.label ?? null)
-        && (b.paidAt != null ? Math.abs(c.postedAt - b.paidAt) <= NEAR_MIN * 60000 : c.postedAt >= window.from && c.postedAt < window.to + 3600e3));
+        && (b.paidAt != null ? c.postedAt >= b.paidAt - back && c.postedAt <= b.paidAt + NEAR_MIN * 60000 : c.postedAt >= window.from && c.postedAt < window.to + 3600e3));
       if (b.paidAt == null && fits.length !== 1) break;
       const best = fits.map((c) => ({ c, minutes: b.paidAt != null ? Math.round(Math.abs(c.postedAt - b.paidAt) / 60000) : null }))
         .sort((x, y) => (x.minutes ?? 0) - (y.minutes ?? 0))[0];
@@ -247,6 +255,46 @@ export function pairGroups(groups: { id: string; upiPaise: number; labels: strin
     if (!g.upiPaise) continue;
     const c = credits.find((x) => !taken.has(x.id) && x.amount === g.upiPaise && x.postedAt >= window.from && x.postedAt < window.to + 3600e3 && labelFits(g.labels, x.label ?? null));
     if (c) { taken.add(c.id); out.set(g.id, c); }
+  }
+  return out;
+}
+
+/** Credits paying one group in parts lie within this span of each other (approved 23 Nov 2026). */
+export const GROUP_PARTS_SPAN_MIN = 120;
+/**
+ * Bills paid together, paid in parts (approved 23 Nov 2026, 26111139 + 26111130 = ₹6,000 + ₹4,434): a group with no
+ * one credit of its UPI total takes two to four free credits in the shift that add up to it exactly, within
+ * GROUP_PARTS_SPAN_MIN of each other, when that is the only such set and no other group could take any of them, and
+ * none is an amount a bill of the shift still wants. Offered only: a person presses Match all.
+ */
+export function pairGroupParts(groups: { id: string; upiPaise: number; labels: string | null }[], credits: EvidenceCredit[], taken: Set<string>,
+  window: { from: number; to: number }, wanted: Set<number>) {
+  const pool = credits.filter((c) => !taken.has(c.id) && !c.machine && !wanted.has(c.amount) && c.postedAt >= window.from && c.postedAt < window.to + 3600e3);
+  const sets = new Map<string, EvidenceCredit[][]>();
+  for (const g of groups) {
+    if (!g.upiPaise) continue;
+    const mine = pool.filter((c) => c.amount < g.upiPaise && labelFits(g.labels, c.label ?? null)).slice(0, 24);
+    const found: EvidenceCredit[][] = [];
+    const walk = (start: number, pick: EvidenceCredit[], sum: number) => {
+      if (pick.length >= 2 && sum === g.upiPaise) { found.push([...pick]); return; }
+      if (pick.length === 4 || found.length > 1) return;
+      for (let i = start; i < mine.length; i++) {
+        if (sum + mine[i].amount > g.upiPaise) continue;
+        pick.push(mine[i]);
+        walk(i + 1, pick, sum + mine[i].amount);
+        pick.pop();
+      }
+    };
+    walk(0, [], 0);
+    const tight = found.filter((set) => { const ts = set.map((c) => c.postedAt); return Math.max(...ts) - Math.min(...ts) <= GROUP_PARTS_SPAN_MIN * 60000; });
+    if (tight.length) sets.set(g.id, tight);
+  }
+  const out = new Map<string, EvidenceCredit[]>();
+  for (const [id, mine] of sets) {
+    if (mine.length !== 1) continue;
+    const ids = new Set(mine[0].map((c) => c.id));
+    if ([...sets].some(([other, s]) => other !== id && s.some((set) => set.some((c) => ids.has(c.id))))) continue;
+    out.set(id, [...mine[0]].sort((x, y) => x.postedAt - y.postedAt));
   }
   return out;
 }

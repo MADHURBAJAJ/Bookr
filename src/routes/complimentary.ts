@@ -9,6 +9,7 @@ import { complimentaryMarks, isPrepaid, NEEDS_DECISION, refreshComparisons } fro
 import { shiftCredits } from '../bankEvidence';
 import { isMachineUpi, machineLabel } from '../cards';
 import { can } from '../permissions';
+import { creditList, creditOf, payStatements, unpayStatements } from '../credit';
 
 export const complimentaryRoutes = new Hono<AppEnv>();
 const CONFIRMED = 'This shift is saved. An Owner must reopen it first.';
@@ -41,12 +42,16 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
       (SELECT count(*) FROM register_rows x WHERE x.paid_with_row_id = r.id) AS members
     FROM bill_comparisons c LEFT JOIN software_bills s ON s.id = c.software_bill_id LEFT JOIN register_rows r ON r.id = c.register_row_id
     WHERE c.business_id = ? AND c.shift_day = ? ORDER BY c.bill_no`, bid, day), complimentaryMarks(db, bid, day)]);
+  const credits = await all<{ id: string; bill_no: string; guest_name: string; amount_paise: number; by: string | null; made_at: number }>(db,
+    'SELECT k.id, k.bill_no, k.guest_name, k.amount_paise, u.name AS by, k.made_at FROM credit_bills k LEFT JOIN users u ON u.id = k.made_by WHERE k.business_id = ? AND k.shift_day = ? ORDER BY k.bill_no', bid, day);
+  const creditNos = new Set(credits.map((k) => k.bill_no));
   const lines = rows.flatMap((r) => {
     const prepaid = isPrepaid(r.mode_text);
     const mark = marks.get(r.bill_no);
     const comp = r.difference === 'complimentary';
     // U/N in the software and not in the register (approved 14 Nov 2026): nobody knows how it was paid, so a person says:
     // paid by Cash, UPI or Card, complimentary, or left out.
+    if (creditNos.has(r.bill_no)) return [];
     if (r.difference === 'missing_in_register' && r.sw_mode === 'unknown' && !r.decision && !prepaid && !mark) {
       return [{
         comparisonId: r.id, billNo: r.bill_no, why: 'unknown', status: 'look', paidAt: r.paid_at,
@@ -93,7 +98,103 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
       o.l.hint = { mode: o.mode, text: `${o.text}, ${Math.round(o.gap / 60000)} min from the bill` };
     }
   }
-  return c.json({ day, lines, valuePaise: lines.filter((l) => l.status === 'ok').reduce((t, l) => t + (l.valuePaise ?? 0), 0) });
+  const byNo = new Map(rows.map((r) => [r.bill_no, r]));
+  return c.json({ day, lines, valuePaise: lines.filter((l) => l.status === 'ok').reduce((t, l) => t + (l.valuePaise ?? 0), 0),
+    credit: credits.map((k) => ({ id: k.id, comparisonId: byNo.get(k.bill_no)?.id ?? null, billNo: k.bill_no, guestName: k.guest_name, amountPaise: k.amount_paise,
+      madeBy: k.by, madeAt: k.made_at, paidAt: byNo.get(k.bill_no)?.paid_at ?? null })) });
+});
+
+/**
+ * Make credit (approved 23 Nov 2026): a U/N bill not in the register that the guest will pay later. Counted as a sale
+ * with no payment mode when the shift is saved; listed on Reports → Credit until its money is matched.
+ */
+complimentaryRoutes.post('/businesses/:businessId/comparisons/:id/credit', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const cmp = await comparison(db, bid, c.req.param('id'));
+  const data = await body(c);
+  const guest = text(data, 'guestName', 'Guest name', { max: 120 })!;
+  const billType = data.billType === 'room' ? 'room' : data.billType === 'fnb' ? 'fnb' : fail(400, 'Choose F&B or Room.');
+  if (cmp.difference !== 'missing_in_register' || cmp.sw_mode !== 'unknown' || cmp.register_row_id) fail(400, `Bill ${cmp.bill_no} is not a U/N bill that only the software has.`);
+  if (cmp.decision) fail(409, `Bill ${cmp.bill_no} is already decided: undo that first.`);
+  if (!cmp.sw_amount_paise) fail(400, `Bill ${cmp.bill_no} has no amount in the software.`);
+  const user = c.get('user').id;
+  const t = now();
+  const id = newId();
+  try {
+    await db.batch([
+      stmt(db, 'INSERT INTO credit_bills (id, business_id, shift_day, bill_no, guest_name, amount_paise, made_by, made_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        id, bid, cmp.shift_day, cmp.bill_no, guest, cmp.sw_amount_paise, user, t),
+      stmt(db, "UPDATE bill_comparisons SET decision = 'use_software', decided_by = ?, decided_at = ?, note = ?, bill_type = ? WHERE id = ?", user, t, `Credit: ${guest}`, billType, cmp.id),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'bill.credit', 'bill_comparisons', ?, NULL, ?, ?)`,
+        bid, user, cmp.id, JSON.stringify({ creditId: id, guestName: guest, billType, amountPaise: cmp.sw_amount_paise, changes: `Made credit: ${guest} owes ${rs(cmp.sw_amount_paise!)}` }), t),
+    ]);
+  } catch (e) {
+    if (isShiftConfirmed(e)) fail(409, CONFIRMED);
+    if (/UNIQUE/i.test(String(e))) fail(409, `Bill ${cmp.bill_no} is already credit.`);
+    throw e;
+  }
+  return c.json({ ok: true, id });
+});
+
+complimentaryRoutes.delete('/businesses/:businessId/comparisons/:id/credit', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const cmp = await comparison(db, bid, c.req.param('id'));
+  const k = await one<{ id: string; guest_name: string }>(db, 'SELECT id, guest_name FROM credit_bills WHERE business_id = ? AND shift_day = ? AND bill_no = ?', bid, cmp.shift_day, cmp.bill_no);
+  if (!k) fail(400, `Bill ${cmp.bill_no} is not credit.`);
+  try {
+    await db.batch([
+      stmt(db, 'DELETE FROM credit_bills WHERE id = ?', k!.id),
+      stmt(db, "UPDATE bill_comparisons SET decision = NULL, decided_by = NULL, decided_at = NULL, note = NULL, bill_type = NULL WHERE id = ? AND note LIKE 'Credit: %'", cmp.id),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'bill.credit_undone', 'bill_comparisons', ?, ?, ?, ?)`,
+        bid, c.get('user').id, cmp.id, JSON.stringify({ guestName: k!.guest_name }), JSON.stringify({ changes: `No longer credit (was ${k!.guest_name})` }), now()),
+    ]);
+  } catch (e) { if (isShiftConfirmed(e)) fail(409, CONFIRMED); throw e; }
+  return c.json({ ok: true });
+});
+
+/** Reports → Credit: who owes what, for how long, and credits that may be their money. */
+complimentaryRoutes.get('/businesses/:businessId/reports/credit', requireRole('reports.view'), async (c) => {
+  const list = await creditList(c.env.DB, c.get('businessId'));
+  // The bank is shown only to people who can match it.
+  if (!can(c.get('role'), 'bank.link')) list.lines.forEach((l) => { l.offers = []; });
+  return c.json(list);
+});
+
+/** The guest's money came: this free UPI credit pays the credit bill. A person presses Match; never by itself. */
+complimentaryRoutes.post('/businesses/:businessId/credit-bills/:id/pay', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const data = await body(c);
+  const rowId = typeof data.bankRowId === 'string' && isUuid(data.bankRowId) ? data.bankRowId : fail(400, 'Choose the bank credit.');
+  const k = await creditOf(db, bid, id);
+  if (!k) fail(404, 'Not found.');
+  if (!k!.tx_id) fail(409, `Save the shift of ${k!.shift_day} first: bill ${k!.bill_no} is counted as a sale then.`);
+  if (k!.paid_row) fail(409, `Bill ${k!.bill_no} is already paid.`);
+  const row = await one<{ kind: string; direction: string; status: string; amount_paise: number }>(db,
+    'SELECT kind, direction, status, amount_paise FROM bank_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  if (!row) fail(404, 'Bank line not found.');
+  if (row!.kind !== 'upi_in' || row!.direction !== 'CR' || row!.status !== 'unmatched') fail(409, 'Choose an open UPI credit.');
+  if (row!.amount_paise !== k!.amount_paise) fail(409, `The credit is ${rs(row!.amount_paise)}; ${k!.guest_name} owes ${rs(k!.amount_paise)}.`);
+  await db.batch(payStatements(db, bid, k!, rowId, newId(), c.get('user').id, now()));
+  const after = await creditOf(db, bid, id);
+  if (!after?.paid_row) fail(409, 'That credit was just used elsewhere: reload.');
+  return c.json({ ok: true });
+});
+
+complimentaryRoutes.post('/businesses/:businessId/credit-bills/:id/unpay', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const k = await creditOf(db, bid, id);
+  if (!k) fail(404, 'Not found.');
+  if (!k!.paid_row) return c.json({ ok: true, unchanged: true });
+  await db.batch(unpayStatements(db, bid, k!, c.get('user').id, now()));
+  return c.json({ ok: true });
 });
 
 /** Make a bill complimentary: the guest's name is asked (approved 14 Nov 2026). Also records the guest on a PREPAID or ₹0 bill. */

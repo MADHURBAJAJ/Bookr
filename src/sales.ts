@@ -4,7 +4,7 @@
 
 import { remember } from './memo';
 import { cardMatchStatements, isMachineUpi, machineLabel, machineUpiPayments, machineUpiStatements } from './cards';
-import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroups, shiftCredits, type Evidence, type EvidenceBill, type EvidenceCredit } from './bankEvidence';
+import { bankIn, creditsWithoutBill, FAR_BACK_MIN, nearGroup, pairEvidence, pairGroupParts, pairGroups, shiftCredits, type Evidence, type EvidenceBill, type EvidenceCredit } from './bankEvidence';
 import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
@@ -574,6 +574,35 @@ export async function creditsForShift(db: DB, businessId: string, day: string) {
   return credits.filter((c) => !used.has(c.id));
 }
 
+/**
+ * Match all on a group paid in parts (approved 23 Nov 2026): audit 'bank.group_parts' on the group's head row with the
+ * credits; Undo adds 'bank.group_parts_undone' with row_id = that audit's id. The latest not undone counts.
+ */
+export async function groupPartsAccepted(db: DB, businessId: string, headIds: string[]) {
+  const rows = await all<{ id: number; row_id: string; after: string }>(db, `SELECT a.id, a.row_id, a.after FROM audit_log a WHERE a.business_id = ? AND a.action = 'bank.group_parts'
+    AND a.row_id IN (${headIds.map(() => '?').join(',')})
+    AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'bank.group_parts_undone' AND x.row_id = CAST(a.id AS TEXT)) ORDER BY a.id`, businessId, ...headIds);
+  return new Map(rows.map((r) => [r.row_id, { id: r.id, creditIds: (JSON.parse(r.after) as { creditIds: string[] }).creditIds }]));
+}
+
+/** Shares credits over sales in order, each sale taking what it still needs (a group paid in parts). */
+export function allocateParts(credits: { id: string; amount: number }[], sales: { id: string; amount: number }[]) {
+  const due = sales.map((x) => ({ ...x, left: x.amount }));
+  return credits.map((c) => {
+    let have = c.amount;
+    const txs: { id: string; amount: number }[] = [];
+    for (const x of due) {
+      if (!have) break;
+      const take = Math.min(have, x.left);
+      if (take <= 0) continue;
+      txs.push({ id: x.id, amount: take });
+      x.left -= take;
+      have -= take;
+    }
+    return { creditId: c.id, txs };
+  });
+}
+
 /** Everything the Compare sales screen shows for one shift, plus what still blocks confirming it. */
 export async function shiftView(db: DB, businessId: string, day: string) {
   // Reads that need only the day start now, beside the first batch (fewer trips to the database, one after another).
@@ -725,6 +754,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const upiOf = (g: PaidGroup) => (written.get(g.headId) ?? []).filter((p) => p.mode === 'upi');
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
   let groupCredits = new Map<string, EvidenceCredit>();
+  let groupParts = new Map<string, EvidenceCredit[]>();
+  const partsOk = groups.length ? await groupPartsAccepted(db, businessId, groups.map((g) => g.headId)) : new Map<string, { id: number; creditIds: string[] }>();
   const near = new Map<string, { creditId: string; amountPaise: number; postedAt: number; label: string | null; minutes: number }>();
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: OpenCredit[] } | null = null;
   if (shift?.status !== 'confirmed') {
@@ -736,12 +767,17 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     const ebills = evidenceBills(comparisons, grouped, paysByRow);
     const { evidence, used } = pairEvidence(ebills, witnesses, cov.window);
     groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), witnesses, used, cov.window);
+    // Paid in parts (approved 23 Nov 2026): a group with no one credit, paid in two to four.
+    const stillWanted = new Set(comparisons.filter((c) => !evidence.has(c.id) && !(c.register_row_id && grouped.has(c.register_row_id)) && c.decision !== 'leave_out' && c.decision !== 'carry_forward')
+      .flatMap((c) => [c.sw_mode === 'upi' ? c.sw_amount_paise : null, c.rg_mode === 'upi' ? c.rg_amount_paise : null]).filter((x): x is number => x != null));
+    groupParts = pairGroupParts(groups.filter((g) => !groupCredits.has(g.headId)).map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })),
+      witnesses, new Set([...used, ...[...groupCredits.values()].map((c) => c.id)]), cov.window, stillWanted);
     // Every credit in the shift no bill or group took: what a register slip may explain (see slips.ts).
-    const taken = new Set([...used, ...[...groupCredits.values()].map((c) => c.id)]);
+    const taken = new Set([...used, ...[...groupCredits.values()].map((c) => c.id), ...[...groupParts.values()].flat().map((c) => c.id)]);
     // Not matched yet (approved 8 Nov 2026): the one count Compare and Reconcile both show, before anything explains them.
     // Why each did not pair (approved 8 Nov 2026): no bill of its amount; every bill of its amount already has a credit
     // (extra money of a common amount); or bills of its amount still without a credit, told with their times.
-    const noBillIds = new Set(creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)).map((c) => c.id));
+    const noBillIds = new Set(creditsWithoutBill(credits, new Set([...used, ...[...groupParts.values()].flat().map((c) => c.id)]), ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)).map((c) => c.id));
     const upiBills = comparisons.filter((c) => c.decision !== 'leave_out' && c.decision !== 'carry_forward' && !(c.register_row_id && grouped.has(c.register_row_id)));
     const open: OpenCredit[] = credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to).map((x) => {
       const base = { id: x.id, amount: x.amount, postedAt: x.postedAt };
@@ -803,7 +839,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       near.set(c.id, { creditId: fit.id, amountPaise: fit.amount, postedAt: fit.postedAt, label: fit.label ?? null, minutes: Math.round(Math.abs(fit.postedAt - c.paid_at) / 60000) });
     }
     const left = cov2.covered ? credits.filter((c) => !taken.has(c.id) && c.postedAt >= cov.window.from && c.postedAt < cov.window.to).map((c) => c.id) : [];
-    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, used, ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left, noUpi, open };
+    bank = { ...cov2, evidence, noBill: cov2.covered ? creditsWithoutBill(credits, new Set([...used, ...[...groupParts.values()].flat().map((c) => c.id)]), ebills, cov.window, groups.filter((g) => g.modes.includes('upi')).map(upiTotal)) : [], left, noUpi, open };
   }
 
   // The card machine as a witness too (approved 9 Nov 2026): a mode difference where one side says card, and the card
@@ -924,8 +960,14 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     paidGroups: groups.map((g) => {
       const members = comparisons.filter((c) => c.register_row_id && g.rowIds.includes(c.register_row_id));
       const matched = members.length === g.rowIds.length && members.every((c) => c.difference === 'match');
+      const parts = groupParts.get(g.headId);
+      const ok = parts ? partsOk.get(g.headId) : undefined;
       return { id: g.headId, billNos: g.billNos, softwarePaise: members.reduce((t, c) => t + (c.sw_amount_paise ?? 0), 0), grossPaise: g.grossPaise, paidPaise: g.paidPaise,
-        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { creditId: groupCredits.get(g.headId)!.id, amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt, machine: groupCredits.get(g.headId)!.machine ?? null } : null, matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
+        modes: g.modes, upiPaise: upiTotal(g), bank: groupCredits.has(g.headId) ? { creditId: groupCredits.get(g.headId)!.id, amountPaise: groupCredits.get(g.headId)!.amount, postedAt: groupCredits.get(g.headId)!.postedAt, machine: groupCredits.get(g.headId)!.machine ?? null }
+          : parts ? { creditId: parts[0].id, amountPaise: parts.reduce((t, c) => t + c.amount, 0), postedAt: parts[0].postedAt, machine: null,
+            parts: parts.map((c) => ({ creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt })),
+            accepted: !!ok && ok.creditIds.length === parts.length && parts.every((c) => ok.creditIds.includes(c.id)), acceptId: ok?.id ?? null } : null,
+        matched, why: matched ? null : groupMismatch(g, members) ?? 'Differences bill by bill' };
     }),
     totals,
     unknownModePaise: unknownPaise,
@@ -940,13 +982,15 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   };
 }
 
-export interface NewRow { amount: number; mode: 'cash' | 'upi' | 'card'; billType: string; source: 'software' | 'register' | 'both_matched'; c: Comparison }
+export interface NewRow { amount: number; mode: 'cash' | 'upi' | 'card' | 'credit'; billType: string; source: 'software' | 'register' | 'both_matched'; c: Comparison }
 
 /** The income rows confirmation would create. The app follows each decision; it never picks a side. */
 export async function plannedRows(db: DB, businessId: string, day: string): Promise<NewRow[]> {
   const { rg, written, paysByRow, groups } = await loadShiftData(db, businessId, day);
   const rgById = new Map(rg.map((r) => [r.id, r]));
   const comps = await all<Comparison>(db, 'SELECT * FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day);
+  // Credit bills (approved 23 Nov 2026): a U/N bill made credit is a sale with no payment mode yet.
+  const credit = new Set((await all<{ bill_no: string }>(db, 'SELECT bill_no FROM credit_bills WHERE business_id = ? AND shift_day = ?', businessId, day)).map((x) => x.bill_no));
   const rows: NewRow[] = [];
   // A group matched on a software total equal to the payment books the software's figure for each bill, so Room and F&B
   // split as billed. When the software lacks the discount its figures add up to more than was paid, so the register's are booked.
@@ -970,7 +1014,7 @@ export async function plannedRows(db: DB, businessId: string, day: string): Prom
     if (asBilled.has(c.id)) for (const p of asBilled.get(c.id)!) rows.push({ amount: p.amount_paise, mode: p.mode as NewRow['mode'], billType, source: 'both_matched', c });
     else if (c.difference === 'match') fromRegister(c.sw_amount_paise === c.rg_amount_paise ? 'both_matched' : 'register');
     else if (c.decision === 'use_register') fromRegister('register');
-    else if (c.decision === 'use_software') rows.push({ amount: c.sw_amount_paise!, mode: c.sw_mode as NewRow['mode'], billType, source: 'software', c });
+    else if (c.decision === 'use_software') rows.push({ amount: c.sw_amount_paise!, mode: c.sw_mode === 'unknown' && credit.has(c.bill_no) ? 'credit' : c.sw_mode as NewRow['mode'], billType, source: 'software', c });
   }
   return rows;
 }
@@ -1016,7 +1060,7 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
       payment_mode, bill_no, pos_no, confirmed_source, comparison_id, shift_day, match_status, ocr_original, created_at)
       VALUES (?, ?, ?, ?, ?, 'income', ?, ?, 'software_report', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ids[i], businessId, r.mode === 'cash' ? cashAccount : null, day, r.amount, headFor.get(r.billType) ?? null,
-      `Bill ${r.c.bill_no}`, onCredit(r) ? 'reviewed' : 'approved', r.mode, r.c.bill_no, r.c.pos_no || null, r.source, r.c.id, day,
+      r.mode === 'credit' ? `Bill ${r.c.bill_no} · credit` : `Bill ${r.c.bill_no}`, onCredit(r) ? 'reviewed' : 'approved', r.mode === 'credit' ? null : r.mode, r.c.bill_no, r.c.pos_no || null, r.source, r.c.id, day,
       r.mode === 'upi' ? 'awaiting_bank_match' : r.mode === 'card' ? 'awaiting_card_settlement' : null,
       onCredit(r) ? JSON.stringify({ countOnCredit: true }) : null, t)),
     stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
@@ -1129,6 +1173,15 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     const upi = rows.map((r, i) => ({ id: ids[i], amount: r.amount, r })).filter((x) => x.r.mode === 'upi' && x.r.c.register_row_id && paidWith.get(x.r.c.register_row_id) === g.id);
     if (upi.some((x) => chosen.has(x.r.c.id))) continue;
     if (!upi.length || upi.reduce((a, x) => a + x.amount, 0) !== g.bank.amountPaise) continue;
+    // Paid in parts: only once a person pressed Match all; each credit pays the sales in turn.
+    if ('parts' in g.bank && g.bank.parts) {
+      if (!g.bank.accepted) continue;
+      for (const a of allocateParts(g.bank.parts.map((p) => ({ id: p.creditId, amount: p.amountPaise })), upi.map(({ id, amount }) => ({ id, amount })))) {
+        statements.push(...confirmMatchStatements(db, businessId, a.creditId, a.txs, userId, t + 1 + matched));
+        matched += 1;
+      }
+      continue;
+    }
     statements.push(...link(g.bank.creditId, g.bank.machine, upi.map(({ id, amount }) => ({ id, amount })), t + 1 + matched));
     matched += 1;
   }
