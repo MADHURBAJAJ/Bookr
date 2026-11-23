@@ -106,7 +106,7 @@ describe('booking mails', () => {
     await receiveMail(message('bookings@mail.example.test', raw('new@mmt.example.test', 'B', 'p1', `Booking MMT-9 | Pair Guest | 9800066666 | Deluxe | ${day} | ${out}`)).msg, e as never);
     await receiveMail(message('bookings@mail.example.test', raw('reports@djubo.example.test', 'B', 'p2', `Booking DJ-9 | Pair Guest | 9800066666 | Deluxe | ${day} | ${out}`)).msg, e as never);
     const arr = (await ok(counter.get(`${B}/bookings/arrivals?day=${day}`))).arrivals;
-    expect(arr.map((x: any) => x.extRef)).toEqual(['MMT-9']);
+    expect(arr.map((x: any) => x.extRef)).toEqual(['DJ-9']);
     await ok(counter.post(`${B}/stays`, { room: 'Deluxe 1', guestName: 'Pair Guest', bookingId: arr[0].id }));
     expect((await q("SELECT ext_ref, status FROM bookings WHERE business_id = ? ORDER BY ext_ref", s.businessId))).toEqual([
       { ext_ref: 'DJ-9', status: 'checked_in' }, { ext_ref: 'MMT-9', status: 'checked_in' }]);

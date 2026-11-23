@@ -70,7 +70,7 @@ describe('reading helpers', () => {
 describe('MakeMyTrip reader', () => {
   it('reads a new booking', () => {
     const m = mmtMail({ ref: 'NH10000000000001', guest: 'Riya Sample', checkIn: "05 Dec &#39;26", checkOut: "07 Dec &#39;26", rooms: [{ name: 'PREMIUM ROOM FOR TWO (AC)', people: '2 Adults' }], gross: '2,345.60' });
-    expect(readMmt(asMail(m.subject, m.html))).toEqual([{ extRef: 'NH10000000000001', guestName: 'Riya Sample', roomType: 'Premium Rooms', rooms: 1, guests: 2,
+    expect(readMmt(asMail(m.subject, m.html))).toMatchObject([{ extRef: 'NH10000000000001', guestName: 'Riya Sample', roomType: 'Premium Rooms', rooms: 1, guests: 2,
       checkIn: '2026-12-05', checkOut: '2026-12-07', amountPaise: 234560, paidPaise: 234560, cancelled: false }]);
   });
 
@@ -84,7 +84,7 @@ describe('MakeMyTrip reader', () => {
   it('reads a cancellation, and mixed room types are kept for a person', () => {
     const m = mmtMail({ kind: 'cancel', ref: 'NH10000000000003', guest: 'Dev Placeholder', checkIn: "10 Dec &#39;26", checkOut: "11 Dec &#39;26",
       rooms: [{ name: 'LUXURY ROOM', people: '2 Adults' }, { name: 'DELUXE ROOM', people: '2 Adults' }] });
-    expect(readMmt(asMail(m.subject, m.html))).toEqual([{ extRef: 'NH10000000000003', guestName: 'Dev Placeholder', roomType: 'Luxury, Deluxe', rooms: 2, guests: 4,
+    expect(readMmt(asMail(m.subject, m.html))).toMatchObject([{ extRef: 'NH10000000000003', guestName: 'Dev Placeholder', roomType: 'Luxury, Deluxe', rooms: 2, guests: 4,
       checkIn: '2026-12-10', checkOut: '2026-12-11', amountPaise: undefined, paidPaise: undefined, cancelled: true }]);
   });
 
@@ -98,7 +98,7 @@ describe('Djubo reader', () => {
   it('reads a reservation with its phone, rooms, guests, amount and advance', () => {
     const m = djuboMail({ ref: 'XOX0000101', guest: 'Asha Testcase', phone: '9000000101', checkIn: '05 Dec, 2026', checkOut: '07 Dec, 2026',
       rooms: [['PREMIUM ROOMS', 2, 0]], sub: '2,000.00', taxes: '100.00', advance: '500.00' });
-    expect(readDjubo(asMail(m.subject, m.html))).toEqual([{ extRef: 'XOX0000101', guestName: 'Asha Testcase', phone: '91- 9000000101', roomType: 'Premium Rooms',
+    expect(readDjubo(asMail(m.subject, m.html))).toMatchObject([{ extRef: 'XOX0000101', guestName: 'Asha Testcase', phone: '91- 9000000101', roomType: 'Premium Rooms',
       rooms: 1, guests: 2, checkIn: '2026-12-05', checkOut: '2026-12-07', amountPaise: 210000, paidPaise: 50000, cancelled: false }]);
   });
 

@@ -21,6 +21,15 @@ export interface ReadBooking {
   amountPaise?: number;
   paidPaise?: number;
   cancelled?: boolean;
+  /** MakeMyTrip / Goibibo booking number (NH…, GH…): the booking's own on an OTA mail, the linked one on a Djubo mail. */
+  otaRef?: string;
+  /** The OTA's PNR (Djubo calls it Reference ID). */
+  pnr?: string;
+  /** Djubo's room / bed numbers ("II B"), when rooms are allotted. */
+  roomLabels?: string[];
+  channel?: string;
+  /** Djubo could not place this OTA booking on its room chart: a person must create it in Djubo by hand. */
+  unplaced?: boolean;
 }
 
 /** A phone from a mail: digits only, an Indian 91 or leading 0 dropped; null when it is not a usable number. */
@@ -129,8 +138,12 @@ export function readMmt(mail: Email): ReadBooking[] {
   const amountPaise = cancelled ? undefined : paiseOf(after(/^Property Gross Charges$/i));
   const pay = after(/^Payment Status$/i) ?? '';
   const paidPaise = amountPaise !== undefined && /paid online|prepaid/i.test(pay) && !/part/i.test(pay) ? amountPaise : undefined;
+  const pnr = after(/^PNR$/i)?.match(/\d{6,}/)?.[0];
   return [{
     extRef: ref,
+    otaRef: ref,
+    pnr,
+    channel: after(/^Booked Via$/i) ?? undefined,
     guestName: guestName && !/^check-?in/i.test(guestName) ? guestName : undefined,
     roomType: oneType(types),
     rooms: Number(roomsLine?.match(/\d+/)?.[0]) || roomCount || undefined,
@@ -148,6 +161,7 @@ export function readMmt(mail: Email): ReadBooking[] {
 export function readDjubo(mail: Email): ReadBooking[] {
   const subject = mail.subject ?? '';
   if (/no show/i.test(subject)) return [];
+  if (/continuous room|unable to generate|unable to (create|modify)/i.test(subject)) return readDjuboUnplaced(mail);
   const rows = mailRows(mail);
   const flat = rows.map((r) => r.join(' | '));
   const head = flat.find((l) => /Reservation ID/i.test(l));
@@ -175,8 +189,16 @@ export function readDjubo(mail: Email): ReadBooking[] {
   const amountPaise = sub !== undefined ? sub + taxes : undefined;
   const paidPaise = money(/^Advance Amount$/i);
   const cancelled = /cancel/i.test(subject) || flat.some((l) => /CANCELLATION REMARK/i.test(l));
+  const all = flat.join(' | ');
+  const cLabel = header.findIndex((c) => /^rooms\s*no/.test(c));
+  const labels = cLabel >= 0 ? roomRows.map((r) => (r[cLabel] ?? '').trim()).filter((x) => x && !/^x$/i.test(x) && !/^-+$/.test(x)) : [];
+  const type = /Type of Reservation:\s*([A-Za-z ]+?)(?:\s*\||$)/i.exec(all)?.[1]?.trim();
   return [{
     extRef: ref,
+    pnr: /Reference ID\s*(\d{6,})/i.exec(head)?.[1],
+    otaRef: /Vendor Booking Id:?\s*([A-Z]{2}\d{8,})/i.exec(all)?.[1],
+    roomLabels: labels.length ? labels : undefined,
+    channel: field(/^Company Name$/i) ?? type,
     guestName: field(/^Guest Name$/i),
     phone: field(/^Guest Contact No/i),
     roomType: oneType(types.filter(Boolean)),
@@ -187,6 +209,35 @@ export function readDjubo(mail: Email): ReadBooking[] {
     amountPaise,
     paidPaise,
     cancelled,
+  }];
+}
+
+/**
+ * Djubo's "ATTENTION - Continuous Room(s) unavailable - System Unable to generate/modify Automated Reservation for <OTA>
+ * Booking Ref No <PNR>": an OTA booking Djubo could not place. Read as an alert booking (ALERT-<PNR>) for a person.
+ */
+function readDjuboUnplaced(mail: Email): ReadBooking[] {
+  const rows = mailRows(mail);
+  const val = (re: RegExp) => { const r = rows.find((x) => re.test(x[0])); return r ? r.slice(1).join(' ').replace(/^:\s*/, '').trim() || undefined : undefined; };
+  const pnr = val(/^Booking Reference Number/i)?.match(/\d{6,}/)?.[0] ?? /Booking Ref No\.?\s*(\d{6,})/i.exec(mail.subject ?? '')?.[1];
+  if (!pnr) throw new Error('This Djubo alert did not have a Booking Reference Number where expected; its layout may have changed.');
+  const hi = rows.findIndex((r) => /^S\.?\s*No/i.test(r[0]));
+  const types: string[] = [];
+  let rooms = 0;
+  for (let i = hi + 1; hi >= 0 && i < rows.length && /^\d+$/.test(rows[i][0]); i++) { types.push(roomTypeOf(rows[i][1] ?? '')); rooms += Number(rows[i][2]) || 1; }
+  return [{
+    extRef: `ALERT-${pnr}`,
+    pnr,
+    unplaced: true,
+    channel: val(/^Agency Name/i),
+    guestName: val(/^Guest Name/i),
+    phone: val(/^Guest Mobile/i),
+    checkIn: dateOf(val(/^Arrival Date/i)),
+    checkOut: dateOf(val(/^Departure Date/i)),
+    amountPaise: paiseOf(val(/^Total Amount/i)),
+    guests: Number(val(/^Number of Pax/i)) || undefined,
+    roomType: oneType(types.filter(Boolean)),
+    rooms: rooms || undefined,
   }];
 }
 

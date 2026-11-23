@@ -15,31 +15,35 @@ const B = '/businesses/:businessId';
 bookingRoutes.use(`${B}/*`, requireStaff);
 
 const COLS = `id, source, ext_ref AS extRef, guest_name AS guestName, phone, room_type AS roomType, rooms, guests, check_in AS checkIn, check_out AS checkOut,
-  amount_paise AS amountPaise, paid_paise AS paidPaise, status, how, problem, match_id AS matchId, mail_id AS mailId, stay_id AS stayId, created_at AS createdAt`;
+  amount_paise AS amountPaise, paid_paise AS paidPaise, status, how, problem, match_id AS matchId, mail_id AS mailId, stay_id AS stayId, created_at AS createdAt,
+  ota_ref AS otaRef, pnr, room_labels AS roomLabels, channel, unplaced`;
 const masked = <T extends { phone: string | null }>(x: T) => ({ ...x, phone: x.phone ? `••••${x.phone.slice(-4)}` : null });
 
 // The Bookings screen: waiting for a person, arriving soon, and the mails received lately (with any problem).
 bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const today = clock(bizOf(c)).shiftDay;
-  const [waiting, arriving, mails, autoRow] = await Promise.all([
-    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status = 'new' ORDER BY check_in, created_at`, bid),
+  const [alerts, waiting, arriving, mails, autoRow] = await Promise.all([
+    // Djubo could not place these OTA bookings: overbooking risk until someone creates them in Djubo by hand.
+    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status = 'new' AND unplaced = 1 ORDER BY check_in, created_at`, bid),
+    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status = 'new' AND unplaced = 0 ORDER BY check_in, created_at`, bid),
     all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status IN ('approved', 'checked_in') AND check_in >= ? ORDER BY check_in, guest_name LIMIT 200`,
       bid, new Date(Date.parse(today) - 86_400_000).toISOString().slice(0, 10)),
     all(c.env.DB, `SELECT id, from_addr AS fromAddr, subject, source, received_at AS receivedAt, status, note FROM inbound_mails WHERE business_id = ?
       ORDER BY received_at DESC LIMIT 30`, bid),
     one<{ a: number | null }>(c.env.DB, 'SELECT bookings_auto_from AS a FROM businesses WHERE id = ?', bid),
   ]);
-  return c.json({ today, waiting: waiting.map(masked), arriving: arriving.map(masked), mails, autoFrom: autoRow?.a ?? null });
+  return c.json({ today, alerts: alerts.map(masked), waiting: waiting.map(masked), arriving: arriving.map(masked), mails, autoFrom: autoRow?.a ?? null });
 });
 
 // Arrivals for check-in on a day: approved bookings not yet checked in (the full phone, to fill the check-in form).
 bookingRoutes.get(`${B}/bookings/arrivals`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const day = date({ d: c.req.query('day') ?? clock(bizOf(c)).shiftDay }, 'd', 'Day');
-  // One guest once: of a MakeMyTrip and Djubo pair of the same stay, the MakeMyTrip one is offered (it has the guest's details).
+  // One guest once: of a Djubo and MakeMyTrip pair of the same stay, the Djubo one is offered (it has the phone, Djubo's room
+  // numbers and what is still to pay).
   return c.json({ arrivals: await all(c.env.DB, `SELECT ${COLS} FROM bookings b WHERE business_id = ? AND status = 'approved' AND check_in <= ? AND check_out > ? AND stay_id IS NULL
-    AND NOT (b.source = 'djubo' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = b.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
+    AND NOT (b.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = b.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
     ORDER BY guest_name`, bid, day, day) });
 });
 
