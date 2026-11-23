@@ -78,7 +78,20 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
       // A new credit account needs a name and a phone (22 Nov 2026).
       const phone = phoneKey(nc.phone);
       if (!phone) fail(400, `Payment ${n}: add the phone number for the new credit account.`);
-      out.newCredit = { name: text(nc, 'name', `Payment ${n}: new credit account name`, { max: 80 })!, phone };
+      const name = text(nc, 'name', `Payment ${n}: new credit account name`, { max: 80 })!;
+      // One account per phone (25 Nov 2026): a phone that already has a credit account goes on that account.
+      const same = await all<{ id: string; credit_limit_paise: number | null; name: string }>(db,
+        "SELECT id, credit_limit_paise, name FROM debtor_accounts WHERE business_id = ? AND kind = 'credit' AND phone = ? ORDER BY created_at LIMIT 2", bid, phone);
+      if (same.length === 1) {
+        const a = same[0];
+        if (a.credit_limit_paise !== null && (await balance(db, a.id)) + out.amountPaise > a.credit_limit_paise) {
+          fail(409, `Payment ${n}: ${a.name} would go over its credit limit of ${rs(a.credit_limit_paise)}.`);
+        }
+        out.debtorAccountId = a.id;
+        out.debtorName = a.name;
+        return out;
+      }
+      out.newCredit = { name, phone };
       out.debtorAccountId = newId();
       out.debtorName = out.newCredit.name;
     } else {
@@ -145,6 +158,17 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     data.payments = [{ mode: 'comp', amount: `${Math.floor(due / 100)}.${String(due % 100).padStart(2, '0')}`, compGuest: places[0].place, nc: true }];
   }
   if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 10) fail(400, 'Add how the bill was paid.');
+  // On credit with the guest's details from the table (25 Nov 2026): the phone kept on the bill (or its order) is used
+  // when the counter asks for it; the screen only ever sees its last 4 digits.
+  const guest = await one<{ name: string | null; phone: string | null }>(db, `SELECT coalesce(b.guest_name, o.guest_name) AS name, coalesce(b.guest_phone, o.guest_phone) AS phone
+    FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.id = ?`, ordered[0].id);
+  for (const raw of data.payments as Record<string, unknown>[]) {
+    const nc = raw?.mode === 'credit' && raw.newCredit && typeof raw.newCredit === 'object' ? raw.newCredit as Record<string, unknown> : null;
+    if (nc?.useGuestPhone === true && !(typeof nc.phone === 'string' && nc.phone.trim())) {
+      if (!guest?.phone) fail(400, 'This table has no phone number. Type the phone for the credit account.');
+      nc.phone = guest.phone;
+    }
+  }
   const pays: Pay[] = [];
   for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card', 'room', 'credit', 'comp', 'advance']));
   const paid = pays.reduce((s, p) => s + p.amountPaise, 0);
@@ -200,6 +224,10 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
     }),
     ...ordered.map((x) => stmt(db, "UPDATE bills SET status = 'settled', settlement_id = ?, settled_at = ? WHERE id = ? AND status = 'printed'", settlementId, t, x.id)),
     ...ordered.map((x) => stmt(db, "UPDATE orders SET status = 'closed' WHERE id = ?", x.order_id)),
+    // A phone typed for a new credit account is kept on the bill and its order when the table had none.
+    ...(!guest?.phone && pays.find((p) => p.newCredit)?.newCredit?.phone ? [
+      stmt(db, 'UPDATE bills SET guest_phone = ? WHERE id = ? AND guest_phone IS NULL', pays.find((p) => p.newCredit)!.newCredit!.phone, ordered[0].id),
+      stmt(db, 'UPDATE orders SET guest_phone = ? WHERE id = ? AND guest_phone IS NULL', pays.find((p) => p.newCredit)!.newCredit!.phone, ordered[0].order_id)] : []),
     ...pays.filter((p) => p.mode === 'comp').map((p) => event(db, bid, 'comp', ordered.map((x) => x.bill_no).join(', '), p.amountPaise, p.compReason, `Guest: ${p.compGuest}${approved}`, staff.id, shiftDay)),
     ...short.flatMap((x) => [
       stmt(db, "INSERT INTO settle_differences (id, business_id, settlement_id, kind, bill_id, amount_paise, reason, shift_day, by_staff, at) VALUES (?, ?, ?, 'discount', ?, ?, ?, ?, ?, ?)",
@@ -248,6 +276,20 @@ function settledMessage(billId: string, bills: { id: string; bill_no: string }[]
     }),
   };
 }
+
+// The guest on a bill (from the table) and the credit accounts with the same phone, for paying on credit (25 Nov 2026).
+// The phone is shown only as its last 4 digits.
+settleRoutes.get(`${B}/bills/:id/credit-match`, requireAction('bills.settle'), async (c) => {
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  const g = await one<{ name: string | null; phone: string | null }>(c.env.DB, `SELECT coalesce(b.guest_name, o.guest_name) AS name, coalesce(b.guest_phone, o.guest_phone) AS phone
+    FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.id = ? AND b.business_id = ?`, isUuid(id) ? id : null, bid);
+  if (!g) fail(404, 'Bill not found.');
+  const matches = g.phone ? await all<{ id: string; name: string; creditLimitPaise: number | null; balancePaise: number }>(c.env.DB, `SELECT d.id, d.name, d.credit_limit_paise AS creditLimitPaise,
+      coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balancePaise
+    FROM debtor_accounts d WHERE d.business_id = ? AND d.kind = 'credit' AND d.phone = ? ORDER BY d.name`, bid, g.phone) : [];
+  return c.json({ guestName: g.name, hasPhone: !!g.phone, phoneEnd: g.phone ? g.phone.slice(-4) : null, matches });
+});
 
 // Money received against a folio or credit account (kind 'receipt'), paid in before any bill (kind 'advance'), or a
 // refundable deposit on a room (kind 'deposit', 24 Nov 2026: kept apart from rent, refunded at check-out). Each gets a

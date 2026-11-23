@@ -1072,9 +1072,7 @@ async function settleScreen(billId) {
           ${m === 'card' ? html`<label class="f">Approval code (from the slip)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="6" autocomplete="off"></label>
             <label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" value="${ui.cardLast4 ?? ''}" maxlength="4" autocomplete="off"></label>` : ''}
           ${m === 'room' ? html`<div style="grid-column:1/-1">${stayPicker('pick', ui.debtorAccountId, (s) => s.accountId)}</div>` : ''}
-          ${m === 'credit' ? html`<div class="f" style="grid-column:1/-1">Credit account<div class="chips">${cache.credit.map((c) => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === c.id}" data-act="pick" data-k="debtorAccountId" data-id="${c.id}">${c.name}</button>`)}
-              <button type="button" class="chip" aria-pressed="${ui.debtorAccountId === 'new'}" data-act="pick" data-k="debtorAccountId" data-id="new">New account</button></div></div>
-            ${ui.debtorAccountId === 'new' ? html`<label class="f">Name (required)<input class="in" data-model="newName" value="${ui.newName ?? ui.bill.guestName ?? ''}"></label><label class="f">Phone (required)<input class="in" inputmode="tel" data-model="newPhone" value="${ui.newPhone ?? ''}"></label>` : ''}` : ''}
+          ${m === 'credit' ? creditPicker() : ''}
           ${m === 'comp' ? html`<label class="f">Guest name (required)<input class="in" data-model="compGuest" value="${ui.compGuest ?? ''}"></label>
             <div class="f">Reason (required)<div class="chips">${reasonsOf('comp').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.compReason === r.id}" data-act="pick" data-k="compReason" data-id="${r.id}">${r.label}</button>`)}</div></div>` : ''}
           ${m === 'advance' ? html`<div class="f" style="grid-column:1/-1">Whose advance${advanceAccts.length ? html`<div class="chips">${advanceAccts.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === a.id}" data-act="pick" data-k="debtorAccountId" data-id="${a.id}">${a.name} · ${rs(-a.bal)} left</button>`)}</div>` : html`<span>Nobody has an advance.</span>`}</div>` : ''}
@@ -1103,7 +1101,31 @@ function shareOf(due, left) {
 }
 actions.shares = (d) => { const n = Number(d.n); ui.shares = ui.shares === n ? null : n; ui.amount = undefined; rerender(); };
 actions.together = (d) => { ui.together = ui.together.includes(d.id) ? ui.together.filter((x) => x !== d.id) : [...ui.together, d.id]; ui.amount = undefined; rerender(); };
-actions.mode = (d) => { ui.mode = d.m; ui.error = null; ui.amount = undefined; ui.debtorAccountId = null; rerender(); };
+actions.mode = async (d) => {
+  ui.mode = d.m; ui.error = null; ui.amount = undefined; ui.debtorAccountId = null;
+  // On credit (25 Nov 2026): the guest typed on the table is used. Their phone finds their credit account; with no account,
+  // a new one is filled in with the table's name and phone.
+  if (d.m === 'credit') {
+    ui.cm ??= await api('GET', `${B()}/bills/${ui.bill.id}/credit-match`).catch(() => null);
+    const cm = ui.cm;
+    if (cm?.matches.length === 1) ui.debtorAccountId = cm.matches[0].id;
+    else if (cm && !cm.matches.length && cm.guestName) { ui.debtorAccountId = 'new'; ui.newName = cm.guestName; ui.useGuestPhone = cm.hasPhone; ui.newPhone = undefined; }
+  }
+  rerender();
+};
+/** Credit accounts at payment: the ones with the table's phone first, then the rest; or a new one from the table's guest. */
+function creditPicker() {
+  const cm = ui.cm;
+  const ids = new Set((cm?.matches ?? []).map((x) => x.id));
+  const chip = (c, extra = '') => html`<button type="button" class="chip" aria-pressed="${ui.debtorAccountId === c.id}" data-act="pick" data-k="debtorAccountId" data-id="${c.id}">${c.name}${extra}</button>`;
+  return html`${cm?.matches.length ? html`<div class="f" style="grid-column:1/-1">Same phone as the table (••••${cm.phoneEnd})<div class="chips">${cm.matches.map((c) => chip(c, ` · owes ${rs(c.balancePaise)}`))}</div></div>` : ''}
+    <div class="f" style="grid-column:1/-1">${cm?.matches.length ? 'Or another credit account' : 'Credit account'}<div class="chips">${cache.credit.filter((c) => !ids.has(c.id)).map((c) => chip(c))}
+      <button type="button" class="chip" aria-pressed="${ui.debtorAccountId === 'new'}" data-act="pick" data-k="debtorAccountId" data-id="new">New account</button></div></div>
+    ${ui.debtorAccountId === 'new' ? html`<label class="f">Name (required)<input class="in" data-model="newName" value="${ui.newName ?? ui.bill.guestName ?? ''}"></label>
+      ${ui.useGuestPhone ? html`<div class="f">Phone<span class="in" style="display:flex;align-items:center;justify-content:space-between;gap:8px">Table's phone ••••${cm?.phoneEnd ?? ''}<button class="btn ghost" type="button" data-act="otherPhone">Use another</button></span></div>`
+        : html`<label class="f">Phone (required)<input class="in" inputmode="tel" data-model="newPhone" value="${ui.newPhone ?? ''}"></label>`}` : ''}`;
+}
+actions.otherPhone = () => { ui.useGuestPhone = false; ui.newPhone = ''; rerender(); };
 actions.pick = (d) => { ui[d.k] = d.id; rerender(); };
 /** A difference marked to match: a discount (with a reason) when paid less, a tip when paid more. */
 const diffOk = (left) => (left > 0 && ui.diff?.kind === 'discount' && !!ui.diff.reasonId) || (left < 0 && ui.diff?.kind === 'tip');
@@ -1142,10 +1164,13 @@ actions.addPay = () => {
     if (ui.debtorAccountId === 'new') {
       const nm = (ui.newName ?? ui.bill.guestName ?? '').trim();
       if (!nm) throw new Error("Type the new account's name.");
-      if (!(ui.newPhone ?? '').trim()) throw new Error("Type the new account's phone number.");
-      p.newCredit = { name: nm, phone: ui.newPhone }; p.detail = nm + ' (new)';
+      if (ui.useGuestPhone) { p.newCredit = { name: nm, phone: '', useGuestPhone: true }; p.detail = `${nm} (new) · ••••${ui.cm?.phoneEnd ?? ''}`; }
+      else {
+        if (!(ui.newPhone ?? '').trim()) throw new Error("Type the new account's phone number.");
+        p.newCredit = { name: nm, phone: ui.newPhone }; p.detail = nm + ' (new)';
+      }
     }
-    else { p.debtorAccountId = ui.debtorAccountId; p.detail = cache.credit.find((c) => c.id === ui.debtorAccountId).name; }
+    else { p.debtorAccountId = ui.debtorAccountId; p.detail = (cache.credit.find((c) => c.id === ui.debtorAccountId) ?? ui.cm?.matches.find((c) => c.id === ui.debtorAccountId))?.name ?? 'Credit'; }
   }
   if (m === 'comp') {
     if (!(ui.compGuest ?? '').trim()) throw new Error("A complimentary bill needs the guest's name.");
