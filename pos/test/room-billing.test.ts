@@ -57,7 +57,7 @@ describe('room billing', () => {
     const stay = (await ok(counter.post(`${B}/stays`, { room: 'XII', guestName: 'Sample Guest', phone: '9800012345', bookingId: arr[0].id }))).id;
     let bill = await ok(counter.get(`${B}/stays/${stay}/bill`));
     expect(bill).toMatchObject({ rentPaise: 210_000, prepaidPaise: 100_000, balancePaise: 110_000, booking: { extRef: 'DJ-1' } });
-    expect(bill.lines.map((l: any) => [l.kind, l.amountPaise, l.note])).toEqual([['room_rent', 210_000, null], ['prepaid', -100_000, 'Advance paid before arrival']]);
+    expect(bill.lines.map((l: any) => [l.kind, l.amountPaise, l.note])).toEqual([['room_rent', 210_000, null], ['prepaid', -100_000, 'Advance paid before arrival (booking team)']]);
     // An extra night in Djubo: the revised mail adds rent; read again, nothing doubles.
     await send(s.businessId, 'r2', `Booking DJ-1 | Sample Guest | 9800012345 | Deluxe | ${day} | ${plus(2)} | 4200 | 1000 | Direct`);
     await send(s.businessId, 'r2b', `Booking DJ-1 | Sample Guest | 9800012345 | Deluxe | ${day} | ${plus(2)} | 4200 | 1000 | Direct`);

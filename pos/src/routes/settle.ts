@@ -12,6 +12,7 @@ import { audit, clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonL
 import { billOut } from './orders';
 import { phoneKey } from './settings';
 import { sendSoon } from '../sync';
+import { syncStay } from '../rooms';
 import { saleMoves } from '../stock';
 import type { AppEnv } from '../types';
 
@@ -272,11 +273,7 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   const settlementId = newId();
   try {
     await db.batch([
-      stmt(db, 'INSERT OR IGNORE INTO receipt_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
-      stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no)
-        SELECT ?, ?, 'receipt', ?, ?, ?, 'RCPT/' || substr(?, 3) || '/' || printf('%04d', next_no) FROM receipt_series WHERE business_id = ? AND fy = ?`,
-        settlementId, bid, shiftDay, staff.id, t, fy, bid, fy),
-      stmt(db, 'UPDATE receipt_series SET next_no = next_no + 1 WHERE business_id = ? AND fy = ?', bid, fy),
+      ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
       ...pays.map((p) => insertPayment(db, bid, settlementId, { ...p, debtorAccountId: null }, shiftDay, staff.id, t)),
       ...pays.map((p) => stmt(db, 'INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, by_staff, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         newId(), bid, acc.id, kind, -p.amountPaise, p.id, staff.id, t)),
@@ -297,6 +294,117 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   const balancePaise = await balance(db, acc.id);
   return c.json({ settlementId, balancePaise, receipt: { receiptNo, kind, at: t, name: room?.guest_name ?? acc.name, room: room?.room ?? null, totalPaise: total, balancePaise,
     payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } }, 201);
+});
+
+/** A numbered receipt (RCPT/26-27/0001): its settlement row, numbered in the same batch. */
+function receiptSettlement(db: DB, bid: string, settlementId: string, shiftDay: string, fy: string, staffId: string, t: number) {
+  return [
+    stmt(db, 'INSERT OR IGNORE INTO receipt_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
+    stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no)
+      SELECT ?, ?, 'receipt', ?, ?, ?, 'RCPT/' || substr(?, 3) || '/' || printf('%04d', next_no) FROM receipt_series WHERE business_id = ? AND fy = ?`,
+      settlementId, bid, shiftDay, staffId, t, fy, bid, fy),
+    stmt(db, 'UPDATE receipt_series SET next_no = next_no + 1 WHERE business_id = ? AND fy = ?', bid, fy),
+  ];
+}
+
+// ---------- advances taken at the desk before check-in (24 Nov 2026)
+// For a booking Djubo has (reception may also enter it in Djubo: the POS then sees it is already taken), or before Djubo has
+// the booking (name, phone and check-in day; attached to the booking when its mail arrives). A numbered advance receipt
+// prints; the money is in this shift's drawer; at check-in it moves onto the room's bill.
+settleRoutes.post(`${B}/desk-advances`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  let booking: { id: string; ext_ref: string; guest_name: string | null; phone: string | null; check_in: string | null; check_out: string | null; status: string } | null = null;
+  if (data.bookingId !== undefined && data.bookingId !== null && data.bookingId !== '') {
+    booking = await one(db, 'SELECT id, ext_ref, guest_name, phone, check_in, check_out, status FROM bookings WHERE id = ? AND business_id = ?', isUuid(String(data.bookingId)) ? data.bookingId : null, bid);
+    if (!booking) fail(404, 'Booking not found.');
+    if (booking.status === 'cancelled') fail(409, 'This booking was cancelled.');
+    if (booking.status === 'checked_in') fail(409, 'This guest is checked in: take it on the room bill.');
+  }
+  const guest = booking?.guest_name ?? text(data, 'guestName', 'Guest name', { max: 80 })!;
+  const phone = booking ? booking.phone : phoneKey(data.phone);
+  if (!booking && !phone) fail(400, "Add the guest's phone, so the advance finds its Djubo booking.");
+  const checkIn = booking?.check_in ?? (typeof data.checkIn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.checkIn) ? data.checkIn : fail(400, 'Check-in must be a date.'));
+  if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 5) fail(400, 'Add how it was paid.');
+  const pays: Pay[] = [];
+  for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card']));
+  const total = pays.reduce((s0, p) => s0 + p.amountPaise, 0);
+  const { t, shiftDay, fy } = clock(bizOf(c));
+  const staff = c.get('staff');
+  const settlementId = newId();
+  const id = newId();
+  try {
+    await db.batch([
+      ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
+      ...pays.map((p) => insertPayment(db, bid, settlementId, { ...p, debtorAccountId: null }, shiftDay, staff.id, t)),
+      stmt(db, `INSERT INTO desk_advances (id, business_id, booking_id, guest_name, phone, check_in, amount_paise, settlement_id, by_staff, at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, booking?.id ?? null, guest, phone, checkIn, total, settlementId, staff.id, t),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
+        settlementId, kind: 'advance', account: { id: null, kind: 'booking', name: guest, booking: booking?.ext_ref ?? null }, shiftDay, at: t, by: staff.name,
+        payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, payAccountName: p.payAccountName,
+          bookrAccountId: p.bookrAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4 })),
+      }), t),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Ask an Owner.');
+    throw e;
+  }
+  sendSoon(c, bid);
+  const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
+  return c.json({ id, receipt: { receiptNo, kind: 'advance', at: t, name: guest, room: null, booking: booking?.ext_ref ?? null, checkIn, checkOut: booking?.check_out ?? null,
+    totalPaise: total, balancePaise: null, payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } }, 201);
+});
+
+async function heldAdvance(c: { req: { param(k: 'id'): string }; get(k: 'businessId'): string; env: { DB: DB } }) {
+  const id = c.req.param('id');
+  const a = await one<{ id: string; guest_name: string; amount_paise: number; settlement_id: string; booking_id: string | null }>(c.env.DB,
+    "SELECT id, guest_name, amount_paise, settlement_id, booking_id FROM desk_advances WHERE id = ? AND business_id = ? AND status = 'held'", isUuid(id) ? id : null, c.get('businessId'));
+  if (!a) fail(404, 'No advance waiting with that id.');
+  return a;
+}
+
+// A person links an advance to its booking when the POS could not tell which it was.
+settleRoutes.post(`${B}/desk-advances/:id/attach`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const a = await heldAdvance(c);
+  const data = await body(c);
+  const k = await one<{ id: string; stay_id: string | null; status: string }>(c.env.DB, 'SELECT id, stay_id, status FROM bookings WHERE id = ? AND business_id = ?',
+    typeof data.bookingId === 'string' && isUuid(data.bookingId) ? data.bookingId : null, bid);
+  if (!k || k.status === 'cancelled') fail(404, 'Choose a booking that is not cancelled.');
+  await stmt(c.env.DB, 'UPDATE desk_advances SET booking_id = ? WHERE id = ?', k.id, a.id).run();
+  if (k.stay_id) await syncStay(c.env.DB, bid, k.stay_id);
+  return c.json({ ok: true });
+});
+
+// An advance taken at the desk given back (the booking was cancelled): out of the drawer, by cash or UPI, a manager approves.
+settleRoutes.post(`${B}/desk-advances/:id/refund`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const a = await heldAdvance(c);
+  const data = await body(c);
+  const mode = data.mode;
+  if (mode !== 'cash' && mode !== 'upi') fail(400, 'A refund is paid by cash or UPI.');
+  const approver = await approval(c, data, 'A refund');
+  const rno = (await one<{ receipt_no: string | null }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', a.settlement_id))?.receipt_no ?? '';
+  const note = `Advance refunded ${rno} · ${a.guest_name}${isManager(c) ? '' : ` · Approved by ${approver.name}`}`.slice(0, 160);
+  const { t, shiftDay } = clock(bizOf(c));
+  const id = newId();
+  const staff = c.get('staff');
+  try {
+    await db.batch([
+      stmt(db, "INSERT INTO drawer_outs (id, business_id, kind, mode, amount_paise, note, shift_day, by_staff, at) VALUES (?, ?, 'paid_out', ?, ?, ?, ?, ?, ?)",
+        id, bid, mode, a.amount_paise, note, shiftDay, staff.id, t),
+      stmt(db, "UPDATE desk_advances SET status = 'refunded' WHERE id = ? AND status = 'held'", a.id),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'drawer_out', ?, ?)", newId(), bid,
+        JSON.stringify({ drawerOutId: id, kind: 'paid_out', mode, amountPaise: a.amount_paise, note, shiftDay, at: t, by: staff.name }), t),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed.');
+    throw e;
+  }
+  sendSoon(c, bid);
+  return c.json({ ok: true }, 201);
 });
 
 // An unused advance paid back (at check-out, or a credit account closing): by cash from the drawer or by UPI.

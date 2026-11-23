@@ -7,7 +7,7 @@ import { all, newId, now, one, stmt, type DB } from '../../src/db';
 import type { Env } from './types';
 import { readerFor, type ReadBooking } from './booking-readers';
 import { phoneKeySoft } from './booking-readers';
-import { syncStayRent } from './rooms';
+import { linkWalkIn, recomputeDesk, syncStayRent } from './rooms';
 import { tableLayout, type Business } from './util';
 
 const GMAIL_CONFIRM = 'forwarding-noreply@google.com';
@@ -112,6 +112,7 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
   const phone = phoneKeySoft(x.phone);
   const known = roomTypes(b);
   const problem = [
+    x.hold && 'website hold: not confirmed or paid yet',
     x.unplaced && 'Djubo could not place this booking on its room chart: create it in Djubo by hand',
     !x.guestName && 'no guest name',
     !x.checkIn && 'no check-in date',
@@ -124,29 +125,51 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
   const goesIn = !problem && !x.unplaced && autoFrom !== null && t >= autoFrom;
   const labels = x.roomLabels?.length ? x.roomLabels.join(', ').slice(0, 200) : null;
   const extra = [x.otaRef ?? null, x.pnr ?? null, labels, x.channel?.slice(0, 40) ?? null, x.unplaced ? 1 : 0,
-    x.bookedAt ?? null, x.changedAt ?? null, x.mealPlan ?? null, x.requests ?? null] as const;
+    x.bookedAt ?? null, x.changedAt ?? null, x.mealPlan ?? null, x.requests ?? null, x.enteredBy ?? null] as const;
   if (prev) {
     // A later mail about the same booking (changed dates, cancelled): brought up to date; a checked-in one keeps its status.
     const status = x.cancelled ? 'cancelled' : prev.status === 'checked_in' ? 'checked_in' : prev.status === 'approved' && !problem ? 'approved' : goesIn ? 'approved' : 'new';
     await stmt(db, `UPDATE bookings SET guest_name = ?, phone = ?, room_type = ?, rooms = ?, guests = ?, check_in = ?, check_out = ?, amount_paise = coalesce(?, amount_paise), paid_paise = coalesce(?, paid_paise),
         status = ?, problem = ?, mail_id = coalesce(?, mail_id), how = CASE WHEN ? = 'approved' AND status <> 'approved' THEN 'auto' ELSE how END, updated_at = ?,
         ota_ref = coalesce(?, ota_ref), pnr = coalesce(?, pnr), room_labels = coalesce(?, room_labels), channel = coalesce(?, channel), unplaced = ?,
-        booked_at = coalesce(?, booked_at), changed_at = coalesce(?, changed_at), meal_plan = coalesce(?, meal_plan), requests = ? WHERE id = ?`,
+        booked_at = coalesce(?, booked_at), changed_at = coalesce(?, changed_at), meal_plan = coalesce(?, meal_plan), requests = ?, entered_by = coalesce(?, entered_by) WHERE id = ?`,
       x.guestName ?? null, phone, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null, x.amountPaise ?? null, x.paidPaise ?? null,
       status, problem, mailId, status, t, ...extra, prev.id).run();
     await afterSave(db, b.id, prev.id, x);
+    await deskMoney(db, b.id, prev.id, source, mailId, x);
     // Already checked in (an extra night, a room change, a cancellation): the room's bill follows the booking.
     if (prev.status === 'checked_in') await syncStayRent(db, b.id, prev.id);
+    else await linkWalkIn(db, b.id, prev.id);
     return prev.id;
   }
   const id = newId();
   await stmt(db, `INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, phone, room_type, rooms, guests, check_in, check_out, amount_paise, paid_paise,
-      status, how, problem, mail_id, created_at, updated_at, ota_ref, pnr, room_labels, channel, unplaced, booked_at, changed_at, meal_plan, requests)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      status, how, problem, mail_id, created_at, updated_at, ota_ref, pnr, room_labels, channel, unplaced, booked_at, changed_at, meal_plan, requests, entered_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id, b.id, source, x.extRef, x.guestName ?? null, phone, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null,
     x.amountPaise ?? null, x.paidPaise ?? null, x.cancelled ? 'cancelled' : goesIn ? 'approved' : 'new', goesIn && !x.cancelled ? 'auto' : null, problem, mailId, t, t, ...extra).run();
   await afterSave(db, b.id, id, x);
+  await deskMoney(db, b.id, id, source, mailId, x);
+  await linkWalkIn(db, b.id, id);
   return id;
+}
+
+/**
+ * Money taken at reception (24 Nov 2026): each Djubo mail's advance is logged with who entered it, and the desk's part is
+ * worked out again; an advance taken here before Djubo had the booking (same phone and check-in day) is attached to it.
+ */
+async function deskMoney(db: DB, bid: string, id: string, source: string, mailId: string | null, x: ReadBooking) {
+  if (source === 'djubo' && mailId) {
+    const m = await one<{ received_at: number }>(db, 'SELECT received_at FROM inbound_mails WHERE id = ?', mailId);
+    await stmt(db, `INSERT INTO booking_paid_log (booking_id, mail_id, business_id, paid_paise, entered_by, received_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (booking_id, mail_id) DO UPDATE SET paid_paise = excluded.paid_paise, entered_by = excluded.entered_by`,
+      id, mailId, bid, x.cancelled ? 0 : x.paidPaise ?? 0, x.enteredBy ?? null, m?.received_at ?? now()).run();
+    await recomputeDesk(db, bid, id);
+  }
+  const phone = phoneKeySoft(x.phone);
+  if (phone && x.checkIn && !x.cancelled) {
+    await stmt(db, `UPDATE desk_advances SET booking_id = ? WHERE business_id = ? AND booking_id IS NULL AND status = 'held' AND phone = ? AND check_in = ?`, id, bid, phone, x.checkIn).run();
+  }
 }
 
 /** After a booking is saved: a Djubo alert for the same PNR is settled once Djubo has the booking; then the pair is linked. */

@@ -9,13 +9,13 @@ const OTA = /make\s*my\s*trip|\bmmt\b|goibibo|booking\.com|agoda|expedia|airbnb|
 /** Who was paid before arrival, as the folio shows it. */
 export function prepaidNote(channel: string | null, source: string): string {
   if (source === 'mmt') return `Paid to ${channel && OTA.test(channel) ? channel : 'MakeMyTrip'}`;
-  return channel && OTA.test(channel) ? `Paid to ${channel}` : 'Advance paid before arrival';
+  return channel && OTA.test(channel) ? `Paid to ${channel}` : 'Advance paid before arrival (booking team)';
 }
 
 /** The booking a stay's rent follows: of a Djubo and MakeMyTrip pair, Djubo's (it has the advance and the GST). */
 async function bookingOfStay(db: DB, stayId: string) {
-  return one<{ id: string; source: string; amount_paise: number | null; paid_paise: number | null; channel: string | null; status: string }>(db,
-    `SELECT id, source, amount_paise, paid_paise, channel, status FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1`, stayId);
+  return one<{ id: string; source: string; amount_paise: number | null; paid_paise: number | null; desk_paid_paise: number; channel: string | null; status: string }>(db,
+    `SELECT id, source, amount_paise, paid_paise, desk_paid_paise, channel, status FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1`, stayId);
 }
 
 /**
@@ -30,12 +30,102 @@ export async function syncStay(db: DB, bid: string, stayId: string) {
   if (!acc || !bk) return;
   const live = bk.status !== 'cancelled';
   const rent = live ? Math.max(0, bk.amount_paise ?? 0) : 0;
-  const paid = live ? Math.min(Math.max(0, bk.paid_paise ?? 0), rent) : 0;
+  // Of Djubo's advance, the part reception entered was taken at the desk: it is collected here with a receipt (24 Nov 2026),
+  // so only the rest counts as paid before arrival.
+  const paid = live ? Math.min(Math.max(0, (bk.paid_paise ?? 0) - bk.desk_paid_paise), rent) : 0;
   const t = now();
   const put = (kind: 'room_rent' | 'prepaid', target: number, note: string | null) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, booking_id, note, at)
     SELECT ?, ?, ?, ?, x.d, ?, ?, ? FROM (SELECT ? - coalesce((SELECT sum(amount_paise) FROM debtor_entries WHERE account_id = ? AND kind = ? AND booking_id IS NOT NULL), 0) AS d) x
     WHERE x.d <> 0`, newId(), bid, acc.id, kind, bk.id, note, t, target, acc.id, kind);
-  await db.batch([put('room_rent', rent, null), put('prepaid', -paid, prepaidNote(bk.channel, bk.source))]);
+  // Advances taken at the desk before check-in, for this booking (or its MakeMyTrip twin), move onto the room's bill.
+  const held = await all<{ id: string; payment_id: string; amount_paise: number }>(db, `SELECT d.id, p.id AS payment_id, p.amount_paise FROM desk_advances d
+    JOIN payments p ON p.settlement_id = d.settlement_id WHERE d.business_id = ? AND d.status = 'held' AND d.booking_id IN (SELECT id FROM bookings WHERE stay_id = ?)`, bid, stayId);
+  await db.batch([put('room_rent', rent, null), put('prepaid', -paid, prepaidNote(bk.channel, bk.source)),
+    ...held.map((h) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, note, at)
+      SELECT ?, ?, ?, 'advance', ?, ?, 'Advance taken at hotel', ? WHERE NOT EXISTS (SELECT 1 FROM debtor_entries WHERE payment_id = ? AND account_id = ?)`,
+      newId(), bid, acc.id, -h.amount_paise, h.payment_id, t, h.payment_id, acc.id)),
+    ...[...new Set(held.map((h) => h.id))].map((id) => stmt(db, "UPDATE desk_advances SET status = 'applied', stay_id = ? WHERE id = ? AND status = 'held'", stayId, id))]);
+}
+
+// ---------- money taken at reception (24 Nov 2026)
+
+/** The Djubo users who work at reception, as set in Settings (lower case). */
+export async function receptionUsers(db: DB, bid: string): Promise<string[]> {
+  const r = await one<{ u: string }>(db, 'SELECT reception_users AS u FROM businesses WHERE id = ?', bid);
+  try { return (JSON.parse(r?.u ?? '[]') as unknown[]).map((x) => String(x).trim().toLowerCase()).filter(Boolean); } catch { return []; }
+}
+
+/**
+ * The part of a Djubo booking's advance taken at the desk, worked out from its mails in order: each increase in a mail made
+ * or changed by a reception user is money taken at the desk; a decrease takes it back. The same however often mails are read.
+ */
+export async function recomputeDesk(db: DB, bid: string, bookingId: string, users?: string[]) {
+  const who = users ?? await receptionUsers(db, bid);
+  const log = await all<{ paid_paise: number; entered_by: string | null; received_at: number }>(db,
+    'SELECT paid_paise, entered_by, received_at FROM booking_paid_log WHERE booking_id = ? ORDER BY received_at, mail_id', bookingId);
+  let prev = 0;
+  let desk = 0;
+  let at: number | null = null;
+  for (const r of log) {
+    const d = r.paid_paise - prev;
+    if (who.includes((r.entered_by ?? '').trim().toLowerCase())) {
+      if (d > 0) { desk += d; at = r.received_at; } else if (d < 0) desk = Math.max(0, desk + d);
+    } else if (d < 0) desk = Math.min(desk, r.paid_paise);
+    prev = r.paid_paise;
+  }
+  desk = Math.max(0, Math.min(desk, prev));
+  await stmt(db, 'UPDATE bookings SET desk_paid_paise = ?, desk_paid_at = ? WHERE id = ?', desk, desk ? at : null, bookingId).run();
+}
+
+/**
+ * Money reception entered in Djubo that has no POS receipt yet: the desk's part of each booking less the advances taken
+ * here for it and, once checked in, the payments taken on its room bill.
+ */
+export async function deskPending(db: DB, bid: string) {
+  const rows = await all<{ id: string; extRef: string; guestName: string | null; checkIn: string | null; checkOut: string | null; status: string; stayId: string | null;
+    deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; coveredPaise: number }>(db, `SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
+      k.check_in AS checkIn, k.check_out AS checkOut, k.status, k.stay_id AS stayId, k.desk_paid_paise AS deskPaidPaise, k.desk_paid_at AS deskPaidAt, k.entered_by AS enteredBy,
+      coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0)
+      + coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+          WHERE a.stay_id = k.stay_id AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0) AS coveredPaise
+    FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in') ORDER BY k.desk_paid_at`, bid);
+  return rows.map((r) => ({ ...r, pendingPaise: r.deskPaidPaise - r.coveredPaise })).filter((r) => r.pendingPaise > 0);
+}
+
+/**
+ * A guest checked in by hand before Djubo had the booking (a walk-in in a rush): when the booking's mail arrives, it is
+ * linked to the in-house room with no booking that has the same check-in day and the same phone, or the same Djubo room
+ * number and first name. Only one clear match is linked; otherwise a person links it.
+ */
+export async function linkWalkIn(db: DB, bid: string, bookingId: string) {
+  const k = await one<{ id: string; phone: string | null; guest_name: string | null; check_in: string | null; room_labels: string | null; status: string; problem: string | null;
+    stay_id: string | null; unplaced: number }>(db, 'SELECT id, phone, guest_name, check_in, room_labels, status, problem, stay_id, unplaced FROM bookings WHERE id = ? AND business_id = ?', bookingId, bid);
+  if (!k || k.stay_id || !['new', 'approved'].includes(k.status) || k.problem || k.unplaced || !k.check_in) return null;
+  const stays = await all<{ id: string; room: string; guest_name: string; phone: string | null }>(db, `SELECT s.id, s.room, s.guest_name, s.phone FROM stays s
+    WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.check_in = ? AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id)`, bid, k.check_in);
+  const flat = (t: string) => t.toLowerCase().replace(/\s+/g, '');
+  const first = (t: string | null) => (t ?? '').trim().toLowerCase().replace(/^(mr|mrs|ms|dr)\.?\s*/, '').split(/\s+/)[0] ?? '';
+  const labels = (k.room_labels ?? '').split(',').map(flat).filter(Boolean);
+  const hits = stays.filter((s) => (k.phone && s.phone === k.phone) || (labels.includes(flat(s.room)) && first(s.guest_name) && first(s.guest_name) === first(k.guest_name)));
+  if (hits.length !== 1) return null;
+  await linkStay(db, bid, k.id, hits[0].id);
+  return hits[0].id;
+}
+
+/** Links a booking (and its MakeMyTrip twin) to an in-house room: rent typed by hand as "Room rent…" gives way to the booking's. */
+export async function linkStay(db: DB, bid: string, bookingId: string, stayId: string) {
+  const acc = await one<{ id: string }>(db, "SELECT id FROM debtor_accounts WHERE stay_id = ? AND business_id = ? AND kind = 'room'", stayId, bid);
+  const ref = (await one<{ ext_ref: string }>(db, 'SELECT ext_ref FROM bookings WHERE id = ?', bookingId))!.ext_ref;
+  const byHand = acc ? (await one<{ s: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS s FROM debtor_entries
+    WHERE account_id = ? AND kind = 'room_rent' AND booking_id IS NULL AND lower(note) LIKE 'room rent%'`, acc.id))!.s : 0;
+  const t = now();
+  await db.batch([
+    stmt(db, `UPDATE bookings SET status = 'checked_in', stay_id = ?, updated_at = ? WHERE business_id = ? AND stay_id IS NULL
+      AND (id = ?4 OR id = (SELECT match_id FROM bookings WHERE id = ?4))`, stayId, t, bid, bookingId),
+    ...(acc && byHand > 0 ? [stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, at) VALUES (?, ?, ?, 'room_rent', ?, ?, ?)",
+      newId(), bid, acc.id, -byHand, `Room rent by hand, replaced by Djubo ${ref}`, t)] : []),
+  ]);
+  await syncStay(db, bid, stayId);
 }
 
 /** After a booking changes: its stay (if checked in) follows. */

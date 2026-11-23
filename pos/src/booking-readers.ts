@@ -36,6 +36,10 @@ export interface ReadBooking {
   mealPlan?: string;
   /** The guest's special requests (the OTA's own booking numbers, which Djubo puts there too, left out). */
   requests?: string;
+  /** Who made or last changed the booking in Djubo ("Suresh Ramoda"); "System" for an OTA's. */
+  enteredBy?: string;
+  /** A website booking Djubo holds until it is paid ("Reservation Hold"): not confirmed yet. */
+  hold?: boolean;
 }
 
 /** A phone from a mail: digits only, an Indian 91 or leading 0 dropped; null when it is not a usable number. */
@@ -211,6 +215,8 @@ export function readDjubo(mail: Email): ReadBooking[] {
   const requests = /SPECIAL REQUESTS\s*(.*?)\s*(?:\|\s*)?(?:Modified By|Created By|Type of Reservation|$)/i.exec(all)?.[1]
     ?.replace(/Booking Reference No\.?:?\s*\S*/gi, '').replace(/Vendor Booking Id:?\s*\S*/gi, '').replace(/^[\s|#:-]+|[\s|#:-]+$/g, '').replace(/\s*\|\s*/g, ' ').trim();
   return [{
+    enteredBy: (/Modified By:?\s*(.+?)\s*Modified On/i.exec(all)?.[1] ?? /Created By:?\s*(.+?)\s*Created On/i.exec(all)?.[1])?.replace(/\s*\|.*$/, '').trim().slice(0, 60) || undefined,
+    hold: /reservation hold/i.test(subject) || undefined,
     bookedAt: stampOf(/Created On:?\s*([^|]+?)(?:\s*\||$)/i.exec(all)?.[1]),
     changedAt: stampOf(/Modified On:?\s*([^|]+?)(?:\s*\||$)/i.exec(all)?.[1]),
     mealPlan: meals.join(', ').slice(0, 60) || undefined,

@@ -7,6 +7,7 @@ import { body, date, fail, isUuid, text } from '../../../src/http';
 import { isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock } from '../util';
 import { readAgain } from '../mail';
+import { deskPending, linkStay, recomputeDesk } from '../rooms';
 import { phoneKey } from './settings';
 import type { AppEnv } from '../types';
 
@@ -16,7 +17,9 @@ bookingRoutes.use(`${B}/*`, requireStaff);
 
 const COLS = `id, source, ext_ref AS extRef, guest_name AS guestName, phone, room_type AS roomType, rooms, guests, check_in AS checkIn, check_out AS checkOut,
   amount_paise AS amountPaise, paid_paise AS paidPaise, status, how, problem, match_id AS matchId, mail_id AS mailId, stay_id AS stayId, created_at AS createdAt,
-  ota_ref AS otaRef, pnr, room_labels AS roomLabels, channel, unplaced, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests`;
+  ota_ref AS otaRef, pnr, room_labels AS roomLabels, channel, unplaced, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests,
+  desk_paid_paise AS deskPaidPaise, entered_by AS enteredBy,
+  (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = bk.id OR d.booking_id = bk.match_id)) AS heldPaise`;
 const masked = <T extends { phone: string | null }>(x: T) => ({ ...x, phone: x.phone ? `••••${x.phone.slice(-4)}` : null });
 
 // The Bookings screen: waiting for a person, arriving soon, and the mails received lately (with any problem).
@@ -25,15 +28,30 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
   const today = clock(bizOf(c)).shiftDay;
   const [alerts, waiting, arriving, mails, autoRow] = await Promise.all([
     // Djubo could not place these OTA bookings: overbooking risk until someone creates them in Djubo by hand.
-    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status = 'new' AND unplaced = 1 ORDER BY check_in, created_at`, bid),
-    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status = 'new' AND unplaced = 0 ORDER BY check_in, created_at`, bid),
-    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings WHERE business_id = ? AND status IN ('approved', 'checked_in') AND check_in >= ? ORDER BY check_in, guest_name LIMIT 200`,
+    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'new' AND unplaced = 1 ORDER BY check_in, created_at`, bid),
+    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'new' AND unplaced = 0 ORDER BY check_in, created_at`, bid),
+    all<{ phone: string | null }>(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status IN ('approved', 'checked_in') AND check_in >= ? ORDER BY check_in, guest_name LIMIT 200`,
       bid, new Date(Date.parse(today) - 86_400_000).toISOString().slice(0, 10)),
     all(c.env.DB, `SELECT id, from_addr AS fromAddr, subject, source, received_at AS receivedAt, status, note FROM inbound_mails WHERE business_id = ?
       ORDER BY received_at DESC LIMIT 30`, bid),
-    one<{ a: number | null }>(c.env.DB, 'SELECT bookings_auto_from AS a FROM businesses WHERE id = ?', bid),
+    one<{ a: number | null; u: string }>(c.env.DB, 'SELECT bookings_auto_from AS a, reception_users AS u FROM businesses WHERE id = ?', bid),
   ]);
-  return c.json({ today, alerts: alerts.map(masked), waiting: waiting.map(masked), arriving: arriving.map(masked), mails, autoFrom: autoRow?.a ?? null });
+  // Money taken at reception (24 Nov 2026): what reception entered in Djubo with no POS receipt yet (before check-in; once
+  // checked in, the room bill shows it as to collect), advances taken here waiting for their Djubo booking, and the rooms
+  // checked in by hand with no booking (to link a booking to).
+  const [pending, advancesWaiting, unbooked] = await Promise.all([
+    deskPending(c.env.DB, bid),
+    all(c.env.DB, `SELECT d.id, d.guest_name AS guestName, d.phone, d.check_in AS checkIn, d.amount_paise AS amountPaise, d.at, s.receipt_no AS receiptNo,
+        k.status AS bookingStatus, k.ext_ref AS bookingRef
+      FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id LEFT JOIN bookings k ON k.id = d.booking_id
+      WHERE d.business_id = ? AND d.status = 'held' AND (d.booking_id IS NULL OR k.status = 'cancelled') ORDER BY d.at`, bid),
+    all(c.env.DB, `SELECT s.id, s.room, s.guest_name AS guestName FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id) ORDER BY s.room`, bid),
+  ]);
+  let users: string[] = [];
+  try { users = JSON.parse(autoRow?.u ?? '[]'); } catch { /* none */ }
+  return c.json({ today, alerts: alerts.map(masked), waiting: waiting.map(masked), arriving: arriving.map(masked), mails, autoFrom: autoRow?.a ?? null,
+    receptionUsers: users, deskToTake: pending.filter((p) => p.status !== 'checked_in'), advancesWaiting: advancesWaiting.map((a) => masked(a as { phone: string | null })), unbooked });
 });
 
 // Arrivals for check-in on a day: approved bookings not yet checked in (the full phone, to fill the check-in form).
@@ -42,8 +60,8 @@ bookingRoutes.get(`${B}/bookings/arrivals`, requireAction('stays.edit'), async (
   const day = date({ d: c.req.query('day') ?? clock(bizOf(c)).shiftDay }, 'd', 'Day');
   // One guest once: of a Djubo and MakeMyTrip pair of the same stay, the Djubo one is offered (it has the phone, Djubo's room
   // numbers and what is still to pay).
-  return c.json({ arrivals: await all(c.env.DB, `SELECT ${COLS} FROM bookings b WHERE business_id = ? AND status = 'approved' AND check_in <= ? AND check_out > ? AND stay_id IS NULL
-    AND NOT (b.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = b.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
+  return c.json({ arrivals: await all(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'approved' AND check_in <= ? AND check_out > ? AND stay_id IS NULL
+    AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
     ORDER BY guest_name`, bid, day, day) });
 });
 
@@ -110,6 +128,38 @@ bookingRoutes.post(`${B}/mails/read-all-again`, requireAction('stays.edit'), asy
   for (const m of ids) await readAgain(c.env, bid, m.id);
   const done = from + ids.length;
   return c.json({ done, total, next: ids.length === PER_CALL && done < total ? done : null });
+});
+
+// The Djubo users who work at reception (a manager sets them): money they enter in Djubo was taken at the desk.
+bookingRoutes.put(`${B}/bookings/reception`, requireAction('stays.edit'), async (c) => {
+  if (!isManager(c)) fail(403, 'A manager or owner sets who works at reception.');
+  const bid = c.get('businessId');
+  const data = await body(c);
+  if (!Array.isArray(data.users) || data.users.length > 10) fail(400, 'List up to 10 names, as Djubo shows them.');
+  const users = [...new Set(data.users.map((u) => String(u).trim()).filter(Boolean).map((u) => u.slice(0, 60)))];
+  const before = await one<{ u: string }>(c.env.DB, 'SELECT reception_users AS u FROM businesses WHERE id = ?', bid);
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE businesses SET reception_users = ? WHERE id = ?', JSON.stringify(users), bid),
+    audit(c.env.DB, bid, c.get('staff').id, 'bookings.reception_users', 'businesses', bid, before?.u ?? null, users),
+  ]);
+  // Worked out again for every booking with Djubo mails, with the new names.
+  const lower = users.map((u) => u.toLowerCase());
+  for (const k of await all<{ booking_id: string }>(c.env.DB, 'SELECT DISTINCT booking_id FROM booking_paid_log WHERE business_id = ?', bid)) await recomputeDesk(c.env.DB, bid, k.booking_id, lower);
+  return c.json({ ok: true, users });
+});
+
+// A person links a booking to the guest already in a room (checked in by hand before Djubo had the booking).
+bookingRoutes.post(`${B}/bookings/:id/link-stay`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const b = await booking(c, c.req.param('id'));
+  if (b.status === 'cancelled' || b.status === 'checked_in') fail(409, b.status === 'cancelled' ? 'This booking was cancelled.' : 'This booking is already checked in.');
+  const data = await body(c);
+  const s = await one<{ id: string }>(c.env.DB, `SELECT s.id FROM stays s WHERE s.id = ? AND s.business_id = ? AND s.checked_out_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id)`, typeof data.stayId === 'string' && isUuid(data.stayId) ? data.stayId : null, bid);
+  if (!s) fail(404, 'Choose an in-house room that has no booking.');
+  await linkStay(c.env.DB, bid, b.id, s.id);
+  await audit(c.env.DB, bid, c.get('staff').id, 'booking.link_stay', 'bookings', b.id, null, { stayId: s.id }).run();
+  return c.json({ ok: true });
 });
 
 // Automatic: from a date (e.g. 10 days on), clean bookings go in by themselves. Off: a person approves every one.

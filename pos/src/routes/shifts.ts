@@ -6,7 +6,8 @@ import { all, isUniqueViolation, newId, one, stmt, type DB } from '../../../src/
 import { parsePaise } from '../../../src/money';
 import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { rs } from '../billing';
+import { rs, shiftDayAt } from '../billing';
+import { deskPending } from '../rooms';
 import { clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
 import type { AppEnv } from '../types';
@@ -17,7 +18,7 @@ shiftRoutes.use(`${B}/*`, requireStaff);
 
 const NOTES = ['2000', '500', '200', '100', '50', '20', '10'];
 
-export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays: number) {
+export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays: number, startHour = 8) {
   const byMode = await all<{ mode: string; n: number; paise: number }>(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise
     FROM payments p JOIN settlements s ON s.id = p.settlement_id WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'bills' GROUP BY p.mode ORDER BY p.mode`, bid, day);
   const receipts = await all<{ mode: string; n: number; paise: number }>(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise
@@ -46,9 +47,12 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const cashIn = [...byMode, ...receipts].filter((r) => r.mode === 'cash').reduce((s, r) => s + r.paise, 0);
   const cashOut = outs.filter((o) => o.mode === 'cash').reduce((s, o) => s + o.amount_paise, 0)
     + creditNotes.filter((n) => n.refund_mode === 'cash').reduce((s, n) => s + n.total_paise, 0);
+  // Money reception entered in Djubo during this shift with no POS receipt (24 Nov 2026).
+  const deskMissing = (await deskPending(db, bid)).filter((r) => r.deskPaidAt !== null && shiftDayAt(r.deskPaidAt, startHour) === day)
+    .map((r) => ({ bookingId: r.id, extRef: r.extRef, guestName: r.guestName, enteredBy: r.enteredBy, at: r.deskPaidAt, pendingPaise: r.pendingPaise }));
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
   return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
-    cashInPaise: cashIn, cashOutPaise: cashOut,
+    cashInPaise: cashIn, cashOutPaise: cashOut, deskMissing,
     drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })),
     tips: differences.filter((d) => d.kind === 'tip').map((d) => ({ mode: d.mode, n: d.n, paise: d.paise })),
     discountsAtPayment: differences.filter((d) => d.kind === 'discount').reduce((t, d) => ({ n: t.n + d.n, paise: t.paise + d.paise }), { n: 0, paise: 0 }),
@@ -61,7 +65,7 @@ shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
   const day = date({ day: c.req.param('day') }, 'day', 'Shift day');
   const closed = await one(c.env.DB, `SELECT opening_float_paise AS openingFloatPaise, counted, counted_paise AS countedPaise, expected_paise AS expectedPaise,
     difference_paise AS differencePaise, difference_reason AS differenceReason, closed_at AS closedAt FROM shift_closes WHERE business_id = ? AND shift_day = ?`, bid, day);
-  return c.json({ summary: await shiftSummary(c.env.DB, bid, day, b.tab_age_days), closed, current: clock(b).shiftDay });
+  return c.json({ summary: await shiftSummary(c.env.DB, bid, day, b.tab_age_days, b.shift_start_hour), closed, current: clock(b).shiftDay });
 });
 
 shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (c) => {
@@ -71,7 +75,7 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const day = date({ day: c.req.param('day') }, 'day', 'Shift day');
   const { t, shiftDay: current } = clock(b);
   if (day > current) fail(400, 'That shift has not started.');
-  const s = await shiftSummary(db, bid, day, b.tab_age_days);
+  const s = await shiftSummary(db, bid, day, b.tab_age_days, b.shift_start_hour);
   if (s.openOrders.length) fail(409, `Bill these orders or keep them as a tab first: ${s.openOrders.map((o) => o.place).join(', ')}.`);
   if (s.unpaidBills.length) fail(409, `These bills are printed but not paid: ${s.unpaidBills.map((x) => x.bill_no).join(', ')}. Settle or void them first.`);
 
@@ -94,7 +98,9 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const expected = float + s.cashInPaise - s.cashOutPaise;
   const diff = countedPaise - expected;
   const reason = text(data, 'reason', 'A reason for the difference', { optional: diff === 0, max: 200 });
-  const totals = { byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment };
+  // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).
+  const deskReason = s.deskMissing.length ? text(data, 'deskReason', `Reception entered ${rs(s.deskMissing.reduce((t, x) => t + x.pendingPaise, 0))} in Djubo with no POS receipt (${s.deskMissing.map((x) => x.extRef).join(', ')}). Take it in Rooms, or a reason`, { max: 200 })! : null;
+  const totals = { deskMissing: s.deskMissing, deskReason, byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment };
   const id = newId();
   try {
     await db.batch([
