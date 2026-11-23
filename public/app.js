@@ -9257,7 +9257,7 @@ async function schoolsView(biz, editId) {
     f.querySelector('input').focus();
     const make = async () => {
       const res = await api('POST', `/businesses/${biz.id}/invites`, { phone: f.elements.phone.value, role: 'entry_staff', accountId: book.id });
-      return { res, text: `Join ${biz.name} on Bookr to keep your cash book. Open this link, choose a password, then sign in with your mobile number: ${res.link}` };
+      return { res, text: `Join ${biz.name} on Bookr to keep your cash book. Open this link, choose a password, then sign in with your mobile number: ${res.link}\n\nThen tap Install when asked: Bookr sits on your home screen like any app.` };
     };
     f.querySelector('[data-cancel]').addEventListener('click', again);
     f.addEventListener('submit', async (e) => {
@@ -9402,6 +9402,43 @@ function ownerBadge(biz, known) {
   api('GET', `/businesses/${biz.id}/owner-look`).then((l) => set(lookCount(l))).catch(() => {});
 }
 
+// Getting Bookr onto a cashier's phone (approved 23 Nov 2026). A phone never installs by itself: the cashier taps once.
+// The first time on Today, a full install screen; after Later, a slim line once a day (✕ hides it for the day). Not when
+// opened from the home-screen icon, and not on a PC. Android: the phone's own Install box; if it is not offered (e.g.
+// opened inside WhatsApp), how to open it in Chrome. iPhone: Share, then Add to Home Screen.
+const LS = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } } };
+const appStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+if (appStandalone()) LS.set('bookr.installed', '1');
+const isIPhone = () => /iPhone|iPad|iPod/.test(navigator.userAgent);
+function cbInstall(body) {
+  if (appStandalone() || LS.get('bookr.installed') === '1' || innerWidth > 767) return body;
+  if (LS.get('bookr.installLater') === todayIst()) return body;
+  const how = isIPhone()
+    ? html`<div class="inst-step"><span class="inst-n">1</span><span>Tap <span class="inst-sym">⬆︎ Share</span> at the bottom of Safari</span></div>
+      <div class="inst-step"><span class="inst-n">2</span><span>Tap <span class="inst-sym">＋ Add to Home Screen</span>, then <b>Add</b></span></div>
+      <div class="tiny">Then open Bookr from the new icon and sign in with your mobile number once more.</div>
+      <div class="tiny">No Share button? You opened it inside WhatsApp: tap the Safari button at the bottom first.</div>`
+    : html`<button type="button" class="btn" data-install ${installPrompt ? '' : 'hidden'}>Install Bookr</button>
+      ${installPrompt ? '' : html`<div class="cb-box wait inst-late" data-noinstall><b>Open this in Chrome to install Bookr</b>
+        <span>Opened inside WhatsApp? Tap <span class="inst-sym">⋮</span> at the top right, then <b>Open in Chrome</b>.</span>
+        <span class="tiny" style="color:inherit">Already installed? Open Bookr from its icon on your home screen.</span></div>`}`;
+  if (LS.get('bookr.installSeen') !== '1') {
+    return html`<section class="card inst-full"><div class="inst-icon">B</div><b style="font-size:16px">Put Bookr on your home screen</b>
+      <span class="tiny">Opens straight to your cash book, like any app. No Play Store needed. You stay signed in.</span>
+      ${how}<button type="button" class="linkbtn" data-instlater>${isIPhone() ? 'Done' : 'Later'}</button></section>`;
+  }
+  return html`${isIPhone() ? html`<details class="inst-slim"><summary><span>Install Bookr on this phone</span><button type="button" class="linkbtn" data-instlater aria-label="Hide for today">✕</button></summary>${how}</details>`
+    : installPrompt ? html`<div class="inst-slim"><span>Install Bookr on this phone</span><span style="display:flex;gap:12px;align-items:center"><button type="button" class="linkbtn" data-install><b>Install</b></button>
+        <button type="button" class="linkbtn" data-instlater aria-label="Hide for today">✕</button></span></div>` : ''}${body}`;
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest?.('[data-instlater]')) return;
+  e.preventDefault();
+  LS.set('bookr.installSeen', '1');
+  LS.set('bookr.installLater', todayIst());
+  route();
+});
+
 function cbFrame(biz, b, tab, body) {
   if (ownerPhone(biz)) {
     const own = b.cashierUserId === me.user.id;
@@ -9413,7 +9450,7 @@ function cbFrame(biz, b, tab, body) {
   return html`<div class="cbapp">
     <header class="cbapp-head"><span><b>${b.branchName ? b.cashierName ?? b.name : b.name}</b> <span class="tiny">· ${b.branchName ?? 'Cash holder'}</span></span>
       ${me.businesses.length > 1 ? html`<a class="tiny" href="#/choose">${biz.name} ▾</a>` : html`<span class="tiny">${biz.name}</span>`}</header>
-    <main class="cbapp-main">${body}</main>
+    <main class="cbapp-main">${tab === 'today' ? cbInstall(body) : body}</main>
     <nav class="cbbar" aria-label="Cash book">
       ${t('today', 'Today', `#/b/${biz.id}/cashbook/${b.id}/${todayIst()}`)}${t('days', 'Days', `#/b/${biz.id}/cbdays/${b.id}`)}
       ${t('handed', 'Handed over', `#/b/${biz.id}/cbhanded/${b.id}`)}${t('more', 'More', `#/b/${biz.id}/cbmore/${b.id}`)}</nav>
@@ -10252,8 +10289,17 @@ async function routeInner() {
 // When the phone offers to install, "Install Bookr on this phone" shows in the business menu and on the cash book.
 let installPrompt = null;
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
-window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; document.querySelectorAll('[data-install]').forEach((b) => { b.hidden = false; }); });
-window.addEventListener('appinstalled', () => { installPrompt = null; document.querySelectorAll('[data-install]').forEach((b) => { b.hidden = true; }); });
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault(); installPrompt = e;
+  document.querySelectorAll('[data-install]').forEach((b) => { b.hidden = false; });
+  document.querySelectorAll('[data-noinstall]').forEach((b) => b.remove());
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  try { localStorage.setItem('bookr.installed', '1'); } catch { /* private mode */ }
+  document.querySelectorAll('[data-install]').forEach((b) => { b.hidden = true; });
+  if (document.querySelector('.inst-full, .inst-slim')) route();
+});
 document.addEventListener('click', async (e) => {
   const b = e.target.closest?.('[data-install]');
   if (!b || !installPrompt) return;
