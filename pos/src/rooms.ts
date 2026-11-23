@@ -27,7 +27,17 @@ export async function syncStay(db: DB, bid: string, stayId: string) {
   if (await one(db, 'SELECT 1 FROM room_invoices WHERE stay_id = ?', stayId)) return;
   const acc = await one<{ id: string }>(db, "SELECT id FROM debtor_accounts WHERE stay_id = ? AND business_id = ? AND kind = 'room'", stayId, bid);
   const bk = await bookingOfStay(db, stayId);
-  if (!acc || !bk) return;
+  if (!acc) return;
+  const t0 = now();
+  // Advances taken with a reservation made here (25 Nov 2026) move onto the room's bill, booking or not.
+  const fromRes = await all<{ id: string; payment_id: string; amount_paise: number }>(db, `SELECT d.id, p.id AS payment_id, p.amount_paise FROM desk_advances d
+    JOIN payments p ON p.settlement_id = d.settlement_id JOIN stays s ON s.reservation_id = d.reservation_id WHERE s.id = ? AND d.business_id = ? AND d.status = 'held'`, stayId, bid);
+  if (fromRes.length) await db.batch([
+    ...fromRes.map((h) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, note, at)
+      SELECT ?, ?, ?, 'advance', ?, ?, 'Advance taken at hotel', ? WHERE NOT EXISTS (SELECT 1 FROM debtor_entries WHERE payment_id = ? AND account_id = ?)`,
+      newId(), bid, acc.id, -h.amount_paise, h.payment_id, t0, h.payment_id, acc.id)),
+    ...[...new Set(fromRes.map((h) => h.id))].map((id) => stmt(db, "UPDATE desk_advances SET status = 'applied', stay_id = ? WHERE id = ? AND status = 'held'", stayId, id))]);
+  if (!bk) return;
   const live = bk.status !== 'cancelled';
   const rent = live ? Math.max(0, bk.amount_paise ?? 0) : 0;
   // Of Djubo's advance, the part reception entered was taken at the desk: it is collected here with a receipt (24 Nov 2026),

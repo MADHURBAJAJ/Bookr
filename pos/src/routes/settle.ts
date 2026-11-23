@@ -2,7 +2,7 @@
 // matches it with (UPI account, card approval code and last 4, folio or credit account, complimentary guest and reason).
 // One settle can pay several bills (paid together). Room, credit and advance payments go to the debtor ledger.
 // Each settled bill becomes one outbox message for Bookr.
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { all, newId, now, one, stmt, type DB } from '../../../src/db';
 import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
@@ -353,10 +353,21 @@ function receiptSettlement(db: DB, bid: string, settlementId: string, shiftDay: 
 // For a booking Djubo has (reception may also enter it in Djubo: the POS then sees it is already taken), or before Djubo has
 // the booking (name, phone and check-in day; attached to the booking when its mail arrives). A numbered advance receipt
 // prints; the money is in this shift's drawer; at check-in it moves onto the room's bill.
-settleRoutes.post(`${B}/desk-advances`, requireAction('debtors.receive'), async (c) => {
+settleRoutes.post(`${B}/desk-advances`, requireAction('debtors.receive'), async (c) => c.json(await deskAdvance(c, await body(c)), 201));
+
+/** Checks the payments typed for a receipt (cash, UPI or card), before anything is saved. */
+export async function checkReceiptPayments(c: Context<AppEnv>, payments: unknown) {
+  if (!Array.isArray(payments) || !payments.length || payments.length > 5) fail(400, 'Add how it was paid.');
+  for (const [i, raw] of payments.entries()) await readPayment(c.env.DB, c.get('businessId'), raw, i + 1, ['cash', 'upi', 'card']);
+}
+
+/**
+ * An advance taken at the desk, with its numbered receipt: for a Djubo booking, a reservation made here (25 Nov 2026), or
+ * before Djubo has the booking (name, phone and check-in day).
+ */
+export async function deskAdvance(c: Context<AppEnv>, data: Record<string, unknown>, reservation?: { id: string; guest: string; phone: string; checkIn: string; checkOut: string }) {
   const bid = c.get('businessId');
   const db = c.env.DB;
-  const data = await body(c);
   let booking: { id: string; ext_ref: string; guest_name: string | null; phone: string | null; check_in: string | null; check_out: string | null; status: string } | null = null;
   if (data.bookingId !== undefined && data.bookingId !== null && data.bookingId !== '') {
     booking = await one(db, 'SELECT id, ext_ref, guest_name, phone, check_in, check_out, status FROM bookings WHERE id = ? AND business_id = ?', isUuid(String(data.bookingId)) ? data.bookingId : null, bid);
@@ -364,10 +375,10 @@ settleRoutes.post(`${B}/desk-advances`, requireAction('debtors.receive'), async 
     if (booking.status === 'cancelled') fail(409, 'This booking was cancelled.');
     if (booking.status === 'checked_in') fail(409, 'This guest is checked in: take it on the room bill.');
   }
-  const guest = booking?.guest_name ?? text(data, 'guestName', 'Guest name', { max: 80 })!;
-  const phone = booking ? booking.phone : phoneKey(data.phone);
+  const guest = booking?.guest_name ?? reservation?.guest ?? text(data, 'guestName', 'Guest name', { max: 80 })!;
+  const phone = booking ? booking.phone : reservation?.phone ?? phoneKey(data.phone);
   if (!booking && !phone) fail(400, "Add the guest's phone, so the advance finds its Djubo booking.");
-  const checkIn = booking?.check_in ?? (typeof data.checkIn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.checkIn) ? data.checkIn : fail(400, 'Check-in must be a date.'));
+  const checkIn = booking?.check_in ?? reservation?.checkIn ?? (typeof data.checkIn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.checkIn) ? data.checkIn : fail(400, 'Check-in must be a date.'));
   if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 5) fail(400, 'Add how it was paid.');
   const pays: Pay[] = [];
   for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card']));
@@ -380,8 +391,8 @@ settleRoutes.post(`${B}/desk-advances`, requireAction('debtors.receive'), async 
     await db.batch([
       ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
       ...pays.map((p) => insertPayment(db, bid, settlementId, { ...p, debtorAccountId: null }, shiftDay, staff.id, t)),
-      stmt(db, `INSERT INTO desk_advances (id, business_id, booking_id, guest_name, phone, check_in, amount_paise, settlement_id, by_staff, at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, booking?.id ?? null, guest, phone, checkIn, total, settlementId, staff.id, t),
+      stmt(db, `INSERT INTO desk_advances (id, business_id, booking_id, guest_name, phone, check_in, amount_paise, settlement_id, by_staff, at, reservation_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, booking?.id ?? null, guest, phone, checkIn, total, settlementId, staff.id, t, reservation?.id ?? null),
       stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
         settlementId, kind: 'advance', account: { id: null, kind: 'booking', name: guest, booking: booking?.ext_ref ?? null }, shiftDay, at: t, by: staff.name,
         payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, payAccountName: p.payAccountName,
@@ -394,9 +405,9 @@ settleRoutes.post(`${B}/desk-advances`, requireAction('debtors.receive'), async 
   }
   sendSoon(c, bid);
   const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
-  return c.json({ id, receipt: { receiptNo, kind: 'advance', at: t, name: guest, room: null, booking: booking?.ext_ref ?? null, checkIn, checkOut: booking?.check_out ?? null,
-    totalPaise: total, balancePaise: null, payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } }, 201);
-});
+  return { id, receipt: { receiptNo, kind: 'advance', at: t, name: guest, room: null, booking: booking?.ext_ref ?? null, checkIn, checkOut: booking?.check_out ?? reservation?.checkOut ?? null,
+    totalPaise: total, balancePaise: null, payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } };
+}
 
 async function heldAdvance(c: { req: { param(k: 'id'): string }; get(k: 'businessId'): string; env: { DB: DB } }) {
   const id = c.req.param('id');

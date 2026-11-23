@@ -15,6 +15,7 @@ import { adminRoutes } from './routes/admin';
 import { eventRoutes } from './routes/events';
 import { inventoryRoutes } from './routes/inventory';
 import { bookingRoutes } from './routes/bookings';
+import { frontDeskRoutes } from './routes/frontdesk';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -59,6 +60,7 @@ app.route('/', stationRoutes);
 app.route('/', eventRoutes);
 app.route('/', inventoryRoutes);
 app.route('/', bookingRoutes);
+app.route('/', frontDeskRoutes);
 app.route('/', adminRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));

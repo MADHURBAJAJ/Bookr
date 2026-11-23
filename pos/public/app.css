@@ -738,3 +738,27 @@ details.receipt-row[open] summary { border-bottom: 1px solid var(--line); }
 .badge.void { color: var(--bad); background: var(--bad-tint); border-color: var(--bad-line); }
 .badge.paid { color: var(--go-dark); background: var(--go-tint); border-color: var(--go-line); }
 @media (max-width: 760px) { .rrow { grid-template-columns: 1fr 1fr; } }
+
+/* ---------- front desk (25 Nov 2026): today's three lists, the room chart */
+.cols3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; margin-top: 14px; }
+@media (max-width: 1000px) { .cols3 { grid-template-columns: minmax(0, 1fr); } }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--pri); font: inherit; cursor: pointer; text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+.chartwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+table.chart { border-collapse: collapse; min-width: 820px; width: 100%; font-size: 13px; table-layout: fixed; }
+.chart th, .chart td { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 0; height: 36px; }
+.chart thead th { padding: 6px 4px; font-weight: 650; color: var(--quiet); white-space: nowrap; }
+.chart thead th.today { color: var(--pri); }
+.chart .croom { width: 96px; text-align: left; padding: 0 10px; white-space: nowrap; position: sticky; left: 0; background: var(--panel); z-index: 1; }
+.chart tr.cgrp th { text-align: left; padding: 5px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--quiet); background: var(--bg); }
+.cfree { width: 100%; height: 100%; min-height: 34px; border: 0; background: transparent; cursor: pointer; }
+.cfree:hover { background: var(--pri-tint); }
+.cbar { display: block; width: calc(100% - 4px); margin: 2px; padding: 6px 7px; border-radius: 6px; border: 1px solid transparent; font: 650 12.5px var(--font, inherit); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.cbar.occ { background: var(--pri-tint); color: var(--pri); border-color: var(--pri-line); }
+.cbar.arr { background: var(--go-tint); color: var(--go-dark); border-color: var(--go-line); }
+.cbar.pos { background: var(--warn-tint); color: var(--warn); border: 1px dashed var(--warn-line); }
+.cbar.hold { background: var(--bg); color: var(--quiet); border: 1px dashed var(--line); }
+.cbar.ooo { background: var(--bad-tint); color: var(--bad); border-color: var(--bad-line); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--quiet); margin-top: 8px; }
+.legend i { display: inline-block; width: 14px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: middle; border: 1px solid var(--line); }
+.legend i.occ { background: var(--pri-tint); } .legend i.arr { background: var(--go-tint); } .legend i.pos { background: var(--warn-tint); border-style: dashed; }
+.legend i.hold { background: var(--bg); border-style: dashed; } .legend i.ooo { background: var(--bad-tint); }

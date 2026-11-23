@@ -8,6 +8,7 @@ import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { rs, shiftDayAt } from '../billing';
 import { deskPending } from '../rooms';
+import { notInDjubo } from './frontdesk';
 import { clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
 import type { AppEnv } from '../types';
@@ -53,6 +54,8 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
   return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut, deskMissing,
+    // Reservations made at the desk that Djubo has not confirmed (25 Nov 2026).
+    notInDjubo: await notInDjubo(db, bid, day),
     drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })),
     tips: differences.filter((d) => d.kind === 'tip').map((d) => ({ mode: d.mode, n: d.n, paise: d.paise })),
     discountsAtPayment: differences.filter((d) => d.kind === 'discount').reduce((t, d) => ({ n: t.n + d.n, paise: t.paise + d.paise }), { n: 0, paise: 0 }),
@@ -100,7 +103,8 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const reason = text(data, 'reason', 'A reason for the difference', { optional: diff === 0, max: 200 });
   // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).
   const deskReason = s.deskMissing.length ? text(data, 'deskReason', `Reception entered ${rs(s.deskMissing.reduce((t, x) => t + x.pendingPaise, 0))} in Djubo with no POS receipt (${s.deskMissing.map((x) => x.extRef).join(', ')}). Take it in Rooms, or a reason`, { max: 200 })! : null;
-  const totals = { deskMissing: s.deskMissing, deskReason, byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment };
+  const djuboReason = s.notInDjubo.length ? text(data, 'djuboReason', `${s.notInDjubo.length} reservation${s.notInDjubo.length === 1 ? '' : 's'} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (${s.notInDjubo.map((x) => x.guestName).join(', ')}). Enter ${s.notInDjubo.length === 1 ? 'it' : 'them'} in Djubo, or a reason`, { max: 200 })! : null;
+  const totals = { deskMissing: s.deskMissing, deskReason, notInDjubo: s.notInDjubo, djuboReason, byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment };
   const id = newId();
   try {
     await db.batch([

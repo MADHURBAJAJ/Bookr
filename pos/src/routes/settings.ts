@@ -850,6 +850,14 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   const city = text(data, 'city', 'City', { optional: true, max: 60 });
   const id = newId();
   const t = now();
+  // Check-in details for the registration card (25 Nov 2026): guests, each adult's ID (type and last 4 digits only),
+  // address and travel, a foreign guest's passport and visa (Form C). A card number is given at every check-in.
+  const ci = readCheckIn(data);
+  const res = typeof data.reservationId === 'string' && isUuid(data.reservationId)
+    ? await one<{ id: string; status: string; check_out: string; lines: string; check_in: string; booking_id: string | null; stay_id: string | null }>(c.env.DB,
+      'SELECT id, status, check_out, lines, check_in, booking_id, stay_id FROM reservations WHERE id = ? AND business_id = ?', data.reservationId, bid) : null;
+  if (typeof data.reservationId === 'string' && (!res || res.status === 'cancelled')) fail(404, 'Reservation not found, or cancelled.');
+  const { fy } = clock(b, t);
   // The guest is kept for next time, by phone: a returning guest's name and city are brought up to date.
   const known = phone ? await one<{ id: string }>(c.env.DB, 'SELECT id FROM guests WHERE business_id = ? AND phone = ?', bid, phone) : null;
   const guestId = phone ? known?.id ?? newId() : null;
@@ -858,8 +866,15 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
       ...(phone ? [known
         ? stmt(c.env.DB, 'UPDATE guests SET name = ?, city = coalesce(?, city), updated_at = ? WHERE id = ?', guest, city, t, guestId)
         : stmt(c.env.DB, 'INSERT INTO guests (id, business_id, name, phone, city, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', guestId, bid, guest, phone, city, t, t)] : []),
-      stmt(c.env.DB, 'INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at, guest_id, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        id, bid, room, guest, clock(b, t).shiftDay, c.get('staff').id, t, guestId, phone),
+      stmt(c.env.DB, `INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at, guest_id, phone, adults, children, id_docs, address, coming_from,
+          going_to, nationality, foreign_info, check_out_plan, reservation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, bid, room, guest, clock(b, t).shiftDay, c.get('staff').id, t, guestId, phone, ci.adults, ci.children, ci.idDocs, ci.address, ci.comingFrom, ci.goingTo,
+        ci.nationality, ci.foreign, ci.checkOutPlan ?? res?.check_out ?? null, res?.id ?? null),
+      stmt(c.env.DB, 'INSERT OR IGNORE INTO grc_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
+      stmt(c.env.DB, `UPDATE stays SET grc_no = (SELECT 'GRC-' || substr(?, 3, 2) || substr(?, 6, 2) || '-' || printf('%04d', next_no) FROM grc_series WHERE business_id = ? AND fy = ?) WHERE id = ?`,
+        fy, fy, bid, fy, id),
+      stmt(c.env.DB, 'UPDATE grc_series SET next_no = next_no + 1 WHERE business_id = ? AND fy = ?', bid, fy),
+      ...(res ? [stmt(c.env.DB, 'UPDATE reservations SET stay_id = coalesce(stay_id, ?) WHERE id = ?', id, res.id)] : []),
       stmt(c.env.DB, "INSERT INTO debtor_accounts (id, business_id, kind, name, stay_id, created_by, created_at) VALUES (?, ?, 'room', ?, ?, ?, ?)",
         newId(), bid, `${/^\d/.test(room) ? 'Room ' : ''}${room} · ${guest}`, id, c.get('staff').id, t),
       audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest, returning: !!known }),
@@ -874,7 +889,62 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   }
   // From a booking: its room rent and what was paid before arrival go on the room's bill (24 Nov 2026).
   if (typeof data.bookingId === 'string') await syncStay(c.env.DB, bid, id);
-  return c.json({ id }, 201);
+  // From a reservation made here and not yet in Djubo: its rate for this room goes on the bill (replaced by Djubo's
+  // rent when the booking's mail arrives), and its advance moves onto the bill.
+  if (res) {
+    if (!res.booking_id && typeof data.bookingId !== 'string') {
+      const lines = JSON.parse(res.lines) as { type: string; ratePaise: number; roomNames?: string[] }[];
+      const sec = (layout ?? []).find((x) => x.tables.includes(room));
+      const line = lines.find((l) => l.roomNames?.includes(room)) ?? lines.find((l) => l.type === sec?.name) ?? lines[0];
+      const n = Math.max(1, Math.round((Date.parse(res.check_out) - Date.parse(clock(b, t).shiftDay)) / 86_400_000));
+      if (line) await stmt(c.env.DB, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, by_staff, at)
+        SELECT ?, ?, d.id, 'room_rent', ?, ?, ?, ? FROM debtor_accounts d WHERE d.stay_id = ?`, newId(), bid, line.ratePaise * n,
+        `Room rent · ${n} night${n === 1 ? '' : 's'} × ₹${(line.ratePaise / 100).toLocaleString('en-IN')} (reservation)`, c.get('staff').id, t, id).run();
+    }
+    await syncStay(c.env.DB, bid, id);
+  }
+  return c.json({ id, grcNo: (await one<{ g: string }>(c.env.DB, 'SELECT grc_no AS g FROM stays WHERE id = ?', id))?.g ?? null }, 201);
+});
+
+const ID_TYPES = ['Aadhaar', 'Driving licence', 'Passport', 'Voter ID', 'PAN', 'Other'];
+/** Check-in details as typed; an ID's number is kept only as its last 4 digits. */
+function readCheckIn(data: Record<string, unknown>) {
+  const num = (k: string, label: string) => {
+    const v = data[k];
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 0 || n > 99) fail(400, `${label} must be a whole number.`);
+    return n;
+  };
+  const docs = Array.isArray(data.idDocs) ? (data.idDocs as Record<string, unknown>[]).slice(0, 20).map((d, i) => {
+    const type = typeof d?.type === 'string' && ID_TYPES.includes(d.type) ? d.type : fail(400, `Guest ${i + 1}: choose the ID type.`);
+    const digits = String(d.number ?? d.last4 ?? '').replace(/[^0-9A-Za-z]/g, '');
+    if (digits.length < 4) fail(400, `Guest ${i + 1}: type at least the last 4 characters of the ID.`);
+    return { type, last4: digits.slice(-4).toUpperCase(), name: typeof d.name === 'string' ? d.name.trim().slice(0, 80) : '' };
+  }) : [];
+  const f = data.foreign && typeof data.foreign === 'object' ? data.foreign as Record<string, unknown> : null;
+  const foreign = f ? JSON.stringify({ passportLast4: String(f.passport ?? '').replace(/\W/g, '').slice(-4).toUpperCase() || null, visa: typeof f.visa === 'string' ? f.visa.slice(0, 40) : null,
+    visaExpiry: typeof f.visaExpiry === 'string' ? f.visaExpiry.slice(0, 10) : null, arrivedOn: typeof f.arrivedOn === 'string' ? f.arrivedOn.slice(0, 10) : null, formC: f.formC === true }) : null;
+  const plan = typeof data.checkOutPlan === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.checkOutPlan) ? data.checkOutPlan : null;
+  return {
+    adults: num('adults', 'Adults'), children: num('children', 'Children'), idDocs: docs.length ? JSON.stringify(docs) : null,
+    address: text(data, 'address', 'Address', { optional: true, max: 200 }), comingFrom: text(data, 'comingFrom', 'Coming from', { optional: true, max: 60 }),
+    goingTo: text(data, 'goingTo', 'Going to', { optional: true, max: 60 }), nationality: text(data, 'nationality', 'Nationality', { optional: true, max: 40 }),
+    foreign, checkOutPlan: plan,
+  };
+}
+
+// The guest registration card for a stay (printed at check-in, or again later).
+settingsRoutes.get(`${B}/stays/:id/grc`, requireAction('stays.edit'), async (c) => {
+  const s = await one<Record<string, unknown> & { id_docs: string | null; foreign_info: string | null }>(c.env.DB, `SELECT s.id, s.room, s.guest_name AS guestName, s.phone, s.created_at AS arrivedAt,
+      s.check_in AS checkIn, coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id)) AS checkOut, s.adults, s.children, s.id_docs, s.address,
+      s.coming_from AS comingFrom, s.going_to AS goingTo, s.nationality, s.foreign_info, s.grc_no AS grcNo, g.city
+    FROM stays s LEFT JOIN guests g ON g.id = s.guest_id WHERE s.id = ? AND s.business_id = ?`, isUuid(c.req.param('id')) ? c.req.param('id') : null, c.get('businessId'));
+  if (!s) fail(404, 'Stay not found.');
+  const bill = await stayBill(c, s.id as string);
+  const { id_docs, foreign_info, ...rest } = s;
+  return c.json({ grc: { ...rest, idDocs: id_docs ? JSON.parse(id_docs) : [], foreign: foreign_info ? JSON.parse(foreign_info) : null, business: bizOf(c).name,
+    rentPaise: bill.rentPaise, prepaidPaise: bill.prepaidPaise, paidPaise: bill.paidPaise, mealPlan: (bill.booking as { mealPlan?: string } | null)?.mealPlan ?? null } });
 });
 
 // ---------- the room's bill (24 Nov 2026): rent from the booking, charges added by hand, food, payments, the invoice
@@ -998,9 +1068,19 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
 });
 
 settingsRoutes.get(`${B}/credit-accounts`, requireAction('pos.view'), async (c) => {
-  return c.json({ accounts: await all(c.env.DB, `SELECT d.id, d.name, d.phone, d.credit_limit_paise AS creditLimitPaise,
+  const accounts = await all<{ id: string; balancePaise: number }>(c.env.DB, `SELECT d.id, d.name, d.phone, d.credit_limit_paise AS creditLimitPaise,
       coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balancePaise
-    FROM debtor_accounts d WHERE d.business_id = ? AND d.kind = 'credit' ORDER BY d.name`, c.get('businessId')) });
+    FROM debtor_accounts d WHERE d.business_id = ? AND d.kind = 'credit' ORDER BY d.name`, c.get('businessId'));
+  // How old the oldest unpaid bill is (25 Nov 2026): what is owed is taken to be the newest charges.
+  const charges = await all<{ account_id: string; amount_paise: number; at: number }>(c.env.DB, `SELECT e.account_id, e.amount_paise, e.at FROM debtor_entries e
+    JOIN debtor_accounts d ON d.id = e.account_id WHERE d.business_id = ? AND d.kind = 'credit' AND e.amount_paise > 0 AND e.kind IN ('charge', 'advance_used') ORDER BY e.at DESC`, c.get('businessId'));
+  const t = now();
+  return c.json({ accounts: accounts.map((a) => {
+    let left = a.balancePaise;
+    let oldest: number | null = null;
+    for (const ch of charges.filter((x) => x.account_id === a.id)) { if (left <= 0) break; left -= ch.amount_paise; oldest = ch.at; }
+    return { ...a, oldestDays: oldest === null ? null : Math.floor((t - oldest) / 86_400_000) };
+  }) });
 });
 
 settingsRoutes.put(`${B}/credit-accounts/:id`, requireAction('reports.view'), async (c) => {

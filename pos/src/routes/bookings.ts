@@ -42,9 +42,9 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
   const [pending, advancesWaiting, unbooked] = await Promise.all([
     deskPending(c.env.DB, bid),
     all(c.env.DB, `SELECT d.id, d.guest_name AS guestName, d.phone, d.check_in AS checkIn, d.amount_paise AS amountPaise, d.at, s.receipt_no AS receiptNo,
-        k.status AS bookingStatus, k.ext_ref AS bookingRef
-      FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id LEFT JOIN bookings k ON k.id = d.booking_id
-      WHERE d.business_id = ? AND d.status = 'held' AND (d.booking_id IS NULL OR k.status = 'cancelled') ORDER BY d.at`, bid),
+        CASE WHEN r.status = 'cancelled' THEN 'cancelled' ELSE k.status END AS bookingStatus, coalesce(k.ext_ref, CASE WHEN r.id IS NOT NULL THEN 'made here' END) AS bookingRef
+      FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id LEFT JOIN bookings k ON k.id = d.booking_id LEFT JOIN reservations r ON r.id = d.reservation_id
+      WHERE d.business_id = ? AND d.status = 'held' AND ((d.booking_id IS NULL AND (d.reservation_id IS NULL OR r.status = 'cancelled')) OR k.status = 'cancelled') ORDER BY d.at`, bid),
     all(c.env.DB, `SELECT s.id, s.room, s.guest_name AS guestName FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id) ORDER BY s.room`, bid),
   ]);

@@ -8,6 +8,7 @@ import type { Env } from './types';
 import { readerFor, type ReadBooking } from './booking-readers';
 import { phoneKeySoft } from './booking-readers';
 import { linkWalkIn, recomputeDesk, syncStayRent } from './rooms';
+import { linkReservation } from './routes/frontdesk';
 import { tableLayout, type Business } from './util';
 
 const GMAIL_CONFIRM = 'forwarding-noreply@google.com';
@@ -167,6 +168,8 @@ async function deskMoney(db: DB, bid: string, id: string, source: string, mailId
     await recomputeDesk(db, bid, id);
   }
   const phone = phoneKeySoft(x.phone);
+  // A reservation made at the desk (25 Nov 2026) is linked when Djubo's mail for it arrives.
+  if (!x.cancelled && !x.unplaced) await linkReservation(db, bid, id, phone, x.checkIn);
   if (phone && x.checkIn && !x.cancelled) {
     await stmt(db, `UPDATE desk_advances SET booking_id = ? WHERE business_id = ? AND booking_id IS NULL AND status = 'held' AND phone = ? AND check_in = ?`, id, bid, phone, x.checkIn).run();
   }
