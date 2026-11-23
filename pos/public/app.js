@@ -2046,39 +2046,79 @@ actions.regCsv = () => downloadCsv(`guest-register-${ui.regFrom}-to-${ui.regTo}.
     x.address ?? '', x.comingFrom ?? '', x.goingTo ?? '', x.invoiceNo ?? '']),
 ]);
 const ID_TYPES = ['Aadhaar', 'Driving licence', 'Passport', 'Voter ID', 'PAN', 'Other'];
+/** Check-in (25 Nov 2026 redesign): one screen in four steps, Guest → Room → ID → Payment. The room picker is searchable,
+ *  grouped by room type, with what is free and what is dirty; Enter checks in. */
 function checkinView() {
   const resArr = (ui.fd?.arrivals ?? []).filter((a) => a.kind === 'reservation');
   const adults = Math.max(1, Math.min(10, Number(ui.ciAdults) || 1));
   const foreign = ui.ciNat && !/^indian?$/i.test(ui.ciNat.trim());
-  return html`<section class="panel">${ui.recv || ui.refund || ui.roomBill || ui.adv ? '' : errorBox()}
-    ${ui.arrivals?.length || resArr.length ? html`<div class="f">Arriving today: tap to fill check-in
-      <div class="chips">${ui.arrivals.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.bookingId === a.id}" data-act="pickArrival" data-id="${a.id}">${a.guestName} · ${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'}${a.rooms > 1 ? ` × ${a.rooms}` : ''} · till ${dayName(a.checkOut)}${dueOf(a) ? html` · <strong>collect ${rs(dueOf(a))}</strong>` : ''}</button>`)}
-        ${resArr.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.resPicked?.id === a.id}" data-act="pickRes" data-id="${a.id}">${a.guestName} · ${a.rooms} · not in Djubo${a.duePaise ? html` · <strong>collect ${rs(a.duePaise)}</strong>` : ''}</button>`)}</div>
-      ${ui.bookingId && ui.arrivals.find((a) => a.id === ui.bookingId) ? bookingCard(ui.arrivals.find((a) => a.id === ui.bookingId)) : ''}
-      ${ui.resPicked ? html`<div class="msg warn" style="margin-top:8px;display:block"><strong>${ui.resPicked.guestName}</strong> · reservation made here, not in Djubo yet · total ${rs(ui.resPicked.totalPaise)} · advance ${rs(ui.resPicked.advancePaise)}
-        <div class="small">Its rate goes on the room bill now; Djubo's amount replaces it when Djubo's mail arrives.</div></div>` : ''}</div>` : html`<p class="quiet small">No bookings due today. Check in a walk-in below.</p>`}
-    <form class="grid2" style="margin-top:12px">
-      <label class="f">Mobile<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" placeholder="Finds a returning guest" autocomplete="off"></label>
-      <label class="f">Guest name, as on ID<input class="in" data-model="guest" value="${ui.guest ?? ''}"></label>
-      ${ui.roomSecs.length ? roomChooser() : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`}
-      ${ui.gFound ? html`<div class="msg ok" style="grid-column:1/-1">Returning guest: <strong>${ui.gFound.name}</strong> · ${plural(ui.gFound.stays.length, 'earlier stay')}${ui.gFound.stays[0] ? ` · last ${dayName(ui.gFound.stays[0].checkIn)} (${ui.gFound.stays[0].room}, ${rs(ui.gFound.stays[0].chargedPaise)})` : ''}</div>` : ''}
-      <label class="f">Adults<input class="in" inputmode="numeric" data-model="ciAdults" data-live value="${ui.ciAdults ?? '1'}"></label>
-      <label class="f">Children<input class="in" inputmode="numeric" data-model="ciKids" value="${ui.ciKids ?? '0'}"></label>
-      <label class="f">Check-out date<input class="in" type="date" data-model="ciOut" value="${ui.ciOut ?? addDays(me.business.shiftDay, 1)}"></label>
-      <label class="f">Nationality<input class="in" data-model="ciNat" data-live value="${ui.ciNat ?? 'Indian'}"></label>
-      <div style="grid-column:1/-1"><p class="label">ID of each adult (shown and checked; only the last 4 characters are kept)</p>
-        ${Array.from({ length: adults }, (_, i) => html`<div class="grid3" style="margin-bottom:6px"><label class="f">Guest ${i + 1} · ID type<select class="in" data-model="idT_${i}">${ID_TYPES.map((t) => html`<option ${(ui[`idT_${i}`] ?? (foreign ? 'Passport' : 'Aadhaar')) === t ? 'selected' : ''}>${t}</option>`)}</select></label>
-          <label class="f">ID number (or its last 4)<input class="in" data-model="idN_${i}" value="${ui[`idN_${i}`] ?? ''}" autocomplete="off"></label>
-          <label class="f">Name on ID<input class="in" data-model="idName_${i}" value="${ui[`idName_${i}`] ?? (i === 0 ? ui.guest ?? '' : '')}"></label></div>`)}</div>
-      <label class="f">Home address<input class="in" data-model="ciAddr" value="${ui.ciAddr ?? ''}"></label>
-      <label class="f">Coming from<input class="in" data-model="gCity" value="${ui.gCity ?? ''}"></label>
-      <label class="f">Going to next (optional)<input class="in" data-model="ciNext" value="${ui.ciNext ?? ''}"></label>
-      ${foreign ? html`<div class="msg warn" style="grid-column:1/-1;display:block"><strong>Foreign guest: Form C</strong> must be filed within 24 hours of arrival.
-        <div class="grid3" style="margin-top:6px"><label class="f">Passport number<input class="in" data-model="fPass" value="${ui.fPass ?? ''}"></label><label class="f">Visa type<input class="in" data-model="fVisa" value="${ui.fVisa ?? ''}"></label>
-          <label class="f">Visa valid till<input class="in" type="date" data-model="fVisaTo" value="${ui.fVisaTo ?? ''}"></label><label class="f">Arrived in India on<input class="in" type="date" data-model="fArr" value="${ui.fArr ?? ''}"></label>
-          <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-model="fFormC" ${ui.fFormC ? 'checked' : ''}> Form C filed</label></div></div>` : ''}
-      <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="openStay" data-submit>Check in and print registration card</button>
-        <button class="btn" type="button" data-act="openStay" data-noprint="1">Check in without printing</button></div></form></section>`;
+  const picked = ui.bookingId ? ui.arrivals.find((a) => a.id === ui.bookingId) : null;
+  const due = picked ? dueOf(picked) : ui.resPicked ? Math.max(0, ui.resPicked.totalPaise - ui.resPicked.advancePaise) : 0;
+  const step = (n, title, body, extra = '') => html`<section class="cistep"><div class="cih"><span class="cin">${n}</span><h2>${title}</h2>${extra}</div>${body}</section>`;
+  return html`${ui.recv || ui.refund || ui.roomBill || ui.adv ? '' : errorBox()}
+    <form class="ciwrap">
+      <div class="cicol">
+        ${step(1, 'Guest', html`
+          ${ui.arrivals?.length || resArr.length ? html`<div class="f">Arriving today<div class="cilist">
+            ${ui.arrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}</small></span>
+              <span class="dright">${dueOf(a) ? html`<span class="status warn">Collect ${rs(dueOf(a))}</span>` : html`<span class="status ok">Prepaid</span>`}</span></button>`)}
+            ${resArr.map((a) => html`<button type="button" class="drow ${ui.resPicked?.id === a.id ? 'on' : ''}" data-act="pickRes" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.rooms} · made here, not in Djubo</small></span>
+              <span class="dright">${a.duePaise ? html`<span class="status warn">Collect ${rs(a.duePaise)}</span>` : html`<span class="status ok">Paid</span>`}</span></button>`)}</div></div>`
+            : html`<p class="small quiet">No bookings due today: check in a walk-in below.</p>`}
+          ${picked ? bookingCard(picked) : ''}
+          ${ui.resPicked ? html`<div class="msg warn" style="display:block"><strong>${ui.resPicked.guestName}</strong> · reservation made here, not in Djubo yet · total ${rs(ui.resPicked.totalPaise)} · advance ${rs(ui.resPicked.advancePaise)}
+            <div class="small">Its rate goes on the room bill now; Djubo's amount replaces it when Djubo's mail arrives.</div></div>` : ''}
+          <div class="grid2"><label class="f">Mobile<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" placeholder="Finds a returning guest" autocomplete="off" autofocus></label>
+            <label class="f">Guest name, as on ID<input class="in" data-model="guest" value="${ui.guest ?? ''}"></label></div>
+          ${ui.gFound ? html`<div class="msg ok">Returning guest: <strong>${ui.gFound.name}</strong> · ${plural(ui.gFound.stays.length, 'earlier stay')}${ui.gFound.stays[0] ? ` · last ${dayName(ui.gFound.stays[0].checkIn)} (${ui.gFound.stays[0].room})` : ''}</div>` : ''}
+          <div class="grid3"><label class="f">Adults<input class="in" inputmode="numeric" data-model="ciAdults" data-live value="${ui.ciAdults ?? '1'}"></label>
+            <label class="f">Children<input class="in" inputmode="numeric" data-model="ciKids" value="${ui.ciKids ?? '0'}"></label>
+            <label class="f">Check-out<input class="in" type="date" data-model="ciOut" value="${ui.ciOut ?? addDays(me.business.shiftDay, 1)}"></label></div>`)}
+        ${step(3, 'ID', html`<p class="small quiet" style="margin:0">Shown and checked for each adult. Only the last 4 characters are kept.</p>
+          ${Array.from({ length: adults }, (_, i) => html`<div class="ciid"><select class="in" data-model="idT_${i}" aria-label="Guest ${i + 1} ID type">${ID_TYPES.map((t) => html`<option ${(ui[`idT_${i}`] ?? (foreign ? 'Passport' : 'Aadhaar')) === t ? 'selected' : ''}>${t}</option>`)}</select>
+            <input class="in" data-model="idN_${i}" value="${ui[`idN_${i}`] ?? ''}" autocomplete="off" placeholder="ID number or last 4" aria-label="Guest ${i + 1} ID number">
+            <input class="in" data-model="idName_${i}" value="${ui[`idName_${i}`] ?? (i === 0 ? ui.guest ?? '' : '')}" placeholder="Name on ID" aria-label="Guest ${i + 1} name on ID"></div>`)}
+          <div class="grid2"><label class="f">Nationality<input class="in" data-model="ciNat" data-live value="${ui.ciNat ?? 'Indian'}"></label><label class="f">Coming from<input class="in" data-model="gCity" value="${ui.gCity ?? ''}"></label>
+            <label class="f">Home address<input class="in" data-model="ciAddr" value="${ui.ciAddr ?? ''}"></label><label class="f">Going to next (optional)<input class="in" data-model="ciNext" value="${ui.ciNext ?? ''}"></label></div>
+          ${foreign ? html`<div class="msg warn" style="display:block"><strong>Foreign guest: Form C</strong> is due within 24 hours of arrival.
+            <div class="grid2" style="margin-top:6px"><label class="f">Passport number<input class="in" data-model="fPass" value="${ui.fPass ?? ''}"></label><label class="f">Visa type<input class="in" data-model="fVisa" value="${ui.fVisa ?? ''}"></label>
+              <label class="f">Visa valid till<input class="in" type="date" data-model="fVisaTo" value="${ui.fVisaTo ?? ''}"></label><label class="f">Arrived in India on<input class="in" type="date" data-model="fArr" value="${ui.fArr ?? ''}"></label></div>
+            <label class="tickline" style="margin-top:6px"><input type="checkbox" data-model="fFormC" ${ui.fFormC ? 'checked' : ''}> Form C filed</label></div>` : ''}`)}
+        ${step(4, 'Payment', html`<div class="row between"><span>${due ? html`To collect at check-in: <strong>${rs(due)}</strong>` : picked || ui.resPicked ? 'Nothing to collect for the room.' : 'Add the rent on the room bill after check-in.'}</span>
+            <span class="small quiet">The room bill opens after check-in, to take it with a receipt.</span></div>
+          <div class="row"><button class="btn pri" type="submit" data-act="openStay" data-submit>Check in and print registration card</button>
+            <button class="btn" type="button" data-act="openStay" data-noprint="1">Check in without printing</button><span class="small quiet">Enter checks in</span></div>`)}
+      </div>
+      <div class="cicol">${step(2, 'Room', ui.roomSecs.length ? roomPicker() : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`,
+        ui.room ? html`<span class="status info" style="margin-left:auto">${ui.room}</span>` : html`<span class="status mute" style="margin-left:auto">choose one</span>`)}</div>
+    </form>`;
+}
+/** The room picker at check-in: search, only free (default), rooms and beds grouped by type with free counts and dirty marks. */
+function roomPicker() {
+  const who = (t) => cache.stays.find((x) => roomKeyOf(x.room) === roomKeyOf(t));
+  const hk = Object.fromEntries((ui.hk?.sections ?? []).flatMap((x) => x.rooms).map((x) => [x.room, x.status]));
+  const q = (ui.roomQ ?? '').trim().toLowerCase();
+  const all = !!ui.rpAll;
+  // A whole category by its name or a short form of it ("dlx" finds Deluxe).
+  const loose = (text) => { let k = 0; for (const ch of text.toLowerCase()) if (ch === q[k]) k++; return k === q.length; };
+  const groups = ui.roomSecs.map((x) => {
+    const units = x.kind === 'dorms' ? (x.dorms ?? []).flatMap((d) => {
+      const beds = Array.from({ length: d.beds }, (_, i) => bedName(d, i));
+      const whole = `${d.name} · whole`;
+      const anyBed = beds.some((b) => who(b));
+      return [{ t: whole, label: `${d.name} whole`, taken: who(whole)?.guestName ?? (anyBed ? 'beds in use' : null) },
+        ...beds.map((b) => ({ t: b, label: b, taken: who(b)?.guestName ?? (who(whole) ? 'booked whole' : null) }))];
+    }) : (x.tables ?? []).map((t) => ({ t, label: t, taken: who(t)?.guestName ?? null }));
+    const typeHit = !!q && !/^\d/.test(q) && (x.name.toLowerCase().includes(q) || loose(x.name));
+    const shown = units.filter((u) => (all || !u.taken) && (!q || typeHit || u.t.toLowerCase().includes(q)));
+    return { x, shown, free: units.filter((u) => !u.taken && !/· whole$/.test(u.t)).length, total: units.filter((u) => !/· whole$/.test(u.t)).length };
+  }).filter((g) => g.shown.length);
+  return html`<div class="row"><input class="in grow" type="search" data-model="roomQ" data-live value="${ui.roomQ ?? ''}" placeholder="Search room, bed or type   /" aria-label="Search rooms and beds" autocomplete="off">
+      <button type="button" class="chip sm" aria-pressed="${!all}" data-act="pick" data-k="rpAll" data-id="${all ? '' : '1'}">Only free</button></div>
+    <div class="rpick">${groups.length ? groups.map((g) => html`<div class="rpg"><div class="rph"><strong>${g.x.name}</strong><span class="small quiet">${g.free} of ${g.total} free</span></div>
+      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
+        title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}">${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
+      : html`<p class="empty">No free room or bed matches. Turn off "Only free" to see taken ones.</p>`}</div>`;
 }
 /** What is still to pay on a booking (Djubo's total less its advance), or 0. */
 // Paid before arrival is Djubo's advance less what reception entered (money taken at the desk, collected here with a receipt),
@@ -2481,40 +2521,6 @@ async function creditScreen() {
       </tbody></table></div><p class="small quiet">New credit accounts are made at the settle screen. Every payment prints a numbered receipt. A negative amount owed is an advance.</p>
     </section>`));
   rerender();
-}
-/** Check-in's room or bed, from Settings: free ones to pick, taken ones show who is there; a whole dorm for a group. */
-function roomChooser() {
-  const who = (t) => cache.stays.find((x) => roomKeyOf(x.room) === roomKeyOf(t));
-  const q = (ui.roomQ ?? '').trim().toLowerCase();
-  // A room by its number, or a whole category by its name or a short form of it ("dlx" finds Deluxe).
-  const loose = (text) => { let k = 0; for (const ch of text.toLowerCase()) if (ch === q[k]) k++; return k === q.length; };
-  let catHit = false;
-  const match = (t) => !q || catHit || t.toLowerCase().includes(q);
-  const tile = (t, blockedBy) => {
-    const g = who(t);
-    const dirty = ui.hk?.sections?.flatMap((x) => x.rooms).find((x) => x.room === t)?.status === 'dirty';
-    const taken = g ? g.guestName : blockedBy;
-    return html`<button type="button" class="chip roomchip ${taken ? 'taken' : ''}" aria-pressed="${ui.room === t}" ${taken ? 'disabled' : ''} data-act="pickRoom" data-name="${t}" title="${taken ? `${t}: ${taken}` : t}">${t}${taken ? html`<span class="small"> · ${taken}</span>` : dirty ? html`<span class="small"> · dirty</span>` : ''}</button>`;
-  };
-  const group = (x) => {
-    catHit = !!q && !/^\d/.test(q) && (x.name.toLowerCase().includes(q) || loose(x.name));
-    if (x.kind === 'dorms') {
-      return html`${(x.dorms ?? []).map((d) => {
-        const whole = `${d.name} · whole`;
-        const beds = Array.from({ length: d.beds }, (_, i) => bedName(d, i));
-        const wholeTaken = !!who(whole);
-        const bedTaken = beds.some((b) => who(b));
-        const shown = [whole, ...beds].filter(match);
-        return shown.length ? html`<div class="roomgrp"><span class="small quiet">${x.name} · ${d.name}</span><div class="chips">${shown.map((t) => (t === whole ? tile(t, bedTaken ? 'beds in use' : null) : tile(t, wholeTaken ? 'booked whole' : null)))}</div></div>` : '';
-      })}`;
-    }
-    const shown = x.tables.filter(match);
-    return shown.length ? html`<div class="roomgrp"><span class="small quiet">${x.name}</span><div class="chips">${shown.map((t) => tile(t, null))}</div></div>` : '';
-  };
-  return html`<div class="f" style="grid-column:1/-1">Room or bed${ui.room ? html` <strong>· ${ui.room}</strong>` : ''}
-    <input class="in" type="search" data-model="roomQ" data-live value="${ui.roomQ ?? ''}" placeholder="Search rooms and beds" aria-label="Search rooms and beds" autocomplete="off">
-    ${ui.roomSecs.map(group)}
-    <span class="small quiet">Rooms and beds come from Settings, Rooms and tables. “Whole” books a dorm for one group.</span></div>`;
 }
 actions.pickRoom = (d) => { ui.room = d.name; ui.error = null; rerender(); };
 // A phone number typed at check-in finds a returning guest: their name and city fill in, and their earlier stays show.
