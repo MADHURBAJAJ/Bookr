@@ -82,7 +82,8 @@ ipcMain.handle('settings:test', async (event, printer, label) => {
   const when = new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
   const body = `<div class="receipt"><div class="hd">TEST PRINT</div><div class="c">${escape(str(label))}</div><hr>
     <div class="rl"><span>Printer</span><span>${escape(p)}</span></div><div class="rl"><span>When</span><span>${escape(when)}</span></div><hr>
-    <div class="c">If this fits the roll, it is set up.</div></div>`;
+    <div class="rl"><span>|1234567890</span><span>1234567890|</span></div>
+    <div class="c">If both | marks print, nothing is cut off.</div></div>`;
   try { await printSlip(body, p, { paperMm: loadSettings().paperMm }); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; }
 });
 const escape = (t) => t.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);

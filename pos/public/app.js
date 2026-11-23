@@ -1224,7 +1224,7 @@ async function doneScreen(billId) {
         ${cn.mode === 'account' ? html`<div class="chips">${[...cache.stays.map((x) => ({ id: x.accountId, name: `Room ${x.room} · ${x.guestName}` })), ...cache.credit.map((x) => ({ id: x.id, name: x.name }))].map((a) => html`<button type="button" class="chip" aria-pressed="${cn.debtorAccountId === a.id}" data-act="cnPick" data-k="debtorAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
         <div class="row"><button class="btn danger" type="submit" data-act="cnGo" data-submit>Make credit note</button><button class="btn" type="button" data-act="cnNo">Cancel</button></div></form>` : ''}
     </section>
-    <section class="panel" style="align-items:center"><p class="label" style="align-self:flex-start">Receipt</p>${receipt(bill)}</section></div>`));
+    <section class="panel" style="align-items:center"><p class="label" style="align-self:flex-start">Receipt</p>${receipt(bill, true)}</section></div>`));
   };
   rerender();
 }
@@ -1266,12 +1266,13 @@ actions.printDone = () => printReceipt(ui.done);
 
 // ---------- printing (the browser's print dialog; a thermal printer set as the default prints 80 mm slips)
 
-function receipt(b) {
+/** A bill as printed. The cashier's name is not printed (23 Nov 2026); it is kept with the bill and shown on screen (`onScreen`). */
+function receipt(b, onScreen = false) {
   return html`<div class="receipt">
     <div class="hd">${b.entityName}</div>
     ${b.gstRegistered ? html`<div class="c">GSTIN ${b.gstin}</div><div class="c">TAX INVOICE</div>` : html`<div class="c">BILL</div>`}
     <div class="rl"><span>Bill ${b.billNo}</span><span>${dateTime(b.printedAt)}</span></div>
-    <div class="rl"><span>${b.place}</span><span>${b.printedBy ?? ''}</span></div>
+    <div class="rl"><span>${b.place}</span>${onScreen && b.printedBy ? html`<span class="quiet">by ${b.printedBy}</span>` : ''}</div>
     ${b.guestName ? html`<div>Guest: ${b.guestName}</div>` : ''}
     ${b.printCount > 1 ? html`<div class="c">COPY ${b.printCount - 1}</div>` : ''}
     <hr>${b.items.map((l) => html`<div class="rl"><span>${l.qty} × ${l.name}${l.taxKind === 'exempt' ? ' †' : l.taxKind === 'liquor' || l.taxed === 0 ? ' *' : ''}${b.gstRegistered && l.taxKind === 'gst' && (b.taxes ?? []).filter((r) => r.kind === 'gst').length > 1 ? ` (${l.gstBp / 100}%)` : ''}</span><span>${rs(l.amountPaise)}</span></div>

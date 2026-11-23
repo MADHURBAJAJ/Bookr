@@ -2,15 +2,19 @@
 // width, then sent straight to a named Windows printer, the page as long as the slip so no paper is wasted.
 const { BrowserWindow } = require('electron');
 
-/** The slip's look on the roll: the same as the POS's own receipt, sized for 80 mm (72 mm printed) or 58 mm (48 mm). */
+/**
+ * The slip's look on the roll: the same as the POS's own receipt. Thermal printers print from the left edge across 72 mm
+ * (80 mm roll) or 48 mm (58 mm roll), so the slip starts at the left and stays 2 mm inside that (23 Nov 2026: with a
+ * 4 mm left gap, the last characters fell off the right edge).
+ */
 function slipDocument(body, paperMm) {
-  const printMm = paperMm === 58 ? 48 : 72;
+  const printMm = paperMm === 58 ? 46 : 70;
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
 <style>
   @page { margin: 0; }
   html, body { margin: 0; padding: 0; background: #fff; color: #000; }
-  .receipt { width: ${printMm}mm; padding: 2mm ${(paperMm - printMm) / 2}mm 4mm; font-family: Consolas, "Courier New", monospace; font-size: 12px;
+  .receipt { width: ${printMm}mm; padding: 0 0 3mm 0.5mm; font-family: Consolas, "Courier New", monospace; font-size: 12px;
     display: flex; flex-direction: column; gap: 3px; box-sizing: content-box; }
   .receipt .c { text-align: center; }
   .receipt .hd { font-weight: 700; font-size: 15px; text-align: center; }
@@ -29,7 +33,8 @@ async function printSlip(body, printer, { paperMm = 80, copies = 1 } = {}) {
     await w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(slipDocument(body, paperMm))}`);
     // The slip's own height (not the window's), so the page ends where the slip does.
     const px = await w.webContents.executeJavaScript('Math.ceil(document.body.getBoundingClientRect().height)');
-    const heightMicrons = Math.max(40_000, Math.ceil((px * 25_400) / 96) + 8_000);
+    // As long as the slip, with no extra blank paper (23 Nov 2026: a 40 mm least length left blank space on short KOTs).
+    const heightMicrons = Math.max(15_000, Math.ceil((px * 25_400) / 96) + 2_000);
     await new Promise((resolve, reject) => {
       w.webContents.print({
         silent: true, deviceName: printer, copies, printBackground: false, margins: { marginType: 'none' },
