@@ -248,6 +248,8 @@ const NAV = [
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
   { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds', 'pending', 'statement', 'bills'] },
   { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
+  // Directors' accounts (approved 23 Nov 2026): each family's ledger.
+  { key: 'directors', label: 'Directors', needs: 'reports.view', group: 'Books', when: (b) => !b.cashBooks },
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
   { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
@@ -1252,6 +1254,13 @@ function missedReport(biz, m) {
  * Complimentary bills (approved 13 Nov 2026): ₹0 bills with no money paid, with the guest's name from the software report
  * and the register's remarks, and the value given free over the shifts chosen (a subtotal per month when there are several).
  */
+/** By name (approved 23 Nov 2026): a director's bills charged at 50%; staff and others listed only. */
+const NC_KIND = { director: 'Director', staff: 'Staff', other: 'Other', unsorted: 'Not sorted' };
+const ncByName = (cp) => (cp.byName?.length ? html`<div class="scroll" style="margin-bottom:10px"><table style="min-width:420px">
+  <thead><tr><th>Name</th><th>Who</th><th style="text-align:right">Bills</th><th style="text-align:right">Value ₹</th><th style="text-align:right">Charged 50% ₹</th></tr></thead>
+  <tbody>${cp.byName.map((n) => html`<tr><td>${n.name}</td><td>${n.person ?? NC_KIND[n.kind]}</td><td class="amount">${n.bills}</td><td class="amount">${money(n.valuePaise)}</td>
+    <td class="amount">${n.kind === 'director' ? money(n.chargedPaise) : html`<span class="note">–</span>`}</td></tr>`)}</tbody></table></div>` : '');
+
 function complimentaryReport(biz, cp) {
   const months = [...new Set(cp.lines.map((l) => l.day.slice(0, 7)))];
   const monthName = (ym) => new Date(`${ym}-01T00:00:00`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
@@ -1264,7 +1273,7 @@ function complimentaryReport(biz, cp) {
     <td class="note">${l.remarks ?? ''}</td>
     <td class="amount">${l.valuePaise != null ? money(l.valuePaise) : html`<span class="note">Not shown</span>`}</td>
     <td class="note">${IN[l.in]}</td></tr>`;
-  const sub = (ym) => { const ls = cp.lines.filter((l) => l.day.startsWith(ym)); return html`<tr><td colspan="5"><strong>${monthName(ym)}</strong> · ${ls.length} bill${ls.length > 1 ? 's' : ''}</td>
+  const sub = (ym) => { const ls = cp.lines.filter((l) => l.day.startsWith(ym)); return html`${ncByName(cp)}<tr><td colspan="5"><strong>${monthName(ym)}</strong> · ${ls.length} bill${ls.length > 1 ? 's' : ''}</td>
     <td class="amount"><strong>${money(ls.reduce((t, l) => t + (l.valuePaise ?? 0), 0))}</strong></td><td></td></tr>`; };
   return html`<section class="card" id="comps" style="gap:10px">
     <h2>Complimentary bills</h2>
@@ -3801,6 +3810,11 @@ function wireRegister(biz, u) {
   document.getElementById('addbill')?.addEventListener('click', () => show(null));
 }
 
+/** The last approved line edited or removed on a page, for its Undo. */
+let expenseUndo = null;
+const DIR_KIND = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Given', repaid: 'Repaid' };
+const dirOf = (r) => { try { return r.director ? (typeof r.director === 'string' ? JSON.parse(r.director) : r.director) : null; } catch { return null; } };
+
 function expensePanel(biz, u, heads, parties = []) {
   const exp = heads.filter((h) => h.type === 'expense');
   const name = (id) => exp.find((h) => h.id === id)?.name;
@@ -3808,9 +3822,11 @@ function expensePanel(biz, u, heads, parties = []) {
   const drafts = u.rows.filter((r) => r.status === 'draft');
   const ready = drafts.filter((r) => r.headId);
   const sum = u.rows.reduce((s, r) => s + r.amountPaise, 0);
+  const undo = expenseUndo?.uploadId === u.id ? expenseUndo : null;
   return html`
     <section class="card grow3" style="gap:12px">
       <div class="note">Each line is an expense paid from Cash. It counts only after an Owner or Accountant approves it.</div>
+      ${undo ? html`<div class="ok-msg">${undo.text} <button class="btn plain dchip" type="button" id="eundo">Undo</button></div>` : ''}
       <div class="scroll"><table style="min-width:560px">
         <thead><tr><th>#</th><th>Party</th><th>Item</th><th style="text-align:right">₹</th><th>Head</th><th>Status</th><th></th></tr></thead>
         <tbody>${u.rows.map((r) => { const q = unclearOf(r.ocrOriginal, r.status === 'draft' && !r.headId); const read = readVendor(r); return html`<tr>
@@ -3828,8 +3844,14 @@ function expensePanel(biz, u, heads, parties = []) {
             : headChoices(r).length > 1 && r.status === 'draft' ? html`<div style="display:flex;flex-wrap:wrap;gap:4px">${headChoices(r).map((hid) => html`<button class="btn plain" type="button" style="min-height:32px;font-size:13px;padding:0 8px" data-quickhead="${r.id}" data-head="${hid}" title="${r.vendor} is used under this head">${name(hid)}</button>`)}</div>`
             : html`<span class="chip bad">Needs input</span>`}</td>
           <td>${r.status === 'approved' ? html`<span class="chip ok">Approved</span>` : html`<span class="chip wait">Draft</span>`}</td>
-          <td style="text-align:right">${r.status === 'draft' ? html`<button class="btn plain" type="button" data-eedit="${r.id}">Edit</button>` : ''}</td>
-        </tr>`; })}</tbody>
+          <td style="text-align:right">${r.status === 'draft' ? html`<button class="btn plain" type="button" data-eedit="${r.id}">Edit</button>`
+            : canApprove ? html`${dirOf(r) ? html`<span class="chip" title="In the directors' ledger">${dirOf(r).person} · ${DIR_KIND[dirOf(r).kind] ?? dirOf(r).kind}</span> ` : ''}<button class="btn plain dchip" type="button" data-emore="${r.id}" title="Edit, put in a director's account, or remove">⋯</button>`
+            : dirOf(r) ? html`<span class="chip">${dirOf(r).person} · ${DIR_KIND[dirOf(r).kind] ?? dirOf(r).kind}</span>` : ''}</td>
+        </tr>${r.status === 'approved' && canApprove ? html`<tr class="emore" data-emorerow="${r.id}" hidden><td colspan="7"><div class="form-row" style="gap:6px;align-items:center">
+          <button class="btn plain dchip" type="button" data-eedit="${r.id}">Edit</button>
+          ${dirOf(r) ? '' : html`<button class="btn plain dchip" type="button" data-edir="${r.id}">Director's account</button>`}
+          ${dirOf(r) ? '' : html`<button class="btn plain dchip danger" type="button" data-eremove="${r.id}">Remove</button>`}
+          <span class="edirbox" data-edirbox="${r.id}"></span></div></td></tr>` : ''}`; })}</tbody>
       </table></div>
       <div><button class="btn plain" type="button" id="eaddline">+ Add a line</button></div>
       <div class="form-row" style="justify-content:space-between">
@@ -3917,8 +3939,10 @@ function wireExpense(biz, u, parties = []) {
   }
   onSubmit(form, async (d) => {
     const body = { narration: d.narration, vendor: d.vendor || null, amount: d.amount, headId: d.headId || null };
-    if (editing) await api('PUT', `/businesses/${biz.id}/expense-rows/${editing}`, body);
-    else await api('POST', `/businesses/${biz.id}/uploads/${u.id}/expense-rows`, body);
+    if (editing) {
+      const r = await api('PUT', `/businesses/${biz.id}/expense-rows/${editing}`, body);
+      expenseUndo = r.auditId ? { uploadId: u.id, auditId: r.auditId, text: `Approved line ${u.rows.find((x) => x.id === editing)?.lineNo ?? ''} changed.` } : null;
+    } else await api('POST', `/businesses/${biz.id}/uploads/${u.id}/expense-rows`, body);
     reviewView(biz, u.id);
   });
   app.querySelectorAll('[data-eedit]').forEach((b) => b.addEventListener('click', () => {
@@ -3957,6 +3981,42 @@ function wireExpense(biz, u, parties = []) {
   document.getElementById('edel').addEventListener('click', async () => {
     await api('DELETE', `/businesses/${biz.id}/expense-rows/${editing}`, {});
     reviewView(biz, u.id);
+  });
+  // Approved lines (approved 23 Nov 2026): ⋯ opens Edit, Director's account, Remove. Owner and Accountant only.
+  app.querySelectorAll('[data-emore]').forEach((b) => b.addEventListener('click', () => {
+    const row = app.querySelector(`[data-emorerow="${b.dataset.emore}"]`);
+    if (row) row.hidden = !row.hidden;
+  }));
+  app.querySelectorAll('[data-eremove]').forEach((b) => b.addEventListener('click', async () => {
+    const r = u.rows.find((x) => x.id === b.dataset.eremove);
+    if (!confirm(`Remove approved line ${r.lineNo}, ${r.narration ?? ''} ₹ ${money(r.amountPaise)}? You can undo it.`)) return;
+    try {
+      const x = await api('DELETE', `/businesses/${biz.id}/expense-rows/${r.id}/approved`, {});
+      expenseUndo = { uploadId: u.id, auditId: x.auditId, text: `Line ${r.lineNo} removed.` };
+      reviewView(biz, u.id);
+    } catch (err) { showError(document.getElementById('rmsg'), err); }
+  }));
+  app.querySelectorAll('[data-edir]').forEach((b) => b.addEventListener('click', async () => {
+    const box = app.querySelector(`[data-edirbox="${b.dataset.edir}"]`);
+    try {
+      const d = await api('GET', `/businesses/${biz.id}/directors`);
+      const ppl = d.families.flatMap((f) => f.people.map((p) => ({ ...p, family: f.family })));
+      if (!ppl.length) { box.innerHTML = html`<span class="note">No directors yet: set them up on the Directors page.</span>`.__html; return; }
+      box.innerHTML = html`<select data-edirp>${ppl.map((p) => html`<option value="${p.id}">${p.family} · ${p.name}</option>`)}</select>
+        <select data-edirk><option value="taken">Taken (cash)</option><option value="stock_taken">Stock taken (removes this cash line)</option><option value="given">Given</option><option value="repaid">Repaid</option></select>
+        <button class="btn dchip" type="button" data-edirsave>Save</button>`.__html;
+      box.querySelector('[data-edirsave]').addEventListener('click', async () => {
+        try {
+          await api('POST', `/businesses/${biz.id}/director-entries`, { transactionId: b.dataset.edir, directorId: box.querySelector('[data-edirp]').value, kind: box.querySelector('[data-edirk]').value });
+          expenseUndo = null;
+          reviewView(biz, u.id);
+        } catch (err) { showError(document.getElementById('rmsg'), err); }
+      });
+    } catch (err) { showError(document.getElementById('rmsg'), err); }
+  }));
+  document.getElementById('eundo')?.addEventListener('click', async () => {
+    try { await api('POST', `/businesses/${biz.id}/expense-rows/undo/${expenseUndo.auditId}`, {}); expenseUndo = null; reviewView(biz, u.id); }
+    catch (err) { showError(document.getElementById('rmsg'), err); }
   });
   document.getElementById('eapprove')?.addEventListener('click', async () => {
     try { await api('POST', `/businesses/${biz.id}/uploads/${u.id}/expense-rows/approve`, {}); reviewView(biz, u.id); }
@@ -4672,7 +4732,21 @@ function compPanelHtml(biz, comp, canAct) {
       <span class="amount" style="float:right">₹ ${money(k.amountPaise)}</span></div>
     <div class="tiny">${k.paidAt ? `settled ${when(k.paidAt)} · ` : ''}no payment ✗ · counted as a sale on saving · Reports → Credit${k.madeBy ? ` · by ${k.madeBy}` : ''}</div>
     ${canAct && k.comparisonId ? html`<div class="form-row" style="gap:6px;margin-top:4px"><button type="button" class="btn plain dchip" data-uncredit="${k.comparisonId}" data-bill="${k.billNo}">Undo</button></div>` : ''}</div>`;
+  // Names not sorted yet (approved 23 Nov 2026): a director's (NC at 50%), staff, or someone else. Asked once per name.
+  const ppl = comp.ncPeople ?? [];
+  const ncCard = (n) => html`<div class="sg-row" style="display:block">
+    <div><span class="mono"><strong>${n.name}</strong></span> <span class="chip" style="${SC_AMBER}">New name</span></div>
+    <div class="tiny" style="color:var(--ink);margin-top:4px">${n.bills.join(' + ')} · ₹${rs(n.valuePaise)}${n.guess ? html` · ${n.guess.name}? 50% = ₹${rs(Math.round(n.valuePaise / 2))}` : ''}</div>
+    <div class="form-row" style="gap:6px;margin-top:6px">
+      ${n.guess ? html`<button class="btn dchip" type="button" data-ncsort="director" data-name="${n.name}" data-dir="${n.guess.id}">${n.guess.family} · ${n.guess.name}</button>` : ''}
+      ${ppl.length ? html`<details class="menu"><summary class="btn plain dchip">${n.guess ? 'Other person' : 'Director'} ▾</summary><div class="menu-pop" style="gap:4px">
+        ${ppl.filter((p) => p.id !== n.guess?.id).map((p) => html`<button class="btn plain dchip" type="button" data-ncsort="director" data-name="${n.name}" data-dir="${p.id}">${p.family} · ${p.name}</button>`)}</div></details>` : ''}
+      <button class="btn plain dchip" type="button" data-ncsort="staff" data-name="${n.name}">Staff</button>
+      <button class="btn plain dchip" type="button" data-ncsort="other" data-name="${n.name}">Not director</button></div>
+    <div class="form-msg"></div></div>`;
+  const asks = canAct ? comp.ncAsk ?? [] : [];
   return html`<section class="card" style="gap:10px">
+    ${asks.length ? html`<div class="lane-h"><strong>Whose bill?</strong><span class="tchip">${asks.length} new name${asks.length === 1 ? '' : 's'}</span></div>${asks.map(ncCard)}` : ''}
     ${credit.length ? html`<div class="lane-h"><strong>Credit</strong><span class="tchip">${credit.length} · ₹ ${money(credit.reduce((t, k) => t + k.amountPaise, 0))} owed</span></div>${credit.map(creditLine)}` : ''}
     <div class="lane-h"><strong>Complimentary bills</strong><span class="tchip">${oks.length} · ₹ ${money(comp.valuePaise)} given free</span></div>
     <div class="note">Not counted as sales. Bills the software calls U/N that the register does not have wait here too, until you say how they were paid. PREPAID bills in the software and ₹0 bills come here by themselves; any other bill can be made complimentary from All bills, Cash or its details. A bill that was paid after all: choose how under "Paid by", and it moves to that tab.</div>
@@ -9531,6 +9605,113 @@ const HISTORY_LABELS = {
   'transaction.approve': 'Approved', 'register.fill_discounts': 'Discounts filled in',
   'register.edit': 'Register line changed', 'cash.shortage_reduced': 'Cash shortage reduced (bill paid on a later day)', 'cash.shortage_restored': 'Cash shortage put back', 'register.paid_later': 'Paid later by card or UPI', 'register.paid_later_undone': 'Paid later undone', 'register.auto_discount': 'Group discount', 'register.split': 'Register line split', 'register.insert_below': 'Line added below',
 };
+// A name on complimentary bills sorted (approved 23 Nov 2026): director, staff or other. From the Complimentary tab
+// and the Directors page.
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest?.('[data-ncsort]');
+  if (!b || b.dataset.busy) return;
+  e.preventDefault();
+  b.dataset.busy = '1'; b.disabled = true;
+  try {
+    await api('POST', `/businesses/${currentBizId()}/nc-names`, { name: b.dataset.name, kind: b.dataset.ncsort, directorId: b.dataset.dir || null });
+    await (drawerReload ?? route)();
+  } catch (err) {
+    const m = b.closest('.sg-row,.ent-line,section')?.querySelector('.form-msg') ?? document.getElementById('dirmsg');
+    if (m) showError(m, err);
+    b.disabled = false; delete b.dataset.busy;
+  }
+});
+
+/** Directors' accounts (approved 23 Nov 2026): each family's ledger, a person on every line. Balance = taken − given. */
+async function directorsView(biz) {
+  const d = await api('GET', `/businesses/${biz.id}/directors`);
+  const ed = d.editor;
+  const ppl = d.families.flatMap((f) => f.people.map((p) => ({ ...p, family: f.family })));
+  const bal = (p) => (p > 0 ? html`owes ₹${rs(p)}` : p < 0 ? html`hotel owes ₹${rs(-p)}` : html`₹0`);
+  const KINDS = [['taken', 'Taken (cash)'], ['stock_taken', 'Stock taken'], ['given', 'Given'], ['repaid', 'Repaid']];
+  const opts = (sel) => ppl.map((p) => html`<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${p.family} · ${p.name}</option>`);
+  const setup = html`<form id="dirsetup" class="inset">
+    <div style="font-size:15px;font-weight:600">${d.from ? 'Add a family or people' : 'Start the ledger'}</div>
+    <div class="form-row">
+      ${d.from ? '' : html`<div class="field"><label>Starts on</label><input type="date" name="from" required></div>`}
+      <div class="field"><label>Family</label><input name="family" placeholder="Bajaj" ${d.from ? 'required' : ''}></div>
+      <div class="field" style="flex:2 1 220px"><label>People (commas)</label><input name="names" placeholder="Mohak, Deepansh"></div>
+    </div><div class="form-msg"></div><div><button class="btn" type="submit">Save</button></div></form>`;
+  const KW = DIR_KIND;
+  const family = (f) => html`<section class="card" style="gap:10px">
+    <div class="lane-h"><strong>${f.family}</strong><span class="tchip">${bal(f.balancePaise)}</span></div>
+    <div class="scroll"><table style="min-width:520px"><thead><tr><th>Person</th><th style="text-align:right">Opening ₹</th><th style="text-align:right">Taken ₹</th><th style="text-align:right">Given ₹</th><th style="text-align:right">Balance</th></tr></thead>
+    <tbody>${f.people.map((p) => html`<tr><td>${p.name}</td>
+      <td class="amount">${ed ? html`<form class="form-row" data-opening="${p.id}" style="gap:4px;justify-content:flex-end;flex-wrap:nowrap">
+          <input name="amount" class="mono" style="width:90px" value="${p.opening == null ? '' : rupeesForInput(Math.abs(p.opening))}" placeholder="0">
+          <select name="side"><option value="owes" ${p.opening < 0 ? '' : 'selected'}>owes</option><option value="owed" ${p.opening < 0 ? 'selected' : ''}>owed</option></select>
+          <button class="btn plain dchip" type="submit">Save</button><span class="form-msg"></span></form>` : p.opening == null ? '–' : bal(p.opening)}</td>
+      <td class="amount">${money(p.takenPaise)}</td><td class="amount">${money(p.givenPaise)}</td><td class="amount">${bal(p.balancePaise)}</td></tr>`)}</tbody></table></div>
+    ${f.lines.filter((l) => l.kind !== 'opening').length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Day</th><th>Person</th><th>What</th><th style="text-align:right">Taken ₹</th><th style="text-align:right">Given ₹</th><th></th></tr></thead>
+    <tbody>${f.lines.filter((l) => l.kind !== 'opening').map((l) => html`<tr><td>${dayLabel(l.day)}</td><td>${l.person}</td>
+      <td><span class="chip">${KW[l.kind]}</span> ${l.note ?? ''}${l.uploadId ? html` <a class="tiny" href="#/b/${biz.id}/review/${l.uploadId}">page</a>` : ''}</td>
+      <td class="amount">${['taken', 'stock_taken', 'nc'].includes(l.kind) ? money(l.amountPaise) : ''}</td>
+      <td class="amount">${['given', 'repaid'].includes(l.kind) ? money(l.amountPaise) : ''}</td>
+      <td>${ed && !l.auto ? html`<button class="btn plain dchip" type="button" data-dirrm="${l.id}" title="Take it out of the ledger${l.kind === 'stock_taken' ? '; its cash line comes back' : ''}">Remove</button>` : ''}</td></tr>`)}</tbody></table></div>` : html`<div class="note">No lines yet.</div>`}
+  </section>`;
+  const addLine = ed && ppl.length ? html`<form id="diradd" class="inset">
+    <div style="font-size:15px;font-weight:600">Add a line</div>
+    <div class="form-row"><div class="field"><label>Person</label><select name="directorId">${opts()}</select></div>
+      <div class="field"><label>What</label><select name="kind">${KINDS.map(([k, w]) => html`<option value="${k}">${w}</option>`)}</select></div>
+      <div class="field"><label>Day</label><input type="date" name="day" required></div>
+      <div class="field"><label>Amount (₹)</label><input name="amount" class="mono" required></div>
+      <div class="field" style="flex:2 1 200px"><label>Note</label><input name="note" maxlength="200"></div></div>
+    <div class="form-msg"></div><div><button class="btn" type="submit">Add</button></div></form>` : '';
+  const move = ed && d.toMove.length ? html`<section class="card" style="gap:10px">
+    <div class="lane-h"><strong>WITHDRAWL lines to move</strong><span class="tchip">${d.toMove.length}</span></div>
+    <div class="note">Cash lines booked under a WITHDRAWL head since the start. Moving puts each in its person's ledger; the cash line stays.</div>
+    <div class="scroll"><table style="min-width:640px"><thead><tr><th><input type="checkbox" id="mvall" checked></th><th>Day</th><th>Line</th><th style="text-align:right">₹</th><th>Person</th><th>What</th></tr></thead>
+    <tbody>${d.toMove.map((m) => html`<tr data-mv="${m.transactionId}"><td><input type="checkbox" data-mvon checked></td><td>${dayLabel(m.day)}</td>
+      <td>${m.narration ?? ''}${m.party ? html` <span class="tiny">· ${m.party}</span>` : ''} <span class="tiny note">${m.head}</span></td><td class="amount">${money(m.amountPaise)}</td>
+      <td><select data-mvp><option value="">Choose</option>${opts(m.directorId)}</select></td>
+      <td><select data-mvk>${[['taken', 'Taken'], ['given', 'Given'], ['repaid', 'Repaid']].map(([k, w]) => html`<option value="${k}" ${k === m.kind ? 'selected' : ''}>${w}</option>`)}</select></td></tr>`)}</tbody></table></div>
+    <div class="form-msg" id="mvmsg"></div><div><button class="btn" type="button" id="mvgo">Move ticked lines</button></div></section>` : '';
+  const names = ed && d.newNames.length ? html`<section class="card" style="gap:10px">
+    <div class="lane-h"><strong>Whose bills?</strong><span class="tchip">${d.newNames.length} new name${d.newNames.length === 1 ? '' : 's'}</span></div>
+    ${d.newNames.map((n) => html`<div class="sg-row" style="display:block"><div><span class="mono"><strong>${n.name}</strong></span> <span class="chip" style="${SC_AMBER}">New name</span></div>
+      <div class="tiny" style="color:var(--ink);margin-top:4px">${n.bills} bill${n.bills === 1 ? '' : 's'} · ₹${rs(n.valuePaise)}${n.guess ? ` · ${n.guess.name}? 50% = ₹${rs(Math.round(n.valuePaise / 2))}` : ''} · last ${dayLabel(n.last)}</div>
+      <div class="form-row" style="gap:6px;margin-top:6px">
+        ${n.guess ? html`<button class="btn dchip" type="button" data-ncsort="director" data-name="${n.name}" data-dir="${n.guess.id}">${n.guess.family} · ${n.guess.name}</button>` : ''}
+        <details class="menu"><summary class="btn plain dchip">${n.guess ? 'Other person' : 'Director'} ▾</summary><div class="menu-pop" style="gap:4px">
+          ${ppl.filter((p) => p.id !== n.guess?.id).map((p) => html`<button class="btn plain dchip" type="button" data-ncsort="director" data-name="${n.name}" data-dir="${p.id}">${p.family} · ${p.name}</button>`)}</div></details>
+        <button class="btn plain dchip" type="button" data-ncsort="staff" data-name="${n.name}">Staff</button>
+        <button class="btn plain dchip" type="button" data-ncsort="other" data-name="${n.name}">Not director</button></div><div class="form-msg"></div></div>`)}</section>` : '';
+  const sorted = d.names.length ? html`<details class="card"><summary><strong>Sorted names</strong> <span class="tiny">${d.names.length}</span></summary>
+    <div class="scroll"><table style="min-width:380px"><tbody>${d.names.map((n) => html`<tr><td class="mono">${n.key}</td>
+      <td>${n.kind === 'director' ? (() => { const p = ppl.find((x) => x.id === n.directorId); return p ? `${p.family} · ${p.name}` : 'Director'; })() : NC_KIND[n.kind]}</td>
+      <td>${ed ? html`<button class="btn plain dchip" type="button" data-ncunsort="${n.key}" title="Ask again for this name">Change</button>` : ''}</td></tr>`)}</tbody></table></div></details>` : '';
+  render(shell(biz, 'directors', 'Directors', d.from ? `Ledger from ${dayLabel(d.from)} · balance = taken − given; above zero the person owes the hotel` : '', html`
+    <div id="dirmsg"></div>
+    ${!d.from || !ppl.length ? (ed ? setup : html`<section class="card"><div class="note">An Owner or Accountant starts the ledger here.</div></section>`) : ''}
+    ${names}${move}${d.families.map(family)}${addLine}${sorted}
+    ${ed && d.from && ppl.length ? html`<details class="card"><summary>Add a family or people</summary>${setup}</details>` : ''}`));
+  const msg = document.getElementById('dirmsg');
+  const f = document.getElementById('dirsetup');
+  f && onSubmit(f, async (x) => { await api('POST', `/businesses/${biz.id}/directors`, { from: x.from || undefined, family: x.family || undefined, names: x.names }); directorsView(biz); });
+  const add = document.getElementById('diradd');
+  add && onSubmit(add, async (x) => { await api('POST', `/businesses/${biz.id}/director-entries`, x); directorsView(biz); });
+  app.querySelectorAll('[data-opening]').forEach((fm) => onSubmit(fm, async (x) => {
+    await api('PUT', `/businesses/${biz.id}/directors/${fm.dataset.opening}/opening`, { amount: x.amount || '0', side: x.side }); directorsView(biz);
+  }));
+  app.querySelectorAll('[data-dirrm]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('DELETE', `/businesses/${biz.id}/director-entries/${b.dataset.dirrm}`, {}); directorsView(biz); } catch (err) { showError(msg, err); }
+  }));
+  app.querySelectorAll('[data-ncunsort]').forEach((b) => b.addEventListener('click', async () => {
+    try { await api('DELETE', `/businesses/${biz.id}/nc-names/${encodeURIComponent(b.dataset.ncunsort)}`, {}); directorsView(biz); } catch (err) { showError(msg, err); }
+  }));
+  document.getElementById('mvall')?.addEventListener('change', (e) => app.querySelectorAll('[data-mvon]').forEach((c) => { c.checked = e.target.checked; }));
+  document.getElementById('mvgo')?.addEventListener('click', async () => {
+    const items = [...app.querySelectorAll('[data-mv]')].filter((r) => r.querySelector('[data-mvon]').checked)
+      .map((r) => ({ transactionId: r.dataset.mv, directorId: r.querySelector('[data-mvp]').value, kind: r.querySelector('[data-mvk]').value }));
+    try { await api('POST', `/businesses/${biz.id}/director-entries/move`, { items }); directorsView(biz); } catch (err) { showError(document.getElementById('mvmsg'), err); }
+  });
+}
+
 const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
 // Complimentary (approved 14 Nov 2026), from any page: data-makecomp="comparisonId" asks the guest's name;
 // data-paidby="comparisonId" with data-mode turns a complimentary or PREPAID bill into a Cash, UPI or Card sale. Both undo.
@@ -11083,6 +11264,7 @@ async function routeInner() {
       if (screen === 'statement') return biz.actions.includes('bank.link') ? statementView(biz, query) : go(`#/b/${biz.id}/reports`);
       if (screen === 'money-out') return moneyOutView(biz, query);
       if (screen === 'parties') return partiesView(biz, query);
+      if (screen === 'directors') return biz.actions.includes('reports.view') ? directorsView(biz) : go(home(biz));
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);

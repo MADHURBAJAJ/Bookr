@@ -339,7 +339,8 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
     const rows = await all(db, `SELECT t.id, t.line_no AS lineNo, t.narration, t.amount_paise AS amountPaise, t.head_id AS headId, t.status,
       t.ocr_original AS ocrOriginal, t.party_id AS partyId, p.name AS vendor,
       (SELECT json_group_array(DISTINCT h) FROM (SELECT p.default_head_id AS h WHERE p.default_head_id IS NOT NULL
-         UNION SELECT x.head_id FROM transactions x WHERE x.party_id = t.party_id AND x.head_id IS NOT NULL AND x.type = 'expense')) AS vendorHeads
+         UNION SELECT x.head_id FROM transactions x WHERE x.party_id = t.party_id AND x.head_id IS NOT NULL AND x.type = 'expense')) AS vendorHeads,
+      (SELECT json_object('id', e.id, 'kind', e.kind, 'person', d.name) FROM director_entries e JOIN directors d ON d.id = e.director_id WHERE e.transaction_id = t.id) AS director
       FROM transactions t LEFT JOIN parties p ON p.id = t.party_id WHERE t.upload_id = ? ORDER BY t.line_no`, u.id) as { id: string; narration: string | null; headId: string | null; status: string }[];
     // A draft line with no head: a one-click suggestion, from an earlier line with the same item, else from common words
     // (petrol → Transport). Never filled in by itself (approved 14 Nov 2026).
@@ -1234,9 +1235,10 @@ captureRoutes.put('/businesses/:businessId/expense-rows/:rowId', requireRole('ro
   const bid = c.get('businessId');
   const rowId = c.req.param('rowId');
   if (!isUuid(rowId)) fail(404, 'Row not found.');
-  const old = await one<{ ocr_original: string | null }>(db,
-    "SELECT ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'draft'", rowId, bid);
-  if (!old) fail(404, 'Draft row not found. Approved rows cannot be edited.');
+  const old = await one<Record<string, unknown> & { ocr_original: string | null; status: string }>(db,
+    "SELECT * FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_photo'", rowId, bid);
+  // Approved lines (approved 23 Nov 2026): an Owner or Accountant may edit one; the change is audited and can be undone.
+  if (!old || (old.status === 'approved' && !can(c.get('role'), 'rows.approve'))) fail(404, 'Draft row not found. Approved rows cannot be edited.');
   const data = await body(c);
   const narration = text(data, 'narration', 'Item', { max: 200 })!;
   const amount = paise(data, 'amount', 'Amount');
@@ -1247,10 +1249,54 @@ captureRoutes.put('/businesses/:businessId/expense-rows/:rowId', requireRole('ro
   await db.batch([
     ...v.statements,
     stmt(db, `UPDATE transactions SET narration = ?, amount_paise = ?, head_id = ?, party_id = ?, ocr_original = ?
-      WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'draft'`,
-      narration, amount, v.headId, v.partyId, markLearned(old.ocr_original, v.learned, v.from), rowId, bid),
+      WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = ?`,
+      narration, amount, v.headId, v.partyId, markLearned(old!.ocr_original, v.learned, v.from), rowId, bid, old!.status),
+    ...(old!.status === 'approved' ? [stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'transaction.edit', 'transactions', ?, ?, ?, ?)`, bid, c.get('user').id, rowId, JSON.stringify(old),
+      JSON.stringify({ narration, amountPaise: amount, headId: v.headId, partyId: v.partyId, changes: `Approved line edited: ${narration} ₹${(amount / 100).toFixed(2)}` }), now()),
+      // A line in a director's account keeps its amount there too.
+      stmt(db, 'UPDATE director_entries SET amount_paise = ? WHERE transaction_id = ?', amount, rowId)] : []),
   ]);
-  return c.json({ ok: true, headId: v.headId, learned: v.learned, from: v.from });
+  const audit = old!.status === 'approved' ? await one<{ id: number }>(db, "SELECT max(id) AS id FROM audit_log WHERE business_id = ? AND row_id = ? AND action = 'transaction.edit'", bid, rowId) : null;
+  return c.json({ ok: true, headId: v.headId, learned: v.learned, from: v.from, auditId: audit?.id ?? null });
+});
+
+// An approved line that is not on the page (typed in by mistake): an Owner or Accountant removes it (approved 23 Nov
+// 2026). The whole line is kept in the audit, so Undo puts it back.
+captureRoutes.delete('/businesses/:businessId/expense-rows/:rowId/approved', requireRole('rows.approve'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = c.req.param('rowId');
+  const old = isUuid(rowId) ? await one<Record<string, unknown>>(db, "SELECT * FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_photo' AND status = 'approved'", rowId, bid) : null;
+  if (!old) fail(404, 'Approved line not found.');
+  if (await one(db, 'SELECT 1 AS x FROM director_entries WHERE transaction_id = ?', rowId)) fail(409, 'This line is in a director\'s account: take it out of the ledger first.');
+  const r = await db.batch([
+    stmt(db, 'DELETE FROM transactions WHERE id = ?', rowId),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'transaction.remove', 'transactions', ?, ?, ?, ?) RETURNING id`,
+      bid, c.get('user').id, rowId, JSON.stringify(old), JSON.stringify({ changes: `Approved line removed: ${old!.narration ?? ''} ₹${(Number(old!.amount_paise) / 100).toFixed(2)}` }), now()),
+  ]);
+  return c.json({ ok: true, auditId: (r[1].results?.[0] as { id: number } | undefined)?.id ?? null });
+});
+
+/** Undo an approved line's edit or removal: the line as it was before. */
+captureRoutes.post('/businesses/:businessId/expense-rows/undo/:auditId', requireRole('rows.approve'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const a = await one<{ id: number; action: string; row_id: string; before: string }>(db,
+    "SELECT id, action, row_id, before FROM audit_log WHERE id = ? AND business_id = ? AND action IN ('transaction.edit', 'transaction.remove')", Number(c.req.param('auditId')), bid);
+  if (!a) fail(404, 'Nothing to undo.');
+  const b = JSON.parse(a!.before) as Record<string, unknown>;
+  const k = Object.keys(b);
+  const s = a!.action === 'transaction.remove'
+    ? [stmt(db, `INSERT INTO transactions (${k.join(', ')}) VALUES (${k.map(() => '?').join(', ')})`, ...k.map((x) => b[x] as never))]
+    : [stmt(db, 'UPDATE transactions SET narration = ?, amount_paise = ?, head_id = ?, party_id = ?, ocr_original = ? WHERE id = ? AND business_id = ?',
+        b.narration as never, b.amount_paise as never, b.head_id as never, b.party_id as never, b.ocr_original as never, a!.row_id, bid),
+      stmt(db, 'UPDATE director_entries SET amount_paise = ? WHERE transaction_id = ?', b.amount_paise as never, a!.row_id)];
+  try {
+    await db.batch([...s, stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, 'transaction.undo', 'transactions', ?, NULL, ?, ?)`,
+      bid, c.get('user').id, a!.row_id, JSON.stringify({ undid: a!.id, changes: 'Undone' }), now())]);
+  } catch (e) { if (/UNIQUE|PRIMARY/i.test(String(e))) fail(409, 'Already undone.'); throw e; }
+  return c.json({ ok: true });
 });
 
 captureRoutes.delete('/businesses/:businessId/expense-rows/:rowId', requireRole('rows.edit'), async (c) => {

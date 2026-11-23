@@ -10,6 +10,10 @@ import { shiftCredits } from '../bankEvidence';
 import { isMachineUpi, machineLabel } from '../cards';
 import { can } from '../permissions';
 import { creditList, creditOf, payStatements, unpayStatements } from '../credit';
+import { guessDirector, ledgerStart, nameKey, people, syncNc } from '../directors';
+
+/** Directors' NC lines follow complimentary bills (approved 23 Nov 2026). */
+const syncDirectors = (db: DB, bid: string, user: string) => syncNc(db, bid, user).catch(() => null);
 
 export const complimentaryRoutes = new Hono<AppEnv>();
 const CONFIRMED = 'This shift is saved. An Owner must reopen it first.';
@@ -99,7 +103,25 @@ complimentaryRoutes.get('/businesses/:businessId/shifts/:day/complimentary', req
     }
   }
   const byNo = new Map(rows.map((r) => [r.bill_no, r]));
-  return c.json({ day, lines, valuePaise: lines.filter((l) => l.status === 'ok').reduce((t, l) => t + (l.valuePaise ?? 0), 0),
+  // Names on this shift's complimentary bills not sorted yet (approved 23 Nov 2026): a director's, staff, or someone else.
+  const from = await ledgerStart(db, bid);
+  const ncAsk: { key: string; name: string; bills: string[]; valuePaise: number; guess: { id: string; name: string; family: string } | null }[] = [];
+  let ncPeople: { id: string; name: string; family: string }[] = [];
+  if (from && day >= from && can(c.get('role'), 'rows.approve')) {
+    const [ppl, known] = await Promise.all([people(db, bid), all<{ name_key: string }>(db, 'SELECT name_key FROM nc_names WHERE business_id = ?', bid)]);
+    ncPeople = ppl;
+    const seen = new Set(known.map((k) => k.name_key));
+    for (const l of lines) {
+      if (l.status !== 'ok') continue;
+      const name = l.guestName ?? l.name;
+      const key = nameKey(name);
+      if (!key || seen.has(key)) continue;
+      let x = ncAsk.find((n) => n.key === key);
+      if (!x) { x = { key, name: name!, bills: [], valuePaise: 0, guess: guessDirector(name, ppl) }; ncAsk.push(x); }
+      x.bills.push(l.billNo); x.valuePaise += l.valuePaise ?? 0;
+    }
+  }
+  return c.json({ day, lines, ncAsk, ncPeople, valuePaise: lines.filter((l) => l.status === 'ok').reduce((t, l) => t + (l.valuePaise ?? 0), 0),
     credit: credits.map((k) => ({ id: k.id, comparisonId: byNo.get(k.bill_no)?.id ?? null, billNo: k.bill_no, guestName: k.guest_name, amountPaise: k.amount_paise,
       madeBy: k.by, madeAt: k.made_at, paidAt: byNo.get(k.bill_no)?.paid_at ?? null })) });
 });
@@ -217,6 +239,7 @@ complimentaryRoutes.post('/businesses/:businessId/comparisons/:id/complimentary'
     ]);
   } catch (e) { if (isShiftConfirmed(e)) fail(409, CONFIRMED); throw e; }
   await refreshComparisons(db, bid, cmp.shift_day, user);
+  await syncDirectors(db, bid, user);
   return c.json({ ok: true });
 });
 
@@ -233,6 +256,7 @@ complimentaryRoutes.delete('/businesses/:businessId/comparisons/:id/complimentar
       bid, user, cmp.id, JSON.stringify({ guestName: old.guest_name }), JSON.stringify({ changes: `No longer complimentary (was ${old.guest_name})` }), now()),
   ]);
   await refreshComparisons(db, bid, cmp.shift_day, user);
+  await syncDirectors(db, bid, user);
   return c.json({ ok: true });
 });
 
@@ -303,6 +327,7 @@ complimentaryRoutes.post('/businesses/:businessId/comparisons/:id/paid-by', requ
         bid, user, after.id, JSON.stringify({ decision: 'use_register', note: `Paid by ${word}` }), t),
     ]);
   }
+  await syncDirectors(db, bid, user);
   return c.json({ ok: true });
 });
 

@@ -131,7 +131,11 @@ describe('expense list and cash summary', () => {
     expect((await h.clients.entry_staff.post(`/businesses/${h.bid}/uploads/${p.id}/expense-rows/approve`)).status).toBe(403);
     const res = await h.clients.accountant.post(`/businesses/${h.bid}/uploads/${p.id}/expense-rows/approve`);
     expect(res.json.approved).toBe(1); // the row without a head stays a draft
-    expect((await h.clients.owner.put(`/businesses/${h.bid}/expense-rows/${p.rowA}`, { narration: 'x', amount: '1' })).status).toBe(404);
+    // Approved lines (23 Nov 2026): entry staff still cannot change one; an Owner or Accountant can, and it is audited.
+    expect((await h.clients.entry_staff.put(`/businesses/${h.bid}/expense-rows/${p.rowA}`, { narration: 'x', amount: '1' })).status).toBe(404);
+    const e = await h.clients.owner.put(`/businesses/${h.bid}/expense-rows/${p.rowA}`, { narration: 'x', amount: '1' });
+    expect(e.status).toBe(200);
+    expect(e.json.auditId).toBeTruthy();
   });
 
   it('runs the four checks, waits on drafts and the shift, and needs a note to accept a mismatch', async () => {

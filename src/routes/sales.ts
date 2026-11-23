@@ -25,6 +25,8 @@ import { settleSaved, undoSettleSaved } from '../settleSaved';
 import { cashCheck, cashPairOf, EXCESS_HEAD, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
 import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
+import { nameKey } from '../directors';
+
 export const salesRoutes = new Hono<AppEnv>();
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -1099,7 +1101,24 @@ salesRoutes.get('/businesses/:businessId/reports/complimentary', requireRole('re
   let from = /^\d{4}-\d{2}-\d{2}$/.test(q.from ?? '') ? q.from! : addDays(to, -30);
   if (from > to) fail(400, 'From must be on or before To.');
   if (from < addDays(to, -366)) from = addDays(to, -366);
-  return c.json({ from, to, ...(await complimentaryBills(c.env.DB, c.get('businessId'), from, to)) });
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const r = await complimentaryBills(db, bid, from, to);
+  // By name (approved 23 Nov 2026): a director's bills are charged at 50%; staff and others are listed only.
+  const [sorted, ppl] = await Promise.all([all<{ name_key: string; kind: string; director_id: string | null }>(db, 'SELECT name_key, kind, director_id FROM nc_names WHERE business_id = ?', bid),
+    all<{ id: string; name: string; family: string }>(db, 'SELECT id, name, family FROM directors WHERE business_id = ?', bid)]);
+  const kindOf = new Map(sorted.map((x) => [x.name_key, x]));
+  const byName = new Map<string, { name: string; kind: string; person: string | null; bills: number; valuePaise: number; chargedPaise: number }>();
+  for (const l of r.lines) {
+    const key = nameKey(l.name) || '-';
+    const k = kindOf.get(key);
+    const p = k?.director_id ? ppl.find((x) => x.id === k.director_id) : null;
+    const x = byName.get(key) ?? { name: l.name ?? 'No name', kind: k?.kind ?? 'unsorted', person: p ? `${p.family} · ${p.name}` : null, bills: 0, valuePaise: 0, chargedPaise: 0 };
+    x.bills += 1; x.valuePaise += l.valuePaise ?? 0;
+    if (x.kind === 'director') x.chargedPaise += Math.round((l.valuePaise ?? 0) / 2);
+    byName.set(key, x);
+  }
+  return c.json({ from, to, ...r, byName: [...byName.values()].sort((a, b) => b.valuePaise - a.valuePaise) });
 });
 
 salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.view'), async (c) => {
