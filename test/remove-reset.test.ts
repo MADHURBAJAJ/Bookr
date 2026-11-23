@@ -23,6 +23,31 @@ async function schoolWithCashier() {
 }
 
 describe('remove login', () => {
+  it('a removed login invited again on the same number joins as new: own name and a new password (23 Nov 2026)', async () => {
+    const { h, o, book, anupId } = await schoolWithCashier();
+    expect((await o.del(`/businesses/${h.bid}/members/${anupId}`)).status).toBe(200);
+    const inv = await o.post(`/businesses/${h.bid}/invites`, { phone: '94120 66666', role: 'entry_staff', accountId: book });
+    const guest = new Client();
+    expect((await guest.get(`/invites/${inviteToken(inv.json.link)}`)).json).toMatchObject({ hasAccount: false });
+    expect((await guest.post(`/invites/${inviteToken(inv.json.link)}/accept`, { name: 'Rajesh Kumar', password: 'a-new-password-1' })).status).toBe(200);
+    expect((await guest.get('/me')).json.user).toMatchObject({ id: anupId, name: 'Rajesh Kumar' });
+    expect((await o.get(`/businesses/${h.bid}/cashbooks`)).json.books.find((b: { id: string }) => b.id === book)).toMatchObject({ cashierUserId: anupId });
+    expect((await new Client().post('/auth/login', { email: '94120 66666', password: 'long-enough-pw' })).status).toBe(401);
+    expect((await new Client().post('/auth/login', { email: '94120 66666', password: 'a-new-password-1' })).status).toBe(200);
+  });
+
+  it('someone still in another business confirms with their own password, as before', async () => {
+    const { h, o, anup, anupId } = await schoolWithCashier();
+    const other = await businessWithAllRoles('XOXO');
+    const inv = await other.clients.owner.post(`/businesses/${other.bid}/invites`, { phone: '94120 66666', role: 'viewer' });
+    const guest = new Client();
+    expect((await guest.get(`/invites/${inviteToken(inv.json.link)}`)).json).toMatchObject({ hasAccount: true });
+    expect((await guest.post(`/invites/${inviteToken(inv.json.link)}/accept`, { name: 'X', password: 'a-new-password-1' })).status).toBe(401);
+    expect((await guest.post(`/invites/${inviteToken(inv.json.link)}/accept`, { password: 'long-enough-pw' })).status).toBe(200);
+    expect((await anup.get('/me')).status).toBe(200);
+    void o; void anupId;
+  });
+
   it('is refused while cash he handed over waits; then his book keeps its lines, has no cashier, and he is signed out', async () => {
     const { h, o, sms, book, anup, anupId } = await schoolWithCashier();
     const other = (await o.post(`/businesses/${h.bid}/cashbooks`, { name: 'Ravi Sharma', branchId: sms, cashierUserId: h.users.entry_staff.id, openingBalance: '0', openingDate: '2026-11-19' })).json.id;

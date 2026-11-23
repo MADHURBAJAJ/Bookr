@@ -78,11 +78,19 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   // Cash holders added and invited by phone, whose person has not joined yet (no school and nobody keeps them yet).
   const pendingHolders = setup ? (await all<{ id: string; name: string; openingBalancePaise: number; openingDate: string }>(db, `SELECT a.id, a.name,
       a.opening_balance_paise AS openingBalancePaise, a.opening_date AS openingDate FROM accounts a
-    WHERE a.business_id = ? AND a.kind = 'cash' AND a.branch_id IS NULL AND a.cashier_user_id IS NULL
+    WHERE a.business_id = ? AND a.kind = 'cash' AND a.branch_id IS NULL AND a.cashier_user_id IS NULL AND a.closed_at IS NULL
       AND (EXISTS (SELECT 1 FROM invites i WHERE i.account_id = a.id)
         OR EXISTS (SELECT 1 FROM audit_log l WHERE l.business_id = a.business_id AND l.action = 'cashbook.create' AND l.row_id = a.id)) ORDER BY a.name`, bid)).map((a) => ({ ...a, invite: pendingOf.get(a.id) ?? null })) : [];
+  // Removing or closing a book (23 Nov 2026): which books were ever used (a line, or cash handed to them), and the closed ones.
+  const [usedRows, closed] = setup ? await Promise.all([
+    all<{ id: string }>(db, `SELECT DISTINCT account_id AS id FROM cash_entries WHERE business_id = ?
+      UNION SELECT to_account_id FROM cash_handovers WHERE business_id = ? AND to_account_id IS NOT NULL`, bid, bid),
+    booksOf(db, bid, user.id, role, 'only'),
+  ]) : [[], []];
+  const used = new Set(usedRows.map((r) => r.id));
   return c.json({
-    today: t, branches, codes, books: booksShown, pendingHolders, handovers: openShown, done: done.filter(visible),
+    today: t, branches, codes, books: booksShown.map((b) => ({ ...b, used: used.has(b.id) })),
+    pendingHolders: pendingHolders.map((b) => ({ ...b, used: used.has(b.id) })), closed, handovers: openShown, done: done.filter(visible),
     members, banks, can: { setup, invite, approve: can(role, 'rows.approve'), write: can(role, 'rows.edit') },
   });
 });
@@ -191,6 +199,71 @@ cashBookRoutes.patch('/businesses/:businessId/cashbooks/:accountId', requireRole
   return c.json({ ok: true });
 });
 
+// ---- Removing or closing a book (approved 23 Nov 2026). A book never used (no lines, nothing handed to it; counts
+// alone do not count as use) is removed outright. A book with history is closed: it leaves the lists and the hand-over
+// choices, nobody writes in it, its days stay readable, and it can be reopened. Either way a waiting phone invite for it
+// is cancelled; the person's login stays (remove it on Users and roles).
+
+async function anyBook(c: Context<AppEnv>) {
+  const b = await one<{ id: string; name: string; branchId: string | null; cashierUserId: string | null; closedAt: number | null; used: number }>(c.env.DB,
+    `SELECT a.id, a.name, a.branch_id AS branchId, a.cashier_user_id AS cashierUserId, a.closed_at AS closedAt,
+      (EXISTS (SELECT 1 FROM cash_entries e WHERE e.account_id = a.id) OR EXISTS (SELECT 1 FROM cash_handovers h WHERE h.to_account_id = a.id)) AS used
+    FROM accounts a WHERE a.id = ? AND a.business_id = ? AND a.kind = 'cash'
+      AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL OR EXISTS (SELECT 1 FROM invites i WHERE i.account_id = a.id)
+        OR EXISTS (SELECT 1 FROM audit_log l WHERE l.business_id = a.business_id AND l.action = 'cashbook.create' AND l.row_id = a.id))`,
+    id404(c.req.param('accountId'), 'Cash book'), c.get('businessId'));
+  if (!b) fail(404, 'Cash book not found.');
+  return b;
+}
+
+cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId', requireRole('accounts.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const b = await anyBook(c);
+  if (b.used) fail(409, 'This book has lines. Close it instead: its days stay readable.');
+  const t = now();
+  try {
+    await db.batch([
+      stmt(db, 'UPDATE invites SET revoked_at = ? WHERE account_id = ? AND accepted_at IS NULL AND revoked_at IS NULL', t, b.id),
+      stmt(db, 'UPDATE invites SET account_id = NULL WHERE account_id = ?', b.id),
+      stmt(db, 'DELETE FROM cash_counts WHERE account_id = ?', b.id),
+      stmt(db, 'DELETE FROM accounts WHERE id = ? AND business_id = ?', b.id, bid),
+      audit(db, { businessId: bid, userId: c.get('user').id, action: 'cashbook.remove', table: 'accounts', rowId: b.id,
+        before: { name: b.name, branchId: b.branchId, cashierUserId: b.cashierUserId }, at: t }),
+    ]);
+  } catch (e) {
+    if (/FOREIGN KEY/i.test(String(e))) fail(409, 'This book is used elsewhere in the books. Close it instead.');
+    throw e;
+  }
+  return c.json({ ok: true });
+});
+
+cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/close', requireRole('accounts.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const b = await anyBook(c);
+  const close = (await body(c)).closed !== false;
+  if (close === !!b.closedAt) return c.json({ ok: true });
+  if (close) {
+    const waiting = await one<{ n: number }>(db, `SELECT count(*) AS n FROM cash_handovers h JOIN cash_entries o ON o.id = h.from_entry_id
+      WHERE h.status = 'sent' AND (o.account_id = ? OR h.to_account_id = ?)`, b.id, b.id);
+    if (waiting!.n) fail(409, 'Cash handed over from or to this book is still on the way. Finish or undo it first.');
+    const book = await one<{ id: string; branchId: string | null; openingBalancePaise: number; openingDate: string }>(db,
+      'SELECT id, branch_id AS branchId, opening_balance_paise AS openingBalancePaise, opening_date AS openingDate FROM accounts WHERE id = ?', b.id);
+    const inHand = await inHandThrough(db, book!, today());
+    if (inHand) fail(409, `The book still shows ₹ ${(inHand / 100).toLocaleString('en-IN')} in hand. Hand it over first, so the cash is not lost from the books.`);
+  }
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE accounts SET closed_at = ?, closed_by = ? WHERE id = ? AND business_id = ?', close ? t : null, close ? user.id : null, b.id, bid),
+    ...(close ? [stmt(db, 'UPDATE invites SET revoked_at = ? WHERE account_id = ? AND accepted_at IS NULL AND revoked_at IS NULL', t, b.id)] : []),
+    audit(db, { businessId: bid, userId: user.id, action: close ? 'cashbook.close' : 'cashbook.reopen', table: 'accounts', rowId: b.id,
+      after: { name: b.name, closed: close }, at: t }),
+  ]);
+  return c.json({ ok: true });
+});
+
 // ---- One day of a book.
 
 cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/day/:day', requireRole('business.view'), async (c) => {
@@ -205,11 +278,11 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/day/:day', requ
     all<{ id: string; name: string; type: string }>(db, 'SELECT id, name, type FROM heads WHERE business_id = ? ORDER BY type, name', bid),
     all<{ id: string; name: string; branchName: string | null; cashierName: string | null }>(db, `SELECT a.id, a.name, b.name AS branchName, u.name AS cashierName
       FROM accounts a LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN users u ON u.id = a.cashier_user_id
-      WHERE a.business_id = ? AND a.kind = 'cash' AND a.id <> ? AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL) ORDER BY b.name, a.name`, bid, book.id),
+      WHERE a.business_id = ? AND a.kind = 'cash' AND a.id <> ? AND a.closed_at IS NULL AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL) ORDER BY b.name, a.name`, bid, book.id),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE business_id = ? AND kind = 'bank' ORDER BY name", bid),
     all<{ name: string }>(db, `SELECT DISTINCT p.name FROM cash_handovers h JOIN parties p ON p.id = h.to_party_id WHERE h.business_id = ? ORDER BY p.name`, bid),
   ]);
-  const canWrite = can(role, 'rows.edit') && (seesAllBooks(role) || book.cashierUserId === user.id);
+  const canWrite = !book.closedAt && can(role, 'rows.edit') && (seesAllBooks(role) || book.cashierUserId === user.id);
   return c.json({ ...d, today: today(), heads, targets, banks, people: people.map((p) => p.name), can: { write: canWrite, approve: can(role, 'rows.approve') } });
 });
 
@@ -222,6 +295,7 @@ async function writableBook(c: Context<AppEnv>) {
   const user = c.get('user');
   const book = await bookFor(c.env.DB, c.get('businessId'), id404(c.req.param('accountId'), 'Cash book'), user.id, role);
   if (!seesAllBooks(role) && book.cashierUserId !== user.id) fail(403, 'Only this book\'s cashier can write in it.');
+  if (book.closedAt) fail(409, 'This book is closed. Reopen it on Schools and cashiers to write in it.');
   return book;
 }
 
@@ -258,7 +332,7 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
     const x = (data.to ?? {}) as Record<string, unknown>;
     if (x.kind === 'book' || x.kind === 'bank') {
       const accountId = typeof x.accountId === 'string' && isUuid(x.accountId) ? x.accountId : null;
-      const a = accountId ? await one<{ name: string }>(db, 'SELECT name FROM accounts WHERE id = ? AND business_id = ? AND kind = ?', accountId, bid, x.kind === 'bank' ? 'bank' : 'cash') : null;
+      const a = accountId ? await one<{ name: string }>(db, 'SELECT name FROM accounts WHERE id = ? AND business_id = ? AND kind = ? AND closed_at IS NULL', accountId, bid, x.kind === 'bank' ? 'bank' : 'cash') : null;
       if (!a) fail(400, x.kind === 'bank' ? 'Choose the bank account.' : 'Choose the cashier\'s book.');
       if (accountId === book.id) fail(400, 'Cash cannot be handed to the same book.');
       to = { kind: x.kind, accountId, partyId: null, name: a.name };

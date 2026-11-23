@@ -68,7 +68,7 @@ memberRoutes.patch('/businesses/:businessId/members/:userId', requireRole('membe
 // What removing a person's login touches (21 Nov 2026): the cash books they keep here, with the cash each should hold
 // today, and cash handed over still waiting to or from those books. Their lines stay; the books lose their keeper.
 async function removeCheck(db: DB, bid: string, userId: string) {
-  const books = (await booksOf(db, bid, userId, 'owner')).filter((b) => b.cashierUserId === userId);
+  const books = (await booksOf(db, bid, userId, 'owner', 'also')).filter((b) => b.cashierUserId === userId);
   const t = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
   const withCash = await Promise.all(books.map(async (b) => ({ id: b.id, name: b.name, inHandPaise: await inHandThrough(db, b, t) })));
   const ids = books.map((b) => b.id);
@@ -162,12 +162,16 @@ memberRoutes.patch('/businesses/:businessId/members/:userId/profile', requireRol
   const name = data.name === undefined ? user.name : text(data, 'name', 'Name', { max: 120 })!;
   let phone = user.phone;
   let email = user.email;
-  if (data.phone !== undefined) {
+  const emailLogin = !user.email.endsWith('@phone.bookr.invalid');
+  // An email login's extra mobile number can be taken off again (23 Nov 2026); a phone login always keeps one.
+  if (emailLogin && (data.phone === null || data.phone === '')) {
+    phone = null;
+  } else if (data.phone !== undefined) {
     phone = normalizePhone(data.phone);
     if (!phone) fail(400, 'Enter a 10-digit mobile number.');
     if (user.email.endsWith('@phone.bookr.invalid')) email = phoneEmail(phone);
   }
-  if (phone !== user.phone && await one(db, 'SELECT 1 AS ok FROM users WHERE phone = ? AND id <> ?', phone, userId)) {
+  if (phone && phone !== user.phone && await one(db, 'SELECT 1 AS ok FROM users WHERE phone = ? AND id <> ?', phone, userId)) {
     fail(409, 'Another person signs in with this number.');
   }
   try {
@@ -249,7 +253,10 @@ async function findInvite(db: DB, token: string) {
 
 inviteRoutes.get('/invites/:token', async (c) => {
   const inv = await findInvite(c.env.DB, c.req.param('token'));
-  const user = await one(c.env.DB, inv.phone ? 'SELECT 1 AS ok FROM users WHERE phone = ?' : 'SELECT 1 AS ok FROM users WHERE lower(email) = lower(?)', inv.phone ?? inv.email);
+  // A phone login (only ever made by a cashier invite) that is in no business any more (removed, 23 Nov 2026) joins like
+  // a new person: name and a new password.
+  const user = await one(c.env.DB, `SELECT 1 AS ok FROM users u WHERE ${inv.phone ? 'u.phone = ?' : 'lower(u.email) = lower(?)'}
+    ${inv.phone ? "AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = u.id)" : ""}`, inv.phone ?? inv.email);
   return c.json({ businessName: inv.business_name, email: inv.phone ? null : inv.email, phone: inv.phone, role: inv.role, hasAccount: !!user });
 });
 
@@ -261,14 +268,23 @@ inviteRoutes.post('/invites/:token/accept', async (c) => {
   const data = await body(c);
   const password = typeof data.password === 'string' ? data.password : '';
   const inv = await findInvite(db, c.req.param('token'));
-  const existing = await one<{ id: string; password_hash: string }>(db, inv.phone
-    ? 'SELECT id, password_hash FROM users WHERE phone = ?' : 'SELECT id, password_hash FROM users WHERE lower(email) = lower(?)', inv.phone ?? inv.email);
+  const existing = await one<{ id: string; password_hash: string; member: number }>(db, `SELECT u.id, u.password_hash,
+      (? IS NULL OR EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = u.id)) AS member FROM users u WHERE ${inv.phone ? 'u.phone = ?' : 'lower(u.email) = lower(?)'}`, inv.phone, inv.phone ?? inv.email);
   const t = now();
   const statements = [stmt(db, 'UPDATE invites SET accepted_at = ? WHERE id = ?', t, inv.id)];
   let userId: string;
-  if (existing) {
+  if (existing?.member) {
     if (!(await verifyPassword(password, existing.password_hash))) fail(401, 'Password is incorrect.');
     userId = existing.id;
+  } else if (existing) {
+    // In no business any more (its login was removed): the invited person sets their own name and password; the old
+    // password stops working and any old sign-in ends.
+    const name = text(data, 'name', 'Your name', { max: 120 })!;
+    if (password.length < MIN_PASSWORD) fail(400, `Password must be at least ${MIN_PASSWORD} characters.`);
+    userId = existing.id;
+    statements.push(
+      stmt(db, 'UPDATE users SET name = ?, password_hash = ? WHERE id = ?', name, await hashPassword(password), userId),
+      stmt(db, 'DELETE FROM sessions WHERE user_id = ?', userId));
   } else {
     const name = text(data, 'name', 'Your name', { max: 120 })!;
     if (password.length < MIN_PASSWORD) fail(400, `Password must be at least ${MIN_PASSWORD} characters.`);
@@ -299,9 +315,11 @@ inviteRoutes.post('/invites/:token/accept', async (c) => {
 const INVALID_RESET = 'This reset link is not valid. Ask the Owner for a new one.';
 
 async function findReset(db: DB, token: string) {
+  // A link made from the server for an Owner who is locked out (scripts/owner-reset.ts, 23 Nov 2026) is marked as made
+  // by the person themselves (no one can do that in the app) and works for an Owner too.
   const r = await one<{ id: string; user_id: string; name: string; signIn: string; ownerAnywhere: number }>(db, `
     SELECT r.id, r.user_id, u.name, ${signInSql('u')} AS signIn,
-      EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = u.id AND x.role = 'owner') AS ownerAnywhere
+      (r.created_by IS NOT r.user_id AND EXISTS (SELECT 1 FROM memberships x WHERE x.user_id = u.id AND x.role = 'owner')) AS ownerAnywhere
     FROM password_resets r JOIN users u ON u.id = r.user_id
     WHERE r.token_hash = ? AND r.used_at IS NULL AND r.revoked_at IS NULL AND r.expires_at > ?
       AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = r.user_id AND m.business_id = r.business_id)`, await sha256(token), now());
