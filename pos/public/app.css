@@ -3,7 +3,7 @@
    amber = needs attention; red = stop, money at risk. Status colours are never the only signal: every coloured tile or
    badge also says its state in words. Printed bills and KOTs stay black on white. */
 :root {
-  --bg: #f2efea; --panel: #fffdfa; --ink: #1d1b18; --quiet: #57524a; --line: #ddd6cb; --rule: #e9e3da; --field: #fffdfa; --field-line: #a39a8c;
+  --bg: #f3f4f2; --panel: #ffffff; --ink: #17201f; --quiet: #4d5b59; --line: #dde2e0; --rule: #e8ecea; --field: #ffffff; --field-line: #a3afac;
   --pri: #0f6e6e; --pri-dark: #0b5656; --pri-tint: #e3f1f0; --pri-line: #9fcfcb; --on-pri: #ffffff;
   --go: #2f6b1f; --go-dark: #22521a; --go-tint: #e8f2e2; --go-line: #a6cf96; --on-go: #ffffff;
   --warn: #8a4b00; --warn-tint: #fbefdd; --warn-line: #e8c48f;
@@ -11,16 +11,18 @@
   --tab: #66379b; --tab-tint: #f3edfb; --tab-line: #cbb3ea;
   --stay: #2b4590; --stay-tint: #eef2fd; --stay-line: #b9c8ef;
   --top: #0f4f4f; --top-ink: #eef6f5; --top-quiet: #b6d3d0; --top-hover: #1a6363; --top-line: #5d9393; --top-active: #eef6f5; --top-active-ink: #0f4f4f;
-  --on-ink: #fffdfa; --hover: #f6f2ec; --hover-line: #8b8274; --disabled: #e6e0d7; --disabled-ink: #5f594f; --placeholder: #776f63;
-  --soft: #f7f3ed; --paper: #fbfaf6; --paper-rule: #a39a8c; --dash: #8b8274; --scrim: rgba(20, 30, 30, .45); --shadow: rgba(0, 0, 0, .25);
+  --on-ink: #ffffff; --hover: #f1f4f3; --hover-line: #7f8d8a; --disabled: #e4e8e6; --disabled-ink: #5d6a68; --placeholder: #6f7c7a;
+  --soft: #f6f7f5; --paper: #fbfbfa; --paper-rule: #a3afac; --dash: #7f8d8a; --scrim: rgba(20, 30, 30, .45); --shadow: rgba(0, 0, 0, .18);
+  /* Booking sources on the room chart (our own hues, not the OTAs' brand colours; every bar also carries a text tag) */
+  --src-direct: #0f6b6b; --src-mmt: #9a3b91; --src-gi: #3953b8; --src-web: #7a6417; --src-desk: #8a5000;
   --focus: #f5a524;
   --radius: 12px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
+  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
 }
 /* Teal night: the bar after dark. A dim screen with no glare; status colours lifted so they read on dark. */
 :root[data-theme="night"] {
-  --bg: #0e1717; --panel: #152222; --ink: #e6f0ef; --quiet: #a3b6b4; --line: #2c3f3f; --rule: #213131; --field: #0f1c1c; --field-line: #557070;
+  --bg: #0e1516; --panel: #141d1e; --ink: #e4ecec; --quiet: #a9b8b8; --line: #2b3c3d; --rule: #223031; --field: #0f1819; --field-line: #557070;
   --pri: #5cc6c0; --pri-dark: #7ad3ce; --pri-tint: #173a39; --pri-line: #2f6563; --on-pri: #081010;
   --go: #7cc46a; --go-dark: #93d283; --go-tint: #1a3018; --go-line: #3d6634; --on-go: #081010;
   --warn: #f0b264; --warn-tint: #33260f; --warn-line: #6b4b1c;
@@ -29,7 +31,8 @@
   --stay: #a9bdf5; --stay-tint: #1c2540; --stay-line: #3e5185;
   --top: #081010; --top-ink: #e6f0ef; --top-quiet: #8fa6a4; --top-hover: #1a2b2b; --top-line: #3a5454; --top-active: #2a4545; --top-active-ink: #ffffff;
   --on-ink: #0e1717; --hover: #1b2a2a; --hover-line: #6b8686; --disabled: #1d2a2a; --disabled-ink: #93a6a4; --placeholder: #849a98;
-  --soft: #132020; --paper: #172525; --paper-rule: #557070; --dash: #6b8686; --scrim: rgba(0, 0, 0, .6); --shadow: rgba(0, 0, 0, .5);
+  --soft: #1a2526; --paper: #172525; --paper-rule: #557070; --dash: #6b8686; --scrim: rgba(0, 0, 0, .6); --shadow: rgba(0, 0, 0, .5);
+  --src-direct: #4cb3ac; --src-mmt: #d48bcd; --src-gi: #93a7f4; --src-web: #c9b36a; --src-desk: #e9b04f;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -56,7 +59,7 @@ input.in:focus, select.in:focus, textarea.in:focus { outline: 3px solid var(--fo
 
 /* ---------- Top bar */
 .top { background: var(--top); color: var(--top-ink); position: sticky; top: 0; z-index: 20; }
-.top-in { max-width: 1440px; margin: 0 auto; display: flex; align-items: center; gap: 8px 18px; padding: 6px 20px; min-height: 60px; }
+.top-in { max-width: 1760px; margin: 0 auto; display: flex; align-items: center; gap: 8px 18px; padding: 6px 20px; min-height: 60px; }
 .brand { font-size: 17px; font-weight: 800; color: var(--top-ink); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; min-height: 44px; line-height: 44px; }
 .mainnav { display: flex; gap: 2px; flex: 1; min-width: 0; flex-wrap: wrap; }
 .mainnav a, .navmenu nav a { color: var(--top-ink); text-decoration: none; padding: 0 12px; min-height: 44px; display: inline-flex; align-items: center; border-radius: 8px; font-weight: 600; font-size: 15px; }
@@ -74,7 +77,7 @@ input.in:focus, select.in:focus, textarea.in:focus { outline: 3px solid var(--fo
 .navmenu nav { position: absolute; left: 0; top: calc(100% + 6px); background: var(--top); border: 1px solid var(--top-line); border-radius: 10px; padding: 6px; display: flex; flex-direction: column; min-width: 220px; z-index: 30; box-shadow: 0 10px 30px var(--shadow); }
 .navmenu nav a[aria-current="page"] { background: var(--top-active); color: var(--top-active-ink); }
 
-main { padding: 20px; max-width: 1440px; margin: 0 auto; }
+main { padding: 20px; max-width: 1760px; margin: 0 auto; }
 
 /* ---------- Page heads and tabs */
 .phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -762,3 +765,86 @@ table.chart { border-collapse: collapse; min-width: 820px; width: 100%; font-siz
 .legend i { display: inline-block; width: 14px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: middle; border: 1px solid var(--line); }
 .legend i.occ { background: var(--pri-tint); } .legend i.arr { background: var(--go-tint); } .legend i.pos { background: var(--warn-tint); border-style: dashed; }
 .legend i.hold { background: var(--bg); border-style: dashed; } .legend i.ooo { background: var(--bad-tint); }
+
+
+/* ==========================================================================================================================
+   Desk density (25 Nov 2026 redesign): the front-desk PC is used with a mouse and keyboard, so every screen except the
+   floor (Tables), the order and the payment screens, which stay touch-sized for a tablet, uses compact controls:
+   36px controls, 14px text, 38px table rows, on a 4px spacing grid. Colours and states are unchanged.
+   ========================================================================================================================== */
+body.desk { font-size: 14px; line-height: 1.4; }
+body.desk .top-in { min-height: 48px; padding: 4px 16px; gap: 6px 14px; }
+body.desk .brand { min-height: 36px; line-height: 36px; font-size: 15px; }
+body.desk .mainnav a, body.desk .navmenu nav a { min-height: 34px; font-size: 14px; padding: 0 10px; border-radius: 6px; }
+body.desk .who { font-size: 13px; gap: 8px; }
+body.desk .who button { min-height: 32px; padding: 0 10px; font-size: 13px; border-radius: 6px; }
+body.desk main { padding: 16px 20px 32px; }
+body.desk h1 { font-size: 20px; }
+body.desk h2 { font-size: 16px; }
+body.desk h3 { font-size: 14px; }
+body.desk .phead { margin-bottom: 10px; align-items: center; }
+body.desk .phead .sub { font-size: 13px; margin-top: 2px; }
+body.desk .tabs { margin-bottom: 14px; gap: 0; }
+body.desk .tabs a { min-height: 38px; padding: 0 12px; font-size: 14px; border-bottom-width: 2px; }
+body.desk .btn { min-height: 36px; padding: 0 12px; border-radius: 6px; font-size: 14px; font-weight: 600; }
+body.desk .btn.big { min-height: 44px; font-size: 16px; }
+body.desk .btn.sm, .btn.sm { min-height: 28px; padding: 0 9px; font-size: 13px; border-radius: 6px; }
+body.desk .chip { min-height: 32px; min-width: 32px; padding: 0 10px; border-radius: 6px; font-size: 13.5px; }
+body.desk .chips { gap: 6px; }
+body.desk label.f, body.desk div.f { font-size: 13px; gap: 4px; }
+body.desk input.in, body.desk select.in, body.desk textarea.in { min-height: 36px; border-radius: 6px; font-size: 14px; padding: 0 10px; }
+body.desk input.in:focus, body.desk select.in:focus, body.desk textarea.in:focus { outline-width: 2px; }
+body.desk .grid2, body.desk .grid3 { gap: 12px; }
+body.desk .panel { padding: 16px; gap: 12px; border-radius: 10px; }
+body.desk .msg { padding: 10px 12px; font-size: 14px; border-radius: 8px; }
+body.desk .flash { font-size: 14px; margin-bottom: 12px; }
+body.desk .flash a { min-height: 32px; }
+body.desk .badge { font-size: 12px; padding: 2px 8px; }
+body.desk .sums { font-size: 14px; }
+body.desk .sums .big { font-size: 18px; }
+body.desk table.t th { font-size: 12px; padding: 8px 10px; }
+body.desk table.t td { padding: 9px 10px; font-size: 13.5px; }
+body.desk .label { font-size: 12px; }
+body.desk .small { font-size: 13px; }
+/* KPI strip: one bar of figures instead of five tall tiles */
+body.desk .kpis { gap: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); margin-bottom: 14px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); overflow: hidden; }
+body.desk .kpi { border: 0; border-right: 1px solid var(--line); border-radius: 0; padding: 10px 14px; gap: 2px; background: transparent; }
+body.desk .kpi:last-child { border-right: 0; }
+body.desk .kpi .k { font-size: 12.5px; }
+body.desk .kpi .v { font-size: 20px; font-weight: 700; }
+body.desk .kpi .n { font-size: 12.5px; }
+body.desk .kpi.good, body.desk .kpi.warn, body.desk .kpi.bad { border-color: var(--line); }
+
+/* Status pills: a dot and a word, never colour alone */
+.status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 2px 8px 2px 6px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; }
+.status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.status.ok { color: var(--go-dark); background: var(--go-tint); } .status.warn { color: var(--warn); background: var(--warn-tint); }
+.status.bad { color: var(--bad); background: var(--bad-tint); } .status.info { color: var(--pri); background: var(--pri-tint); }
+.status.mute { color: var(--quiet); background: var(--soft); border-color: var(--line); }
+.status.sq::before { border-radius: 1px; transform: rotate(45deg); }
+
+/* Keyboard hints */
+.kbd { font: 600 11px ui-monospace, Menlo, Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--quiet); background: var(--panel); }
+
+/* Tables: sticky header, light striping, hover; numbers right-aligned (class num); sortable headers */
+table.t thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+body.desk table.t tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--soft) 70%, transparent); }
+body.desk table.t tbody tr:hover td { background: var(--pri-tint); }
+table.t th[data-sort] { cursor: pointer; user-select: none; }
+table.t th[data-sort]:hover { color: var(--ink); }
+table.t th[aria-sort="ascending"]::after { content: " ↑"; color: var(--pri); }
+table.t th[aria-sort="descending"]::after { content: " ↓"; color: var(--pri); }
+.empty { border: 1px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--quiet); font-size: 13.5px; }
+
+/* Side panel: details open on the right; the page stays where it was. Esc closes it. */
+.drawer { position: fixed; top: 48px; right: 0; bottom: 0; width: min(480px, 100vw); background: var(--bg); border-left: 1px solid var(--line); box-shadow: -12px 0 32px var(--shadow);
+  z-index: 25; overflow-y: auto; padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+.drawer .dhead { display: flex; align-items: center; gap: 8px; }
+.drawer .dhead h2 { flex: 1; margin: 0; }
+.drawer .panel { max-width: none !important; margin: 0 !important; }
+@media (prefers-reduced-motion: no-preference) { .drawer { animation: drawerin .14s ease-out; } @keyframes drawerin { from { transform: translateX(24px); opacity: .6; } } }
+body.desk main:has(> .drawer) { padding-right: 500px; }
+@media (max-width: 1100px) { body.desk main:has(> .drawer) { padding-right: 20px; } }
+body.desk .brandbox { line-height: 1.1; }
+body.desk .switcher { min-height: 30px; font-size: 14px; padding: 0 8px; border-radius: 6px; }
+body.desk .product { font-size: 10px; }

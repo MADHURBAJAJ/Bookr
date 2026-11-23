@@ -177,6 +177,9 @@ async function route() {
     }
     if (!me) return await signIn();
     const [path, a, b] = location.hash.replace(/^#\/?/, '').split('/');
+    // Desk density (25 Nov 2026): compact controls for a mouse and keyboard; the floor, order and payment screens stay
+    // touch-sized for a tablet.
+    document.body.classList.toggle('desk', !['', 'order', 'bill', 'settle', 'done', 'signin'].includes(path ?? ''));
     if (path === 'order') return await orderScreen(a);
     if (path === 'bill') return await billScreen(a);
     if (path === 'settle') return await settleScreen(a, b);
@@ -361,6 +364,45 @@ actions.pinGo = async () => {
   try { await api('POST', '/auth/pin', { staffId: ui.who, pin: ui.pin }); } catch (e) { ui.pin = ''; throw e; }
   me = null; go('#/');
 };
+// Keyboard shortcuts (25 Nov 2026): / searches the screen, N starts a new reservation (on Rooms), Esc closes the side
+// panel or the open form. Not while typing in a field (except Esc).
+const ESC_KEYS = ['roomBill', 'recv', 'refund', 'adv', 'rbForm', 'chartSel', 'resSel', 'drawer', 'approval', 'guestAsk'];
+document.addEventListener('keydown', (ev) => {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey || ui.pinPad) return;
+  const typing = ev.target.matches?.('input, textarea, select');
+  if (ev.key === 'Escape') {
+    if (typing) { ev.target.blur(); if (!ESC_KEYS.some((k) => ui[k])) return; }
+    const open = ESC_KEYS.filter((k) => ui[k]);
+    if (!open.length) return;
+    ev.preventDefault();
+    // The innermost first: a form inside the side panel, then the panel itself.
+    const k = ['approval', 'guestAsk', 'recv', 'refund', 'adv', 'rbForm'].find((x) => ui[x]) ?? open[0];
+    ui[k] = null; if (k === 'roomBill' || k === 'drawer' || k === 'chartSel') { ui.roomBill = ui.drawer = ui.chartSel = null; ui.rbForm = null; }
+    ui.error = null; rerender(); return;
+  }
+  if (typing) return;
+  if (ev.key === '/') {
+    const box = root.querySelector('input[type="search"], [data-search]');
+    if (box) { ev.preventDefault(); box.focus(); box.select?.(); }
+  } else if ((ev.key === 'n' || ev.key === 'N') && location.hash.startsWith('#/rooms') && can('stays.edit')) {
+    ev.preventDefault(); go('#/rooms/new');
+  }
+});
+// Sortable tables: a header with data-sort sorts its table's rows on click (numbers by value, ₹ and commas ignored).
+root.addEventListener('click', (ev) => {
+  const th = ev.target.closest?.('th[data-sort]');
+  if (!th) return;
+  const table = th.closest('table');
+  const tbody = table.tBodies[0];
+  const idx = [...th.parentElement.children].indexOf(th);
+  const dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+  table.querySelectorAll('th[aria-sort]').forEach((x) => x.removeAttribute('aria-sort'));
+  th.setAttribute('aria-sort', dir);
+  const key = (tr) => { const c = tr.children[idx]; const v = (c?.dataset.v ?? c?.textContent ?? '').trim(); const n = Number(v.replace(/[₹,\s]/g, '')); return Number.isFinite(n) && /\d/.test(v) && !/[a-z]{2}/i.test(v.replace(/₹/g, '')) ? n : v.toLowerCase(); };
+  const rows = [...tbody.rows].filter((r) => r.children.length > 1);
+  rows.sort((a, b) => { const x = key(a); const y = key(b); const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y)); return dir === 'ascending' ? c : -c; });
+  rows.forEach((r) => tbody.appendChild(r));
+});
 // A counter PC has a keyboard: digits, Backspace and Enter work on the PIN pad.
 document.addEventListener('keydown', (ev) => {
   if (!ui.pinPad || ev.ctrlKey || ev.metaKey || ev.altKey || ev.target.matches?.('input, textarea, select')) return;
@@ -1450,13 +1492,14 @@ async function roomsScreen(view) {
   reopenStay = null;
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms', 'The front desk: arrivals, guests in house, departures, the room chart and reservations.')}
     ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, t, k]), v) : ''}
-    ${moneyForms()}
-    ${ui.roomBill ? roomBillPanel(ui.roomBill) : ''}
+    ${drawerOpen() ? html`<aside class="drawer" aria-label="Details">${moneyForms()}${ui.roomBill ? roomBillPanel(ui.roomBill) : ui.chartSel ? chartSelPanel() : ui.drawer ? ui.drawer() : ''}</aside>` : moneyForms()}
     ${!can('stays.edit') ? inHouseTable() : v === 'today' ? todayView() : v === 'chart' ? chartView() : v === 'list' ? listView() : v === 'new' ? newResView()
       : v === 'audit' ? auditView() : v === 'house' ? houseView() : v === 'register' ? registerView() : checkinView()}`));
   rerender();
 }
 
+/** The side panel (25 Nov 2026): a room bill, a chart booking or free cell, or another detail, beside the page. */
+const drawerOpen = () => !!(ui.roomBill || ui.chartSel || ui.drawer);
 /** The guests in house, as before (for a captain who cannot check in). */
 const inHouseTable = () => html`<section class="panel"><h2>In house</h2>${ui.recv || ui.refund || ui.roomBill || ui.adv ? '' : errorBox()}
   <div class="scroll"><table class="t cards"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
@@ -1545,11 +1588,7 @@ function chartView() {
   return html`<div class="row" style="margin-bottom:10px"><button class="btn" type="button" data-act="chartMove" data-n="-7">‹ Earlier</button><strong>${dayName(c.from)} → ${dayName(addDays(c.from, c.days - 1))}</strong>
       <button class="btn" type="button" data-act="chartMove" data-n="7">Later ›</button><button class="btn ghost" type="button" data-act="chartMove" data-n="0">Today</button></div>
     ${errorBox()}
-    ${sel ? html`<div class="msg ${sel.kind === 'ooo' ? 'warn' : 'ok'}" style="margin-bottom:10px;display:block"><strong>${sel.room} · ${sel.label}</strong> · ${dayName(sel.from)} → ${dayName(sel.to)}
-      <div class="row" style="margin-top:6px">${sel.ref.type === 'stay' ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${sel.ref.id}">Room bill</button>` : ''}
-        ${sel.ref.type === 'reservation' ? html`<button class="btn pri" type="button" data-act="resOpen" data-id="${sel.ref.id}">Open reservation</button>` : ''}
-        ${sel.ref.type === 'block' ? html`<button class="btn" type="button" data-act="blockDel" data-id="${sel.ref.id}">Back in use</button>` : ''}
-        <button class="btn ghost" type="button" data-act="chartSelNo">Close</button></div></div>` : ''}
+
     <div class="chartwrap"><table class="chart"><thead><tr><th class="croom">Room</th>${dates.map((d) => html`<th class="${d === c.today ? 'today' : ''}">${label(d)}</th>`)}</tr></thead><tbody>
       ${c.sections.map((sec) => html`<tr class="cgrp"><th colspan="${c.days + 1}">${sec.name}${ui.chartRates?.[sec.name] ? ` · ${rs(ui.chartRates[sec.name])} / night` : ''}</th></tr>${sec.rooms.map((r) => rowFor(sec, r))}`)}
     </tbody></table></div>
@@ -1562,6 +1601,15 @@ function chartView() {
         <label class="f">Why<input class="in" data-model="blkNote" value="${ui.blkNote ?? ''}" placeholder="e.g. AC repair"></label>
         <label class="f">First night<input class="in" type="date" data-model="blkFrom" value="${ui.blkFrom ?? c.today}"></label><label class="f">Last night<input class="in" type="date" data-model="blkTo" value="${ui.blkTo ?? c.today}"></label></div>
       <div><button class="btn" type="submit" data-act="blockAdd" data-submit>Mark out of order</button></div></form>`;
+}
+/** A booking, stay or blocked room picked on the chart, in the side panel. */
+function chartSelPanel() {
+  const sel = ui.chartSel;
+  return html`<div class="dhead"><h2>${sel.room}</h2><button class="btn ghost" type="button" data-act="chartSelNo" title="Close (Esc)">Close</button></div>
+    <section class="panel"><strong>${sel.label}</strong><div class="small quiet">${dayName(sel.from)} → ${dayName(sel.to)}</div>
+      <div class="row">${sel.ref.type === 'stay' ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${sel.ref.id}">Room bill</button>` : ''}
+        ${sel.ref.type === 'reservation' ? html`<button class="btn pri" type="button" data-act="resOpen" data-id="${sel.ref.id}">Open reservation</button>` : ''}
+        ${sel.ref.type === 'block' ? html`<button class="btn" type="button" data-act="blockDel" data-id="${sel.ref.id}">Back in use</button>` : ''}</div></section>`;
 }
 actions.chartSel = (d) => { ui.chartSel = { ...ui.chart.bars[Number(d.i)] }; rerender(); };
 actions.chartSelNo = () => { ui.chartSel = null; rerender(); };
