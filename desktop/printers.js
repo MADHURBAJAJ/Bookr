@@ -49,9 +49,12 @@ $('save').addEventListener('click', async () => {
   const s = data.settings;
   s.paperMm = Number(document.querySelector('input[name=paper]:checked')?.value ?? 80);
   s.startWithWindows = $('startWin').checked;
-  data.settings = await window.bookrSettings.save(s);
-  $('msg').className = 'msg ok'; $('msg').textContent = 'Saved. Bills and KOTs now print on these printers.';
+  const r = await window.bookrSettings.save(s).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+  if (!r?.ok) { $('msg').className = 'msg bad'; $('msg').textContent = r?.error ?? 'Could not save.'; return; }
+  data.settings = r.settings;
+  $('msg').className = 'msg ok'; $('msg').textContent = 'Saved. Bills and KOTs now print on these printers. Closing…';
   paint();
+  setTimeout(() => window.bookrSettings.close(), 1500);
 });
 
 window.bookrSettings.load().then((d) => { data = d; paint(); });

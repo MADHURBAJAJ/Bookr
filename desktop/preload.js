@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld('bookrDesktop', {
   /** job: { kind: 'bill' | 'kot', station?: string, html: string, copies?: number } → { ok, error?, printer? } */
   print: (job) => ipcRenderer.invoke('print', job),
   openPrinters: () => ipcRenderer.invoke('printers:open'),
+  minimize: () => ipcRenderer.invoke('window:minimize'),
+  toggleFullScreen: () => ipcRenderer.invoke('window:fullscreen'),
 });

@@ -118,7 +118,11 @@ const iconBtn = (act, id, icon, label, cls = '') => html`<button class="ibtn ${c
 // Full screen on the counter (21 Nov 2026): no app needed. Chrome can also install Bookr POS as its own window (the
 // install icon in the address bar), which opens without the address bar.
 const FULL_ICON = html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>`;
-const fullButton = () => (document.fullscreenEnabled ? html`<button type="button" class="themebtn" data-act="fullScreen" title="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}" aria-label="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}">${FULL_ICON}</button>` : '');
+// In the Bookr POS Windows app: the window's own full screen, and a minimize button (23 Nov 2026).
+const MIN_ICON = html`<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 18h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>`;
+const fullButton = () => (window.bookrDesktop?.minimize ? html`<button type="button" class="themebtn" data-act="deskMin" title="Minimize" aria-label="Minimize">${MIN_ICON}</button>
+  <button type="button" class="themebtn" data-act="deskFull" title="Full screen on or off (F11)" aria-label="Full screen on or off">${FULL_ICON}</button>`
+  : document.fullscreenEnabled ? html`<button type="button" class="themebtn" data-act="fullScreen" title="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}" aria-label="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}">${FULL_ICON}</button>` : '');
 function shell(active, body) {
   const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms and credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
@@ -196,6 +200,8 @@ actions.fullScreen = async () => {
   else await document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
 };
 document.addEventListener('fullscreenchange', () => rerender());
+actions.deskMin = () => window.bookrDesktop?.minimize();
+actions.deskFull = () => window.bookrDesktop?.toggleFullScreen();
 actions.theme = () => {
   const next = { auto: 'day', day: 'night', night: 'auto' }[themeMode()];
   try { localStorage.setItem(THEME_KEY, next); } catch { /* a private window: this visit only */ }

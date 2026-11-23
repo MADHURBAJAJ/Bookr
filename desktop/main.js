@@ -59,6 +59,8 @@ ipcMain.handle('print', async (event, job) => {
   }
 });
 ipcMain.handle('printers:open', (event) => { if (fromPos(event)) openPrinters(); });
+ipcMain.handle('window:minimize', (event) => { if (fromPos(event)) main?.minimize(); });
+ipcMain.handle('window:fullscreen', (event) => { if (fromPos(event) && main) main.setFullScreen(!main.isFullScreen()); });
 
 // ---------- the Printers settings window
 
@@ -68,7 +70,11 @@ ipcMain.handle('settings:load', async (event) => {
   const printers = (await printersWin.webContents.getPrintersAsync()).map((p) => ({ name: p.name, isDefault: !!p.isDefault }));
   return { settings: loadSettings(), printers, version: app.getVersion() };
 });
-ipcMain.handle('settings:save', (event, s) => (fromPrinters(event) ? saveSettings(s) : null));
+ipcMain.handle('settings:save', (event, s) => {
+  if (!fromPrinters(event)) return null;
+  try { return { ok: true, settings: saveSettings(s) }; } catch (e) { return { ok: false, error: `Could not save on this PC: ${e.message}. If an antivirus is blocking Bookr POS, add it to its trusted list.` }; }
+});
+ipcMain.handle('settings:close', (event) => { if (fromPrinters(event)) printersWin?.close(); });
 ipcMain.handle('settings:test', async (event, printer, label) => {
   if (!fromPrinters(event)) return { ok: false };
   const p = str(printer);
