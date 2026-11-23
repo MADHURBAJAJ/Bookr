@@ -1491,7 +1491,7 @@ async function roomsScreen(view) {
   }
   reopenStay = null;
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms', '')}
-    ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, t, k]), v) : ''}
+    ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, k === 'list' && inboxCount(ui.bk) ? html`${t} <span class="status warn" title="Waiting for you">${inboxCount(ui.bk)}</span>` : t, k]), v) : ''}
     ${drawerOpen() ? html`<aside class="drawer" aria-label="Details">${moneyForms()}${ui.roomBill ? roomBillPanel(ui.roomBill) : ui.chartSel ? chartSelPanel() : ui.drawer ? ui.drawer() : ''}</aside>` : moneyForms()}
     ${!can('stays.edit') ? inHouseTable() : v === 'today' ? todayView() : v === 'chart' ? chartView() : v === 'list' ? listView() : v === 'new' ? newResView()
       : v === 'audit' ? auditView() : v === 'house' ? houseView() : v === 'register' ? registerView() : checkinView()}`));
@@ -1582,7 +1582,7 @@ actions.resCancel = async (d) => {
   flash = { kind: r.advanceToRefund ? 'warn' : 'ok', text: r.advanceToRefund ? 'Reservation cancelled. Its advance is waiting to be given back (Money at reception).' : 'Reservation cancelled.' };
   await refreshDeskAlerts(); route();
 };
-actions.resOpen = async (d) => { const r = await api('GET', `${B()}/reservations/${d.id}`); go('#/rooms/list'); setTimeout(() => { ui.resSel = r.reservation; rerender(); }, 400); };
+actions.resOpen = (d) => actions.resPick(d);
 
 // ----- room chart
 // ----- room chart (25 Nov 2026 redesign): sticky dates and rooms, filters, search, bars by source, side panel, drag to extend
@@ -1645,7 +1645,7 @@ function chartView() {
   return html`<div class="ctool">
       <div class="row"><button class="btn" type="button" data-act="chartMove" data-n="-" title="Earlier">‹</button><strong class="crange">${dayName(c.from)} – ${dayName(addDays(c.from, c.days - 1))}</strong>
         <button class="btn" type="button" data-act="chartMove" data-n="+" title="Later">›</button><button class="btn ghost" type="button" data-act="chartMove" data-n="0">Today</button>
-        <span class="seg">${[7, 14].map((n) => html`<button type="button" class="chip sm" aria-pressed="${ui.chartDays === n}" data-act="chartDays" data-n="${n}">${n} days</button>`)}</span></div>
+        <span class="segs">${[7, 14].map((n) => html`<button type="button" class="chip sm" aria-pressed="${ui.chartDays === n}" data-act="chartDays" data-n="${n}">${n} days</button>`)}</span></div>
       <div class="row grow" style="justify-content:flex-end"><input class="in" type="search" data-model="chartQ" data-live value="${ui.chartQ ?? ''}" placeholder="Guest or room   /" aria-label="Search guest or room" style="max-width:220px">
         <select class="in" data-model="chartType" aria-label="Room type" style="max-width:180px"><option value="">All room types</option>${c.sections.map((s) => html`<option ${ui.chartType === s.name ? 'selected' : ''}>${s.name}</option>`)}</select>
         <button type="button" class="chip sm" aria-pressed="${freeOnly}" data-act="pick" data-k="chartFree" data-id="${freeOnly ? '' : '1'}">Only free</button>
@@ -1768,26 +1768,52 @@ function listView() {
     || (f === 'house' && y.st[1] === 'Checked in') || (f === 'holds' && /hold/i.test(y.st[1])) || (f === 'nodjubo' && y.st[1] === 'Not in Djubo yet') || (f === 'cancelled' && y.st[1] === 'Cancelled'))
     .sort((a, b) => a.checkIn.localeCompare(b.checkIn));
   const sel = ui.resSel;
-  return html`<form class="row" style="margin-bottom:10px"><input class="in" type="search" data-model="resQ" value="${ui.resQ ?? ''}" placeholder="Name, phone, Djubo or MakeMyTrip number" style="flex:1 1 240px" aria-label="Search reservations">
+  const inbox = inboxCount(ui.bk);
+  const seg = html`<div class="segs" style="margin-bottom:12px"><button type="button" class="chip" aria-pressed="${ui.resTab !== 'inbox'}" data-act="pick" data-k="resTab" data-id="list">All reservations</button>
+    <button type="button" class="chip" aria-pressed="${ui.resTab === 'inbox'}" data-act="pick" data-k="resTab" data-id="inbox">Waiting for you ${inbox ? html`<span class="status warn">${inbox}</span>` : ''}</button></div>`;
+  if (ui.resTab === 'inbox') return html`${seg}${errorBox()}${ui.bk ? bookingsPanel(ui.bk) : html`<p class="empty">Could not load bookings from mail.</p>`}`;
+  return html`${seg}<form class="row" style="margin-bottom:10px"><input class="in" type="search" data-model="resQ" value="${ui.resQ ?? ''}" placeholder="Name, phone, Djubo or MakeMyTrip number" style="flex:1 1 240px" aria-label="Search reservations">
       <button class="btn" type="submit" data-act="resSearch" data-submit>Search</button></form>
     <div class="chips" style="margin-bottom:10px">${[['upcoming', 'Upcoming'], ['house', 'In house'], ['holds', 'Holds'], ['nodjubo', 'Not in Djubo'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="resF" data-id="${k}">${t}</button>`)}</div>
     ${errorBox()}
     ${sel ? reservationCard(sel, r.now) : ''}
-    <section class="panel"><div class="scroll"><table class="t cards"><thead><tr><th>Guest</th><th>Stay</th><th>Room</th><th>Source</th><th>Status</th><th class="num">Total</th><th class="num">To collect</th></tr></thead><tbody>
+    <section class="panel" style="padding:0;overflow:hidden"><div class="scroll" style="max-height:calc(100vh - 290px)"><table class="t cards"><thead><tr><th data-sort>Guest</th><th data-sort>Stay</th><th data-sort>Room</th><th data-sort>Source</th><th data-sort>Status</th><th class="num" data-sort>Total</th><th class="num" data-sort>To collect</th></tr></thead><tbody>
       ${rows.length ? rows.map(({ kind, x, st }) => html`<tr>
-        <td data-label="Guest">${kind === 'res' ? html`<button class="linkbtn" type="button" data-act="resPick" data-id="${x.id}"><strong>${x.guestName}</strong></button>` : html`<strong>${x.guestName ?? 'No name'}</strong>`}
+        <td data-label="Guest">${kind === 'res' ? html`<button class="linkbtn" type="button" data-act="resPick" data-id="${x.id}"><strong>${x.guestName}</strong></button>` : html`<button class="linkbtn" type="button" data-act="bkOpen" data-id="${x.id}"><strong>${x.guestName ?? 'No name'}</strong></button>`}
           <div class="small quiet">${kind === 'res' ? 'made here' : `${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef}`}${x.phone ? ` · ${x.phone}` : ''}</div></td>
-        <td data-label="Stay">${dayName(x.checkIn)} → ${dayName(x.checkOut)}</td>
+        <td data-label="Stay" data-v="${x.checkIn}">${dayName(x.checkIn)} → ${dayName(x.checkOut)}</td>
         <td data-label="Room">${kind === 'res' ? x.lines.map((l) => `${l.type}${l.roomNames.length ? ` ${l.roomNames.join(', ')}` : ` × ${l.rooms}`}`).join(' · ') : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`}</td>
         <td data-label="Source">${kind === 'res' ? x.source : x.channel ?? '—'}</td>
         <td data-label="Status"><span class="badge ${st[0]}">${st[1]}</span></td>
         <td class="num" data-label="Total">${rs(kind === 'res' ? x.totalPaise : x.amountPaise ?? 0)}</td>
-        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7" class="quiet">Nothing here.</td></tr>`}
-    </tbody></table></div></section>
-    ${ui.bk ? bookingsPanel(ui.bk) : ''}`;
+        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
+    </tbody></table></div></section>`;
 }
 actions.resSearch = async () => { ui.res = await api('GET', `${B()}/reservations${ui.resQ ? `?q=${encodeURIComponent(ui.resQ)}` : ''}`); ui.resF = 'all'; rerender(); };
-actions.resPick = async (d) => { ui.resSel = (await api('GET', `${B()}/reservations/${d.id}`)).reservation; rerender(); scrollTo(0, 0); };
+actions.resPick = async (d) => {
+  const r = (await api('GET', `${B()}/reservations/${d.id}`)).reservation;
+  ui.roomBill = null; ui.chartSel = null;
+  ui.drawer = () => html`<div class="dhead"><h2>${r.guestName}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${reservationCard(r, Date.now())}`;
+  rerender();
+};
+/** A Djubo or MakeMyTrip booking from the list, in the side panel. */
+actions.bkOpen = (d) => {
+  const k = ui.res?.bookings.find((x) => x.id === d.id);
+  if (!k) return;
+  const today = me.business.shiftDay;
+  ui.roomBill = null; ui.chartSel = null;
+  ui.drawer = () => html`<div class="dhead"><h2>${k.guestName ?? 'Booking'}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+    <section class="panel">${bookingCard(k)}${k.problem ? html`<div class="small" style="color:var(--warn)">Check: ${k.problem}</div>` : ''}
+      <div class="row">${k.status === 'approved' && !k.stayId && k.checkIn <= today ? html`<button class="btn pri" type="button" data-act="goCheckin" data-kind="booking" data-id="${k.id}">Check in</button>` : ''}
+        ${k.stayId ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${k.stayId}">Room bill</button>` : ''}
+        ${['approved', 'new'].includes(k.status) && !k.stayId && k.checkIn < today ? html`<button class="btn" type="button" data-act="noShow" data-kind="booking" data-id="${k.id}" data-held="${k.heldPaise}">No-show</button>` : ''}
+        ${k.status === 'new' ? html`<button class="btn" type="button" data-act="pick" data-k="resTab" data-id="inbox">Approve in Waiting for you</button>` : ''}</div>
+      <p class="small quiet">Change dates or rooms in Djubo; its revised mail updates this booking.</p></section>`;
+  rerender();
+};
+/** How many things wait in the inbox: bookings to approve (a MakeMyTrip + Djubo pair counts once), Djubo alerts, mails to look at. */
+const inboxCount = (r) => (r ? r.waiting.filter((b) => !(b.source === 'mmt' && b.matchId && r.waiting.some((x) => x.id === b.matchId))).length + (r.alerts?.length ?? 0)
+  + r.mails.filter((m) => m.status === 'failed' || m.source === 'gmail').length : 0);
 /** The WhatsApp message confirming a reservation, ready for staff to send. */
 const waLink = (r) => {
   const n = Math.max(1, Math.round((Date.parse(r.checkOut) - Date.parse(r.checkIn)) / 86400000));
@@ -1801,7 +1827,7 @@ function reservationCard(r, now) {
   const st = resStatus(r, now);
   const open = r.status !== 'cancelled' && !r.stayId;
   return html`<section class="panel" style="margin-bottom:12px;border-color:var(--pri-line)">
-    <div class="line"><h2 class="grow" style="margin:0">${r.guestName} <span class="badge ${st[0]}">${st[1]}</span></h2><button class="btn ghost" type="button" data-act="pick" data-k="resSel" data-id="">Close</button></div>
+    <div class="line"><h2 class="grow" style="margin:0">${r.guestName} <span class="badge ${st[0]}">${st[1]}</span></h2>${ui.drawer ? '' : html`<button class="btn ghost" type="button" data-act="pick" data-k="resSel" data-id="">Close</button>`}</div>
     <div class="small">${dayName(r.checkIn)} → ${dayName(r.checkOut)}${r.arrivalTime ? ` · arriving ${r.arrivalTime}` : ''} · ${r.lines.map((l) => `${l.type}${l.roomNames.length ? ` ${l.roomNames.join(', ')}` : ` × ${l.rooms}`} · ${l.adults} adult${l.adults === 1 ? '' : 's'}${l.children ? `, ${l.children} child` : ''} · ${rs(l.ratePaise)}/night`).join(' · ')}</div>
     <div class="small">${r.source} · made ${dateTime(r.createdAt)}${r.madeBy ? ` by ${r.madeBy}` : ''}${r.mealPlan ? ` · ${r.mealPlan}` : ''}${r.policy ? ` · ${r.policy}` : ''}${r.company ? ` · ${r.company}${r.gstin ? ` (${r.gstin})` : ''}` : ''}</div>
     ${r.requests ? html`<div class="small">Requests: ${r.requests}</div>` : ''}${r.staffNote ? html`<div class="small quiet">Staff note: ${r.staffNote}</div>` : ''}
@@ -1877,7 +1903,7 @@ function newResView() {
         <td><input class="in" style="width:70px" inputmode="numeric" data-model="nrKids_${t.type}" data-live value="${ui[`nrKids_${t.type}`] ?? ''}" placeholder="0"></td>
         <td class="num"><input class="in" style="width:110px;text-align:right" inputmode="decimal" data-model="nrRate_${t.type}" data-live value="${ui[`nrRate_${t.type}`] ?? ''}"></td></tr>`)}
     </tbody></table></div>
-    ${isMgr() ? html`<p class="small quiet">Room rates come from <button class="linkbtn" type="button" data-act="ratesEdit">Rates per room type</button>. A rate lower than that by more than the discount limit needs a manager's PIN.</p>` : ''}
+    ${isMgr() ? html`<p class="small quiet">Room rates come from <a href="#/settings/bookings">Settings › Rooms and bookings</a>. A rate lower than that by more than the discount limit needs a manager's PIN.</p>` : ''}
     ${ui.ratesEdit ? ratesForm() : ''}
     <div class="f">Meal plan<div class="chips">${['Room only (EP)', 'Breakfast (CP)', 'Breakfast + 1 meal (MAP)', 'All meals (AP)'].map((m) => chip('nrMeal', m))}</div></div>
     <label class="f">Extras (optional)<input class="in" data-model="nrExtras" value="${ui.nrExtras ?? ''}" placeholder="e.g. extra mattress, early check-in, pickup"></label>
@@ -1926,10 +1952,10 @@ actions.nrSave = async () => {
   flash = { kind: 'ok', text: `Reservation saved for ${full.guestName}: ${rs(r.totalPaise)}${r.receipt ? `, advance ${rs(r.receipt.totalPaise)} (${r.receipt.receiptNo})` : ''}. Now enter it in Djubo.`, link: [waLink(full), 'Send confirmation on WhatsApp'] };
   go('#/rooms/list');
 };
-function ratesForm() {
-  return html`<div class="panel" style="margin:8px 0;border-color:var(--pri-line)"><h3>Rates per room type (₹ per night, GST included)</h3>
+function ratesForm(page = false) {
+  return html`<div class="panel" style="${page ? '' : 'margin:8px 0;border-color:var(--pri-line)'}"><${page ? 'h2' : 'h3'}>Rates per room type (₹ per night, GST included)</${page ? 'h2' : 'h3'}>${page ? html`<p class="small quiet">Filled in for reservations made at the desk. Djubo and MakeMyTrip bookings keep their own amounts.</p>` : ''}
     <div class="grid3">${(ui.free ?? []).map((t) => html`<label class="f">${t.type}<input class="in" inputmode="decimal" data-model="rate_${t.type}" value="${ui[`rate_${t.type}`] ?? (ui.rates?.[t.type] ? rupees(ui.rates[t.type]) : '')}"></label>`)}</div>
-    <div class="row"><button class="btn pri" type="button" data-act="ratesSave">Save rates</button><button class="btn ghost" type="button" data-act="pick" data-k="ratesEdit" data-id="">Close</button></div></div>`;
+    <div class="row"><button class="btn pri" type="button" data-act="ratesSave">Save rates</button>${page ? '' : html`<button class="btn ghost" type="button" data-act="pick" data-k="ratesEdit" data-id="">Close</button>`}</div></div>`;
 }
 actions.ratesEdit = () => { ui.ratesEdit = 'on'; rerender(); };
 actions.ratesSave = async () => {
@@ -2315,9 +2341,10 @@ actions.pickArrival = (d, _el, quiet) => {
   if (!quiet) rerender();
 };
 /** Bookings from mail: waiting for a person (approve, fix, cancel), arriving soon, the mails received, and automatic. */
-function bookingsPanel(r) {
+function bookingsPanel(r, mode = 'inbox') {
   const src = { mmt: 'MakeMyTrip', djubo: 'Djubo' };
-  const types = ui.roomSecs.map((x) => x.name);
+  const inWaiting = new Set(r.waiting.map((x) => x.id));
+  const types = (ui.roomSecs ?? []).map((x) => x.name);
   const row = (b) => {
     const fixing = ui.bkFix === b.id;
     const matched = b.matchId ? [...r.waiting, ...r.arriving].find((x) => x.id === b.matchId) : null;
@@ -2339,24 +2366,32 @@ function bookingsPanel(r) {
           <label class="f">Check-in<input class="in" type="date" data-model="bkIn" value="${ui.bkIn ?? b.checkIn ?? ''}"></label><label class="f">Check-out<input class="in" type="date" data-model="bkOut" value="${ui.bkOut ?? b.checkOut ?? ''}"></label>
           <label class="f">Phone (only to change it)<input class="in" inputmode="tel" data-model="bkPhone" data-live value="${ui.bkPhone ?? ''}"></label>${phoneHint(ui.bkPhone)}
           <div class="row"><button class="btn pri" type="submit" data-act="bkApprove" data-id="${b.id}" data-fix="1" data-submit>Save and approve</button><button class="btn ghost" type="button" data-act="bkFixNo">Cancel</button></div></form>` : ''}</div>
-      ${b.status === 'new' && !fixing ? html`<div class="row"><button class="btn pri" type="button" data-act="bkApprove" data-id="${b.id}">Approve</button><button class="btn" type="button" data-act="bkFix" data-id="${b.id}">Fix</button>
-        <button class="btn ghost" type="button" data-act="bkCancel" data-id="${b.id}">Cancel booking</button></div>` : ''}</div>`;
+      ${b.status === 'new' && !fixing ? html`<div class="row"><button class="btn pri sm" type="button" data-act="bkApprove" data-id="${b.id}" data-pair="${matched && inWaiting.has(matched.id) ? matched.id : ''}">Approve${matched && inWaiting.has(matched.id) ? ' both' : ''}</button><button class="btn sm" type="button" data-act="bkFix" data-id="${b.id}">Fix</button>
+        <button class="btn ghost sm" type="button" data-act="bkCancel" data-id="${b.id}">Cancel booking</button></div>` : ''}</div>`;
   };
+  // A MakeMyTrip booking and its Djubo copy waiting together show as one item (the Djubo one: it has the phone and room).
+  const waiting = r.waiting.filter((b) => !(b.source === 'mmt' && b.matchId && r.waiting.some((x) => x.id === b.matchId)));
+  const auto0 = r.autoFrom ? new Date(r.autoFrom + 19_800_000).toISOString().slice(0, 10) : null;
+  if (mode === 'settings') {
+    return html`<section class="panel"><h2>Bookings from mail</h2>
+      <p class="small quiet">Read from the Djubo and MakeMyTrip mails forwarded by Gmail. ${auto0 ? (auto0 <= r.today ? `Automatic since ${dayName(auto0)}: clean bookings go in by themselves; odd ones wait in Reservations › Waiting for you.` : `Automatic from ${dayName(auto0)}; until then a person approves each one.`) : 'A person approves each one.'}</p>
+      <form class="row" style="align-items:end"><label class="f">Automatic from<input class="in" type="date" data-model="bkAuto" value="${ui.bkAuto ?? auto0 ?? addDays(r.today, 10)}"></label>
+        <button class="btn" type="submit" data-act="bkAutoSave" data-submit>Save</button>${auto0 ? html`<button class="btn ghost" type="button" data-act="bkAutoOff">Turn off</button>` : ''}</form>
+      <form class="row" style="align-items:end"><label class="f" style="flex:1">Djubo users at reception (money they enter in Djubo was taken at the desk)<input class="in" data-model="bkDesk" value="${ui.bkDesk ?? (r.receptionUsers ?? []).join(', ')}" placeholder="e.g. Suresh Ramoda"></label>
+        <button class="btn" type="submit" data-act="bkDeskSave" data-submit>Save</button></form></section>`;
+  }
+  const linkable = r.arriving.filter((b) => b.status === 'approved' && !b.stayId && b.checkIn && b.checkIn <= r.today && (r.unbooked ?? []).length);
   const problems = r.mails.filter((m) => m.status === 'failed' || (m.source === 'gmail'));
   const auto = r.autoFrom ? new Date(r.autoFrom + 19_800_000).toISOString().slice(0, 10) : null;
-  return html`<section class="panel" style="margin-top:16px"><h2>Bookings from mail</h2>
-    <p class="small quiet">Read from the Djubo and MakeMyTrip mails forwarded by Gmail. ${auto ? (auto <= r.today ? `Automatic since ${dayName(auto)}: clean bookings go in by themselves; odd ones wait here.` : `Automatic from ${dayName(auto)}; until then a person approves each one.`) : 'A person approves each one.'}</p>
-    ${isMgr() ? html`<form class="row" style="align-items:end;margin-bottom:8px"><label class="f">Automatic from<input class="in" type="date" data-model="bkAuto" value="${ui.bkAuto ?? auto ?? addDays(r.today, 10)}"></label>
-      <button class="btn" type="submit" data-act="bkAutoSave" data-submit>Save</button>${auto ? html`<button class="btn ghost" type="button" data-act="bkAutoOff">Turn off</button>` : ''}</form>` : ''}
-    ${isMgr() ? html`<form class="row" style="align-items:end;margin-bottom:8px"><label class="f" style="flex:1">Djubo users at reception (money they enter in Djubo was taken at the desk)<input class="in" data-model="bkDesk" value="${ui.bkDesk ?? (r.receptionUsers ?? []).join(', ')}" placeholder="e.g. Suresh Ramoda"></label>
-      <button class="btn" type="submit" data-act="bkDeskSave" data-submit>Save</button></form>` : ''}
+  return html`<section class="panel"><div class="row between"><h2>Waiting for you</h2><span class="small quiet">${auto ? (auto <= r.today ? `Automatic since ${dayName(auto)}: only odd bookings wait here.` : `Automatic from ${dayName(auto)}.`) : 'A person approves each booking.'}
+      ${isMgr() ? html`<a href="#/settings/bookings">Settings</a>` : ''}</span></div>
     ${r.alerts?.length ? html`<div class="msg bad" role="alert" style="margin:8px 0"><p style="margin:0 0 6px"><strong>Djubo could not place ${plural(r.alerts.length, 'booking')}.</strong> Create ${r.alerts.length === 1 ? 'it' : 'them'} in Djubo by hand, or rooms may be sold twice.</p>
       ${r.alerts.map((b) => html`<div class="line" style="gap:8px;border-top:1px solid var(--bad-line);padding:6px 0"><span class="grow small"><strong>${b.guestName ?? 'No name'}</strong> · ${b.channel ?? 'OTA'} ref ${b.pnr}${b.phone ? ` · ${b.phone}` : ''}<br>
         ${b.roomType ?? '?'}${b.rooms > 1 ? ` × ${b.rooms}` : ''} · ${b.checkIn ? dayName(b.checkIn) : '?'} → ${b.checkOut ? dayName(b.checkOut) : '?'}${b.amountPaise ? ` · ${rs(b.amountPaise)}` : ''}</span>
         <button class="btn" type="button" data-act="bkHandled" data-id="${b.id}">Done in Djubo</button></div>`)}
       <p class="small" style="margin:6px 0 0">It clears by itself when Djubo's confirmation for the same booking arrives.</p></div>` : ''}
-    <h3>Waiting for you (${r.waiting.length})</h3>${r.waiting.length ? r.waiting.map(row) : html`<p class="quiet small">Nothing waiting.</p>`}
-    <h3 style="margin-top:12px">Arriving (${r.arriving.length})</h3>${r.arriving.length ? r.arriving.map(row) : html`<p class="quiet small">No approved bookings ahead.</p>`}
+    <h3>To approve (${waiting.length})</h3>${waiting.length ? waiting.map(row) : html`<p class="empty">Nothing to approve. New bookings from Djubo and MakeMyTrip appear here.</p>`}
+    ${linkable.length ? html`<h3 style="margin-top:12px">Arriving today: guest already in a room? (${linkable.length})</h3>${linkable.map(row)}` : ''}
     ${problems.length ? html`<h3 style="margin-top:12px">Mails to look at</h3>${problems.map((m) => {
       // Gmail's forwarding confirmation: its link as a button (only a Google mail-settings link, opened in a new tab).
       const link = m.source === 'gmail' ? /https:\/\/(?:mail-settings\.google\.com|mail\.google\.com)\/\S+/.exec(m.note ?? '')?.[0] : null;
@@ -2372,6 +2407,8 @@ actions.bkFixNo = () => { ui.bkFix = null; rerender(); };
 actions.bkApprove = async (d) => {
   const fix = d.fix ? { guestName: ui.bkName, roomType: ui.bkType, checkIn: ui.bkIn, checkOut: ui.bkOut, phone: ui.bkPhone || undefined } : {};
   await api('POST', `${B()}/bookings/${d.id}/approve`, fix);
+  // The other copy of the same stay (MakeMyTrip + Djubo) is approved with it.
+  if (d.pair && !d.fix) await api('POST', `${B()}/bookings/${d.pair}/approve`, {}).catch(() => null);
   flash = { kind: 'ok', text: 'Booking approved.' }; route();
 };
 actions.bkCancel = async (d) => { if (!confirm('Cancel this booking?')) return; await api('POST', `${B()}/bookings/${d.id}/cancel`); route(); };
@@ -3939,12 +3976,17 @@ actions.tablesSave = async () => {
 actions.tablesClear = async () => { if (!confirm('Clear all rooms and tables? The counter then shows the tables used lately.')) return; await api('PUT', B() + '/tables', { sections: [] }); flash = { kind: 'ok', text: 'Cleared.' }; route(); };
 async function settingsScreen(tab = 'menu') {
   const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Rooms and tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
-    ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
+    ['bookings', 'Rooms and bookings', 'menu.edit'], ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];
   await load('menu', 'reasons', 'entities', 'payAccounts');
   if (tab === 'staff') { ui.staff = (await api('GET', B() + '/staff')).staff; if (!me.support) ui.supportInfo = await api('GET', B() + '/support'); }
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
+  // Rooms and bookings (25 Nov 2026): mail approval, reception's Djubo users and room rates, moved here from Rooms.
+  if (tab === 'bookings') {
+    const today = me.business.shiftDay;
+    [ui.bk, { types: ui.free, rates: ui.rates }] = await Promise.all([api('GET', B() + '/bookings'), api('GET', `${B()}/frontdesk/free?from=${today}&to=${addDays(today, 1)}`)]);
+  }
   if (tab === 'menu' && can('menu.upload')) ui.uploads = (await api('GET', B() + '/menu/uploads')).uploads;
   if (tab === 'tables') {
     const t = await api('GET', B() + '/tables');
@@ -4037,6 +4079,7 @@ async function settingsScreen(tab = 'menu') {
         ${['manager', 'owner'].includes(ui.sRole) ? html`<label class="f">Email<input class="in" type="email" data-model="sEmail" value="${ui.sEmail ?? ''}"></label><label class="f">Password (12+ characters)<input class="in" type="password" data-model="sPassword" autocomplete="new-password"></label>` : ''}
         ${ui.editStaff ? html`<label class="f">Status<select class="in" data-model="sActive"><option value="yes">Active</option><option value="no" ${ui.sActive === 'no' ? 'selected' : ''}>Inactive (cannot sign in)</option></select></label>` : ''}
         <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
+    if (tab === 'bookings') body = html`<div class="stack" style="max-width:900px">${errorBox()}${bookingsPanel(ui.bk, 'settings')}${ratesForm(true)}</div>`;
     if (tab === 'device') body = html`${window.bookrDesktop ? html`<section class="panel" style="margin-bottom:16px"><h2>Printers on this PC</h2>
       <p class="quiet small">This PC runs the Bookr POS Windows app (version ${window.bookrDesktop.version || '1'}): bills and each station's KOTs print straight to their own printers.</p>
       <button class="btn pri" type="button" data-act="deskPrinters">Choose printers</button></section>` : ''}<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}

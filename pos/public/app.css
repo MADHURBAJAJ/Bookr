@@ -920,3 +920,5 @@ body.desk main:has(> .drawer) { max-width: none; }
 .ico { width: 22px; height: 22px; flex: none; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; }
 .ico.t-bad { color: var(--bad); background: var(--bad-tint); } .ico.t-warn { color: var(--warn); background: var(--warn-tint); } .ico.t-mute { color: var(--quiet); background: var(--soft); }
 .dfoot { padding: 10px 12px; border-top: 1px solid var(--line); }
+.segs { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.segs .chip { border-color: transparent; }
