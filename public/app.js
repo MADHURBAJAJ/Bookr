@@ -1432,7 +1432,7 @@ const PENDING_GROUPS = [
   ['cash_short', 'Short in the cash count', 'wait'],
   ['cash_wait', 'Cash bills not in the register', 'wait'],
   ['found', 'Payment found, to match', 'info'],
-  ['paperwork', 'Money in, the paperwork differs', ''],
+  ['paperwork', 'Payment received, not in software', ''],
   ['other', 'Other', ''],
 ];
 const MODE_LABEL = { cash: 'Cash', upi: 'UPI', card: 'Card' };
@@ -2452,21 +2452,59 @@ function rowIssues(r) {
   const od = r.otherDayBill;
   const odMode = (m) => (m === 'upi' ? 'UPI' : m ?? '');
   const rowMode = r.payments.length === 1 ? r.payments[0].mode : null;
-  const cp = r.copyOf;
+  const td = r.twoDays;
   // Its day's software report is not uploaded (23 Nov 2026): grey, with no other numbers offered.
-  const noReport = bm && !bm.exact && regMissing.includes(billDateOf(r.billNo));
+  const noReport = !td && bm && !bm.exact && regMissing.includes(billDateOf(r.billNo));
+  for (const x of r.paidOtherDay ?? []) info.push(`₹ ${rs(x.amountPaise)} paid ${dayLabel(x.day).replace(/\s\d{4}$/, '')}`);
   if (noReport) info.push(`${dayLabel(billDateOf(r.billNo)).replace(/\s\d{4}$/, '')} report not uploaded`);
-  else if (cp && !od && bm && !bm.exact) {
-    // Already on another day (approved 21 Nov 2026): in that day's software report and register, most likely written twice.
-    const d = dayLabel(cp.day).replace(/\s\d{4}$/, '');
-    const where = html`Bill <span class="mono">${r.billNo}</span> is a ${d} bill: ₹ ${rs(cp.amountPaise)} ${odMode(cp.mode)} in the ${d} software report and on line ${cp.line.lineNo} of the ${d} register`;
-    if (r.status === 'checked') info.push(html`Kept as a second payment. ${where}; this one needs its own bill in the software.`);
-    else {
+  else if (td) {
+    // One bill on two days (approved 23 Nov 2026), as a short card: bill + chip, one line of figures, short buttons.
+    const d = dayLabel(td.home.day).replace(/\s\d{4}$/, '');
+    const h = td.home;
+    const at = `${d} p${h.pageNo} l${h.lineNo}`;
+    const open = html`<a class="btn plain dchip" href="#/b/${currentBizId()}/review/${h.uploadId}/${h.rowId}">Open ${d} ›</a>`;
+    const learn = (act) => html`<span class="tiny" style="float:right;color:var(--muted)">auto after 10 right · ${twoRight[act] ?? 0}/10</span>`;
+    const card = (chip, colour, figures, buttons, act) => html`<span class="mono">${r.billNo}</span> <span class="chip" style="${colour}">${chip}</span>${act ? learn(act) : ''}
+      <div class="tiny" style="color:var(--ink);margin-top:4px">${figures}</div>${buttons ? html`<div class="form-row" style="gap:6px;margin-top:6px">${buttons}</div>` : ''}`;
+    const BLUE = 'background:#DBEAFE;color:#1E3A8A', AMBER = 'background:#FEF3C7;color:#92400E', RED = 'background:#FEE2E2;color:#991B1B';
+    const ok = (b) => (b ? '✓' : '✗');
+    if (td.done) {
+      info.push(card(td.done === 'settle' ? 'Paid now' : td.done === 'close' ? 'Written twice · closed' : td.later ? 'Balance paid' : 'Advance', BLUE,
+        td.done === 'settle' ? `${d} bill · ₹ ${rs(td.herePaidPaise)} cash here · counted on ${d}` : td.done === 'close' ? `counted on ${at}` : `₹ ${rs(td.herePaidPaise)} counted on ${at}`,
+        html`<button type="button" class="btn plain dchip" data-twoundo>Undo</button>`));
+    } else if (td.kind === 'part_paid' || td.kind === 'advance') {
+      flags.bill_no = 'amber';
+      const disc = h.swAmountPaise - td.herePaidPaise - h.paidPaise;
+      const fits = Math.abs(disc) <= 1000;
+      // Paid before the bill's own day it is an advance; after it, the balance paid later.
+      const later = td.later;
+      amber.push(card(td.kind === 'advance' ? 'Advance' : 'Part paid', AMBER,
+        td.kind === 'advance' ? `₹ ${rs(td.herePaidPaise)} here · ${at} nothing paid ✓ · software ₹ ${rs(h.swAmountPaise)} ${ok(fits)}`
+          : `₹ ${rs(td.herePaidPaise)} + ₹ ${rs(h.paidPaise)} ${d}${disc > 0 ? ` + disc ₹ ${rs(disc)}` : ''} = ₹ ${rs(h.swAmountPaise)} ${ok(fits)}`,
+        html`<button type="button" class="btn plain dchip" data-twoadv>${later ? 'Balance paid' : 'Advance'}</button><button type="button" class="btn plain dchip" data-copydel>Written twice</button>${open}`, 'advance'));
+    } else if (td.kind === 'paid_later_cash') {
+      flags.bill_no = 'amber';
+      amber.push(card(`Paid now · ${d} bill`, AMBER,
+        `${d}: written ${odMode(h.mode)} ₹ ${rs(h.paidPaise)} · software cash ₹ ${rs(h.swAmountPaise)} · cash here ₹ ${rs(td.herePaidPaise)} ✓`,
+        html`<button type="button" class="btn plain dchip" data-twosettle>Settles it</button><button type="button" class="btn plain dchip" data-copydel>Remove</button>${open}`, 'settle'));
+    } else if (td.kind === 'wrong_number') {
       flags.bill_no = 'red';
-      red.push(html`<span class="chip" style="background:#DBEAFE;color:#1E3A8A">Already on ${d}</span><div class="tiny" style="color:var(--ink);margin-top:4px">${where}.</div>
-        <div class="form-row" style="gap:6px;margin-top:6px"><button type="button" class="btn plain dchip" data-copydel>Written twice: remove this line</button>
-        <button type="button" class="btn plain dchip" data-copykeep>A second payment: keep it</button>
-        <a class="btn plain dchip" href="#/b/${currentBizId()}/review/${cp.line.uploadId}/${cp.line.rowId}">Open ${d} line ${cp.line.lineNo} ›</a></div>`);
+      const c0 = td.leftover[0];
+      red.push(card('Wrong number?', RED,
+        `${at} ✓ · software ${timeOf(h.paidAt)} ✓ · ₹ ${rs(td.herePaidPaise)} credit ${timeOf(c0?.postedAt)} here, no bill ✗`,
+        html`${td.candidates.map((x) => html`<button type="button" class="pickchip mono" data-pick="${x.billNo}">${x.billNo} · ${timeOf(x.paidAt)}</button>`)}
+          <button type="button" class="btn plain dchip" data-copydel>${td.candidates.length ? 'None: remove' : 'Remove'}</button>${open}`));
+    } else {
+      flags.bill_no = 'red';
+      // On a saved day the line cannot be removed: its waiting item is closed instead, unless it is counted on both days.
+      const saved = td.here?.confirmed;
+      const both = saved && (td.here.decision === 'use_software' || td.here.decision === 'use_register');
+      const credit = h.swMode === 'upi' ? ` · credit ${h.creditAt ? `${timeOf(h.creditAt)} ✓` : '✗'}` : '';
+      red.push(card('Written twice', RED,
+        `${at} ✓ · software ${timeOf(h.paidAt) || d} ✓${credit}${td.herePaidPaise ? ` · no ₹ ${rs(td.herePaidPaise)} left here ✓` : ' · nothing paid here'}${both ? ` · counted on both days ✗` : ''}`,
+        both ? html`<span class="tiny">Reopen this shift to take the sale off</span>${open}`
+          : saved ? html`<button type="button" class="btn plain dchip" data-twoclose>Close</button>${open}`
+          : html`<button type="button" class="btn plain dchip" data-copydel>Remove</button><button type="button" class="btn plain dchip" data-wrongno>Wrong number…</button>${open}`, saved && !both ? 'close' : null));
     }
   } else if (od && bm && !bm.exact) {
     // Settled on another day (11 Nov 2026): the bill is in that day's software report, counted there.
@@ -2620,6 +2658,7 @@ const netOf = (r) => r.amountPaise - (r.discountPaise ?? 0);
 let regRows = [];
 // Days whose software report is not uploaded (approved 23 Nov 2026), from the server: their bills are not called missing.
 let regMissing = [];
+let twoRight = {};
 /** The calendar day a new POS number was printed on: 26111313 → 2026-11-13. */
 const billDateOf = (b) => { const m = /^(\d{2})(\d{2})(\d{2})\d{1,3}$/.exec(b ?? ''); return m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31 ? `20${m[1]}-${m[2]}-${m[3]}` : null; };
 /** "12 and 13 Nov", "30 Oct and 1 Nov", "12, 13 and 15 Nov". */
@@ -3043,6 +3082,7 @@ function registerPanel(biz, u) {
   regRows = shiftRowsOf(u);
   regOffers = u.twinOffers ?? [];
   regMissing = u.reportMissing ?? [];
+  twoRight = u.twoDayRight ?? {};
   const locked = u.shiftStatus === 'confirmed';
   const written = u.pageWrittenTotalPaise;
   return html`
@@ -3385,7 +3425,18 @@ function wireInlineRows(biz, u, strip) {
       } catch (err) { showError(document.getElementById('rmsg'), err); }
     });
     tr.querySelector('[data-copydel]')?.addEventListener('click', () => tr.querySelector('[data-delrow]')?.click());
-    tr.querySelector('[data-copykeep]')?.addEventListener('click', () => { const cb = tr.querySelector('[data-f="checked"]'); if (cb && !cb.checked) cb.click(); });
+    // One bill on two days (23 Nov 2026).
+    const twoDays = (path, body, msg) => async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      try { await chain; await api('POST', `/businesses/${biz.id}/register-rows/${tr.dataset.row}/two-days${path}`, body); await reviewView(biz, u.id, tr.dataset.row); doneToast(msg); }
+      catch (err) { b.disabled = false; showError(document.getElementById('rmsg'), err); }
+    };
+    tr.querySelector('[data-twoadv]')?.addEventListener('click', twoDays('', { action: 'advance' }, 'Added to the bill\'s own day. Undo is on this line.'));
+    tr.querySelector('[data-twosettle]')?.addEventListener('click', twoDays('', { action: 'settle' }, 'Cash counted for that day\'s bill. Undo is on this line.'));
+    tr.querySelector('[data-twoclose]')?.addEventListener('click', twoDays('', { action: 'close' }, 'Closed: counted on its own day. Undo is on this line.'));
+    tr.querySelector('[data-twoundo]')?.addEventListener('click', twoDays('/undo', {}, 'Put back.'));
+    tr.querySelector('[data-wrongno]')?.addEventListener('click', () => { const bn = val(tr, 'billNo'); bn?.focus(); bn?.select(); });
     tr.querySelector('[data-delrow]')?.addEventListener('click', async () => {
       const r = u.rows.find((x) => x.id === tr.dataset.row);
       const why = await askDeleteReason(r);
@@ -7015,7 +7066,9 @@ async function reconcileView(biz, dayArg) {
     const nc = noCredit.find((k) => (k.billNos ?? []).includes(b.billNo));
     const slips = (r.numberSlips ?? []).filter((x) => x.billNo === b.billNo);
     const card = onCardLine(b);
-    const hint = typo ? loHint(`= register ${typo.c.billNo}?`) : own ? loHint(`→ ${own.f.billNo}?`) : slips.length ? loHint(`written as ${slips[0].writtenAs}?`, 'warn')
+    // Its bill is on another day's software and register (23 Nov 2026): the number is right.
+    const on = c?.onDay;
+    const hint = on ? loHint(`On ${dayLabel(on.day).replace(/\s\d{4}$/, '')}${on.paidAt ? ` · paid ${timeOf(on.paidAt)}` : ''}`) : typo ? loHint(`= register ${typo.c.billNo}?`) : own ? loHint(`→ ${own.f.billNo}?`) : slips.length ? loHint(`written as ${slips[0].writtenAs}?`, 'warn')
       : card ? loHint('card machine?', 'warn') : '';
     const tags = [b.grouped && 'paid together', b.fromDay ? `${dayLabel(b.fromDay)} bill` : !b.paidAt && 'register only'].filter(Boolean).map((t) => html`<span class="lo-tag">${t}</span>`);
     const body = html`<div class="tiny"><strong class="mono">${b.billNo ?? '—'}</strong> · ₹ ${money(b.amountPaise)} · ${b.paidAt ? when(b.paidAt) : 'register only, no bill time'}</div>

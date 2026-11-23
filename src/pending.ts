@@ -14,9 +14,9 @@
  * - a cash bill not in its own register, written as cash in a later day's register.
  */
 import type { DB } from './db';
-import { all } from './db';
+import { all, SUMMARY_IN_USE } from './db';
 import { addDays, istDay, shiftDayOf, shiftWindow } from './time';
-import { waitingPicture } from './waiting';
+import { CASH_WATCH_DAYS, waitingPicture } from './waiting';
 import { cashCheck } from './cash';
 
 export type PendingGroup = 'not_received' | 'cash_short' | 'cash_wait' | 'found' | 'paperwork' | 'other';
@@ -36,7 +36,7 @@ export async function pendingBills(db: DB, businessId: string, from: string, to:
   const [picture, countDays] = await Promise.all([
     waitingPicture(db, businessId, today),
     all<{ day: string }>(db, `SELECT DISTINCT s.shift_day AS day FROM cash_summaries s JOIN shifts h ON h.business_id = s.business_id AND h.shift_day = s.shift_day
-      WHERE s.business_id = ? AND s.status = 'approved' AND h.status = 'confirmed' AND s.shift_day BETWEEN ? AND ? ORDER BY 1`, businessId, from, to),
+      WHERE s.business_id = ? AND ${SUMMARY_IN_USE.replace('ocr_original', 's.ocr_original')} AND h.status = 'confirmed' AND s.shift_day BETWEEN ? AND ? ORDER BY 1`, businessId, from, to),
   ]);
   const inRange = (d: string) => d >= from && d <= to;
   const toReceive: PendingLine[] = picture.look.filter((x) => inRange(x.day) && x.billNo).map((x) => ({
@@ -52,10 +52,12 @@ export async function pendingBills(db: DB, businessId: string, from: string, to:
       if (listed.has(`${k.day}|${b.billNo}`)) continue;
       const notCash = k.registerNotCash.find((x) => x.billNo === b.billNo);
       const nir = k.notInRegister.find((x) => x.billNo === b.billNo);
-      const reason = notCash ? `Cash · the register wrote ${(notCash.rgMode ?? 'another mode').toUpperCase()}${notCash.rgPaise && notCash.rgPaise !== notCash.amountPaise ? ` ${rs(notCash.rgPaise)}` : ''}, short in the cash count`
+      // Written UPI or card, counted as cash, no money and the drawer short (approved 23 Nov 2026): a payment not received.
+      const reason = notCash ? `Register ${(notCash.rgMode ?? 'another mode').toUpperCase()}${notCash.rgPaise ? ` ${rs(notCash.rgPaise)}` : ''}, no ${notCash.rgMode === 'card' ? 'machine payment' : 'credit'} · counted as cash · explains ${rs(b.partPaise)} of ${rs(-k.differencePaise)} short`
         : nir?.late ? `Cash · written in the ${short(nir.late.day)} register${nir.late.mode ? ` as ${nir.late.mode}` : ''}, short in the cash count`
           : `Cash · not in any register, short in the cash count`;
-      toReceive.push({ day: k.day, billNo: b.billNo, amountPaise: b.partPaise, mode: 'cash', group: 'cash_short', reason, daysWaiting: daysBetween(k.day, today), saved: true });
+      const waited = daysBetween(k.day, today);
+      toReceive.push({ day: k.day, billNo: b.billNo, amountPaise: b.partPaise, mode: 'cash', group: notCash && waited > CASH_WATCH_DAYS ? 'not_received' : 'cash_short', reason, daysWaiting: waited, saved: true });
       listed.add(`${k.day}|${b.billNo}`);
     }
   }

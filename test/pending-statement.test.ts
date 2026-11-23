@@ -36,9 +36,10 @@ describe('pending bills', () => {
     const pending = async () => (await acc.get(`/businesses/${h.bid}/reports/pending?from=2026-10-25&to=2026-11-05`)).json;
 
     const p = await pending();
-    const short = p.toReceive.filter((x: any) => x.group === 'cash_short');
+    const short = p.toReceive.filter((x: any) => x.group === 'cash_short' || x.group === 'not_received');
     expect(short.map((x: any) => [x.billNo, x.amountPaise]).sort()).toEqual([['2610501', 163400], ['2610504', 8300]]);
-    expect(short.find((x: any) => x.billNo === '2610504').reason).toMatch(/register wrote UPI/);
+    // Written UPI, counted as cash, no credit, the drawer short, past its 2 days: not received (23 Nov 2026).
+    expect(short.find((x: any) => x.billNo === '2610504')).toMatchObject({ group: 'not_received', reason: 'Register UPI ₹ 83.00, no credit · counted as cash · explains ₹ 83.00 of ₹ 1,717.00 short' });
     expect(short.find((x: any) => x.billNo === '2610501').reason).toMatch(/1 Nov register as card/);
     expect(p.toReceive.some((x: any) => x.billNo === '2610505')).toBe(false);
     expect(p.received).toEqual([]);
@@ -60,7 +61,7 @@ describe('pending bills', () => {
     expect(p2.received).toMatchObject([{ day: '2026-10-31', billNo: '2610501', amountPaise: 163400, from: 'cash', mode: 'card', paidOn: '2026-11-01', how: 'changed', lateDays: 1 }]);
     // Now a card sale: it waits for its machine payment to be matched, no longer for cash.
     expect(p2.toReceive.filter((x: any) => x.billNo === '2610501').map((x: any) => [x.group, x.mode])).toEqual([['not_received', 'card']]);
-    expect(p2.toReceive.find((x: any) => x.billNo === '2610504')).toMatchObject({ group: 'cash_short' });
+    expect(p2.toReceive.find((x: any) => x.billNo === '2610504')).toMatchObject({ group: 'not_received' });
     // Bank people only for the statement; sales people for pending.
     expect((await h.clients.entry_staff.get(`/businesses/${h.bid}/reports/bank-statement`)).status).toBe(403);
   });

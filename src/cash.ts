@@ -153,7 +153,7 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
   if (difference !== null && difference < 0 && !settled) {
     let left = -difference;
     const bills = [];
-    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note && (x.tx_mode == null || x.tx_mode === 'cash') && !lateOut.some((l) => l.linkedId === x.id)), ...notCash.filter((x) => !x.close_note)];
+    const waiting = [...notInRegister.filter((x) => !x.typed && x.decision === 'use_software' && !x.close_note && (x.tx_mode == null || x.tx_mode === 'cash') && !lateOut.some((l) => l.linkedId === x.id)), ...notCash.filter((x) => !x.close_note && !lateOut.some((l) => l.linkedId === x.id))];
     for (const c of waiting.sort((a, b) => (a.paid_at ?? 0) - (b.paid_at ?? 0))) {
       if (left <= 0) break;
       const part = Math.min(left, c.sw_amount_paise);

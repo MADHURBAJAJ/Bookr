@@ -10,6 +10,7 @@ import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
 import { cardAdvancePlans, joinCardAdvanceStatements } from './cardAdvance';
 import { all, newId, now, one, stmt, type DB, SUMMARY_IN_USE } from './db';
+import { twoDaysFor, type TwoDays } from './twoDays';
 import { addDays, istDay, missingInWindow, shiftWindow, type Gap } from './time';
 
 export type Difference = 'match' | 'amount' | 'mode' | 'amount_and_mode' | 'missing_in_register' | 'missing_in_software' | 'complimentary';
@@ -324,6 +325,14 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
   if (!open.length && !unknownMode.length) return;
   const others = await otherDays(db, businessId, day, comps);
   const numbers = open.some((c) => c.difference === 'missing_in_software' && isNewPosBill(c.bill_no)) ? await numberContext(db, businessId, day) : null;
+  // A register line whose bill is in another shift's software report and on that shift's register is the same bill on two
+  // days (23 Nov 2026): a person says what it is (part paid, advance, written twice, paid later), so it is never counted by itself.
+  const twoDay = new Set((open.some((c) => c.difference === 'missing_in_software') ? await all<{ bill_no: string }>(db, `
+    SELECT DISTINCT sb.bill_no FROM software_bills sb JOIN register_rows r ON r.business_id = sb.business_id AND r.shift_day = sb.shift_day AND r.bill_no = sb.bill_no
+      AND coalesce(json_extract(r.ocr_original, '$.source'), '') <> 'software_report'
+    WHERE sb.business_id = ? AND sb.shift_day <> ? AND sb.shift_day BETWEEN ? AND ?
+      AND sb.bill_no IN (SELECT bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND difference = 'missing_in_software')`,
+    businessId, day, addDays(day, -7), addDays(day, 7), businessId, day) : []).map((x) => x.bill_no));
   const t = now();
   const statements: D1PreparedStatement[] = [];
   const decide = (c: Comparison, decision: Decision, note: string, linkedTo: string | null, billType: string | null) => statements.push(
@@ -341,7 +350,7 @@ async function decideOneSided(db: DB, businessId: string, day: string, rgById: M
       if (c.sw_mode !== 'cash' && c.sw_mode !== 'upi' && c.sw_mode !== 'card') continue;
       decide(c, 'use_software', link ? `Counted here · matched with ${o!.day}` : AUTO_COUNTED_NOTE, link, 'fnb');
     } else {
-      if (!isNewPosBill(c.bill_no)) continue;
+      if (!isNewPosBill(c.bill_no) || twoDay.has(c.bill_no)) continue;
       const r = c.register_row_id ? rgById.get(c.register_row_id) : undefined;
       if (!r || !paysByRow.get(r.paid_with_row_id ?? r.id)?.length) continue;
       // A number that looks like a typo is not counted by itself: it could be a bill counted from the software too.
@@ -693,6 +702,9 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const typed = new Set(typeHeads.map((t) => t.bill_type));
   const counted = comparisons.filter((c) => c.difference === 'match' || isCounted(c.decision));
   const rgById = new Map(rg.map((r) => [r.id, r]));
+  const onlyRg = comparisons.filter((c) => c.difference === 'missing_in_software' && c.register_row_id);
+  const twoDays = onlyRg.length ? await twoDaysFor(db, businessId, day, onlyRg.map((c) => ({ id: c.register_row_id!, billNo: c.bill_no,
+    pays: (written.get(c.register_row_id!) ?? []).map((p) => ({ mode: p.mode, amountPaise: p.amount_paise })) }))) : new Map<string, TwoDays>();
   const swName = new Map((sw as SwBill[]).map((x) => [x.id, x.customer_name ?? null]));
   const typeOf = (c: Comparison) => (c.register_row_id ? rgById.get(c.register_row_id)?.bill_type : c.bill_type) ?? null;
   const missingType = counted.filter((c) => !typeOf(c));
@@ -880,6 +892,8 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     registerRows: rg.length,
     registerPages: new Set(rg.map((r) => r.upload_id)).size,
     comparisons: comparisons.map((c) => ({
+      // Its bill is on another day's software report and register (23 Nov 2026): the number is right, it is that day's bill.
+      onDay: (() => { const t = c.register_row_id ? twoDays.get(c.register_row_id) : undefined; return t ? { day: t.home.day, paidAt: t.home.paidAt, kind: t.kind, done: t.done } : null; })(),
       id: c.id, posNo: c.pos_no, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, note: c.note, billType: c.bill_type,
       software: c.software_bill_id ? { amountPaise: c.sw_amount_paise, mode: c.sw_mode, name: swName.get(c.software_bill_id) ?? null } : null,
       register: c.register_row_id ? { reviewed: rgById.get(c.register_row_id)?.status === 'checked', amountPaise: c.rg_amount_paise, mode: c.rg_mode, billType: rgById.get(c.register_row_id)?.bill_type ?? null, discountPaise: rgById.get(c.register_row_id)?.discount_paise ?? 0,
@@ -891,7 +905,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
       auto: !!c.decision && !c.decided_by && c.decided_at != null,
       otherDay: others.get(c.id) ?? null,
       confirmedBy: lateLines.get(c.id) ?? null,
-      numberFlags: flagsOf.get(c.id) ?? [],
+      numberFlags: c.register_row_id && twoDays.has(c.register_row_id) ? [] : flagsOf.get(c.id) ?? [],
       bank: bank?.evidence.get(c.id) ?? null,
       bankNone: bank?.noUpi.get(c.id) ?? null,
       bankNear: near.get(c.id) ?? null,

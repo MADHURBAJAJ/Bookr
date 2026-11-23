@@ -20,6 +20,7 @@ import { waitingPicture } from '../waiting';
 import { pendingBills, pendingRange } from '../pending';
 import { allBills, billsRange } from '../billsReport';
 import { paidLaterLines } from '../paidLater';
+import { twoDaysFor } from '../twoDays';
 import { cashCheck, cashPairOf, EXCESS_HEAD, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
 import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
@@ -1184,4 +1185,141 @@ salesRoutes.post('/businesses/:businessId/shifts/:day/auto-tick', requireRole('r
     if (isShiftConfirmed(e)) return c.json({ fixed: 0, removed: 0, ticked: 0 });
     throw e;
   }
+});
+
+/**
+ * One bill on two days (approved 23 Nov 2026), from the copy's line:
+ * - "advance": part paid, or paid ahead. The copy's payment joins the bill's own line (the line on the day the software
+ *   has it), whose discount becomes what is really left; the copy is left out there ("Part of …"). Cash paid on the
+ *   other day moves between the two drawers, as a bill paid late does.
+ * - "settle": written as UPI on the bill's day, paid in cash on a later day. The copy is left out ("Paid now …") and its
+ *   cash comes into this day's drawer for that bill; the sale stays on its day.
+ * Both shifts must be open. Undo below puts everything back.
+ */
+salesRoutes.post('/businesses/:businessId/register-rows/:rowId/two-days', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = c.req.param('rowId');
+  if (!isUuid(rowId)) fail(404, 'Not found.');
+  const b = await body(c);
+  const action = b.action === 'advance' || b.action === 'settle' || b.action === 'close' ? b.action : fail(400, 'Choose advance, settle or close.');
+  const here = await one<{ id: string; shift_day: string; bill_no: string }>(db, 'SELECT id, shift_day, bill_no FROM register_rows WHERE id = ? AND business_id = ?', rowId, bid);
+  if (!here) fail(404, 'Not found.');
+  const hp = await all<{ mode: string; amount_paise: number; column_label: string | null }>(db, 'SELECT mode, amount_paise, column_label FROM register_payments WHERE register_row_id = ?', rowId);
+  const td = (await twoDaysFor(db, bid, here!.shift_day, [{ id: rowId, billNo: here!.bill_no, pays: hp.map((p) => ({ mode: p.mode, amountPaise: p.amount_paise })) }])).get(rowId);
+  if (!td) fail(409, `Bill ${here!.bill_no} is not on another day's register any more.`);
+  const want = action === 'advance' ? ['part_paid', 'advance'] : action === 'settle' ? ['paid_later_cash'] : ['written_twice', 'wrong_number'];
+  if (!want.includes(td!.kind)) fail(409, `Bill ${here!.bill_no} does not look like that any more: open it again.`);
+  if (action === 'close') {
+    // Written twice on a saved day (approved 23 Nov 2026): the line cannot be removed there, so its waiting item is closed,
+    // with Undo. A line counted as a sale on both days is not closed: its day must be reopened to take the sale off.
+    const h = td!.here;
+    if (!h?.confirmed) fail(409, 'This shift is not saved: remove the line instead.');
+    if (h.decision === 'use_software' || h.decision === 'use_register') fail(409, `Bill ${here!.bill_no} is counted as a sale on ${here!.shift_day} and on ${td!.home.day}. An Owner must reopen ${here!.shift_day} to take it off.`);
+    if (h.closed) fail(409, 'Already closed.');
+    const user = c.get('user').id;
+    const t = now();
+    const note = `Written twice: counted on ${td!.home.day}`;
+    const mine = await one<{ id: string }>(db, 'SELECT id FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
+    await db.batch([
+      stmt(db, 'UPDATE bill_comparisons SET closed_at = ?, closed_by = ?, close_note = ? WHERE id = ? AND business_id = ? AND closed_at IS NULL', t, user, note, mine!.id, bid),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.two_days', 'register_rows', ?, '{}', ?, ?)`, bid, user, rowId,
+        JSON.stringify({ action, billNo: here!.bill_no, day: here!.shift_day, homeDay: td!.home.day, hereComparisonId: mine!.id, homeRowId: td!.home.rowId }), t),
+    ]);
+    return c.json({ ok: true });
+  }
+  // Settling changes only this day: the bill's own day stays as saved. An advance changes the bill's own line too.
+  const shifts = await all<{ shift_day: string }>(db, "SELECT shift_day FROM shifts WHERE business_id = ? AND shift_day IN (?, ?) AND status = 'confirmed'",
+    bid, here!.shift_day, action === 'advance' ? td!.home.day : here!.shift_day);
+  if (shifts.length) fail(409, `The ${shifts.map((s) => s.shift_day).join(' and ')} shift is confirmed. An Owner must reopen it first.`);
+  const mine = await one<{ id: string }>(db, 'SELECT id FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
+  const homeCmp = await one<{ id: string; decision: string | null; sw_mode: string | null }>(db, `SELECT id, decision, sw_mode FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND bill_no = ?
+    AND software_bill_id IS NOT NULL`, bid, td!.home.day, here!.bill_no);
+  if (!mine || !homeCmp) fail(409, 'Compare both days first.');
+  if (action === 'settle' && homeCmp!.decision && homeCmp!.decision !== 'use_software') fail(409, `Bill ${here!.bill_no} is counted as ${homeCmp!.decision === 'use_register' ? 'UPI' : 'not a sale'} on ${td!.home.day}: change it to cash there first.`);
+  const user = c.get('user').id;
+  const t = now();
+  const paidHere = hp.reduce((s, p) => s + p.amount_paise, 0);
+  const cashHere = hp.filter((p) => p.mode === 'cash').reduce((s, p) => s + p.amount_paise, 0);
+  const statements: D1PreparedStatement[] = [];
+  const after: Record<string, unknown> = { action, billNo: here!.bill_no, day: here!.shift_day, homeDay: td!.home.day, hereComparisonId: mine!.id, homeRowId: td!.home.rowId };
+  let before: Record<string, unknown> = {};
+  if (action === 'advance') {
+    const h = await one<{ amount_paise: number; discount_paise: number; tip_paise: number }>(db, 'SELECT amount_paise, discount_paise, tip_paise FROM register_rows WHERE id = ?', td!.home.rowId);
+    const homePaid = td!.home.paidPaise;
+    const left = h!.amount_paise - homePaid - paidHere;
+    const paymentIds = hp.map(() => newId());
+    before = { discountPaise: h!.discount_paise, tipPaise: h!.tip_paise };
+    Object.assign(after, { paymentIds, discountPaise: Math.max(left, 0), tipPaise: Math.max(-left, 0) });
+    statements.push(
+      ...hp.map((p, i) => stmt(db, 'INSERT INTO register_payments (id, business_id, register_row_id, mode, column_label, amount_paise, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        paymentIds[i], bid, td!.home.rowId, p.mode, p.column_label, p.amount_paise, t)),
+      stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, edited_by = ?, edited_at = ? WHERE id = ?', Math.max(left, 0), Math.max(-left, 0), user, t, td!.home.rowId),
+    );
+  }
+  const note = action === 'advance' ? `Part of ${here!.bill_no}: counted on ${td!.home.day}` : `Paid now: ${td!.home.day} bill ${here!.bill_no}`;
+  statements.push(
+    stmt(db, 'UPDATE bill_comparisons SET decision = \'leave_out\', decided_by = ?, decided_at = ?, note = ?, linked_to_id = ? WHERE id = ?', user, t, note, homeCmp!.id, mine!.id),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'comparison.decide', 'bill_comparisons', ?, NULL, ?, ?)`, bid, user, mine!.id, JSON.stringify({ decision: 'leave_out', note, linkedToId: homeCmp!.id }), t),
+  );
+  if (cashHere) {
+    // The cash came into this day's drawer, for a sale counted on the bill's day (the same record as a bill paid late).
+    statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash.paid_late', 'bill_comparisons', ?, NULL, ?, ?)`, bid, user, mine!.id,
+      JSON.stringify({ day: here!.shift_day, fromDay: td!.home.day, comparisonId: mine!.id, linkedId: homeCmp!.id, billNo: here!.bill_no, amountPaise: cashHere, swAmountPaise: td!.home.swAmountPaise, twoDays: true }), t));
+  }
+  statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'register.two_days', 'register_rows', ?, ?, ?, ?)`, bid, user, rowId, JSON.stringify(before), JSON.stringify(after), t));
+  // The bill's own line changes first and its day is compared again (which clears whatever was linked to it), then the copy is decided.
+  const homeFirst = action === 'advance' ? statements.splice(0, hp.length + 1) : [];
+  try {
+    if (homeFirst.length) { await db.batch(homeFirst); await refreshComparisons(db, bid, td!.home.day, user); }
+    await db.batch(statements);
+  } catch (e) { if (isShiftConfirmed(e)) fail(409, CONFIRMED); throw e; }
+  await refreshComparisons(db, bid, here!.shift_day, user);
+  return c.json({ ok: true });
+});
+
+salesRoutes.post('/businesses/:businessId/register-rows/:rowId/two-days/undo', requireRole('sales.decide'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const rowId = c.req.param('rowId');
+  if (!isUuid(rowId)) fail(404, 'Not found.');
+  const a = await one<{ id: number; before: string; after: string }>(db, `SELECT a.id, a.before, a.after FROM audit_log a WHERE a.business_id = ? AND a.action = 'register.two_days' AND a.row_id = ?
+    AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'register.two_days_undone' AND x.row_id = a.row_id AND x.id > a.id)
+    ORDER BY a.id DESC LIMIT 1`, bid, rowId);
+  if (!a) fail(404, 'Nothing to undo.');
+  const before = JSON.parse(a!.before) as { discountPaise?: number; tipPaise?: number };
+  const after = JSON.parse(a!.after) as { action: string; day: string; homeDay: string; hereComparisonId: string; homeRowId: string; paymentIds?: string[] };
+  if (after.action === 'close') {
+    await db.batch([
+      stmt(db, 'UPDATE bill_comparisons SET closed_at = NULL, closed_by = NULL, close_note = NULL WHERE id = ? AND business_id = ?', after.hereComparisonId, bid),
+      stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+        VALUES (?, ?, 'register.two_days_undone', 'register_rows', ?, NULL, ?, ?)`, bid, c.get('user').id, rowId, a!.after, now()),
+    ]);
+    return c.json({ ok: true });
+  }
+  const shifts = await all<{ shift_day: string }>(db, "SELECT shift_day FROM shifts WHERE business_id = ? AND shift_day IN (?, ?) AND status = 'confirmed'",
+    bid, after.day, after.action === 'advance' ? after.homeDay : after.day);
+  if (shifts.length) fail(409, `The ${shifts.map((s) => s.shift_day).join(' and ')} shift is confirmed. An Owner must reopen it first.`);
+  const user = c.get('user').id;
+  const t = now();
+  const cashAudit = await one<{ id: number }>(db, `SELECT id FROM audit_log WHERE business_id = ? AND action = 'cash.paid_late' AND row_id = ? AND json_extract(after, '$.twoDays') = 1
+    AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = audit_log.business_id AND x.action = 'cash.paid_late_undone' AND x.row_id = CAST(audit_log.id AS TEXT)) ORDER BY id DESC LIMIT 1`, bid, after.hereComparisonId);
+  const statements: D1PreparedStatement[] = [
+    ...(after.paymentIds ?? []).map((id) => stmt(db, 'DELETE FROM register_payments WHERE id = ? AND business_id = ?', id, bid)),
+    ...(before.discountPaise != null ? [stmt(db, 'UPDATE register_rows SET discount_paise = ?, tip_paise = ?, edited_by = ?, edited_at = ? WHERE id = ? AND business_id = ?',
+      before.discountPaise, before.tipPaise ?? 0, user, t, after.homeRowId, bid)] : []),
+    stmt(db, 'UPDATE bill_comparisons SET decision = NULL, decided_by = NULL, decided_at = NULL, note = NULL, linked_to_id = NULL WHERE id = ? AND business_id = ?', after.hereComparisonId, bid),
+    ...(cashAudit ? [stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'cash.paid_late_undone', 'audit_log', ?, NULL, NULL, ?)`, bid, user, String(cashAudit.id), t)] : []),
+    stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+      VALUES (?, ?, 'register.two_days_undone', 'register_rows', ?, NULL, ?, ?)`, bid, user, rowId, a!.after, t),
+  ];
+  try { await db.batch(statements); } catch (e) { if (isShiftConfirmed(e)) fail(409, CONFIRMED); throw e; }
+  if (after.action === 'advance') await refreshComparisons(db, bid, after.homeDay, user);
+  await refreshComparisons(db, bid, after.day, user);
+  return c.json({ ok: true });
 });
