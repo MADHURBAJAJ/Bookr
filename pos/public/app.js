@@ -1979,40 +1979,74 @@ actions.pickRes = async (d) => { await pickReservation(d.id); rerender(); };
 function auditView() {
   const a = ui.audit;
   if (!a) return '';
-  const box = (title, n, body, tone = '') => html`<section class="panel" style="margin-bottom:12px${tone ? `;border-color:var(--${tone}-line)` : ''}"><h2>${title} (${n})</h2>${n ? body : html`<p class="quiet small">Nothing here.</p>`}</section>`;
-  const line = (left, right) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:8px 0;flex-wrap:wrap;align-items:center"><div class="grow" style="min-width:180px">${left}</div><div class="row">${right}</div></div>`;
-  return html`${errorBox()}<p class="quiet small" style="margin-bottom:12px">Work through these before the day ends: every guest due has arrived or is marked a no-show, every guest due out has left or is extended, and nothing is left unpaid by mistake.</p>
+  // A checklist: each step shows its count, is ticked when nothing is left, and its rows carry the action that clears them.
+  const steps = [
+    { id: 'arr', short: 'To arrive', title: 'Due to arrive, not checked in', list: a.notArrived, tone: 'warn', rows: a.notArrived.map((x) => [html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? 'made here' : x.channel ?? 'Djubo'} · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}${x.heldPaise ? ` · advance ${rs(x.heldPaise)}` : ''}</small>`,
+      html`${x.checkIn < a.today ? html`<span class="status bad">was due ${dayName(x.checkIn)}</span>` : ''}<button class="btn sm" type="button" data-act="goCheckin" data-kind="${x.kind}" data-id="${x.id}">Check in</button><button class="btn sm ghost" type="button" data-act="noShow" data-kind="${x.kind}" data-id="${x.id}" data-held="${x.heldPaise}">No-show</button>`]) },
+    { id: 'over', short: 'Overstays', title: 'Past their check-out date', list: a.overstays, tone: 'bad', rows: a.overstays.map((x) => [html`<strong>${x.room} · ${x.guestName}</strong><small>was due out ${dayName(x.plan)}</small>`,
+      html`${x.balancePaise ? html`<span class="status warn">Owes ${rs(x.balancePaise)}</span>` : ''}<button class="btn sm pri" type="button" data-act="roomBill" data-id="${x.id}">Extend or check out</button>`]) },
+    { id: 'out', short: 'Due out', title: 'Due out today', list: a.dueOut, tone: 'warn', rows: a.dueOut.map((x) => [html`<strong>${x.room} · ${x.guestName}</strong>`,
+      html`${x.balancePaise > 0 ? html`<span class="status warn">Owes ${rs(x.balancePaise)}</span>` : x.balancePaise < 0 ? html`<span class="status info">Holds ${rs(-x.balancePaise)}</span>` : html`<span class="status ok">Settled</span>`}<button class="btn sm" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`]) },
+    { id: 'formc', short: 'Form C', title: 'Form C not filed', list: a.formC, tone: a.formC.some((x) => x.level === 'red') ? 'bad' : 'warn', rows: a.formC.map((x) => [html`<strong>${x.room} · ${x.guestName}</strong><small>checked in ${x.hours} h ago · due within 24 h</small>`,
+      html`<button class="btn sm" type="button" data-act="formC" data-id="${x.stayId}">Mark filed</button>`]) },
+    { id: 'bal', short: 'Balances', title: 'In house with money owed or held', list: a.balances, tone: 'info', rows: a.balances.map((x) => [html`<strong>${x.room} · ${x.guestName}</strong>`,
+      html`${x.balancePaise > 0 ? html`<span class="status warn">Owes ${rs(x.balancePaise)}</span>` : html`<span class="status info">Holds ${rs(-x.balancePaise)}</span>`}<button class="btn sm" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`]) },
+    { id: 'nodate', short: 'No check-out date', title: 'In house with no check-out date', list: a.noDate, tone: 'warn', rows: a.noDate.map((x) => [html`<strong>${x.room} · ${x.guestName}</strong>`, html`<button class="btn sm" type="button" data-act="roomBill" data-id="${x.id}">Set the date</button>`]) },
+    { id: 'hk', short: 'Not ready', title: 'Rooms not ready', list: a.dirty, tone: 'mute', rows: a.dirty.length ? [[html`<span class="rpc">${a.dirty.map((x) => html`<span class="status ${x.status === 'dirty' ? 'bad' : 'warn'} dia">${x.room} · ${x.status}</span>`)}</span>`, html`<a class="btn sm" href="#/rooms/house">Housekeeping</a>`]] : [] },
+  ];
+  const open = steps.filter((x) => x.list.length).length;
+  return html`${errorBox()}
+    <div class="auditbar"><div><strong>${open ? `${plural(open, 'step')} left before the day is closed` : 'Everything is done for today'}</strong>
+      <div class="small quiet">Every guest due has arrived or is a no-show, every guest due out has left or is extended, and nothing is unpaid by mistake.</div></div>
+      <nav class="ajump" aria-label="Jump to a step">${steps.map((x) => html`<a href="#/rooms/audit" data-act="jump" data-to="au-${x.id}" class="status ${x.list.length ? x.tone : 'ok'}">${x.list.length ? x.list.length : '✓'} ${x.short}</a>`)}</nav></div>
     ${notInDjuboBox(a.notInDjubo)}
-    ${box('Due to arrive, not checked in', a.notArrived.length, a.notArrived.map((x) => line(html`<strong>${x.guestName ?? 'No name'}</strong><div class="small quiet">${x.kind === 'reservation' ? 'made here' : x.channel ?? 'Djubo'} · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}${x.checkIn < a.today ? html` · <strong style="color:var(--bad)">was due ${dayName(x.checkIn)}</strong>` : ''}${x.heldPaise ? ` · advance ${rs(x.heldPaise)}` : ''}</div>`,
-      html`<button class="btn" type="button" data-act="goCheckin" data-kind="${x.kind}" data-id="${x.id}">Check in</button><button class="btn ghost" type="button" data-act="noShow" data-kind="${x.kind}" data-id="${x.id}" data-held="${x.heldPaise}">No-show</button>`)), 'warn')}
-    ${box('Past their check-out date (overstay)', a.overstays.length, a.overstays.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">was due out ${dayName(x.plan)}${x.balancePaise ? ` · owes ${rs(x.balancePaise)}` : ''}</div>`,
-      html`<button class="btn pri" type="button" data-act="roomBill" data-id="${x.id}">Room bill: extend or check out</button>`)), 'bad')}
-    ${box('Due out today', a.dueOut.length, a.dueOut.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">${x.balancePaise > 0 ? `owes ${rs(x.balancePaise)}` : x.balancePaise < 0 ? `holds ${rs(-x.balancePaise)}` : 'nothing due'}</div>`,
-      html`<button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`)))}
-    ${box('Form C not filed', a.formC.length, a.formC.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">checked in ${x.hours} h ago (due within 24 h)</div>`,
-      html`<button class="btn" type="button" data-act="formC" data-id="${x.stayId}">Form C filed</button>`)), a.formC.some((x) => x.level === 'red') ? 'bad' : '')}
-    ${box('In house with money owed or held', a.balances.length, a.balances.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong><div class="small quiet">${x.balancePaise > 0 ? `owes ${rs(x.balancePaise)}` : `holds ${rs(-x.balancePaise)}`}</div>`,
-      html`<button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill</button>`)))}
-    ${box('In house with no check-out date', a.noDate.length, a.noDate.map((x) => line(html`<strong>${x.room} · ${x.guestName}</strong>`, html`<button class="btn" type="button" data-act="roomBill" data-id="${x.id}">Room bill: set the date (Extend stay)</button>`)))}
-    ${box('Rooms not ready (housekeeping)', a.dirty.length, html`<div class="chips">${a.dirty.map((x) => html`<span class="badge ${x.status === 'dirty' ? 'bad' : 'new'}">${x.room} · ${x.status}</span>`)}</div><p class="small"><a href="#/rooms/house">Housekeeping</a></p>`)}
-    ${box(`Arriving tomorrow (${dayName(a.tomorrow)})`, a.tomorrow_.length, html`<div class="small">${a.tomorrow_.map((x) => `${x.guestName ?? 'No name'}${x.roomLabels ? ` · ${x.roomLabels}` : x.roomType ? ` · ${x.roomType}` : ''}`).join(' · ')}</div>`)}`;
+    <ol class="achk">${steps.map((x) => html`<li id="au-${x.id}" class="astep ${x.list.length ? '' : 'done'}"><div class="ash"><span class="atick" aria-hidden="true">${x.list.length ? '' : '✓'}</span><h2>${x.title}</h2>
+      <span class="status ${x.list.length ? x.tone : 'ok'}">${x.list.length ? x.list.length : 'Done'}</span></div>
+      ${x.rows.map(([l, r]) => html`<div class="arow"><span class="grow">${l}</span><span class="dright">${r}</span></div>`)}</li>`)}</ol>
+    <section class="panel"><div class="dch"><h2>Arriving tomorrow · ${dayName(a.tomorrow)}</h2><span class="status mute">${a.tomorrow_.length}</span></div>
+      ${a.tomorrow_.length ? html`<div class="small">${a.tomorrow_.map((x) => `${x.guestName ?? 'No name'}${x.roomLabels ? ` · ${x.roomLabels}` : x.roomType ? ` · ${x.roomType}` : ''}`).join(' · ')}</div>` : html`<p class="empty">No arrivals tomorrow yet.</p>`}</section>`;
 }
+actions.jump = (d) => { document.getElementById(d.to)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
 
 // ----- housekeeping (25 Nov 2026): dirty after a check-out or a move; clean; inspected (ready to sell)
+const HK = { dirty: ['bad', 'Dirty'], clean: ['warn', 'Clean'], inspected: ['ok', 'Ready'] };
 function houseView() {
   const h = ui.hk;
   if (!h) return '';
-  const tone = { dirty: 'bad', clean: 'new', inspected: 'open' };
   const sel = new Set(ui.hkSel ?? []);
-  return html`${errorBox()}<p class="quiet small" style="margin-bottom:10px">A room is marked dirty when a guest checks out or moves. Tap rooms, then mark them. Checking a guest into a dirty room is asked about first.</p>
-    ${h.sections.map((sec) => html`<section class="panel" style="margin-bottom:12px"><h2>${sec.name}</h2><div class="chips">
-      ${sec.rooms.map((r) => html`<button type="button" class="chip" aria-pressed="${sel.has(r.room)}" data-act="hkPick" data-r="${r.room}" title="${r.by ? `${r.status} · ${r.by}` : r.status}">${r.room}
-        <span class="badge ${tone[r.status]}" style="margin-left:6px">${r.status === 'inspected' ? 'ready' : r.status}</span>${r.guest ? html`<span class="small"> · ${r.guest}</span>` : ''}</button>`)}</div></section>`)}
-    <div class="row" style="position:sticky;bottom:0;background:var(--bg);padding:10px 0"><span class="grow">${sel.size ? `${plural(sel.size, 'room')} chosen` : 'Choose rooms'}</span>
+  const all = h.sections.flatMap((x) => x.rooms);
+  const n = (st) => all.filter((r) => r.status === st).length;
+  const f = ui.hkF ?? '';
+  const chip = (k, label, count) => html`<button type="button" class="chip sm" aria-pressed="${f === k}" data-act="pick" data-k="hkF" data-id="${k}">${label} <span class="quiet">${count}</span></button>`;
+  return html`<div class="kpis">${kpi('Dirty', String(n('dirty')), '', n('dirty') ? 'bad' : '')}${kpi('Clean, not inspected', String(n('clean')), '', n('clean') ? 'warn' : '')}${kpi('Ready to sell', String(n('inspected')))}${kpi('Occupied', String(all.filter((r) => r.guest).length))}</div>
+    ${errorBox()}
+    <div class="ctool"><div class="cfilt">${chip('', 'All', all.length)}${chip('dirty', 'Dirty', n('dirty'))}${chip('clean', 'Clean', n('clean'))}${chip('inspected', 'Ready', n('inspected'))}</div>
+      <span class="small quiet grow">Tap rooms, shift-click to choose a run. Marked dirty at check-out and on a move.</span>
+      ${n('dirty') ? html`<button type="button" class="btn sm" data-act="hkAll" data-s="dirty">Choose all dirty</button>` : ''}${n('clean') ? html`<button type="button" class="btn sm" data-act="hkAll" data-s="clean">Choose all clean</button>` : ''}</div>
+    ${h.sections.map((sec) => {
+      const rooms = sec.rooms.filter((r) => !f || r.status === f);
+      return rooms.length ? html`<section class="hkg"><div class="rph"><strong>${sec.name}</strong><span class="small quiet">${sec.rooms.filter((r) => r.status === 'inspected').length} of ${sec.rooms.length} ready</span></div>
+        <div class="hkt">${rooms.map((r) => html`<button type="button" class="hkc s-${r.status} ${sel.has(r.room) ? 'on' : ''}" aria-pressed="${sel.has(r.room)}" data-act="hkPick" data-r="${r.room}" title="${r.by ? `${HK[r.status][1]} · ${r.by}` : HK[r.status][1]}">
+          <span class="hkn">${r.room}</span><span class="status ${HK[r.status][0]} ${r.status === 'dirty' ? 'dia' : ''}">${HK[r.status][1]}</span><small>${r.guest ?? 'vacant'}</small></button>`)}</div></section>` : '';
+    })}
+    ${f && !all.some((r) => r.status === f) ? html`<p class="empty">No rooms are ${HK[f][1].toLowerCase()} right now.</p>` : ''}
+    <div class="hkbar"><span class="grow">${sel.size ? html`<strong>${plural(sel.size, 'room')} chosen</strong> <button type="button" class="btn ghost sm" data-act="hkClear">Clear</button>` : html`<span class="quiet">Choose rooms to mark them</span>`}</span>
       <button class="btn" type="button" data-act="hkSet" data-s="dirty" ${sel.size ? '' : 'disabled'}>Dirty</button><button class="btn" type="button" data-act="hkSet" data-s="clean" ${sel.size ? '' : 'disabled'}>Clean</button>
       <button class="btn pri" type="button" data-act="hkSet" data-s="inspected" ${sel.size ? '' : 'disabled'}>Inspected · ready</button></div>`;
 }
-actions.hkPick = (d) => { const s0 = new Set(ui.hkSel ?? []); if (s0.has(d.r)) s0.delete(d.r); else s0.add(d.r); ui.hkSel = [...s0]; rerender(); };
+let shiftClick = false;
+document.addEventListener('click', (e) => { shiftClick = e.shiftKey; }, true);
+actions.hkPick = (d) => {
+  const s0 = new Set(ui.hkSel ?? []);
+  const order = (ui.hk?.sections ?? []).flatMap((x) => x.rooms).filter((r) => !ui.hkF || r.status === ui.hkF).map((r) => r.room);
+  if (shiftClick && ui.hkLast && order.includes(ui.hkLast)) {
+    const [i, j] = [order.indexOf(ui.hkLast), order.indexOf(d.r)].sort((x, y) => x - y);
+    order.slice(i, j + 1).forEach((r) => s0.add(r));
+  } else if (s0.has(d.r)) s0.delete(d.r); else s0.add(d.r);
+  ui.hkLast = d.r; ui.hkSel = [...s0]; rerender();
+};
+actions.hkAll = (d) => { ui.hkSel = [...new Set([...(ui.hkSel ?? []), ...(ui.hk?.sections ?? []).flatMap((x) => x.rooms).filter((r) => r.status === d.s).map((r) => r.room)])]; rerender(); };
+actions.hkClear = () => { ui.hkSel = []; rerender(); };
 actions.hkSet = async (d) => {
   await api('POST', `${B()}/frontdesk/housekeeping`, { rooms: ui.hkSel ?? [], status: d.s });
   ui.hk = await api('GET', `${B()}/frontdesk/housekeeping`); flash = { kind: 'ok', text: `${plural((ui.hkSel ?? []).length, 'room')} marked ${d.s === 'inspected' ? 'ready' : d.s}.` }; ui.hkSel = []; rerender();
