@@ -34,6 +34,35 @@ function roomsOf(b: Business) {
   }));
 }
 
+/** Occupancy for shifts from..to (25 Nov 2026), from who actually stayed: nights sold and nights available, private rooms
+ *  and dorm beds apart (a "whole" dorm fills every bed). A night is counted up to today only; rooms out of order still count
+ *  as available. A day-use stay (in and out the same day) counts as one night. */
+export async function occupancy(db: DB, b: Business, from: string, to: string, t = now()) {
+  const today = clock(b, t).shiftDay;
+  const last = to < today ? to : today;
+  const days = last < from ? 0 : Math.round((Date.parse(last) - Date.parse(from)) / DAY) + 1;
+  const secs = roomsOf(b);
+  const rooms = secs.filter((s) => s.kind === 'rooms').flatMap((s) => s.rooms);
+  const beds = secs.filter((s) => s.kind === 'dorms').flatMap((s) => s.rooms);
+  const wholes: Record<string, string[]> = Object.assign({}, ...secs.map((s) => s.wholes));
+  const startOf = (d: string) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), b.shift_start_hour) - 19_800_000;
+  const stays = days ? await all<{ room: string; check_in: string; out: number | null }>(db,
+    'SELECT room, check_in, checked_out_at AS out FROM stays WHERE business_id = ? AND check_in <= ? AND (checked_out_at IS NULL OR checked_out_at >= ?)', b.id, last, startOf(from)) : [];
+  const sold = { rooms: new Set<string>(), beds: new Set<string>() };
+  for (const st of stays) {
+    const w = Object.entries(wholes).find(([k]) => flat(k) === flat(st.room));
+    const units = w ? w[1] : [rooms.find((x) => flat(x) === flat(st.room)) ?? beds.find((x) => flat(x) === flat(st.room))].filter((x): x is string => !!x);
+    if (!units.length) continue;
+    const outDay = st.out == null ? addDays(last, 1) : clock(b, st.out).shiftDay;
+    const end = outDay > st.check_in ? outDay : addDays(st.check_in, 1);
+    for (let d = st.check_in < from ? from : st.check_in; d < end && d <= last; d = addDays(d, 1)) {
+      for (const u of units) (rooms.includes(u) ? sold.rooms : sold.beds).add(`${u}|${d}`);
+    }
+  }
+  const part = (n: number, set: Set<string>) => ({ available: n * days, sold: set.size, pct: n * days ? Math.round((set.size * 1000) / (n * days)) / 10 : null });
+  return { days, upTo: last, rooms: part(rooms.length, sold.rooms), beds: part(beds.length, sold.beds) };
+}
+
 export interface Bar { room: string; from: string; to: string; kind: 'occ' | 'arr' | 'hold' | 'pos' | 'ooo'; label: string; ref: { type: string; id: string };
   /** For the chart's colours and filters (25 Nov 2026): the guest, where it was booked, and whether it can be stretched here. */
   guest?: string | null; src?: 'direct' | 'mmt' | 'gi' | 'web' | 'desk' | null; byHand?: boolean }

@@ -7,6 +7,7 @@ import { requireAction, requireStaff } from '../auth';
 import { clock, bizOf, loadBusiness } from '../util';
 import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
+import { occupancy } from './frontdesk';
 
 export const reportRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -332,7 +333,17 @@ reportRoutes.get(`${B}/reports/rooms`, requireAction('reports.view'), async (c) 
       WHERE d.business_id = ? AND d.status = 'kept' AND d.kept_at >= ? AND d.kept_at < ?`, bid, Date.parse(from) + hour - 19_800_000, Date.parse(to) + 86_400_000 + hour - 19_800_000),
   ]);
   const sum = (rows: Record<string, unknown>[], k: string) => rows.reduce((t, r) => t + Number(r[k] ?? 0), 0);
-  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept,
+  // Occupancy, ADR and RevPAR (25 Nov 2026). ADR is room sales before GST per night invoiced (invoices are made at
+  // check-out); RevPAR is ADR times occupancy, rooms and beds together.
+  const occ = await occupancy(db, bizOf(c), from, to);
+  const nightsInvoiced = sum(invoices, 'nights');
+  const salesNet = sum(invoices, 'taxablePaise') - sum(cns, 'taxablePaise');
+  const adrPaise = nightsInvoiced ? Math.round(salesNet / nightsInvoiced) : null;
+  const avail = occ.rooms.available + occ.beds.available;
+  const occAll = avail ? (occ.rooms.sold + occ.beds.sold) / avail : null;
+  const kpis = { ...occ, adrPaise, revparPaise: adrPaise != null && occAll != null ? Math.round(adrPaise * occAll) : null,
+    pct: occAll == null ? null : Math.round(occAll * 1000) / 10 };
+  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept, occupancy: kpis,
     totals: { invoices: invoices.length, nights: sum(invoices, 'nights'), taxablePaise: sum(invoices, 'taxablePaise') - sum(cns, 'taxablePaise'),
       gstPaise: sum(invoices, 'cgstPaise') + sum(invoices, 'sgstPaise') - sum(cns, 'cgstPaise') - sum(cns, 'sgstPaise'),
       totalPaise: sum(invoices, 'totalPaise') - sum(cns, 'totalPaise'), noShowPaise: sum(kept, 'amountPaise') } });

@@ -149,7 +149,14 @@ const tabsNav = (label, items, current) => html`<nav class="tabs" aria-label="${
 const kpi = (k, v, n, tone = '') => html`<div class="kpi ${tone}"><span class="k">${k}</span><span class="v">${v}</span>${n ? html`<span class="n">${n}</span>` : ''}</div>`;
 
 let shownFlash = null;
-function paint(view) { root.innerHTML = asHtml(view); shownFlash = flash; flash = null; const f = root.querySelector('[autofocus]'); if (f) f.focus(); }
+function paint(view) { root.innerHTML = asHtml(view); shownFlash = flash; flash = null; sortable(); const f = root.querySelector('[autofocus]'); if (f) f.focus(); }
+/** Every data table with more than two rows sorts by any titled column (25 Nov 2026): a Total row stays at the bottom. */
+function sortable() {
+  for (const table of root.querySelectorAll('table.t')) {
+    if (!table.tBodies[0] || [...table.tBodies[0].rows].filter((r) => r.children.length > 1).length < 3) continue;
+    for (const th of table.querySelectorAll('thead th:not([data-sort])')) if (th.textContent.trim() && th.colSpan === 1) th.setAttribute('data-sort', '');
+  }
+}
 const errorBox = () => html`${ui.guestAsk ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>${ui.guestAsk.message}</strong></p>
   <div class="row"><button class="btn pri" type="button" data-act="guestChoice" data-c="saved">Yes, ${ui.guestAsk.savedName}</button>
     <button class="btn" type="button" data-act="guestChoice" data-c="update">Use the name I typed</button><button class="btn ghost" type="button" data-act="guestChoiceNo">Cancel</button></div></div>` : ''}${ui.approval ? approvalBox() : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
@@ -399,9 +406,11 @@ root.addEventListener('click', (ev) => {
   table.querySelectorAll('th[aria-sort]').forEach((x) => x.removeAttribute('aria-sort'));
   th.setAttribute('aria-sort', dir);
   const key = (tr) => { const c = tr.children[idx]; const v = (c?.dataset.v ?? c?.textContent ?? '').trim(); const n = Number(v.replace(/[₹,\s]/g, '')); return Number.isFinite(n) && /\d/.test(v) && !/[a-z]{2}/i.test(v.replace(/₹/g, '')) ? n : v.toLowerCase(); };
-  const rows = [...tbody.rows].filter((r) => r.children.length > 1);
+  const isTotal = (r) => /^total\b/i.test(r.children[0]?.textContent.trim() ?? '');
+  const rows = [...tbody.rows].filter((r) => r.children.length > 1 && !isTotal(r));
+  const totals = [...tbody.rows].filter(isTotal);
   rows.sort((a, b) => { const x = key(a); const y = key(b); const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y)); return dir === 'ascending' ? c : -c; });
-  rows.forEach((r) => tbody.appendChild(r));
+  rows.forEach((r) => tbody.appendChild(r)); totals.forEach((r) => tbody.appendChild(r));
 });
 // A counter PC has a keyboard: digits, Backspace and Enter work on the PIN pad.
 document.addEventListener('keydown', (ev) => {
@@ -2768,7 +2777,12 @@ async function roomsReportTab(head, from, to) {
   const r = await api('GET', `${B()}/reports/rooms?from=${from}&to=${to}`);
   const t = r.totals;
   rerender = () => paint(shell('#/reports', html`${head}
+    ${r.occupancy ? html`<div class="kpis">${kpi('Occupancy', r.occupancy.pct == null ? '—' : `${r.occupancy.pct}%`, `rooms ${r.occupancy.rooms.pct ?? '—'}% · beds ${r.occupancy.beds.pct ?? '—'}%`)}
+      ${kpi('ADR', r.occupancy.adrPaise == null ? '—' : rs(r.occupancy.adrPaise), 'per night sold, before GST')}
+      ${kpi('RevPAR', r.occupancy.revparPaise == null ? '—' : rs(r.occupancy.revparPaise), 'per room or bed available')}
+      ${kpi('Nights sold', String(r.occupancy.rooms.sold + r.occupancy.beds.sold), `of ${r.occupancy.rooms.available + r.occupancy.beds.available} available${r.occupancy.upTo < r.to ? ` · up to ${dayName(r.occupancy.upTo)}` : ''}`)}</div>` : ''}
     <div class="kpis">${kpi('Room invoices', String(t.invoices))}${kpi('Room nights', String(t.nights))}${kpi('Room sales (before GST)', rs(t.taxablePaise))}${kpi('GST on rooms', rs(t.gstPaise))}${kpi('No-show charges kept', rs(t.noShowPaise))}</div>
+    <p class="small quiet">Occupancy counts the guests who stayed each night, rooms and dorm beds together. ADR is room sales before GST per night invoiced (a room is invoiced at check-out). RevPAR is ADR × occupancy.</p>
     <section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Room invoices</h2>${r.invoices.length ? html`<button class="btn" type="button" data-act="roomsCsv">Download (CSV)</button>` : ''}</div>
       <div class="scroll"><table class="t"><thead><tr><th>Invoice</th><th>Day</th><th>Guest / company</th><th>Room</th><th class="num">Nights</th><th>Rate</th><th class="num">Value</th><th class="num">GST</th><th class="num">Total</th></tr></thead><tbody>
         ${r.invoices.length ? r.invoices.map((x) => html`<tr><td>${x.invoiceNo}</td><td>${dayName(x.day)}</td><td>${x.guestName}${x.billToName ? html`<div class="small quiet">${x.billToName}${x.billToGstin ? ` · ${x.billToGstin}` : ''}</div>` : ''}</td><td>${x.room}</td>
