@@ -179,6 +179,10 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
     // The day's own expense page, so its Review link opens it (18 Nov 2026), not the list of every day.
     expensesWaitingUploadId: expenses!.waitingUpload,
     expensesUploadId: expenses!.anyUpload,
+    // The day's expense lines (approved 24 Nov 2026): the Expenses row of Cash page vs Bookr opens into them.
+    expenseLines: await all<{ lineNo: number | null; narration: string | null; amountPaise: number; head: string | null; status: string }>(db, `SELECT t.line_no AS lineNo,
+        t.narration, t.amount_paise AS amountPaise, h.name AS head, t.status FROM transactions t LEFT JOIN heads h ON h.id = t.head_id
+      WHERE t.business_id = ? AND t.day = ? AND t.source = 'cash_photo' AND t.type = 'expense' ORDER BY t.upload_id, t.line_no LIMIT 60`, businessId, day),
     shortagePaise: shortageTotal,
     // Each shortage booked on this shift, and the bill it was booked for (18 Nov 2026).
     shortages: shorts.map((x) => { let o: { comparisonId?: string; billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }

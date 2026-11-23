@@ -4540,7 +4540,7 @@ function cashPanelHtml(biz, k, opts = {}) {
     const more = html`<details class="menu"><summary class="btn plain dchip" aria-label="More for bill ${b.billNo}">⋯</summary><div class="menu-pop" style="min-width:200px;gap:6px">
       <button type="button" class="btn plain dchip" data-bill-drawer="${b.billNo}|${k.day}">Edit</button>
       ${draft && b.state !== 'complimentary' && biz.actions.includes('sales.decide') ? html`<button type="button" class="btn plain dchip" data-makecomp="${b.comparisonId}" data-bill="${b.billNo}">Make complimentary</button>` : ''}</div></details>`;
-    items.push({ same, html: html`<div class="ent-line" style="${same ? 'border:1px solid #F3B4B4;border-radius:8px;padding:8px 10px' : ''}">
+    items.push({ same, b, html: html`<div class="ent-line" style="${same ? 'border:1px solid #F3B4B4;border-radius:8px;padding:8px 10px' : ''}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span>${same ? html`<span class="chip bad">Same amount</span> ` : ''}<span class="mono">${b.billNo}</span> · ${text}</span>${more}</div>
       ${wit}
       ${b.rgCashPaise === null && draft && biz.actions.includes('sales.decide') ? cashUpiFix(b, opts.byUpi?.get(b.comparisonId), true) : ''}
@@ -4573,10 +4573,18 @@ function cashPanelHtml(biz, k, opts = {}) {
   const tillLine = (list, word, paise) => (list.length ? html`<tr><td></td><td class="note" colspan="3"><details><summary style="cursor:pointer">${word} on <u>${list.length} bill${list.length === 1 ? '' : 's'}</u> · ₹ ${money(paise)}</summary>
     ${list.map((b) => html`<div class="tiny"><span class="mono">${b.billNo}</span> · software ₹ ${money(b.swCashPaise)} · paid ₹ ${money(b.rgCashPaise)} · ${b.roundedPaise > 0 ? 'discount' : 'extra'} ₹ ${money(Math.abs(b.roundedPaise))}</div>`)}</details></td></tr>` : '');
   const roundedRows = html`${tillLine(rounded.filter((b) => b.roundedPaise > 0), 'Discount at the till', off)}${tillLine(rounded.filter((b) => b.roundedPaise < 0), 'Paid more than the bill', extra)}`;
-  if (k.expensesWaiting) items.push({ same: gap === k.expensesWaitingPaise, html: html`<div class="ent-line"><div><span class="chip wait">Waiting approval</span> ${k.expensesWaiting} cash expense${k.expensesWaiting === 1 ? '' : 's'}, ₹${money(k.expensesWaitingPaise).replace(/\.00$/, '')}: counted once approved</div>
-    <div class="form-row" style="gap:6px;margin-top:4px"><a class="btn plain dchip" href="#/b/${biz.id}/review${k.expensesWaitingUploadId ? `/${k.expensesWaitingUploadId}` : `?day=${k.day}`}">Review</a></div></div>` });
   items.sort((a, b) => Number(!!b.top) - Number(!!a.top) || Number(b.same) - Number(a.same));
   const tops = items.filter((x) => x.top), rest = items.filter((x) => !x.top);
+  // Only the bills that make the cash differ from the register (approved 24 Nov 2026): Bookr counts other cash than the
+  // register's cash column, or not decided yet. The others sit behind "show N" in the bills list.
+  const moves = (b) => b.state === 'undecided' || (b.countedPaise ?? 0) !== (b.rgCashPaise ?? 0);
+  const loud = rest.filter((x) => !x.quiet && (!x.b || moves(x.b)));
+  const loudBills = loud.filter((x) => x.b).map((x) => x.b);
+  const allMoved = diff == null || !loudBills.length ? null : diff + loudBills.reduce((t, b) => t + (b.countedPaise ?? 0) - (b.rgCashPaise ?? 0), 0) + (k.expensesWaiting ? k.expensesWaitingPaise ?? 0 : 0);
+  const word0 = (d) => (d === 0 ? 'cash agrees' : d < 0 ? `short ₹${money(-d).replace(/\.00$/, '')}` : `₹${money(d).replace(/\.00$/, '')} over`);
+  const bothTxt = allMoved == null ? '' : `${loudBills.length === 1 ? 'Changed' : loudBills.length === 2 ? 'Both changed' : `All ${loudBills.length} changed`}${k.expensesWaiting ? ` and the ${k.expensesWaiting} expense line${k.expensesWaiting === 1 ? '' : 's'} approved` : ''}: ${word0(allMoved)}${k.page?.receivedPaise != null && allMoved === k.page.receivedPaise - (k.registerCashPaise ?? k.page.receivedPaise) ? ", the page's own sum" : ''}.`;
+  const shownIds = new Set(loudBills.map((b) => b.comparisonId));
+  const pvb = pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills });
   const tint = (b) => (b.rgCashPaise === null || (b.state === 'undecided' && b.swCashPaise !== null && b.rgCashPaise !== null && !b.rgCashPaise) ? 'cash-bad' : b.differs ? 'cash-warn' : '');
   const counted = (b) => (b.state === 'match' ? 'Matches' : b.state === 'left_out' ? 'Left out' : b.state === 'complimentary' ? 'Complimentary' : b.state === 'undecided' ? 'Not decided'
     : b.decision === 'use_software' ? 'Use software' : b.decision === 'use_register' ? 'Use register' : DECISION_LABELS[b.decision] ?? '');
@@ -4587,13 +4595,13 @@ function cashPanelHtml(biz, k, opts = {}) {
     <div class="cash-strip">
       <div><div class="note">Cash counted</div><div class="cash-big">${k.countedPaise == null ? '—' : `₹ ${money(k.countedPaise)}`}</div>
         ${k.countedPaise == null ? html`<a class="tiny" href="#/b/${biz.id}/bringin">Not in yet: bring it in</a>` : html`<div class="tiny note">from the cash page</div>`}</div>
-      <div><div class="note">Should be there</div><div class="cash-big">${shouldBe == null ? '—' : `₹ ${money(shouldBe)}`}</div><div class="tiny note">${k.openingPaise == null ? 'No opening cash yet' : 'worked out below'}</div></div>
+      <div><div class="note">Should be there</div><div class="cash-big">${shouldBe == null ? '—' : `₹ ${money(shouldBe)}`}</div><div class="tiny note">${k.openingPaise == null ? 'No opening cash yet' : pvb ? 'the table below' : 'worked out below'}</div></div>
       <div class="${tone}" title="${draft ? 'Changes as you decide and correct bills, final after Save' : 'Final: booked when the shift was saved'}"><div style="font-size:13px">${{ ok: 'Cash agrees', accepted: 'Difference accepted', short: 'Cash short', over: 'Extra cash' }[state] ?? 'Difference'}</div><div class="cash-big">${diff == null ? '—' : diff === 0 ? '₹ 0' : `₹ ${money(Math.abs(diff))}`}</div><div class="tiny">${draft ? 'can change until you save' : 'saved'}</div></div>
     </div>
     ${diff ? html`<div class="note">₹ ${money(k.countedPaise)} counted − ₹ ${money(shouldBe)} expected = ₹ ${money(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than expected.</div>` : ''}
-    ${pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills })}
+    ${pvb}
     ${paidHereNotice(k.paidHere, !!opts.decide)}
-    <details><summary class="note">How ${shouldBe == null ? 'it' : `₹ ${money(shouldBe)}`} is worked out</summary><div class="scroll"><table style="min-width:560px">
+    ${pvb ? '' : html`<details><summary class="note">How ${shouldBe == null ? 'it' : `₹ ${money(shouldBe)}`} is worked out</summary><div class="scroll"><table style="min-width:560px">
       ${row('Cash at the start', k.openingFrom === 'previous' ? `counted at the end of ${dayLabel(addDaysIso(k.day, -1))}` : k.openingFrom === 'page' ? 'written on this day\'s cash page' : 'no cash page for the day before', k.openingPaise)}
       ${k.previous ? html`<tr style="color:var(--muted)"><td></td><td colspan="3">${dayLabel(k.previous.day)} was short ₹ ${money(-k.previous.differencePaise)}${k.previous.bills.length ? ` (${k.previous.bills.join(', ')} waiting)` : ''}. Not carried in: this day starts from the counted ₹ ${money(k.openingPaise ?? 0)}.</td></tr>` : ''}
       ${row('+ Cash sales', billsOpen(draft ? 'as they stand now' : 'booked for this shift', counting), sales)}
@@ -4611,9 +4619,10 @@ function cashPanelHtml(biz, k, opts = {}) {
       ${row('= Should be there', '', shouldBe, '', true)}
       ${row('Counted', 'cash in hand on this day\'s cash page', k.countedPaise, k.summaryUploadId ? html`<a href="#/b/${biz.id}/review/${k.summaryUploadId}">Open page</a>` : html`<a href="#/b/${biz.id}/bringin">Bring it in</a>`)}
       ${diff !== null ? row('Difference', `${diff < 0 ? 'short' : diff > 0 ? 'over' : ''}${wasDiff != null && wasDiff !== diff ? ` · was ${wasDiff < 0 ? `₹ ${money(-wasDiff)} short` : wasDiff > 0 ? `₹ ${money(wasDiff)} over` : '₹ 0'} when saved` : ''}`, diff, '', true, diff < 0 ? 'cash-bad' : diff > 0 ? 'cash-warn' : '') : ''}
-    </table></div></details>
+    </table></div></details>`}
     ${diff ? html`<div style="display:flex;flex-direction:column;gap:6px">${tops.map((x) => x.html)}
-      ${rest.filter((x) => !x.quiet).length ? html`<strong>Bills that change the cash</strong><div class="tiny note">Each button shows what the shortage becomes. ✓ is how it stands now.</div>${rest.filter((x) => !x.quiet).map((x) => x.html)}` : ''}
+      ${loud.length ? html`<strong>Bills that change the cash · ${loud.length}</strong><div class="tiny note">Each button shows what the shortage becomes. ✓ is how it stands now.</div>${loud.map((x) => x.html)}
+        ${bothTxt ? html`<div class="tiny note">${bothTxt}</div>` : ''}` : ''}
       ${rest.filter((x) => x.quiet).length ? html`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px"><strong>Not in the drawer: paid another way</strong><span class="chip ok">${rest.filter((x) => x.quiet).length} · nothing to do</span></div>${rest.filter((x) => x.quiet).map((x) => x.html)}` : ''}
       ${k.reverse ? html`<div class="ent-line"><span class="chip">Came late?</span> Over by ₹ ${money(k.reverse.amountPaise)}: a shortage of the same was booked on ${dayLabel(k.reverse.day)}${k.reverse.billNo ? ` for bill ${k.reverse.billNo}` : ''}.
         ${biz.actions.includes('cash.writeoff') ? html`<button class="btn plain dchip" type="button" id="cashreverse" data-tx="${k.reverse.id}" data-day="${k.reverse.day}">Reverse that shortage</button>` : ''}
@@ -4623,7 +4632,15 @@ function cashPanelHtml(biz, k, opts = {}) {
         : `₹ ${money(k.pair.amountPaise)} short on ${dayLabel(k.pair.shortDay)}, over on ${dayLabel(k.pair.overDay)}.`}
         ${!draft && biz.actions.includes('sales.decide') ? html`<button class="btn plain dchip" type="button" id="cashpair" data-other="${k.pair.day}">Settle both as paid late</button>` : html`<a class="btn plain dchip" href="#/b/${biz.id}/reconcile/${k.pair.day}">Open ${dayLabel(k.pair.day)}</a>`}</div>` : ''}
     </div>` : ''}
-    ${bills.length ? html`<details><summary style="display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap"><strong>Cash bills · ${counting.length} · ₹ ${money(bills.reduce((t, b) => t + (b.countedPaise ?? 0), 0))}</strong><span class="note">${bills.length > counting.length ? `the list has ${bills.length}: ${bills.length - counting.length} not counted as cash · ` : ''}${differ.length ? `${differ.length} differ` : 'all agree'}</span></summary>
+    ${diff && shownIds.size && bills.length > shownIds.size ? html`<details><summary class="note" style="cursor:pointer">The other ${bills.length - shownIds.size} bill${bills.length - shownIds.size === 1 ? '' : 's'} ${bills.some((b) => !shownIds.has(b.comparisonId) && moves(b)) ? 'are listed here' : 'match the register'}: <u>show ${bills.length - shownIds.size}</u></summary>
+      <div class="scroll"><table style="min-width:600px">
+      <thead><tr><th>Bill</th><th style="text-align:right">Software cash</th><th style="text-align:right">Register cash</th><th>Counted as</th><th style="text-align:right">Counted ₹</th><th></th></tr></thead>
+      <tbody>${bills.filter((b) => !shownIds.has(b.comparisonId)).map((b) => html`<tr class="${tint(b)}">
+        <td class="mono">${b.billNo}${b.groupSize > 1 ? html` <span class="tiny">group of ${b.groupSize}</span>` : ''}${opts.oldPos?.has(b.comparisonId) ? html` <span class="chip">old POS</span>` : ''}</td>
+        <td class="amount">${b.swCashPaise == null ? (b.swMode ? `${MODE_LABELS[b.swMode] ?? b.swMode} ${money(b.swAmountPaise ?? 0)}` : '—') : money(b.swCashPaise)}</td>
+        <td class="amount">${b.rgCashPaise == null ? '—' : b.rgCashPaise ? money(b.rgCashPaise) : other(b) || '0.00'}</td>
+        <td>${counted(b)}</td><td class="amount">${b.countedPaise ? money(b.countedPaise) : ''}</td><td>${edit(b)}</td></tr>`)}</tbody></table></div></details>`
+    : bills.length ? html`<details><summary style="display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap"><strong>Cash bills · ${counting.length} · ₹ ${money(bills.reduce((t, b) => t + (b.countedPaise ?? 0), 0))}</strong><span class="note">${bills.length > counting.length ? `the list has ${bills.length}: ${bills.length - counting.length} not counted as cash · ` : ''}${differ.length ? `${differ.length} differ` : 'all agree'}</span></summary>
       ${differ.length ? html`<label class="note" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="cashonly" checked> Only those that differ</label>` : ''}
     <div class="scroll"><table style="min-width:600px" id="cashbills">
       <thead><tr><th>Bill</th><th style="text-align:right">Software cash</th><th style="text-align:right">Register cash</th><th>Counted as</th><th style="text-align:right">Counted ₹</th><th></th></tr></thead>
@@ -4633,7 +4650,7 @@ function cashPanelHtml(biz, k, opts = {}) {
         <td class="amount">${b.rgCashPaise == null ? '—' : b.rgCashPaise ? money(b.rgCashPaise) : other(b) || '0.00'}</td>
         <td>${counted(b)}</td><td class="amount">${b.countedPaise ? money(b.countedPaise) : ''}</td><td>${edit(b)}</td></tr>`)}</tbody>
     </table></div></details>` : ''}
-    ${draft && diff < 0 && notCashPaise ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}: the register doesn't show ${notInReg.length} bill${notInReg.length === 1 ? '' : 's'} as cash: ${notInReg.map((b) => `${b.billNo} ₹ ${money(b.countedPaise)}`).join(', ')}. ${-diff > notCashPaise ? html`<strong>Unexplained ₹ ${money(-diff - notCashPaise)}</strong>.` : 'Unexplained ₹ 0.'}</div>` : ''}
+    ${draft && diff < 0 && notCashPaise && !pvb ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}: the register doesn't show ${notInReg.length} bill${notInReg.length === 1 ? '' : 's'} as cash: ${notInReg.map((b) => `${b.billNo} ₹ ${money(b.countedPaise)}`).join(', ')}. ${-diff > notCashPaise ? html`<strong>Unexplained ₹ ${money(-diff - notCashPaise)}</strong>.` : 'Unexplained ₹ 0.'}</div>` : ''}
     ${!draft && k.explained ? html`<div class="note" style="color:var(--ink)">Short ₹ ${money(-diff)}${k.explained.bills.length ? html`, explained by ${k.explained.bills.length} bill${k.explained.bills.length === 1 ? '' : 's'} the register doesn't show as cash: ${k.explained.bills.map((b) => `${b.billNo} ₹ ${money(b.partPaise)}${b.partPaise < b.amountPaise ? ` of ₹ ${money(b.amountPaise)}` : ''}`).join(', ')}` : ''}${k.explained.unexplainedPaise ? html`${k.explained.bills.length ? ' / ' : ': '}<strong>unexplained ₹ ${money(k.explained.unexplainedPaise)}</strong>` : ''}.</div>` : ''}
     ${k.accepted ? html`<div class="note">Accepted with a note: ${k.accepted}</div>` : ''}
     ${!draft && diff !== null && diff !== 0 && !k.settled ? html`<form id="cashact" class="inset">
@@ -4673,10 +4690,6 @@ function pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills }) {
       <button type="button" class="btn plain dchip" data-excess="${diff}">Book ₹ ${money(diff)} as Cash excess</button></div></div>` : '';
   // Received: earlier bills paid here, then what the page has beyond the register.
   const offers = k.lateOffers ?? [];
-  const offered = offers.reduce((t, x) => t + x.amountPaise, 0);
-  const pageOverReg = pg.receivedPaise - (k.registerCashPaise ?? 0);
-  const rest = recGap - offered;
-  const likely = rest ? bills.filter((b) => b.rgOther?.some((p) => p.amountPaise === Math.abs(rest))) : [];
   const recItems = [
     ...offers.map((x) => box(x.amountPaise, html`<span class="mono">${x.billNo}</span> · ₹ ${money(x.amountPaise)} · a ${dayLabel(x.fromDay)} bill paid here in cash`,
       html`Counted as cash on ${dayLabel(x.fromDay)} (software ₹ ${money(x.swAmountPaise)}), but not in that day's register. The ${dayLabel(k.day)} register writes it as ₹ ${money(x.amountPaise)} cash received: the money is in this drawer. Counting it here also explains ${dayLabel(x.fromDay)}'s cash by ₹ ${money(x.amountPaise)}; the sale stays on ${dayLabel(x.fromDay)}.`,
@@ -4685,24 +4698,65 @@ function pageVsBookr(biz, k, { draft, sales, shouldBe, diff, bills }) {
       ${can ? html`<button type="button" class="btn plain dchip" data-cashlateundo="${x.auditId}" data-bill="${x.billNo}">Undo</button>` : ''}</div>`),
     ...(k.excesses ?? []).map((x) => html`<div class="ent-line" style="border-left:3px solid var(--teal);padding-left:10px"><div>₹ ${money(x.amountPaise)} booked as Cash excess${x.note ? html` · "${x.note}"` : ''}<div class="tiny note">${x.by ? `${x.by}, ` : ''}${when(x.at)}</div></div>
       ${biz.actions.includes('cash.writeoff') ? html`<button type="button" class="btn plain dchip" data-excessundo="${x.id}" data-amt="${x.amountPaise}">Undo</button>` : ''}</div>`),
-    ...(rest ? [box(Math.abs(rest), rest > 0 ? (pageOverReg === rest ? `₹ ${money(rest)} on the page, not in the register` : `₹ ${money(rest)} more on the page than Bookr counts`) : `₹ ${money(-rest)} less on the page than Bookr counts`,
-      html`The register's cash column adds up to ₹ ${money(k.registerCashPaise ?? 0)}; the page says ₹ ${money(pg.receivedPaise)}.${likely.length ? html` Likely: ${likely.map((b, i) => html`${i ? ', ' : ''}<span class="mono">${b.billNo}</span> ₹ ${money(Math.abs(rest))}, written as ${b.rgOther.map((p) => MODE_LABELS[p.mode] ?? p.mode).join(' + ').toLowerCase()} in the register`)}, added into cash on the page by mistake.` : ' A slip on the page, or a bill written as cash on the page only.'}`,
-      html`${k.summaryUploadId ? html`<a class="btn plain dchip" href="#/b/${biz.id}/review/${k.summaryUploadId}">Open the cash page</a>` : ''}${excessForm}`)] : []),
+    ...(excessForm ? [html`<div class="ent-line" style="padding:8px 10px;background:#FFFBEB">${excessForm}</div>`] : []),
   ];
-  const expItems = expGap ? [box(Math.abs(expGap), expGap > 0 ? `₹ ${money(expGap)} more on the page than the approved lines` : `₹ ${money(-expGap)} less on the page than the approved lines`,
-    k.expensesWaiting ? `${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} of ₹ ${money(k.expensesWaitingPaise)} still waiting approval.` : `The page says ₹ ${money(pg.expensesPaise)}; Bookr's approved lines add up to ₹ ${money(bkExp)}. A line on the photo may be missing or read wrong: check the photo, and add the line, or note the page total is wrong.`,
-    (k.expensesWaitingUploadId || k.expensesUploadId) ? html`<a class="btn plain dchip" href="#/b/${biz.id}/review/${k.expensesWaitingUploadId || k.expensesUploadId}">Open the expense page</a>` : '')] : [];
+  // Received, part by part (approved 24 Nov 2026): the register's cash column, then each bill Bookr counts other than
+  // the register, bills paid on another day, cash excess, and anything left.
+  const reg = k.registerCashPaise ?? 0;
+  const moved = bills.filter((b) => (b.countedPaise ?? 0) !== (b.rgCashPaise ?? 0) && !(k.lateIn ?? []).some((x) => x.comparisonId === b.comparisonId));
+  const offerOf = (b) => offers.find((x) => x.comparisonId === b.comparisonId);
+  const billWhy = (b) => (offerOf(b) ? `a ${dayLabel(offerOf(b).fromDay)} bill paid here in cash, not counted yet` : b.rgCashPaise === null ? 'cash in the software, not in the register'
+    : !b.rgCashPaise && b.rgOther.length ? `software cash, register ${b.rgOther.map((x) => `${MODE_LABELS[x.mode] ?? x.mode} ₹${money(x.amountPaise).replace(/\.00$/, '')}`).join(' + ')}`
+    : b.state === 'complimentary' || b.state === 'left_out' ? `${b.state === 'complimentary' ? 'complimentary' : 'left out'}, register cash ₹${money(b.rgCashPaise).replace(/\.00$/, '')}`
+    : `register cash ₹${money(b.rgCashPaise).replace(/\.00$/, '')}, counted ₹${money(b.countedPaise ?? 0).replace(/\.00$/, '')}`);
+  const parts = [
+    ...moved.map((b) => ({ label: html`<button type="button" class="linkbtn mono" data-bill-drawer="${b.billNo}|${k.day}">${b.billNo}</button> <span class="note">${billWhy(b)}</span>`, v: (b.countedPaise ?? 0) - (b.rgCashPaise ?? 0) })),
+    ...(k.lateOut ?? []).map((x) => ({ label: html`<span class="mono">${x.billNo}</span> <span class="note">paid in cash on ${dayLabel(x.day)}: in that drawer</span>`, v: -x.amountPaise })),
+    ...(excessP ? [{ label: html`<span class="note">Cash excess booked</span>`, v: excessP }] : []),
+  ];
+  const leftover = bkRec - reg - parts.reduce((t, x) => t + x.v, 0);
+  if (leftover) parts.push({ label: html`<span class="note">Other</span>`, v: leftover });
+  const regGap = pg.receivedPaise - reg;
+  const likely = regGap ? bills.filter((b) => b.rgOther?.some((x) => x.amountPaise === regGap)) : [];
+  const pageLink = k.summaryUploadId ? html` <a href="#/b/${biz.id}/review/${k.summaryUploadId}">Check the page</a>` : '';
+  const regNote = !regGap ? '' : likely.length && regGap > 0
+    ? html`${likely.map((b, i) => html`${i ? ', ' : ''}<span class="mono">${b.billNo}</span>`)} ₹ ${money(regGap)} is written as ${likely[0].rgOther.map((x) => MODE_LABELS[x.mode] ?? x.mode).join(' + ').toLowerCase()} in the register, likely added into cash on the page by mistake.${pageLink}`
+    : html`The page's Received total looks added wrong: its cash lines come to ₹ ${money(reg)}, not ₹ ${money(pg.receivedPaise)}.${pageLink}`;
+  const sub = (key, cells, open) => html`<tr data-pvbpart="${key}" ${open ? '' : 'hidden'} style="font-size:13px;background:#FAFAF9">${cells}</tr>`;
+  const recOpen = !!recGap, expOpen = !!expGap;
+  const recRows = html`${sub('rec', html`<td style="padding-left:22px">Register cash column adds up to</td><td class="amount">${money(pg.receivedPaise)}</td><td class="amount">${money(reg)}</td><td class="amount">${signed(regGap)}</td>`, recOpen)}
+    ${regNote ? sub('rec', html`<td colspan="4" style="padding-left:22px;color:#92400E" class="tiny">${regNote}</td>`, recOpen) : ''}
+    ${parts.map((x) => sub('rec', html`<td style="padding-left:22px">${x.label}</td><td class="amount note">—</td><td class="amount">${x.v > 0 ? '+' : '−'}${money(Math.abs(x.v))}</td><td class="amount">${signed(-x.v)}</td>`, recOpen))}`;
+  // Expenses, part by part: lines waiting approval (each with its head, or "needs head"), then the rest Bookr takes off.
+  const waitLines = (k.expenseLines ?? []).filter((x) => x.status !== 'approved');
+  const noHead = waitLines.filter((x) => !x.head).length;
+  const expLink = (k.expensesWaitingUploadId || k.expensesUploadId) ? html` <a href="#/b/${biz.id}/review/${k.expensesWaitingUploadId || k.expensesUploadId}">Open the expense page</a>` : '';
+  const expParts = [
+    ...(k.expensesPaise ? [[`Approved lines`, k.expensesPaise]] : []),
+    ...(k.shortagePaise ? [['Cash shortage booked', k.shortagePaise]] : []),
+    ...(k.depositedPaise ? [['Cash deposited to bank', k.depositedPaise]] : []),
+    ...(k.drawnPaise ? [['Cash from bank (added back)', -k.drawnPaise]] : []),
+  ];
+  const expRows = html`${k.expensesWaiting ? sub('exp', html`<td colspan="4" style="padding-left:22px"><strong>${k.expensesWaiting} line${k.expensesWaiting === 1 ? '' : 's'} waiting approval</strong>${noHead ? ` · ${noHead} need${noHead === 1 ? 's' : ''} a head` : ''} · ₹ ${money(k.expensesWaitingPaise ?? 0)}${expLink}</td>`, expOpen) : ''}
+    ${waitLines.map((x) => sub('exp', html`<td colspan="4" style="padding-left:34px" class="tiny">${x.lineNo ?? ''}${x.lineNo != null ? ' · ' : ''}${x.narration ?? 'Line'} <span class="amount">₹ ${money(x.amountPaise)}</span> — ${x.head ? x.head : html`<span style="color:#92400E">needs head</span>`}</td>`, expOpen))}
+    ${expParts.map(([l, v]) => sub('exp', html`<td style="padding-left:22px">${l}</td><td class="amount note">—</td><td class="amount">${money(v)}</td><td></td>`, expOpen))}
+    ${expGap && !k.expensesWaiting ? sub('exp', html`<td colspan="4" style="padding-left:22px;color:#92400E" class="tiny">The page says ₹ ${money(pg.expensesPaise)}; Bookr's approved lines add up to ₹ ${money(bkExp)}. A line on the photo may be missing or read wrong.${expLink}</td>`, expOpen) : ''}`;
+  const tog = (key, open, any) => (any ? html`<button type="button" class="linkbtn" data-pvbopen="${key}" aria-expanded="${open}" aria-label="Show the parts" style="width:16px">${open ? '▾' : '▸'}</button>` : html`<span style="display:inline-block;width:16px"></span>`);
+  // Once the waiting lines are approved, what is left apart.
+  const afterApprove = k.expensesWaiting && diff != null ? diff + (k.expensesWaitingPaise ?? 0) : null;
   return html`<div class="inset" style="display:flex;flex-direction:column;gap:8px">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><strong>Cash page vs Bookr</strong>${diff ? html`<span class="chip wait">₹ ${money(Math.abs(diff))} apart</span>` : html`<span class="chip ok">same</span>`}</div>
     <div class="scroll"><table style="min-width:420px"><colgroup><col><col style="width:110px"><col style="width:110px"><col style="width:90px"></colgroup>
       <thead><tr><th>Line</th><th style="text-align:right">Cash page</th><th style="text-align:right">Bookr</th><th style="text-align:right">Gap</th></tr></thead>
-      <tbody><tr><td>Cash at the start</td><td class="amount">${pg.openingPaise == null ? '—' : money(pg.openingPaise)}</td><td class="amount">${money(k.openingPaise ?? 0)}</td><td class="amount">${pg.openingPaise == null ? '' : signed(pg.openingPaise - (k.openingPaise ?? 0))}</td></tr>
-      <tr><td>+ Received</td><td class="amount">${money(pg.receivedPaise)}</td><td class="amount">${money(bkRec)}</td><td class="amount">${signed(recGap)}</td></tr>
-      <tr><td>− Expenses</td><td class="amount">${money(pg.expensesPaise)}</td><td class="amount">${money(bkExp)}</td><td class="amount">${signed(-expGap)}</td></tr>
-      <tr style="font-weight:600"><td>= Cash in hand</td><td class="amount">${money(pg.cashInHandPaise ?? k.countedPaise)}</td><td class="amount">${money(shouldBe)}</td><td class="amount">${signed(diff)}</td></tr></tbody></table></div>
+      <tbody><tr><td>${tog('', false, false)}Cash at the start</td><td class="amount">${pg.openingPaise == null ? '—' : money(pg.openingPaise)}</td><td class="amount">${money(k.openingPaise ?? 0)}</td><td class="amount">${pg.openingPaise == null ? '' : signed(pg.openingPaise - (k.openingPaise ?? 0))}</td></tr>
+      <tr><td>${tog('rec', recOpen, true)}+ Received</td><td class="amount">${money(pg.receivedPaise)}</td><td class="amount">${money(bkRec)}</td><td class="amount">${signed(recGap)}</td></tr>
+      ${recRows}
+      <tr><td>${tog('exp', expOpen, !!(k.expensesWaiting || expParts.length || expGap))}− Expenses</td><td class="amount">${money(pg.expensesPaise)}</td><td class="amount">${money(bkExp)}</td><td class="amount">${signed(-expGap)}</td></tr>
+      ${expRows}
+      <tr style="font-weight:600"><td>${tog('', false, false)}= Cash in hand</td><td class="amount">${money(pg.cashInHandPaise ?? k.countedPaise)}</td><td class="amount">${money(shouldBe)}</td><td class="amount">${signed(diff)}</td></tr></tbody></table></div>
+    ${afterApprove != null ? html`<div class="tiny note">Once the ${k.expensesWaiting} line${k.expensesWaiting === 1 ? ' is' : 's are'} approved: ${afterApprove === 0 ? 'the page and Bookr agree' : html`₹ ${money(Math.abs(afterApprove))} apart${expGap === (k.expensesWaitingPaise ?? 0) && afterApprove === recGap ? ', all of it in Received' : ''}`}.</div>` : ''}
     ${ownSum ? html`<div class="tiny note">The cash page's ₹ ${money(pg.cashInHandPaise)} is its own sum (start + received − expenses), not a separate count: the gap is the page and Bookr adding up differently.</div>` : ''}
-    ${recItems.length ? html`<strong style="font-size:14px">Why Received is ₹ ${money(Math.abs(recGap))} apart</strong>${recItems}` : ''}
-    ${expItems.length ? html`<strong style="font-size:14px">Why Expenses are ₹ ${money(Math.abs(expGap))} apart</strong>${expItems}` : ''}
+    ${recItems.length ? html`${recItems}` : ''}
   </div>`;
 }
 
@@ -4772,6 +4826,12 @@ let drawerCash = null;
 
 function wireCashPanel(biz, day, reload, msg, k = null) {
   if (k) drawerCash = { day, shouldBePaise: k.confirmed ? k.shouldBePaise : k.draft?.shouldBePaise ?? null, countedPaise: k.countedPaise };
+  // Received and Expenses open to their parts (approved 24 Nov 2026).
+  document.querySelectorAll('#cashpanel [data-pvbopen]').forEach((b) => b.addEventListener('click', () => {
+    const open = b.getAttribute('aria-expanded') !== 'true';
+    b.setAttribute('aria-expanded', String(open)); b.textContent = open ? '▾' : '▸';
+    document.querySelectorAll(`#cashpanel tr[data-pvbpart="${b.dataset.pvbopen}"]`).forEach((tr) => { tr.hidden = !open; });
+  }));
   document.getElementById('cashonly')?.addEventListener('change', (e) => {
     document.querySelectorAll('#cashbills tbody tr').forEach((tr) => { tr.hidden = e.target.checked && !tr.dataset.differs; });
   });

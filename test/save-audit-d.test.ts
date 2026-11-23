@@ -68,6 +68,8 @@ describe('D15 cash after the sales', () => {
     const before = await cashOf(h);
     // 2000 + 1500 − 300 (approved; ₹200 waits) − 400 deposited = 2,800; counted 2,600.
     expect(before).toMatchObject({ expensesPaise: 30000, expensesWaiting: 1, depositedPaise: 40000 });
+    // The day's expense lines, for the Expenses row of Cash page vs Bookr (24 Nov 2026).
+    expect(before.expenseLines.map((x: { amountPaise: number; status: string }) => [x.amountPaise, x.status]).sort()).toEqual([[20000, 'draft'], [30000, 'approved']]);
     expect(before.draft).toEqual({ cashSalesPaise: 150000, shouldBePaise: 280000, differencePaise: -20000 });
     await saveChecked(h);
     expect(await cashOf(h)).toMatchObject({ shouldBePaise: 280000, differencePaise: -20000, settled: false });
