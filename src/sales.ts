@@ -10,7 +10,7 @@ import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
 import { cardAdvancePlans, joinCardAdvanceStatements } from './cardAdvance';
 import { all, newId, now, one, stmt, type DB, SUMMARY_IN_USE } from './db';
-import { addDays, missingInWindow, shiftWindow, type Gap } from './time';
+import { addDays, istDay, missingInWindow, shiftWindow, type Gap } from './time';
 
 export type Difference = 'match' | 'amount' | 'mode' | 'amount_and_mode' | 'missing_in_register' | 'missing_in_software' | 'complimentary';
 export type Decision = 'use_software' | 'use_register' | 'leave_out' | 'carry_forward';
@@ -1347,6 +1347,8 @@ export function suggestBills(
 export interface PendingBill { billNo: string; day: string; amountPaise: number }
 export interface NumberContext {
   day: string;
+  /** YYMMDD of the days around the shift with no software report (23 Nov 2026): their numbers get no two-digit typo flags. */
+  missing?: Set<string>;
   /** Software bills with no register line: this shift's, and earlier shifts' still waiting. */
   pending: PendingBill[];
   /** Highest running number by YYMMDD, and whether the reports are complete enough to trust it. */
@@ -1386,6 +1388,9 @@ export function withDatePrefix(billNo: string, day: string): string[] {
 export function numberFlags(row: { bill_no: string; amount_paise: number; gross_paise?: number }, ctx: NumberContext): NumberFlag[] {
   const w = digits(row.bill_no ?? '');
   if (!w) return [];
+  // Its day's software report is not uploaded (23 Nov 2026): the real bill may be in that report, so only a bill one
+  // digit off is still worth saying; two digits off is not.
+  const noReport = isNewPosBill(row.bill_no) && !!ctx.missing?.has(row.bill_no.slice(0, 6));
   const blank = { billNo: null, day: null, sameShift: false, amountPaise: null, date: null, seq: null, max: null };
   const candidates = withDatePrefix(row.bill_no, ctx.day);
   const out: NumberFlag[] = [];
@@ -1394,7 +1399,7 @@ export function numberFlags(row: { bill_no: string; amount_paise: number; gross_
     if (p.amountPaise !== row.amount_paise && p.amountPaise !== row.gross_paise) continue;
     // Misread (Stage 4, 10 Nov 2026): one digit off, or two on a full new POS number; same amount.
     const dist = w.length >= 5 ? billDistance(w, digits(p.billNo)) : 99;
-    const kind = candidates.includes(p.billNo) ? 'pending' : dist === 1 || (dist === 2 && w.length >= 7) ? 'pending_typo' : null;
+    const kind = candidates.includes(p.billNo) ? 'pending' : dist === 1 || (dist === 2 && w.length >= 7 && !noReport) ? 'pending_typo' : null;
     if (kind) out.push({ ...blank, kind, billNo: p.billNo, day: p.day, sameShift: p.day === ctx.day, amountPaise: p.amountPaise });
   }
   for (const c of candidates) {
@@ -1438,8 +1443,13 @@ export async function numberContext(db: DB, businessId: string, day: string): Pr
     const complete = had?.complete ?? missingInWindow({ from: w.from - 8 * 3600e3, to: w.to }, covers).length === 0;
     ranges.set(date, { max: Math.max(had?.max ?? 0, +b.bill_no.slice(6)), complete });
   }
+  // Calendar days around the shift that no report touches, once they are over (see daysWithoutReport).
+  const today = istDay(Date.now());
+  const missing = new Set([addDays(day, -1), day, addDays(day, 1)].filter((d) => d < today && !covers.some((c) => {
+    const f = shiftWindow(d).from - 8 * 3600e3; return c.from < f + 86400e3 && c.to >= f;
+  })).map(yymmdd));
   return {
-    day, ranges, taken: new Set(written.map((r) => r.bill_no)),
+    day, ranges, taken: new Set(written.map((r) => r.bill_no)), missing,
     pending: [
       ...bills.filter((b) => b.shift_day === day).map((b) => ({ billNo: b.bill_no, day, amountPaise: b.amount_paise })),
       // The next shift's software bills too: a bill written in the register before the software bill is printed.

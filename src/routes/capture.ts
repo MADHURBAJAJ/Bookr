@@ -13,6 +13,7 @@ import { columnSlipMoves, findColumnSlip, findSlip, TOTAL_KEYS, type ColumnTotal
 import { can, type Role } from '../permissions';
 import { columnHints } from '../columnHints';
 import { restoreRemoved, shiftTwinRows, writtenTwice } from '../writtenTwice';
+import { billDate, daysWithoutReport } from '../reportDays';
 
 export const captureRoutes = new Hono<AppEnv>();
 
@@ -299,6 +300,10 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
       return [x.rowId, { day: x.day, amountPaise: x.amount, mode: x.mode, line: { rowId, uploadId, lineNo: Number(lineNo), amountPaise: Number(amount) } }];
     }));
     const pageNo = new Map(pages.map((p, i) => [p.id, i + 1]));
+    // Days whose software report is not uploaded (approved 23 Nov 2026): the shift's own day and the next morning's,
+    // and the dates of the shift's bill numbers within a week. Their lines are not called "Not in software report".
+    const reportMissing = shift?.status === 'confirmed' ? [] : await daysWithoutReport(db, bid, [u.business_day, addDays(u.business_day, 1),
+      ...shiftRows.map((r) => billDate(r.bill_no)).filter((d): d is string => !!d && d >= addDays(u.business_day, -7) && d <= addDays(u.business_day, 1))]);
     const slip = pageSlip(rows as unknown as SlipRow[], pays as unknown as { registerRowId: string; amountPaise: number }[]);
     const colSlip = shift?.status === 'confirmed' ? null : pageColumnSlip(rows as unknown as SlipRow[], pays as unknown as ColPay[]);
     return c.json({
@@ -309,7 +314,7 @@ captureRoutes.get('/businesses/:businessId/uploads/:uploadId', requireRole('rows
         return { ...JSON.parse(d.before), ...after, at: d.at, by: d.by, rowId: d.rowId, ...(after.auto ? { restorable: shift?.status !== 'confirmed' } : {}) };
       }),
       twinOffers: shift?.status === 'confirmed' ? [] : await twinOffersFor(db, bid, u.business_day, new Set(rows.map((r) => r.id))),
-      ...base, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
+      ...base, reportMissing, shiftStatus: shift?.status ?? 'open', softwareBills: swBills.length, pageNo: pageNo.get(u.id) ?? 1, shiftPages: pages.length,
       slip: slip && { direction: slip.direction, lines: slip.lineNos, receiver: slip.receiverLineNo },
       // The shift's software bills, for the bill box's suggestions as you type.
       softwareList: swBills.map((b) => ({ billNo: b.bill_no, amountPaise: b.amount_paise, mode: b.mode, paidAt: b.paid_at, used: shiftRows.some((r) => r.bill_no === b.bill_no) })),

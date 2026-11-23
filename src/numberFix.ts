@@ -1,6 +1,7 @@
 import { all, newId, now, stmt, type DB } from './db';
 import { addDays } from './time';
 import { parsePaise } from './money';
+import { daysWithoutReport } from './reportDays';
 import { completeBillNo, dateFormNumber, IMPOSSIBLE_TIMES, splitPaymentCell } from './ocr';
 
 /**
@@ -9,7 +10,7 @@ import { completeBillNo, dateFormNumber, IMPOSSIBLE_TIMES, splitPaymentCell } fr
  * still missing on the register anywhere (a room bill paid on the next shift's page).
  */
 export async function numberContext(db: DB, businessId: string, day: string, exceptUpload?: string) {
-  const [sw, taken, prev] = await Promise.all([
+  const [sw, taken, prev, missingDates] = await Promise.all([
     all<{ bill_no: string; amount_paise: number }>(db,
       'SELECT bill_no, max(amount_paise) AS amount_paise FROM software_bills WHERE business_id = ? AND shift_day = ? GROUP BY bill_no', businessId, day),
     all<{ bill_no: string }>(db, `SELECT DISTINCT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ?${exceptUpload ? ' AND upload_id <> ?' : ''}`,
@@ -17,13 +18,15 @@ export async function numberContext(db: DB, businessId: string, day: string, exc
     all<{ bill_no: string; amount_paise: number }>(db, `SELECT s.bill_no, max(s.amount_paise) AS amount_paise FROM software_bills s
       WHERE s.business_id = ? AND s.shift_day = ? AND NOT EXISTS (SELECT 1 FROM register_rows r WHERE r.business_id = s.business_id AND r.bill_no = s.bill_no)
       GROUP BY s.bill_no`, businessId, addDays(day, -1)),
+    // Dates whose software report is not uploaded: their numbers are not completed to another day's bills.
+    daysWithoutReport(db, businessId, [addDays(day, -1), day, addDays(day, 1)]),
   ]);
   return {
     softwareBills: sw.map((b) => b.bill_no),
     softwareAmounts: Object.fromEntries(sw.map((b) => [b.bill_no, b.amount_paise])) as Record<string, number>,
     takenBills: taken.map((b) => b.bill_no),
     previousBills: Object.fromEntries(prev.map((b) => [b.bill_no, b.amount_paise])) as Record<string, number>,
-    day,
+    day, missingDates,
   };
 }
 
@@ -54,6 +57,7 @@ export async function recheckDay(db: DB, businessId: string, day: string): Promi
   const personal = new Set(edited.map((e) => e.row_id));
   const software = new Map(ctx.softwareBills.map((b) => [b, ctx.softwareAmounts[b]]));
   const previous = new Map(Object.entries(ctx.previousBills));
+  const missing = new Set(ctx.missingDates.map((d) => d.replace(/-/g, '').slice(2)));
   const allBills = await all<{ bill_no: string }>(db, 'SELECT bill_no FROM register_rows WHERE business_id = ? AND shift_day = ?', businessId, day);
   const used = new Set(allBills.map((b) => b.bill_no));
   const t = now();
@@ -80,7 +84,7 @@ export async function recheckDay(db: DB, businessId: string, day: string): Promi
     if (read && (asRead || asCompleted) && !(asRead && software.has(r.bill_no))) {
       const from = o.completedFrom ?? read;
       if (asCompleted) used.delete(r.bill_no);
-      const hit = completeBillNo(from, [r.amount_paise, paid], software, used, previous);
+      const hit = completeBillNo(from, [r.amount_paise, paid], software, used, previous, missing);
       let to: string | null = hit && hit !== 'several' ? hit.billNo : null;
       if (!to) to = dateFormNumber(from, day);
       if (!to && asCompleted) to = from; // the old completion no longer fits: back to the number as read

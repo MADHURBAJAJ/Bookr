@@ -422,7 +422,10 @@ export type NumberHit = { billNo: string; how: 'end' | 'missing' | 'digit' } | '
  * on the register (a room paid the next day). Several bills fitting one step: left for a person.
  * Without the software amounts (old callers), the end of a number is enough, as before.
  */
-export function completeBillNo(read: string, amounts: number[], software: Map<string, number>, used: Set<string>, previous: Map<string, number> = new Map()): NumberHit {
+export function completeBillNo(read: string, amounts: number[], software: Map<string, number>, used: Set<string>, previous: Map<string, number> = new Map(),
+  missing: Set<string> = new Set()): NumberHit {
+  // A full number of a day whose software report is not uploaded (23 Nov 2026): most likely right, kept as written.
+  if (/^\d{7,9}$/.test(read) && missing.has(read.slice(0, 6))) return null;
   const digits = billDigits(read);
   if (digits.length < 2 || software.has(read) || software.has(digits)) return null;
   const free = [...software].filter(([b]) => !used.has(b));
@@ -451,7 +454,7 @@ export function dateFormNumber(read: string, day: string | undefined): string | 
   return `${y.slice(2)}${mo}${d}${Number(m[3])}`;
 }
 
-export interface DraftOpts { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number>; previousBills?: Record<string, number>; day?: string }
+export interface DraftOpts { softwareBills?: string[]; takenBills?: string[]; softwareAmounts?: Record<string, number>; previousBills?: Record<string, number>; day?: string; missingDates?: string[] }
 
 export function draftRegisterRows(r: Reading, opts: DraftOpts = {}): DraftRow[] {
   const rows: DraftRow[] = r.rows.map((row) => {
@@ -480,11 +483,12 @@ export function draftRegisterRows(r: Reading, opts: DraftOpts = {}): DraftRow[] 
   if (sw.size) {
     const amounts = new Map([...sw].map((b) => [b, opts.softwareAmounts?.[b] ?? -1]));
     const previous = new Map(Object.entries(opts.previousBills ?? {}));
+    const missing = new Set((opts.missingDates ?? []).map((d) => d.replace(/-/g, '').slice(2)));
     const used = new Set([...(opts.takenBills ?? []), ...rows.map((x) => x.billNo).filter((b) => sw.has(b))]);
     for (const x of rows) {
       if (!x.billNo || sw.has(x.billNo)) continue;
       const paid = x.pays.reduce((t, p) => t + (p.paise ?? 0), 0);
-      const hit = completeBillNo(x.billNo, [x.amt ?? -1, paid], amounts, used, previous);
+      const hit = completeBillNo(x.billNo, [x.amt ?? -1, paid], amounts, used, previous, missing);
       if (hit && hit !== 'several') {
         x.completedFrom = x.billNo; x.billNo = hit.billNo; used.add(hit.billNo);
         x.unclear.delete('bill_no');

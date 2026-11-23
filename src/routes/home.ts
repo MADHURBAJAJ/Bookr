@@ -10,6 +10,7 @@ import { booksStart } from '../bank';
 import { shiftCards, unsettledDays } from '../cards';
 import { cashCheck } from '../cash';
 import { cardReportsStatus } from '../cardDrive';
+import { daysWithoutReport } from '../reportDays';
 
 export const homeRoutes = new Hono<AppEnv>();
 
@@ -86,6 +87,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     AND closed_at >= ?`, businessId, NOT_BILLED_NOTE, Date.now() - 7 * 86400000));
   const result = {
     today, watchDays: WATCH_DAYS, bringIn: null as null | { day: string; software: number; registerPages: number },
+    missingReports: [] as { day: string; register: boolean }[],
     shifts: { count: 0, list: [] as Awaited<typeof listP> },
     waitingBills: { count: waiting.look.length, late: waiting.look.filter((b) => b.unresolved).length, firstDay: waiting.look[0]?.day ?? null, grey: [...greyBy.values()], notBilled: 0,
       // The same groups as a shift's To do (18 Nov 2026), over every saved shift: each with its count, total and shifts.
@@ -113,6 +115,20 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     one<{ n: number }>(db, "SELECT count(*) AS n FROM uploads WHERE business_id = ? AND business_day = ? AND kind = 'bill_register'", businessId, lastShift),
     one<{ n: number }>(db, "SELECT count(*) AS n FROM shifts WHERE business_id = ? AND shift_day = ? AND status = 'confirmed'", businessId, lastShift),
   ]);
+  // Calendar days of the last SHIFT_DAYS with no software report (approved 23 Nov 2026), from the first report on, and
+  // whether the day's register is in. Only for a business that brings in software reports at all.
+  const missingP = (async () => {
+    const first = await one<{ at: number | null }>(db, 'SELECT min(covers_from) AS at FROM sales_reports WHERE business_id = ? AND replaced_by IS NULL', businessId);
+    if (first?.at == null) return;
+    const from = [istDay(first.at), since0].sort()[1];
+    const days: string[] = [];
+    for (let d = from; d < today; d = addDays(d, 1)) days.push(d);
+    const missing = await daysWithoutReport(db, businessId, days, today);
+    if (!missing.length) return;
+    const reg = await all<{ day: string }>(db, `SELECT DISTINCT business_day AS day FROM uploads WHERE business_id = ? AND kind = 'bill_register' AND business_day BETWEEN ? AND ?`,
+      businessId, missing[0], missing[missing.length - 1]);
+    result.missingReports = missing.map((d) => ({ day: d, register: reg.some((r) => r.day === d) }));
+  })();
   const bankP = (async () => {
   if (bank) {
     const [accounts, unbooked, unsettled, cardStatus] = await Promise.all([
@@ -164,7 +180,7 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     result.photos = { count: pages.reduce((t, p) => t + p.count, 0), paise: pages.reduce((t, p) => t + p.paise, 0), pages };
   }
   })();
-  const [list, notBilled, [sw, reg, saved]] = await Promise.all([listP, notBilledP, bringInP, bankP, decideP, approveP]);
+  const [list, notBilled, [sw, reg, saved]] = await Promise.all([listP, notBilledP, bringInP, bankP, decideP, approveP, missingP]);
   const open = list.filter((s) => s.status !== 'confirmed' || (s.bank && s.bank.billsLeft + s.bank.creditsLeft + s.bank.cardsLeft > 0));
   // Every shift to finish, for the strip of days on Today (18 Nov 2026).
   result.shifts = { count: open.length, list: open.slice(0, MAX_SHIFTS) };

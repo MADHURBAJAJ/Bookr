@@ -664,6 +664,17 @@ async function dashboardView(biz) {
     <div class="td-upto">${upto}${f.bank ? html`<button class="btn plain" id="dashsync" type="button" style="min-height:32px">Sync</button>` : ''}</div><div id="dashmsg"></div>
     ${next ? html`<section class="card td-next"><div><div class="note">Next</div><div class="td-nt">${next.title}</div>${next.why ? html`<div class="note">${next.why}</div>` : ''}</div>
       <a class="btn" href="${next.href}">${next.label} ›</a></section>` : html`<div class="ok-msg">Nothing waiting.</div>`}
+    ${h.missingReports?.length && can('sales.import') ? (() => {
+      // Software report not uploaded (approved 23 Nov 2026): one line per day, or per run of days alike, oldest first.
+      const runs = [];
+      for (const m of h.missingReports) {
+        const last = runs.at(-1);
+        if (last && last.register === m.register && addDaysIso(last.to, 1) === m.day) last.to = m.day; else runs.push({ from: m.day, to: m.day, register: m.register });
+      }
+      const label = (r) => (r.from === r.to ? short(r.from) : r.from.slice(5, 7) === r.to.slice(5, 7) ? `${short(r.from).split(' ')[0]} – ${short(r.to)}` : `${short(r.from)} – ${short(r.to)}`);
+      return html`<section class="card" style="gap:4px"><h2>Software report not uploaded</h2>
+        ${runs.map((r) => html`<div class="list-row"><strong>${label(r)}</strong><span class="note">${r.register ? 'register in' : 'no register yet'}</span></div>`)}
+        <div><a class="btn plain" href="${screenHref(biz, 'bringin', h.missingReports[0].day)}">Upload software reports ›</a></div></section>`; })() : ''}
     ${list.length ? html`<section class="card" style="gap:8px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>Shifts · ${nOf(list.filter((s) => s.stage !== 'saved').length, 'shift')} not saved</h2><span class="note">Press a day to open it</span></div>
       <div class="td-strip">${list.map((s, i) => html`<a class="td-day ${STAGES[s.stage][0]}" href="${hrefOf(s)}" title="${dayLabel(s.day)} · ${STAGES[s.stage][1]}">${short(s.day).split(' ')[0]}${i === 0 || s.day.slice(5, 7) !== list[i - 1].day.slice(5, 7) ? html`<small>${short(s.day).split(' ')[1]}</small>` : ''}</a>`)}</div>
@@ -2442,7 +2453,10 @@ function rowIssues(r) {
   const odMode = (m) => (m === 'upi' ? 'UPI' : m ?? '');
   const rowMode = r.payments.length === 1 ? r.payments[0].mode : null;
   const cp = r.copyOf;
-  if (cp && !od && bm && !bm.exact) {
+  // Its day's software report is not uploaded (23 Nov 2026): grey, with no other numbers offered.
+  const noReport = bm && !bm.exact && regMissing.includes(billDateOf(r.billNo));
+  if (noReport) info.push(`${dayLabel(billDateOf(r.billNo)).replace(/\s\d{4}$/, '')} report not uploaded`);
+  else if (cp && !od && bm && !bm.exact) {
     // Already on another day (approved 21 Nov 2026): in that day's software report and register, most likely written twice.
     const d = dayLabel(cp.day).replace(/\s\d{4}$/, '');
     const where = html`Bill <span class="mono">${r.billNo}</span> is a ${d} bill: ₹ ${rs(cp.amountPaise)} ${odMode(cp.mode)} in the ${d} software report and on line ${cp.line.lineNo} of the ${d} register`;
@@ -2604,6 +2618,16 @@ const netOf = (r) => r.amountPaise - (r.discountPaise ?? 0);
 /** A bill whose written payments do not equal its amount after discount (complimentary bills with none are fine). */
 // Rows of the register page on screen, for bills paid together (a group = head row + rows paid with it).
 let regRows = [];
+// Days whose software report is not uploaded (approved 23 Nov 2026), from the server: their bills are not called missing.
+let regMissing = [];
+/** The calendar day a new POS number was printed on: 26111313 → 2026-11-13. */
+const billDateOf = (b) => { const m = /^(\d{2})(\d{2})(\d{2})\d{1,3}$/.exec(b ?? ''); return m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31 ? `20${m[1]}-${m[2]}-${m[3]}` : null; };
+/** "12 and 13 Nov", "30 Oct and 1 Nov", "12, 13 and 15 Nov". */
+function daysListText(days) {
+  const parts = days.map((d) => { const [dd, mon] = new Date(`${d}T12:00:00+05:30`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' }).split(' '); return { dd, mon }; });
+  const words = parts.map((x, i) => (parts[i + 1]?.mon === x.mon ? x.dd : `${x.dd} ${x.mon}`));
+  return words.length > 1 ? `${words.slice(0, -1).join(', ')} and ${words.at(-1)}` : words[0] ?? '';
+}
 let regOffers = [];
 /** This page's rows plus the shift's rows on its other pages (bills paid together can run across sheets). */
 const shiftRowsOf = (u) => [...u.rows, ...(u.otherPageRows ?? []).map((x) => ({ ...x, elsewhere: true }))];
@@ -3018,6 +3042,7 @@ function regRowsHeadHtml(u) {
 function registerPanel(biz, u) {
   regRows = shiftRowsOf(u);
   regOffers = u.twinOffers ?? [];
+  regMissing = u.reportMissing ?? [];
   const locked = u.shiftStatus === 'confirmed';
   const written = u.pageWrittenTotalPaise;
   return html`
@@ -3026,6 +3051,7 @@ function registerPanel(biz, u) {
         : html`<div class="note">Fix anything that differs from the photo, then tick.
           <details class="howto"><summary>How this works</summary><kbd>Enter</kbd> ticks the row and moves on, <kbd>↑</kbd><kbd>↓</kbd> move between rows. Every change saves when you leave the cell. Red means it needs you: Claude could not read the cell, the bill number is not in the software report, or the payments do not add up. Amber was filled in by Bookr; check it against the photo. When every row is ticked and the payments match, an Owner or Accountant confirms the shift on <a href="#/b/${biz.id}/compare/${u.day}">Compare sales</a>, which locks this page. Use ✎ for a bill paid together with another, or paid in two ways in one column.</details></div>`}
       <div class="rv-bar" id="rvbar">${regBarHtml(u)}</div>
+      ${regMissing.length && !locked ? html`<div class="demo-band" style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>Software report not uploaded for ${daysListText(regMissing)}</span>${biz.actions.includes('sales.import') ? html`<a href="${screenHref(biz, 'bringin', regMissing[0])}">Upload</a>` : ''}</div>` : ''}
       <div id="regtools">${regToolsHtml(u, locked)}</div>
       ${locked ? '' : html`<div class="rv-cards" id="regcards"></div><div id="rowshead"></div>`}
       ${u.fromSoftware ? '' : html`<div class="strip" id="strip"><canvas></canvas><span class="band"></span>
@@ -3287,6 +3313,7 @@ function wireInlineRows(biz, u, strip) {
       u.softwareList = fresh.softwareList;
       u.pageWrittenTotalPaise = fresh.pageWrittenTotalPaise; u.columnTotals = fresh.columnTotals; u.deletedRows = fresh.deletedRows;
       u.twinOffers = fresh.twinOffers; regOffers = u.twinOffers ?? [];
+      u.reportMissing = fresh.reportMissing; regMissing = u.reportMissing ?? [];
       regRows = shiftRowsOf(u);
       // Redraw every row: fixing one bill number changes what the others are offered.
       redraw();
