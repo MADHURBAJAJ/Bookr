@@ -176,4 +176,41 @@ describe('one bill on two days', () => {
     // An Undo starts the count again.
     expect((await get()).twoDayRight).toEqual({});
   });
+
+  it('paid now on a saved day: the extra sale goes without reopening, the drawers move, and Undo puts it back', async () => {
+    const h = await hotel();
+    await h.software([['2610312', '31 21:00', 'CASH', '209'], ['2611012', '1 10:00', 'CASH', '50']], istToMs(2026, 11, 2, 8, 0, 0));
+    await h.register([{ no: '2610312', amount: '210', pays: [['upi', '210']] }]);
+    await h.register([{ no: '2611012', amount: '50', pays: [['cash', '50']], day: '2026-11-01' }, { no: '2610312', amount: '210', pays: [['cash', '210']], day: '2026-11-01' }]);
+    const copyRow = h.rows['2610312'];
+    await h.view('2026-10-31');
+    await h.decideRest('2026-10-31', (c: any) => (c.billNo === '2610312' ? 'use_software' : undefined));
+    await h.confirm('2026-10-31');
+    // Saved the old way: the later line counted as a new cash sale.
+    await h.view('2026-11-01');
+    await h.decideRest('2026-11-01');
+    await h.confirm('2026-11-01');
+    const sales = async () => (await sql`SELECT shift_day, amount_paise FROM transactions WHERE bill_no = '2610312' AND type = 'income' ORDER BY shift_day`).map((x: any) => [x.shift_day, x.amount_paise]);
+    expect(await sales()).toEqual([['2026-10-31', 20900], ['2026-11-01', 21000]]);
+    await count(h.bid, '2026-10-30', 1000);
+    await count(h.bid, '2026-10-31', 1000);
+    await count(h.bid, '2026-11-01', 1260);
+    const acc = h.clients.accountant;
+    const base = `/businesses/${h.bid}`;
+    const diff = async (d: string) => (await acc.get(`${base}/shifts/${d}/cash`)).json.differencePaise;
+    expect([await diff('2026-10-31'), await diff('2026-11-01')]).toEqual([-20900, 0]);
+
+    const res = await acc.post(`${base}/register-rows/${copyRow}/two-days`, { action: 'settle' });
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    expect(await sales()).toEqual([['2026-10-31', 20900]]);
+    expect((await sql`SELECT decision, note FROM bill_comparisons WHERE register_row_id = ${copyRow}`)[0]).toMatchObject({ decision: 'leave_out', note: 'Paid now: 2026-10-31 bill 2610312' });
+    expect((await sql`SELECT status FROM shifts WHERE shift_day = '2026-11-01' AND business_id = ${h.bid}`)[0].status).toBe('confirmed');
+    // 1 Nov's drawer still balances (₹210 now for the 31 Oct bill); 31 Oct is short only the ₹1 round-off it was billed over.
+    expect([await diff('2026-10-31'), await diff('2026-11-01')]).toEqual([100, 0]);
+
+    expect((await acc.post(`${base}/register-rows/${copyRow}/two-days/undo`, {})).status).toBe(200);
+    expect(await sales()).toEqual([['2026-10-31', 20900], ['2026-11-01', 21000]]);
+    expect((await sql`SELECT decision FROM bill_comparisons WHERE register_row_id = ${copyRow}`)[0].decision).toBe('use_register');
+    expect([await diff('2026-10-31'), await diff('2026-11-01')]).toEqual([-20900, 0]);
+  });
 });

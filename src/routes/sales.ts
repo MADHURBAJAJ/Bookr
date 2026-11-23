@@ -21,6 +21,7 @@ import { pendingBills, pendingRange } from '../pending';
 import { allBills, billsRange } from '../billsReport';
 import { paidLaterLines } from '../paidLater';
 import { twoDaysFor } from '../twoDays';
+import { settleSaved, undoSettleSaved } from '../settleSaved';
 import { cashCheck, cashPairOf, EXCESS_HEAD, LEAVE_OUT_REASONS, SHORTAGE_HEAD, shortageToReverse } from '../cash';
 import { CASH_BY_UPI_MIN, cashBills, complimentaryMarks, isPrepaid, complimentaryBills, confirmShift, isCounted, isNewPosBill, LARGE_DISCOUNT_PCT, largeDiscounts, NEEDS_DECISION, ONE_SIDED, otherDays, waitingBills, WATCH_DAYS, refreshComparisons, reopenShift, shiftStatement, shiftView, type Decision } from '../sales';
 
@@ -1229,6 +1230,17 @@ salesRoutes.post('/businesses/:businessId/register-rows/:rowId/two-days', requir
     ]);
     return c.json({ ok: true });
   }
+  if (action === 'settle' && td!.here?.confirmed) {
+    // The later day is saved (approved 23 Nov 2026): settled there without reopening it.
+    const mine = await one<{ id: string }>(db, 'SELECT id FROM bill_comparisons WHERE business_id = ? AND register_row_id = ?', bid, rowId);
+    const homeCmp = await one<{ id: string; decision: string | null }>(db, `SELECT id, decision FROM bill_comparisons WHERE business_id = ? AND shift_day = ? AND bill_no = ?
+      AND software_bill_id IS NOT NULL`, bid, td!.home.day, here!.bill_no);
+    if (!mine || !homeCmp) fail(409, 'Compare both days first.');
+    if (homeCmp!.decision && homeCmp!.decision !== 'use_software') fail(409, `Bill ${here!.bill_no} is counted as ${homeCmp!.decision === 'use_register' ? 'UPI' : 'not a sale'} on ${td!.home.day}: change it to cash there first.`);
+    await settleSaved(db, bid, { rowId, comparisonId: mine!.id, homeComparisonId: homeCmp!.id, billNo: here!.bill_no, day: here!.shift_day, homeDay: td!.home.day,
+      homeRowId: td!.home.rowId, cashPaise: hp.filter((p) => p.mode === 'cash').reduce((n, p) => n + p.amount_paise, 0), swAmountPaise: td!.home.swAmountPaise }, c.get('user').id);
+    return c.json({ ok: true });
+  }
   // Settling changes only this day: the bill's own day stays as saved. An advance changes the bill's own line too.
   const shifts = await all<{ shift_day: string }>(db, "SELECT shift_day FROM shifts WHERE business_id = ? AND shift_day IN (?, ?) AND status = 'confirmed'",
     bid, here!.shift_day, action === 'advance' ? td!.home.day : here!.shift_day);
@@ -1293,6 +1305,10 @@ salesRoutes.post('/businesses/:businessId/register-rows/:rowId/two-days/undo', r
   if (!a) fail(404, 'Nothing to undo.');
   const before = JSON.parse(a!.before) as { discountPaise?: number; tipPaise?: number };
   const after = JSON.parse(a!.after) as { action: string; day: string; homeDay: string; hereComparisonId: string; homeRowId: string; paymentIds?: string[] };
+  if ((after as { savedDay?: boolean }).savedDay) {
+    await undoSettleSaved(db, bid, rowId, a!.after, c.get('user').id);
+    return c.json({ ok: true });
+  }
   if (after.action === 'close') {
     await db.batch([
       stmt(db, 'UPDATE bill_comparisons SET closed_at = NULL, closed_by = NULL, close_note = NULL WHERE id = ? AND business_id = ?', after.hereComparisonId, bid),
