@@ -34,14 +34,14 @@ describe('booking mails', () => {
     // Gmail's forwarding confirmation is kept with its link.
     m = message('bookings@mail.example.test', raw('forwarding-noreply@google.com', 'Gmail Forwarding Confirmation', 'g1', 'Open https://mail-settings.google.com/mail/vf-abc123 to confirm'));
     await receiveMail(m.msg, e as never);
-    // A MakeMyTrip mail before its reader is written: kept, with why it was not read; the same mail again is not kept twice.
+    // A MakeMyTrip mail its reader cannot read: kept, with why it was not read; the same mail again is not kept twice.
     for (let i = 0; i < 2; i++) await receiveMail(message('bookings@mail.example.test', raw('new@mmt.example.test', 'New Booking Received', 'm1', 'Booking X1 | A | 9800011111 | Deluxe | 2026-12-01 | 2026-12-02')).msg, e as never);
     const mails = await q('SELECT source, status, note FROM inbound_mails WHERE business_id = ? ORDER BY created_at', s.businessId);
     expect(mails).toEqual([
       { source: 'gmail', status: 'ignored', note: 'Gmail asks to confirm forwarding to Bookr POS. Open https://mail-settings.google.com/mail/vf-abc123' },
-      { source: 'mmt', status: 'failed', note: expect.stringMatching(/not written yet/) },
+      { source: 'mmt', status: 'failed', note: expect.stringMatching(/did not have a Booking ID/) },
     ]);
-    // Once the reader is in place, "Read again" reads the kept mail.
+    // Once the reader is improved, "Read again" reads the kept mail.
     setReader('mmt', fake);
     const id = (await q("SELECT id FROM inbound_mails WHERE source = 'mmt' AND business_id = ?", s.businessId))[0].id;
     await s.ok(s.counter.post(`${s.B}/mails/${id}/read-again`));

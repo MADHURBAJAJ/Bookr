@@ -123,7 +123,7 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
   if (prev) {
     // A later mail about the same booking (changed dates, cancelled): brought up to date; a checked-in one keeps its status.
     const status = x.cancelled ? 'cancelled' : prev.status === 'checked_in' ? 'checked_in' : prev.status === 'approved' && !problem ? 'approved' : goesIn ? 'approved' : 'new';
-    await stmt(db, `UPDATE bookings SET guest_name = ?, phone = ?, room_type = ?, rooms = ?, guests = ?, check_in = ?, check_out = ?, amount_paise = ?, paid_paise = ?,
+    await stmt(db, `UPDATE bookings SET guest_name = ?, phone = ?, room_type = ?, rooms = ?, guests = ?, check_in = ?, check_out = ?, amount_paise = coalesce(?, amount_paise), paid_paise = coalesce(?, paid_paise),
         status = ?, problem = ?, mail_id = coalesce(?, mail_id), how = CASE WHEN ? = 'approved' AND status <> 'approved' THEN 'auto' ELSE how END, updated_at = ? WHERE id = ?`,
       x.guestName ?? null, phone, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null, x.amountPaise ?? null, x.paidPaise ?? null,
       status, problem, mailId, status, t, prev.id).run();
