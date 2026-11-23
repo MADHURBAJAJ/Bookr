@@ -983,6 +983,34 @@ async function removeLogin(biz, userId, name) {
   return true;
 }
 
+// Also sign in with a mobile number (approved 23 Nov 2026): someone who signs in by email adds a mobile number to their
+// own login, with their password. Either then signs in; a phone invite to that number joins this same login.
+const fmtPhone = (p) => (p ? `${p.slice(3, 8)} ${p.slice(8)}` : '');
+function myPhoneCard() {
+  if (me.user.phoneLogin) return html`<section class="card"><div class="note">You sign in with your mobile number, ${fmtPhone(me.user.phone)}. The owner can change it.</div></section>`;
+  return html`<section class="card" style="gap:10px">
+    <h2 style="margin-bottom:0">Your sign-in</h2>
+    <div class="note">You sign in with ${me.user.email}${me.user.phone ? html`, or your mobile number <b>${fmtPhone(me.user.phone)}</b>` : ''}. Same password either way.</div>
+    <form id="myphone" style="display:flex;flex-direction:column;gap:10px">
+      <div class="field"><label for="mpp">${me.user.phone ? 'Mobile number' : 'Also sign in with mobile number'}</label>
+        <input id="mpp" name="phone" type="tel" inputmode="numeric" autocomplete="tel-national" placeholder="94120 55555" value="${fmtPhone(me.user.phone)}">
+        <span class="note">A phone invite to this number from any business then joins this same login.${me.user.phone ? ' Clear it to sign in by email only.' : ''}</span></div>
+      <div class="field"><label for="mpw">Your Bookr password</label><input id="mpw" name="password" type="password" autocomplete="current-password" required></div>
+      <div class="form-msg"></div>
+      <div><button class="btn plain" type="submit">Save mobile number</button></div>
+    </form></section>`;
+}
+function wireMyPhone(after) {
+  const f = document.getElementById('myphone');
+  f && onSubmit(f, async (x) => {
+    await api('PUT', '/me/phone', { phone: x.phone.trim() || null, password: x.password });
+    me = await api('GET', '/me');
+    GET_CACHE.clear();
+    await after();
+    doneToast(me.user.phone ? `You can now sign in with ${fmtPhone(me.user.phone)} too.` : 'Mobile number taken off. You sign in by email.');
+  });
+}
+
 async function usersView(biz, selectedId) {
   const { members, invites } = await api('GET', `/businesses/${biz.id}/members`);
   const selected = members.find((m) => m.id === selectedId) ?? members.find((m) => m.id !== me.user.id) ?? members[0];
@@ -1052,7 +1080,7 @@ async function usersView(biz, selectedId) {
               <button class="btn plain" type="button" id="reset-copy">Copy reset link</button></div>
             <div class="form-msg" id="reset-msg"></div>
           </div>
-        </section>` : selected && selected.id !== me.user.id && selected.ownerAnywhere ? html`
+        </section>` : selected && selected.id === me.user.id ? myPhoneCard() : selected && selected.id !== me.user.id && selected.ownerAnywhere ? html`
         <section class="card"><div class="note">${selected.name} is an Owner, so only they can change their own password and number.</div></section>` : ''}
       </div>
     </div>
@@ -1084,6 +1112,7 @@ async function usersView(biz, selectedId) {
       flash(`${b.dataset.name}'s login is removed. Their entries stay.`, true);
     } catch (e) { flash(e.message); }
   }));
+  wireMyPhone(() => usersView(biz, selected?.id));
   const pf = document.getElementById('profile');
   pf && onSubmit(pf, async (x) => {
     const payload = { name: x.name };
@@ -9146,7 +9175,16 @@ async function schoolsView(biz, editId) {
       <span style="min-width:0"><span style="font-weight:500">${b.name}</span>
         <span class="tiny">· opening ₹ ${rs(b.openingBalancePaise)} on ${shortDay(b.openingDate)}</span>
         <div data-cbwho="${b.id}" style="margin-top:4px">${who(b)}</div></span>
-      <a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a></div>`;
+      <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+        <a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/schools/${b.id}">Change</a>
+        ${d.can.setup ? html`<button type="button" class="btn plain" style="min-height:32px" data-cbshut="${b.id}" data-used="${b.used ? '1' : ''}" data-name="${b.name}">${b.used ? 'Close book' : 'Remove'}</button>` : ''}</span></div>`;
+  // Closed books (23 Nov 2026): out of every list, their days stay readable, and they can be reopened.
+  const closedSection = (d.closed ?? []).length ? html`<section class="card">
+      <h2 style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">Closed books <span class="tiny" style="font-weight:400">read only</span></h2>
+      ${d.closed.map((b) => html`<div class="list-row"><span style="min-width:0"><span style="font-weight:500">${b.name}</span>
+          <span class="tiny">· ${b.branchName ?? 'Cash holder'}${b.closedAt ? ` · closed ${shortDay(new Date(b.closedAt + IST_MS).toISOString().slice(0, 10))}` : ''}</span></span>
+        <span style="display:flex;gap:6px"><a class="btn plain" style="min-height:32px;display:inline-flex;align-items:center" href="#/b/${biz.id}/cbdays/${b.id}">See days</a>
+          <button type="button" class="btn plain" style="min-height:32px" data-cbreopen="${b.id}" data-name="${b.name}">Reopen</button></span></div>`)}</section>` : '';
   // Cash holders (21 Nov 2026): people not at a school who keep a cash book, e.g. a director.
   const holders = [...d.books.filter((b) => !b.branchId), ...(d.pendingHolders ?? []).map((b) => ({ ...b, pending: true }))];
   const holderSection = html`<section class="card">
@@ -9213,6 +9251,7 @@ async function schoolsView(biz, editId) {
     ${edit}
     ${d.branches.length ? schools : html`<section class="card"><div class="note">Start with your first school, then add its cashiers.</div></section>`}
     ${d.branches.length ? holderSection : ''}
+    ${closedSection}
     <section class="card">
       <form id="cb-branch" class="form-row" style="align-items:flex-end">
         <div class="field"><label for="cbb">${d.branches.length ? 'Add a school' : 'Your first school'}</label><input id="cbb" name="name" placeholder="Chilkana Road" required></div>
@@ -9222,6 +9261,31 @@ async function schoolsView(biz, editId) {
   wireShell();
   if (editing) document.getElementById('cb-edit').scrollIntoView({ block: 'start' });
   const again = () => schoolsView(biz, editId);
+  // Remove a book never used, or close one with history (23 Nov 2026).
+  app.querySelectorAll('[data-cbshut]').forEach((btn) => btn.addEventListener('click', async () => {
+    const used = !!btn.dataset.used;
+    const name = btn.dataset.name;
+    if (!confirm(used
+      ? `Close ${name}'s book? It leaves the lists and nobody can write in it. Its days stay readable under Closed books, and you can reopen it. Their login stays.`
+      : `Remove ${name}'s book? It was never used, so nothing is lost. A waiting invite for it is cancelled. Their login stays.`)) return;
+    btn.disabled = true;
+    try {
+      await (used ? api('POST', `/businesses/${biz.id}/cashbooks/${btn.dataset.cbshut}/close`, { closed: true }) : api('DELETE', `/businesses/${biz.id}/cashbooks/${btn.dataset.cbshut}`, {}));
+      BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+      await schoolsView(biz);
+      doneToast(used ? `${name}'s book is closed.` : `${name}'s book is removed.`,
+        used ? () => api('POST', `/businesses/${biz.id}/cashbooks/${btn.dataset.cbshut}/close`, { closed: false }) : null, () => schoolsView(biz));
+    } catch (e) { alert(e.message); btn.disabled = false; }
+  }));
+  app.querySelectorAll('[data-cbreopen]').forEach((btn) => btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      await api('POST', `/businesses/${biz.id}/cashbooks/${btn.dataset.cbreopen}/close`, { closed: false });
+      BIZ_KEEP.delete(biz.id); GET_CACHE.clear();
+      await schoolsView(biz);
+      doneToast(`${btn.dataset.name}'s book is open again.`);
+    } catch (e) { alert(e.message); btn.disabled = false; }
+  }));
   // Cancel invite (22 Nov 2026): the link stops working and the line goes back to Invite by phone.
   app.querySelectorAll('[data-cbcancel]').forEach((btn) => btn.addEventListener('click', async () => {
     if (!confirm(`Cancel the invite sent to ${btn.dataset.phone}? The link they have stops working.`)) return;
@@ -9658,6 +9722,7 @@ async function cashBookDayView(biz, accountId, dayIn) {
       </nav>
       ${d.before ? html`<div class="note">This book starts on ${dayLabel(b.openingDate)}.</div>` : html`
       <div><div class="cb-big">₹ ${rs(d.shouldPaise)}</div><div class="tiny">should be in hand${f?.sheetIn ? html` · <span class="chip ok">sheet in</span>` : typed.length ? html` · <span class="chip wait">sheet not in yet</span>` : ''}</div></div>`}
+      ${b.closedAt ? html`<div class="cb-box info">This book is closed: read only. Reopen it on Schools and cashiers.</div>` : ''}
       ${waiting}
       ${cbFeeBox(f, d.can.write, { bring: `#/b/${biz.id}/cbmore/${b.id}`, view: `#/b/${biz.id}/fees/${day}` })}
       <section class="card cb-card">
@@ -10061,11 +10126,15 @@ function ownerMoreView(biz) {
       <button type="button" class="btn plain" id="o-pc">Use the PC screens on this phone</button>
       <div class="tiny">Reports, settings, Schools and cashiers and the rest are on the PC screens. You can come back to this from their menu.</div>
       ${installButton()}
+    </section>
+    ${myPhoneCard()}
+    <section class="card" style="gap:8px">
       <button type="button" class="btn plain" id="signout">Sign out</button>
       <div class="tiny">Signed in as ${me.user.name} · ${me.user.email}</div>
     </section></div>`));
   wireShell();
   ownerBadge(biz);
+  wireMyPhone(() => ownerMoreView(biz));
   document.getElementById('o-pc').addEventListener('click', () => {
     try { localStorage.setItem(OWNER_PC_KEY, '1'); } catch { /* ignore */ }
     go(`#/b/${biz.id}/dashboard`);

@@ -21,17 +21,21 @@ export const seesAllBooks = (role: Role) => role !== 'entry_staff';
 export interface Book {
   id: string; name: string; branchId: string | null; branchName: string | null; cashierUserId: string | null; cashierName: string | null;
   openingBalancePaise: number; openingDate: string; cashierRole?: string | null;
+  /** Closed (23 Nov 2026): out of the lists, read only, can be reopened. */
+  closedAt?: number | null;
 }
 const BOOK_SQL = `SELECT a.id, a.name, a.branch_id AS branchId, b.name AS branchName, a.cashier_user_id AS cashierUserId, u.name AS cashierName,
     (SELECT m.role FROM memberships m WHERE m.user_id = a.cashier_user_id AND m.business_id = a.business_id) AS cashierRole,
-    a.opening_balance_paise AS openingBalancePaise, a.opening_date AS openingDate
+    a.opening_balance_paise AS openingBalancePaise, a.opening_date AS openingDate, a.closed_at AS closedAt
   FROM accounts a LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN users u ON u.id = a.cashier_user_id
   WHERE a.business_id = ? AND a.kind = 'cash' AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL)`;
 
-export async function booksOf(db: DB, businessId: string, userId: string, role: Role): Promise<Book[]> {
+/** Open books only, unless `closed` is 'also' (every book) or 'only'. */
+export async function booksOf(db: DB, businessId: string, userId: string, role: Role, closed: 'no' | 'also' | 'only' = 'no'): Promise<Book[]> {
+  const c = closed === 'also' ? '' : closed === 'only' ? ' AND a.closed_at IS NOT NULL' : ' AND a.closed_at IS NULL';
   return seesAllBooks(role)
-    ? all<Book>(db, `${BOOK_SQL} ORDER BY b.name, a.name`, businessId)
-    : all<Book>(db, `${BOOK_SQL} AND a.cashier_user_id = ? ORDER BY b.name, a.name`, businessId, userId);
+    ? all<Book>(db, `${BOOK_SQL}${c} ORDER BY b.name, a.name`, businessId)
+    : all<Book>(db, `${BOOK_SQL}${c} AND a.cashier_user_id = ? ORDER BY b.name, a.name`, businessId, userId);
 }
 
 /** The book, if the caller may see it; 404 otherwise (a cashier cannot probe other books). */
