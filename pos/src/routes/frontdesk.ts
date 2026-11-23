@@ -34,7 +34,12 @@ function roomsOf(b: Business) {
   }));
 }
 
-export interface Bar { room: string; from: string; to: string; kind: 'occ' | 'arr' | 'hold' | 'pos' | 'ooo'; label: string; ref: { type: string; id: string } }
+export interface Bar { room: string; from: string; to: string; kind: 'occ' | 'arr' | 'hold' | 'pos' | 'ooo'; label: string; ref: { type: string; id: string };
+  /** For the chart's colours and filters (25 Nov 2026): the guest, where it was booked, and whether it can be stretched here. */
+  guest?: string | null; src?: 'direct' | 'mmt' | 'gi' | 'web' | 'desk' | null; byHand?: boolean }
+/** Where a booking came from, for the chart: MakeMyTrip, Goibibo, the website, or direct (phone, walk-in, Djubo direct). */
+export const srcOf = (channel: string | null, source: string | null): Bar['src'] =>
+  /goibibo/i.test(channel ?? '') ? 'gi' : /make\s*my\s*trip|\bmmt\b/i.test(channel ?? '') || source === 'mmt' ? 'mmt' : /website|booking engine/i.test(channel ?? '') ? 'web' : 'direct';
 
 /** Everything on the chart from `from` for `days` nights: Djubo / MakeMyTrip bookings, guests in house, reservations made here, rooms out of order. */
 export async function chartData(db: DB, b: Business, from: string, days: number, excludeReservation: string | null = null) {
@@ -53,9 +58,9 @@ export async function chartData(db: DB, b: Business, from: string, days: number,
   };
   const bars: Bar[] = [];
   const unassigned: { label: string; from: string; to: string; kind: string; ref: { type: string; id: string }; roomType: string | null }[] = [];
-  const put = (labels: string[], f: string, e: string, kind: Bar['kind'], label: string, ref: Bar['ref'], roomType: string | null) => {
+  const put = (labels: string[], f: string, e: string, kind: Bar['kind'], label: string, ref: Bar['ref'], roomType: string | null, extra: Partial<Bar> = {}) => {
     const rows = labels.flatMap(rowsFor);
-    if (rows.length) for (const room of rows) bars.push({ room, from: f, to: e, kind, label, ref });
+    if (rows.length) for (const room of rows) bars.push({ room, from: f, to: e, kind, label, ref, ...extra });
     else unassigned.push({ label, from: f, to: e, kind, ref, roomType });
   };
   const [bookings, stays, reservations, blocks] = await Promise.all([
@@ -63,7 +68,10 @@ export async function chartData(db: DB, b: Business, from: string, days: number,
       source: string; stay_id: string | null; room_type: string | null; rooms: number | null }>(db, `SELECT id, guest_name, check_in, check_out, room_labels, status, problem, channel, source, stay_id, room_type, rooms
       FROM bookings k WHERE business_id = ? AND status IN ('new', 'approved', 'checked_in') AND unplaced = 0 AND check_in IS NOT NULL AND check_out IS NOT NULL
       AND check_in < ? AND check_out > ? AND NOT (source = 'mmt' AND match_id IS NOT NULL AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = k.match_id AND m.status <> 'cancelled'))`, b.id, to, from),
-    all<{ id: string; room: string; guest_name: string; check_in: string; plan: string | null }>(db, `SELECT s.id, s.room, s.guest_name, s.check_in,
+    all<{ id: string; room: string; guest_name: string; check_in: string; plan: string | null; channel: string | null; bsource: string | null; booked: number }>(db, `SELECT s.id, s.room, s.guest_name, s.check_in,
+      (SELECT k.channel FROM bookings k WHERE k.stay_id = s.id ORDER BY k.source = 'djubo' DESC LIMIT 1) AS channel,
+      (SELECT k.source FROM bookings k WHERE k.stay_id = s.id ORDER BY k.source = 'djubo' DESC LIMIT 1) AS bsource,
+      EXISTS (SELECT 1 FROM bookings k WHERE k.stay_id = s.id) AS booked,
       coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id), (SELECT r.check_out FROM reservations r WHERE r.id = s.reservation_id)) AS plan
       FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL`, b.id),
     all<{ id: string; guest_name: string; check_in: string; check_out: string; lines: string; status: string; hold_until: number | null; stay_id: string | null; source: string }>(db,
@@ -73,22 +81,32 @@ export async function chartData(db: DB, b: Business, from: string, days: number,
   ]);
   for (const s of stays) {
     const end = s.plan && s.plan > today ? s.plan : addDays(today, 1);
-    put([s.room], s.check_in, end, 'occ', `${s.guest_name} · in house`, { type: 'stay', id: s.id }, null);
+    put([s.room], s.check_in, end, 'occ', `${s.guest_name} · in house`, { type: 'stay', id: s.id }, null,
+      { guest: s.guest_name, src: s.booked ? srcOf(s.channel, s.bsource) : 'direct', byHand: !s.booked });
   }
   for (const k of bookings) {
     if (k.stay_id) continue;   // shown by its stay
     put((k.room_labels ?? '').split(',').map((x) => x.trim()).filter(Boolean), k.check_in, k.check_out, k.problem ? 'hold' : 'arr',
-      `${k.guest_name ?? 'No name'} · ${k.channel ?? (k.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}`, { type: 'booking', id: k.id }, k.room_type);
+      `${k.guest_name ?? 'No name'} · ${k.channel ?? (k.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}`, { type: 'booking', id: k.id }, k.room_type,
+      { guest: k.guest_name, src: srcOf(k.channel, k.source), byHand: false });
   }
   for (const r of reservations) {
     if (r.status === 'hold' && (r.hold_until ?? 0) < t) continue;   // a lapsed hold frees its rooms
     const lines = JSON.parse(r.lines) as { type: string; roomNames?: string[] }[];
     const names = lines.flatMap((l) => l.roomNames ?? []);
     put(names, r.check_in, r.check_out, r.status === 'hold' ? 'hold' : 'pos', `${r.guest_name} · ${r.status === 'hold' ? 'hold' : 'not in Djubo yet'}`, { type: 'reservation', id: r.id },
-      lines.map((l) => l.type).join(', '));
+      lines.map((l) => l.type).join(', '), { guest: r.guest_name, src: 'desk', byHand: true });
   }
-  for (const x of blocks) put([x.room], x.from_day, addDays(x.to_day, 1), 'ooo', `Out of order · ${x.note}`, { type: 'block', id: x.id }, null);
-  return { from, days, today, sections: secs.map((s) => ({ name: s.name, kind: s.kind, rooms: s.rooms })), bars, unassigned };
+  for (const x of blocks) put([x.room], x.from_day, addDays(x.to_day, 1), 'ooo', `Out of order · ${x.note}`, { type: 'block', id: x.id }, null, { guest: null, src: null, byHand: true });
+  // Housekeeping state per room, and the room-type rates, for the chart (25 Nov 2026).
+  const [hk, rates] = await Promise.all([
+    all<{ room: string; status: string }>(db, "SELECT room, status FROM room_status WHERE business_id = ? AND status <> 'inspected'", b.id),
+    one<{ r: string }>(db, 'SELECT room_rates AS r FROM businesses WHERE id = ?', b.id),
+  ]);
+  let rateMap: Record<string, number> = {};
+  try { rateMap = JSON.parse(rates?.r ?? '{}'); } catch { /* none */ }
+  return { from, days, today, sections: secs.map((s) => ({ name: s.name, kind: s.kind, rooms: s.rooms, ratePaise: rateMap[s.name] ?? null })), bars, unassigned,
+    housekeeping: Object.fromEntries(hk.map((x) => [x.room, x.status])) };
 }
 
 /** Rooms of each type free on every night from..to (a room with any bar on those nights is taken). Unplaced bookings of a type take one each. */

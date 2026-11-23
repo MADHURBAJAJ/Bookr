@@ -1557,68 +1557,173 @@ actions.resCancel = async (d) => {
 actions.resOpen = async (d) => { const r = await api('GET', `${B()}/reservations/${d.id}`); go('#/rooms/list'); setTimeout(() => { ui.resSel = r.reservation; rerender(); }, 400); };
 
 // ----- room chart
-async function loadChart() { ui.chart = await api('GET', `${B()}/frontdesk/chart?from=${ui.chartFrom}&days=7`); }
-actions.chartMove = async (d) => { ui.chartFrom = d.n === '0' ? me.business.shiftDay : addDays(ui.chartFrom, Number(d.n)); await loadChart(); rerender(); };
+// ----- room chart (25 Nov 2026 redesign): sticky dates and rooms, filters, search, bars by source, side panel, drag to extend
+const SRC = { direct: ['D', 'Direct'], mmt: ['MMT', 'MakeMyTrip'], gi: ['GI', 'Goibibo'], web: ['WEB', 'Website'], desk: ['HERE', 'Made here'] };
+const KIND = { occ: 'In house', arr: 'Booked', hold: 'Hold', pos: 'Not in Djubo yet', ooo: 'Out of order' };
+async function loadChart() { ui.chartDays ??= window.innerWidth >= 1600 ? 14 : 7; ui.chart = await api('GET', `${B()}/frontdesk/chart?from=${ui.chartFrom}&days=${ui.chartDays}`); }
+actions.chartMove = async (d) => {
+  const step = ui.chartDays;
+  ui.chartFrom = d.n === '0' ? me.business.shiftDay : addDays(ui.chartFrom, d.n === '-' ? -step : step);
+  await loadChart(); rerender();
+};
+actions.chartDays = async (d) => { ui.chartDays = Number(d.n); await loadChart(); rerender(); };
+actions.chartToggle = (d) => { const k = `chartHide_${d.k}`; ui[k] = !ui[k]; rerender(); };
 function chartView() {
   const c = ui.chart;
   if (!c) return '';
   const dates = Array.from({ length: c.days }, (_, i) => addDays(c.from, i));
   const end = addDays(c.from, c.days);
-  const dayIdx = (d) => Math.round((Date.parse(`${d}T12:00:00Z`) - Date.parse(`${c.from}T12:00:00Z`)) / 86400000);
-  const label = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', timeZone: 'UTC' });
-  const sel = ui.chartSel;
-  const rowFor = (sec, room) => {
-    const bars = c.bars.filter((b) => b.room === room).sort((a, b) => a.from.localeCompare(b.from));
+  const idx = (d) => Math.round((Date.parse(`${d}T12:00:00Z`) - Date.parse(`${c.from}T12:00:00Z`)) / 86400000);
+  const head = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', timeZone: 'UTC' });
+  const q = String(ui.chartQ ?? '').trim().toLowerCase();
+  const shown = (b) => !ui[`chartHide_${b.kind}`] && !(b.src && ui[`chartHide_${b.src}`]);
+  const bars = c.bars.filter(shown);
+  const hit = (b) => q && ((b.guest ?? '').toLowerCase().includes(q) || b.label.toLowerCase().includes(q));
+  const freeOnly = !!ui.chartFree;
+  const cell = (room, sec, rowBars, key, loose = false) => {
     const cells = [];
     let i = 0;
     while (i < c.days) {
       const d = dates[i];
-      const bar = bars.find((b) => b.from <= d && b.to > d);
-      if (bar) {
-        const span = Math.min(dayIdx(bar.to > end ? end : bar.to), c.days) - i;
-        cells.push(html`<td colspan="${span}"><button type="button" class="cbar ${bar.kind}" data-act="chartSel" data-room="${room}" data-i="${c.bars.indexOf(bar)}" title="${bar.label}">${bar.label}</button></td>`);
-        i += Math.max(1, span);
+      const b = rowBars.find((x) => x.from <= d && x.to > d);
+      if (b) {
+        const span = Math.max(1, Math.min(idx(b.to > end ? end : b.to), c.days) - i);
+        const startsBefore = b.from < c.from;
+        cells.push(html`<td colspan="${span}" class="${dates.slice(i, i + span).includes(c.today) ? 'today' : ''}"><button type="button" class="cbar k-${b.kind} s-${b.src ?? 'none'} ${hit(b) ? 'hit' : ''} ${startsBefore ? 'cont' : ''}"
+          data-act="${loose ? 'chartLoose' : 'chartSel'}" data-i="${loose ? c.unassigned.indexOf(b.u) : c.bars.indexOf(b)}" title="${b.label} · ${dayName(b.from)} → ${dayName(b.to)}${b.src ? ` · ${SRC[b.src][1]}` : ''}">
+          ${b.src && b.kind !== 'ooo' ? html`<span class="srct">${SRC[b.src][0]}</span>` : ''}<span class="gn">${b.kind === 'ooo' ? b.label : b.guest ?? b.label}</span>${b.kind === 'occ' ? html`<span class="st">in</span>` : b.kind === 'hold' ? html`<span class="st">hold</span>` : ''}
+          ${b.byHand && b.kind === 'occ' && b.ref.type === 'stay' ? html`<span class="grip" data-grip="${b.ref.id}" title="Drag to extend the stay"></span>` : ''}</button></td>`);
+        i += span;
       } else {
-        cells.push(html`<td><button type="button" class="cfree" data-act="chartNew" data-room="${room}" data-type="${sec.name}" data-day="${d}" aria-label="New reservation: ${room}, ${label(d)}"></button></td>`);
+        cells.push(loose ? html`<td class="${d === c.today ? 'today' : ''}"></td>` : html`<td class="${d === c.today ? 'today' : ''}" data-day="${d}"><button type="button" class="cfree" data-act="chartNew" data-room="${room}" data-type="${sec.name}" data-day="${d}" aria-label="${room}, ${head(d)}: free"></button></td>`);
         i += 1;
       }
     }
-    return html`<tr><th class="croom">${room}</th>${cells}</tr>`;
+    return html`<tr data-row="${key}"><th class="croom" scope="row">${loose ? html`<span class="noroom" title="Booked in Djubo with no room number yet">no room yet</span>` : room}${!loose && c.housekeeping?.[room] ? html` <span class="status ${c.housekeeping[room] === 'dirty' ? 'bad' : 'warn'} dia hk">${c.housekeeping[room]}</span>` : ''}</th>${cells}</tr>`;
   };
-  return html`<div class="row" style="margin-bottom:10px"><button class="btn" type="button" data-act="chartMove" data-n="-7">‹ Earlier</button><strong>${dayName(c.from)} → ${dayName(addDays(c.from, c.days - 1))}</strong>
-      <button class="btn" type="button" data-act="chartMove" data-n="7">Later ›</button><button class="btn ghost" type="button" data-act="chartMove" data-n="0">Today</button></div>
+  const sections = c.sections.filter((s) => !ui.chartType || s.name === ui.chartType);
+  const body = sections.map((sec) => {
+    let rooms = sec.rooms.map((r) => ({ r, bars: bars.filter((b) => b.room === r) }));
+    if (freeOnly) rooms = rooms.filter((x) => !x.bars.length);
+    if (q) rooms = rooms.filter((x) => x.r.toLowerCase().includes(q) || x.bars.some(hit));
+    // Booked with no room number yet: a line of their own under the room type, so the night is not lost from view.
+    const loose = freeOnly ? [] : c.unassigned.filter((u) => (u.roomType ?? '').toLowerCase().split(', ').includes(sec.name.toLowerCase()) && (!q || u.label.toLowerCase().includes(q)));
+    if (!rooms.length && !loose.length) return '';
+    return html`<tr class="cgrp"><th colspan="${c.days + 1}">${sec.name}<span class="gmeta">${plural(sec.rooms.length, sec.kind === 'dorms' ? 'bed' : 'room')}${sec.ratePaise ? ` · ${rs(sec.ratePaise)}/night` : ''}</span></th></tr>
+      ${rooms.map((x) => cell(x.r, sec, x.bars, x.r))}
+      ${loose.map((u, i) => cell('', sec, [{ ...u, u, room: '', guest: u.label.split(' · ')[0], byHand: false, src: /make\s*my\s*trip|mmt/i.test(u.label) ? 'mmt' : /goibibo/i.test(u.label) ? 'gi' : u.kind === 'pos' ? 'desk' : 'direct' }], `loose-${sec.name}-${i}`, true))}`;
+  });
+  const chip = (k, label, extra = '') => html`<button type="button" class="chip sm ${extra}" aria-pressed="${!ui[`chartHide_${k}`]}" data-act="chartToggle" data-k="${k}">${label}</button>`;
+  return html`<div class="ctool">
+      <div class="row"><button class="btn" type="button" data-act="chartMove" data-n="-" title="Earlier">‹</button><strong class="crange">${dayName(c.from)} – ${dayName(addDays(c.from, c.days - 1))}</strong>
+        <button class="btn" type="button" data-act="chartMove" data-n="+" title="Later">›</button><button class="btn ghost" type="button" data-act="chartMove" data-n="0">Today</button>
+        <span class="seg">${[7, 14].map((n) => html`<button type="button" class="chip sm" aria-pressed="${ui.chartDays === n}" data-act="chartDays" data-n="${n}">${n} days</button>`)}</span></div>
+      <div class="row grow" style="justify-content:flex-end"><input class="in" type="search" data-model="chartQ" data-live value="${ui.chartQ ?? ''}" placeholder="Guest or room   /" aria-label="Search guest or room" style="max-width:220px">
+        <select class="in" data-model="chartType" aria-label="Room type" style="max-width:180px"><option value="">All room types</option>${c.sections.map((s) => html`<option ${ui.chartType === s.name ? 'selected' : ''}>${s.name}</option>`)}</select>
+        <button type="button" class="chip sm" aria-pressed="${freeOnly}" data-act="pick" data-k="chartFree" data-id="${freeOnly ? '' : '1'}">Only free</button>
+        <button class="btn" type="button" data-act="blockAsk">Out of order…</button></div></div>
+    <div class="cfilt"><span class="label" style="margin:0">Show</span>${chip('occ', 'In house')}${chip('arr', 'Booked')}${chip('pos', 'Made here')}${chip('hold', 'Holds')}${chip('ooo', 'Out of order')}
+      <span class="label" style="margin:0 0 0 10px">Source</span>${['direct', 'mmt', 'gi', 'web'].map((k) => chip(k, html`<span class="srct s-${k}">${SRC[k][0]}</span> ${SRC[k][1]}`))}</div>
     ${errorBox()}
-
-    <div class="chartwrap"><table class="chart"><thead><tr><th class="croom">Room</th>${dates.map((d) => html`<th class="${d === c.today ? 'today' : ''}">${label(d)}</th>`)}</tr></thead><tbody>
-      ${c.sections.map((sec) => html`<tr class="cgrp"><th colspan="${c.days + 1}">${sec.name}${ui.chartRates?.[sec.name] ? ` · ${rs(ui.chartRates[sec.name])} / night` : ''}</th></tr>${sec.rooms.map((r) => rowFor(sec, r))}`)}
-    </tbody></table></div>
-    <div class="legend"><span><i class="occ"></i>In house</span><span><i class="arr"></i>Booked</span><span><i class="pos"></i>Made here, not in Djubo yet</span><span><i class="hold"></i>Hold</span><span><i class="ooo"></i>Out of order</span></div>
-    <p class="small quiet">Tap a free cell to start a reservation for that room and night. The chart is built from Djubo's booking mails and what is made here; Djubo stays the master.</p>
-    ${c.unassigned.length ? html`<section class="panel" style="margin-top:12px"><h2>Booked, no room number yet (${c.unassigned.length})</h2>
-      ${c.unassigned.map((u) => html`<div class="small" style="border-top:1px solid var(--line);padding:6px 0">${u.label} · ${u.roomType ?? ''} · ${dayName(u.from)} → ${dayName(u.to)}</div>`)}</section>` : ''}
-    <form class="panel" style="margin-top:12px"><h2>Room out of order</h2>
-      <div class="grid2"><label class="f">Room or bed<select class="in" data-model="blkRoom"><option value="">Choose</option>${c.sections.flatMap((s) => s.rooms).map((r) => html`<option ${ui.blkRoom === r ? 'selected' : ''}>${r}</option>`)}</select></label>
-        <label class="f">Why<input class="in" data-model="blkNote" value="${ui.blkNote ?? ''}" placeholder="e.g. AC repair"></label>
-        <label class="f">First night<input class="in" type="date" data-model="blkFrom" value="${ui.blkFrom ?? c.today}"></label><label class="f">Last night<input class="in" type="date" data-model="blkTo" value="${ui.blkTo ?? c.today}"></label></div>
-      <div><button class="btn" type="submit" data-act="blockAdd" data-submit>Mark out of order</button></div></form>`;
+    <div class="chartwrap"><table class="chart"><thead><tr><th class="croom">Room</th>${dates.map((d) => html`<th class="${d === c.today ? 'today' : ''} ${[0, 6].includes(new Date(`${d}T12:00:00Z`).getUTCDay()) ? 'wkend' : ''}">${head(d)}${d === c.today ? html`<span class="tmark">today</span>` : ''}</th>`)}</tr></thead>
+      <tbody>${body}</tbody></table></div>
+    <div class="legend"><span><i class="lg k-occ"></i>In house (solid)</span><span><i class="lg k-arr"></i>Booked (tinted, edge = source)</span><span><i class="lg k-pos"></i>Made here, not in Djubo (dashed)</span>
+      <span><i class="lg k-hold"></i>Hold (hatched)</span><span><i class="lg k-ooo"></i>Out of order (striped)</span><span class="kbd">/</span> search · <span class="kbd">N</span> new · <span class="kbd">Esc</span> close · drag the end of an in-house stay made here to extend it</div>`;
 }
 /** A booking, stay or blocked room picked on the chart, in the side panel. */
 function chartSelPanel() {
   const sel = ui.chartSel;
+  if (sel.free) return freeCellPanel(sel);
+  if (sel.res) return html`<div class="dhead"><h2>${sel.room}</h2><button class="btn ghost" type="button" data-act="chartSelNo" title="Close (Esc)">Close</button></div>${reservationCard(sel.res, Date.now())}`;
+  const n = Math.max(1, Math.round((Date.parse(sel.to) - Date.parse(sel.from)) / 86400000));
+  const today = me.business.shiftDay;
   return html`<div class="dhead"><h2>${sel.room}</h2><button class="btn ghost" type="button" data-act="chartSelNo" title="Close (Esc)">Close</button></div>
-    <section class="panel"><strong>${sel.label}</strong><div class="small quiet">${dayName(sel.from)} → ${dayName(sel.to)}</div>
-      <div class="row">${sel.ref.type === 'stay' ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${sel.ref.id}">Room bill</button>` : ''}
-        ${sel.ref.type === 'reservation' ? html`<button class="btn pri" type="button" data-act="resOpen" data-id="${sel.ref.id}">Open reservation</button>` : ''}
-        ${sel.ref.type === 'block' ? html`<button class="btn" type="button" data-act="blockDel" data-id="${sel.ref.id}">Back in use</button>` : ''}</div></section>`;
+    <section class="panel"><div><strong style="font-size:16px">${sel.guest ?? sel.label}</strong></div>
+      <div class="row">${sel.src ? html`<span class="srct s-${sel.src}">${SRC[sel.src][0]}</span><span class="small">${SRC[sel.src][1]}</span>` : ''}<span class="status ${sel.kind === 'ooo' ? 'bad' : sel.kind === 'occ' ? 'info' : sel.kind === 'arr' ? 'ok' : 'warn'}">${KIND[sel.kind]}</span></div>
+      <div class="small quiet">${dayName(sel.from)} → ${dayName(sel.to)} · ${plural(n, 'night')}</div>
+      <div class="row">${sel.ref.type === 'booking' && sel.from <= today ? html`<button class="btn pri" type="button" data-act="goCheckin" data-kind="booking" data-id="${sel.ref.id}">Check in</button>` : ''}
+        ${sel.ref.type === 'booking' && sel.from < today ? html`<button class="btn" type="button" data-act="noShow" data-kind="booking" data-id="${sel.ref.id}" data-held="0">No-show</button>` : ''}
+        ${sel.ref.type === 'block' ? html`<button class="btn" type="button" data-act="blockDel" data-id="${sel.ref.id}">Back in use</button>` : ''}</div>
+      ${sel.ref.type === 'booking' ? html`<p class="small quiet">From Djubo: change dates or rooms in Djubo; its revised mail updates this chart.</p>` : ''}</section>`;
 }
-actions.chartSel = (d) => { ui.chartSel = { ...ui.chart.bars[Number(d.i)] }; rerender(); };
+/** A free room and night: a quick reservation here, or mark it out of order. */
+function freeCellPanel(sel) {
+  const rate = ui.chart.sections.find((s) => s.name === sel.type)?.ratePaise;
+  const nights = Math.max(1, Number(ui.qrN) || 1);
+  return html`<div class="dhead"><h2>${sel.room} · free</h2><button class="btn ghost" type="button" data-act="chartSelNo" title="Close (Esc)">Close</button></div>
+    <form class="panel"><div class="small quiet">${sel.type} · from ${dayName(sel.day)}</div>${errorBox()}
+      <div class="grid2"><label class="f">Nights<input class="in" inputmode="numeric" data-model="qrN" data-live value="${ui.qrN ?? '1'}"></label>
+        <label class="f">Rate per night (₹, GST incl.)<input class="in" inputmode="decimal" data-model="qrRate" value="${ui.qrRate ?? (rate ? rupees(rate) : '')}"></label>
+        <label class="f">Mobile<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" autofocus></label>
+        <label class="f">Guest name<input class="in" data-model="guest" value="${ui.guest ?? ''}"></label></div>
+      <div class="chips">${['Phone', 'WhatsApp', 'Walk-in', 'Instagram', 'Travel agent'].map((x) => html`<button type="button" class="chip sm" aria-pressed="${(ui.qrSrc ?? 'Phone') === x}" data-act="pick" data-k="qrSrc" data-id="${x}">${x}</button>`)}</div>
+      <div class="small">Check-out ${dayName(addDays(sel.day, nights))} · total ${rs((toPaise(ui.qrRate ?? (rate ? rupees(rate) : '0')) ?? 0) * nights)}</div>
+      <div class="row"><button class="btn pri" type="submit" data-act="qrSave" data-submit>Save reservation</button>
+        <button class="btn" type="button" data-act="chartFull" data-room="${sel.room}" data-type="${sel.type}" data-day="${sel.day}">Full form</button>
+        <button class="btn ghost" type="button" data-act="blockAsk" data-room="${sel.room}" data-day="${sel.day}">Out of order…</button></div>
+      <p class="small quiet">Then enter it in Djubo. Until Djubo's mail arrives it shows as "made here" and reception is reminded.</p></form>`;
+}
+actions.chartSel = async (d) => {
+  const b = { ...ui.chart.bars[Number(d.i)] };
+  if (b.ref.type === 'stay') { ui.chartSel = null; await actions.roomBill({ id: b.ref.id }); return; }
+  if (b.ref.type === 'reservation') b.res = (await api('GET', `${B()}/reservations/${b.ref.id}`)).reservation;
+  ui.chartSel = b; ui.roomBill = null; ui.error = null; rerender();
+};
 actions.chartSelNo = () => { ui.chartSel = null; rerender(); };
-actions.chartNew = (d) => { pendingNew = { room: d.room, type: d.type, day: d.day }; go('#/rooms/new'); };
+actions.chartLoose = async (d) => {
+  const u = ui.chart.unassigned[Number(d.i)];
+  const b = { ...u, room: `${u.roomType ?? ''} · no room yet`, guest: u.label.split(' · ')[0], src: /make\s*my\s*trip|mmt/i.test(u.label) ? 'mmt' : /goibibo/i.test(u.label) ? 'gi' : u.kind === 'pos' ? 'desk' : 'direct' };
+  if (u.ref.type === 'reservation') b.res = (await api('GET', `${B()}/reservations/${u.ref.id}`)).reservation;
+  ui.chartSel = b; ui.roomBill = null; rerender();
+};
+actions.chartNew = (d) => { ui.chartSel = { free: true, room: d.room, type: d.type, day: d.day }; ui.roomBill = null; ui.qrN = '1'; ui.qrRate = undefined; ui.guest = ''; ui.gPhone = ''; ui.error = null; rerender(); };
+actions.chartFull = (d) => { pendingNew = { room: d.room, type: d.type, day: d.day }; go('#/rooms/new'); };
+actions.qrSave = async () => {
+  const sel = ui.chartSel;
+  const rate = ui.qrRate ?? rupees(ui.chart.sections.find((s) => s.name === sel.type)?.ratePaise ?? 0);
+  const nights = Math.max(1, Number(ui.qrN) || 1);
+  const r = await api('POST', `${B()}/reservations`, { checkIn: sel.day, checkOut: addDays(sel.day, nights), guestName: ui.guest ?? '', phone: ui.gPhone ?? '', source: ui.qrSrc ?? 'Phone',
+    lines: [{ type: sel.type, roomNames: [sel.room], adults: 2, rate }], nationality: 'Indian' });
+  const full = (await api('GET', `${B()}/reservations/${r.id}`)).reservation;
+  flash = { kind: 'ok', text: `Reservation saved: ${full.guestName}, ${sel.room}, ${dayName(sel.day)} for ${plural(nights, 'night')}. Now enter it in Djubo.`, link: [waLink(full), 'Send confirmation on WhatsApp'] };
+  ui.chartSel = null; await loadChart(); await refreshDeskAlerts(); rerender();
+};
+actions.blockAsk = (d) => {
+  ui.chartSel = null; ui.roomBill = null; ui.blkRoom = d.room ?? ui.blkRoom; ui.blkFrom = d.day ?? ui.blkFrom; ui.blkTo = d.day ?? ui.blkTo;
+  ui.drawer = () => html`<div class="dhead"><h2>Room out of order</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+    <form class="panel">${errorBox()}<label class="f">Room or bed<select class="in" data-model="blkRoom"><option value="">Choose</option>${ui.chart.sections.flatMap((s) => s.rooms).map((r) => html`<option ${ui.blkRoom === r ? 'selected' : ''}>${r}</option>`)}</select></label>
+      <label class="f">Why<input class="in" data-model="blkNote" value="${ui.blkNote ?? ''}" placeholder="e.g. AC repair"></label>
+      <div class="grid2"><label class="f">First night<input class="in" type="date" data-model="blkFrom" value="${ui.blkFrom ?? ui.chart.today}"></label><label class="f">Last night<input class="in" type="date" data-model="blkTo" value="${ui.blkTo ?? ui.blkFrom ?? ui.chart.today}"></label></div>
+      <div class="row"><button class="btn pri" type="submit" data-act="blockAdd" data-submit>Mark out of order</button></div></form>`;
+  rerender();
+};
 actions.blockAdd = async () => {
   await api('POST', `${B()}/frontdesk/blocks`, { room: ui.blkRoom ?? '', from: ui.blkFrom ?? ui.chart.today, to: ui.blkTo ?? ui.blkFrom ?? ui.chart.today, note: ui.blkNote ?? '' });
-  ui.blkNote = ''; flash = { kind: 'ok', text: `${ui.blkRoom} marked out of order.` }; await loadChart(); rerender();
+  flash = { kind: 'ok', text: `${ui.blkRoom} marked out of order.` }; ui.blkNote = ''; ui.drawer = null; await loadChart(); rerender();
 };
 actions.blockDel = async (d) => { await api('DELETE', `${B()}/frontdesk/blocks/${d.id}`); ui.chartSel = null; await loadChart(); rerender(); };
+// Drag to extend (a stay checked in here, not from Djubo): drag the bar's end to a later night; the room bill opens on
+// "Extend stay" with that date, to confirm and add the rent. Djubo stays are extended in Djubo.
+root.addEventListener('mousedown', (ev) => {
+  const grip = ev.target.closest?.('[data-grip]');
+  if (!grip || !ui.chart) return;
+  ev.preventDefault(); ev.stopPropagation();
+  const stayId = grip.dataset.grip;
+  let last = null;
+  const over = (e) => {
+    root.querySelectorAll('td.dragto').forEach((x) => x.classList.remove('dragto'));
+    const td = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('td[data-day]');
+    if (td && td.closest('tr') === grip.closest('tr')) { td.classList.add('dragto'); last = td.dataset.day; } else last = null;
+  };
+  const up = async () => {
+    document.removeEventListener('mousemove', over); document.removeEventListener('mouseup', up);
+    root.querySelectorAll('td.dragto').forEach((x) => x.classList.remove('dragto'));
+    if (!last) return;
+    await actions.roomBill({ id: stayId });
+    ui.rbForm = 'extend'; ui.exTo = addDays(last, 1); ui.exRate = undefined; rerender();
+  };
+  document.addEventListener('mousemove', over); document.addEventListener('mouseup', up);
+}, true);
 
 // ----- reservations list
 const resStatus = (r, now) => (r.status === 'cancelled' ? ['bad', 'Cancelled'] : r.stayId ? ['open', 'Checked in'] : r.status === 'linked' ? ['open', `In Djubo ${r.bookingRef ?? ''}`]
