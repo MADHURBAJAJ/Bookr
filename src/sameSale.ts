@@ -154,18 +154,27 @@ export async function undoSameSaleStatements(db: DB, businessId: string, rowId: 
   ];
 }
 
-/** Bills of this amount waiting near a credit about to be booked: booking it too would count that sale twice. */
+/**
+ * Bills of this amount waiting near a credit about to be booked: booking it too would count that sale twice. The UPI
+ * part of a bill split between cash and UPI counts too (bill 26110648, 6 Nov: ₹966 = ₹500 cash + ₹466 UPI; approved
+ * 24 Nov 2026). txId: a saved sale the credit can be matched to now; without it the shift is not saved yet and the
+ * credit is matched when it is.
+ */
 export async function waitingBillsLike(db: DB, businessId: string, amountPaise: number, day: string) {
   if (amountPaise < SMALL_PAISE) return [];
   const from = addDays(day, -WATCH);
   const to = addDays(day, WATCH);
-  return all<{ billNo: string; day: string }>(db, `
-    SELECT t.bill_no AS billNo, t.shift_day AS day FROM transactions t
+  return all<{ billNo: string; day: string; txId: string | null; billPaise: number; upiPaise: number }>(db, `
+    SELECT t.bill_no AS billNo, t.shift_day AS day, t.id AS txId, t.amount_paise AS upiPaise,
+      (SELECT sum(x.amount_paise) FROM transactions x WHERE x.business_id = t.business_id AND x.type = 'income' AND x.bill_no = t.bill_no AND x.shift_day = t.shift_day) AS billPaise
+    FROM transactions t
     WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
       AND t.amount_paise = ? AND t.shift_day BETWEEN ? AND ?
     UNION
-    SELECT c.bill_no, c.shift_day FROM bill_comparisons c LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
+    SELECT c.bill_no, c.shift_day, NULL, ?, coalesce(c.rg_amount_paise, c.sw_amount_paise, ?)
+    FROM bill_comparisons c LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
     WHERE c.business_id = ? AND coalesce(s.status, '') <> 'confirmed' AND c.closed_at IS NULL AND coalesce(c.decision, '') NOT IN ('leave_out', 'carry_forward')
-      AND c.shift_day BETWEEN ? AND ? AND ((c.rg_mode = 'upi' AND c.rg_amount_paise = ?) OR (c.sw_mode = 'upi' AND c.sw_amount_paise = ?))
-    LIMIT 5`, businessId, amountPaise, from, to, businessId, from, to, amountPaise, amountPaise);
+      AND c.shift_day BETWEEN ? AND ? AND ((c.rg_mode = 'upi' AND c.rg_amount_paise = ?) OR (c.sw_mode = 'upi' AND c.sw_amount_paise = ?)
+        OR (c.register_row_id IS NOT NULL AND (SELECT sum(p.amount_paise) FROM register_payments p WHERE p.register_row_id = c.register_row_id AND p.mode = 'upi') = ?))
+    LIMIT 5`, businessId, amountPaise, from, to, amountPaise, amountPaise, businessId, from, to, amountPaise, amountPaise, amountPaise);
 }

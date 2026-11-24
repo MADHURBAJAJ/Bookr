@@ -1,9 +1,12 @@
-// A fresh local D1 (the same engine wrangler dev uses, via wrangler's platform proxy) with the
-// migrations applied. Each test file gets its own throwaway copy.
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+// A fresh test database with the migrations applied. Each test file gets its own throwaway copy.
+// By default it is SQLite inside the test process (test/sqlite-d1.ts): the migrations are applied once into a template file
+// and each file copies it. D1_REAL=1 uses wrangler's local D1 instead (the same engine wrangler dev uses, via the platform
+// proxy), which is slower but is the real engine: worth a run before a live deploy.
+import { createHash } from 'node:crypto';
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getPlatformProxy } from 'wrangler';
+import { memoryR2, sqliteD1 } from './sqlite-d1';
 
 const MIGRATIONS = new URL('../migrations/', import.meta.url);
 
@@ -28,14 +31,50 @@ export function splitStatements(text: string): string[] {
   return out;
 }
 
-export async function createTestDb() {
+const migrationFiles = () =>
+  readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort().map((f) => ({ name: f, text: readFileSync(new URL(f, MIGRATIONS), 'utf8') }));
+
+// The template is named after the migrations' contents, so a changed or added migration makes a new one. Test files that
+// start together may each build it; the last rename wins and every copy is the same.
+async function template(): Promise<string> {
+  const files = migrationFiles();
+  const hash = createHash('sha256');
+  for (const f of files) hash.update(f.name).update('\0').update(f.text).update('\0');
+  const path = join(tmpdir(), `bookr-test-template-${hash.digest('hex').slice(0, 16)}.sqlite`);
+  if (existsSync(path)) return path;
+  const building = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+  const { db, close } = sqliteD1(building);
+  try {
+    for (const f of files) {
+      const statements = splitStatements(f.text);
+      await db.batch(statements.map((s) => db.prepare(s)));
+    }
+  } finally {
+    close();
+  }
+  renameSync(building, path);
+  return path;
+}
+
+export async function createTestDb(): Promise<{ db: D1Database; uploads: R2Bucket; dispose: () => Promise<void> }> {
+  if (process.env.D1_REAL === '1') return createWorkerdDb();
+  const dir = mkdtempSync(join(tmpdir(), 'bookr-db-'));
+  const file = join(dir, 'test.sqlite');
+  copyFileSync(await template(), file);
+  const { db, close } = sqliteD1(file);
+  const dispose = async () => {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { db, uploads: memoryR2(), dispose };
+}
+
+async function createWorkerdDb() {
+  const { getPlatformProxy } = await import('wrangler');
   const dir = mkdtempSync(join(tmpdir(), 'bookr-d1-'));
   const proxy = await getPlatformProxy<{ DB: D1Database; UPLOADS: R2Bucket }>({ persist: { path: dir } });
   const db = proxy.env.DB;
-  for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()) {
-    const statements = splitStatements(readFileSync(new URL(file, MIGRATIONS), 'utf8'));
-    await db.batch(statements.map((s) => db.prepare(s)));
-  }
+  for (const f of migrationFiles()) await db.batch(splitStatements(f.text).map((s) => db.prepare(s)));
   const dispose = async () => {
     await proxy.dispose();
     rmSync(dir, { recursive: true, force: true });

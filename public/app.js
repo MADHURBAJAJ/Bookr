@@ -8926,15 +8926,49 @@ function wireCardSection(biz, k, act) {
   }));
 }
 
-/** Books a credit, asking first if a bill of its amount is waiting: both would count one sale twice. False if the person stops. */
+/**
+ * Books a credit, asking first if a bill of its amount is waiting (the whole bill, or the UPI part of a cash + UPI
+ * bill: approved 24 Nov 2026): both would count one sale twice. A saved sale can be matched from the card instead.
+ * True when booked or matched; false if the person stops.
+ */
 async function bookCredit(biz, rowId, payload) {
   const path = `/businesses/${biz.id}/bank-rows/${rowId}/book`;
   const first = await apiFull('POST', path, { ...payload, checkBills: true });
   if (first.ok) return true;
-  const list = first.waitingBills.map((b) => `${b.billNo} (${dayLabel(b.day)} shift)`).join(', ');
-  if (!confirm(`A bill of this amount is waiting: ${list}.\n\nIf this credit pays it, match them instead, or this sale is counted twice. Book it anyway?`)) return false;
-  await apiFull('POST', path, payload);
+  const pick = await askWaitingBill(first.waitingBills);
+  if (!pick) return false;
+  if (pick === 'book') { await apiFull('POST', path, payload); return true; }
+  await apiFull('POST', `/businesses/${biz.id}/bank-rows/${rowId}/match`, { transactionIds: [pick] });
   return true;
+}
+
+/** The waiting bills as suggestion cards: Match (saved sale), Book anyway or Cancel. Resolves a txId, 'book' or null. */
+function askWaitingBill(bills) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.className = 'rowdlg';
+    const line = (b) => b.billPaise !== b.upiPaise
+      ? `Bill ₹ ${rs(b.billPaise)} = other ₹ ${rs(b.billPaise - b.upiPaise)} ✓ + UPI ₹ ${rs(b.upiPaise)} ✗ · ${dayLabel(b.day)} shift`
+      : `Bill ₹ ${rs(b.billPaise)} UPI ✗ · ${dayLabel(b.day)} shift`;
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:10px;max-width:460px">
+      ${bills.map((b) => html`<div style="border-bottom:1px solid var(--line-soft);padding-bottom:10px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="mono">${b.billNo}</span>
+          <span class="chip wait">${b.billPaise !== b.upiPaise ? 'UPI part waiting' : 'UPI waiting'}</span></div>
+        <div class="tiny" style="margin-top:4px">${line(b)}</div>
+        ${b.txId ? '' : html`<div class="tiny note">Shift not saved: the credit is matched when it is.</div>`}
+        ${b.txId ? html`<div class="form-row" style="margin-top:8px"><button class="btn" value="m:${b.txId}" type="submit">Match to ${b.billNo}</button></div>` : ''}
+      </div>`)}
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button><button class="btn plain" value="book" type="submit">Book anyway</button></div>
+    </form>`.__html;
+    document.body.append(dlg);
+    dlg.addEventListener('close', () => {
+      const v = dlg.returnValue;
+      resolve(v === 'book' ? 'book' : v.startsWith('m:') ? v.slice(2) : null);
+      dlg.remove();
+    });
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
+    dlg.showModal();
+  });
 }
 
 /** Tab 2: what is still open on every shift, oldest first. Closing a bill takes Owner or Accountant, and a reason. */
