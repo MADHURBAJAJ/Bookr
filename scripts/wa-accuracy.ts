@@ -48,7 +48,7 @@ for (const e of exp.items) {
     const { data, model: used } = old ? { data: old.reading, model: old.model }
       : await readWithClaude(env, { bytes, mediaType }, waInstructions({ sent_at: sentAt, caption: e.caption ?? null, group_name: exp.group.name }), WaReading);
     const s = settle(data, sentAt);
-    if (s.kind !== 'other') forPairs.push({ id: e.file, kind: s.kind, sender: 'sample-sender', messageId: e.file, replyTo: e.replyTo ?? null,
+    if (s.kind === 'upi' || s.kind === 'bill') forPairs.push({ id: e.file, kind: s.kind, sender: 'sample-sender', messageId: e.file, replyTo: e.replyTo ?? null,
       caption: e.caption ?? null, sentAt, amountPaise: s.amountPaise, billNo: s.billNo });
     saved.push({ file: e.file, model: used, reading: data, settled: s });
     const misses: string[] = [];

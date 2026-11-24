@@ -12,6 +12,13 @@ function keyFor(env: Env, businessId: string): string | null {
   try { const k = JSON.parse(env.BOOKR_KEYS ?? '{}')[businessId]; return typeof k === 'string' && k ? k : null; } catch { return null; }
 }
 
+/** Where Bookr is and this business's key, or null when the POS is not connected (the payment proof list asks with it). */
+export function bookrLink(env: Env, businessId: string): { base: string; key: string } | null {
+  const key = keyFor(env, businessId);
+  const base = env.BOOKR_URL?.replace(/\/+$/, '');
+  return key && base ? { base, key } : null;
+}
+
 export async function sendOutbox(env: Env, businessId: string, fetcher: typeof fetch = (...a) => fetch(...a)): Promise<SendResult> {
   const db: DB = env.DB;
   const key = keyFor(env, businessId);

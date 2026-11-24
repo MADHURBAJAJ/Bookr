@@ -161,7 +161,7 @@ export async function pairGroup(db: DB, groupId: string, from: number, to: numbe
  */
 export async function findDuplicate(db: DB, id: string): Promise<string | null> {
   const it = await one<{ business_id: string; kind: string | null; utr: string | null; amount_paise: number | null; doc_at: number | null;
-    bill_no: string | null; sent_at: number; created_at: number; payee: string | null }>(db, `SELECT business_id, kind, utr, amount_paise, doc_at, bill_no, sent_at, created_at,
+    bill_no: string | null; card_approval: string | null; sent_at: number; created_at: number; payee: string | null }>(db, `SELECT business_id, kind, utr, amount_paise, doc_at, bill_no, card_approval, sent_at, created_at,
       lower(coalesce(json_extract(extracted_json, '$.reading.upi.payee_vpa'), json_extract(extracted_json, '$.reading.upi.payee_name'))) AS payee
     FROM wa_items WHERE id = ?`, id);
   if (!it) return null;
@@ -179,6 +179,10 @@ export async function findDuplicate(db: DB, id: string): Promise<string | null> 
   } else if (it.kind === 'bill' && it.bill_no && it.amount_paise) {
     hit = await one(db, `SELECT id FROM wa_items WHERE ${earlier} AND bill_no = ? AND amount_paise = ? ${order}`,
       it.business_id, id, 'bill', it.bill_no, it.amount_paise);
+  } else if (it.kind === 'card' && it.card_approval && it.amount_paise) {
+    // Approval codes repeat over time: the same code and amount within two days.
+    hit = await one(db, `SELECT id FROM wa_items WHERE ${earlier} AND card_approval = ? AND amount_paise = ? AND sent_at > ? ${order}`,
+      it.business_id, id, 'card', it.card_approval, it.amount_paise, it.sent_at - 2 * 86400_000);
   }
   return hit?.id ?? null;
 }
@@ -187,7 +191,7 @@ export async function findDuplicate(db: DB, id: string): Promise<string | null> 
 export async function markDuplicate(db: DB, id: string, of: string) {
   const o = await one<{ sent_at: number; kind: string }>(db, 'SELECT sent_at, kind FROM wa_items WHERE id = ?', of);
   const at = o ? new Date(o.sent_at + 19_800_000).toISOString().slice(0, 16).replace('T', ' ') : '';
-  const what = o?.kind === 'bill' ? 'Same bill as one posted' : 'Same payment as one posted';
+  const what = o?.kind === 'bill' ? 'Same bill as one posted' : o?.kind === 'card' ? 'Same card slip as one posted' : 'Same payment as one posted';
   await stmt(db, `UPDATE wa_items SET status = 'duplicate', duplicate_of = ?,
       read_note = trim(coalesce(read_note, '') || ' ' || ?) WHERE id = ? AND status = 'pending'`, of, `${what} ${at}.`, id).run();
 }

@@ -15,7 +15,7 @@ const Rupees = z.string().nullable().describe('Rupees exactly as shown: digits w
 const Text = z.string().nullable();
 
 export const WaReading = z.object({
-  kind: z.enum(['upi', 'bill', 'other']).describe('upi: a UPI payment screen or receipt (Paytm, Google Pay, PhonePe, a bank app, or a photo of a phone showing one). bill: a printed bill or invoice. other: anything else.'),
+  kind: z.enum(['upi', 'bill', 'card', 'other']).describe('upi: a UPI payment screen or receipt (Paytm, Google Pay, PhonePe, a bank app, or a photo of a phone showing one). bill: a printed bill or invoice. card: a card machine (POS terminal) charge slip. other: anything else.'),
   legible: z.enum(['clear', 'unsure', 'unreadable']).describe('clear: every value you give is plainly readable. unsure: some values are a best guess (blur, glare, cracks, partly covered). unreadable: the key values cannot be read.'),
   upi: z.object({
     amount: Rupees,
@@ -41,6 +41,14 @@ export const WaReading = z.object({
     total: Rupees.describe('Grand total / amount payable.'),
     items: Text.describe('A short summary of the items, e.g. "2 Heineken, 1 Sev Puri".'),
   }).nullable().describe('Fill only when kind is bill; otherwise null.'),
+  card: z.object({
+    amount: Rupees.describe('The amount charged (AMOUNT / TOTAL / SALE). Rupees as shown, no ₹ sign, no commas.'),
+    date: Text.describe('Date exactly as printed.'),
+    time: Text.describe('Time exactly as printed.'),
+    approval_code: Text.describe('APPR CODE / AUTH CODE / Approval code exactly as printed.'),
+    last4: Text.describe('The last 4 digits of the card number (printed like XXXX XXXX XXXX 1234). Digits only.'),
+    status: z.enum(['approved', 'declined', 'unknown']).describe('approved only when the slip says APPROVED / SALE completed; declined when it says DECLINED, VOID or failed.'),
+  }).nullable().describe('Fill only when kind is card; otherwise null.'),
   unclear: z.array(z.string()).describe('Names of the fields that are shown but could not be read with confidence. A field the image simply does not show is null and is not listed here.'),
 });
 export type WaReading = z.infer<typeof WaReading>;
@@ -54,7 +62,7 @@ function istWall(ms: number) {
 /** What Claude is asked. The caption and time help only with the year and context: the picture decides the values. */
 export function waInstructions(item: { sent_at: number; caption: string | null; group_name: string }) {
   return [
-    'This image or PDF was posted in a WhatsApp work group of a hotel in Goa, India. It is usually either a guest\'s UPI payment screen (often a photo of the guest\'s phone) or a printed bill from the hotel.',
+    'This image or PDF was posted in a WhatsApp work group of a hotel in Goa, India. It is usually a guest\'s UPI payment screen (often a photo of the guest\'s phone), a printed bill from the hotel, or a card machine\'s charge slip.',
     `Message details: group "${item.group_name}", sent ${istWall(item.sent_at)} India time${item.caption ? `, caption "${item.caption.slice(0, 200)}"` : ''}.`,
     'Read only what the image shows. Never fill a value from the caption or guess one: give null and name the field in unclear instead.',
     'Ignore adverts, offers, scratch cards and rewards on payment screens.',
@@ -62,13 +70,15 @@ export function waInstructions(item: { sent_at: number; caption: string | null; 
   ].join('\n');
 }
 
-const KEY_FIELDS = new Set(['amount', 'date', 'time', 'utr', 'status', 'bill_no', 'total']);
+const KEY_FIELDS = new Set(['amount', 'date', 'time', 'utr', 'status', 'bill_no', 'total', 'approval_code']);
 
 export interface WaRead {
-  kind: 'upi' | 'bill' | 'other';
+  kind: 'upi' | 'bill' | 'card' | 'other';
   amountPaise: number | null;
   utr: string | null;
   billNo: string | null;
+  cardApproval: string | null;
+  cardLast4: string | null;
   docAt: number | null;
   failed: boolean;
   notes: string[];
@@ -139,7 +149,7 @@ export function settle(r: WaReading, sentAt: number): WaRead {
     if (key.length) notes.push(`Check: ${key.join(', ')}.`);
     else if (r.legible === 'unsure') notes.push('Check: some values are a best guess.');
   }
-  let out: WaRead = { kind: r.kind, amountPaise: null, utr: null, billNo: null, docAt: null, failed: false, notes };
+  let out: WaRead = { kind: r.kind, amountPaise: null, utr: null, billNo: null, cardApproval: null, cardLast4: null, docAt: null, failed: false, notes };
   if (r.kind === 'upi' && r.upi) {
     const u = r.upi;
     out = { ...out, amountPaise: money(u.amount), utr: u.utr?.replace(/\s+/g, '') || null, docAt: docTime(u.date, u.time, sentAt) };
@@ -148,6 +158,13 @@ export function settle(r: WaReading, sentAt: number): WaRead {
   } else if (r.kind === 'bill' && r.bill) {
     const b = r.bill;
     out = { ...out, amountPaise: money(b.total), billNo: b.bill_no?.trim() || null, docAt: docTime(b.date, b.time, sentAt) };
+  } else if (r.kind === 'card' && r.card) {
+    const c = r.card;
+    const last4 = (c.last4 ?? '').replace(/\D/g, '').slice(-4);
+    out = { ...out, amountPaise: money(c.amount), cardApproval: c.approval_code?.replace(/\s+/g, '').toUpperCase() || null,
+      cardLast4: last4.length === 4 ? last4 : null, docAt: docTime(c.date, c.time, sentAt) };
+    if (c.status === 'declined') { out.failed = true; notes.unshift('The slip shows a declined or void charge.'); }
+    else if (c.status !== 'approved') notes.push('Card slip: approval not clear.');
   }
   if (out.kind !== 'other' && !out.amountPaise && r.legible !== 'unreadable') notes.push('No amount read.');
   // A time printed after the message was sent, or days before it, is most likely misread.
@@ -233,9 +250,9 @@ async function readItem(env: Env, it: Item): Promise<boolean> {
     const s = settle(data, it.sent_at);
     await db.batch([
       stmt(db, `UPDATE wa_items SET read_status = 'read', read_tries = read_tries + 1, read_after = NULL, kind = ?, extracted_json = ?,
-          amount_paise = ?, utr = ?, bill_no = ?, doc_at = ?, read_note = ?,
+          amount_paise = ?, utr = ?, bill_no = ?, card_approval = ?, card_last4 = ?, doc_at = ?, read_note = ?,
           status = CASE WHEN ? AND status = 'pending' THEN 'rejected' ELSE status END WHERE id = ?`,
-        s.kind, JSON.stringify({ model, reading: data }), s.amountPaise, s.utr, s.billNo, s.docAt, s.notes.join(' ') || null,
+        s.kind, JSON.stringify({ model, reading: data }), s.amountPaise, s.utr, s.billNo, s.cardApproval, s.cardLast4, s.docAt, s.notes.join(' ') || null,
         s.failed ? 1 : 0, it.id),
       audit({ ok: true, model, kind: s.kind }),
     ]);

@@ -222,7 +222,7 @@ describe('in the database', () => {
     it('after reading: the later copy is set aside with a note and left out of pairing', async () => {
       const mocked = vi.mocked(readWithClaude);
       Object.assign(env, { ANTHROPIC_API_KEY: 'test-key', OCR_MAX_PARALLEL: '3' });
-      const reading = (amount: string): WaReading => ({ kind: 'upi', legible: 'clear', bill: null, unclear: [],
+      const reading = (amount: string): WaReading => ({ kind: 'upi', legible: 'clear', bill: null, card: null, unclear: [],
         upi: { amount, date: '23 Nov', time: '9:08 PM', utr: '319852358212', app: 'Paytm', payer_name: null, payer_vpa: null, payer_bank: null,
           payee_name: null, payee_vpa: 'exosparkgoainn@icici', status: 'success' } });
       const ids: string[] = [];

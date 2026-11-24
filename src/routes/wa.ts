@@ -130,7 +130,7 @@ waInboxRoutes.patch(`${B}/items/:id`, requireRole('wa.review'), async (c) => {
   const b = await body(c);
   const e: ItemEdit = {};
   if (b.kind !== undefined) {
-    if (b.kind !== 'upi' && b.kind !== 'bill' && b.kind !== 'other') fail(400, 'Kind is upi, bill or other.');
+    if (b.kind !== 'upi' && b.kind !== 'bill' && b.kind !== 'card' && b.kind !== 'other') fail(400, 'Kind is upi, bill, card or other.');
     e.kind = b.kind;
   }
   if (b.amount !== undefined) {
@@ -194,8 +194,9 @@ waInboxRoutes.post(`${B}/groups`, requireRole('wa.review'), async (c) => {
 waInboxRoutes.patch(`${B}/groups/:id`, requireRole('wa.review'), async (c) => {
   const b = await body(c);
   if (b.active !== undefined && typeof b.active !== 'boolean') fail(400, 'active must be true or false.');
+  if (b.posProof !== undefined && typeof b.posProof !== 'boolean') fail(400, 'posProof must be true or false.');
   await act(() => editGroup(c.env.DB, c.get('businessId'), c.get('user').id, idParam(c), {
     name: optText(b.name, 'Name', 200) ?? undefined, department: optText(b.department, 'Department'), defaultHeadId: optHead(b.defaultHeadId),
-    active: b.active as boolean | undefined }));
+    active: b.active as boolean | undefined, posProof: b.posProof as boolean | undefined }));
   return c.json({ ok: true });
 });

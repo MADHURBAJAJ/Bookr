@@ -10203,10 +10203,10 @@ function waButtons(c, tab) {
 function waDetail(biz, c, singles) {
   const its = [c.upi, c.bill, c.other].filter(Boolean);
   const form = (it) => html`<form class="wa-edit" data-waedit="${it.id}">
-    <div class="tiny"><strong>${it.kind === 'bill' ? 'Bill' : it.kind === 'upi' ? 'UPI photo' : 'Photo'}</strong> · ${it.sender ?? ''} · sent ${when(it.sentAt)}${it.caption ? html` · caption “${it.caption}”` : ''}</div>
+    <div class="tiny"><strong>${it.kind === 'bill' ? 'Bill' : it.kind === 'upi' ? 'UPI photo' : it.kind === 'card' ? 'Card slip' : 'Photo'}</strong> · ${it.sender ?? ''} · sent ${when(it.sentAt)}${it.caption ? html` · caption “${it.caption}”` : ''}</div>
     ${it.note ? html`<div class="tiny" style="color:#92400E">${it.note}</div>` : ''}
     <div class="form-row" style="gap:8px">
-      <div class="field" style="flex:0 1 150px"><label>What</label><select name="kind">${[['upi', 'UPI payment'], ['bill', 'Bill'], ['other', 'Something else']].map(([k, w]) => html`<option value="${k}" ${it.kind === k ? 'selected' : ''}>${w}</option>`)}</select></div>
+      <div class="field" style="flex:0 1 150px"><label>What</label><select name="kind">${[['upi', 'UPI payment'], ['bill', 'Bill'], ['card', 'Card slip'], ['other', 'Something else']].map(([k, w]) => html`<option value="${k}" ${it.kind === k ? 'selected' : ''}>${w}</option>`)}</select></div>
       <div class="field" style="flex:0 1 110px"><label>Amount ₹</label><input name="amount" class="mono" value="${it.amountPaise == null ? '' : rsIn(it.amountPaise)}"></div>
       ${it.kind !== 'bill' ? html`<div class="field" style="flex:1 1 180px"><label>UTR</label><input name="utr" class="mono" value="${it.utr ?? ''}"></div>` : ''}
       ${it.kind !== 'upi' ? html`<div class="field" style="flex:0 1 130px"><label>Bill no.</label><input name="billNo" class="mono" value="${it.billNo ?? ''}"></div>` : ''}
@@ -10316,12 +10316,13 @@ async function waGroupsView(biz) {
     <td><input data-f="department" list="wadeps" value="${g.department ?? ''}" placeholder="Department" style="min-height:36px"></td>
     <td><select data-f="defaultHeadId" class="compact">${headOpts(g.defaultHeadId)}</select></td>
     <td>${g.active ? html`<span class="chip ok">On</span>` : html`<span class="chip mute">Off</span>`}</td>
+    <td><label class="tiny" style="white-space:nowrap" title="Guest payment proof (UPI screenshots, card slips, cash on bill photos) for the POS Payments list"><input type="checkbox" data-wgproof ${g.posProof ? 'checked' : ''}> POS proof</label></td>
     <td style="white-space:nowrap"><button type="button" class="btn plain wa-b" data-wgsave>Save</button>
       <button type="button" class="btn plain wa-b" data-wgon="${g.active ? '' : '1'}">${g.active ? 'Stop reading' : 'Read'}</button><span class="form-msg"></span></td></tr>`;
   render(shell(biz, 'wagroups', 'WhatsApp groups', 'Photos are taken only from groups that are on. The listener on the billing PC sends the groups it can see.', html`
     ${deps}
     <section class="card"><h2>Read</h2>
-      ${d.groups.length ? html`<div class="scroll"><table style="min-width:640px"><thead><tr><th>Group</th><th>Department</th><th>Default head</th><th>Read</th><th></th></tr></thead>
+      ${d.groups.length ? html`<div class="scroll"><table style="min-width:720px"><thead><tr><th>Group</th><th>Department</th><th>Default head</th><th>Read</th><th>Payments</th><th></th></tr></thead>
         <tbody>${d.groups.map(row)}</tbody></table></div>` : html`<div class="note">None yet.</div>`}</section>
     <section class="card"><h2>Seen by the listener, not read</h2>
       ${d.seen.length ? html`<div class="scroll"><table style="min-width:520px"><tbody>${d.seen.map((s) => html`<tr data-waseen="${s.waGroupId}">
@@ -10335,7 +10336,8 @@ async function waGroupsView(biz) {
   const go2 = async (b, fn) => { b.disabled = true; try { await fn(); await waGroupsView(biz); } catch (err) { b.disabled = false; showError(b.parentElement.querySelector('.form-msg'), err); } };
   app.querySelectorAll('[data-wgsave]').forEach((b) => b.addEventListener('click', () => {
     const tr = b.closest('tr');
-    go2(b, () => api('PATCH', `/businesses/${biz.id}/wa/groups/${tr.dataset.wagroup}`, { department: val(tr, 'department'), defaultHeadId: val(tr, 'defaultHeadId') }));
+    go2(b, () => api('PATCH', `/businesses/${biz.id}/wa/groups/${tr.dataset.wagroup}`, { department: val(tr, 'department'), defaultHeadId: val(tr, 'defaultHeadId'),
+      posProof: tr.querySelector('[data-wgproof]').checked }));
   }));
   app.querySelectorAll('[data-wgon]').forEach((b) => b.addEventListener('click', () => {
     const tr = b.closest('tr');

@@ -154,10 +154,10 @@ export async function confirmAgreeing(db: DB, bid: string, pairIds: string[], us
 export async function confirmItem(db: DB, bid: string, id: string, user: string, paidAs: 'cash' | null) {
   const it = await item(db, bid, id);
   if (it.status !== 'pending') throw new InboxError(409, 'Already reviewed. Refresh the page.');
-  if (it.kind !== 'upi' && it.kind !== 'bill') throw new InboxError(400, 'Say whether it is a UPI payment or a bill first (Open).');
+  if (it.kind !== 'upi' && it.kind !== 'bill' && it.kind !== 'card') throw new InboxError(400, 'Say whether it is a UPI payment, a bill or a card slip first (Open).');
   if (await pairOf(db, id)) throw new InboxError(409, 'It is paired: confirm the pair, or unpair it first.');
   if (it.kind === 'bill' && paidAs !== 'cash') throw new InboxError(400, 'A bill without its UPI photo is confirmed as paid in cash, or paired with its payment.');
-  if (it.kind === 'upi' && paidAs) throw new InboxError(400, 'A UPI payment is not paid in cash.');
+  if (it.kind !== 'bill' && paidAs) throw new InboxError(400, `A ${it.kind === 'card' ? 'card slip' : 'UPI payment'} is not paid in cash.`);
   if (it.amount_paise == null) throw new InboxError(400, 'Type the amount first (Open).');
   const t = now();
   await db.batch([
@@ -197,7 +197,7 @@ export async function restoreItem(db: DB, bid: string, id: string, user: string)
   if (!p) await repair(db, it);
 }
 
-export interface ItemEdit { kind?: 'upi' | 'bill' | 'other'; amountPaise?: number | null; utr?: string | null; billNo?: string | null; docAt?: number | null }
+export interface ItemEdit { kind?: 'upi' | 'bill' | 'card' | 'other'; amountPaise?: number | null; utr?: string | null; billNo?: string | null; docAt?: number | null }
 
 /** A person corrects what was read. The photo counts as read; Bookr pairs around it again (a pair made by hand stays). */
 export async function editItem(db: DB, bid: string, id: string, user: string, e: ItemEdit) {
@@ -225,8 +225,8 @@ export async function editItem(db: DB, bid: string, id: string, user: string, e:
 
 export async function groupsView(db: DB, bid: string) {
   const [groups, seen, heads] = await Promise.all([
-    all<{ id: string; wa_group_id: string; name: string; department: string | null; default_head_id: string | null; active: number; items: number; last_at: number | null }>(db,
-      `SELECT g.id, g.wa_group_id, g.name, g.department, g.default_head_id, g.active,
+    all<{ id: string; wa_group_id: string; name: string; department: string | null; default_head_id: string | null; active: number; pos_proof: number; items: number; last_at: number | null }>(db,
+      `SELECT g.id, g.wa_group_id, g.name, g.department, g.default_head_id, g.active, g.pos_proof,
          (SELECT count(*) FROM wa_items i WHERE i.group_id = g.id) AS items, (SELECT max(sent_at) FROM wa_items i WHERE i.group_id = g.id) AS last_at
        FROM wa_groups g WHERE g.business_id = ? ORDER BY g.active DESC, lower(g.name)`, bid),
     // Groups read by another business are not offered here.
@@ -237,7 +237,7 @@ export async function groupsView(db: DB, bid: string) {
   ]);
   return {
     groups: groups.map((g) => ({ id: g.id, waGroupId: g.wa_group_id, name: g.name, department: g.department, defaultHeadId: g.default_head_id,
-      active: !!g.active, items: g.items, lastAt: g.last_at })),
+      active: !!g.active, posProof: !!g.pos_proof, items: g.items, lastAt: g.last_at })),
     seen: seen.map((s) => ({ waGroupId: s.wa_group_id, name: s.name, lastSeenAt: s.last_seen_at })),
     heads: heads.map((h) => ({ id: h.id, name: h.name, type: h.type })),
     departments: [...new Set(groups.map((g) => g.department).filter((d): d is string => !!d))].sort(),
@@ -270,18 +270,19 @@ export async function addGroup(db: DB, bid: string, user: string, g: { waGroupId
   return id;
 }
 
-export async function editGroup(db: DB, bid: string, user: string, id: string, e: { name?: string; department?: string | null; defaultHeadId?: string | null; active?: boolean }) {
-  const g = await one<{ name: string; department: string | null; default_head_id: string | null; active: number }>(db,
-    'SELECT name, department, default_head_id, active FROM wa_groups WHERE id = ? AND business_id = ?', id, bid);
+export async function editGroup(db: DB, bid: string, user: string, id: string, e: { name?: string; department?: string | null; defaultHeadId?: string | null; active?: boolean; posProof?: boolean }) {
+  const g = await one<{ name: string; department: string | null; default_head_id: string | null; active: number; pos_proof: number }>(db,
+    'SELECT name, department, default_head_id, active, pos_proof FROM wa_groups WHERE id = ? AND business_id = ?', id, bid);
   if (!g) throw new InboxError(404, 'Group not found.');
   await checkHead(db, bid, e.defaultHeadId);
   const next = {
     name: e.name?.trim() || g.name, department: e.department !== undefined ? (e.department?.trim() || null) : g.department,
     default_head_id: e.defaultHeadId !== undefined ? (e.defaultHeadId || null) : g.default_head_id, active: e.active !== undefined ? (e.active ? 1 : 0) : g.active,
+    pos_proof: e.posProof !== undefined ? (e.posProof ? 1 : 0) : g.pos_proof,
   };
   const t = now();
   await db.batch([
-    stmt(db, 'UPDATE wa_groups SET name = ?, department = ?, default_head_id = ?, active = ? WHERE id = ?', next.name, next.department, next.default_head_id, next.active, id),
+    stmt(db, 'UPDATE wa_groups SET name = ?, department = ?, default_head_id = ?, active = ?, pos_proof = ? WHERE id = ?', next.name, next.department, next.default_head_id, next.active, next.pos_proof, id),
     audit(db, bid, user, 'wa.group.edit', 'wa_groups', id, g, next, t),
   ]);
 }

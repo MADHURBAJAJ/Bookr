@@ -16,24 +16,33 @@ vi.setConfig({ testTimeout: 60_000 });
 
 const SENT = istToMs(2026, 11, 23, 21, 8, 40);
 const upi = (over: Partial<NonNullable<WaReading['upi']>> = {}, top: Partial<WaReading> = {}): WaReading => ({
-  kind: 'upi', legible: 'clear', bill: null, unclear: [],
+  kind: 'upi', legible: 'clear', bill: null, card: null, unclear: [],
   upi: { amount: '2497', date: '2026-11-23', time: '21:08', utr: '3198 5235 8212', app: 'Paytm', payer_name: null, payer_vpa: null, payer_bank: null,
     payee_name: 'M S Exospark Goa Inn Private Limited', payee_vpa: 'exosparkgoainn@icici', status: 'success', ...over },
   ...top,
 });
 const bill = (over: Partial<NonNullable<WaReading['bill']>> = {}): WaReading => ({
-  kind: 'bill', legible: 'clear', upi: null, unclear: [],
+  kind: 'bill', legible: 'clear', upi: null, card: null, unclear: [],
   bill: { vendor: 'XOXO HOSTEL', bill_no: '26112317', date: '2026-11-23', time: '21:08', sub_total: '2270.00', service_charge: '113.50', gst: '113.50', total: '2497.00', items: '3 Black N White 30, 5 Budweiser Pint', ...over },
 });
 
 describe('settle: what is kept from a reading', () => {
   it('a UPI screen: amount in paise, UTR without spaces, the time on the screen', () => {
-    expect(settle(upi(), SENT)).toEqual({ kind: 'upi', amountPaise: 249700, utr: '319852358212', billNo: null,
+    expect(settle(upi(), SENT)).toEqual({ kind: 'upi', amountPaise: 249700, utr: '319852358212', billNo: null, cardApproval: null, cardLast4: null,
       docAt: istToMs(2026, 11, 23, 21, 8), failed: false, notes: [] });
   });
 
   it('a bill: bill number and grand total', () => {
     expect(settle(bill(), SENT)).toMatchObject({ kind: 'bill', amountPaise: 249700, billNo: '26112317', utr: null, docAt: istToMs(2026, 11, 23, 21, 8) });
+  });
+
+  it('a card slip: amount, approval code and last 4 digits; a declined slip is marked', () => {
+    const card = (over: Partial<NonNullable<WaReading['card']>> = {}): WaReading => ({ kind: 'card', legible: 'clear', upi: null, bill: null, unclear: [],
+      card: { amount: '1,250.00', date: '23/11/26', time: '21:06', approval_code: 'a1b 2c3', last4: 'XXXX XXXX XXXX 4417', status: 'approved', ...over } });
+    expect(settle(card({ amount: '1250.00' }), SENT)).toEqual({ kind: 'card', amountPaise: 125000, utr: null, billNo: null, cardApproval: 'A1B2C3',
+      cardLast4: '4417', docAt: istToMs(2026, 11, 23, 21, 6), failed: false, notes: [] });
+    expect(settle(card({ status: 'declined' }), SENT)).toMatchObject({ failed: true, notes: ['The slip shows a declined or void charge.'] });
+    expect(settle(card({ status: 'unknown', last4: '44' }), SENT)).toMatchObject({ cardLast4: null, notes: ['Card slip: approval not clear.'] });
   });
 
   it('a failed payment is marked, a pending one noted', () => {

@@ -125,7 +125,7 @@ const fullButton = () => (window.bookrDesktop?.minimize ? html`<button type="but
   <button type="button" class="themebtn" data-act="deskFull" title="Full screen on or off (F11)" aria-label="Full screen on or off">${FULL_ICON}</button>`
   : document.fullscreenEnabled ? html`<button type="button" class="themebtn" data-act="fullScreen" title="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}" aria-label="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}">${FULL_ICON}</button>` : '');
 function shell(active, body) {
-  const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/shift', 'Day close', 'shift.close'],
+  const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/payments', 'Payments', 'pos.view'], ['#/shift', 'Day close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   const navLinks = links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`);
   const current = links.find(([h]) => h === active)?.[1] ?? 'Menu';
@@ -178,6 +178,7 @@ async function route() {
   ui = {};
   document.title = 'Bookr POS';
   stopStation();
+  stopProof();
   try {
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
@@ -198,6 +199,7 @@ async function route() {
     refreshDeskAlerts();
     if (path === 'rooms') return await roomsScreen(a);
     if (path === 'credit') return await creditScreen();
+    if (path === 'payments') return await paymentsScreen(a);
     if (path === 'shift') return await shiftScreen();
     if (path === 'handover') return await handoverScreen(a);
     if (path === 'exceptions') return await exceptionsScreen(a);
@@ -2595,6 +2597,65 @@ function grcSlip(g) {
 }
 
 // ---------- credit accounts (25 Nov 2026: their own tab)
+// ---------- payment proof list (24 Nov 2026): every bill and receipt of the shift against the proof staff post in the
+// Guest payment group. Bookr reads WhatsApp and matches; this screen asks every 12 seconds. Settling never waits on it.
+
+let proofTimer = null;
+function stopProof() { if (proofTimer) { clearInterval(proofTimer); proofTimer = null; } }
+const PROOF_TABS = [['', 'All'], ['diff', 'Differences'], ['missing', 'No proof'], ['extras', 'Extras']];
+const PROOF_STATUS = {
+  matched: ['ok', '✓ Matched'], waiting: ['warn', 'Printed, no proof yet'], missing: ['bad', 'Settled, no proof'],
+  difference: ['info', 'Difference'], not_needed: ['', 'No proof needed'], unknown: ['', '—'],
+};
+const PROOF_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Room', credit: 'Credit', comp: 'Comp', advance: 'Advance' };
+
+async function paymentsScreen(tab = '') {
+  const load = async () => { ui.pf = await api('GET', `${B()}/proof`); };
+  await load();
+  rerender = () => {
+    const d = ui.pf;
+    const byKey = new Map((d.rows ?? []).map((r) => [r.key, r]));
+    const rows = d.bills.map((b) => byKey.get(b.key) ?? { ...b, status: 'unknown', proof: [], differences: [], missing: [] }).reverse();
+    const extras = [...(d.extras ?? [])].reverse();
+    const n = { diff: rows.filter((r) => r.status === 'difference').length, missing: rows.filter((r) => r.status === 'missing').length, extras: extras.length };
+    const shown = tab === 'diff' ? rows.filter((r) => r.status === 'difference') : tab === 'missing' ? rows.filter((r) => r.status === 'missing') : rows;
+    const stale = d.listener?.lastSeenAt && Date.now() - d.listener.lastSeenAt > 10 * 60_000;
+    const proofText = (e) => `${{ upi: 'UPI', card: 'Card slip', bill: 'Bill photo' }[e.kind]}${e.amountPaise ? ` ${rs(e.amountPaise)}` : ''} · ${time(e.sentAt)}${e.caption ? ` · “${e.caption}”` : ''}`;
+    const row = (r) => {
+      const [tone, label] = PROOF_STATUS[r.status] ?? PROOF_STATUS.unknown;
+      return html`<tr><td>${time(r.at)}</td><td class="mono">${r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
+        <td>${r.modes.length ? r.modes.map((m) => `${PROOF_MODE[m.mode] ?? m.mode} ${rs(m.amountPaise)}`).join(' + ') : html`<span class="quiet">not paid</span>`}</td>
+        <td class="small">${r.proof.length ? r.proof.map((e) => html`<div>${proofText(e)}</div>`) : html`<span class="quiet">—</span>`}</td>
+        <td>${tone ? html`<span class="status ${tone}">${label}</span>` : html`<span class="quiet small">${label}</span>`}
+          ${[...r.differences, ...r.missing].map((x) => html`<div class="small">${x}</div>`)}</td></tr>`;
+    };
+    paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(d.day)}`, 'Every bill and receipt of the shift against the proof posted in the Guest payment group: a UPI screenshot, the card slip, or “cash” on the bill photo. Post proof until the day closes.')}
+      ${d.connected === false ? html`<div class="msg warn">This POS is not connected to Bookr, so no proof is shown. The bills are listed below.</div>` : ''}
+      ${d.error ? html`<div class="msg warn">Bookr could not be reached (${d.error}). Trying again every few seconds; the bills are listed below.</div>` : ''}
+      ${stale ? html`<div class="msg warn">WhatsApp has not been read since ${time(d.listener.lastSeenAt)}: new proof will not show until the reception PC is back.</div>` : ''}
+      <div class="kpis">${kpi('Matched', String(rows.filter((r) => r.status === 'matched').length), `of ${rows.filter((r) => ['matched', 'missing', 'difference'].includes(r.status)).length} paid needing proof`, 'good')}
+        ${kpi('Settled, no proof', String(n.missing), '', n.missing ? 'bad' : '')}
+        ${kpi('Printed, not paid', String(rows.filter((r) => r.status === 'waiting').length), '', 'warn')}
+        ${kpi('Differences', String(n.diff), '', n.diff ? 'bad' : '')}
+        ${kpi('Extras', String(n.extras), 'proof with no POS bill')}</div>
+      ${d.reading ? html`<p class="small quiet">${d.reading} photo${d.reading === 1 ? ' is' : 's are'} being read.</p>` : ''}
+      ${tabsNav('Payments', PROOF_TABS.map(([k, t]) => [k ? `#/payments/${k}` : '#/payments', k && n[k] ? html`${t} <span class="status ${k === 'extras' ? 'info' : 'bad'}">${n[k]}</span>` : t, k]), tab)}
+      <section class="panel">${tab === 'extras'
+        ? (extras.length ? html`<table class="t"><thead><tr><th>Posted</th><th>What</th><th>Caption</th><th>By</th></tr></thead><tbody>
+            ${extras.map((e) => html`<tr><td>${time(e.sentAt)}</td><td>${e.what}</td><td class="small">${e.caption ?? ''}</td><td class="small">${e.sender ?? ''}</td></tr>`)}</tbody></table>`
+          : html`<p class="empty">No extra proof: everything posted fits a POS bill.</p>`)
+        : (shown.length ? html`<table class="t"><thead><tr><th>Time</th><th>Bill</th><th>Table</th><th class="num">Amount</th><th>Paid by</th><th>Proof posted</th><th>Status</th></tr></thead>
+            <tbody>${shown.map(row)}</tbody></table>`
+          : html`<p class="empty">${tab ? 'Nothing here.' : 'No bills in this shift yet.'}</p>`)}</section>`));
+  };
+  rerender();
+  // Asks again every 12 seconds while this screen is open and the window is in front.
+  proofTimer = setInterval(async () => {
+    if (document.hidden) return;
+    try { await load(); rerender(); } catch { /* the next tick tries again */ }
+  }, 12_000);
+}
+
 async function creditScreen() {
   await load('credit', 'payAccounts');
   rerender = () => paint(shell('#/credit', html`${pageHead('Credit', 'Credit accounts: what each owes, how old it is, and payments.')}
