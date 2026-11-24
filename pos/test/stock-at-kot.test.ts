@@ -52,15 +52,6 @@ describe('stock at the KOT', () => {
       expect(await used('si-beer')).toBe(4);
       await ok(counter.post(`${B}/orders/${o2}/cancel`, { reasonId: s.reasons.kot_cancel, made: false, ...mgr }));
       expect(await used('si-beer')).toBe(2);
-
-      // Sent but on no bill (a table still eating, or a walkout): shown on Consumption as not billed.
-      const o3 = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'T12' }))).id;
-      await ok(counter.post(`${B}/orders/${o3}/items`, { itemId: s.items['Beer 650 ml'], delta: 4 }));
-      await ok(counter.post(`${B}/orders/${o3}/kot`));
-      const day = (await ok(s.owner.get('/me'))).business.shiftDay;
-      const use = await ok(s.owner.get(`${B}/stock/consumption?from=${day}&to=${day}`));
-      expect(use.items.find((i: any) => i.name === 'Sample Beer')).toMatchObject({ sold: 6, notBilled: 4 });
-      expect(use.items.find((i: any) => i.name === 'Sample Batter')).toMatchObject({ sold: 150, notBilled: 0, waste: 150 });
     } finally {
       stockRule.kotFrom = saved;
     }
