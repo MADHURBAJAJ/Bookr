@@ -11,6 +11,7 @@ import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
 import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
 import { clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
+import { dishMoves, cancelMoves, stockAtKot } from '../stock';
 import { sendSoon } from '../sync';
 import { istDay } from '../../../src/time';
 import type { AppEnv } from '../types';
@@ -228,6 +229,14 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
         ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = order_lines.qty + excluded.qty,
           sent_qty = CASE order_lines.kot WHEN 0 THEN order_lines.qty + excluded.qty ELSE order_lines.sent_qty END`,
       newId(), bid, o.id, unit, delta, delta, t, variant, chosen.length ? JSON.stringify(chosen) : null, priceBy, item.id, item.id).run();
+    // A no-KOT item (a bottle at the counter) is handed over at once: its stock goes now (24 Nov 2026).
+    if (stockAtKot(o.opened_at)) {
+      const nl = await one<{ kot: number; station: string }>(db, 'SELECT kot, station FROM order_lines WHERE order_id = ? AND item_id = ? AND variant = ?', o.id, item.id, variant);
+      if (nl?.kot === 0) {
+        const moves = await dishMoves(db, bid, [{ itemId: item.id, station: nl.station, qty: delta }], 'sale', `${o.place} · no KOT`, null, c.get('staff').id, clock(bizOf(c)).shiftDay, t);
+        if (moves.length) await db.batch(moves);
+      }
+    }
     return c.json({ order: orderOut(o, await lines(db, o.id)) });
   }
   // A line by its id, or (older screens) the dish's plain line.
@@ -239,7 +248,8 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
   const newQty = line.qty + delta;
   // A no-KOT line was never with a station: it follows its quantity and needs no reason to come off.
   if (line.kot === 0) {
-    await stmt(db, 'UPDATE order_lines SET qty = ?, sent_qty = ? WHERE id = ?', newQty, newQty, line.id).run();
+    await db.batch([stmt(db, 'UPDATE order_lines SET qty = ?, sent_qty = ? WHERE id = ?', newQty, newQty, line.id),
+      ...(stockAtKot(o.opened_at) ? await dishMoves(db, bid, [{ itemId: line.item_id, station: line.station, qty: delta }], 'sale', `${o.place} · no KOT`, null, c.get('staff').id, clock(bizOf(c)).shiftDay, t) : [])]);
     return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: 0, kots: [] });
   }
   const cancelSent = Math.max(0, line.sent_qty - newQty);
@@ -256,6 +266,9 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
     const k = await kotStatements(db, bid, o.id, [{ ...line, qty: -cancelSent, sent_qty: 0 }], c.get('staff').id, now(), true, clock(bizOf(c)).shiftDay);
     statements.push(...k.statements);
     kotIds = k.ids;
+    // Its stock (24 Nov 2026): back to the store when not made yet; wastage when it was made.
+    if (stockAtKot(o.opened_at)) statements.push(...await cancelMoves(db, bid, [{ itemId: line.item_id, station: line.station, qty: cancelSent }], data.made !== false,
+      `${o.place} · cancelled`, reason, c.get('staff').id, clock(bizOf(c)).shiftDay, t));
   }
   await db.batch(statements);
   return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: cancelSent, kots: await kotsOut(db, kotIds, o.place) });
@@ -267,8 +280,13 @@ orderRoutes.post(`${B}/orders/:id/kot`, requireAction('orders.edit'), async (c) 
   const o = await order(c, bid, c.req.param('id'), true);
   const ls = (await lines(c.env.DB, o.id)).filter((l) => l.qty > l.sent_qty);
   if (!ls.length) fail(409, 'Nothing new to send.');
-  const k = await kotStatements(c.env.DB, bid, o.id, ls, c.get('staff').id, now(), false, clock(bizOf(c)).shiftDay);
-  await c.env.DB.batch([...k.statements, ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id))]);
+  const t = now();
+  const { shiftDay } = clock(bizOf(c));
+  const k = await kotStatements(c.env.DB, bid, o.id, ls, c.get('staff').id, t, false, shiftDay);
+  // What goes to the kitchen and bar takes its stock now (24 Nov 2026), not at payment.
+  const moves = stockAtKot(o.opened_at) ? await dishMoves(c.env.DB, bid, ls.filter((l) => l.kot !== 0).map((l) => ({ itemId: l.item_id, station: l.station, qty: l.qty - l.sent_qty })),
+    'sale', `${o.place} · KOT`, null, c.get('staff').id, shiftDay, t) : [];
+  await c.env.DB.batch([...k.statements, ...moves, ...ls.map((l) => stmt(c.env.DB, 'UPDATE order_lines SET sent_qty = qty WHERE id = ?', l.id))]);
   return c.json({ kots: await kotsOut(c.env.DB, k.ids, o.place), order: orderOut(o, await lines(c.env.DB, o.id)) }, 201);
 });
 
@@ -410,6 +428,9 @@ orderRoutes.post(`${B}/orders/:id/cancel`, requireAction('orders.edit'), async (
     ...sent.map((l) => event(db, bid, 'kot_cancel', `${o.place} · ${l.sent_qty} × ${[l.name, ...chosenOf(l).map((x) => x.name)].join(' + ')} (whole order)`,
       l.sent_qty * l.price_paise, reason, `Approved by ${approver.name}`, staffId, shiftDay)),
     stmt(db, "UPDATE orders SET status = 'cancelled' WHERE id = ?", o.id),
+    // Its stock (24 Nov 2026): back when not made; wastage when made. No-KOT items were handed over: they stay used.
+    ...(stockAtKot(o.opened_at) ? await cancelMoves(db, bid, sent.map((l) => ({ itemId: l.item_id, station: l.station, qty: l.sent_qty })), data.made !== false,
+      `${o.place} · cancelled`, reason, staffId, shiftDay, now()) : []),
   ]);
   return c.json({ ok: true, kots: await kotsOut(db, k.ids, o.place) });
 });
