@@ -31,7 +31,8 @@ async function hostel() {
   setReader('djubo', fake);
   await s.ok(s.owner.call('PUT', `${s.B}/tables`, { sections: [{ name: 'Deluxe', kind: 'rooms', tables: ['X', 'XI', 'XII'] }] }));
   await s.ok(s.owner.call('PUT', `${s.B}/bookings/auto`, { from: '2026-01-01' }));
-  await s.ok(s.owner.call('PUT', `${s.B}/bookings/reception`, { users: ['Sample Desk'] }));
+  // Money anyone but the booking team enters in Djubo needs a POS receipt (24 Nov 2026).
+  await s.ok(s.owner.call('PUT', `${s.B}/bookings/booking-team`, { users: ['Sample Team'] }));
   const day = (await s.ok(s.owner.get('/me'))).business.shiftDay;
   const plus = (n: number) => new Date(Date.parse(day) + n * 86_400_000).toISOString().slice(0, 10);
   return { ...s, day, plus };
@@ -142,5 +143,19 @@ describe('money taken at reception', () => {
     expect((await ok(counter.get(`${B}/bookings`))).waiting).toMatchObject([{ extRef: 'DJ-H1', problem: expect.stringMatching(/website hold/) }]);
     await send(s.businessId, 'h2', `Booking DJ-H1 | Web Guest | 9800099999 | Deluxe | ${day} | ${plus(1)} | 5000 | 5000 | System | X`, 'Reservation Confirmation');
     expect((await ok(counter.get(`${B}/bookings/arrivals?day=${day}`))).arrivals.map((a: any) => a.extRef)).toEqual(['DJ-H1']);
+  });
+
+  it('only the booking team and OTA bookings need no receipt; anyone else, even someone new, needs one', async () => {
+    const s = await hostel();
+    const { B, counter, ok, day, plus } = s;
+    await send(s.businessId, 'n1', `Booking DJ-N1 | Ota Guest | 9800010101 | Deluxe | ${day} | ${plus(1)} | 3000 | 3000 | System | X`);
+    await send(s.businessId, 'n2', `Booking DJ-N2 | Team Guest | 9800010102 | Deluxe | ${day} | ${plus(1)} | 3000 | 1000 | Sample Team | XI`);
+    await send(s.businessId, 'n3', `Booking DJ-N3 | New Desk Guest | 9800010103 | Deluxe | ${day} | ${plus(1)} | 3000 | 1500 | New Person | XII`);
+    const take = (await ok(counter.get(`${B}/bookings`))).deskToTake.map((x: any) => [x.extRef, x.pendingPaise]);
+    expect(take).toEqual([['DJ-N3', 150_000]]);
+    // Adding the new person to the booking team: their money no longer needs a receipt.
+    await ok(s.owner.call('PUT', `${B}/bookings/booking-team`, { users: ['Sample Team', 'New Person'] }));
+    expect((await ok(counter.get(`${B}/bookings`))).deskToTake).toEqual([]);
+    expect((await counter.call('PUT', `${B}/bookings/booking-team`, { users: [] })).status).toBe(403);
   });
 });

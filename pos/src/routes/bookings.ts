@@ -34,7 +34,7 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
       bid, new Date(Date.parse(today) - 86_400_000).toISOString().slice(0, 10)),
     all(c.env.DB, `SELECT id, from_addr AS fromAddr, subject, source, received_at AS receivedAt, status, note FROM inbound_mails WHERE business_id = ?
       ORDER BY received_at DESC LIMIT 30`, bid),
-    one<{ a: number | null; u: string }>(c.env.DB, 'SELECT bookings_auto_from AS a, reception_users AS u FROM businesses WHERE id = ?', bid),
+    one<{ a: number | null; u: string }>(c.env.DB, 'SELECT bookings_auto_from AS a, no_receipt_users AS u FROM businesses WHERE id = ?', bid),
   ]);
   // Money taken at reception (24 Nov 2026): what reception entered in Djubo with no POS receipt yet (before check-in; once
   // checked in, the room bill shows it as to collect), advances taken here waiting for their Djubo booking, and the rooms
@@ -51,7 +51,7 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
   let users: string[] = [];
   try { users = JSON.parse(autoRow?.u ?? '[]'); } catch { /* none */ }
   return c.json({ today, alerts: alerts.map(masked), waiting: waiting.map(masked), arriving: arriving.map(masked), mails, autoFrom: autoRow?.a ?? null,
-    receptionUsers: users, deskToTake: pending.filter((p) => p.status !== 'checked_in'), advancesWaiting: advancesWaiting.map((a) => masked(a as { phone: string | null })), unbooked });
+    bookingTeam: users, deskToTake: pending.filter((p) => p.status !== 'checked_in'), advancesWaiting: advancesWaiting.map((a) => masked(a as { phone: string | null })), unbooked });
 });
 
 // Arrivals for check-in on a day: approved bookings not yet checked in (the full phone, to fill the check-in form).
@@ -130,17 +130,18 @@ bookingRoutes.post(`${B}/mails/read-all-again`, requireAction('stays.edit'), asy
   return c.json({ done, total, next: ids.length === PER_CALL && done < total ? done : null });
 });
 
-// The Djubo users who work at reception (a manager sets them): money they enter in Djubo was taken at the desk.
-bookingRoutes.put(`${B}/bookings/reception`, requireAction('stays.edit'), async (c) => {
-  if (!isManager(c)) fail(403, 'A manager or owner sets who works at reception.');
+// The Djubo users of the booking team (a manager sets them, 24 Nov 2026): money they enter in Djubo needs no POS receipt.
+// Anyone else's (reception, someone new) does; OTA bookings ("System") never do.
+bookingRoutes.put(`${B}/bookings/booking-team`, requireAction('stays.edit'), async (c) => {
+  if (!isManager(c)) fail(403, 'A manager or owner sets the booking team.');
   const bid = c.get('businessId');
   const data = await body(c);
   if (!Array.isArray(data.users) || data.users.length > 10) fail(400, 'List up to 10 names, as Djubo shows them.');
   const users = [...new Set(data.users.map((u) => String(u).trim()).filter(Boolean).map((u) => u.slice(0, 60)))];
-  const before = await one<{ u: string }>(c.env.DB, 'SELECT reception_users AS u FROM businesses WHERE id = ?', bid);
+  const before = await one<{ u: string }>(c.env.DB, 'SELECT no_receipt_users AS u FROM businesses WHERE id = ?', bid);
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE businesses SET reception_users = ? WHERE id = ?', JSON.stringify(users), bid),
-    audit(c.env.DB, bid, c.get('staff').id, 'bookings.reception_users', 'businesses', bid, before?.u ?? null, users),
+    stmt(c.env.DB, 'UPDATE businesses SET no_receipt_users = ? WHERE id = ?', JSON.stringify(users), bid),
+    audit(c.env.DB, bid, c.get('staff').id, 'bookings.booking_team', 'businesses', bid, before?.u ?? null, users),
   ]);
   // Worked out again for every booking with Djubo mails, with the new names.
   const lower = users.map((u) => u.toLowerCase());

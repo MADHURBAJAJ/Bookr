@@ -59,18 +59,20 @@ export async function syncStay(db: DB, bid: string, stayId: string) {
 
 // ---------- money taken at reception (24 Nov 2026)
 
-/** The Djubo users who work at reception, as set in Settings (lower case). */
-export async function receptionUsers(db: DB, bid: string): Promise<string[]> {
-  const r = await one<{ u: string }>(db, 'SELECT reception_users AS u FROM businesses WHERE id = ?', bid);
+/** The Djubo users of the booking team, whose money needs no POS receipt, as set in Settings (lower case). */
+export async function bookingTeam(db: DB, bid: string): Promise<string[]> {
+  const r = await one<{ u: string }>(db, 'SELECT no_receipt_users AS u FROM businesses WHERE id = ?', bid);
   try { return (JSON.parse(r?.u ?? '[]') as unknown[]).map((x) => String(x).trim().toLowerCase()).filter(Boolean); } catch { return []; }
 }
 
 /**
  * The part of a Djubo booking's advance taken at the desk, worked out from its mails in order: each increase in a mail made
- * or changed by a reception user is money taken at the desk; a decrease takes it back. The same however often mails are read.
+ * or changed by anyone but the booking team and the OTAs ("System") is money taken at the desk; a decrease takes it back.
+ * The same however often mails are read. (24 Nov 2026: by who needs no receipt, so a new or unlisted person needs one.)
  */
-export async function recomputeDesk(db: DB, bid: string, bookingId: string, users?: string[]) {
-  const who = users ?? await receptionUsers(db, bid);
+export async function recomputeDesk(db: DB, bid: string, bookingId: string, team?: string[]) {
+  const noReceipt = team ?? await bookingTeam(db, bid);
+  const atDesk = (name: string | null) => { const n = (name ?? '').trim().toLowerCase(); return !!n && n !== 'system' && !noReceipt.includes(n); };
   const log = await all<{ paid_paise: number; entered_by: string | null; received_at: number }>(db,
     'SELECT paid_paise, entered_by, received_at FROM booking_paid_log WHERE booking_id = ? ORDER BY received_at, mail_id', bookingId);
   let prev = 0;
@@ -78,7 +80,7 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, user
   let at: number | null = null;
   for (const r of log) {
     const d = r.paid_paise - prev;
-    if (who.includes((r.entered_by ?? '').trim().toLowerCase())) {
+    if (atDesk(r.entered_by)) {
       if (d > 0) { desk += d; at = r.received_at; } else if (d < 0) desk = Math.max(0, desk + d);
     } else if (d < 0) desk = Math.min(desk, r.paid_paise);
     prev = r.paid_paise;

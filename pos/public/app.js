@@ -2416,10 +2416,10 @@ actions.bkLink = async (d) => {
 };
 actions.bkDeskSave = async () => {
   // An unchanged box keeps the names it shows (24 Nov 2026: saving it untouched used to clear them).
-  const users = String(ui.bkDesk ?? (ui.bk?.receptionUsers ?? []).join(', ')).split(',').map((x) => x.trim()).filter(Boolean);
-  if (!users.length && (ui.bk?.receptionUsers ?? []).length && !confirm('Remove every reception user? Money they enter in Djubo would then count as paid before arrival.')) return;
-  await api('PUT', `${B()}/bookings/reception`, { users });
-  flash = { kind: 'ok', text: users.length ? `Reception in Djubo: ${users.join(', ')}.` : 'No reception users set.' }; route();
+  const users = String(ui.bkDesk ?? (ui.bk?.bookingTeam ?? []).join(', ')).split(',').map((x) => x.trim()).filter(Boolean);
+  if (!users.length && (ui.bk?.bookingTeam ?? []).length && !confirm('Remove everyone from the booking team? Money they enter in Djubo would then need a POS receipt.')) return;
+  await api('PUT', `${B()}/bookings/booking-team`, { users });
+  flash = { kind: 'ok', text: users.length ? `No receipt needed for: ${users.join(', ')} and OTA bookings. Everyone else's money in Djubo needs a POS receipt.` : 'Everyone\'s money in Djubo needs a POS receipt (OTA bookings excepted).' }; route();
 };
 /** The stay's tax invoice for room rent, with what was paid and the food bills paid on their own. */
 function roomInvoiceSlip(bill) {
@@ -2495,8 +2495,9 @@ function bookingsPanel(r, mode = 'inbox') {
       <p class="small quiet">Read from the Djubo and MakeMyTrip mails forwarded by Gmail. ${auto0 ? (auto0 <= r.today ? `Automatic since ${dayName(auto0)}: clean bookings go in by themselves; odd ones wait in Reservations › Waiting for you.` : `Automatic from ${dayName(auto0)}; until then a person approves each one.`) : 'A person approves each one.'}</p>
       <form class="row" style="align-items:end"><label class="f">Automatic from<input class="in" type="date" data-model="bkAuto" value="${ui.bkAuto ?? auto0 ?? addDays(r.today, 10)}"></label>
         <button class="btn" type="submit" data-act="bkAutoSave" data-submit>Save</button>${auto0 ? html`<button class="btn ghost" type="button" data-act="bkAutoOff">Turn off</button>` : ''}</form>
-      <form class="row" style="align-items:end"><label class="f" style="flex:1">Djubo users at reception (money they enter in Djubo was taken at the desk)<input class="in" data-model="bkDesk" value="${ui.bkDesk ?? (r.receptionUsers ?? []).join(', ')}" placeholder="e.g. Suresh Ramoda"></label>
-        <button class="btn" type="submit" data-act="bkDeskSave" data-submit>Save</button></form></section>`;
+      <form class="row" style="align-items:end"><label class="f" style="flex:1">Djubo users who don't need a POS receipt (booking team)<input class="in" data-model="bkDesk" value="${ui.bkDesk ?? (r.bookingTeam ?? []).join(', ')}" placeholder="e.g. the booking team's names, as Djubo shows them"></label>
+        <button class="btn" type="submit" data-act="bkDeskSave" data-submit>Save</button></form>
+      <p class="small quiet">Money anyone else enters in Djubo (reception, someone new) needs a POS receipt and shows on Today until it is taken here. OTA bookings never need one. Separate names with commas.</p></section>`;
   }
   const linkable = r.arriving.filter((b) => b.status === 'approved' && !b.stayId && b.checkIn && b.checkIn <= r.today && (r.unbooked ?? []).length);
   const problems = r.mails.filter((m) => m.status === 'failed' || (m.source === 'gmail'));
