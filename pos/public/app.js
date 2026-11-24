@@ -1844,7 +1844,16 @@ actions.bkOpen = (d) => {
   rerender();
 };
 /** How many things wait in the inbox: bookings to approve (a MakeMyTrip + Djubo pair counts once), Djubo alerts, mails to look at. */
-const inboxCount = (r) => (r ? r.waiting.filter((b) => !(b.source === 'mmt' && b.matchId && r.waiting.some((x) => x.id === b.matchId))).length + (r.alerts?.length ?? 0)
+/** What waits in the inbox (24 Nov 2026): bookings to approve; website holds waiting for the guest to pay (not for you);
+ *  and MakeMyTrip copies of a booking Djubo could not place, shown with that alert as one item. */
+function waitingGroups(r) {
+  const base = r.waiting.filter((b) => !(b.source === 'mmt' && b.matchId && r.waiting.some((x) => x.id === b.matchId)));
+  const alertPnrs = new Set((r.alerts ?? []).map((a) => a.pnr).filter(Boolean));
+  const copyOfAlert = (b) => b.source === 'mmt' && b.pnr && alertPnrs.has(b.pnr);
+  const isHold = (b) => /website hold/i.test(b.problem ?? '');
+  return { approve: base.filter((b) => !copyOfAlert(b) && !isHold(b)), holds: base.filter((b) => !copyOfAlert(b) && isHold(b)), copies: base.filter(copyOfAlert) };
+}
+const inboxCount = (r) => (r ? waitingGroups(r).approve.length + (r.alerts?.length ?? 0)
   + r.mails.filter((m) => m.status === 'failed' || m.source === 'gmail').length : 0);
 /** The WhatsApp message confirming a reservation, ready for staff to send. */
 const waLink = (r) => {
@@ -2488,7 +2497,7 @@ function bookingsPanel(r, mode = 'inbox') {
         <button class="btn ghost sm" type="button" data-act="bkCancel" data-id="${b.id}">Cancel booking</button></div>` : ''}</div>`;
   };
   // A MakeMyTrip booking and its Djubo copy waiting together show as one item (the Djubo one: it has the phone and room).
-  const waiting = r.waiting.filter((b) => !(b.source === 'mmt' && b.matchId && r.waiting.some((x) => x.id === b.matchId)));
+  const { approve: waiting, holds, copies } = waitingGroups(r);
   const auto0 = r.autoFrom ? new Date(r.autoFrom + 19_800_000).toISOString().slice(0, 10) : null;
   if (mode === 'settings') {
     return html`<section class="panel"><h2>Bookings from mail</h2>
@@ -2506,10 +2515,12 @@ function bookingsPanel(r, mode = 'inbox') {
       ${isMgr() ? html`<a href="#/settings/bookings">Settings</a>` : ''}</span></div>
     ${r.alerts?.length ? html`<div class="msg bad" role="alert" style="margin:8px 0"><p style="margin:0 0 6px"><strong>Djubo could not place ${plural(r.alerts.length, 'booking')}.</strong> Create ${r.alerts.length === 1 ? 'it' : 'them'} in Djubo by hand, or rooms may be sold twice.</p>
       ${r.alerts.map((b) => html`<div class="line" style="gap:8px;border-top:1px solid var(--bad-line);padding:6px 0"><span class="grow small"><strong>${b.guestName ?? 'No name'}</strong> · ${b.channel ?? 'OTA'} ref ${b.pnr}${b.phone ? ` · ${b.phone}` : ''}<br>
-        ${b.roomType ?? '?'}${b.rooms > 1 ? ` × ${b.rooms}` : ''} · ${b.checkIn ? dayName(b.checkIn) : '?'} → ${b.checkOut ? dayName(b.checkOut) : '?'}${b.amountPaise ? ` · ${rs(b.amountPaise)}` : ''}</span>
+        ${b.roomType ?? '?'}${b.rooms > 1 ? ` × ${b.rooms}` : ''} · ${b.checkIn ? dayName(b.checkIn) : '?'} → ${b.checkOut ? dayName(b.checkOut) : '?'}${b.amountPaise ? ` · ${rs(b.amountPaise)}` : ''}
+        ${copies.filter((x) => x.pnr === b.pnr).map((x) => html`<br><span class="quiet">MakeMyTrip's copy ${x.extRef} waits with it, and goes in by itself once Djubo has the booking.</span>`)}</span>
         <button class="btn" type="button" data-act="bkHandled" data-id="${b.id}">Done in Djubo</button></div>`)}
       <p class="small" style="margin:6px 0 0">It clears by itself when Djubo's confirmation for the same booking arrives.</p></div>` : ''}
     <h3>To approve (${waiting.length})</h3>${waiting.length ? waiting.map(row) : html`<p class="empty">Nothing to approve. New bookings from Djubo and MakeMyTrip appear here.</p>`}
+    ${holds.length ? html`<h3 style="margin-top:12px">On hold, not paid yet (${holds.length})</h3><p class="small quiet" style="margin:0">Website bookings Djubo holds until the guest pays. Nothing to do: each goes in by itself when Djubo confirms it. Cancel one only if it is not going to be paid.</p>${holds.map(row)}` : ''}
     ${linkable.length ? html`<h3 style="margin-top:12px">Arriving today: guest already in a room? (${linkable.length})</h3>${linkable.map(row)}` : ''}
     ${problems.length ? html`<h3 style="margin-top:12px">Mails to look at</h3>${problems.map((m) => {
       // Gmail's forwarding confirmation: its link as a button (only a Google mail-settings link, opened in a new tab).
