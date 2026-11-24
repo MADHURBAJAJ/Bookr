@@ -3598,14 +3598,15 @@ function useTab(storeSel) {
       <label class="f">From<input class="in" type="date" data-model="uFrom" value="${ui.uFrom}"></label><label class="f">To<input class="in" type="date" data-model="uTo" value="${ui.uTo}"></label>
       <button class="btn" type="submit" data-act="useGo" data-submit>Show</button></form>
     ${u.items.length ? html`<div class="sums" style="max-width:520px;margin:12px 0"><div><span>Used in ${plural(u.days, 'day')}, at the last price paid</span><span><strong>${rs(u.totals.usedValuePaise)}</strong></span></div>
-        <div><span>of which breakage</span><span>${rs(u.totals.wasteValuePaise)}</span></div><div><span>of which missing at counts</span><span style="${u.totals.missingValuePaise ? 'color:var(--bad)' : ''}">${rs(u.totals.missingValuePaise)}</span></div></div>
+        <div><span>of which breakage and wastage</span><span>${rs(u.totals.wasteValuePaise)}</span></div><div><span>of which missing at counts</span><span style="${u.totals.missingValuePaise ? 'color:var(--bad)' : ''}">${rs(u.totals.missingValuePaise)}</span></div>
+        ${ui.uStore ? '' : html`<div><span>Sent to kitchen or bar, not on a bill</span><span style="${u.totals.notBilledValuePaise ? 'color:var(--warn)' : ''}">${rs(u.totals.notBilledValuePaise ?? 0)}</span></div>`}</div>
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Missing</th><th class="num">Used</th><th class="num">A day</th><th class="num">Value</th><th>Used most by</th></tr></thead><tbody>
         ${u.items.map((i) => html`<tr><td data-label="Item"><strong>${i.name}</strong>${i.extra ? html`<div class="small quiet">+${i.extra} ${i.unit} found extra at counts</div>` : ''}</td>
-          <td data-label="Sold" class="num">${unitQty(i.sold, i)}</td><td data-label="Breakage" class="num">${i.waste ? unitQty(i.waste, i) : '—'}</td>
+          <td data-label="Sold" class="num">${unitQty(i.sold, i)}${i.notBilled ? html`<div class="small" style="color:var(--warn)">${unitQty(i.notBilled, i)} not billed</div>` : ''}</td><td data-label="Breakage" class="num">${i.waste ? unitQty(i.waste, i) : '—'}</td>
           <td data-label="Missing" class="num" style="${i.missing ? 'color:var(--bad)' : ''}">${i.missing ? unitQty(i.missing, i) : '—'}</td><td data-label="Used" class="num"><strong>${unitQty(i.used, i)}</strong></td>
           <td data-label="A day" class="num">${i.perDay} ${i.unit}</td><td data-label="Value" class="num">${rs(i.usedValuePaise)}</td>
           <td data-label="Used most by" class="small">${i.topDishes.length ? i.topDishes.map((d) => `${d.dish} (${d.qty})`).join(', ') : html`<span class="quiet">—</span>`}</td></tr>`)}</tbody></table></div>
-      <p class="small quiet">Sold is by each dish's recipe when its bill was settled. Missing is what counts found short of the book. Values are at the last price paid.</p>`
+      <p class="small quiet">Sold is by each dish's recipe when it was sent to the kitchen or bar (orders before 25 Nov, 8 am: when the bill was paid). Not billed is what was sent but is on no bill: tables still open, walkouts, or food that left without a bill (all stores only). Breakage and wastage includes food made and then cancelled. Missing is what counts found short of the book. Values are at the last price paid.</p>`
       : html`<p class="quiet">Nothing was used in these dates${ui.uStore ? ' from this store' : ''}.</p>`}</section>`;
 }
 actions.useGo = () => route();

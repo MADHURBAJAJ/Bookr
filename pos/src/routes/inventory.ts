@@ -79,15 +79,21 @@ inventoryRoutes.get(`${B}/stock/consumption`, requireAction('stock.edit'), async
       JOIN recipes r ON r.menu_item_id = l.item_id WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void'
       GROUP BY r.stock_item_id, l.name ORDER BY units DESC`, bid, from, to);
   const nDays = Math.round((Date.parse(to) - Date.parse(from)) / DAY) + 1;
+  // Sent to the kitchen or bar but not on a bill (24 Nov 2026): what the KOTs took less what bills (not void) account for —
+  // tables still open, walkouts, or anything else that left without a bill. Only for all stores, as bills are not by store.
+  const billed = new Map<string, number>();
+  for (const d of dishes) billed.set(d.stock_item_id, (billed.get(d.stock_item_id) ?? 0) + d.units);
   const items = rows.map((r) => {
     const used = r.sold + r.waste + r.missing;
+    const notBilled = storeId ? 0 : Math.max(0, r.sold - (billed.get(r.id) ?? 0));
     return { id: r.id, name: r.name, unit: r.unit, packSize: r.pack_size, sold: r.sold, waste: r.waste, missing: r.missing, extra: r.extra, used,
+      notBilled, notBilledValuePaise: valueOf(notBilled, r),
       perDay: Math.round((used / nDays) * 10) / 10, usedValuePaise: valueOf(used, r), wasteValuePaise: valueOf(r.waste, r), missingValuePaise: valueOf(r.missing, r),
       topDishes: dishes.filter((d) => d.stock_item_id === r.id).slice(0, 3).map((d) => ({ dish: d.dish, qty: d.qty, units: d.units })) };
   }).filter((x) => x.used || x.extra);
   return c.json({ from, to, days: nDays, storeId, items, totals: {
     usedValuePaise: items.reduce((t, x) => t + x.usedValuePaise, 0), wasteValuePaise: items.reduce((t, x) => t + x.wasteValuePaise, 0),
-    missingValuePaise: items.reduce((t, x) => t + x.missingValuePaise, 0) } });
+    missingValuePaise: items.reduce((t, x) => t + x.missingValuePaise, 0), notBilledValuePaise: items.reduce((t, x) => t + x.notBilledValuePaise, 0) } });
 });
 
 // What was bought for shifts from..to: each receipt (a bill, or one receiving), its lines and amount, the price paid
