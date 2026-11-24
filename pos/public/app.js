@@ -858,8 +858,7 @@ async function orderScreen(id) {
             <button class="btn pri" type="submit" data-act="lessApprove" data-submit>Approve</button><button class="btn ghost" type="button" data-act="lessNo">Keep it</button></div>`
           : html`<p>No manager or owner has a PIN yet. The Owner sets one in Settings, Staff and PINs.</p><button class="btn ghost" type="button" data-act="lessNo">Keep it</button>`}</form>`
         : html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>Already sent to the kitchen.</strong> Why cancel one?${isMgr() ? '' : ' A manager or owner approves next.'}</p>
-        ${madeChips('cMade')}
-        <div class="chips">${reasonsOf('kot_cancel').map((r) => html`<button type="button" class="chip" data-act="lessWhy" data-id="${lineKey(l)}" data-r="${r.id}" ${ui.cMade === undefined ? 'disabled' : ''}>${r.label}</button>`)}
+        <div class="chips">${reasonsOf('kot_cancel').map((r) => html`<button type="button" class="chip" data-act="lessWhy" data-id="${lineKey(l)}" data-r="${r.id}">${r.label}</button>`)}
         <button type="button" class="chip" data-act="lessNo">Keep it</button></div></div>`) : ''}</div>`;
     const fresh = o.lines.filter((l) => l.qty > l.sentQty);
     const sent = o.lines.filter((l) => l.qty <= l.sentQty);
@@ -1001,10 +1000,6 @@ actions.cat = (d) => { ui.cat = d.c; rerender(); };
 let saving = Promise.resolve();
 let pendingSaves = 0;
 /** target: {itemId} for a plain dish (its plain line, or a new one), or {key} for a line on the ticket. */
-const madeChips = (k) => html`<div class="chips" style="margin-bottom:6px"><span class="small" style="align-self:center"><strong>Was it already made?</strong></span>
-  <button type="button" class="chip" aria-pressed="${ui[k] === true}" data-act="madePick" data-k="${k}" data-v="1">Yes, made · wastage</button>
-  <button type="button" class="chip" aria-pressed="${ui[k] === false}" data-act="madePick" data-k="${k}" data-v="">Not made · back to stock</button></div>`;
-actions.madePick = (d) => { ui[d.k] = !!d.v; rerender(); };
 function change(target, delta, reasonId, approval) {
   const o = ui.order;
   const plain = (x) => !x.options?.length && !x.typedPrice;
@@ -1041,18 +1036,16 @@ actions.less = (d) => {
 };
 // Cancelling what the kitchen already has: a manager or owner does it themselves, or approves it with their PIN (21 Nov 2026).
 actions.lessWhy = async (d) => {
-  if (ui.cMade === undefined) throw new Error('Say first whether it was already made.');
-  const made = ui.cMade;
-  if (isMgr()) { ui.asking = null; ui.cMade = undefined; change({ key: d.id }, -1, d.r, { made }); return; }
+  if (isMgr()) { ui.asking = null; change({ key: d.id }, -1, d.r); return; }
   ui.approvers = (await api('GET', `${B()}/approvers`)).approvers;
-  ui.approve = { key: d.id, reasonId: d.r, made }; ui.apId = ui.approvers[0]?.id; ui.apPin = '';
+  ui.approve = { key: d.id, reasonId: d.r }; ui.apId = ui.approvers[0]?.id; ui.apPin = '';
   rerender();
 };
 actions.lessApprove = () => {
   const a = ui.approve;
   if (!/^\d{4,6}$/.test(ui.apPin ?? '')) throw new Error('Type the 4 to 6 digit PIN.');
-  ui.asking = null; ui.approve = null; ui.cMade = undefined;
-  change({ key: a.key }, -1, a.reasonId, { approverId: ui.apId, approverPin: ui.apPin, made: a.made });
+  ui.asking = null; ui.approve = null;
+  change({ key: a.key }, -1, a.reasonId, { approverId: ui.apId, approverPin: ui.apPin });
   ui.apPin = '';
 };
 actions.toBill = async () => { await saved(); if (!ui.error) go(`#/bill/${ui.order.id}`); };
@@ -1062,12 +1055,11 @@ function wholeCancelBox(o) {
   const w = ui.wholeCancel;
   const sent = o.lines.filter((l) => l.sentQty > 0 && !l.noKot);
   return html`<form class="msg warn approve" role="alert" style="margin-top:10px"><p style="margin-bottom:8px"><strong>Cancel the whole order?</strong> ${plural(sent.reduce((t, l) => t + l.sentQty, 0), 'item')} already with the kitchen get a cancel KOT.</p>
-    ${madeChips('wMade')}
     <div class="chips">${reasonsOf('kot_cancel').map((r) => html`<button type="button" class="chip" aria-pressed="${w.reasonId === r.id}" data-act="wholeWhy" data-r="${r.id}">${r.label}</button>`)}</div>
     ${isMgr() ? '' : ui.approvers?.length ? html`<div class="row" style="margin-top:8px"><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((a) => html`<option value="${a.id}" ${ui.apId === a.id ? 'selected' : ''}>${a.name}</option>`)}</select>
         <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's or owner's PIN"></div>`
       : html`<p>No manager or owner has a PIN yet. The Owner sets one in Settings, Staff and PINs.</p>`}
-    <div class="row" style="margin-top:8px"><button class="btn danger" type="submit" data-act="wholeGo" data-submit ${w.reasonId && ui.wMade !== undefined ? '' : 'disabled'}>Cancel whole order</button><button class="btn ghost" type="button" data-act="wholeNo">Keep the order</button></div></form>`;
+    <div class="row" style="margin-top:8px"><button class="btn danger" type="submit" data-act="wholeGo" data-submit ${w.reasonId ? '' : 'disabled'}>Cancel whole order</button><button class="btn ghost" type="button" data-act="wholeNo">Keep the order</button></div></form>`;
 }
 actions.wholeAsk = async () => {
   await saved();
@@ -1078,13 +1070,12 @@ actions.wholeWhy = (d) => { ui.wholeCancel.reasonId = d.r; rerender(); };
 actions.wholeNo = () => { ui.wholeCancel = null; ui.apPin = ''; rerender(); };
 actions.wholeGo = async () => {
   if (!isMgr() && !/^\d{4,6}$/.test(ui.apPin ?? '')) throw new Error("Type the manager's or owner's 4 to 6 digit PIN.");
-  if (ui.wMade === undefined) throw new Error('Say first whether the food was already made.');
-  const r = await api('POST', `${B()}/orders/${ui.order.id}/cancel`, { reasonId: ui.wholeCancel.reasonId, made: ui.wMade, ...(isMgr() ? {} : { approverId: ui.apId, approverPin: ui.apPin }) });
+  const r = await api('POST', `${B()}/orders/${ui.order.id}/cancel`, { reasonId: ui.wholeCancel.reasonId, ...(isMgr() ? {} : { approverId: ui.apId, approverPin: ui.apPin }) });
   printKots(r.kots.filter((k) => k.printAt === 'counter'));
   flash = { kind: 'ok', text: `${ui.order.place}: order cancelled. ${r.kots.length ? kotSummary(r.kots) : ''}` };
   go('#/');
 };
-actions.lessNo = () => { ui.asking = null; ui.approve = null; ui.apPin = ''; ui.cMade = undefined; rerender(); };
+actions.lessNo = () => { ui.asking = null; ui.approve = null; ui.apPin = ''; rerender(); };
 actions.kot = async () => {
   await saved();
   const { kots, order } = await api('POST', `${B()}/orders/${ui.order.id}/kot`);
@@ -3598,7 +3589,7 @@ function useTab(storeSel) {
       <label class="f">From<input class="in" type="date" data-model="uFrom" value="${ui.uFrom}"></label><label class="f">To<input class="in" type="date" data-model="uTo" value="${ui.uTo}"></label>
       <button class="btn" type="submit" data-act="useGo" data-submit>Show</button></form>
     ${u.items.length ? html`<div class="sums" style="max-width:520px;margin:12px 0"><div><span>Used in ${plural(u.days, 'day')}, at the last price paid</span><span><strong>${rs(u.totals.usedValuePaise)}</strong></span></div>
-        <div><span>of which breakage and wastage</span><span>${rs(u.totals.wasteValuePaise)}</span></div><div><span>of which missing at counts</span><span style="${u.totals.missingValuePaise ? 'color:var(--bad)' : ''}">${rs(u.totals.missingValuePaise)}</span></div>
+        <div><span>of which breakage</span><span>${rs(u.totals.wasteValuePaise)}</span></div><div><span>of which missing at counts</span><span style="${u.totals.missingValuePaise ? 'color:var(--bad)' : ''}">${rs(u.totals.missingValuePaise)}</span></div>
         ${ui.uStore ? '' : html`<div><span>Sent to kitchen or bar, not on a bill</span><span style="${u.totals.notBilledValuePaise ? 'color:var(--warn)' : ''}">${rs(u.totals.notBilledValuePaise ?? 0)}</span></div>`}</div>
       <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Missing</th><th class="num">Used</th><th class="num">A day</th><th class="num">Value</th><th>Used most by</th></tr></thead><tbody>
         ${u.items.map((i) => html`<tr><td data-label="Item"><strong>${i.name}</strong>${i.extra ? html`<div class="small quiet">+${i.extra} ${i.unit} found extra at counts</div>` : ''}</td>
@@ -3606,7 +3597,7 @@ function useTab(storeSel) {
           <td data-label="Missing" class="num" style="${i.missing ? 'color:var(--bad)' : ''}">${i.missing ? unitQty(i.missing, i) : '—'}</td><td data-label="Used" class="num"><strong>${unitQty(i.used, i)}</strong></td>
           <td data-label="A day" class="num">${i.perDay} ${i.unit}</td><td data-label="Value" class="num">${rs(i.usedValuePaise)}</td>
           <td data-label="Used most by" class="small">${i.topDishes.length ? i.topDishes.map((d) => `${d.dish} (${d.qty})`).join(', ') : html`<span class="quiet">—</span>`}</td></tr>`)}</tbody></table></div>
-      <p class="small quiet">Sold is by each dish's recipe when it was sent to the kitchen or bar (orders before 25 Nov, 8 am: when the bill was paid). Not billed is what was sent but is on no bill: tables still open, walkouts, or food that left without a bill (all stores only). Breakage and wastage includes food made and then cancelled. Missing is what counts found short of the book. Values are at the last price paid.</p>`
+      <p class="small quiet">Sold is by each dish's recipe when it was sent to the kitchen or bar (orders before 25 Nov, 8 am: when the bill was paid). Not billed is what was sent but is on no bill: tables still open, walkouts, or food that left without a bill (all stores only). A cancelled KOT puts its stock back, so food made and then cancelled shows as missing at the count. Missing is what counts found short of the book. Values are at the last price paid.</p>`
       : html`<p class="quiet">Nothing was used in these dates${ui.uStore ? ' from this store' : ''}.</p>`}</section>`;
 }
 actions.useGo = () => route();

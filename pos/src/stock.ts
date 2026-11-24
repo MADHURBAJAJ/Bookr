@@ -1,6 +1,7 @@
-// Stock used by what is sold (24 Nov 2026: at the KOT, not at payment). Each dish's recipe comes out of the store that
-// matches its station (bar or kitchen) when it is sent to the kitchen or bar, or when a no-KOT item is added. Cancelled
-// before it is made: it goes back. Cancelled after it is made: it is wastage, with the reason. Payment moves no stock.
+// Stock used by what is sold (25 Nov 2026: at the KOT, not at payment). Each dish's recipe comes out of the store that
+// matches its station (bar or kitchen) when it is sent to the kitchen or bar, or when a no-KOT item is added. A KOT
+// cancelled (an item or the whole order) always puts it back (owner's choice): food made and then cancelled shows as
+// missing at the shift's stock count, with the cancel and its reason on the Daily check. Payment moves no stock.
 // Orders opened before the change keep the old rule (stock at payment), so nothing is counted twice or missed.
 import { all, newId, stmt, type DB } from '../../src/db';
 
@@ -39,11 +40,9 @@ export async function dishMoves(db: DB, bid: string, uses: { itemId: string; sta
     newId(), bid, m.item, m.store, kind, m.qty, ref.slice(0, 80), reason, staffId, shiftDay, t));
 }
 
-/** A dish cancelled after it was sent: back to stock when not made; when made, its sale becomes wastage with the reason. */
-export async function cancelMoves(db: DB, bid: string, uses: { itemId: string; station: string; qty: number }[], made: boolean, ref: string, reason: string,
-  staffId: string, shiftDay: string, t: number) {
-  const back = await dishMoves(db, bid, uses.map((u) => ({ ...u, qty: -u.qty })), 'sale', ref, null, staffId, shiftDay, t);
-  return made ? [...back, ...(await dishMoves(db, bid, uses, 'waste', ref, `Made, then cancelled: ${reason}`.slice(0, 200), staffId, shiftDay, t))] : back;
+/** A dish cancelled after it was sent: its stock goes back. */
+export async function cancelMoves(db: DB, bid: string, uses: { itemId: string; station: string; qty: number }[], ref: string, staffId: string, shiftDay: string, t: number) {
+  return dishMoves(db, bid, uses.map((u) => ({ ...u, qty: -u.qty })), 'sale', ref, null, staffId, shiftDay, t);
 }
 
 /** The old rule, for orders opened before stock moved to the KOT: each settled bill's lines use their recipes at payment. */

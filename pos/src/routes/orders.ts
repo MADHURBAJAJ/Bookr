@@ -266,9 +266,9 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
     const k = await kotStatements(db, bid, o.id, [{ ...line, qty: -cancelSent, sent_qty: 0 }], c.get('staff').id, now(), true, clock(bizOf(c)).shiftDay);
     statements.push(...k.statements);
     kotIds = k.ids;
-    // Its stock (24 Nov 2026): back to the store when not made yet; wastage when it was made.
-    if (stockAtKot(o.opened_at)) statements.push(...await cancelMoves(db, bid, [{ itemId: line.item_id, station: line.station, qty: cancelSent }], data.made !== false,
-      `${o.place} · cancelled`, reason, c.get('staff').id, clock(bizOf(c)).shiftDay, t));
+    // Its stock goes back to the store (25 Nov 2026).
+    if (stockAtKot(o.opened_at)) statements.push(...await cancelMoves(db, bid, [{ itemId: line.item_id, station: line.station, qty: cancelSent }],
+      `${o.place} · cancelled`, c.get('staff').id, clock(bizOf(c)).shiftDay, t));
   }
   await db.batch(statements);
   return c.json({ order: orderOut(o, await lines(db, o.id)), cancelledSent: cancelSent, kots: await kotsOut(db, kotIds, o.place) });
@@ -428,9 +428,9 @@ orderRoutes.post(`${B}/orders/:id/cancel`, requireAction('orders.edit'), async (
     ...sent.map((l) => event(db, bid, 'kot_cancel', `${o.place} · ${l.sent_qty} × ${[l.name, ...chosenOf(l).map((x) => x.name)].join(' + ')} (whole order)`,
       l.sent_qty * l.price_paise, reason, `Approved by ${approver.name}`, staffId, shiftDay)),
     stmt(db, "UPDATE orders SET status = 'cancelled' WHERE id = ?", o.id),
-    // Its stock (24 Nov 2026): back when not made; wastage when made. No-KOT items were handed over: they stay used.
-    ...(stockAtKot(o.opened_at) ? await cancelMoves(db, bid, sent.map((l) => ({ itemId: l.item_id, station: l.station, qty: l.sent_qty })), data.made !== false,
-      `${o.place} · cancelled`, reason, staffId, shiftDay, now()) : []),
+    // Its stock goes back to the store (25 Nov 2026). No-KOT items were handed over: they stay used.
+    ...(stockAtKot(o.opened_at) ? await cancelMoves(db, bid, sent.map((l) => ({ itemId: l.item_id, station: l.station, qty: l.sent_qty })),
+      `${o.place} · cancelled`, staffId, shiftDay, now()) : []),
   ]);
   return c.json({ ok: true, kots: await kotsOut(db, k.ids, o.place) });
 });
