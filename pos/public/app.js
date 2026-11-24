@@ -68,6 +68,9 @@ let flash = null;       // { kind, text, link?: [href, text] } shown once at the
 const can = (a) => !!me?.actions.includes(a);
 const B = () => `/businesses/${me.business.id}`;
 
+// Where the app starts (24 Nov 2026): Counter for anyone who works the counter (front desk and billing), Tables for the
+// others. Only on opening the app or signing in; the Tables link itself still goes to Tables.
+let startHere = true;
 function go(hash) { if (location.hash === hash) route(); else location.hash = hash; }
 window.addEventListener('hashchange', route);
 
@@ -189,6 +192,10 @@ async function route() {
     }
     if (!me) return await signIn();
     const [path, a, b] = location.hash.replace(/^#\/?/, '').split('/');
+    if (startHere) {
+      startHere = false;
+      if ((path === '' || path === 'signin') && can('stays.edit')) { location.replace('#/counter'); return; }
+    }
     // Desk density (25 Nov 2026): compact controls for a mouse and keyboard; the floor, order and payment screens stay
     // touch-sized for a tablet.
     document.body.classList.toggle('desk', !['', 'order', 'bill', 'settle', 'done', 'signin'].includes(path ?? ''));
@@ -383,7 +390,7 @@ actions.pinKey = (d) => { if (ui.pin.length < 6) ui.pin += d.k; rerender(); };
 actions.pinBack = () => { ui.pin = ui.pin.slice(0, -1); rerender(); };
 actions.pinGo = async () => {
   try { await api('POST', '/auth/pin', { staffId: ui.who, pin: ui.pin }); } catch (e) { ui.pin = ''; throw e; }
-  me = null; go('#/');
+  me = null; startHere = true; go('#/');
 };
 /** The desk screens where the counter's shortcut keys work: Counter, Tables and Rooms. */
 const onDesk = () => /^#\/(counter|rooms)?(\/.*)?$|^#?$/.test(location.hash) && !/^#\/(order|bill|settle|done)/.test(location.hash);
@@ -444,12 +451,12 @@ document.addEventListener('keydown', (ev) => {
   else if (ev.key === 'Enter' && !ev.target.closest?.('button')) { ev.preventDefault(); root.querySelector('[data-act="pinGo"]')?.click(); }
 });
 actions.pwMode = () => { ui.passwordMode = !ui.passwordMode; ui.error = null; rerender(); };
-actions.login = async () => { await api('POST', '/auth/login', { email: ui.email ?? '', password: ui.password ?? '' }); me = null; go('#/'); };
+actions.login = async () => { await api('POST', '/auth/login', { email: ui.email ?? '', password: ui.password ?? '' }); me = null; startHere = true; go('#/'); };
 actions.logout = async () => { await api('POST', '/auth/logout'); me = null; cache = {}; go('#/signin'); };
 // An owner of more than one restaurant moves between them; only their own appear in the list.
 actions.switchRestaurant = async (_d, el) => {
   await api('POST', '/auth/switch', { businessId: el.value });
-  me = null; cache = {}; go('#/');
+  me = null; cache = {}; startHere = true; go('#/');
 };
 
 // ---------- tables
