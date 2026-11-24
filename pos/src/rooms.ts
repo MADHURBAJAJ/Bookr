@@ -114,7 +114,7 @@ export async function linkWalkIn(db: DB, bid: string, bookingId: string) {
     stay_id: string | null; unplaced: number }>(db, 'SELECT id, phone, guest_name, check_in, room_labels, status, problem, stay_id, unplaced FROM bookings WHERE id = ? AND business_id = ?', bookingId, bid);
   if (!k || k.stay_id || !['new', 'approved'].includes(k.status) || k.problem || k.unplaced || !k.check_in) return null;
   const stays = await all<{ id: string; room: string; guest_name: string; phone: string | null }>(db, `SELECT s.id, s.room, s.guest_name, s.phone FROM stays s
-    WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.check_in = ? AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id)`, bid, k.check_in);
+    WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.check_in = ? AND s.group_stay_id IS NULL AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id)`, bid, k.check_in);
   const flat = (t: string) => t.toLowerCase().replace(/\s+/g, '');
   const first = (t: string | null) => (t ?? '').trim().toLowerCase().replace(/^(mr|mrs|ms|dr)\.?\s*/, '').split(/\s+/)[0] ?? '';
   const labels = (k.room_labels ?? '').split(',').map(flat).filter(Boolean);

@@ -67,8 +67,10 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
     out.cardLast4 = last4;
   }
   if (mode === 'room') {
-    const a = await one<{ id: string; name: string }>(db, `SELECT d.id, d.name FROM debtor_accounts d JOIN stays s ON s.id = d.stay_id
-      WHERE d.id = ? AND d.business_id = ? AND d.kind = 'room' AND s.checked_out_at IS NULL`, p.debtorAccountId ?? null, bid);
+    // A room or bed checked in with others (24 Nov 2026) is billed on the group's first room.
+    const a = await one<{ id: string; name: string }>(db, `SELECT g.id, g.name FROM debtor_accounts d JOIN stays s ON s.id = d.stay_id
+      JOIN debtor_accounts g ON g.stay_id = coalesce(s.group_stay_id, s.id) JOIN stays gs ON gs.id = g.stay_id
+      WHERE d.id = ? AND d.business_id = ? AND d.kind = 'room' AND s.checked_out_at IS NULL AND gs.checked_out_at IS NULL`, p.debtorAccountId ?? null, bid);
     if (!a) fail(400, `Payment ${n}: choose an in-house room.`);
     out.debtorAccountId = a.id;
     out.debtorName = a.name;

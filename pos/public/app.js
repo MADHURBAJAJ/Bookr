@@ -2292,7 +2292,7 @@ function checkinView() {
             <button class="btn" type="button" data-act="openStay" data-noprint="1">Check in without printing</button><span class="small quiet">Enter checks in</span></div>`)}
       </div>
       <div class="cicol">${step(2, 'Room', ui.roomSecs.length ? roomPicker() : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`,
-        ui.room ? html`<span class="status info" style="margin-left:auto">${ui.room}</span>` : html`<span class="status mute" style="margin-left:auto">choose one</span>`)}</div>
+        ui.room ? html`<span class="status info" style="margin-left:auto">${[ui.room, ...(ui.ciRooms ?? [])].join(', ')}</span>` : html`<span class="status mute" style="margin-left:auto">choose one</span>`)}</div>
     </form>`;
 }
 /** The room picker at check-in: search, only free (default), rooms and beds grouped by type with free counts and dirty marks. */
@@ -2317,8 +2317,11 @@ function roomPicker() {
   }).filter((g) => g.shown.length);
   return html`<div class="row"><input class="in grow" type="search" data-model="roomQ" data-live value="${ui.roomQ ?? ''}" placeholder="Search room, bed or type   /" aria-label="Search rooms and beds" autocomplete="off">
       <button type="button" class="chip sm" aria-pressed="${!all}" data-act="pick" data-k="rpAll" data-id="${all ? '' : '1'}">Only free</button></div>
+    <label class="tickline small"><input type="checkbox" data-act="ciMultiTog" ${ui.ciMulti ? 'checked' : ''}> Several rooms or beds for this guest${ui.ciMulti ? ': tap each one; the first holds the bill' : ''}</label>
+    ${(ui.ciTaken ?? []).length ? html`<div class="msg warn">Djubo has ${ui.ciTaken.join(', ')} for this booking, but ${ui.ciTaken.length === 1 ? 'it is' : 'they are'} taken now. Choose ${ui.ciTaken.length === 1 ? 'another' : 'others'} below, or check the guest there out first.</div>` : ''}
+    ${(ui.ciRooms ?? []).length ? html`<div class="msg ok">Checking in to <strong>${[ui.room, ...ui.ciRooms].join(', ')}</strong> · one bill, on ${ui.room}</div>` : ''}
     <div class="rpick">${groups.length ? groups.map((g) => html`<div class="rpg"><div class="rph"><strong>${g.x.name}</strong><span class="small quiet">${g.free} of ${g.total} free</span></div>
-      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
+      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
         title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}">${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
       : html`<p class="empty">No free room or bed matches. Turn off "Only free" to see taken ones.</p>`}</div>`;
 }
@@ -2373,7 +2376,8 @@ function folioLabel(l) {
 /** The room's bill (24 Nov 2026): rent, charges, food, payments, what is still to collect, and check-out with the invoice. */
 function roomBillPanel(r) {
   const st = r.stay;
-  const name = `Room ${st.room} · ${st.guestName}`;
+  const grp = (st.group ?? []).filter((g) => !g.checkedOutAt);
+  const name = `Room ${[st.room, ...grp.map((g) => g.room)].join(', ')} · ${st.guestName}`;
   const f = ui.rbForm;   // which form is open on the bill: charge, lower, transfer, move, extend, checkout, cn
   const out = !!st.checkedOutAt;
   const inv = r.invoice;
@@ -2414,6 +2418,8 @@ function roomBillPanel(r) {
   };
   return html`<section class="panel" style="margin-bottom:16px;max-width:820px;border-color:var(--pri-line)">
     <div class="line"><h2 class="grow" style="margin:0">${name}${out ? html` <span class="badge bad">checked out ${dateTime(st.checkedOutAt)}</span>` : ''}</h2><button class="btn ghost" type="button" data-act="rbClose">Close</button></div>${ui.recv || ui.refund || ui.adv ? '' : errorBox()}
+    ${!out && grp.length ? html`<div class="msg ok" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="grow">One bill for ${st.room} and ${grp.map((g) => g.room).join(', ')}: food and payments of all of them come here. Checking out ${st.room} checks out all.</span>
+      ${grp.map((g) => html`<button class="btn sm" type="button" data-act="bedOut" data-id="${g.id}" data-r="${g.room}">${g.room} leaves early</button>`)}</div>` : ''}
     ${!out && st.foreign && !st.formCAt ? html`<div class="msg warn" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow">Foreign guest: Form C is due within 24 hours of arrival.</span><button class="btn" type="button" data-act="formC" data-id="${st.id}">Form C filed</button></div>` : ''}
     ${r.booking?.fromReport && r.booking.amountPaise == null && !st.checkedOutAt ? html`<form class="msg warn" style="display:block;margin-top:8px"><strong>Type the total rent from Djubo</strong>
       <div class="small">This booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}). The rest counts as paid before arrival. Needed before check-out.</div>
@@ -2588,10 +2594,16 @@ actions.pickArrival = (d, _el, quiet) => {
   // Djubo's room or bed number when a room here is named the same; else the room type, to narrow the list.
   // Djubo writes "XIVA" or "XIV A": compared without spaces.
   const flat = (t) => String(t).toLowerCase().replace(/\s+/g, '');
-  const label = flat((a.roomLabels ?? '').split(',')[0]);
-  const hit = label ? ui.roomSecs.flatMap((x) => x.tables ?? []).find((t) => flat(t) === label) : null;
-  ui.roomQ = hit ?? a.roomType ?? '';
-  if (hit) ui.room = hit;
+  // Every room or bed of the booking (24 Nov 2026): one check-in puts the guest in all of them, billed on the first.
+  const names = ui.roomSecs.flatMap((x) => x.tables ?? []);
+  const labels = (a.roomLabels ?? '').split(',').map(flat).filter(Boolean);
+  const hits = [...new Set(labels.map((l) => names.find((t) => flat(t) === l)).filter(Boolean))];
+  const busy = (t) => (cache.stays ?? []).some((x) => roomKeyOf(x.room) === roomKeyOf(t));
+  const free = hits.filter((t) => !busy(t));
+  ui.ciTaken = hits.filter(busy);
+  ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
+  ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
+  ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
   if (!quiet) rerender();
 };
 /** Bookings from mail: waiting for a person (approve, fix, cancel), arriving soon, the mails received, and automatic. */
@@ -2693,14 +2705,14 @@ actions.openStay = async (d = {}) => {
   const idDocs = Array.from({ length: adults }, (_, i) => ({ type: ui[`idT_${i}`] ?? (foreignGuest ? 'Passport' : 'Aadhaar'), number: ui[`idN_${i}`] ?? '', name: ui[`idName_${i}`] ?? (i === 0 ? ui.guest : '') }))
     .filter((x) => String(x.number).trim());
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
-  const r = await api('POST', B() + '/stays', { room: ui.room, guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
-    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut, idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
+  const r = await api('POST', B() + '/stays', { room: ui.room, rooms: ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
+    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
     goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign });
   if (!d.noprint) printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${r.id}/grc`)).grc)) }]);
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
   // The room bill opens, ready to take what is still to pay (24 Nov 2026).
   reopenStay = r.id;
-  flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in to ${ui.room}${r.grcNo ? ` · ${r.grcNo}` : ''}.${due ? ` Collect ${rs(due)} still to pay (Take payment, below).` : ''}` };
+  flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in to ${(r.rooms ?? [ui.room]).join(', ')}${r.grcNo ? ` · ${r.grcNo}` : ''}.${due ? ` Collect ${rs(due)} still to pay (Take payment, below).` : ''}` };
   await refreshDeskAlerts(); go('#/rooms');
 };
 /** The guest registration card, printed at check-in for the guest to sign. */
@@ -2805,7 +2817,25 @@ async function creditScreen() {
     </section>`));
   rerender();
 }
-actions.pickRoom = (d) => { ui.room = d.name; ui.error = null; rerender(); };
+// One room, or several for one guest (24 Nov 2026): the first chosen holds the bill, the others are checked in with it.
+actions.pickRoom = (d) => {
+  ui.error = null;
+  const extra = ui.ciRooms ?? [];
+  if (!ui.ciMulti) { ui.room = d.name; ui.ciRooms = []; rerender(); return; }
+  if (ui.room === d.name) { ui.room = extra[0] ?? null; ui.ciRooms = extra.slice(1); }
+  else if (extra.includes(d.name)) ui.ciRooms = extra.filter((x) => x !== d.name);
+  else if (!ui.room) ui.room = d.name;
+  else ui.ciRooms = [...extra, d.name];
+  rerender();
+};
+// One bed of a group leaves before the others (24 Nov 2026): its bill stays on the first room.
+actions.bedOut = async (d) => {
+  if (!confirm(`Check out ${d.r} only? The bill stays on this room.`)) return;
+  await api('POST', `${B()}/stays/${d.id}/check-out`, {});
+  ui.roomBill = await api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`); await load('stays');
+  flash = { kind: 'ok', text: `${d.r} checked out and marked dirty.` }; rerender();
+};
+actions.ciMultiTog = () => { ui.ciMulti = !ui.ciMulti; if (!ui.ciMulti) ui.ciRooms = []; rerender(); };
 // A phone number typed at check-in finds a returning guest: their name and city fill in, and their earlier stays show.
 actions.gLookup = async (_d, el) => {
   const digits = el.value.replace(/\D/g, '');

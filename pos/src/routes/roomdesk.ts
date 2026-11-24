@@ -41,8 +41,9 @@ roomDeskRoutes.post(`${B}/stays/:id/transfer`, requireAction('stays.edit'), asyn
   const pre = [];
   let approvedBy = '';
   if (data.to === 'room') {
+    // To a bed of a group: its bill is the group's first room (24 Nov 2026).
     const other = await one<{ account_id: string; room: string; guest_name: string }>(db, `SELECT d.id AS account_id, s.room, s.guest_name FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id
-      WHERE s.id = ? AND s.business_id = ? AND s.checked_out_at IS NULL`, typeof data.stayId === 'string' && isUuid(data.stayId) ? data.stayId : null, bid);
+      WHERE s.id = (SELECT coalesce(x.group_stay_id, x.id) FROM stays x WHERE x.id = ?) AND s.business_id = ? AND s.checked_out_at IS NULL`, typeof data.stayId === 'string' && isUuid(data.stayId) ? data.stayId : null, bid);
     if (!other || other.account_id === s.account_id) fail(400, 'Choose another room that is checked in.');
     target = { id: other.account_id, name: `Room ${other.room} · ${other.guest_name}` };
   } else if (data.to === 'credit') {
@@ -183,6 +184,8 @@ roomDeskRoutes.post(`${B}/stays/:id/extend`, requireAction('stays.edit'), async 
   const t = now();
   await c.env.DB.batch([
     stmt(c.env.DB, 'UPDATE stays SET check_out_plan = ? WHERE id = ?', to, s.id),
+    // The group's other rooms and beds stay as long (24 Nov 2026).
+    stmt(c.env.DB, 'UPDATE stays SET check_out_plan = ? WHERE group_stay_id = ? AND checked_out_at IS NULL', to, s.id),
     ...(rate ? [stmt(c.env.DB, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, by_staff, at) VALUES (?, ?, ?, 'room_rent', ?, ?, ?, ?)",
       newId(), bid, s.account_id, rate * nights, `Room rent · ${nights} extra night${nights === 1 ? '' : 's'} × ${rupeesText(rate)}`, c.get('staff').id, t)] : []),
     audit(c.env.DB, bid, c.get('staff').id, 'stay.extend', 'stays', s.id, { checkOut: from }, { checkOut: to, ratePaise: rate }),
@@ -306,7 +309,8 @@ export async function roomIsDirty(db: DB, bid: string, room: string) {
 roomDeskRoutes.post(`${B}/stays/:id/move`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
-  const s = await openStay(c, c.req.param('id'));
+  // A bed of a group moves on its own (24 Nov 2026).
+  const s = await openStay(c, c.req.param('id'), true);
   if (s.checked_out_at) fail(409, 'This guest has checked out.');
   const data = await body(c);
   const all_ = (tableLayout(bizOf(c)) ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms').flatMap((x) => x.tables);
