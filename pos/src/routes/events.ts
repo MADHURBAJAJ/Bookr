@@ -11,6 +11,7 @@ import { parsePaise } from '../../../src/money';
 import { requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, isTrigger, placeOf, tableLayout, type Section } from '../util';
 import type { AppEnv } from '../types';
+import { cashGuard } from './drawers';
 
 export const eventRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -142,6 +143,7 @@ eventRoutes.post(`${B}/event-mode/:id/payments`, requireAction('reports.view'), 
   const { t, shiftDay } = clock(bizOf(c));
   const id = newId();
   const outId = mode === 'bank' ? null : newId();
+  await cashGuard(c, mode === 'cash');
   try {
     await db.batch([
       ...(outId ? [stmt(db, "INSERT INTO drawer_outs (id, business_id, kind, mode, amount_paise, note, shift_day, by_staff, at) VALUES (?, ?, 'paid_out', ?, ?, ?, ?, ?, ?)",

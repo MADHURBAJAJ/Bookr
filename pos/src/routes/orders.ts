@@ -19,8 +19,10 @@ export const orderRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
 orderRoutes.use(`${B}/*`, requireStaff);
 
-interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; guest_phone: string | null; guest_id: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string }
-const ORDER_COLS = 'id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day';
+interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; guest_phone: string | null; guest_id: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string;
+  handed_at: number | null; handed_from_name: string | null; held_by_name: string | null }
+const ORDER_COLS = `id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day, handed_at,
+  (SELECT name FROM staff WHERE id = orders.handed_from) AS handed_from_name, (SELECT name FROM staff WHERE id = orders.held_by) AS held_by_name`;
 interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number }
 /** What was chosen on a line: [{group, name, addPaise}], in the dish's order of groups. */
 type Chosen = { group: string; name: string; addPaise: number }[];
@@ -71,6 +73,8 @@ function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
   return {
     id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, guestPhone: maskPhone(o.guest_phone), covers: o.covers, status: o.status,
     openedAt: o.opened_at, openedShiftDay: o.opened_shift_day,
+    // Handed over between cashiers (24 Nov 2026): from whom, to whom, when.
+    handedFrom: o.handed_from_name, heldBy: o.held_by_name, handedAt: o.handed_at,
     lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty,
       options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0 })),
     itemsPaise: ls.reduce((s, l) => s + l.qty * l.price_paise, 0), bill,

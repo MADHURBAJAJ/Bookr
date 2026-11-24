@@ -10,6 +10,7 @@ import { phoneKey, openStay, stayBill } from './settings';
 import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
+import { cashGuard } from './drawers';
 
 export const roomDeskRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -101,6 +102,7 @@ roomDeskRoutes.post(`${B}/room-invoices/:id/credit-note`, requireAction('bills.r
   const { t, shiftDay, fy } = clock(bizOf(c));
   const staff = c.get('staff');
   const cnId = newId();
+  await cashGuard(c, mode === 'cash');
   const note = `Room credit note on ${inv.invoice_no} · ${reason}${isManager(c) ? '' : ` · Approved by ${ap.name}`}`.slice(0, 160);
   try {
     await db.batch([

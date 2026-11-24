@@ -7,6 +7,7 @@ import { currentDevice, endSession, PIN_LOCK_MS, PIN_TRIES, requireAction, requi
 import { PERMISSIONS, type Action } from '../permissions';
 import { clock, bizOf, loadBusiness } from '../util';
 import type { AppEnv } from '../types';
+import { openDrawer } from './drawers';
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -96,15 +97,18 @@ authRoutes.post('/auth/logout', async (c) => {
 
 authRoutes.get('/me', requireStaff, async (c) => {
   const s = c.get('staff');
-  const b = await one<{ name: string; shift_start_hour: number; fy_start_month: number; tab_age_days: number; disc_limit_bp: number }>(c.env.DB,
-    'SELECT name, shift_start_hour, fy_start_month, tab_age_days, disc_limit_bp FROM businesses WHERE id = ?', s.businessId);
+  const b = await one<{ name: string; shift_start_hour: number; fy_start_month: number; tab_age_days: number; disc_limit_bp: number; float_paise: number }>(c.env.DB,
+    'SELECT name, shift_start_hour, fy_start_month, tab_age_days, disc_limit_bp, float_paise FROM businesses WHERE id = ?', s.businessId);
   const actions = (Object.keys(PERMISSIONS) as Action[]).filter((a) => (PERMISSIONS[a] as readonly string[]).includes(s.role));
   // The restaurants this person may switch to: only their own login's places (given by a Bookr POS admin), active ones.
   const loginId = c.get('loginId');
   const restaurants = loginId && !c.get('support') ? await all<{ id: string; name: string }>(c.env.DB,
     `SELECT b.id, b.name FROM staff st JOIN businesses b ON b.id = st.business_id
      WHERE st.login_id = ? AND st.active = 1 AND st.role IN ('owner', 'manager') AND b.status = 'active' ORDER BY b.name`, loginId) : [];
-  return c.json({ staff: s, business: { id: s.businessId, ...b, shiftDay: clock(bizOf(c)).shiftDay }, actions, restaurants, support: c.get('support') });
+  // Who holds the cash drawer (24 Nov 2026), for the top bar.
+  const dr = await openDrawer(c.env.DB, s.businessId);
+  return c.json({ staff: s, business: { id: s.businessId, ...b, shiftDay: clock(bizOf(c)).shiftDay }, actions, restaurants, support: c.get('support'),
+    drawer: dr ? { holder: dr.holder, heldBy: dr.held_by, since: dr.opened_at } : null });
 });
 
 // Moves the signed-in person to another of their own restaurants (same login), without signing in again.

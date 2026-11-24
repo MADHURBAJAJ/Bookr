@@ -19,6 +19,7 @@ export const PERMISSIONS = {
   'stays.edit': TILL,            // open and close in-house stays
   'debtors.receive': TILL,       // take an advance, or a payment against a folio or credit account
   'shift.close': TILL,
+  'drawer.float': MANAGE,        // the fixed float left in the cash drawer (24 Nov 2026)
   'reports.view': MANAGE,        // exceptions, shift reports, debtors
   'menu.edit': MANAGE,           // menu items and reason lists
   'stock.edit': MANAGE,          // stock items, recipes, receiving, transfers, breakage, counts and the stock report

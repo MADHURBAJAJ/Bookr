@@ -15,6 +15,7 @@ import { sendSoon } from '../sync';
 import { syncStay } from '../rooms';
 import { saleMoves } from '../stock';
 import type { AppEnv } from '../types';
+import { cashGuard } from './drawers';
 
 export const settleRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -249,6 +250,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
         // Tips go with the last bill of the settle: [{paymentId, mode, amountPaise}].
         tips: x.id === ordered[ordered.length - 1].id ? over.map((o) => ({ paymentId: o.paymentId, mode: pays.find((q) => q.id === o.paymentId)!.mode, amountPaise: o.amountPaise })) : [] }), t));
   }
+  await cashGuard(c, pays.some((p) => p.mode === 'cash'));
   try {
     await db.batch(statements);
   } catch (e) {
@@ -312,6 +314,7 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
   const b = bizOf(c);
   const { t, shiftDay, fy } = clock(b);
   const staff = c.get('staff');
+  await cashGuard(c, pays.some((p) => p.mode === 'cash'));
   const settlementId = newId();
   try {
     await db.batch([
@@ -385,6 +388,7 @@ export async function deskAdvance(c: Context<AppEnv>, data: Record<string, unkno
   const total = pays.reduce((s0, p) => s0 + p.amountPaise, 0);
   const { t, shiftDay, fy } = clock(bizOf(c));
   const staff = c.get('staff');
+  await cashGuard(c, pays.some((p) => p.mode === 'cash'));
   const settlementId = newId();
   const id = newId();
   try {
@@ -441,6 +445,7 @@ settleRoutes.post(`${B}/desk-advances/:id/refund`, requireAction('debtors.receiv
   const approver = await approval(c, data, 'A refund');
   const rno = (await one<{ receipt_no: string | null }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', a.settlement_id))?.receipt_no ?? '';
   const note = `Advance refunded ${rno} · ${a.guest_name}${isManager(c) ? '' : ` · Approved by ${approver.name}`}`.slice(0, 160);
+  await cashGuard(c, mode === 'cash');
   const { t, shiftDay } = clock(bizOf(c));
   const id = newId();
   const staff = c.get('staff');
@@ -477,6 +482,7 @@ settleRoutes.post(`${B}/debtors/:id/refund`, requireAction('debtors.receive'), a
   // Money out of the drawer: a manager approves (21 Nov 2026).
   const approver = await approval(c, data, 'A refund');
   const note = isManager(c) ? note0 : `${note0} · Approved by ${approver.name}`.slice(0, 160);
+  await cashGuard(c, mode === 'cash');
   const { t, shiftDay } = clock(bizOf(c));
   const id = newId();
   const staff = c.get('staff');

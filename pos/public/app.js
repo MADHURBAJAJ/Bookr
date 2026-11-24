@@ -125,7 +125,7 @@ const fullButton = () => (window.bookrDesktop?.minimize ? html`<button type="but
   <button type="button" class="themebtn" data-act="deskFull" title="Full screen on or off (F11)" aria-label="Full screen on or off">${FULL_ICON}</button>`
   : document.fullscreenEnabled ? html`<button type="button" class="themebtn" data-act="fullScreen" title="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}" aria-label="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}">${FULL_ICON}</button>` : '');
 function shell(active, body) {
-  const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/shift', 'Shift close', 'shift.close'],
+  const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/shift', 'Day close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   const navLinks = links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`);
   const current = links.find(([h]) => h === active)?.[1] ?? 'Menu';
@@ -135,7 +135,7 @@ function shell(active, body) {
       : html`<a class="brand" href="#/" title="${me.business.name}">${me.business.name}</a>`}</div>
     <nav class="mainnav" aria-label="Main">${navLinks}</nav>
     ${links.length > 1 ? html`<details class="navmenu"><summary aria-label="Go to: ${current}">${current} <span aria-hidden="true">▾</span></summary><nav aria-label="Main">${navLinks}</nav></details>` : ''}
-    <div class="who">${fullButton()}${themeButton()}<span class="shiftchip" title="Shift of ${dayName(me.business.shiftDay)}: a shift runs 8 am to 8 am" aria-label="Shift ${dayName(me.business.shiftDay)}">${dayName(me.business.shiftDay)}</span>
+    <div class="who">${drawerChip()}${fullButton()}${themeButton()}<span class="shiftchip" title="Shift of ${dayName(me.business.shiftDay)}: a shift runs 8 am to 8 am" aria-label="Shift ${dayName(me.business.shiftDay)}">${dayName(me.business.shiftDay)}</span>
       <span class="person">${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
   </div></header>
   ${me.support ? html`<div class="supportbar" role="status">You are in ${me.business.name} as Bookr POS support. The owner can see this visit.</div>` : ''}
@@ -144,6 +144,8 @@ function shell(active, body) {
 /** A page title with an optional line under it and controls on the right. */
 const pageHead = (title, sub, right) => html`<div class="phead"><div><h1>${title}</h1>${sub ? html`<p class="sub">${sub}</p>` : ''}</div>${right ?? ''}</div>`;
 /** Tabs that are links (each tab has its own address). */
+/** Who holds the cash drawer (24 Nov 2026), with the way to hand it over. */
+const drawerChip = () => (can('shift.close') ? html`<a class="drawerchip ${me.drawer ? '' : 'none'}" href="#/handover" title="${me.drawer ? `Cash drawer: ${me.drawer.holder} since ${time(me.drawer.since)}. Tap to hand it over.` : 'Nobody holds the cash drawer yet: the next person to take cash starts it.'}">${me.drawer ? html`Drawer: <b>${me.drawer.holder}</b> · ${time(me.drawer.since)}` : 'Drawer: nobody yet'}</a>` : '');
 const tabsNav = (label, items, current) => html`<nav class="tabs" aria-label="${label}">${items.map(([href, text, key]) => html`<a href="${href}" ${key === current ? html`aria-current="page"` : ''}>${text}</a>`)}</nav>`;
 /** A headline number. tone: '', 'good', 'warn' or 'bad'. */
 const kpi = (k, v, n, tone = '') => html`<div class="kpi ${tone}"><span class="k">${k}</span><span class="v">${v}</span>${n ? html`<span class="n">${n}</span>` : ''}</div>`;
@@ -157,7 +159,9 @@ function sortable() {
     for (const th of table.querySelectorAll('thead th:not([data-sort])')) if (th.textContent.trim() && th.colSpan === 1) th.setAttribute('data-sort', '');
   }
 }
-const errorBox = () => html`${ui.guestAsk ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>${ui.guestAsk.message}</strong></p>
+const errorBox = () => html`${ui.drawerAsk ? html`<div class="msg warn" role="alert" style="display:block"><p style="margin-bottom:8px"><strong>The cash drawer is with ${ui.drawerAsk.holder}.</strong> Only the person holding it takes cash.</p>
+  <div class="row"><a class="btn pri" href="#/handover">${ui.drawerAsk.holder} is here: hand it to me</a><a class="btn" href="#/handover/takeover">${ui.drawerAsk.holder} has left: I take it over</a>
+    <button class="btn ghost" type="button" data-act="drawerAskNo">Cancel</button></div></div>` : ''}${ui.guestAsk ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>${ui.guestAsk.message}</strong></p>
   <div class="row"><button class="btn pri" type="button" data-act="guestChoice" data-c="saved">Yes, ${ui.guestAsk.savedName}</button>
     <button class="btn" type="button" data-act="guestChoice" data-c="update">Use the name I typed</button><button class="btn ghost" type="button" data-act="guestChoiceNo">Cancel</button></div></div>` : ''}${ui.approval ? approvalBox() : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
 /** The manager's PIN for a step a cashier may not take alone (asked for by the server). */
@@ -195,6 +199,7 @@ async function route() {
     if (path === 'rooms') return await roomsScreen(a);
     if (path === 'credit') return await creditScreen();
     if (path === 'shift') return await shiftScreen();
+    if (path === 'handover') return await handoverScreen(a);
     if (path === 'exceptions') return await exceptionsScreen(a);
     if (path === 'reports') return await reportsScreen(a, b);
     if (path === 'stock') return await stockScreen(a);
@@ -241,6 +246,8 @@ async function actionError(e, act, dataset) {
     if (e instanceof ApiError && e.code === 'guest_differs') {
       ui.guestAsk = { message: e.message, savedName: e.data?.savedName, act, data: { ...dataset } }; ui.error = null; rerender(); return;
     }
+    // Cash while the drawer is with someone else (24 Nov 2026): hand it over, or take it over.
+    if (e instanceof ApiError && e.code === 'drawer_held') { ui.drawerAsk = { holder: e.data?.holder ?? 'someone else' }; ui.error = null; rerender(); return; }
     // A room still marked dirty (25 Nov 2026): asked, then the same tap again.
     if (e instanceof ApiError && e.code === 'room_dirty') {
       if (confirm(e.message)) { await Promise.resolve(actions[act]({ ...dataset, dirtyOk: '1' })).catch((x) => actionError(x, act, dataset)); }
@@ -293,6 +300,10 @@ actions.discLimitSave = async () => {
   const b = me.business;
   await api('PUT', `${B()}/settings`, { name: b.name, fyStartMonth: b.fy_start_month, shiftStartHour: b.shift_start_hour, tabAgeDays: b.tab_age_days, discLimitPct: Number(ui.discLimit ?? b.disc_limit_bp / 100) });
   me = await api('GET', '/me'); flash = { kind: 'ok', text: `Saved: a cashier may give up to ${me.business.disc_limit_bp / 100}% alone.` }; route();
+};
+actions.floatSave = async () => {
+  await api('PUT', `${B()}/drawer/float`, { amount: String(ui.floatAmt ?? (me.business.float_paise ?? 0) / 100) });
+  me = await api('GET', '/me'); flash = { kind: 'ok', text: `Saved: ${rs(me.business.float_paise)} stays in the drawer at each day close.` }; route();
 };
 actions.guestChoiceNo = () => { ui.guestAsk = null; rerender(); };
 actions.guestChoice = async (d) => {
@@ -456,7 +467,7 @@ async function tablesScreen() {
       return html`<a class="ocard ${s}" href="${orderHref(o)}">
         <div class="top-l"><div><div class="kind">${KIND_TEXT[o.kind] ?? o.kind}</div><div class="pl">${o.place}</div></div>
           <span class="amt">${rs(o.status === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span></div>
-        <div class="row" style="gap:6px"><span class="badge ${s}">${s === 'billed' ? `Bill ${o.bill?.billNo} · to pay` : s === 'tab' ? `Tab since ${dayName(o.openedShiftDay)}` : STATE_TEXT[s]}</span></div>
+        <div class="row" style="gap:6px">${carriedTag(o)}<span class="badge ${s}">${s === 'billed' ? `Bill ${o.bill?.billNo} · to pay` : s === 'tab' ? `Tab since ${dayName(o.openedShiftDay)}` : STATE_TEXT[s]}</span></div>
         <span class="small quiet">${o.guestName ? o.guestName + ' · ' : ''}${plural(o.lines.reduce((t, l) => t + l.qty, 0), 'item')} · opened ${time(o.openedAt)} (${since(o.openedAt)})</span></a>`;
     };
     paint(shell('#/', html`
@@ -495,6 +506,12 @@ const bedLabel = (d, i) => (d.letters ? `${d.name} ${String.fromCharCode(65 + i)
 const SECTION_NOTE = { rooms: "Orders go on the room's folio or are paid at the table", dorms: 'Each bed is sold on its own; “whole” is for a group that books all of it',
   outhouse: 'Guests not staying with us', nc: 'Non-chargeable: closes as complimentary in the person’s name · managers and owners only', other: '' };
 const eventStrip = (e) => html`<div class="msg warn evstrip" role="status"><span class="evtag">EVENT ON</span><span><strong>${e.name}</strong> · ${e.organiser} · until ${time(e.endsAt)} · ${e.sections.join(', ')} bills count towards ${e.commissionBp / 100}% commission${e.menu ? ` · menu: ${e.menu.join(', ')}` : ''}</span></div>`;
+/** A table carried over (24 Nov 2026): from an earlier day (red once carried over two day closes), or handed over by a cashier today. */
+const isCarried = (o) => o.status !== 'tab' && (o.openedShiftDay < me.business.shiftDay || !!o.handedFrom);
+const carriedTag = (o) => (o.status === 'tab' ? ''
+  : o.openedShiftDay < addDays(me.business.shiftDay, -1) ? html`<span class="ctag over">From ${dayName(o.openedShiftDay)} · overdue</span>`
+  : o.openedShiftDay < me.business.shiftDay ? html`<span class="ctag day">From ${dayName(o.openedShiftDay)}</span>`
+  : o.handedFrom ? html`<span class="ctag who">From ${o.handedFrom}</span>` : '');
 function tableGrid() {
   const busy = new Map(ui.orders.filter((o) => o.kind === 'table').map((o) => [o.place.toLowerCase(), o]));
   const secs = ui.sections.length ? ui.sections : [{ name: 'Tables', kind: 'other', tables: ui.tables }];
@@ -519,7 +536,7 @@ function tableGrid() {
     }
     const s = orderState(o);
     const who = guest?.guestName ?? o.guestName;
-    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}"><span class="tn">${label}</span>${who ? html`<span class="tg">${who}</span>` : ''}
+    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}">${carriedTag(o)}<span class="tn">${label}</span>${who ? html`<span class="tg">${who}</span>` : ''}
       <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
   };
   const used = (t) => busy.has(t.toLowerCase()) || !!stayAt(t);
@@ -572,9 +589,15 @@ function tableGrid() {
   if (ui.tSec === 'running') {
     for (const g of groups) g.tables = g.tables.filter((t) => busy.has(t.toLowerCase()));
     const live = groups.filter((g) => g.tables.length);
+    // Carried over first, oldest first (24 Nov 2026), then the rest in the order of the sections.
+    const carried = live.flatMap((x) => x.tables.map((t) => [t, x.kind])).filter(([t]) => isCarried(busy.get(t.toLowerCase())))
+      .sort((a, b) => busy.get(a[0].toLowerCase()).openedAt - busy.get(b[0].toLowerCase()).openedAt);
+    const carriedSet = new Set(carried.map(([t]) => t));
     return html`<div class="sect"><h2>Tables <span class="small quiet" style="font-weight:500">· ${free} free of ${total}</span></h2></div>${tabs}
-      ${live.length ? html`<div class="grouph"><span class="small quiet">${plural(running.length, 'running order')}, in the order of your sections</span></div>
-        <div class="tgrid roomgrid">${live.flatMap((x) => x.tables.map((t) => cell(t, x.kind, null)))}</div>`
+      ${carried.length ? html`<div class="grouph"><h3>Carried over</h3><span class="small quiet">${plural(carried.length, 'table')} from an earlier day or cashier: settle these first</span></div>
+        <div class="tgrid roomgrid">${carried.map(([t, k]) => cell(t, k, null))}</div>` : ''}
+      ${live.length > 0 && running.length > carried.length ? html`<div class="grouph"><span class="small quiet">${plural(running.length - carried.length, 'running order')}, in the order of your sections</span></div>
+        <div class="tgrid roomgrid">${live.flatMap((x) => x.tables.filter((t) => !carriedSet.has(t)).map((t) => cell(t, x.kind, null)))}</div>` : carried.length ? ''
         : html`<p class="empty">No table, room or bed has an order right now. Choose Private rooms, Dorms, Out House or NC to start one.</p>`}`;
   }
   const body = (x) => (x.kind === 'dorms' ? html`<div class="dormcards">${(x.dorms ?? []).map(dormCard)}</div>`
@@ -2610,29 +2633,30 @@ actions.recvGo = async () => {
 // ---------- shift close
 
 async function shiftScreen() {
-  // The shift moves on at its hour or when it is closed by hand (24 Nov 2026): read the current one afresh.
+  // The day moves on at its hour or when it is closed by hand (24 Nov 2026): read the current one afresh.
   try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
   const day = me.business.shiftDay;
   const d = await api('GET', `${B()}/shifts/${day}`);
-  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt;
-  const notes = ['2000', '500', '200', '100', '50', '20', '10'];
+  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue;
+  const notes = NOTE_VALUES;
   rerender = () => {
     const s = ui.s;
     const counted = notes.reduce((t, n) => t + (Number(ui.counts[n]) || 0) * Number(n) * 100, 0) + (toPaise(ui.loose || '0') ?? 0);
-    const float = toPaise(ui.float || '0') ?? 0;
-    const expected = float + s.cashInPaise - s.cashOutPaise;
-    const diff = counted - expected;
-    // Short or over only once counting has started (display only; the close still sends the same numbers).
-    const started = !!(ui.float || ui.loose || Object.values(ui.counts).some((v) => v));
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
-    paint(shell('#/shift', html`${pageHead(`Shift close · ${dayName(s.shiftDay)}`, 'A shift runs 8 am to 8 am. Check the takings, count the drawer, then close.')}
-      <div class="kpis">${kpi('Should be in the drawer', rs(expected), 'Float plus cash in, less cash out')}${kpi('Counted', rs(counted))}
-        ${started || ui.closed ? kpi(diff === 0 ? 'Drawer agrees' : diff < 0 ? 'Drawer short' : 'Drawer over', rs(Math.abs(diff)), ui.closed ? 'Shift closed' : 'Before closing', diff === 0 ? 'good' : 'bad') : kpi('Drawer', 'Not counted yet', 'Count the notes to compare')}
-        ${s.openOrders.length || s.unpaidBills.length ? kpi('Still open', String(s.openOrders.length + s.unpaidBills.length), 'Orders or bills to finish first', 'warn') : ''}</div>
-      ${ui.last && !ui.last.countedAt ? lateCountPanel(notes) : ''}
-      ${s.openOrders.length || s.unpaidBills.length || s.notInDjubo?.length || s.deskMissing?.length ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${s.openOrders.length + s.unpaidBills.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0)}</span></div>
-        ${s.openOrders.length ? html`<div class="msg bad">Bill these orders or keep them as a tab first: ${s.openOrders.map((o) => o.place).join(', ')}.</div>` : ''}
-        ${s.unpaidBills.length ? html`<div class="msg bad">Printed but not paid: ${s.unpaidBills.map((b) => b.bill_no).join(', ')}.</div>` : ''}
+    const carried = [...s.openOrders.map((o) => o.place), ...s.unpaidBills.map((x) => `${x.place ?? ''} ${x.bill_no}`.trim())];
+    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0);
+    const cd = ui.countDiff;
+    paint(shell('#/shift', html`${pageHead(`Day close · ${dayName(s.shiftDay)}`, `The day runs ${me.business.shift_start_hour} am to ${me.business.shift_start_hour} am. Count the drawer, check the day, then close it. Closing does not change who holds the drawer.`)}
+      <div class="kpis">${kpi('Cash drawer', ui.dz ? ui.dz.holder : 'Nobody yet', ui.dz ? `since ${dateTime(ui.dz.since)}` : 'starts with the next cash')}
+        ${kpi('Float kept', ui.floatSet ? rs(ui.floatSet) : 'Not set', ui.floatSet ? 'the rest goes to the safe' : 'set it in Settings, Staff')}
+        ${kpi('Tables carried on', String(carried.length), carried.length ? 'into the next day, with their holder' : 'none open')}
+        ${ui.overdue.length ? kpi('Open since an earlier day', String(ui.overdue.length), 'clear before closing', 'bad') : ''}</div>
+      ${ui.last && !ui.last.countedAt ? html`<section class="panel blockers"><div class="bh"><h2>${dayName(ui.last.shiftDay)} closed by itself</h2><span class="status warn">Drawer not counted</span></div>
+        <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
+        <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
+      ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
+        ${ui.overdue.length ? html`<div class="msg bad" style="display:block"><strong>Open since an earlier day:</strong> ${ui.overdue.map((o) => `${o.place}${o.bill_no ? ` (${o.bill_no})` : ''} · since ${dayName(o.since)}`).join(', ')}
+          <div class="small">Take payment, post to a room, put on credit, or void with a manager. <a href="#/">Go to Tables</a></div></div>` : ''}
         ${s.notInDjubo?.length ? html`<div class="msg bad" style="display:block"><strong>Reservations made here, not in Djubo yet: ${s.notInDjubo.length}</strong>
           ${s.notInDjubo.map((x) => html`<div class="small">${x.guestName} · ${x.rooms} · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}${x.madeBy ? ` · made by ${x.madeBy}` : ''}</div>`)}
           <div class="small">Enter them in Djubo, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
@@ -2640,6 +2664,7 @@ async function shiftScreen() {
           ${s.deskMissing.map((x) => html`<div class="small">Djubo ${x.extRef} · ${x.guestName ?? ''} · ${x.enteredBy ?? ''}, ${time(x.at)} · ${rs(x.pendingPaise)}</div>`)}
           <div class="small">Take it in Rooms so a receipt prints, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
       </section>` : ''}
+      ${carried.length ? html`<p class="small quiet" style="margin-bottom:12px">Carrying into ${dayName(addDays(s.shiftDay, 1))}: ${carried.join(', ')}. Their sale stays on the day the bill was printed; the money counts when paid.</p>` : ''}
       <div class="two rev">
       <section class="panel"><h2>Takings</h2>
         ${ui.closed ? html`<div class="msg ok">Closed at ${dateTime(ui.closed.closedAt)} · counted ${rs(ui.closed.countedPaise)} · difference ${rs(ui.closed.differencePaise)}</div>` : ''}
@@ -2648,7 +2673,7 @@ async function shiftScreen() {
           ${s.receipts.map((m) => html`<div><span class="quiet">Received on folios and credit: ${modeName[m.mode]}</span><span>${rs(m.paise)}</span></div>`)}</div>
         <div class="sums">${s.billed.map((b) => html`<div><span>${b.entity}: ${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}</span><span>${rs(b.paise)}</span></div>`)}</div>
         <div class="sums">${s.events.map((e) => html`<div><span>${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings', credit_note: 'Credit notes', stock_waste: 'Stock breakage', stock_count: 'Stock count variances' }[e.kind]}</span><span>${e.n} · ${rs(e.paise)}</span></div>`)}</div>
-        ${s.tabs.length ? html`<div class="sums"><div><strong>Tabs carried to the next shift (not in these totals)</strong></div>${s.tabs.map((t) => html`<div><span>${t.place} · ${t.guest} · since ${t.since}${t.old ? ' · overdue' : ''}</span><span>${rs(t.paise)}</span></div>`)}</div>` : ''}
+        ${s.tabs.length ? html`<div class="sums"><div><strong>Tabs carried to the next day (not in these totals)</strong></div>${s.tabs.map((t) => html`<div><span>${t.place} · ${t.guest} · since ${t.since}${t.old ? ' · overdue' : ''}</span><span>${rs(t.paise)}</span></div>`)}</div>` : ''}
         ${s.tips.length || s.discountsAtPayment.n ? html`<div class="sums">${s.tips.map((t) => html`<div><span>Tips on ${t.mode} (${t.n}) · for staff, not sales</span><span>${rs(t.paise)}</span></div>`)}
           ${s.discountsAtPayment.n ? html`<div><span>Discounts at payment (${s.discountsAtPayment.n})</span><span>${rs(s.discountsAtPayment.paise)}</span></div>` : ''}</div>` : ''}
         ${s.creditNotes.length ? html`<div class="sums"><div><strong>Credit notes (money given back)</strong></div>${s.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
@@ -2658,44 +2683,30 @@ async function shiftScreen() {
           <button class="btn" type="submit" data-act="paidOut" data-submit>Record paid out</button></form>`}
       </section>
       ${ui.closed ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
-        <label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" data-live value="${ui.float ?? ''}"></label>
+        ${ui.floatSet ? html`<div class="row between"><span>Float (fixed in Settings)</span><strong>${rs(ui.floatSet)}</strong></div>`
+          : html`<label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" value="${ui.float ?? ''}"></label>`}
         <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="c${n}" data-note="${n}" value="${ui.counts[n] ?? ''}"></label>`)}
           <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="loose" data-live value="${ui.loose ?? ''}"></label></div>
-        <div class="sums"><div><span>Should be in the drawer</span><span>${rs(expected)}</span></div><div><span>Counted</span><span>${rs(counted)}</span></div>
-          ${started ? html`<div class="big" style="color:${diff ? 'var(--bad)' : 'var(--go-dark)'}"><span>${diff === 0 ? 'Agrees' : diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(diff))}</span></div>` : html`<div><span class="quiet">Enter the float and the notes to compare</span><span></span></div>`}</div>
-        ${diff && (started || ui.error) ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}"></label>` : ''}
+        <div class="sums"><div><span>Counted</span><span>${rs(counted)}</span></div>
+          ${cd ? html`<div><span>Should hold</span><span>${rs(cd.expected)}</span></div><div class="big" style="color:var(--bad)"><span>${cd.diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(cd.diff))}</span></div>`
+            : html`<div><span class="quiet">What the drawer should hold shows after you close: count first.</span><span></span></div>`}</div>
+        ${cd ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}" autofocus></label>` : ''}
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}" placeholder="e.g. Entered in Djubo, mail not come yet"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift</button>
-        <p class="small quiet">${Date.now() < ui.endsAt ? `This shift ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts the ${dayName(addDays(s.shiftDay, 1))} shift at once: money taken after this goes there.` : ''}</p></form>`}
-      ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen the ${dayName(ui.last.shiftDay)} shift (owner)</summary>
-        <p class="small quiet">Closed ${ui.last.auto ? 'automatically' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); count and close it again after. Bookr keeps the first close it was sent.</p>
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length ? 'disabled' : ''}>Close the day</button>
+        <p class="small quiet">${Date.now() < ui.endsAt ? `The day ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts ${dayName(addDays(s.shiftDay, 1))} at once: money taken after this goes there.` : ''}</p></form>`}
+      ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen ${dayName(ui.last.shiftDay)} (owner)</summary>
+        <p class="small quiet">Closed ${ui.last.auto ? 'by itself' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); close it again after. Bookr keeps the first close it was sent.</p>
         <div class="row"><input class="in grow" data-model="reopenWhy" value="${ui.reopenWhy ?? ''}" placeholder="Why reopen (required)"><button class="btn" type="button" data-act="reopenShift" data-day="${ui.last.shiftDay}">Reopen</button></div></details>` : ''}
     </div>`));
   };
   rerender();
 }
+const NOTE_VALUES = ['2000', '500', '200', '100', '50', '20', '10'];
 root.addEventListener('input', (ev) => { const n = ev.target.dataset?.note; if (n) { ui.counts[n] = ev.target.value; refocus(ev.target.dataset.model, () => rerender()); } });
 actions.paidOut = async () => {
   await api('POST', B() + '/drawer-outs', { amount: ui.outAmount ?? '', note: ui.outNote ?? '' });
   flash = { kind: 'ok', text: `Paid out ${rs(toPaise(ui.outAmount) ?? 0)} recorded.` }; route();
-};
-/** The drawer of a shift closed automatically at its hour, counted later (24 Nov 2026). */
-function lateCountPanel(notes) {
-  const l = ui.last;
-  return html`<form class="panel blockers"><div class="bh"><h2>Count the ${dayName(l.shiftDay)} shift's drawer</h2><span class="status warn">Not counted</span></div>
-    <p class="small">It closed by itself at ${dateTime(l.closedAt)}. Count the whole drawer now: the cash taken since then is taken off, so any difference stays with the ${dayName(l.shiftDay)} shift.</p>
-    <label class="f">Opening float of that shift (₹)<input class="in" inputmode="decimal" data-model="lFloat" value="${ui.lFloat ?? ''}"></label>
-    <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="lc${n}" value="${ui[`lc${n}`] ?? ''}"></label>`)}
-      <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="lLoose" value="${ui.lLoose ?? ''}"></label></div>
-    <label class="f">Reason, if it does not agree<input class="in" data-model="lReason" value="${ui.lReason ?? ''}"></label>
-    <div class="row"><button class="btn pri" type="submit" data-act="countLater" data-day="${l.shiftDay}" data-submit>Save the count</button></div></form>`;
-}
-actions.countLater = async (d) => {
-  const counted = {}; for (const n of ['2000', '500', '200', '100', '50', '20', '10']) counted[n] = Number(ui[`lc${n}`]) || 0;
-  counted.loose = ui.lLoose || '0';
-  const r = await api('POST', `${B()}/shifts/${d.day}/count`, { openingFloat: ui.lFloat || '0', counted, reason: ui.lReason });
-  flash = { kind: r.differencePaise ? 'warn' : 'ok', text: `${dayName(d.day)} drawer counted. ${r.message}` }; route();
 };
 actions.reopenShift = async (d) => {
   if (!confirm(`Reopen the ${dayName(d.day)} shift?`)) return;
@@ -2705,8 +2716,75 @@ actions.reopenShift = async (d) => {
 actions.closeShift = async () => {
   const counted = {}; for (const [k, v] of Object.entries(ui.counts)) counted[k] = Number(v) || 0;
   counted.loose = ui.loose || '0';
-  const r = await api('POST', `${B()}/shifts/${ui.s.shiftDay}/close`, { openingFloat: ui.float || '0', counted, reason: ui.reason, deskReason: ui.deskReason, djuboReason: ui.djuboReason });
-  flash = { kind: r.differencePaise ? 'warn' : 'ok', text: `Shift closed. ${r.message}` }; route();
+  try {
+    const r = await api('POST', `${B()}/shifts/${ui.s.shiftDay}/close`, { openingFloat: ui.floatSet ? undefined : ui.float || '0', counted, reason: ui.reason, deskReason: ui.deskReason, djuboReason: ui.djuboReason });
+    flash = { kind: r.differencePaise ? 'warn' : 'ok', text: `Day closed. ${r.message}` }; me = await api('GET', '/me'); route();
+  } catch (e) {
+    // Blind count (24 Nov 2026): the expected amount comes back only after counting, with a request for the reason.
+    if (e instanceof ApiError && e.code === 'count_differs') { ui.countDiff = { expected: Number(e.data.expectedPaise), diff: Number(e.data.differencePaise) }; ui.error = null; rerender(); return; }
+    throw e;
+  }
+};
+actions.drawerAskNo = () => { ui.drawerAsk = null; rerender(); };
+
+// ---------- cash drawer handover (24 Nov 2026): any time; blind count; open tables pass on by name; the next cashier accepts with their PIN.
+// Modes: hand over (default), take over (the holder has left: a manager confirms), count (keep it, just count).
+async function handoverScreen(mode = '') {
+  try { me = await api('GET', '/me'); } catch { /* keep */ }
+  const d = await api('GET', `${B()}/drawer`);
+  ui.hd = d; ui.hMode = mode === 'takeover' ? 'takeover' : mode === 'count' ? 'count' : 'handover';
+  const dz = d.drawer;
+  const mine = dz && dz.heldBy === me.staff.id;
+  // Handing over: to whoever is signed in, unless the holder is signed in (then they choose).
+  ui.hTo ??= mine ? d.staff.find((x) => x.id !== me.staff.id && x.role === 'cashier')?.id ?? '' : me.staff.id;
+  rerender = () => {
+    const counted = NOTE_VALUES.reduce((t, n) => t + (Number(ui[`h${n}`]) || 0) * Number(n) * 100, 0) + (toPaise(ui.hLoose || '0') ?? 0);
+    const cd = ui.countDiff;
+    const title = ui.hMode === 'takeover' ? 'Take the drawer over' : ui.hMode === 'count' ? 'Count the drawer' : 'Hand over the drawer';
+    const to = d.staff.find((x) => x.id === ui.hTo);
+    paint(shell('#/handover', html`${pageHead(title, ui.hMode === 'takeover' ? `${dz?.holder ?? 'The holder'} has left. You count the drawer and a manager confirms; any difference stays with ${dz?.holder ?? 'them'}.`
+      : ui.hMode === 'count' ? 'Count the drawer and keep it. Any difference is recorded now.' : 'Any time the person at the till changes. Settle what you can, count the drawer, and the next person accepts with their PIN.')}
+      ${errorBox()}
+      ${!dz && ui.hMode !== 'count' ? html`<p class="empty">Nobody holds the cash drawer now. The next person to take cash starts it with the float${d.floatPaise ? ` (${rs(d.floatPaise)})` : ''}.</p>` : html`
+      <div class="kpis">${kpi('Held by', dz ? dz.holder : 'Nobody yet', dz ? `since ${dateTime(dz.since)}` : 'this count starts from the float')}${kpi('Started with', rs(dz ? dz.openingPaise : d.floatPaise), !dz || dz.openingFrom === 'float' ? 'the float' : 'handed over')}
+        ${kpi('Open tables', String(d.tables.length), d.tables.length ? (ui.hMode === 'count' ? 'stay as they are' : `pass to ${ui.hMode === 'takeover' ? 'you' : to?.name ?? 'the next person'}`) : 'none')}</div>
+      <div class="two">
+        <section class="panel"><h2>Open tables</h2>
+          ${d.tables.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Table</th><th>State</th><th class="num">Amount</th><th></th></tr></thead><tbody>
+            ${d.tables.map((x) => html`<tr><td><strong>${x.place}</strong>${x.openedShiftDay < me.business.shiftDay ? html` <span class="status warn">From ${dayName(x.openedShiftDay)}</span>` : ''}</td>
+              <td>${x.billNo ? html`<span class="status ok">To pay · ${x.billNo}</span>` : x.status === 'tab' ? html`<span class="status info">Tab</span>` : html`<span class="status info">Open</span>`}</td>
+              <td class="num">${rs(x.paise)}</td><td class="act"><a class="btn sm" href="${x.billId ? `#/settle/${x.billId}` : `#/order/${x.orderId}`}">${x.billId ? 'Paid now' : 'Open'}</a></td></tr>`)}</tbody></table></div>
+            <p class="small quiet">"Paid now" takes the payment first, so the cash is in the drawer before the count. ${ui.hMode === 'count' ? '' : 'The rest pass on by name and show "From" on the Tables screen.'}</p>`
+            : html`<p class="empty">No open tables.</p>`}
+        </section>
+        <form class="panel"><h2>${ui.hMode === 'count' ? 'Count' : 'Blind count'}</h2>
+          ${ui.hMode === 'handover' ? html`<label class="f">Taking over<select class="in" data-model="hTo">${d.staff.filter((x) => x.id !== dz?.heldBy).map((x) => html`<option value="${x.id}" ${ui.hTo === x.id ? 'selected' : ''}>${x.name}${x.id === me.staff.id ? ' (you)' : ''}</option>`)}</select></label>
+            ${!mine ? html`<label class="f">${dz?.holder}'s PIN (handing over)<input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="hFromPin" value=""></label>` : ''}
+            ${ui.hTo && ui.hTo !== me.staff.id ? html`<label class="f">${to?.name ?? 'Their'} PIN (accepting)<input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="hToPin" value=""></label>` : ''}` : ''}
+          <div class="notes">${NOTE_VALUES.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="h${n}" data-live value="${ui[`h${n}`] ?? ''}"></label>`)}
+            <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="hLoose" data-live value="${ui.hLoose ?? ''}"></label></div>
+          <div class="sums"><div><span>Counted</span><span>${rs(counted)}</span></div>
+            ${cd ? html`<div><span>Should hold</span><span>${rs(cd.expected)}</span></div><div class="big" style="color:var(--bad)"><span>${cd.diff < 0 ? 'Short' : 'Over'}</span><span>${rs(Math.abs(cd.diff))}</span></div>`
+              : html`<div><span class="quiet">What it should hold shows after you save the count.</span><span></span></div>`}</div>
+          ${cd ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="hReason" value="${ui.hReason ?? ''}" autofocus></label>` : ''}
+          <button class="btn pri" type="submit" data-act="drawerGo" data-submit>${ui.hMode === 'takeover' ? 'Count and take over' : ui.hMode === 'count' ? 'Save the count' : `Count and hand to ${to?.name ?? '…'}`}</button>
+          <p class="small quiet">${ui.hMode === 'handover' ? html`Holder has left? <a href="#/handover/takeover">Take it over</a> instead.` : ui.hMode === 'takeover' ? 'A manager confirms with their PIN.' : ''}</p>
+        </form>
+      </div>`}`));
+  };
+  rerender();
+}
+actions.drawerGo = async () => {
+  const counted = {}; for (const n of NOTE_VALUES) counted[n] = Number(ui[`h${n}`]) || 0;
+  counted.loose = ui.hLoose || '0';
+  const path = ui.hMode === 'takeover' ? 'takeover' : ui.hMode === 'count' ? 'count' : 'handover';
+  try {
+    const r = await api('POST', `${B()}/drawer/${path}`, { counted, reason: ui.hReason, toId: ui.hTo, fromPin: ui.hFromPin, toPin: ui.hToPin });
+    flash = { kind: r.differencePaise ? 'warn' : 'ok', text: r.message }; me = await api('GET', '/me'); go('#/');
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'count_differs') { ui.countDiff = { expected: Number(e.data.expectedPaise), diff: Number(e.data.differencePaise) }; ui.error = null; rerender(); return; }
+    throw e;
+  }
 };
 
 // ---------- reports (Owner and manager)
@@ -3899,6 +3977,12 @@ async function exceptionsScreen(day = me.business.shiftDay) {
         ${d.shiftClose && !d.shiftClose.countedAt ? html`<p style="color:var(--bad)">Closed by itself at the shift's hour; the drawer is not counted yet. <a href="#/shift">Count it on Shift close</a>.</p>`
           : d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
           : html`<p style="color:var(--warn)">Not closed yet.</p>`}
+        ${d.drawers?.length ? html`<h2>Cash drawers</h2><div class="scroll"><table class="t"><thead><tr><th>Held by</th><th>From – to</th><th class="num">Cash in</th><th class="num">Out</th><th class="num">Counted</th><th>Result</th></tr></thead><tbody>
+          ${d.drawers.map((x) => html`<tr><td>${x.holder}${x.acceptedBy ? ` → ${x.acceptedBy}` : ''}${x.closeKind === 'takeover' ? html`<div class="small quiet">${x.holder} not present · confirmed by ${x.approvedBy ?? 'a manager'}</div>` : ''}</td>
+            <td>${time(x.from)} – ${x.to ? time(x.to) : 'open'}</td><td class="num">${rs(x.cashInPaise)}</td><td class="num">${rs(x.cashOutPaise)}</td>
+            <td class="num">${x.countedPaise == null ? '—' : rs(x.countedPaise)}</td>
+            <td>${x.countedPaise == null ? html`<span class="status mute">Not counted yet</span>` : x.differencePaise === 0 ? html`<span class="status ok">Agrees</span>`
+              : html`<span class="status bad">${x.differencePaise < 0 ? 'Short' : 'Over'} ${rs(Math.abs(x.differencePaise))}</span><div class="small quiet">${x.reason ?? ''}</div>`}</td></tr>`)}</tbody></table></div>` : ''}
         <h2>Bill numbers (${d.fy})</h2>
         ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: ${x.missing.join(', ')} missing</div>`)}</div>`
           : html`<p>${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</p>`}
@@ -4161,6 +4245,10 @@ async function settingsScreen(tab = 'menu') {
       <form class="row" style="align-items:end"><label class="f">Discount a cashier may give alone (%)<input class="in" inputmode="numeric" data-model="discLimit" value="${ui.discLimit ?? (me.business.disc_limit_bp ?? 1000) / 100}" style="width:120px"></label>
         <button class="btn" type="submit" data-act="discLimitSave" data-submit>Save</button></form>
       <p class="small quiet">Above this, a manager's or owner's PIN is needed. A PIN is always needed to make an item free, give a complimentary bill, open a credit account, give money back, or change how a bill was paid.</p></section>
+      <section class="panel" style="margin-bottom:16px"><h2>Cash drawer float</h2>
+      <form class="row" style="align-items:end"><label class="f">Float kept in the drawer (₹)<input class="in" inputmode="decimal" data-model="floatAmt" value="${ui.floatAmt ?? (me.business.float_paise ?? 0) / 100}" style="width:140px"></label>
+        <button class="btn" type="submit" data-act="floatSave" data-submit>Save</button></form>
+      <p class="small quiet">The day close keeps this much in the drawer for change; the rest goes to the safe. The first cash of a new drawer starts from it. 0 means the float is typed at each day close.</p></section>
       <section class="panel"><h2>Staff and PINs</h2>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
         ${ui.staff.filter((s) => !s.support).map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>

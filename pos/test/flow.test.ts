@@ -206,7 +206,7 @@ describe('settle', () => {
 });
 
 describe('tabs and shift close', () => {
-  it('carries tabs over, blocks the close until orders and bills are dealt with, and records the drawer', async () => {
+  it('carries tabs over, blocks the close only for tables carried over an earlier day, and records the drawer', async () => {
     const s = await setupBusiness();
     const tab = (await s.counter.post(`${s.B}/orders`, { kind: 'table', place: 'Lounge', guestName: 'R. Nair' })).json.id;
     await s.counter.post(`${s.B}/orders/${tab}/items`, { itemId: s.items['Masala Chai'], delta: 3 });
@@ -215,11 +215,13 @@ describe('tabs and shift close', () => {
     const day = bill.shiftDay;
     const close = (body: unknown) => s.counter.post(`${s.B}/shifts/${day}/close`, body);
 
+    // A table already carried over an earlier day close blocks the close (24 Nov 2026); today's carry on.
+    await q('UPDATE orders SET opened_shift_day = ? WHERE id = ?', new Date(Date.parse(day) - 86_400_000).toISOString().slice(0, 10), tab);
     expect((await close({ openingFloat: '1000' })).json.error).toMatch(/Lounge/);
+    await q('UPDATE orders SET opened_shift_day = ? WHERE id = ?', day, tab);
     // A tab needs the guest's name and phone (22 Nov 2026).
     expect((await s.counter.post(`${s.B}/orders/${tab}/tab`, {})).json.error).toMatch(/phone/);
     expect((await s.counter.post(`${s.B}/orders/${tab}/tab`, { guestPhone: '9800000001' })).status).toBe(200);
-    expect((await close({ openingFloat: '1000' })).json.error).toMatch(/printed but not paid/);
     await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: '189' }] });
 
     // Expected 1,000 float + 189 cash = 1,189; counted 1,180 is ₹9 short and needs a reason.

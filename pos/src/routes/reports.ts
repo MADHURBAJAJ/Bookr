@@ -8,6 +8,7 @@ import { clock, bizOf, loadBusiness } from '../util';
 import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
 import { occupancy } from './frontdesk';
+import { drawersOfDay } from './drawers';
 
 export const reportRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -199,6 +200,8 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
       missing: [...dayGaps(x.days, (d, n) => creditNoteNo(x.prefix, d, n)), ...g.missing.map((n) => `credit note ${n} of ${fy}`)] }; }),
     typedPrices: typed,
     bar: { counts: bar!.counts, missingPaise: Math.round(bar!.missing), extraPaise: Math.round(bar!.extra), breakagePaise: Math.round(bar!.waste) },
+    drawers: await drawersOfDay(db, bid, Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000,
+      Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000 + 86_400_000),
     shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at, countedAt: close.counted_at, auto: !!close.auto } : null,
   });
 });

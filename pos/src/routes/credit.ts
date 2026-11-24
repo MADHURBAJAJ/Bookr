@@ -12,6 +12,7 @@ import { clock, event, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendSoon } from '../sync';
 import { billOut } from './orders';
 import type { AppEnv } from '../types';
+import { cashGuard } from './drawers';
 
 export const creditRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -108,6 +109,7 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
   // The message for Bookr, written in the same batch; its number is filled from the row just written.
   const message = JSON.stringify({ creditNoteId: id, cnNo: null, billId, billNo: bill.bill_no, reason, lines: chosen, ...totals, refundMode: mode,
     payAccountName: pa?.name ?? null, bookrAccountId: pa?.bookr_account_id ?? null, debtorName: debtor?.name ?? null, shiftDay, at: t, by: staff.name });
+  await cashGuard(c, mode === 'cash');
   try {
     await db.batch([
       stmt(db, 'INSERT OR IGNORE INTO credit_note_series (entity_id, fy, next_no) VALUES (?, ?, 1)', bill.entity_id, fy),

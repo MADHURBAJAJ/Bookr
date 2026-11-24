@@ -50,16 +50,18 @@ describe('shift rollover', () => {
     await ok(counter.post(`${B}/settlements`, { billIds: [open.id], payments: [{ mode: 'cash', amount: String(open.totalPaise / 100) }] }));
     const shift = await ok(counter.get(`${B}/shifts/${next(day)}`));
     expect(shift.lastClosed).toMatchObject({ shiftDay: day, countedAt: null, auto: true });
+    expect(shift.drawer).toMatchObject({ openingFrom: 'float' });
 
-    // Counted later: the whole drawer holds both shifts' cash; what came in since is taken off.
+    // Counted later with the drawer: it covers both days' cash, and the day closed by itself is marked counted with it.
     const all = (paid.totalPaise + open.totalPaise) / 100;
-    expect((await counter.post(`${B}/shifts/${day}/count`, { openingFloat: '0', counted: { loose: String(all - 10) } })).json.error).toMatch(/reason/);
-    const c = await ok(counter.post(`${B}/shifts/${day}/count`, { openingFloat: '0', counted: { loose: String(all) } }));
-    expect(c).toMatchObject({ differencePaise: 0, sincePaise: open.totalPaise, expectedPaise: paid.totalPaise + open.totalPaise });
-    expect((await counter.post(`${B}/shifts/${day}/count`, { openingFloat: '0', counted: {} })).status).toBe(409);
+    const r = await counter.post(`${B}/drawer/count`, { counted: { loose: String(all - 10) } });
+    expect(r.json).toMatchObject({ code: 'count_differs', differencePaise: '-1000' });
+    const c = await ok(counter.post(`${B}/drawer/count`, { counted: { loose: String(all) } }));
+    expect(c).toMatchObject({ differencePaise: 0, expectedPaise: paid.totalPaise + open.totalPaise });
     expect((await q("SELECT count(*) AS n FROM outbox WHERE business_id = ? AND kind = 'shift_closed'", s.businessId))[0].n).toBe(1);
     daily = await ok(owner.get(`${B}/reports/daily-check?day=${day}`));
     expect(daily.shiftClose.countedAt).toBeGreaterThan(0);
+    expect(daily.drawers.length).toBeGreaterThan(0);
 
     // Reopen: owner only, with a reason, kept in the log.
     expect((await counter.post(`${B}/shifts/${day}/reopen`, { reason: 'Recount' })).status).toBe(403);

@@ -93,13 +93,13 @@ export function requireAction(action: Action): MiddlewareHandler<AppEnv> {
  * A manager or owner approving something at the counter with their PIN (cancelling an item already sent to the kitchen,
  * 21 Nov 2026). Wrong PINs count towards this device's lock, the same as PIN sign-in, so a PIN cannot be guessed here.
  */
-export async function approverOf(c: Context<AppEnv>, approverId: unknown, pin: unknown): Promise<{ id: string; name: string }> {
+export async function approverOf(c: Context<AppEnv>, approverId: unknown, pin: unknown, roles: readonly string[] = ['owner', 'manager']): Promise<{ id: string; name: string }> {
   const bid = c.get('businessId');
   const device = await currentDevice(c);
   const t = now();
   if (device?.locked_until && device.locked_until > t) fail(429, 'Too many wrong PINs. Try again in a few minutes.');
   const a = typeof approverId === 'string' && isUuid(approverId) ? await one<{ id: string; name: string; pin_hash: string | null }>(c.env.DB,
-    "SELECT id, name, pin_hash FROM staff WHERE id = ? AND business_id = ? AND active = 1 AND support = 0 AND role IN ('owner', 'manager')", approverId, bid) : null;
+    `SELECT id, name, pin_hash FROM staff WHERE id = ? AND business_id = ? AND active = 1 AND support = 0 AND role IN (${roles.map(() => '?').join(', ')})`, approverId, bid, ...roles) : null;
   const ok = typeof pin === 'string' && /^\d{4,6}$/.test(pin) && (await verifyPassword(pin, a?.pin_hash ?? DUMMY_HASH));
   if (!a || !a.pin_hash || !ok) {
     if (device) {
@@ -108,7 +108,7 @@ export async function approverOf(c: Context<AppEnv>, approverId: unknown, pin: u
       await stmt(c.env.DB, 'UPDATE devices SET pin_failures = ?, locked_until = ? WHERE id = ?', lock ? 0 : failures, lock, device.id).run();
       if (lock) fail(429, 'Too many wrong PINs. PIN entry is locked on this device for 15 minutes.');
     }
-    fail(403, a && !a.pin_hash ? `${a.name} has no PIN yet. The Owner sets one in Settings, Staff and PINs.` : 'Wrong PIN: a manager or owner must approve.');
+    fail(403, a && !a.pin_hash ? `${a.name} has no PIN yet. The Owner sets one in Settings, Staff and PINs.` : roles.includes('cashier') ? 'Wrong PIN.' : 'Wrong PIN: a manager or owner must approve.');
   }
   if (device?.pin_failures) await stmt(c.env.DB, 'UPDATE devices SET pin_failures = 0 WHERE id = ?', device.id).run();
   return { id: a.id, name: a.name };
