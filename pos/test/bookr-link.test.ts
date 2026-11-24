@@ -104,4 +104,21 @@ describe('POS to Bookr', () => {
       body: JSON.stringify({ businessId: bid, messages: [] }) }, bookrEnv);
     expect(ok.status).toBe(200);
   });
+
+  it('links a POS business to Bookr when Bookr knows it by another id (24 Nov 2026)', async () => {
+    const owner = await makeUser('owner');
+    const bid = await makeBusiness(owner.id, 'Sample Hostel');
+    const bookr = await signIn(owner.email);
+    const key = (await bookr.post(`/businesses/${bid}/pos/link`)).json.key as string;
+    const s = await setupBusiness();   // the POS's own id for the business, not Bookr's
+    expect(s.businessId).not.toBe(bid);
+    const bill = (await billed(s, [['Masala Chai', 1]])).bill;
+    await s.ok(s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: String(bill.totalPaise / 100) }] }));
+    // The plain form sends the POS's id, which Bookr refuses for this key.
+    const plain = await sendOutbox({ ...posEnv, BOOKR_URL: 'https://bookr.example.test', BOOKR_KEYS: JSON.stringify({ [s.businessId]: key }) }, s.businessId, toBookr);
+    expect(plain.sent).toBe(0);
+    // With Bookr's id named, the POS sends that id and Bookr takes the bill.
+    const linked = await sendOutbox({ ...posEnv, BOOKR_URL: 'https://bookr.example.test', BOOKR_KEYS: JSON.stringify({ [s.businessId]: { bookrId: bid, key } }) }, s.businessId, toBookr);
+    expect(linked).toMatchObject({ sent: 1, rejected: 0, waiting: 0 });
+  });
 });

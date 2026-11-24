@@ -65,7 +65,7 @@ export async function proofList(env: Env, bid: string, day: string, startHour: n
     const res = await fetcher(`${link.base}/api/pos/proof`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${link.key}` },
-      body: JSON.stringify({ businessId: bid, shiftDay: day, startHour, bills }),
+      body: JSON.stringify({ businessId: link.bookrId, shiftDay: day, startHour, bills }),
     });
     const answer = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) throw new Error(typeof answer.error === 'string' ? answer.error : `Bookr answered ${res.status}`);

@@ -7,21 +7,31 @@ import type { Env } from './types';
 
 export interface SendResult { sent: number; rejected: number; waiting: number; error?: string }
 
-/** The key Bookr gave this business (Worker secret BOOKR_KEYS, JSON {"<business id>": "<key>"}). */
-function keyFor(env: Env, businessId: string): string | null {
-  try { const k = JSON.parse(env.BOOKR_KEYS ?? '{}')[businessId]; return typeof k === 'string' && k ? k : null; } catch { return null; }
+/**
+ * The key Bookr gave this business, and the business's id in Bookr (Worker secret BOOKR_KEYS). Either
+ * {"<POS business id>": "<key>"} when both use the same id, or (24 Nov 2026) {"<POS business id>": {"bookrId": "<Bookr's
+ * id for it>", "key": "<key>"}} when Bookr knows the business by another id: Bookr checks the key against the id sent.
+ */
+function keyFor(env: Env, businessId: string): { key: string; bookrId: string } | null {
+  try {
+    const k = JSON.parse(env.BOOKR_KEYS ?? '{}')[businessId];
+    if (typeof k === 'string' && k) return { key: k, bookrId: businessId };
+    if (k && typeof k === 'object' && typeof k.key === 'string' && k.key) return { key: k.key, bookrId: typeof k.bookrId === 'string' && k.bookrId ? k.bookrId : businessId };
+    return null;
+  } catch { return null; }
 }
 
 /** Where Bookr is and this business's key, or null when the POS is not connected (the payment proof list asks with it). */
-export function bookrLink(env: Env, businessId: string): { base: string; key: string } | null {
-  const key = keyFor(env, businessId);
+export function bookrLink(env: Env, businessId: string): { base: string; key: string; bookrId: string } | null {
+  const k = keyFor(env, businessId);
   const base = env.BOOKR_URL?.replace(/\/+$/, '');
-  return key && base ? { base, key } : null;
+  return k && base ? { base, key: k.key, bookrId: k.bookrId } : null;
 }
 
 export async function sendOutbox(env: Env, businessId: string, fetcher: typeof fetch = (...a) => fetch(...a)): Promise<SendResult> {
   const db: DB = env.DB;
-  const key = keyFor(env, businessId);
+  const link = keyFor(env, businessId);
+  const key = link?.key ?? null;
   const base = env.BOOKR_URL?.replace(/\/+$/, '');
   const rows = await all<{ id: string; kind: string; body: string }>(db,
     'SELECT id, kind, body FROM outbox WHERE business_id = ? AND sent_at IS NULL ORDER BY created_at, rowid LIMIT 50', businessId);
@@ -34,7 +44,7 @@ export async function sendOutbox(env: Env, businessId: string, fetcher: typeof f
     const res = await fetcher(`${base}/api/pos/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ businessId, messages: rows.map((r) => ({ id: r.id, kind: r.kind, body: JSON.parse(r.body) })) }),
+      body: JSON.stringify({ businessId: link!.bookrId, messages: rows.map((r) => ({ id: r.id, kind: r.kind, body: JSON.parse(r.body) })) }),
     });
     answer = (await res.json().catch(() => ({}))) as typeof answer;
     if (!res.ok) throw new Error(answer?.error ?? `Bookr answered ${res.status}`);

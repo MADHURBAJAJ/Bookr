@@ -31,7 +31,7 @@
   "r2_buckets": [{ "binding": "BILLS", "bucket_name": "pos-demo-bills" }],
   // Bookr's address. The key Bookr gives each business goes in the BOOKR_KEYS Worker secret, never here.
   // Bill photos are read by Claude: the API key is the ANTHROPIC_API_KEY Worker secret, never here.
-  "vars": { "BOOKR_URL": "", "CLAUDE_OCR_MODEL": "claude-opus-5-5", "BILL_READS_PER_DAY": "30",
+  "vars": { "BOOKR_URL": "https://bookr.thebajajgroup.co", "CLAUDE_OCR_MODEL": "claude-opus-5-5", "BILL_READS_PER_DAY": "30",
     // Booking mails: which address belongs to which business, and which senders' mails are read (others bounce).
     "MAIL_ROUTES": "{\"bookings@mail.thebajajgroup.co\": \"d165d1c4-909d-42ff-bedc-d9c2eccd3cab\"}",
     "BOOKING_MAIL_FROM": "{\"mmt\": \"no-reply@go-mmt.com, no-reply@goibibo.com\", \"djubo\": \"notifications@djubo.com\"}" },
