@@ -10,6 +10,7 @@ import { audit, bizOf, clock, dormBed, dormWhole, tableLayout, type Business } f
 import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
 import { deskPending } from '../rooms';
+import { shiftDayAt } from '../billing';
 import { formCPending } from './roomdesk';
 import type { AppEnv } from '../types';
 
@@ -53,7 +54,7 @@ export async function occupancy(db: DB, b: Business, from: string, to: string, t
     const w = Object.entries(wholes).find(([k]) => flat(k) === flat(st.room));
     const units = w ? w[1] : [rooms.find((x) => flat(x) === flat(st.room)) ?? beds.find((x) => flat(x) === flat(st.room))].filter((x): x is string => !!x);
     if (!units.length) continue;
-    const outDay = st.out == null ? addDays(last, 1) : clock(b, st.out).shiftDay;
+    const outDay = st.out == null ? addDays(last, 1) : shiftDayAt(st.out, b.shift_start_hour);
     const end = outDay > st.check_in ? outDay : addDays(st.check_in, 1);
     for (let d = st.check_in < from ? from : st.check_in; d < end && d <= last; d = addDays(d, 1)) {
       for (const u of units) (rooms.includes(u) ? sold.rooms : sold.beds).add(`${u}|${d}`);

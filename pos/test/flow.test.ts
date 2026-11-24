@@ -231,11 +231,10 @@ describe('tabs and shift close', () => {
     expect(summary.summary.tabs[0]).toMatchObject({ guest: 'R. Nair', paise: 12000 });
     expect(JSON.parse((await q("SELECT body FROM outbox WHERE business_id = ? AND kind = 'shift_closed'", s.businessId))[0].body).tabs).toHaveLength(1);
 
-    // Nothing more is paid into the closed shift.
+    // Nothing more is paid into the closed shift: what comes after goes to the next shift (24 Nov 2026).
     const late = (await billed(s, [['Masala Chai', 1]])).bill;
-    if (late.shiftDay === day) {
-      expect((await s.counter.post(`${s.B}/settlements`, { billIds: [late.id], payments: [{ mode: 'cash', amount: '42' }] })).json.error).toMatch(/closed/);
-    }
+    expect(late.shiftDay).not.toBe(day);
+    expect((await s.counter.post(`${s.B}/settlements`, { billIds: [late.id], payments: [{ mode: 'cash', amount: '42' }] })).status).toBe(201);
   });
 });
 

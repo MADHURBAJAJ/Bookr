@@ -9,7 +9,7 @@ import { readerFor, type ReadBooking } from './booking-readers';
 import { phoneKeySoft } from './booking-readers';
 import { linkWalkIn, recomputeDesk, syncStayRent } from './rooms';
 import { linkReservation } from './routes/frontdesk';
-import { tableLayout, type Business } from './util';
+import { CLOSED_TO, tableLayout, type Business } from './util';
 
 const GMAIL_CONFIRM = 'forwarding-noreply@google.com';
 export type MailSource = 'mmt' | 'djubo' | 'gmail' | 'other';
@@ -89,7 +89,7 @@ async function readMail(db: DB, businessId: string, mailId: string, source: Mail
     try {
       const found = readerFor(source)(mail);
       if (!found.length) { status = 'ignored'; note = 'No booking in this mail.'; } else {
-        const b = (await one<Business>(db, 'SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp FROM businesses WHERE id = ?', businessId))!;
+        const b = (await one<Business>(db, `SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp, ${CLOSED_TO} FROM businesses WHERE id = ?`, businessId))!;
         const auto = (await one<{ a: number | null }>(db, 'SELECT bookings_auto_from AS a FROM businesses WHERE id = ?', businessId))!.a;
         for (const x of found) await saveBooking(db, b, auto, source, mailId, x);
         status = 'read'; note = `${found.length} booking${found.length === 1 ? '' : 's'} read.`;

@@ -2610,9 +2610,11 @@ actions.recvGo = async () => {
 // ---------- shift close
 
 async function shiftScreen() {
+  // The shift moves on at its hour or when it is closed by hand (24 Nov 2026): read the current one afresh.
+  try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
   const day = me.business.shiftDay;
   const d = await api('GET', `${B()}/shifts/${day}`);
-  ui.s = d.summary; ui.closed = d.closed; ui.counts = {};
+  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt;
   const notes = ['2000', '500', '200', '100', '50', '20', '10'];
   rerender = () => {
     const s = ui.s;
@@ -2627,6 +2629,7 @@ async function shiftScreen() {
       <div class="kpis">${kpi('Should be in the drawer', rs(expected), 'Float plus cash in, less cash out')}${kpi('Counted', rs(counted))}
         ${started || ui.closed ? kpi(diff === 0 ? 'Drawer agrees' : diff < 0 ? 'Drawer short' : 'Drawer over', rs(Math.abs(diff)), ui.closed ? 'Shift closed' : 'Before closing', diff === 0 ? 'good' : 'bad') : kpi('Drawer', 'Not counted yet', 'Count the notes to compare')}
         ${s.openOrders.length || s.unpaidBills.length ? kpi('Still open', String(s.openOrders.length + s.unpaidBills.length), 'Orders or bills to finish first', 'warn') : ''}</div>
+      ${ui.last && !ui.last.countedAt ? lateCountPanel(notes) : ''}
       ${s.openOrders.length || s.unpaidBills.length || s.notInDjubo?.length || s.deskMissing?.length ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${s.openOrders.length + s.unpaidBills.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0)}</span></div>
         ${s.openOrders.length ? html`<div class="msg bad">Bill these orders or keep them as a tab first: ${s.openOrders.map((o) => o.place).join(', ')}.</div>` : ''}
         ${s.unpaidBills.length ? html`<div class="msg bad">Printed but not paid: ${s.unpaidBills.map((b) => b.bill_no).join(', ')}.</div>` : ''}
@@ -2663,7 +2666,11 @@ async function shiftScreen() {
         ${diff && (started || ui.error) ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}"></label>` : ''}
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}" placeholder="e.g. Entered in Djubo, mail not come yet"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift</button></form>`}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit>Close shift</button>
+        <p class="small quiet">${Date.now() < ui.endsAt ? `This shift ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts the ${dayName(addDays(s.shiftDay, 1))} shift at once: money taken after this goes there.` : ''}</p></form>`}
+      ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen the ${dayName(ui.last.shiftDay)} shift (owner)</summary>
+        <p class="small quiet">Closed ${ui.last.auto ? 'automatically' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); count and close it again after. Bookr keeps the first close it was sent.</p>
+        <div class="row"><input class="in grow" data-model="reopenWhy" value="${ui.reopenWhy ?? ''}" placeholder="Why reopen (required)"><button class="btn" type="button" data-act="reopenShift" data-day="${ui.last.shiftDay}">Reopen</button></div></details>` : ''}
     </div>`));
   };
   rerender();
@@ -2672,6 +2679,28 @@ root.addEventListener('input', (ev) => { const n = ev.target.dataset?.note; if (
 actions.paidOut = async () => {
   await api('POST', B() + '/drawer-outs', { amount: ui.outAmount ?? '', note: ui.outNote ?? '' });
   flash = { kind: 'ok', text: `Paid out ${rs(toPaise(ui.outAmount) ?? 0)} recorded.` }; route();
+};
+/** The drawer of a shift closed automatically at its hour, counted later (24 Nov 2026). */
+function lateCountPanel(notes) {
+  const l = ui.last;
+  return html`<form class="panel blockers"><div class="bh"><h2>Count the ${dayName(l.shiftDay)} shift's drawer</h2><span class="status warn">Not counted</span></div>
+    <p class="small">It closed by itself at ${dateTime(l.closedAt)}. Count the whole drawer now: the cash taken since then is taken off, so any difference stays with the ${dayName(l.shiftDay)} shift.</p>
+    <label class="f">Opening float of that shift (₹)<input class="in" inputmode="decimal" data-model="lFloat" value="${ui.lFloat ?? ''}"></label>
+    <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="lc${n}" value="${ui[`lc${n}`] ?? ''}"></label>`)}
+      <label class="f">Coins and loose (₹)<input class="in" inputmode="decimal" data-model="lLoose" value="${ui.lLoose ?? ''}"></label></div>
+    <label class="f">Reason, if it does not agree<input class="in" data-model="lReason" value="${ui.lReason ?? ''}"></label>
+    <div class="row"><button class="btn pri" type="submit" data-act="countLater" data-day="${l.shiftDay}" data-submit>Save the count</button></div></form>`;
+}
+actions.countLater = async (d) => {
+  const counted = {}; for (const n of ['2000', '500', '200', '100', '50', '20', '10']) counted[n] = Number(ui[`lc${n}`]) || 0;
+  counted.loose = ui.lLoose || '0';
+  const r = await api('POST', `${B()}/shifts/${d.day}/count`, { openingFloat: ui.lFloat || '0', counted, reason: ui.lReason });
+  flash = { kind: r.differencePaise ? 'warn' : 'ok', text: `${dayName(d.day)} drawer counted. ${r.message}` }; route();
+};
+actions.reopenShift = async (d) => {
+  if (!confirm(`Reopen the ${dayName(d.day)} shift?`)) return;
+  await api('POST', `${B()}/shifts/${d.day}/reopen`, { reason: ui.reopenWhy ?? '' });
+  flash = { kind: 'ok', text: `The ${dayName(d.day)} shift is open again.` }; route();
 };
 actions.closeShift = async () => {
   const counted = {}; for (const [k, v] of Object.entries(ui.counts)) counted[k] = Number(v) || 0;
@@ -3854,7 +3883,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   rerender = () => paint(shell('#/exceptions', html`${pageHead(`Daily check · shift ${dayName(day)}`, 'The owner\'s morning page: money, the cash close, bill numbers and anything unusual.',
       html`<form class="row" style="align-items:end"><label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label><button class="btn" type="submit" data-act="exDay" data-submit>Show</button><button class="btn pri" type="button" data-act="exCopy">Copy day summary</button></form>`)}
     <div class="kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), `${rs(d.sales.totalPaise)} with GST`)}
-      ${d.shiftClose ? kpi('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
+      ${d.shiftClose && !d.shiftClose.countedAt ? kpi('Cash close', 'Not counted', 'Closed by itself at the shift\'s hour. Count it on Shift close.', 'bad')
+        : d.shiftClose ? kpi('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
         : kpi('Cash close', 'Not closed', 'The shift is not closed yet', 'warn')}
       ${kpi('Bill numbers', broken.length ? 'Gaps found' : 'Unbroken', broken.length ? 'See below' : `Financial year ${d.fy}`, broken.length ? 'bad' : 'good')}
       ${kpi('Exceptions', String(exCount), 'Voids, discounts, comps, cancels, reprints and more', exCount ? 'warn' : 'good')}
@@ -3866,7 +3896,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
           ${d.sales.ncBills ? html`<div><span class="quiet">NC and complimentary (not in sales)</span><span>${plural(d.sales.ncBills, 'bill')} · ${rs(d.sales.ncMenuPaise)} at menu price</span></div>` : ''}
           ${d.byMode.map((m) => html`<div><span>${modeName[m.mode] ?? m.mode} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
         <h2>Shift close</h2>
-        ${d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
+        ${d.shiftClose && !d.shiftClose.countedAt ? html`<p style="color:var(--bad)">Closed by itself at the shift's hour; the drawer is not counted yet. <a href="#/shift">Count it on Shift close</a>.</p>`
+          : d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
           : html`<p style="color:var(--warn)">Not closed yet.</p>`}
         <h2>Bill numbers (${d.fy})</h2>
         ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: ${x.missing.join(', ')} missing</div>`)}</div>`

@@ -2,10 +2,14 @@ import { now, one, stmt, type DB } from '../../src/db';
 import { fail } from '../../src/http';
 import { fyOf, shiftDayAt } from './billing';
 
-export interface Business { id: string; name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null; disc_limit_bp: number }
+export interface Business { id: string; name: string; fy_start_month: number; shift_start_hour: number; tab_age_days: number; tables: string | null; disc_limit_bp: number;
+  /** The latest shift day already closed (24 Nov 2026): a close by hand before the shift's hour starts the next shift at once. */
+  closed_to?: string | null }
+/** Reads the latest closed shift day with a business row. */
+export const CLOSED_TO = '(SELECT max(x.shift_day) FROM shift_closes x WHERE x.business_id = businesses.id) AS closed_to';
 
 export async function loadBusiness(db: DB, id: string): Promise<Business> {
-  const b = await one<Business>(db, 'SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp FROM businesses WHERE id = ?', id);
+  const b = await one<Business>(db, `SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp, ${CLOSED_TO} FROM businesses WHERE id = ?`, id);
   if (!b) fail(404, 'Business not found.');
   return b;
 }
@@ -65,9 +69,12 @@ export function bizOf(c: { get(k: 'business'): Business }): Business {
   return c.get('business');
 }
 
+const nextDay = (d: string) => new Date(Date.parse(d) + 86_400_000).toISOString().slice(0, 10);
 /** The current shift day and financial year of a business, at `t` (default now). */
 export function clock(b: Business, t = now()) {
-  const shiftDay = shiftDayAt(t, b.shift_start_hour);
+  // Once the shift is closed (by hand, before the shift's hour), what happens now belongs to the next shift (24 Nov 2026).
+  const raw = shiftDayAt(t, b.shift_start_hour);
+  const shiftDay = b.closed_to && b.closed_to >= raw ? nextDay(raw) : raw;
   return { t, shiftDay, fy: fyOf(shiftDay, b.fy_start_month) };
 }
 

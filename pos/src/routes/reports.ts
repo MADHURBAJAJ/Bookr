@@ -147,8 +147,8 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     all<{ entity_id: string; name: string; prefix: string; seqs: string; days: string | null }>(db, `SELECT e.id AS entity_id, e.name, e.series_prefix AS prefix,
         group_concat(n.seq) AS seqs, group_concat(n.print_day || ':' || n.day_seq) AS days
       FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.fy = ? GROUP BY e.id`, bid, fy),
-    one<{ difference_paise: number; difference_reason: string | null; closed_at: number }>(db,
-      'SELECT difference_paise, difference_reason, closed_at FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, day),
+    one<{ difference_paise: number; difference_reason: string | null; closed_at: number; counted_at: number | null; auto: number }>(db,
+      'SELECT difference_paise, difference_reason, closed_at, counted_at, auto FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, day),
     // The bar: how many counts were taken this shift, and what they found missing or extra, at cost.
     one<{ counts: number; missing: number; extra: number; waste: number }>(db, `SELECT
         (SELECT count(*) FROM pos_events e WHERE e.business_id = ?1 AND e.shift_day = ?2 AND e.kind = 'stock_count' AND e.reason = 'Count'
@@ -199,7 +199,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
       missing: [...dayGaps(x.days, (d, n) => creditNoteNo(x.prefix, d, n)), ...g.missing.map((n) => `credit note ${n} of ${fy}`)] }; }),
     typedPrices: typed,
     bar: { counts: bar!.counts, missingPaise: Math.round(bar!.missing), extraPaise: Math.round(bar!.extra), breakagePaise: Math.round(bar!.waste) },
-    shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at } : null,
+    shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at, countedAt: close.counted_at, auto: !!close.auto } : null,
   });
 });
 
@@ -438,7 +438,7 @@ reportRoutes.get(`${B}/reports/losses`, requireAction('reports.view'), async (c)
       FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
       WHERE m.business_id = ? AND m.shift_day BETWEEN ? AND ? AND (m.kind = 'waste' OR (m.kind = 'count' AND m.qty < 0))
       GROUP BY i.id, m.kind ORDER BY valuePaise DESC`, bid, from, to),
-    all(db, `SELECT x.shift_day AS day, x.difference_paise AS differencePaise, x.difference_reason AS reason, coalesce(s.name, '') AS byName
+    all(db, `SELECT x.shift_day AS day, x.difference_paise AS differencePaise, CASE WHEN x.counted_at IS NULL THEN 'Not counted (closed automatically)' ELSE x.difference_reason END AS reason, coalesce(s.name, '') AS byName
       FROM shift_closes x LEFT JOIN staff s ON s.id = x.closed_by WHERE x.business_id = ? AND x.shift_day BETWEEN ? AND ? ORDER BY x.shift_day`, bid, from, to),
   ]);
   return c.json({ from, to, events, stock, cash });

@@ -252,7 +252,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   try {
     await db.batch(statements);
   } catch (e) {
-    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Ask an Owner.');
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Open the screen again: money now goes to the next shift.');
     if (isTrigger(e, 'bill_frozen')) fail(409, 'One of these bills changed meanwhile. Open it again.');
     throw e;
   }
@@ -327,7 +327,7 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
       }), t),
     ]);
   } catch (e) {
-    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Ask an Owner.');
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Open the screen again: money now goes to the next shift.');
     throw e;
   }
   sendSoon(c, bid);
@@ -400,7 +400,7 @@ export async function deskAdvance(c: Context<AppEnv>, data: Record<string, unkno
       }), t),
     ]);
   } catch (e) {
-    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Ask an Owner.');
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Open the screen again: money now goes to the next shift.');
     throw e;
   }
   sendSoon(c, bid);
