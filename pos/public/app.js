@@ -4180,7 +4180,9 @@ actions.stStore = async () => { await api('POST', `${B()}/stock/stores`, { name:
 // ---------- exceptions
 
 async function exceptionsScreen(day = me.business.shiftDay) {
-  const [{ events }, d] = await Promise.all([api('GET', `${B()}/events?day=${encodeURIComponent(day)}`), api('GET', `${B()}/reports/daily-check?day=${encodeURIComponent(day)}`)]);
+  const [{ events }, d, prev] = await Promise.all([api('GET', `${B()}/events?day=${encodeURIComponent(day)}`), api('GET', `${B()}/reports/daily-check?day=${encodeURIComponent(day)}`),
+    api('GET', `${B()}/reports/daily-check?day=${addDays(day, -7)}`).catch(() => null)]);
+  ui.exPrev = prev;
   const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance', pay_change: 'Payment type changed' };
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const ev = (k) => d.events[k] ?? { n: 0, paise: 0 };
@@ -4202,60 +4204,146 @@ async function exceptionsScreen(day = me.business.shiftDay) {
     `Bill numbers: ${broken.length ? 'gaps found' : 'unbroken'}`,
     d.unpaid.length ? `Sent to kitchen, not paid: ${d.unpaid.length}${oldUnpaid ? ` (${oldUnpaid} overdue)` : ''}` : '',
   ].filter(Boolean).join('\n');
-  rerender = () => paint(shell('#/exceptions', html`${pageHead(`Daily check · shift ${dayName(day)}`, 'The owner\'s morning page: money, the cash close, bill numbers and anything unusual.',
-      html`<form class="row" style="align-items:end"><label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label><button class="btn" type="submit" data-act="exDay" data-submit>Show</button><button class="btn pri" type="button" data-act="exCopy">Copy day summary</button></form>`)}
-    <div class="kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), `${rs(d.sales.totalPaise)} with GST`)}
-      ${d.shiftClose && !d.shiftClose.countedAt ? kpi('Cash close', 'Not counted', 'Closed by itself at the shift\'s hour. Count it on Shift close.', 'bad')
+  // ----- Sent to the kitchen or bar, not paid (25 Nov 2026): five ways food leaves with no money, and who.
+  const placeOf = (ref) => String(ref ?? '').split(' · ')[0];
+  const cancels = events.filter((e) => e.kind === 'kot_cancel' && !/\(whole order\)/.test(e.ref ?? ''));
+  const wholeLines = events.filter((e) => e.kind === 'kot_cancel' && /\(whole order\)/.test(e.ref ?? ''));
+  const wholeOrders = [...new Set(wholeLines.map((e) => placeOf(e.ref)))];
+  const voidsLost = d.voidedNotRebilled ?? [];
+  const comps = events.filter((e) => e.kind === 'comp');
+  const unpaidOld = d.unpaid.filter((o) => o.old);
+  const sum = (xs, f) => xs.reduce((t, x) => t + (f(x) ?? 0), 0);
+  const np = [
+    { k: 'cancel', label: 'Cancelled after KOT', color: '#b45309', n: cancels.length, unit: 'line', paise: sum(cancels, (e) => e.amountPaise),
+      what: cancels.slice(0, 4).map((e) => String(e.ref ?? '').split(' · ').slice(1).join(' · ')).join(' · '), stock: 'back', filter: 'kot_cancel' },
+    { k: 'whole', label: 'Whole order cancelled', color: '#d97706', n: wholeOrders.length, unit: 'order', paise: sum(wholeLines, (e) => e.amountPaise),
+      what: wholeOrders.slice(0, 4).join(' · '), stock: 'back', filter: 'kot_cancel' },
+    { k: 'void', label: 'Bill voided, not billed again', color: '#7c2d12', n: voidsLost.length, unit: 'bill', paise: sum(voidsLost, (b) => b.totalPaise),
+      what: voidsLost.slice(0, 4).map((b) => `${b.billNo} · ${b.place}`).join(' · '), stock: 'used', filter: 'void' },
+    { k: 'comp', label: 'Complimentary / NC', color: '#0f766e', n: comps.length, unit: 'bill', paise: sum(comps, (e) => e.amountPaise),
+      what: comps.slice(0, 4).map((e) => e.reason ?? e.ref).join(' · '), stock: 'used', filter: 'other' },
+    { k: 'unpaid', label: 'Not paid yet', color: '#b91c1c', n: unpaidOld.length, unit: 'table', paise: sum(unpaidOld, (o) => o.sentPaise),
+      what: unpaidOld.slice(0, 4).map((o) => `${o.place} · open ${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d` : `${o.hours} h`}`).join(' · '), stock: 'used' },
+  ];
+  const npTotal = sum(np, (x) => x.paise);
+  const npItems = cancels.length + wholeLines.length + voidsLost.length + comps.length + unpaidOld.length;
+  const people = new Map();
+  const who = (name) => { const k = name || 'Unknown'; if (!people.has(k)) people.set(k, { name: k, cancels: 0, orders: new Set(), voids: 0, nc: 0, paise: 0 }); return people.get(k); };
+  for (const e of cancels) { const p = who(e.byName); p.cancels++; p.paise += e.amountPaise ?? 0; }
+  for (const e of wholeLines) { const p = who(e.byName); p.orders.add(placeOf(e.ref)); p.paise += e.amountPaise ?? 0; }
+  const lostNos = new Set(voidsLost.map((b) => b.billNo));
+  for (const e of events.filter((x) => x.kind === 'void' && lostNos.has(x.ref))) { const p = who(e.byName); p.voids++; p.paise += e.amountPaise ?? 0; }
+  for (const e of comps) { const p = who(e.byName); p.nc++; p.paise += e.amountPaise ?? 0; }
+  const byPerson = [...people.values()].sort((a, b2) => b2.paise - a.paise);
+  const heavy = byPerson.filter((p) => p.cancels + p.orders.size >= 3);
+  ui.npOpen ??= !!(unpaidOld.length || heavy.length);
+  // ----- What to look at first.
+  const look = [
+    ...(d.shiftClose && !d.shiftClose.countedAt ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
+    ...(d.drawers ?? []).filter((x) => x.differencePaise).map((x) => `Cash ${x.differencePaise < 0 ? 'short' : 'over'} ${rs(Math.abs(x.differencePaise))} in ${x.holder}'s drawer`),
+    ...unpaidOld.map((o) => `${o.place} not paid for ${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d` : `${o.hours} h`}`),
+    ...heavy.map((p) => `${p.name} cancelled ${plural(p.cancels + p.orders.size, 'KOT line')}`),
+    ...(broken.length ? ['Bill numbers missing'] : []),
+    ...(d.bar.missingPaise ? [`Bar count: ${rs(d.bar.missingPaise)} missing`] : []),
+  ];
+  const prevNet = ui.exPrev?.sales?.netPaise ?? null;
+  const change = prevNet ? Math.round(((d.sales.netPaise - prevNet) / prevNet) * 100) : null;
+  const modes = d.byMode.filter((m) => m.mode !== 'comp');
+  const maxMode = Math.max(1, ...modes.map((m) => m.paise));
+  const tile = (n, label, money, tone) => html`<div class="dc-tile ${n ? tone : 'none'}"><span class="k">${label}</span><span class="v">${n}</span><span class="n">${n ? (money !== undefined ? rs(money) : 'see the list') : 'none'}</span></div>`;
+  const evKind = { void: 'void', kot_cancel: 'kot_cancel', discount: 'discount' };
+  const exF = ui.exF ?? 'all';
+  const shown = events.filter((e) => exF === 'all' || (exF === 'other' ? !evKind[e.kind] : e.kind === exF));
+  const chip = (k, label, n) => html`<button type="button" class="chip" aria-pressed="${exF === k}" data-act="pick" data-k="exF" data-id="${k}">${label} ${n}</button>`;
+  const tone = { void: 'bad', kot_cancel: 'warn', discount: 'mute', comp: 'ok', reprint: 'mute', credit_note: 'warn', stock_waste: 'warn', stock_count: 'warn', limit_warning: 'warn', pay_change: 'warn' };
+  const hrs = (h) => (h >= 24 ? `${Math.floor(h / 24)} d ${h % 24} h` : `${h} h`);
+  rerender = () => paint(shell('#/exceptions', html`
+    <div class="dc-head"><div class="grow"><h1>Daily check</h1><p class="quiet">Shift of ${dayName(day)} · ${me.business.shift_start_hour ?? 8} am to ${me.business.shift_start_hour ?? 8} am · the owner's morning page</p></div>
+      <form class="row" style="align-items:end"><button class="btn" type="button" data-act="exStep" data-n="-1" aria-label="Previous shift">‹</button>
+        <label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label>
+        <button class="btn" type="button" data-act="exStep" data-n="1" aria-label="Next shift">›</button><button class="btn" type="submit" data-act="exDay" data-submit>Show</button>
+        <button class="btn pri" type="button" data-act="exCopy">Copy for WhatsApp</button></form></div>
+    ${look.length ? html`<div class="dc-look"><span class="badge-n">${plural(look.length, 'thing')} to look at</span><span>${look.join(' · ')}</span></div>`
+      : html`<div class="dc-look ok"><span class="badge-n">All clear</span><span>Cash matched, nothing unpaid for long, no unusual cancels.</span></div>`}
+    <div class="kpis dc-kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), change === null ? `${rs(d.sales.totalPaise)} with GST` : `${change >= 0 ? '▲' : '▼'} ${Math.abs(change)}% on last ${new Date(day + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long' })}`)}
+      ${d.shiftClose && !d.shiftClose.countedAt ? kpi('Cash close', 'Not counted', 'Count it on Day close', 'bad')
         : d.shiftClose ? kpi('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
         : kpi('Cash close', 'Not closed', 'The shift is not closed yet', 'warn')}
-      ${kpi('Bill numbers', broken.length ? 'Gaps found' : 'Unbroken', broken.length ? 'See below' : `Financial year ${d.fy}`, broken.length ? 'bad' : 'good')}
-      ${kpi('Exceptions', String(exCount), 'Voids, discounts, comps, cancels, reprints and more', exCount ? 'warn' : 'good')}
-      ${kpi('Sent, not paid', String(d.unpaid.length), oldUnpaid ? `${oldUnpaid} overdue` : 'Right now', oldUnpaid ? 'bad' : d.unpaid.length ? 'warn' : 'good')}</div>
+      ${kpi('Bill numbers', broken.length ? 'Gaps found' : 'Unbroken', broken.length ? 'See below' : `${plural(d.series.length, 'series', 'series')} · FY ${d.fy}`, broken.length ? 'bad' : 'good')}
+      ${kpi('Not paid for', rs(npTotal), npItems ? `${plural(npItems, 'item')} sent, no money` : 'Everything sent was paid', npTotal ? 'warn' : 'good')}
+      ${kpi('Bar count', d.bar.counts ? (d.bar.missingPaise ? `${rs(d.bar.missingPaise)} missing` : 'Nothing missing') : 'Not counted', d.bar.counts ? plural(d.bar.counts, 'count') : 'Count the bar on Stock', d.bar.counts ? (d.bar.missingPaise ? 'bad' : 'good') : 'warn')}</div>
+    ${ui.npOpen ? html`<section class="panel dc-np"><div class="line"><div class="grow"><h2 style="margin:0">Sent to kitchen or bar, not paid</h2>
+        <p class="quiet small" style="margin:4px 0 0">Everything that went out on a KOT this shift and brought in no money, at menu price.</p>
+        ${unpaidOld.length || heavy.length ? html`<p class="small" style="margin:6px 0 0;color:var(--warn);font-weight:650">Opened by itself: ${[unpaidOld.length ? `${plural(unpaidOld.length, 'table')} unpaid past 6 hours` : '', heavy.length ? `${heavy.map((p) => p.name).join(', ')} with 3 or more cancels` : ''].filter(Boolean).join(', ')}.</p>` : ''}</div>
+        <div class="dc-total"><strong>${rs(npTotal)}</strong><span class="quiet small">${plural(npItems, 'item')}${d.sales.netPaise ? ` · ${((npTotal / d.sales.netPaise) * 100).toFixed(1)}% of sales` : ''}</span></div>
+        <button class="btn" type="button" data-act="npTog" aria-expanded="true">Fold ▲</button></div>
+      ${npBar(np, npTotal)}
+      <div class="scroll"><table class="t"><thead><tr><th>How</th><th>Count</th><th class="num">Menu price</th><th>Stock</th><th></th></tr></thead><tbody>
+        ${np.map((x) => html`<tr><td><span class="dc-dot" style="background:${x.color}"></span><strong>${x.label}</strong>${x.what ? html`<div class="small quiet dc-what">${x.what}</div>` : ''}</td>
+          <td>${x.n ? plural(x.n, x.unit) : html`<span class="quiet">none</span>`}</td><td class="num"><strong style="${x.k === 'unpaid' && x.n ? 'color:var(--bad)' : ''}">${x.n ? rs(x.paise) : '—'}</strong></td>
+          <td>${x.n ? (x.stock === 'back' ? html`<span class="status warn">put back · check at count</span>` : html`<span class="status mute">used</span>`) : ''}</td>
+          <td class="act">${x.n && x.filter ? html`<button class="btn ghost sm" type="button" data-act="exSee" data-f="${x.filter}">See each</button>` : x.n && x.k === 'unpaid' ? html`<a class="btn ghost sm" href="#/order/${unpaidOld[0].id}">Open ${unpaidOld[0].place}</a>` : ''}</td></tr>`)}</tbody></table></div>
+      <div class="grid2" style="align-items:start">
+        <div class="dc-box"><h3>By person</h3>
+          ${byPerson.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Who</th><th class="num">Cancels</th><th class="num">Voids</th><th class="num">NC</th><th class="num">Total</th></tr></thead><tbody>
+            ${byPerson.map((p) => html`<tr class="${p.cancels + p.orders.size >= 3 ? 'dc-flag' : ''}"><td><strong>${p.name}</strong>${p.cancels + p.orders.size >= 3 ? html` <span class="small" style="color:var(--warn);font-weight:650">· ${p.cancels + p.orders.size} cancels this shift</span>` : ''}</td>
+              <td class="num">${p.cancels + p.orders.size || '—'}</td><td class="num">${p.voids || '—'}</td><td class="num">${p.nc || '—'}</td><td class="num"><strong>${rs(p.paise)}</strong></td></tr>`)}</tbody></table></div>
+            <p class="small quiet" style="margin:6px 0 0">Cancels count against who asked; each one names the manager who approved it in the list below.</p>` : html`<p class="quiet">Nobody cancelled, voided or gave anything free.</p>`}</div>
+        <div class="dc-box"><h3>Check these at the stock count</h3>
+          <p class="small quiet" style="margin:0 0 6px">Their KOT was cancelled, so the stock went back on the book. If the count finds them short, they were made and thrown away, or taken.</p>
+          ${(d.cancelReturns ?? []).length ? html`<ul class="dc-list">${d.cancelReturns.map((x) => html`<li><span>${x.name}</span><strong>${x.qty} ${x.unit} · ${x.store}</strong></li>`)}</ul>
+            <a href="#/stock">Open the stock count</a>` : html`<p class="quiet">Nothing put back this shift.</p>`}</div>
+      </div></section>`
+    : html`<section class="panel dc-np dc-np-fold"><div class="grow"><div class="line" style="gap:12px"><h2 style="margin:0">Sent to kitchen or bar, not paid</h2><span class="quiet">${rs(npTotal)} · ${plural(npItems, 'item')}</span></div>
+        ${npBar(np, npTotal)}<div class="dc-legend">${np.filter((x) => x.n).map((x) => html`<span style="${x.k === 'unpaid' ? 'color:var(--bad);font-weight:650' : ''}">${x.label} ${rs(x.paise)}</span>`)}</div></div>
+        <button class="btn" type="button" data-act="npTog" aria-expanded="false">Open ▼</button></section>`}
     <div class="grid2" style="align-items:start">
-      <section class="panel"><h2>Money</h2>
-        <div class="sums"><div class="big"><span>Net sales · ${plural(d.sales.bills, 'bill')}</span><span>${rs(d.sales.netPaise)}</span></div>
-          <div><span class="quiet">With GST</span><span>${rs(d.sales.totalPaise)}</span></div>
-          ${d.sales.ncBills ? html`<div><span class="quiet">NC and complimentary (not in sales)</span><span>${plural(d.sales.ncBills, 'bill')} · ${rs(d.sales.ncMenuPaise)} at menu price</span></div>` : ''}
-          ${d.byMode.map((m) => html`<div><span>${modeName[m.mode] ?? m.mode} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}</div>
-        <h2>Shift close</h2>
-        ${d.shiftClose && !d.shiftClose.countedAt ? html`<p style="color:var(--bad)">Closed by itself at the shift's hour; the drawer is not counted yet. <a href="#/shift">Count it on Shift close</a>.</p>`
-          : d.shiftClose ? html`<p>${d.shiftClose.differencePaise === 0 ? 'Closed, cash matched.' : html`<span style="color:var(--bad)">Closed, cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} by ${rs(Math.abs(d.shiftClose.differencePaise))}</span> · ${d.shiftClose.reason ?? ''}`}</p>`
-          : html`<p style="color:var(--warn)">Not closed yet.</p>`}
-        ${d.drawers?.length ? html`<h2>Cash drawers</h2><div class="scroll"><table class="t"><thead><tr><th>Held by</th><th>From – to</th><th class="num">Cash in</th><th class="num">Out</th><th class="num">Counted</th><th>Result</th></tr></thead><tbody>
-          ${d.drawers.map((x) => html`<tr><td>${x.holder}${x.acceptedBy ? ` → ${x.acceptedBy}` : ''}${x.closeKind === 'takeover' ? html`<div class="small quiet">${x.holder} not present · confirmed by ${x.approvedBy ?? 'a manager'}</div>` : ''}</td>
-            <td>${time(x.from)} – ${x.to ? time(x.to) : 'open'}</td><td class="num">${rs(x.cashInPaise)}</td><td class="num">${rs(x.cashOutPaise)}</td>
-            <td class="num">${x.countedPaise == null ? '—' : rs(x.countedPaise)}</td>
-            <td>${x.countedPaise == null ? html`<span class="status mute">Not counted yet</span>` : x.differencePaise === 0 ? html`<span class="status ok">Agrees</span>`
-              : html`<span class="status bad">${x.differencePaise < 0 ? 'Short' : 'Over'} ${rs(Math.abs(x.differencePaise))}</span><div class="small quiet">${x.reason ?? ''}</div>`}</td></tr>`)}</tbody></table></div>` : ''}
-        <h2>Bill numbers (${d.fy})</h2>
-        ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: ${x.missing.join(', ')} missing</div>`)}</div>`
-          : html`<p>${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</p>`}
-        <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span>${x.count} bills, last ${x.lastNo ?? x.last}</span></div>`)}</div></section>
+      <section class="panel"><h2>Money in</h2>
+        ${modes.length ? html`<div class="dc-bars">${modes.map((m) => html`<div class="dc-barrow"><span>${modeName[m.mode] ?? m.mode} <span class="quiet">(${m.n})</span></span><span class="dc-track"><span style="width:${Math.max(2, Math.round((m.paise / maxMode) * 100))}%"></span></span><strong class="num">${rs(m.paise)}</strong></div>`)}</div>` : html`<p class="quiet">No payments this shift.</p>`}
+        <div class="sums" style="margin-top:10px"><div class="big"><span>Net sales · ${plural(d.sales.bills, 'bill')}</span><span>${rs(d.sales.netPaise)}</span></div><div><span class="quiet">With GST</span><span>${rs(d.sales.totalPaise)}</span></div>
+          ${d.sales.ncBills ? html`<div><span class="quiet">NC and complimentary (not in sales)</span><span>${plural(d.sales.ncBills, 'bill')} · ${rs(d.sales.ncMenuPaise)} at menu price</span></div>` : ''}</div></section>
       <section class="panel"><h2>Exceptions</h2>
-        <div class="sums">${flag(ev('void').n, 'Void bills', ev('void').paise)}${flag(ev('discount').n + df('discount').n, 'Discounts', ev('discount').paise + df('discount').paise)}
-          ${flag(ev('comp').n, 'Complimentary', ev('comp').paise)}${flag(ev('kot_cancel').n, 'Cancelled after KOT')}${flag(ev('reprint').n, 'Reprints')}
-          ${flag(ev('credit_note').n, 'Credit notes', ev('credit_note').paise)}${flag(ev('pay_change').n, 'Payment type changed', ev('pay_change').paise)}${flag(df('tip').n, 'Tips', df('tip').paise)}
-          ${flag(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise)}${flag(ev('stock_count').n, 'Stock count differences')}
-          <div><span style="${d.bar.missingPaise ? 'color:var(--bad);font-weight:700' : d.bar.counts ? '' : 'color:var(--warn)'}">Bar: missing at count</span>
-            <span>${d.bar.counts ? `${d.bar.missingPaise ? rs(d.bar.missingPaise) : 'none'} · ${d.bar.counts} count${d.bar.counts === 1 ? '' : 's'}` : 'bar not counted'}</span></div>${flag(ev('limit_warning').n, 'Billing name limit warnings')}</div>
-        <h2>Sent to kitchen, not paid (right now)</h2>
-        <p class="small quiet">Every order holding food or drinks already sent to the kitchen or bar, with no paid bill. Old ones (tabs past ${me.business.tab_age_days ?? 3} days, others past 6 hours) are in red.</p>
-        ${d.unpaid.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Where</th><th>State</th><th class="num">Sent</th><th class="num">Open for</th></tr></thead><tbody>
-          ${d.unpaid.map((o) => html`<tr style="${o.old ? 'color:var(--bad)' : ''}"><td><a href="#/order/${o.id}">${o.place}</a>${o.guestName ? html`<div class="small quiet">${o.guestName}</div>` : ''}</td>
-            <td>${statusName[o.status]}${o.billNo ? ' · ' + o.billNo : ''}${o.voided ? html`<div class="small">A bill was voided</div>` : ''}</td><td class="num">${rs(o.sentPaise)}</td>
-            <td class="num">${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d ${o.hours % 24} h` : `${o.hours} h`}</td></tr>`)}</tbody></table></div>` : html`<p>Nothing: everything sent was paid for.</p>`}</section>
+        <div class="dc-tiles">${tile(ev('void').n, 'Void bills', ev('void').paise, 'warn')}${tile(ev('discount').n + df('discount').n, 'Discounts', ev('discount').paise + df('discount').paise, 'warn')}
+          ${tile(ev('kot_cancel').n, 'Cancelled after KOT', ev('kot_cancel').paise, 'warn')}${tile(ev('comp').n, 'Complimentary', ev('comp').paise, 'warn')}
+          ${tile(ev('reprint').n, 'Reprints', undefined, 'warn')}${tile(ev('credit_note').n, 'Credit notes', ev('credit_note').paise, 'warn')}
+          ${tile(ev('pay_change').n, 'Payment type changed', ev('pay_change').paise, 'warn')}${tile(df('tip').n, 'Tips', df('tip').paise, 'good')}
+          ${tile(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise, 'warn')}${tile(ev('stock_count').n, 'Stock count differences', undefined, 'warn')}
+          ${ev('limit_warning').n ? tile(ev('limit_warning').n, 'Billing name limit warnings', undefined, 'warn') : ''}</div>
+        <p class="small quiet" style="margin:8px 0 0">Coloured: happened this shift, see the list below. Grey: none.</p></section>
+      <section class="panel"><h2>Cash drawers</h2>
+        ${d.drawers?.length ? html`<div class="dc-drawers">${d.drawers.map((x) => html`<div class="dc-drawer"><div class="grow"><strong>${x.holder}${x.acceptedBy ? ` → ${x.acceptedBy}` : ''}</strong>
+            <div class="small quiet">${time(x.from)} – ${x.to ? time(x.to) : 'open'} · cash in ${rs(x.cashInPaise)} · out ${rs(x.cashOutPaise)}${x.closeKind === 'takeover' ? ` · ${x.holder} not present, confirmed by ${x.approvedBy ?? 'a manager'}` : ''}${x.reason ? ` · "${x.reason}"` : ''}</div></div>
+            <span class="num">${x.countedPaise == null ? '—' : rs(x.countedPaise)}</span>
+            ${x.countedPaise == null ? html`<span class="status mute">Not counted yet</span>` : x.differencePaise === 0 ? html`<span class="status ok">Agrees</span>` : html`<span class="status bad">${x.differencePaise < 0 ? 'Short' : 'Over'} ${rs(Math.abs(x.differencePaise))}</span>`}</div>`)}</div>`
+          : html`<p class="quiet">No cash drawer this shift.</p>`}
+        ${d.shiftClose && !d.shiftClose.countedAt ? html`<p style="color:var(--bad)">Closed by itself at the shift's hour; the drawer is not counted yet. <a href="#/shift">Count it on Day close</a>.</p>` : ''}</section>
+      <section class="panel"><h2>Bill numbers · FY ${d.fy}</h2>
+        ${broken.length ? html`<div class="msg bad">${broken.map((x) => html`<div>${x.name}: ${x.missing.join(', ')} missing</div>`)}</div>`
+          : html`<div class="msg ok">${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</div>`}
+        <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span class="quiet">${x.count} bills, last ${x.lastNo ?? x.last}</span></div>`)}</div></section>
     </div>
     ${(d.typedPrices ?? []).length ? html`<section class="panel" style="margin-top:16px"><h2>Prices typed at billing</h2>
       <p class="quiet small">Bottles and other price-at-billing items, with the price typed and who typed it.</p>
       <div class="scroll"><table class="t"><thead><tr><th>Bill</th><th>Item</th><th class="num">Qty</th><th class="num">Price typed</th><th class="num">Lowest allowed</th><th>Typed by</th></tr></thead><tbody>
-        ${d.typedPrices.map((x) => html`<tr><td>${x.billNo}</td><td>${x.name}</td><td class="num">${x.qty}</td><td class="num">${rs(x.pricePaise)}</td><td class="num">${x.minPricePaise == null ? '—' : rs(x.minPricePaise)}</td><td>${x.byName ?? ''}</td></tr>`)}</tbody></table></div></section>` : ''}
-    <section class="panel" style="margin-top:16px"><h2>Every exception, in order</h2>
+        ${d.typedPrices.map((x) => html`<tr><td>${x.billNo}</td><td>${x.name}</td><td class="num">${x.qty}</td><td class="num"><strong>${rs(x.pricePaise)}</strong></td><td class="num">${x.minPricePaise == null ? '—' : rs(x.minPricePaise)}</td><td>${x.byName ?? ''}</td></tr>`)}</tbody></table></div></section>` : ''}
+    ${d.unpaid.length ? html`<section class="panel" style="margin-top:16px"><h2>Sent to kitchen, not paid (right now)</h2>
+      <p class="small quiet">Every order holding food or drinks already sent to the kitchen or bar, with no paid bill. Old ones (tabs past ${me.business.tab_age_days ?? 3} days, others past 6 hours) are in red.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Where</th><th>State</th><th class="num">Sent</th><th class="num">Open for</th></tr></thead><tbody>
+        ${d.unpaid.map((o) => html`<tr style="${o.old ? 'color:var(--bad)' : ''}"><td><a href="#/order/${o.id}">${o.place}</a>${o.guestName ? html`<div class="small quiet">${o.guestName}</div>` : ''}</td>
+          <td>${statusName[o.status]}${o.billNo ? ' · ' + o.billNo : ''}${o.voided ? html`<div class="small">A bill was voided</div>` : ''}</td><td class="num">${rs(o.sentPaise)}</td><td class="num">${hrs(o.hours)}</td></tr>`)}</tbody></table></div></section>` : ''}
+    <section class="panel" style="margin-top:16px" id="exlist"><div class="line" style="flex-wrap:wrap;gap:10px"><h2 class="grow" style="margin:0">Every exception, in order</h2>
+      <div class="chips">${chip('all', 'All', events.length)}${chip('kot_cancel', 'Cancels', events.filter((e) => e.kind === 'kot_cancel').length)}${chip('discount', 'Discounts', events.filter((e) => e.kind === 'discount').length)}${chip('void', 'Voids', events.filter((e) => e.kind === 'void').length)}${chip('other', 'Other', events.filter((e) => !evKind[e.kind]).length)}</div></div>
     <p class="quiet small">Every void, reprint, cancelled KOT line, discount and complimentary bill, with who and why. Nothing here can be changed.</p>
     <div class="scroll"><table class="t"><thead><tr><th>Time</th><th>What</th><th>Bill or item</th><th class="num">Amount</th><th>By</th><th>Reason</th></tr></thead><tbody>
-      ${events.length ? events.map((e) => html`<tr><td>${time(e.at)}</td><td>${kind[e.kind]}</td><td>${e.ref}</td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
+      ${shown.length ? shown.map((e) => html`<tr><td>${time(e.at)}</td><td><span class="status ${tone[e.kind] ?? 'mute'}">${kind[e.kind]}</span></td><td><strong>${e.ref}</strong></td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
         : html`<tr><td colspan="6" class="quiet">Nothing in this shift.</td></tr>`}</tbody></table></div></section>`));
   rerender();
 }
+/** The share of each way food left without money, as one bar. */
+const npBar = (np, total) => html`<div class="dc-bar" role="img" aria-label="${np.filter((x) => x.n).map((x) => `${x.label} ${total ? Math.round((x.paise / total) * 100) : 0}%`).join(', ') || 'Nothing'}">${total ? np.filter((x) => x.paise).map((x) => html`<span style="width:${(x.paise / total) * 100}%;background:${x.color}"></span>`) : ''}</div>`;
+actions.npTog = () => { ui.npOpen = !ui.npOpen; rerender(); };
+actions.exSee = (d) => { ui.exF = d.f; rerender(); document.getElementById('exlist')?.scrollIntoView({ behavior: 'smooth' }); };
+actions.exStep = (d) => { const cur = ui.day ?? location.hash.split('/')[2] ?? me.business.shiftDay; go(`#/exceptions/${addDays(cur, Number(d.n))}`); };
 actions.exDay = () => go(`#/exceptions/${ui.day}`);
 actions.exCopy = async () => {
   try { await navigator.clipboard.writeText(ui.exSummary); flash = { kind: 'ok', text: 'Day summary copied. Paste it into WhatsApp.' }; }

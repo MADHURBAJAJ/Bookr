@@ -59,6 +59,11 @@ describe('stock at the KOT', () => {
       const use = await ok(s.owner.get(`${B}/stock/consumption?from=${day}&to=${day}`));
       expect(use.items.find((i: any) => i.name === 'Sample Beer')).toMatchObject({ sold: 6, notBilled: 4 });
       expect(use.items.find((i: any) => i.name === 'Sample Batter')).toMatchObject({ sold: 150, notBilled: 0, waste: 0 });
+
+      // The Daily check lists what cancelled KOTs put back, to check at the stock count.
+      const dc = await ok(s.owner.get(`${B}/reports/daily-check?day=${day}`));
+      expect(dc.cancelReturns.map((x: any) => [x.name, x.qty, x.store]).sort()).toEqual([['Sample Batter', 150, 'Sample Kitchen'], ['Sample Beer', 3, 'Sample Bar']]);
+      expect(dc.voidedNotRebilled).toEqual([]);
     } finally {
       stockRule.kotFrom = saved;
     }

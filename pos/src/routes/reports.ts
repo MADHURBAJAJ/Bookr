@@ -203,6 +203,14 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     drawers: await drawersOfDay(db, bid, Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000,
       Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000 + 86_400_000),
     shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at, countedAt: close.counted_at, auto: !!close.auto } : null,
+    // Sent to the kitchen or bar, not paid (25 Nov 2026): bills voided this shift whose order was not billed and paid
+    // again, and the stock a cancelled KOT put back on the book, to check at the stock count.
+    voidedNotRebilled: await all(db, `SELECT b.bill_no AS billNo, b.total_paise AS totalPaise, o.place
+      FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.business_id = ? AND b.shift_day = ? AND b.status = 'void'
+        AND NOT EXISTS (SELECT 1 FROM bills x WHERE x.order_id = b.order_id AND x.status <> 'void') ORDER BY b.printed_at`, bid, day),
+    cancelReturns: await all(db, `SELECT i.name, ss.name AS store, i.unit, sum(m.qty) AS qty FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
+      JOIN stock_stores ss ON ss.id = m.store_id WHERE m.business_id = ? AND m.shift_day = ? AND m.kind = 'sale' AND m.qty > 0 AND m.ref LIKE '% · cancelled'
+      GROUP BY i.id, ss.id ORDER BY i.name`, bid, day),
   });
 });
 

@@ -1013,3 +1013,45 @@ body .ctrcol .kpis { margin-bottom: 0; grid-template-columns: repeat(auto-fit, m
 .c-dirty { border-color: var(--bad); border-width: 2px; } .c-dirty small { color: var(--bad); }
 .c-ooo { background: var(--soft); } .c-ooo small { color: var(--quiet); }
 .ctrkeys { margin-top: 12px; }
+
+/* ---------- Daily check (25 Nov 2026): what to look at, status tiles, money not received, bars and tiles */
+.dc-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.dc-head h1 { margin: 0; font-size: 26px; }
+.dc-head p { margin: 4px 0 0; }
+.dc-look { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: var(--warn-tint); border: 1px solid var(--warn-line); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 14px; }
+.dc-look .badge-n { background: var(--warn); color: var(--on-pri); border-radius: 999px; padding: 3px 10px; font-weight: 700; font-size: 13px; white-space: nowrap; }
+.dc-look.ok { background: var(--go-tint); border-color: var(--go-line); }
+.dc-look.ok .badge-n { background: var(--go-dark); }
+.dc-kpis { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.dc-np { border-color: var(--warn-line); margin-bottom: 16px; display: flex; flex-direction: column; gap: 14px; }
+.dc-np .line { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.dc-np-fold { flex-direction: row; align-items: center; gap: 20px; flex-wrap: wrap; }
+.dc-np-fold .grow { display: flex; flex-direction: column; gap: 10px; min-width: 260px; }
+.dc-total { display: flex; flex-direction: column; align-items: flex-end; }
+.dc-total strong { font-size: 28px; color: var(--warn); font-variant-numeric: tabular-nums; }
+.dc-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--soft); }
+.dc-bar span { display: block; height: 100%; }
+.dc-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13.5px; }
+.dc-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; }
+.dc-what { margin-left: 18px; }
+.dc-box { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.dc-box h3 { margin: 0 0 8px; font-size: 15px; }
+.dc-flag td { background: var(--warn-tint); }
+.dc-list { margin: 0 0 8px; padding: 0; list-style: none; }
+.dc-list li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.dc-bars { display: flex; flex-direction: column; gap: 10px; }
+.dc-barrow { display: grid; grid-template-columns: 140px minmax(0, 1fr) 100px; align-items: center; gap: 10px; }
+.dc-track { height: 10px; background: var(--soft); border-radius: 5px; overflow: hidden; }
+.dc-track span { display: block; height: 100%; background: var(--pri); border-radius: 5px; }
+.dc-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.dc-tile { border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; background: var(--soft); }
+.dc-tile .k { font-size: 13px; font-weight: 650; color: var(--quiet); }
+.dc-tile .v { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.dc-tile .n { font-size: 13px; color: var(--quiet); }
+.dc-tile.warn { background: var(--warn-tint); } .dc-tile.warn .k { color: var(--warn); }
+.dc-tile.good { background: var(--go-tint); } .dc-tile.good .k { color: var(--go-dark); }
+.dc-tile.none .v { color: var(--quiet); }
+.dc-drawers { display: flex; flex-direction: column; }
+.dc-drawer { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.dc-drawer:last-child { border-bottom: 0; }
+@media (max-width: 640px) { .dc-barrow { grid-template-columns: 100px minmax(0, 1fr) 84px; } .dc-total { align-items: flex-start; } }
