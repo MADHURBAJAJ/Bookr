@@ -194,4 +194,12 @@ describe('heartbeat', () => {
     const [st] = await sql`SELECT * FROM wa_listener_status`;
     expect(st).toMatchObject({ last_message_at: null, state: 'waiting_for_qr' });
   });
+
+  it('answers with the groups Bookr reads, so the listener downloads nothing else', async () => {
+    await sql`INSERT INTO wa_groups (id, business_id, wa_group_id, name, active, created_at)
+      VALUES (${crypto.randomUUID()}, ${bid}, '120363000000000002@g.us', 'Staff chat', 0, ${Date.now()})`;
+    expect((await beat({})).json.readGroups).toEqual([GROUP]);
+    await sql`UPDATE wa_groups SET active = 0`;
+    expect((await beat({})).json.readGroups).toEqual([]);
+  });
 });

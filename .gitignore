@@ -11,3 +11,6 @@ listener/data/
 listener/logs/
 listener/.env
 wa-samples/
+listener/groups.txt
+# The example settings file holds no secret.
+!listener/.env.example

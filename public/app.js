@@ -10042,11 +10042,15 @@ async function whatsappView(biz, query) {
   const tab = WA_TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'pending';
   const d = await api('GET', `/businesses/${biz.id}/wa/inbox?tab=${tab}`);
   const l = d.listener;
+  // The PC is on but WhatsApp unlinked it (phase 5): the heartbeat still comes, so say so rather than "on".
+  const unlinked = !l.never && !l.offline && ['not_linked', 'logged_out'].includes(l.state);
   const status = l.never ? html`<span style="color:#B91C1C">Listener not connected yet</span>`
+    : unlinked ? html`<span style="color:#B91C1C">Listener not linked to WhatsApp</span>`
     : l.offline ? html`<span style="color:#B91C1C">Listener offline · ${waAgo(l.lastHeartbeatAt)}</span>`
     : html`<span style="color:var(--ok)">Listener on · last seen ${waAgo(l.lastHeartbeatAt)} ago</span>`;
   const banner = !d.groups ? html`<section class="card"><div class="note">No WhatsApp group is read yet. Choose one in <a href="#/b/${biz.id}/wagroups">Settings → WhatsApp groups</a>.</div></section>`
     : l.never ? html`<div class="wa-banner">The listener on the billing PC has not connected yet. Photos come in once it is set up and linked to WhatsApp.</div>`
+    : unlinked ? html`<div class="wa-banner">The billing PC is on but not linked to WhatsApp, so no photos come in. Relink it with the reception phone (listener README, "Relink").</div>`
     : l.offline ? html`<div class="wa-banner">Listener offline since ${when(l.lastHeartbeatAt)} (${waAgo(l.lastHeartbeatAt)}). Photos sent now come in when the billing PC is back on.</div>` : '';
   const singles = d.shifts.flatMap((s) => s.cards).filter((c) => !c.pair && !c.other).map((c) => c.upi ?? c.bill);
   const card = (c) => {

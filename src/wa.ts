@@ -108,3 +108,8 @@ export async function heartbeat(db: DB, b: z.infer<typeof HeartbeatBody>) {
   }
   return t;
 }
+
+/** The groups Bookr reads (active in any business): the listener downloads files from these only, nothing else. */
+export const readGroupIds = async (db: DB) =>
+  (await db.prepare('SELECT DISTINCT wa_group_id FROM wa_groups WHERE active = 1 ORDER BY wa_group_id').all<{ wa_group_id: string }>()).results
+    .map((r) => r.wa_group_id);
