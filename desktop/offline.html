@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Bookr POS</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 16px/1.5 "Segoe UI", system-ui, sans-serif; background: #f3f0eb; color: #1c1b19; }
+  .box { background: #fffdf9; border: 1px solid #d9d3c9; border-radius: 14px; padding: 28px 32px; max-width: 460px; text-align: center; }
+  h1 { margin: 0 0 8px; font-size: 22px; } p { margin: 0 0 16px; color: #6b6760; }
+  button { font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 10px; border: 0; background: #0f4f4f; color: #fff; cursor: pointer; }
+</style></head>
+<body><div class="box"><h1>No internet</h1><p>Bookr POS needs the internet. It tries again every 10 seconds, or press the button.</p>
+<button id="again" type="button">Try again</button></div>
+<script>
+  const to = new URLSearchParams(location.search).get('to') || 'https://pos.thebajajgroup.co/';
+  const go = () => { if (/^https:\/\/pos\.thebajajgroup\.co\//.test(to)) location.href = to; else location.href = 'https://pos.thebajajgroup.co/'; };
+  document.getElementById('again').addEventListener('click', go);
+  setInterval(go, 10000);
+</script></body></html>

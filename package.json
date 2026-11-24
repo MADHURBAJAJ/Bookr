@@ -13,7 +13,14 @@
     "test": "vitest run",
     "db:seed-demo-sales": "tsx scripts/seed-demo-sales.ts",
     "demo:images": "tsx scripts/make-demo-images.ts",
-    "ocr:accuracy": "tsx scripts/ocr-accuracy.ts"
+    "ocr:accuracy": "tsx scripts/ocr-accuracy.ts",
+    "pos:dev": "wrangler dev -c pos/wrangler.jsonc --port 8788",
+    "pos:migrate:local": "wrangler d1 migrations apply DB --local -c pos/wrangler.jsonc",
+    "pos:migrate:remote": "wrangler d1 migrations apply DB --remote -c pos/wrangler.jsonc",
+    "pos:seed-demo:local": "tsx pos/scripts/seed-demo.ts --local",
+    "pos:seed-demo:remote": "tsx pos/scripts/seed-demo.ts --remote",
+    "pos:deploy": "wrangler deploy -c pos/wrangler.jsonc",
+    "pos:reset-demo:remote": "tsx pos/scripts/seed-demo.ts --remote --keep-password"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",

@@ -1,0 +1,42 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  // The restaurant POS: a separate Worker with its own D1 database (approved 14 Nov 2026). It pushes settled bills and shift
+  // closes to Bookr. Run from the repo root: npx wrangler dev -c pos/wrangler.jsonc
+  "name": "pos-demo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Runs the Worker next to its database (APAC, Singapore), so each database question is a few milliseconds.
+  // Smart Placement left it wherever the guest's request lands (often Europe for Indian networks), ~170 ms per question.
+  "placement": { "region": "aws:ap-southeast-1" },
+  // The POS's own address (19 Nov 2026). The domain's DNS is on Cloudflare, so the deploy makes the DNS record and the
+  // certificate. The workers.dev address keeps working too, until it is turned off.
+  "routes": [{ "pattern": "pos.thebajajgroup.co", "custom_domain": true }],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pos-demo",
+      // Made by `wrangler d1 create pos-demo --location apac` (14 Nov 2026). An id, not a secret.
+      "database_id": "4fb23f6b-0647-4c16-b315-186af02baa48",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Photos of supplier bills. Made by `wrangler r2 bucket create pos-demo-bills`; served only through the Worker after a role check.
+  "r2_buckets": [{ "binding": "BILLS", "bucket_name": "pos-demo-bills" }],
+  // Bookr's address. The key Bookr gives each business goes in the BOOKR_KEYS Worker secret, never here.
+  // Bill photos are read by Claude: the API key is the ANTHROPIC_API_KEY Worker secret, never here.
+  "vars": { "BOOKR_URL": "", "CLAUDE_OCR_MODEL": "claude-opus-5-5", "BILL_READS_PER_DAY": "30",
+    // Booking mails: which address belongs to which business, and which senders' mails are read (others bounce).
+    "MAIL_ROUTES": "{\"bookings@mail.thebajajgroup.co\": \"d165d1c4-909d-42ff-bedc-d9c2eccd3cab\"}",
+    "BOOKING_MAIL_FROM": "{\"mmt\": \"no-reply@go-mmt.com, no-reply@goibibo.com\", \"djubo\": \"notifications@djubo.com\"}" },
+  // Sends Bookr whatever is still waiting, every 5 minutes.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // POS_SETUP_TOKEN is a Worker secret (wrangler secret put POS_SETUP_TOKEN -c pos/wrangler.jsonc), never here.
+  "observability": { "enabled": true }
+}

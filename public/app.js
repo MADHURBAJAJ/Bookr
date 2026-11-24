@@ -248,6 +248,8 @@ const NAV = [
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
   // WhatsApp inbox (approved 24 Nov 2026): guest payment photos and bills from the WhatsApp groups.
   { key: 'whatsapp', label: 'WhatsApp', needs: 'wa.review', group: 'Daily work', when: (b) => !b.cashBooks },
+  // Restaurant POS (approved 14 Nov 2026): its bills, receipts and shift closes, and Connect POS.
+  { key: 'pos', label: 'POS', needs: 'sales.view', group: 'Daily work', when: (b) => !b.cashBooks },
   { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds', 'pending', 'statement', 'bills'] },
   { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
   // Directors' accounts (approved 23 Nov 2026): each family's ledger.
@@ -10490,6 +10492,64 @@ function wireCardSource(biz, reload, msg) {
   })));
 }
 
+// ---------- POS (approved 14 Nov 2026): what the restaurant POS sent, shift by shift, with the evidence Bookr already holds.
+// Read only for now: these bills are not yet booked as income or shown on Compare sales.
+const POS_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to room', credit: 'On credit', comp: 'Complimentary', advance: 'Advance used' };
+async function posView(biz, query = '') {
+  const q = new URLSearchParams(query);
+  const day = isDay(q.get('day')) ? q.get('day') : (lastDay(biz.id) ?? todayIst());
+  const r = await api('GET', `/businesses/${biz.id}/pos?day=${day}`);
+  const isOwner = biz.actions.includes('pos.link');
+  const payText = (p) => [POS_MODE[p.mode] ?? p.mode, p.account, p.cardApproval ? `approval ${p.cardApproval} · ****${p.cardLast4}` : '', p.debtor, p.compGuest ? `${p.compGuest} · ${p.compReason}` : '',
+    p.paymentTotalPaise !== p.amountPaise ? `share of ₹ ${money(p.paymentTotalPaise)}` : ''].filter(Boolean).join(' · ');
+  const evid = (p) => p.evidence ? html`<div class="tiny">${p.evidence}</div>` : '';
+  const total = r.bills.reduce((t, b) => t + b.totalPaise, 0);
+  render(shell(biz, 'pos', 'POS', 'Bills the restaurant POS sent, by shift. Not booked as income yet.', html`
+    <div class="row">
+      <section class="card grow3">
+        <form class="form-row" id="posday" style="align-items:center;gap:8px"><label for="pd" class="note">Shift</label>
+          <input id="pd" name="day" type="date" class="compact" value="${day}"><button class="btn plain" type="submit">Show</button></form>
+        <h2>${dayLabel(day)} · ${r.bills.length} bill${r.bills.length === 1 ? '' : 's'} · ₹ ${money(total)}</h2>
+        <div class="form-row" style="gap:16px">${Object.entries(r.byMode).map(([m, p]) => html`<span>${POS_MODE[m] ?? m}: <strong>₹ ${money(p)}</strong></span>`)}</div>
+        <div class="scroll"><table style="min-width:720px">
+          <thead><tr><th>Bill</th><th>Name on bill</th><th>Where</th><th style="text-align:right">Total</th><th>Paid by</th></tr></thead>
+          <tbody>${r.bills.length ? r.bills.map((b) => html`<tr>
+            <td class="mono">${b.billNo}<div class="tiny">${hhmm(b.settledAt)}</div></td>
+            <td>${b.entityName}${b.gstRegistered ? '' : html`<div class="tiny">no GST</div>`}</td>
+            <td>${b.place ?? ''}${b.guestName ? html`<div class="tiny">${b.guestName}</div>` : ''}</td>
+            <td class="amount">₹ ${money(b.totalPaise)}${b.discountPaise ? html`<div class="tiny">discount ₹ ${money(b.discountPaise)} · ${b.discountReason}</div>` : ''}</td>
+            <td>${b.payments.map((p) => html`<div>₹ ${money(p.amountPaise)} · ${payText(p)}${evid(p)}</div>`)}${b.paidTogether.length ? html`<div class="tiny">paid together with ${b.paidTogether.join(', ')}</div>` : ''}
+              ${b.settleDiscountPaise ? html`<div class="tiny">discount at payment ₹ ${money(b.settleDiscountPaise)} · ${b.settleDiscountReason}</div>` : ''}${b.tipPaise ? html`<div class="tiny">tip ₹ ${money(b.tipPaise)} (not income)</div>` : ''}</td>
+          </tr>`) : html`<tr><td colspan="5" class="note">No POS bills in this shift.</td></tr>`}</tbody>
+        </table></div>
+        ${r.receipts.length ? html`<h2>Money received on folios and credit accounts</h2>${r.receipts.map((p) => html`<div>₹ ${money(p.amountPaise)} · ${p.kind === 'advance' ? 'Advance' : 'Payment'} from ${p.debtor} · ${payText(p)}${evid(p)}</div>`)}` : ''}
+        ${r.creditNotes?.length ? html`<h2>Credit notes (money given back)</h2>${r.creditNotes.map((n) => html`<div><span class="mono">${n.cnNo}</span> on ${n.billNo} · ₹ ${money(n.totalPaise)} · ${n.reason} · ${n.refundMode}</div>`)}` : ''}
+        ${r.drawerOuts?.length ? html`<h2>Paid out of the POS drawer</h2>${r.drawerOuts.map((o) => html`<div>₹ ${money(o.amountPaise)} · ${o.kind === 'refund' ? `Advance refunded to ${o.debtor ?? ''}` : 'Paid out'} · ${o.note}${o.mode === 'upi' ? ' (UPI)' : ''}</div>`)}` : ''}
+        ${r.voids.length ? html`<h2>Voided bills</h2>${r.voids.map((v) => html`<div class="mono">${v.billNo} · ₹ ${money(v.totalPaise)} · ${v.reason}</div>`)}` : ''}
+      </section>
+      <section class="card grow2">
+        <h2>Shift close</h2>
+        ${r.shiftClose ? html`<div>Counted ₹ ${money(r.shiftClose.countedPaise)} against ₹ ${money(r.shiftClose.expectedPaise)} expected${r.shiftClose.differencePaise ? html` · <strong>${r.shiftClose.differencePaise < 0 ? 'short' : 'over'} ₹ ${money(Math.abs(r.shiftClose.differencePaise))}</strong> (${r.shiftClose.differenceReason})` : ' · agrees'}</div>
+          <div class="tiny">Closed ${when(r.shiftClose.closedAt)}${r.shiftClose.closedBy ? ` by ${r.shiftClose.closedBy}` : ''}</div>` : html`<div class="note">Not closed on the POS yet.</div>`}
+        <h2>Connection</h2>
+        ${r.link ? html`<div>Connected ${when(r.link.connectedAt)}. Last message ${r.link.lastMessageAt ? when(r.link.lastMessageAt) : 'not yet'}.</div>` : html`<div class="note">No POS is connected.</div>`}
+        ${r.rejected.length ? html`<div class="error">${r.rejected.length} message${r.rejected.length === 1 ? ' was' : 's were'} not filed: ${[...new Set(r.rejected.map((m) => m.note))].map((n) => `${n} (${r.rejected.filter((m) => m.note === n).length})`).join('; ')}</div>` : ''}
+        ${isOwner ? html`<div class="form-row"><button class="btn" type="button" id="poslink">${r.link ? 'Make a new key' : 'Connect POS'}</button>
+          ${r.link ? html`<button class="btn plain" type="button" id="posunlink">Disconnect</button>` : ''}</div>
+          <div id="poskey"></div>` : ''}
+      </section>
+    </div>`));
+  wireShell();
+  document.getElementById('posday')?.addEventListener('submit', (e) => { e.preventDefault(); const d = new FormData(e.target).get('day'); rememberDay(biz.id, d); go(`#/b/${biz.id}/pos?day=${d}`); });
+  document.getElementById('poslink')?.addEventListener('click', async () => {
+    const { key } = await api('POST', `/businesses/${biz.id}/pos/link`, {});
+    document.getElementById('poskey').innerHTML = html`<div class="card" style="background:var(--paper-2, #f6f5f2)"><strong>Key (shown once):</strong>
+      <div class="mono" style="word-break:break-all;user-select:all">${key}</div>
+      <div class="note">Set it on the POS Worker as the BOOKR_KEYS secret: {"${biz.id}": "this key"}. Do not paste it into chat or email. A new key replaces this one.</div></div>`.__html;
+  });
+  document.getElementById('posunlink')?.addEventListener('click', async () => { await api('POST', `/businesses/${biz.id}/pos/unlink`, {}); posView(biz, query); });
+}
+
 async function cardsView(biz, query = '') {
   const q = new URLSearchParams(query);
   const to = isDay(q.get('to')) ? q.get('to') : todayIst();
@@ -11868,6 +11928,7 @@ async function routeInner() {
       if (screen === 'loans') return biz.actions.includes('reports.view') ? loansView(biz) : go(home(biz));
       if (screen === 'whatsapp') return biz.actions.includes('wa.review') ? whatsappView(biz, query) : go(home(biz));
       if (screen === 'wagroups') return biz.actions.includes('wa.review') ? waGroupsView(biz) : go(home(biz));
+      if (screen === 'pos') return posView(biz, query);
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);

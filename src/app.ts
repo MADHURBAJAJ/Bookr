@@ -23,6 +23,7 @@ import { cashBookRoutes } from './routes/cashbook';
 import { feeRoutes } from './routes/fees';
 import { directorRoutes } from './routes/directors';
 import { waInboxRoutes, waRoutes } from './routes/wa';
+import { posRoutes } from './routes/pos';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -100,6 +101,7 @@ app.route('/', cashBookRoutes);
 app.route('/', feeRoutes);
 app.route('/', directorRoutes);
 app.route('/', waInboxRoutes);
+app.route('/', posRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

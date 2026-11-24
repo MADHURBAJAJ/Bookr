@@ -42,6 +42,8 @@ export const PERMISSIONS = {
   'cash.writeoff': BOOKS,
   // WhatsApp inbox (24 Nov 2026): reviewing guest payment photos and choosing the groups read.
   'wa.review': BOOKS,
+  // The restaurant POS (approved 14 Nov 2026): connecting one is Owner work; its bills are seen with sales.view.
+  'pos.link': OWNER,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

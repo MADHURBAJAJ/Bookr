@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'">
+<title>Bookr POS · Printers</title>
+<style>
+  :root { --ink: #1c1b19; --quiet: #6b6760; --line: #d9d3c9; --bg: #f3f0eb; --card: #fffdf9; --pri: #0f4f4f; --go: #2f6b1f; --bad: #a52a1f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: var(--pri); color: #fff; padding: 14px 20px; } header h1 { margin: 0; font-size: 18px; } header p { margin: 2px 0 0; opacity: .85; font-size: 13px; }
+  main { padding: 16px 20px 24px; display: grid; gap: 12px; }
+  .row { display: grid; grid-template-columns: 170px 1fr auto; gap: 10px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .row b { font-size: 15px; } .row small { display: block; color: var(--quiet); font-size: 12px; }
+  select, input[type=text] { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; width: 100%; }
+  button { font: inherit; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
+  button.pri { background: var(--pri); color: #fff; border-color: var(--pri); }
+  .msg { font-size: 13px; min-height: 18px; } .ok { color: var(--go); } .bad { color: var(--bad); }
+  .opts { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  h2 { font-size: 13px; letter-spacing: .05em; text-transform: uppercase; color: var(--quiet); margin: 8px 0 0; }
+</style></head>
+<body>
+<header><h1>Printers</h1><p>Choose which printer gets each slip on this PC. Bills and KOTs then print straight away, with no print window.</p></header>
+<main>
+  <h2>Bills</h2>
+  <div id="bill"></div>
+  <h2>KOTs, by station</h2>
+  <div id="stations" style="display:grid;gap:12px"></div>
+  <div class="row"><div><b>Add a station</b><small>Its name as in Settings, Stations</small></div><input type="text" id="newStation" placeholder="e.g. Tandoor"><button id="addStation" type="button">Add</button></div>
+  <h2>Paper and start</h2>
+  <div class="row"><div><b>Paper roll</b></div>
+    <div class="opts"><label><input type="radio" name="paper" value="80"> 80 mm</label><label><input type="radio" name="paper" value="58"> 58 mm</label>
+      <label><input type="checkbox" id="startWin"> Start Bookr POS when Windows starts</label></div><span></span></div>
+  <div class="foot"><span class="msg" id="msg"></span><span><span id="ver" style="color:var(--quiet);font-size:12px;margin-right:12px"></span><button class="pri" id="save" type="button">Save</button></span></div>
+</main>
+<script src="printers.js"></script>
+</body></html>
