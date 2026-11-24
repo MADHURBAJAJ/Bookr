@@ -135,6 +135,21 @@ When you are done, remove the test PC from the test phone (Linked devices), and 
 - **Files Bookr refused** (not a photo or PDF, too large) are kept in `data\failed\` for a look. They are never sent
   again.
 
+## 3a. The morning Daily check to the owner (optional)
+
+Until a WhatsApp Business number is ready, the listener can send the Daily check to the owner's own WhatsApp each morning:
+one PDF at phone width, with a short caption, at about `DAILY_AT` (it moves by up to `DAILY_JITTER` minutes each day).
+It is the only thing the listener ever sends:
+
+- The POS gives a one-time link to the last closed shift's Daily check (read-only, that shift only, expires in a day),
+  using `POS_REPORT_KEY`. The same key is in the POS's Worker secret `REPORT_KEYS`.
+- The listener opens the link in a hidden Chrome (or Edge), saves the page as a PDF, and sends it to `DAILY_TO`.
+- The guard lets it through only while a permit is open: 90 seconds, to that one number, 4 frames at most. Everything else
+  stays read-only. The hourly log line shows it as `message:daily-check-to-owner`.
+- It sends once per day at most, even after a restart, and not after 2 pm. A failed try is retried every 10 minutes, 5 times.
+
+Set it up in `.env` (see `.env.example`). Turn it off by removing `DAILY_TO` and restarting.
+
 ## 4. When something is wrong
 
 | Bookr or the log says | Do this |

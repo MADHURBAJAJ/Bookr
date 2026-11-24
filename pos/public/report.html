@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Daily check</title>
+<!-- The Daily check for the owner (25 Nov 2026): one shift, read-only, at phone width, opened from a one-time link and
+     saved as the PDF sent each morning. The same sections as the Daily check tab, in one column. -->
+<style>
+  :root { --bg: #f2efea; --panel: #ffffff; --ink: #1d2422; --quiet: #5b6461; --line: #e7e2da; --pri: #0f5f5a; --top: #0f4c4a;
+    --warn: #9a4a00; --warn-tint: #fdf0dc; --warn-line: #e0b98a; --bad: #b91c1c; --bad-tint: #fbe3e3; --go: #0f766e; --go-tint: #e6f3f0; --soft: #efe9e1; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 Inter, "Segoe UI", system-ui, -apple-system, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .page { max-width: 430px; margin: 0 auto; padding: 0 0 18px; }
+  header { background: var(--top); color: #fff; padding: 14px 16px; }
+  header small { display: block; font-size: 10px; letter-spacing: 1.5px; font-weight: 700; opacity: .8; }
+  header h1 { margin: 2px 0 0; font-size: 20px; }
+  header p { margin: 2px 0 0; opacity: .85; font-size: 13px; }
+  main { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .look { background: var(--warn-tint); border: 1px solid var(--warn-line); border-radius: 12px; padding: 10px 12px; }
+  .look.ok { background: var(--go-tint); border-color: #b7dcd5; }
+  .look b { display: inline-block; background: var(--warn); color: #fff; border-radius: 999px; padding: 2px 9px; font-size: 12px; margin-bottom: 6px; }
+  .look.ok b { background: var(--go); }
+  .look ul { margin: 0; padding-left: 18px; }
+  .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; break-inside: avoid; }
+  .tile .k { font-size: 12px; color: var(--quiet); font-weight: 600; } .tile .v { font-size: 19px; font-weight: 800; } .tile .n { font-size: 12px; color: var(--quiet); }
+  .tile.good { border-color: #b7dcd5; } .tile.good .v { color: var(--go); }
+  .tile.warn { border-color: var(--warn-line); } .tile.warn .v { color: var(--warn); }
+  .tile.bad { border-color: #f0b4b4; } .tile.bad .v { color: var(--bad); }
+  .tile.wide { grid-column: 1 / -1; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; break-inside: avoid; }
+  section.np { border-color: var(--warn-line); }
+  h2 { margin: 0 0 8px; font-size: 16px; } h3 { margin: 10px 0 6px; font-size: 14px; }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid #f0ece6; }
+  .row:last-child { border-bottom: 0; }
+  .q { color: var(--quiet); font-size: 12.5px; }
+  .bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--soft); margin: 6px 0 8px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 6px; }
+  .track { height: 8px; background: var(--soft); border-radius: 4px; overflow: hidden; margin-top: 3px; } .track i { display: block; height: 100%; background: var(--pri); }
+  .pill { border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .pill.ok { background: var(--go-tint); color: var(--go); } .pill.bad { background: var(--bad-tint); color: var(--bad); } .pill.warn { background: var(--warn-tint); color: var(--warn); } .pill.mute { background: #eef1f0; color: #3d4643; }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .ex { border-radius: 8px; padding: 6px 8px; background: #f6f4f0; } .ex.on { background: var(--warn-tint); }
+  .ex .k { font-size: 11.5px; color: var(--quiet); font-weight: 600; } .ex.on .k { color: var(--warn); } .ex .v { font-size: 16px; font-weight: 800; } .ex .n { font-size: 11.5px; color: var(--quiet); }
+  .flag { background: var(--warn-tint); }
+  .err { margin: 40px 16px; padding: 16px; background: var(--bad-tint); color: var(--bad); border-radius: 12px; }
+  footer { text-align: center; color: var(--quiet); font-size: 11.5px; padding: 6px 12px 0; }
+  @page { margin: 0; }
+</style>
+</head>
+<body>
+<div class="page" id="page"><p class="q" style="padding:16px">Loading the Daily check…</p></div>
+<script src="/report.js"></script>
+</body>
+</html>

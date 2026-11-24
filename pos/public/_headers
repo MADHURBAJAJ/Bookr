@@ -10,3 +10,7 @@
   Cache-Control: no-cache
 /index.html
   Cache-Control: no-cache
+/report.html
+  Cache-Control: no-cache
+/report.js
+  Cache-Control: no-cache

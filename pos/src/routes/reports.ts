@@ -1,10 +1,10 @@
 // Reports the POS gives on its own, before it is connected to Bookr: sales by billing name with GST, by payment mode and by
 // item; discounts and complimentary bills; and who owes what, aged, with each account's statement (GET /debtors/:id).
 import { Hono } from 'hono';
-import { all, one } from '../../../src/db';
+import { all, one, type DB } from '../../../src/db';
 import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
-import { clock, bizOf, loadBusiness } from '../util';
+import { clock, bizOf, loadBusiness, type Business } from '../util';
 import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
 import { occupancy } from './frontdesk';
@@ -114,11 +114,11 @@ reportRoutes.get(`${B}/reports/insights`, requireAction('reports.view'), async (
 
 // The owner's morning check for one shift: the day's money, every exception, food sent to the kitchen that is not paid for,
 // orders left open, whether every bill-number series is unbroken, and whether the shift was closed.
-reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), async (c) => {
-  const bid = c.get('businessId');
-  const db = c.env.DB;
-  const b = bizOf(c);
-  const day = date({ d: c.req.query('day') ?? '' }, 'd', 'Shift');
+reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), async (c) =>
+  c.json(await dailyCheckData(c.env.DB, bizOf(c), c.get('businessId'), date({ d: c.req.query('day') ?? '' }, 'd', 'Shift'))));
+
+/** The Daily check of one shift (also sent to the owner as a PDF each morning, through a one-time link). */
+export async function dailyCheckData(db: DB, b: Business, bid: string, day: string) {
   const { t } = clock(b);
   const fy = fyOf(day, b.fy_start_month);
   const [sales, byMode, events, diffs, unpaid, series, cnSeries, close, bar, typed] = await Promise.all([
@@ -182,7 +182,7 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     return out;
   };
   const HOUR = 3_600_000;
-  return c.json({
+  return {
     day, fy,
     sales: { bills: sales!.bills ?? 0, netPaise: sales!.net, totalPaise: sales!.total, voids: sales!.voids ?? 0, ncBills: sales!.nc ?? 0, ncMenuPaise: sales!.ncMenu }, byMode,
     events: Object.fromEntries(events.map((e) => [e.kind, { n: e.n, paise: e.paise }])),
@@ -211,8 +211,8 @@ reportRoutes.get(`${B}/reports/daily-check`, requireAction('reports.view'), asyn
     cancelReturns: await all(db, `SELECT i.name, ss.name AS store, i.unit, sum(m.qty) AS qty FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
       JOIN stock_stores ss ON ss.id = m.store_id WHERE m.business_id = ? AND m.shift_day = ? AND m.kind = 'sale' AND m.qty > 0 AND m.ref LIKE '% · cancelled'
       GROUP BY i.id, ss.id ORDER BY i.name`, bid, day),
-  });
-});
+  };
+}
 
 // GSTR-1 working for one calendar month, per GST-registered billing name: sales to unregistered buyers (B2C small) by rate,
 // net of credit notes; the SAC summary; and the document summary (bill and credit-note series, with void bills as cancelled).

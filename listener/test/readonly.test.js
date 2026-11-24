@@ -177,8 +177,18 @@ test('only the read-only parts of the connection reach the listener', () => {
 test("the listener's own code never calls a sending function", () => {
   const forbidden = /\.(sendMessage|relayMessage|readMessages|sendReceipts?|sendPresenceUpdate|presenceSubscribe|chatModify|star|sendNode|sendRawMessage|query|sendMessageAck|sendRetryRequest|requestPairingCode|logout|groupLeave|groupParticipantsUpdate|groupUpdateSubject|groupUpdateDescription|groupSettingUpdate|updateProfile\w*|updateBlockStatus|updateLastSeenPrivacy|updateOnlinePrivacy|updateReadReceiptsPrivacy|newsletter\w*|rejectCall|sendPeerDataOperationMessage|fetchMessageHistory|requestPlaceholderResend)\s*\(/;
   const dir = join(here, '..', 'src');
+  let dailySends = 0;
   for (const f of readdirSync(dir).filter((n) => n.endsWith('.js'))) {
     const code = readFileSync(join(dir, f), 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l));
-    code.forEach((line, i) => assert.doesNotMatch(line, forbidden, `${f}:${i + 1} ${line.trim()}`));
+    code.forEach((line, i) => {
+      // The one exception (25 Nov 2026, the owner's choice): the morning Daily check PDF, to the owner's number only.
+      if (f === 'whatsapp.js' && /\/\/ DAILY-CHECK-SEND$/.test(line)) {
+        dailySends += 1;
+        assert.match(line, /openSock\.sendMessage\(`\$\{cfg\.daily\.to\}@s\.whatsapp\.net`, \{ document: pdf, mimetype: 'application\/pdf', fileName, caption \}\)/);
+        return;
+      }
+      assert.doesNotMatch(line, forbidden, `${f}:${i + 1} ${line.trim()}`);
+    });
   }
+  assert.equal(dailySends, 1, 'exactly one sending line: the Daily check to the owner');
 });

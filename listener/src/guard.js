@@ -1,5 +1,7 @@
 // The send guard. The listener is read-only: it never sends a message or a reaction, never marks anything read, and never
-// shows the reception number as online or typing. Our own code never calls any of those (see test/readonly.test.js), and
+// shows the reception number as online or typing. One exception, chosen by the owner (25 Nov 2026) until a WhatsApp
+// Business number is ready: the morning Daily check PDF to the owner's own number, once a day. It goes through only while
+// a permit is open (dailyPermit, below): for 90 seconds, to that one number, at most 4 frames. Our own code never calls any of those (see test/readonly.test.js), and
 // this guard stops the WhatsApp library itself from doing so.
 //
 // How: every frame the library sends to WhatsApp after the login handshake goes through one function, sendNode
@@ -38,10 +40,30 @@ export function topNode(xml) {
 const userOf = (jid) => String(jid ?? '').split('@')[0].split(':')[0];
 
 /**
+ * The one way out for the morning Daily check: open() for one send to one number, closed again right after. While open,
+ * a message to that number, and the "trusted contact" token WhatsApp asks for with a first message, may go: 4 frames at
+ * most, for 90 seconds at most. Closed, nothing changes from read-only.
+ */
+export function dailyPermit(now = () => Date.now()) {
+  let p = null;
+  return {
+    open(number) { p = { to: String(number), until: now() + 90_000, left: 4 }; },
+    close() { p = null; },
+    /** Takes one frame from the permit when it fits; true when it does. */
+    take(kind, to) {
+      if (!p || now() > p.until || p.left <= 0) return false;
+      if (kind === 'message' && userOf(to) !== p.to) return false;
+      p.left -= 1;
+      return true;
+    },
+  };
+}
+
+/**
  * Whether a frame may go to WhatsApp. Returns { ok: true, kind } or { ok: false, kind }.
  * `me` is the linked number's own ids ({ id, lid }), for the library's housekeeping messages to its own phone.
  */
-export function checkOutgoing(xml, me = {}) {
+export function checkOutgoing(xml, me = {}, permit = null) {
   const node = topNode(xml);
   if (!node) return { ok: false, kind: 'unreadable frame' };
   const { tag, attrs } = node;
@@ -51,6 +73,8 @@ export function checkOutgoing(xml, me = {}) {
       // missing key). It goes to the reception phone itself, category "peer", and nobody sees it.
       const own = [me.id, me.lid].filter(Boolean).map(userOf);
       if (attrs.category === 'peer' && own.includes(userOf(attrs.to))) return { ok: true, kind: 'message:to-own-phone' };
+      // The morning Daily check to the owner, while its permit is open.
+      if (!attrs.category && permit?.take('message', attrs.to)) return { ok: true, kind: 'message:daily-check-to-owner' };
       return { ok: false, kind: 'sending a message or reaction' };
     }
     case 'receipt':
@@ -65,6 +89,9 @@ export function checkOutgoing(xml, me = {}) {
     case 'iq':
       // A chat change (mark read or unread, archive, mute, pin, delete) is an app-state patch.
       if (attrs.xmlns === 'w:sync:app:state' && /<patch[\s/>]/.test(xml)) return { ok: false, kind: 'changing a chat (read, archive, mute)' };
+      // With the owner's Daily check: the one "trusted contact" token WhatsApp asks for with a message.
+      if (attrs.type === 'set' && attrs.xmlns === 'privacy' && (xml.match(/<token\s/g) ?? []).length === 1 && /type='trusted_contact'/.test(xml)
+        && permit?.take('token')) return { ok: true, kind: 'iq:privacy-token-for-daily-check' };
       if (attrs.type === 'set' && CHANGES.has(attrs.xmlns)) return { ok: false, kind: `changing a setting (${attrs.xmlns})` };
       return { ok: true, kind: `iq:${attrs.xmlns || '?'}` };
     default:
@@ -82,7 +109,7 @@ const bump = (map, k) => map.set(k, (map.get(k) ?? 0) + 1);
  * The logger handed to the WhatsApp library. It must report level "trace" so the library shows it every frame it
  * sends. The library's own warnings and errors go to our log as short text (never message contents).
  */
-export function guardedLogger({ log, stats, me }) {
+export function guardedLogger({ log, stats, me, permit = null }) {
   const text = (obj, msg) => {
     if (typeof obj === 'string') return obj;
     const err = obj?.err ?? obj?.error;
@@ -93,7 +120,7 @@ export function guardedLogger({ log, stats, me }) {
     child: () => make(),
     trace(obj) {
       if (obj && typeof obj === 'object' && obj.msg === 'xml send') {
-        const r = checkOutgoing(obj.xml, me());
+        const r = checkOutgoing(obj.xml, me(), permit);
         if (!r.ok) {
           bump(stats.blocked, r.kind);
           log.error(`BLOCKED ${r.kind}: the WhatsApp library tried to send it; it was stopped and not sent.`);

@@ -5,7 +5,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { makeLog } from './log.js';
-import { assertGuardInPlace, GuardError, guardedLogger, newStats } from './guard.js';
+import { assertGuardInPlace, dailyPermit, GuardError, guardedLogger, newStats } from './guard.js';
+import { createDaily } from './daily.js';
 import { bookrClient } from './bookr.js';
 import { createListener } from './listener.js';
 import { runWhatsApp } from './whatsapp.js';
@@ -53,7 +54,10 @@ const listener = createListener({
   download: (msg) => wa.download(msg),
 });
 // The guard needs the reception number's own ids: the library's notes to its own phone are the only messages let through.
-const logger = guardedLogger({ log, stats, me: () => wa?.me() ?? {} });
+// The morning Daily check to the owner, when set up in .env: the guard's one way out, open only while it is sent.
+const permit = cfg.daily ? dailyPermit() : null;
+const logger = guardedLogger({ log, stats, me: () => wa?.me() ?? {}, permit });
+const daily = createDaily({ cfg, log, wa: () => wa });
 
 process.on('uncaughtException', (e) => {
   if (e instanceof GuardError) return; // already in the log as BLOCKED; nothing was sent
@@ -65,12 +69,13 @@ process.on('unhandledRejection', (e) => {
   if (e instanceof GuardError) return;
   log.debug(`unhandled: ${e?.message ?? e}`);
 });
-const quit = (code = 0) => { listener.stop(); wa?.stop(); unlock(); setTimeout(() => process.exit(code), 500); };
+const quit = (code = 0) => { listener.stop(); daily.stop(); wa?.stop(); unlock(); setTimeout(() => process.exit(code), 500); };
 process.on('SIGINT', () => quit(0));
 process.on('SIGTERM', () => quit(0));
 
 log.info(`Bookr WhatsApp listener ${version} starting (${mode === 'link' ? 'linking' : 'read-only'}; Bookr at ${cfg.bookrUrl}).`);
-log.info('It never sends, reacts, marks as read or shows the number online: see the SENT/BLOCKED line every hour.');
+log.info(cfg.daily ? 'It never sends, reacts, marks as read or shows the number online, except the morning Daily check PDF to the owner: see the SENT/BLOCKED line every hour.'
+  : 'It never sends, reacts, marks as read or shows the number online: see the SENT/BLOCKED line every hour.');
 
 if (mode === 'link') {
   wa = await runWhatsApp({
@@ -84,6 +89,7 @@ if (mode === 'link') {
   const ok = await listener.heartbeat();
   if (!ok) log.warn('Bookr was not reached at start; using the group list from last time until it answers.');
   listener.start();
-  wa = await runWhatsApp({ cfg, log, logger, mode, listener, onReady: (h) => { wa = h; } });
+  wa = await runWhatsApp({ cfg, log, logger, mode, listener, permit, onReady: (h) => { wa = h; } });
   void listener.sendDue();
+  daily.start();
 }

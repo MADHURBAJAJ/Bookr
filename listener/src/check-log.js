@@ -39,6 +39,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (r.bad.length) console.log(`NOT ALLOWED kinds sent: ${r.bad.join(', ')}`);
   if (r.blocked.length) { console.log(`The guard stopped something ${r.blocked.length} time(s) (nothing was sent):`); for (const b of r.blocked.slice(0, 20)) console.log(`  ${b}`); }
   const clean = !r.bad.length && !r.blocked.length;
-  console.log(clean ? 'OK: no message, reaction, read receipt, typing or online status was ever sent.' : 'Look at the lines above.');
+  const daily = r.sent.get('message:daily-check-to-owner') ?? 0;
+  console.log(clean ? `OK: no message, reaction, read receipt, typing or online status was ever sent${daily ? `, except ${daily} morning Daily check message(s) to the owner` : ''}.` : 'Look at the lines above.');
   process.exit(clean ? 0 : 1);
 }

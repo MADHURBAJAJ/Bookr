@@ -63,10 +63,12 @@ export function withoutOwnName(ev, creds) {
  * Keeps the connection up. mode 'link' shows the QR to scan and stops once linked; mode 'run' never shows a QR (at
  * boot nobody is there to scan it): when not linked it says so in the log and in the heartbeat, and waits.
  */
-export async function runWhatsApp({ cfg, log, logger, listener, mode = 'run', onLinked = () => {}, onReady = () => {} }) {
+export async function runWhatsApp({ cfg, log, logger, listener, mode = 'run', onLinked = () => {}, onReady = () => {}, permit = null }) {
   let retry = 0;
   let stopped = false;
   let current = null;
+  /** The open connection's full socket: kept here, never handed to the listener; used only by sendDailyCheck below. */
+  let openSock = null;
   /** The linked number's ids from the saved login (known before the connection opens). */
   let creds = null;
 
@@ -100,6 +102,7 @@ export async function runWhatsApp({ cfg, log, logger, listener, mode = 'run', on
       }
       if (u.connection === 'open') {
         retry = 0;
+        openSock = sock;
         listener.setState('connected');
         listener.attach(ro);
         const me = ro.user();
@@ -108,6 +111,7 @@ export async function runWhatsApp({ cfg, log, logger, listener, mode = 'run', on
         if (mode === 'link') onLinked();
       }
       if (u.connection === 'close') {
+        if (openSock === sock) openSock = null;
         listener.detach();
         if (current === ro) current = null;
         const code = u.lastDisconnect?.error?.output?.statusCode;
@@ -145,6 +149,20 @@ export async function runWhatsApp({ cfg, log, logger, listener, mode = 'run', on
       return downloadMediaMessage(msg, 'buffer', {}, ro ? { logger, reuploadRequest: ro.updateMediaMessage } : undefined);
     },
     me: () => ({ id: creds?.me?.id, lid: creds?.me?.lid, name: creds?.me?.name }),
+    canSend: () => !!(openSock && cfg.daily && permit),
+    /**
+     * The one message the listener sends (25 Nov 2026, the owner's choice): the morning Daily check PDF to the owner's
+     * own number. The guard lets it through only while its permit is open, to that number, for 90 seconds.
+     */
+    async sendDailyCheck(pdf, fileName, caption) {
+      if (!openSock || !cfg.daily || !permit) throw new Error('not connected to WhatsApp');
+      permit.open(cfg.daily.to);
+      try {
+        await openSock.sendMessage(`${cfg.daily.to}@s.whatsapp.net`, { document: pdf, mimetype: 'application/pdf', fileName, caption }); // DAILY-CHECK-SEND
+      } finally {
+        setTimeout(() => permit.close(), 15_000);   // the token WhatsApp asks for right after the message
+      }
+    },
   };
   onReady(handle);
   await connect();

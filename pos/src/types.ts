@@ -21,6 +21,8 @@ export interface Env {
   MAIL_ROUTES?: string;
   /** Who may send booking mails, JSON {"mmt": "@go-mmt.com", "djubo": "@djubo.com"}: addresses or "@domain", comma-separated. */
   BOOKING_MAIL_FROM?: string;
+  /** Worker secret: the key the WhatsApp listener uses to fetch each morning's Daily check for the owner, JSON {"<business id>": "<key>"}. */
+  REPORT_KEYS?: string;
 }
 
 export interface Staff {
