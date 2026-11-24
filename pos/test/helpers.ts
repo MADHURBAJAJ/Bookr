@@ -1,28 +1,60 @@
-// A fresh POS database for each test file (local D1, the engine wrangler dev uses) and a small client that keeps cookies.
-// All names, amounts and accounts here are invented.
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+// A fresh POS database for each test file and a small client that keeps cookies. All names, amounts and accounts here are
+// invented. By default the database is SQLite inside the test process (test/sqlite-d1.ts, as Bookr's tests): the POS
+// migrations are applied once into a template file that each test file copies. D1_REAL=1 uses wrangler's local D1 instead
+// (the engine wrangler dev uses), which is slower but is the real engine: worth a run before a live deploy.
+import { createHash } from 'node:crypto';
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getPlatformProxy } from 'wrangler';
 import { splitStatements } from '../../test/d1';
+import { memoryR2, sqliteD1 } from '../../test/sqlite-d1';
 import { app } from '../src/app';
 
 const MIGRATIONS = new URL('../migrations/', import.meta.url);
+const migrationFiles = () =>
+  readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort().map((f) => ({ name: f, text: readFileSync(new URL(f, MIGRATIONS), 'utf8') }));
 
-const dir = mkdtempSync(join(tmpdir(), 'pos-d1-'));
-const proxy = await getPlatformProxy<{ DB: D1Database; UPLOADS: R2Bucket }>({ persist: { path: dir } });
-export const db = proxy.env.DB;
-for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()) {
-  await db.batch(splitStatements(readFileSync(new URL(file, MIGRATIONS), 'utf8')).map((s) => db.prepare(s)));
+// The template is named after the POS migrations' contents, so a changed or added migration makes a new one. Test files that
+// start together may each build it; the last rename wins and every copy is the same.
+async function template(): Promise<string> {
+  const files = migrationFiles();
+  const hash = createHash('sha256');
+  for (const f of files) hash.update(f.name).update('\0').update(f.text).update('\0');
+  const path = join(tmpdir(), `pos-test-template-${hash.digest('hex').slice(0, 16)}.sqlite`);
+  if (existsSync(path)) return path;
+  const building = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+  const t = sqliteD1(building);
+  try {
+    for (const f of files) await t.db.batch(splitStatements(f.text).map((x) => t.db.prepare(x)));
+  } finally {
+    t.close();
+  }
+  renameSync(building, path);
+  return path;
 }
-export async function dispose() {
-  await proxy.dispose();
-  rmSync(dir, { recursive: true, force: true });
+
+async function open(): Promise<{ db: D1Database; bills: R2Bucket; dispose: () => Promise<void> }> {
+  if (process.env.D1_REAL === '1') {
+    const { getPlatformProxy } = await import('wrangler');
+    const dir = mkdtempSync(join(tmpdir(), 'pos-d1-'));
+    const proxy = await getPlatformProxy<{ DB: D1Database; UPLOADS: R2Bucket }>({ persist: { path: dir } });
+    for (const f of migrationFiles()) await proxy.env.DB.batch(splitStatements(f.text).map((x) => proxy.env.DB.prepare(x)));
+    return { db: proxy.env.DB, bills: proxy.env.UPLOADS, dispose: async () => { await proxy.dispose(); rmSync(dir, { recursive: true, force: true }); } };
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'pos-db-'));
+  const file = join(dir, 'test.sqlite');
+  copyFileSync(await template(), file);
+  const { db, close } = sqliteD1(file);
+  return { db, bills: memoryR2(), dispose: async () => { close(); rmSync(dir, { recursive: true, force: true }); } };
 }
+
+const opened = await open();
+export const db = opened.db;
+export const dispose = opened.dispose;
 
 export const SETUP_TOKEN = 'test-setup-token-not-a-secret';
-// BILLS: a local R2 bucket (the root config's), so bill photos are stored and read back in tests.
-export const env = { DB: db, POS_SETUP_TOKEN: SETUP_TOKEN, BILLS: proxy.env.UPLOADS };
+// BILLS: an R2 bucket (in memory, or the root config's local one with D1_REAL=1), so bill photos are stored and read back in tests.
+export const env = { DB: db, POS_SETUP_TOKEN: SETUP_TOKEN, BILLS: opened.bills };
 
 export async function q(sql: string, ...params: unknown[]): Promise<any[]> {
   return (await db.prepare(sql).bind(...params).all()).results;
