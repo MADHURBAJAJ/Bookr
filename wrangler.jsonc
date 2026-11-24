@@ -3,8 +3,12 @@
   "name": "bookr-demo",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
+  // The browser files are built from public/ into dist/ (minified, hashed names) on every deploy and dev run.
+  "build": { "command": "node scripts/build-assets.mjs" },
+  // Run the Worker next to the database (Smart Placement): each query is a short trip, not a long one.
+  "placement": { "region": "aws:ap-southeast-1" },
   "assets": {
-    "directory": "./public",
+    "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
@@ -31,5 +35,38 @@
     "OCR_DAILY_PAGE_LIMIT": "40",
     "OCR_MAX_PARALLEL": "3"
   },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  // Every minute: read the pages still waiting in the reading queue (src/index.ts scheduled).
+  "triggers": { "crons": ["* * * * *"] },
+
+  // The real live site, kept apart from the demo: its own Worker, database, file store and secrets.
+  // Deploy it only with `npx wrangler deploy --env production`; a plain `npm run deploy` updates the demo.
+  // Never seed demo data into it.
+  "env": {
+    "production": {
+      "placement": { "region": "aws:ap-east-1" },
+      "name": "bookr-live",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "bookr.thebajajgroup.co", "custom_domain": true }],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bookr-live",
+          "database_id": "0ebad1a8-f582-4588-a4cf-1c263a07ae37",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        { "binding": "UPLOADS", "bucket_name": "bookr-live-uploads" }
+      ],
+      "vars": {
+        "CLAUDE_OCR_MODEL": "claude-opus-5-5",
+        "OCR_DAILY_PAGE_LIMIT": "120",
+        "OCR_MAX_PARALLEL": "3"
+      },
+      "triggers": { "crons": ["* * * * *"] },
+      "observability": { "enabled": true }
+    }
+  }
 }
