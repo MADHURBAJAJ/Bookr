@@ -263,8 +263,10 @@ export async function addGroup(db: DB, bid: string, user: string, g: { waGroupId
     have
       ? stmt(db, 'UPDATE wa_groups SET active = 1, name = ?, department = coalesce(?, department), default_head_id = coalesce(?, default_head_id) WHERE id = ?',
         name, g.department?.trim() || null, g.defaultHeadId || null, id)
-      : stmt(db, 'INSERT INTO wa_groups (id, business_id, wa_group_id, name, department, default_head_id, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
-        id, bid, g.waGroupId, name, g.department?.trim() || null, g.defaultHeadId || null, t),
+      // A group named for payments is the guests' payment group: its proof shows on the POS Payments screen from the start
+      // (24 Nov 2026), the same rule migration 0042 used for existing groups. It can be switched off on the group.
+      : stmt(db, 'INSERT INTO wa_groups (id, business_id, wa_group_id, name, department, default_head_id, active, created_at, pos_proof) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
+        id, bid, g.waGroupId, name, g.department?.trim() || null, g.defaultHeadId || null, t, /payment/i.test(name) ? 1 : 0),
     audit(db, bid, user, 'wa.group.add', 'wa_groups', id, null, { waGroupId: g.waGroupId, name }, t),
   ]);
   return id;

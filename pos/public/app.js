@@ -2620,6 +2620,8 @@ async function paymentsScreen(tab = '') {
     const n = { diff: rows.filter((r) => r.status === 'difference').length, missing: rows.filter((r) => r.status === 'missing').length, extras: extras.length };
     const shown = tab === 'diff' ? rows.filter((r) => r.status === 'difference') : tab === 'missing' ? rows.filter((r) => r.status === 'missing') : rows;
     const stale = d.listener?.lastSeenAt && Date.now() - d.listener.lastSeenAt > 10 * 60_000;
+    // Connected to Bookr, but Bookr has never heard from the WhatsApp listener (24 Nov 2026): say so, or bills just show no proof.
+    const neverSeen = d.connected !== false && !d.error && !d.listener?.lastSeenAt;
     const proofText = (e) => `${{ upi: 'UPI', card: 'Card slip', bill: 'Bill photo' }[e.kind]}${e.amountPaise ? ` ${rs(e.amountPaise)}` : ''} · ${time(e.sentAt)}${e.caption ? ` · “${e.caption}”` : ''}`;
     const row = (r) => {
       const [tone, label] = PROOF_STATUS[r.status] ?? PROOF_STATUS.unknown;
@@ -2632,6 +2634,7 @@ async function paymentsScreen(tab = '') {
     paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(d.day)}`, 'Every bill and receipt of the shift against the proof posted in the Guest payment group: a UPI screenshot, the card slip, or “cash” on the bill photo. Post proof until the day closes.')}
       ${d.connected === false ? html`<div class="msg warn">This POS is not connected to Bookr, so no proof is shown. The bills are listed below.</div>` : ''}
       ${d.error ? html`<div class="msg warn">Bookr could not be reached (${d.error}). Trying again every few seconds; the bills are listed below.</div>` : ''}
+      ${neverSeen ? html`<div class="msg warn">WhatsApp is not connected to Bookr yet, so no payment proof can show. The listener on the reception PC needs setting up, and the Guest payment group adding in Bookr (Settings › WhatsApp groups, with POS proof on).</div>` : ''}
       ${stale ? html`<div class="msg warn">WhatsApp has not been read since ${time(d.listener.lastSeenAt)}: new proof will not show until the reception PC is back.</div>` : ''}
       <div class="kpis">${kpi('Matched', String(rows.filter((r) => r.status === 'matched').length), `of ${rows.filter((r) => ['matched', 'missing', 'difference'].includes(r.status)).length} paid needing proof`, 'good')}
         ${kpi('Settled, no proof', String(n.missing), '', n.missing ? 'bad' : '')}

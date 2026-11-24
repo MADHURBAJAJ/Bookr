@@ -226,6 +226,11 @@ describe('groups', () => {
     expect(after.json.groups.find((x: any) => x.name === 'XOXO staff')).toMatchObject({ department: 'Café', defaultHeadId: head.id, active: true });
     expect(after.json.seen).toEqual([]);
     expect(after.json.departments).toEqual(['Café']);
+    // A new group named for payments starts with POS proof on; any other starts off (24 Nov 2026).
+    expect((await sql`SELECT pos_proof FROM wa_groups WHERE wa_group_id = '120363000000000002@g.us'`)[0].pos_proof).toBe(0);
+    await sql`INSERT INTO wa_seen_groups (wa_group_id, name, last_seen_at) VALUES ('120363000000000009@g.us', 'Guest Payments Desk', ${Date.now()}) ON CONFLICT DO NOTHING`;
+    expect((await owner.post(`${W()}/groups`, { waGroupId: '120363000000000009@g.us' })).status).toBe(201);
+    expect((await sql`SELECT pos_proof FROM wa_groups WHERE wa_group_id = '120363000000000009@g.us'`)[0].pos_proof).toBe(1);
 
     expect((await owner.patch(`${W()}/groups/${groupId}`, { active: false, department: 'Front desk' })).status).toBe(200);
     expect((await sql`SELECT active, department FROM wa_groups WHERE id = ${groupId}`)[0]).toMatchObject({ active: 0, department: 'Front desk' });
