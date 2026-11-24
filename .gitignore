@@ -5,3 +5,9 @@ node_modules/
 *.log
 .claude/
 dist/
+# WhatsApp listener: its login is as sensitive as the phone's WhatsApp. Login, local state and samples never go into Git.
+listener/auth/
+listener/data/
+listener/logs/
+listener/.env
+wa-samples/

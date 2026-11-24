@@ -22,6 +22,7 @@ import { fundsRoutes } from './routes/funds';
 import { cashBookRoutes } from './routes/cashbook';
 import { feeRoutes } from './routes/fees';
 import { directorRoutes } from './routes/directors';
+import { waInboxRoutes, waRoutes } from './routes/wa';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -34,7 +35,9 @@ app.use('*', async (c, next) => {
     // JSON, or a raw photo or PDF body for uploads. None of these can be sent cross-site without a preflight.
     const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
     const upload = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/uploads$/.test(c.req.path);
-    if (type !== 'application/json' && !(upload && ['image/jpeg', 'image/png', 'application/pdf'].includes(type))) {
+    // The WhatsApp listener sends its file as a multipart form; it is a program, never a browser, and needs the secret header.
+    const waFile = c.req.method === 'POST' && c.req.path === '/api/wa/ingest' && type === 'multipart/form-data';
+    if (type !== 'application/json' && !waFile && !(upload && ['image/jpeg', 'image/png', 'application/pdf'].includes(type))) {
       throw new HTTPException(415, { message: 'Send JSON.' });
     }
   }
@@ -73,6 +76,7 @@ app.get('/many', requireUser, async (c) => {
   return c.json({ results });
 });
 
+app.route('/', waRoutes);
 app.route('/', authRoutes);
 app.route('/', inviteRoutes);
 app.use('/businesses', requireUser);
@@ -95,6 +99,7 @@ app.route('/', fundsRoutes);
 app.route('/', cashBookRoutes);
 app.route('/', feeRoutes);
 app.route('/', directorRoutes);
+app.route('/', waInboxRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 

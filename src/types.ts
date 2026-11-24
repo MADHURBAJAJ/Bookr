@@ -15,6 +15,12 @@ export interface Env {
   CARD_SCRIPT_URL?: string;
   /** The code the script checks before it runs. Secret. */
   CARD_SCRIPT_TOKEN?: string;
+  /** Worker secret: what the WhatsApp listener sends in X-Bookr-WA-Secret (at least 16 characters). */
+  WA_INGEST_SECRET?: string;
+  /** Worker secret: the previous one, still accepted while the listener is moved to a new secret. Remove afterwards. */
+  WA_INGEST_SECRET_OLD?: string;
+  /** Worker setting: WhatsApp files read per day (India time), across businesses. Default 150. */
+  WA_DAILY_READ_LIMIT?: string;
   /** Worker settings (wrangler.jsonc vars). */
   CLAUDE_OCR_MODEL?: string;
   OCR_DAILY_PAGE_LIMIT?: string;

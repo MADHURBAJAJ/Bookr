@@ -246,6 +246,8 @@ const NAV = [
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts', when: (b) => !b.cashBooks },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
+  // WhatsApp inbox (approved 24 Nov 2026): guest payment photos and bills from the WhatsApp groups.
+  { key: 'whatsapp', label: 'WhatsApp', needs: 'wa.review', group: 'Daily work', when: (b) => !b.cashBooks },
   { key: 'reports', label: 'Reports', needs: 'reports.view', group: 'Books', screens: ['reports', 'funds', 'pending', 'statement', 'bills'] },
   { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
   // Directors' accounts (approved 23 Nov 2026): each family's ledger.
@@ -255,6 +257,7 @@ const NAV = [
   { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
   // Schools and cashiers (21 Nov 2026): set up of a school business, also how a new business becomes one.
   { key: 'schools', label: 'Schools and cashiers', needs: 'accounts.edit', group: 'Settings' },
+  { key: 'wagroups', label: 'WhatsApp groups', needs: 'wa.review', group: 'Settings', when: (b) => !b.cashBooks },
 ];
 // The menu counts: the Today figures, kept a minute so moving between pages does not ask again.
 let navCounts = { bizId: null, at: 0, n: null };
@@ -9915,6 +9918,240 @@ async function directorsView(biz) {
   });
 }
 
+// ---------- WhatsApp inbox (phase 4, mock approved 24 Nov 2026)
+// Guest UPI photos and bills from the WhatsApp groups, as short cards: line 1 the bill number and a chip, line 2 the
+// figures with ✓ / ✗, then 1-3 word buttons. Confirming books nothing: Reconcile offers confirmed payments (phase 6).
+const WA_TABS = [['pending', 'To check'], ['confirmed', 'Confirmed'], ['rejected', 'Rejected'], ['duplicate', 'Duplicates']];
+const waOpen = new Set();
+const waFile = (biz, it) => `/api/businesses/${biz.id}/wa/items/${it.id}/file`;
+const waMins = (ms) => Math.max(1, Math.round(ms / 60000));
+const waAgo = (ms) => { const m = waMins(Date.now() - ms); return m < 60 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`; };
+const waIstInput = (ms) => (ms == null ? '' : new Date(ms + IST_MS).toISOString().slice(0, 16).replace('T', ' '));
+const waYes = html`<span style="color:var(--ok)">✓</span>`, waNo = html`<span style="color:#B91C1C">✗</span>`;
+// Could not be read well enough to trust the amount. A reading that is only "a best guess" somewhere still agrees when
+// the amounts match and Bookr is sure of the pair; it shows as Photo unclear only when Bookr is not sure (below 80).
+const waUnclear = (it) => it && (it.readStatus === 'failed' || it.legible === 'unreadable' || it.amountPaise == null || /Check:[^.]*amount/.test(it.note ?? ''));
+const waSure = (c) => c.pair && (c.pair.byHand || c.pair.confidence >= 80);
+
+function waThumb(biz, it, label) {
+  if (!it) return html`<span class="wa-th wa-th-none" aria-hidden="true">—</span>`;
+  return it.mediaType === 'application/pdf'
+    ? html`<a class="wa-th" href="${waFile(biz, it)}" target="_blank" rel="noopener" title="${label} (PDF)">PDF</a>`
+    : html`<a class="wa-th" href="${waFile(biz, it)}" target="_blank" rel="noopener" title="${label}: open full size"><img src="${waFile(biz, it)}" alt="${label}" loading="lazy"></a>`;
+}
+
+/** The chip and the figures line of a card. */
+function waLines(c, tab) {
+  const u = c.upi, b = c.bill, x = c.other;
+  const one = u ?? b ?? x;
+  if (tab === 'confirmed') {
+    const extra = b?.paidAs === 'cash' ? ' · cash' : u?.tipPaise ? ` · tip ₹${rs(u.tipPaise)}` : !b ? ' · no bill' : '';
+    return { chip: html`<span class="chip ok">Confirmed${extra}</span>`, by: html` <span class="tiny">${(u ?? b).reviewedBy ?? ''} · ${when((u ?? b).reviewedAt)}</span>` };
+  }
+  if (tab === 'rejected') return { chip: html`<span class="chip bad">Rejected</span>`, by: html` <span class="tiny">${one.reviewedBy ?? ''}</span>` };
+  if (tab === 'duplicate') return { chip: html`<span class="chip wait">Duplicate</span>`, by: '' };
+  if (x) {
+    if (x.readStatus === 'waiting' || x.readStatus === 'reading') return { chip: html`<span class="chip info">Reading…</span>`, by: '' };
+    if (x.readStatus === 'failed') return { chip: html`<span class="chip bad">Could not read</span>`, by: '' };
+    return { chip: html`<span class="chip mute">Not a payment</span>`, by: '' };
+  }
+  if (c.pair) {
+    if (c.diffPaise == null) return { chip: html`<span class="chip wait">Amount not read</span>`, by: '' };
+    if (c.diffPaise > 0) return { chip: html`<span class="chip wait">Paid ₹${rs(c.diffPaise)} more</span>`, by: '' };
+    if (c.diffPaise < 0) return { chip: html`<span class="chip bad">Paid ₹${rs(-c.diffPaise)} less</span>`, by: '' };
+    if (waUnclear(u) || waUnclear(b) || !waSure(c)) return { chip: html`<span class="chip wait">${u.legible === 'clear' && b.legible === 'clear' && !waUnclear(u) && !waUnclear(b) ? 'Not sure' : 'Photo unclear'}</span>`, by: '' };
+    return { chip: html`<span class="chip ok">Paid</span>`, by: '' };
+  }
+  if (waUnclear(one)) return { chip: html`<span class="chip bad">Could not read</span>`, by: '' };
+  return { chip: html`<span class="chip mute">${b ? 'No UPI photo' : 'No bill photo'}</span>`, by: '' };
+}
+
+function waFigures(c) {
+  const u = c.upi, b = c.bill, x = c.other;
+  const parts = [];
+  const eq = c.diffPaise === 0;
+  if (u) parts.push(html`${u.app ?? 'UPI'} <span class="mono">${u.amountPaise == null ? '₹?' : `₹${rs(u.amountPaise)}`}</span>${c.pair ? (u.amountPaise == null ? '' : eq ? html` ${waYes}` : html` ${waNo}`) : ''}`);
+  if (b) parts.push(html`bill <span class="mono">${b.amountPaise == null ? '₹?' : `₹${rs(b.amountPaise)}`}</span>${c.pair && eq ? html` ${waYes}` : ''}`);
+  const reasons = c.pair?.reasons ?? [];
+  const links = [reasons.includes('bill no. in caption') ? html`caption ${waYes}` : '', reasons.includes('reply') ? html`reply ${waYes}` : '', c.pair?.byHand ? 'paired by hand' : ''].filter(Boolean);
+  if (links.length) parts.push(html`${links.map((l, i) => html`${i ? ' ' : ''}${l}`)}`);
+  const t = u?.docAt ?? b?.docAt;
+  const gap = reasons.find((r) => r === 'same minute' || / min apart$/.test(r));
+  if (u && u.docAt == null && u.kind) parts.push(html`time not read ${waNo} · sent ${timeOf(u.sentAt)}`);
+  else parts.push(html`${timeOf(t ?? (u ?? b ?? x).sentAt)}${gap ? html` ${gap} ${waYes}` : ''}`);
+  if (u) parts.push(u.utr ? html`UTR <span class="mono">…${u.utr.slice(-4)}</span>` : 'no UTR on screen');
+  if (x?.note) parts.push(x.note);
+  return html`${parts.map((p, i) => html`${i ? ' · ' : ''}${p}`)}`;
+}
+
+function waButtons(c, tab) {
+  const u = c.upi, b = c.bill, x = c.other;
+  const one = u ?? b ?? x;
+  const btn = (label, attrs, plain = true) => html`<button type="button" class="btn ${plain ? 'plain' : ''} wa-b" ${{ __html: attrs }}>${label}</button>`;
+  if (tab !== 'pending') {
+    const r = [btn('Put back', `data-wa="restore" data-id="${one.id}"`)];
+    if (tab === 'duplicate') r.push(btn('Reject', `data-wa="reject" data-id="${one.id}"`));
+    return r;
+  }
+  const open = btn(waOpen.has(c.key) ? 'Close' : 'Open', `data-waopen="${c.key}"`);
+  if (x) return [open, btn('Reject', `data-wa="reject" data-id="${x.id}"`)];
+  const menu = (items) => html`<details class="menu"><summary class="btn plain wa-b" aria-label="More">⋯</summary><div class="menu-pop" style="min-width:200px">${items}</div></details>`;
+  if (c.pair) {
+    const primary = c.diffPaise > 0 ? btn(`Tip ₹${rs(c.diffPaise)}`, `data-wa="confirm" data-pair="${c.pair.id}" data-tip="1"`, false)
+      : c.diffPaise === 0 && !waUnclear(u) && !waUnclear(b) && waSure(c) ? btn('Confirm', `data-wa="confirm" data-pair="${c.pair.id}"`, false) : null;
+    const more = [
+      ...(primary && c.diffPaise === 0 ? [] : [btn(c.diffPaise > 0 ? 'Confirm, no tip' : 'Confirm', `data-wa="confirm" data-pair="${c.pair.id}"`)]),
+      btn('Unpair', `data-wa="unpair" data-pair="${c.pair.id}"`), btn('Reject UPI photo', `data-wa="reject" data-id="${u.id}"`), btn('Reject bill', `data-wa="reject" data-id="${b.id}"`)];
+    return [...(primary ? [primary] : []), open, menu(more)];
+  }
+  if (b) return [btn('Pair…', `data-waopen="${c.key}"`), btn('Was cash', `data-wa="cash" data-id="${b.id}"`), menu([btn('Reject', `data-wa="reject" data-id="${b.id}"`)])];
+  return [btn('Pair…', `data-waopen="${c.key}"`), btn('No bill', `data-wa="alone" data-id="${u.id}"`), menu([btn('Reject', `data-wa="reject" data-id="${u.id}"`)])];
+}
+
+/** An opened card: the photos large, what was read (to correct), and Pair with for a photo on its own. */
+function waDetail(biz, c, singles) {
+  const its = [c.upi, c.bill, c.other].filter(Boolean);
+  const form = (it) => html`<form class="wa-edit" data-waedit="${it.id}">
+    <div class="tiny"><strong>${it.kind === 'bill' ? 'Bill' : it.kind === 'upi' ? 'UPI photo' : 'Photo'}</strong> · ${it.sender ?? ''} · sent ${when(it.sentAt)}${it.caption ? html` · caption “${it.caption}”` : ''}</div>
+    ${it.note ? html`<div class="tiny" style="color:#92400E">${it.note}</div>` : ''}
+    <div class="form-row" style="gap:8px">
+      <div class="field" style="flex:0 1 150px"><label>What</label><select name="kind">${[['upi', 'UPI payment'], ['bill', 'Bill'], ['other', 'Something else']].map(([k, w]) => html`<option value="${k}" ${it.kind === k ? 'selected' : ''}>${w}</option>`)}</select></div>
+      <div class="field" style="flex:0 1 110px"><label>Amount ₹</label><input name="amount" class="mono" value="${it.amountPaise == null ? '' : rsIn(it.amountPaise)}"></div>
+      ${it.kind !== 'bill' ? html`<div class="field" style="flex:1 1 180px"><label>UTR</label><input name="utr" class="mono" value="${it.utr ?? ''}"></div>` : ''}
+      ${it.kind !== 'upi' ? html`<div class="field" style="flex:0 1 130px"><label>Bill no.</label><input name="billNo" class="mono" value="${it.billNo ?? ''}"></div>` : ''}
+      <div class="field" style="flex:0 1 170px"><label>${it.kind === 'bill' ? 'Bill time' : 'Paid at'}</label><input name="paidAt" class="mono" placeholder="${it.docAt == null ? 'not read: YYYY-MM-DD HH:MM' : ''}" value="${waIstInput(it.docAt)}"></div>
+    </div>
+    <div class="form-row" style="gap:8px;align-items:center"><button class="btn plain wa-b" type="submit">Save</button><span class="form-msg"></span></div></form>`;
+  const one = !c.pair && !c.other ? (c.upi ?? c.bill) : null;
+  const pick = one ? singles.filter((s) => s.kind !== one.kind && s.kind !== 'other') : [];
+  return html`<div class="wa-detail">
+    <div class="wa-big">${its.map((it) => it.mediaType === 'application/pdf'
+      ? html`<a href="${waFile(biz, it)}" target="_blank" rel="noopener" class="wa-bigph">Open PDF</a>`
+      : html`<a href="${waFile(biz, it)}" target="_blank" rel="noopener"><img class="wa-bigph" src="${waFile(biz, it)}" alt="${it.kind ?? 'photo'}"></a>`)}</div>
+    <div style="flex:1 1 320px;display:flex;flex-direction:column;gap:12px;min-width:0">
+      ${its.map(form)}
+      ${one ? html`<div class="form-row" style="gap:8px;align-items:flex-end">
+        <div class="field" style="flex:1 1 240px"><label>Pair with ${one.kind === 'bill' ? 'a UPI photo' : 'a bill'}</label>
+          <select data-wapick="${one.id}" data-kind="${one.kind}">${pick.length ? pick.map((s) => html`<option value="${s.id}">${s.kind === 'bill' ? `bill ${s.billNo ?? '?'}` : s.app ?? 'UPI'} · ₹${s.amountPaise == null ? '?' : rs(s.amountPaise)} · ${when(s.sentAt)}</option>`) : html`<option value="">None waiting</option>`}</select></div>
+        <button class="btn plain wa-b" type="button" data-wa="pair" data-id="${one.id}" ${pick.length ? '' : 'disabled'}>Pair</button></div>` : ''}
+    </div></div>`;
+}
+
+async function whatsappView(biz, query) {
+  const q = new URLSearchParams(query ?? '');
+  const tab = WA_TABS.some(([k]) => k === q.get('tab')) ? q.get('tab') : 'pending';
+  const d = await api('GET', `/businesses/${biz.id}/wa/inbox?tab=${tab}`);
+  const l = d.listener;
+  const status = l.never ? html`<span style="color:#B91C1C">Listener not connected yet</span>`
+    : l.offline ? html`<span style="color:#B91C1C">Listener offline · ${waAgo(l.lastHeartbeatAt)}</span>`
+    : html`<span style="color:var(--ok)">Listener on · last seen ${waAgo(l.lastHeartbeatAt)} ago</span>`;
+  const banner = !d.groups ? html`<section class="card"><div class="note">No WhatsApp group is read yet. Choose one in <a href="#/b/${biz.id}/wagroups">Settings → WhatsApp groups</a>.</div></section>`
+    : l.never ? html`<div class="wa-banner">The listener on the billing PC has not connected yet. Photos come in once it is set up and linked to WhatsApp.</div>`
+    : l.offline ? html`<div class="wa-banner">Listener offline since ${when(l.lastHeartbeatAt)} (${waAgo(l.lastHeartbeatAt)}). Photos sent now come in when the billing PC is back on.</div>` : '';
+  const singles = d.shifts.flatMap((s) => s.cards).filter((c) => !c.pair && !c.other).map((c) => c.upi ?? c.bill);
+  const card = (c) => {
+    const { chip, by } = waLines(c, tab);
+    const bill = c.bill?.billNo ?? (c.upi?.caption && /^\d{3,}$/.test(c.upi.caption.trim()) ? c.upi.caption.trim() : null);
+    return html`<div class="wa-row ${tab === 'pending' && c.pair && c.diffPaise !== 0 ? 'warn' : ''}" data-wacard="${c.key}">
+      <div class="wa-main">
+        <div class="wa-ths">${c.other ? waThumb(biz, c.other, 'Photo') : html`${waThumb(biz, c.upi, 'UPI photo')}${waThumb(biz, c.bill, 'Bill')}`}</div>
+        <div style="flex:1;min-width:0">
+          <div class="wa-l1"><span class="mono"><strong>${bill ?? (c.upi ? 'UPI' : '—')}</strong></span> ${chip}${by}
+            ${c.pair && tab === 'pending' ? html`<span class="tiny wa-conf" title="How sure Bookr is that these two go together (0-100)">${c.pair.confidence}</span>` : ''}</div>
+          <div class="tiny wa-l2">${waFigures(c)}</div>
+        </div>
+        <div class="wa-btns">${waButtons(c, tab)}</div>
+      </div>
+      ${tab === 'pending' && waOpen.has(c.key) ? waDetail(biz, c, singles) : ''}
+      <div class="form-msg"></div>
+    </div>`;
+  };
+  const shiftBlock = (s) => {
+    const agree = s.cards.filter((c) => c.agrees && !waUnclear(c.upi) && !waUnclear(c.bill));
+    return html`<section class="card" style="gap:4px">
+      <div class="lane-h"><strong>${dayLabel(s.day)} shift</strong>
+        ${tab === 'pending' && agree.length > 1 ? html`<button type="button" class="btn wa-b" data-waall="${agree.map((c) => c.pair.id).join(',')}">Confirm ${agree.length} that agree</button>` : ''}</div>
+      ${s.cards.map(card)}</section>`;
+  };
+  render(shell(biz, 'whatsapp', 'WhatsApp', status, html`
+    ${banner}
+    <div class="wa-tabs">${WA_TABS.map(([k, w]) => html`<a class="btn plain wa-b ${k === tab ? 'on' : ''}" href="#/b/${biz.id}/whatsapp${k === 'pending' ? '' : `?tab=${k}`}">${w} ${d.counts[k]}</a>`)}
+      <a class="tiny" style="margin-left:auto" href="#/b/${biz.id}/wagroups">Groups</a></div>
+    <div id="wamsg"></div>
+    ${d.shifts.length ? d.shifts.map(shiftBlock) : html`<section class="card"><div class="note">${tab === 'pending' ? 'Nothing to check.' : 'None.'}</div></section>`}
+    ${tab === 'pending' && d.shifts.length ? html`<div class="tiny">⋯ = Confirm another way, Unpair, Reject. The grey number is how sure Bookr is that the two go together (0–100). Confirming books nothing yet: Reconcile will offer it.</div>` : ''}`));
+
+  const again = () => whatsappView(biz, query);
+  const msgOf = (el) => el.closest('[data-wacard]')?.querySelector(':scope > .form-msg') ?? document.getElementById('wamsg');
+  const run = async (el, fn) => { el.disabled = true; try { await fn(); await again(); } catch (err) { el.disabled = false; showError(msgOf(el), err); } };
+  const W = `/businesses/${biz.id}/wa`;
+  app.querySelectorAll('[data-waopen]').forEach((b) => b.addEventListener('click', () => {
+    const k = b.dataset.waopen;
+    if (waOpen.has(k)) waOpen.delete(k); else waOpen.add(k);
+    again();
+  }));
+  app.querySelectorAll('[data-waall]').forEach((b) => b.addEventListener('click', () => run(b, () => api('POST', `${W}/confirm-agreeing`, { pairIds: b.dataset.waall.split(',') }))));
+  app.querySelectorAll('[data-wa]').forEach((b) => b.addEventListener('click', () => {
+    const a = b.dataset.wa, id = b.dataset.id, pair = b.dataset.pair;
+    if (a === 'confirm') return run(b, () => api('POST', `${W}/pairs/${pair}/confirm`, { tip: b.dataset.tip === '1' }));
+    if (a === 'unpair') return run(b, () => api('DELETE', `${W}/pairs/${pair}`));
+    if (a === 'reject') return run(b, () => api('POST', `${W}/items/${id}/reject`));
+    if (a === 'restore') return run(b, () => api('POST', `${W}/items/${id}/restore`));
+    if (a === 'cash') return run(b, () => api('POST', `${W}/items/${id}/confirm`, { paidAs: 'cash' }));
+    if (a === 'alone') return run(b, () => api('POST', `${W}/items/${id}/confirm`, {}));
+    if (a === 'pair') {
+      const sel = app.querySelector(`[data-wapick="${id}"]`);
+      const upi = sel.dataset.kind === 'upi' ? id : sel.value, bill = sel.dataset.kind === 'upi' ? sel.value : id;
+      return run(b, async () => { await api('POST', `${W}/pairs`, { upiItemId: upi, billItemId: bill }); waOpen.clear(); });
+    }
+  }));
+  app.querySelectorAll('[data-waedit]').forEach((f) => onSubmit(f, async (x) => {
+    await api('PATCH', `${W}/items/${f.dataset.waedit}`, { kind: x.kind, amount: x.amount, ...('utr' in x ? { utr: x.utr } : {}), ...('billNo' in x ? { billNo: x.billNo } : {}), paidAt: x.paidAt });
+    await again();
+  }));
+}
+
+/** Settings → WhatsApp groups: which groups are read, each with a department and the head a confirmed item starts with. */
+async function waGroupsView(biz) {
+  const d = await api('GET', `/businesses/${biz.id}/wa/groups`);
+  const income = d.heads.filter((h) => h.type === 'income');
+  const headOpts = (sel) => html`<option value="">None</option>${income.map((h) => html`<option value="${h.id}" ${h.id === sel ? 'selected' : ''}>${h.name}</option>`)}`;
+  const deps = html`<datalist id="wadeps">${d.departments.map((x) => html`<option value="${x}">`)}</datalist>`;
+  const row = (g) => html`<tr data-wagroup="${g.id}"><td>${g.name}<div class="tiny">${g.items} photo${g.items === 1 ? '' : 's'}${g.lastAt ? ` · last ${when(g.lastAt)}` : ''}</div></td>
+    <td><input data-f="department" list="wadeps" value="${g.department ?? ''}" placeholder="Department" style="min-height:36px"></td>
+    <td><select data-f="defaultHeadId" class="compact">${headOpts(g.defaultHeadId)}</select></td>
+    <td>${g.active ? html`<span class="chip ok">On</span>` : html`<span class="chip mute">Off</span>`}</td>
+    <td style="white-space:nowrap"><button type="button" class="btn plain wa-b" data-wgsave>Save</button>
+      <button type="button" class="btn plain wa-b" data-wgon="${g.active ? '' : '1'}">${g.active ? 'Stop reading' : 'Read'}</button><span class="form-msg"></span></td></tr>`;
+  render(shell(biz, 'wagroups', 'WhatsApp groups', 'Photos are taken only from groups that are on. The listener on the billing PC sends the groups it can see.', html`
+    ${deps}
+    <section class="card"><h2>Read</h2>
+      ${d.groups.length ? html`<div class="scroll"><table style="min-width:640px"><thead><tr><th>Group</th><th>Department</th><th>Default head</th><th>Read</th><th></th></tr></thead>
+        <tbody>${d.groups.map(row)}</tbody></table></div>` : html`<div class="note">None yet.</div>`}</section>
+    <section class="card"><h2>Seen by the listener, not read</h2>
+      ${d.seen.length ? html`<div class="scroll"><table style="min-width:520px"><tbody>${d.seen.map((s) => html`<tr data-waseen="${s.waGroupId}">
+        <td>${s.name}<div class="tiny">seen ${when(s.lastSeenAt)}</div></td>
+        <td><input data-f="department" list="wadeps" placeholder="Department" style="min-height:36px"></td>
+        <td><select data-f="defaultHeadId" class="compact">${headOpts(null)}</select></td>
+        <td><button type="button" class="btn plain wa-b" data-wgadd>Read</button><span class="form-msg"></span></td></tr>`)}</tbody></table></div>`
+        : html`<div class="note">${d.groups.length ? 'No other groups.' : 'The listener has not sent its groups yet. Once it is linked to WhatsApp on the billing PC, its groups show here.'}</div>`}</section>
+    <div><a href="#/b/${biz.id}/whatsapp">← WhatsApp inbox</a></div>`));
+  const val = (tr, f) => tr.querySelector(`[data-f="${f}"]`).value;
+  const go2 = async (b, fn) => { b.disabled = true; try { await fn(); await waGroupsView(biz); } catch (err) { b.disabled = false; showError(b.parentElement.querySelector('.form-msg'), err); } };
+  app.querySelectorAll('[data-wgsave]').forEach((b) => b.addEventListener('click', () => {
+    const tr = b.closest('tr');
+    go2(b, () => api('PATCH', `/businesses/${biz.id}/wa/groups/${tr.dataset.wagroup}`, { department: val(tr, 'department'), defaultHeadId: val(tr, 'defaultHeadId') }));
+  }));
+  app.querySelectorAll('[data-wgon]').forEach((b) => b.addEventListener('click', () => {
+    const tr = b.closest('tr');
+    go2(b, () => api('PATCH', `/businesses/${biz.id}/wa/groups/${tr.dataset.wagroup}`, { active: b.dataset.wgon === '1' }));
+  }));
+  app.querySelectorAll('[data-wgadd]').forEach((b) => b.addEventListener('click', () => {
+    const tr = b.closest('tr');
+    go2(b, () => api('POST', `/businesses/${biz.id}/wa/groups`, { waGroupId: tr.dataset.waseen, department: val(tr, 'department'), defaultHeadId: val(tr, 'defaultHeadId') || null }));
+  }));
+}
+
 const historyWords = (h) => { try { const c = JSON.parse(h.after ?? '{}').changes; return c ? `: ${c}` : ''; } catch { return ''; } };
 // Complimentary (approved 14 Nov 2026), from any page: data-makecomp="comparisonId" asks the guest's name;
 // data-paidby="comparisonId" with data-mode turns a complimentary or PREPAID bill into a Cash, UPI or Card sale. Both undo.
@@ -11469,6 +11706,8 @@ async function routeInner() {
       if (screen === 'money-out') return moneyOutView(biz, query);
       if (screen === 'parties') return partiesView(biz, query);
       if (screen === 'directors') return biz.actions.includes('reports.view') ? directorsView(biz) : go(home(biz));
+      if (screen === 'whatsapp') return biz.actions.includes('wa.review') ? whatsappView(biz, query) : go(home(biz));
+      if (screen === 'wagroups') return biz.actions.includes('wa.review') ? waGroupsView(biz) : go(home(biz));
       if (item?.phase) return laterView(biz, screen);
       if (!biz.actions.includes('reports.view')) return go(home(biz));
       return dashboardView(biz);

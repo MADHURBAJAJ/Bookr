@@ -40,6 +40,8 @@ export const PERMISSIONS = {
   'shift.reopen': OWNER,
   // Booking a cash shortage: Owner or Accountant (18 Nov 2026).
   'cash.writeoff': BOOKS,
+  // WhatsApp inbox (24 Nov 2026): reviewing guest payment photos and choosing the groups read.
+  'wa.review': BOOKS,
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;
