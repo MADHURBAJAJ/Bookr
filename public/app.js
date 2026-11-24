@@ -252,6 +252,7 @@ const NAV = [
   { key: 'parties', label: 'Parties', needs: 'heads.view', group: 'Books' },
   // Directors' accounts (approved 23 Nov 2026): each family's ledger.
   { key: 'directors', label: 'Directors', needs: 'reports.view', group: 'Books', when: (b) => !b.cashBooks },
+  { key: 'loans', label: 'Loans', needs: 'reports.view', group: 'Books', when: (b) => !b.cashBooks },
   { key: 'accounts', label: 'Accounts', group: 'Settings' },
   { key: 'heads', label: 'Heads and rules', group: 'Settings' },
   { key: 'users', label: 'Users and roles', owner: true, group: 'Settings' },
@@ -1839,9 +1840,9 @@ async function fundsView(biz, query) {
         <tbody>
           ${head(`Funds at start · ${dayLabel(r.from)}`, r.start)}
           ${head('+ Money in', addUp(ins))}
-          ${block(ins, 'sales', 'Sales received')}${block(ins, 'advance')}${block(ins, 'income')}${block(ins, 'left_out')}${block(ins, 'open')}
+          ${block(ins, 'sales', 'Sales received')}${block(ins, 'advance')}${block(ins, 'income')}${block(ins, 'loans', 'Loans and deposits')}${block(ins, 'left_out')}${block(ins, 'open')}
           ${head('− Money out', addUp(outs))}
-          ${block(outs, 'expenses', 'Expenses by head')}${block(outs, 'card_fees')}${block(outs, 'not_approved')}${block(outs, 'left_out')}${block(outs, 'open')}
+          ${block(outs, 'expenses', 'Expenses by head')}${block(outs, 'loans', 'Loans and deposits')}${block(outs, 'card_fees')}${block(outs, 'not_approved')}${block(outs, 'left_out')}${block(outs, 'open')}
           ${trs.length ? html`${head('± Transfers between own accounts', addUp(trs))}${trs.map((x) => line(x, 18))}` : ''}
           ${head(`= Funds at end · ${dayLabel(r.to)}`, r.end)}
           ${totalOnly ? '' : html`<tr><td class="tiny">Statement balance / cash counted</td>${accs.map((a) => html`<td class="amount tiny">${known(a) == null ? '–' : rs(known(a))}</td>`)}<td></td></tr>
@@ -3815,7 +3816,7 @@ function wireRegister(biz, u) {
 
 /** The last approved line edited or removed on a page, for its Undo. */
 let expenseUndo = null;
-const DIR_KIND = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Paid for the hotel', repaid: 'Repaid' };
+const DIR_KIND = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Paid to the company', repaid: 'Repaid' };
 const dirOf = (r) => { try { return r.director ? (typeof r.director === 'string' ? JSON.parse(r.director) : r.director) : null; } catch { return null; } };
 
 function expensePanel(biz, u, heads, parties = []) {
@@ -4012,7 +4013,7 @@ function wireExpense(biz, u, parties = []) {
       const ppl = d.families.flatMap((f) => f.people.map((p) => ({ ...p, family: f.family })));
       if (!ppl.length) { box.innerHTML = html`<span class="note">No directors yet: set them up on the Directors page.</span>`.__html; return; }
       box.innerHTML = html`<select data-edirp>${ppl.map((p) => html`<option value="${p.id}">${p.family} · ${p.name}</option>`)}</select>
-        <select data-edirk><option value="taken">Taken (cash)</option><option value="stock_taken">Stock taken (removes this cash line)</option><option value="repaid">Repaid (paying them back)</option><option value="given">Paid for the hotel</option></select>
+        <select data-edirk><option value="taken">Taken (cash)</option><option value="stock_taken">Stock taken (removes this cash line)</option><option value="repaid">Repaid (paying them back)</option><option value="given">Paid to the company</option></select>
         <button class="btn dchip" type="button" data-edirsave>Save</button>`.__html;
       box.querySelector('[data-edirsave]').addEventListener('click', async () => {
         try {
@@ -5781,6 +5782,11 @@ async function bankView(biz, query = '') {
   const cashLink = (r) => r.kind === 'upi_in' || r.kind === 'upi_out' || r.kind === 'card_settlement' || r.kind === 'upi_fee' || (r.direction === 'DR' && !r.cashMove) ? ''
     : html`<button class="btn ${r.cashMove ? '' : 'plain'}" type="button" style="${SMALL}" data-cashmove="${r.id}" data-dir="${r.direction}" data-shift="${shiftOfMs(r.postedAt)}"
       title="${r.direction === 'CR' ? 'Cash from the drawer paid into the bank: not income' : 'Cash taken out of the bank for the drawer: not an expense'}">${r.direction === 'CR' ? 'Cash deposited' : 'Cash for the drawer'}</button>`;
+  // Loans (approved 24 Nov 2026): money in or out of a loan or deposit, not income or an expense. A remembered lender
+  // or borrower is suggested on the line, never booked by itself.
+  const canLoan = biz.actions.includes('rows.approve');
+  const loanLink = (r) => !canLoan || r.kind === 'card_settlement' ? '' : html`${r.loan ? html`<button class="btn" type="button" style="${SMALL}" data-loango="${r.id}" data-loan="${r.loan.id}" data-name="${r.loan.name}"
+      title="Remembered for this loan: check it is right">${r.loan.name} · loan</button>` : ''}<button class="btn plain" type="button" style="${SMALL}" data-loanpick="${r.id}" title="Money in or out of a loan or deposit: not income or an expense">Loan…</button>`;
   const rulePill = (r) => canRules && r.kind !== 'upi_in' ? html`<button class="btn plain" type="button" style="${SMALL}" data-mkrule="${r.id}" title="Remember this payee's head">Rule</button>` : '';
   const shiftBody = (list) => {
     if (tab === 'done') {
@@ -5798,14 +5804,14 @@ async function bankView(biz, query = '') {
           ${lineFields(r)}<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
             <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="fnb" title="A sale nobody billed: booked as F&B income">Unbilled F&amp;B</button>
             <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="room" title="A sale nobody billed: booked as Room income">Unbilled Room</button>
-            ${cashLink(r)}${ownLink(r)}${skipLink(r)}</div>`, 'book')}`;
+            ${cashLink(r)}${ownLink(r)}${loanLink(r)}${skipLink(r)}</div>`, 'book')}`;
     }
     const known = list.filter((r) => r.suggest?.headId && !isTr(r));
     const rest = list.filter((r) => !r.suggest?.headId && !isTr(r));
     // Only the buttons that fit (approved 23 Nov 2026): Cash for the drawer on cash withdrawals; the rest under ⋯.
     const outActs = (r) => r.kind === 'upi_fee' ? html`<div style="display:flex;gap:4px">${skipLink(r)}</div>`
-      : html`<div style="display:flex;gap:4px;align-items:center">${cashLink(r)}<details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary>
-        <div class="menu-pop" style="min-width:160px;gap:6px">${ownLink(r)}${rulePill(r)}${skipLink(r)}</div></details></div>`;
+      : html`<div style="display:flex;gap:4px;align-items:center">${cashLink(r)}${r.loan && canLoan ? html`<button class="btn" type="button" style="${SMALL}" data-loango="${r.id}" data-loan="${r.loan.id}" data-name="${r.loan.name}" title="Remembered for this loan: check it is right">${r.loan.name} · loan</button>` : ''}<details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary>
+        <div class="menu-pop" style="min-width:160px;gap:6px">${ownLink(r)}${canLoan ? html`<button class="btn plain" type="button" style="${SMALL}" data-loanpick="${r.id}" title="Money in or out of a loan or deposit: not income or an expense">Loan…</button>` : ''}${rulePill(r)}${skipLink(r)}</div></details></div>`;
     return html`${transferCards(list)}${section('ruled', 'Head suggested', 'From the party\'s past lines, a rule or the note; change anything that is wrong', known, (r) => html`
         ${lineFields(r)}${outActs(r)}`, 'book')}
       ${section('needs', 'Needs a head', 'Give the item, party and head once: next time the party fills in its head', rest, (r) => html`
@@ -6015,6 +6021,57 @@ async function bankView(biz, query = '') {
     if (remember === null) return;
     run(() => ownTransfer(line.id, { otherAccountId: other.id, remember: remember.trim() || null }),
       (r) => `Booked as a transfer ${line.direction === 'DR' ? 'to' : 'from'} ${other.name}.${r.remembered ? ` "${r.remembered}" is remembered on ${other.name}.` : ''} Undo is on Done.`);
+  }));
+  const loanWord = (kind, dir) => (dir === 'CR' ? (kind === 'taken' || kind === 'deposit_received' ? 'received' : 'paid back to the company') : (kind === 'given' || kind === 'deposit_paid' ? 'given' : 'repaid'));
+  app.querySelectorAll('[data-loango]').forEach((b) => b.addEventListener('click', () => run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.loango}/loan`, { loanId: b.dataset.loan }),
+    `Booked to ${b.dataset.name}: not income or an expense. Undo is on Done.`)));
+  app.querySelectorAll('[data-loanpick]').forEach((b) => b.addEventListener('click', async () => {
+    const line = lines.rows.find((r) => r.id === b.dataset.loanpick);
+    const host = app.querySelector(`[data-line="${line?.id}"]`) ?? b.closest('.rv-card');
+    if (!line || !host) return;
+    const old = app.querySelector(`[data-loanbox="${line.id}"]`);
+    if (old) { old.remove(); return; }
+    let loans = [];
+    try { loans = (await api('GET', `/businesses/${biz.id}/loans`)).loans; } catch (err) { showError(msg, err); return; }
+    const cr = line.direction === 'CR';
+    const ih = heads.filter((h) => h.type === (cr ? 'income' : 'expense'));
+    const ihGuess = ih.find((h) => /interest/i.test(h.name));
+    const guess = (line.vpa || (line.remark && !/^(UPI|NA|NO REMARKS?)$/i.test(line.remark) ? line.remark : '') || '').toLowerCase();
+    const box = document.createElement('div');
+    box.dataset.loanbox = line.id;
+    box.style.cssText = 'grid-column:1/-1;background:var(--surface-2,#F6F7F9);border-radius:8px;padding:10px;margin:4px 0;display:grid;gap:8px';
+    box.innerHTML = html`<div class="tiny"><strong>₹ ${money(line.amountPaise)} ${cr ? 'in' : 'out'}</strong> · ${line.description}</div>
+      <div class="form-row" style="gap:8px;align-items:center"><span class="tiny" style="width:70px">Loan</span><select data-lnpick style="min-height:34px">
+        ${loans.map((x) => html`<option value="${x.id}" data-kind="${x.kind}">${x.name} (${x.kindWord})</option>`)}<option value="">New loan or deposit…</option></select></div>
+      <div class="form-row" data-lnnew style="gap:8px;align-items:center"><span class="tiny" style="width:70px">New</span><input data-lnname maxlength="80" placeholder="Name" style="min-height:34px;max-width:220px">
+        <select data-lnkind style="min-height:34px">${Object.entries(LOAN_KIND).map(([k, w]) => html`<option value="${k}" ${k === (cr ? 'taken' : 'given') ? 'selected' : ''}>${w}</option>`)}</select></div>
+      <div class="form-row" style="gap:8px;align-items:center"><span class="tiny" style="width:70px">Interest</span><input data-lnint class="mono" placeholder="0" style="min-height:34px;width:100px">
+        <select data-lnhead style="min-height:34px"><option value="">${cr ? 'Income' : 'Expense'} head for the interest…</option>${ih.map((h) => html`<option value="${h.id}" ${h.id === ihGuess?.id ? 'selected' : ''}>${h.name}</option>`)}</select>
+        <span class="tiny">only if part of it is interest (an EMI)</span></div>
+      <div class="form-row" style="gap:8px;align-items:center"><span class="tiny" style="width:70px">Note</span><input data-lnnote maxlength="200" style="min-height:34px;max-width:280px"></div>
+      <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-lnkeep ${guess.length >= 3 ? 'checked' : ''}> Remember <input data-lnkey class="mono" value="${guess}" style="min-height:30px;max-width:220px"> for this loan</label>
+      <div class="tiny" data-lnsays></div>
+      <div class="form-row" style="gap:6px"><button class="btn" type="button" data-lnbook style="${SMALL}">Book</button><button class="btn plain" type="button" data-lncancel style="${SMALL}">Cancel</button><span class="form-msg"></span></div>`.__html;
+    host.after(box);
+    const pick = box.querySelector('[data-lnpick]');
+    const says = () => {
+      const isNew = !pick.value;
+      box.querySelector('[data-lnnew]').style.display = isNew ? '' : 'none';
+      const name = isNew ? box.querySelector('[data-lnname]').value.trim() || 'the new loan' : loans.find((x) => x.id === pick.value)?.name;
+      const kind = isNew ? box.querySelector('[data-lnkind]').value : pick.selectedOptions[0]?.dataset.kind;
+      const i = Math.round(Number((box.querySelector('[data-lnint]').value || '0').replace(/,/g, '')) * 100) || 0;
+      box.querySelector('[data-lnsays]').textContent = `${name}: ₹ ${money(line.amountPaise - i)} ${loanWord(kind, line.direction)}${i ? ` + interest ₹ ${money(i)} under a head` : ''} · not income or an expense`;
+      box.querySelector('[data-lnbook]').textContent = `Book to ${name}`;
+    };
+    box.querySelectorAll('select, input').forEach((x) => x.addEventListener('input', says)); says();
+    box.querySelector('[data-lncancel]').addEventListener('click', () => box.remove());
+    box.querySelector('[data-lnbook]').addEventListener('click', () => {
+      const isNew = !pick.value;
+      const payload = { ...(isNew ? { newLoan: { name: box.querySelector('[data-lnname]').value.trim(), kind: box.querySelector('[data-lnkind]').value } } : { loanId: pick.value }),
+        interest: box.querySelector('[data-lnint]').value.trim() || undefined, interestHeadId: box.querySelector('[data-lnhead]').value || undefined,
+        note: box.querySelector('[data-lnnote]').value.trim() || undefined, remember: box.querySelector('[data-lnkeep]').checked ? box.querySelector('[data-lnkey]').value.trim() || null : null };
+      run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${line.id}/loan`, payload), (r) => `Booked to the loan: not income or an expense.${r.remembered ? ` "${r.remembered}" is remembered for it.` : ''} Undo is on Done.`);
+    });
   }));
   app.querySelectorAll('[data-cashmove]').forEach((b) => b.addEventListener('click', () => {
     const dep = b.dataset.dir === 'CR';
@@ -8418,13 +8475,18 @@ function trialCardSection(biz, k, book = null, ex = {}) {
     if (n.why === 'not_purchase') return html`<div class="rv-card">${head}<div class="note">A ${String(p.txnType).toLowerCase()} on the card machine, not a sale. Check it with the bill it reverses on <a href="#/b/${biz.id}/cards">Card settlements</a>.</div></div>`;
     // Book it now (approved 11 Nov 2026), as on the UPI tab: an unbilled sale, or under a head. Undo takes it back.
     return html`<div class="rv-card">${head}
+      ${n.director && book && biz.actions.includes('rows.approve') ? html`<div class="cmp-warn" style="margin:0"><span class="tchip warn">Director's card</span> ${p.label} = ${n.director.name} <span style="color:#067647">✓</span> · no bill of ₹ ${money(p.amountPaise)} <span style="color:#067647">✓</span>
+        <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn" type="button" style="min-height:36px" data-tcarddirgo="${p.id}" data-dir="${n.director.directorId}" data-name="${n.director.name}">${n.director.name} · paid to the company</button>
+        <span class="tiny" style="color:var(--muted)">A guest's card? Use the choices below.</span></div></div>` : ''}
       <div class="tiny" style="color:var(--muted)">No card bill of this amount. Several bills on one card? Tick them together in Match several at once below. A bill written as cash or UPI? Correct it on its row. Otherwise book it here.</div>
       ${book ? html`<div class="form-row" style="gap:6px;align-items:center">
         <input type="text" data-tcardwhat="${p.id}" maxlength="120" placeholder="What was it? (optional)" style="flex:1 1 180px;max-width:240px;min-height:36px" aria-label="What was ₹ ${money(p.amountPaise)}?">
         ${book.unbilled.map((h) => html`<button class="btn plain" type="button" style="min-height:36px" data-tcardsale="${p.id}" data-type="${h.billType}">Unbilled ${h.billType === 'room' ? 'Room' : 'F&B'}</button>`)}
         ${book.unbilled.some((h) => h.billType === 'room') ? html`<button class="btn plain" type="button" style="min-height:36px" data-tcardadv="${p.id}">Advance…</button>` : ''}
         <select data-tcardhead="${p.id}" style="min-height:36px;max-width:200px" aria-label="Book under a head"><option value="">Other income head…</option>${book.income.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>
-        <button class="btn plain" type="button" style="min-height:36px" data-tcardbook="${p.id}">Book</button></div>` : ''}<div class="form-msg"></div></div>`;
+        <button class="btn plain" type="button" style="min-height:36px" data-tcardbook="${p.id}">Book</button>
+        ${biz.actions.includes('rows.approve') ? html`<button class="btn plain" type="button" style="min-height:36px" data-tcarddir="${p.id}">Director…</button>` : ''}</div>
+        <div data-tcarddirbox="${p.id}"></div>` : ''}<div class="form-msg"></div></div>`;
   };
   const noSwipe = (x) => html`<div class="rv-card">
     <div class="lane-h"><strong>Card bill <span class="mono">${x.billNo}</span>, ₹ ${money(x.amountPaise)}: no card payment</strong><span class="tchip warn">No swipe</span></div>
@@ -8580,6 +8642,41 @@ function wireTrialCards(biz, day, k, reload) {
     const who = prompt('Advance received on the card machine: from which guest (name, room or booking)?', what(pid) ?? '');
     if (!who?.trim()) return;
     bookCard(b, pid, { billType: 'room', item: `Advance: ${who.trim()}` }, 'Booked as an advance. Its room bill can use it when it comes.');
+  }));
+  // Paid to the company by a director (24 Nov 2026): a line in their account, not income; Undo takes it back.
+  const bookDirector = (b, pid, directorId, name, note, remember) => bookCard(b, pid, { directorId, note, remember },
+    `Card payment booked to ${name}: paid to the company.${remember ? ' The card is remembered as theirs.' : ''}`);
+  box.querySelectorAll('[data-tcarddirgo]').forEach((b) => b.addEventListener('click', () => bookDirector(b, b.dataset.tcarddirgo, b.dataset.dir, b.dataset.name, what(b.dataset.tcarddirgo), false)));
+  box.querySelectorAll('[data-tcarddir]').forEach((b) => b.addEventListener('click', async () => {
+    const pid = b.dataset.tcarddir;
+    const slot = box.querySelector(`[data-tcarddirbox="${pid}"]`);
+    if (slot.innerHTML) { slot.innerHTML = ''; return; }
+    let people = [];
+    try { people = (await api('GET', `/businesses/${biz.id}/directors`)).families.flatMap((f) => f.people.map((x) => ({ ...x, family: f.family }))); }
+    catch (err) { showError(msgOf(b), err); return; }
+    if (!people.length) { showError(msgOf(b), new Error('Add the directors on the Directors page first.')); return; }
+    const owes = (x) => x.balancePaise;
+    slot.innerHTML = html`<div style="background:var(--bg-soft,#f6f7f9);border-radius:8px;padding:10px;margin-top:6px;display:grid;gap:8px">
+      <div class="form-row" style="gap:8px;align-items:center"><span class="tiny" style="width:60px">Who</span><select data-dirwho style="min-height:36px">${people.map((x) => html`<option value="${x.id}">${x.name} (${x.family})</option>`)}</select></div>
+      <div class="form-row" style="gap:8px;align-items:center"><span class="tiny" style="width:60px">As</span><span class="tchip">Paid to the company</span></div>
+      <div class="form-row" style="gap:8px;align-items:center"><span class="tiny" style="width:60px">Note</span><input type="text" data-dirnote maxlength="200" style="min-height:36px;max-width:280px" value="${what(pid) ?? ''}" placeholder="optional"></div>
+      <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-dirkeep checked> Remember this card as theirs</label>
+      <div class="tiny" data-dirsays></div>
+      <div class="form-row" style="gap:6px"><button class="btn" type="button" style="min-height:36px" data-dirbook></button><button class="btn plain" type="button" style="min-height:36px" data-dircancel>Cancel</button></div></div>`.__html;
+    const pay = k.needs.find((n) => n.payment.id === pid)?.payment;
+    const who = slot.querySelector('[data-dirwho]');
+    const says = () => {
+      const x = people.find((q) => q.id === who.value);
+      const amt = pay?.amountPaise ?? 0;
+      slot.querySelector('[data-dirsays]').textContent = `${x.name} owes the company ₹ ${money(owes(x))} → ₹ ${money(owes(x) - amt)} · not income · the card payment is cleared`;
+      slot.querySelector('[data-dirbook]').textContent = `Book to ${x.name}`;
+    };
+    who.addEventListener('change', says); says();
+    slot.querySelector('[data-dircancel]').addEventListener('click', () => { slot.innerHTML = ''; });
+    slot.querySelector('[data-dirbook]').addEventListener('click', (e) => {
+      const x = people.find((q) => q.id === who.value);
+      bookDirector(e.currentTarget, pid, x.id, x.name, slot.querySelector('[data-dirnote]').value.trim() || undefined, slot.querySelector('[data-dirkeep]').checked);
+    });
   }));
   const advPath = `/businesses/${biz.id}/shifts/${day}/card-advance`;
   box.querySelectorAll('[data-tcarduseadv]').forEach((b) => b.addEventListener('click', async () => {
@@ -9829,12 +9926,70 @@ document.addEventListener('click', async (e) => {
 });
 
 /** Directors' accounts (approved 23 Nov 2026): each family's ledger, a person on every line. Balance = took or got − paid for the hotel. */
+// Loans (approved 24 Nov 2026): loans taken and given, deposits, and the directors' balances, in one place. Lines come
+// from Bank money in / out (Loan…) or are typed in here.
+const LOAN_KIND = { taken: 'Loan taken', given: 'Loan given', deposit_paid: 'Deposit paid', deposit_received: 'Deposit received' };
+const LOAN_HELP = { taken: 'money in raises what the company owes; repayments lower it', given: 'money out raises what they owe the company; repayments lower it',
+  deposit_paid: 'a deposit the company paid: owed back to the company', deposit_received: 'a deposit the company holds: owed back by the company' };
+async function loansView(biz) {
+  const [l, d] = await Promise.all([api('GET', `/businesses/${biz.id}/loans`), api('GET', `/businesses/${biz.id}/directors`).catch(() => ({ families: [] }))]);
+  const ed = biz.actions.includes('rows.approve');
+  const people = (d.families ?? []).flatMap((f) => f.people.filter((p) => p.balancePaise || p.takenPaise || p.givenPaise).map((p) => ({ ...p, family: f.family })));
+  const owedTo = people.filter((p) => p.balancePaise > 0).reduce((t, p) => t + p.balancePaise, 0) + l.loans.filter((x) => !x.companyOwes && x.balancePaise > 0).reduce((t, x) => t + x.balancePaise, 0)
+    + l.loans.filter((x) => x.companyOwes && x.balancePaise < 0).reduce((t, x) => t - x.balancePaise, 0);
+  const owes = people.filter((p) => p.balancePaise < 0).reduce((t, p) => t - p.balancePaise, 0) + l.loans.filter((x) => x.companyOwes && x.balancePaise > 0).reduce((t, x) => t + x.balancePaise, 0)
+    + l.loans.filter((x) => !x.companyOwes && x.balancePaise < 0).reduce((t, x) => t - x.balancePaise, 0);
+  // Balance as two columns: what the company is owed, and what it owes.
+  const cols = (owedPaise) => html`<td class="amount">${owedPaise > 0 ? money(owedPaise) : ''}</td><td class="amount">${owedPaise < 0 ? money(-owedPaise) : ''}</td>`;
+  const tile = (label, v, color = 'inherit') => html`<div class="card" style="gap:2px;padding:12px"><div class="tiny">${label}</div><div class="amount" style="font-size:20px;color:${color}">₹ ${money(v)}</div></div>`;
+  const loanRow = (x) => html`<tr><td><details><summary><strong>${x.name}</strong> <span class="tiny">${x.lines.length} line${x.lines.length === 1 ? '' : 's'}</span></summary>
+      <div style="padding:8px 0;display:grid;gap:8px">
+        <div class="tiny">${LOAN_HELP[x.kind]}${x.openingPaise ? ` · opening ₹ ${money(x.openingPaise)}${x.openingDay ? ` on ${dayLabel(x.openingDay)}` : ''}` : ''}${x.interestPaise ? ` · interest booked ₹ ${money(x.interestPaise)}` : ''}</div>
+        ${x.keys.length ? html`<div class="tiny">Known by: ${x.keys.map((k) => html`<span class="chip mono">${k}</span>${ed ? html` <button class="linkbtn tiny" type="button" data-lnforget="${x.id}" data-key="${k}">forget</button>` : ''} `)}</div>` : ''}
+        ${x.lines.length ? html`<div class="scroll"><table style="min-width:520px"><thead><tr><th>Day</th><th>What</th><th style="text-align:right">In ₹</th><th style="text-align:right">Out ₹</th><th></th></tr></thead><tbody>
+          ${x.lines.map((e) => html`<tr><td>${dayLabel(e.day)}</td><td>${e.fromBank ? html`<span class="chip">Bank</span> ` : ''}${e.note ?? ''}${e.interestPaise ? html` <span class="tiny">+ interest ₹ ${money(e.interestPaise)}</span>` : ''}</td>
+            <td class="amount">${e.direction === 'in' ? money(e.amountPaise) : ''}</td><td class="amount">${e.direction === 'out' ? money(e.amountPaise) : ''}</td>
+            <td>${ed && !e.fromBank ? html`<button class="btn plain dchip" type="button" data-lnrm="${e.id}">Remove</button>` : ''}</td></tr>`)}</tbody></table></div>` : ''}
+        ${ed ? html`<form class="form-row" data-lnadd="${x.id}" style="gap:6px;align-items:flex-end">
+          <div class="field"><label>Money</label><select name="direction"><option value="in">In (to the company)</option><option value="out">Out (from the company)</option></select></div>
+          <div class="field"><label>Day</label><input type="date" name="day" required></div>
+          <div class="field"><label>Amount (₹)</label><input name="amount" class="mono" style="width:110px" required></div>
+          <div class="field" style="flex:2 1 160px"><label>Note</label><input name="note" maxlength="200" placeholder="cash, cheque…"></div>
+          <button class="btn plain" type="submit">Add line</button><span class="form-msg"></span></form>
+          ${!x.lines.length ? html`<div><button class="btn plain dchip" type="button" data-lndel="${x.id}">Remove this loan</button></div>` : ''}` : ''}
+      </div></details></td><td>${x.kindWord}</td>${cols(x.companyOwes ? -x.balancePaise : x.balancePaise)}</tr>`;
+  const group = (title, list) => list.length ? html`<tr><td colspan="4" class="tiny" style="padding-top:12px">${title}</td></tr>${list}` : '';
+  const kindsIn = (ks) => l.loans.filter((x) => ks.includes(x.kind)).map(loanRow);
+  render(shell(biz, 'loans', 'Loans', 'Loans taken and given, deposits and the directors\' balances. Not income or expenses; an EMI\'s interest goes under a head.', html`
+    <div id="lnmsg"></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">${tile('Owed to the company', owedTo)}${tile('The company owes', owes)}</div>
+    <section class="card"><div class="scroll"><table style="min-width:560px"><thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Owes the company ₹</th><th style="text-align:right">Company owes ₹</th></tr></thead><tbody>
+      ${group(html`Directors · <a href="#/b/${biz.id}/directors">open their ledgers</a>`, people.map((p) => html`<tr><td>${p.name} <span class="tiny">· ${p.family}</span></td><td>Director</td>${cols(p.balancePaise)}</tr>`))}
+      ${group('Loans taken', kindsIn(['taken']))}${group('Loans given', kindsIn(['given']))}${group('Deposits', kindsIn(['deposit_paid', 'deposit_received']))}
+      ${!l.loans.length && !people.length ? html`<tr><td colspan="4" class="note">Nothing yet. Add a loan below, or use Loan… on a line under Bank → Money in / Money out.</td></tr>` : ''}
+    </tbody></table></div></section>
+    ${ed ? html`<form id="lnnew" class="inset"><div style="font-size:15px;font-weight:600">Add a loan or deposit</div>
+      <div class="form-row"><div class="field" style="flex:2 1 180px"><label>Name</label><input name="name" maxlength="80" required placeholder="HDFC car loan, Ramesh (advance)…"></div>
+        <div class="field"><label>Type</label><select name="kind">${Object.entries(LOAN_KIND).map(([k, w]) => html`<option value="${k}">${w}</option>`)}</select></div>
+        <div class="field"><label>Owed at the start (₹)</label><input name="opening" class="mono" style="width:120px" placeholder="0"></div>
+        <div class="field"><label>On</label><input type="date" name="openingDay"></div></div>
+      <div class="form-msg"></div><div><button class="btn" type="submit">Add</button></div></form>` : ''}`));
+  const msg = document.getElementById('lnmsg');
+  const fnew = document.getElementById('lnnew');
+  fnew && onSubmit(fnew, async (x) => { await api('POST', `/businesses/${biz.id}/loans`, { name: x.name, kind: x.kind, opening: x.opening || undefined, openingDay: x.openingDay || undefined }); loansView(biz); });
+  app.querySelectorAll('[data-lnadd]').forEach((fm) => onSubmit(fm, async (x) => { await api('POST', `/businesses/${biz.id}/loans/${fm.dataset.lnadd}/entries`, x); loansView(biz); }));
+  const act = (sel, fn) => app.querySelectorAll(sel).forEach((b) => b.addEventListener('click', async () => { try { await fn(b); loansView(biz); } catch (err) { showError(msg, err); } }));
+  act('[data-lnrm]', (b) => api('DELETE', `/businesses/${biz.id}/loan-entries/${b.dataset.lnrm}`, {}));
+  act('[data-lndel]', (b) => api('DELETE', `/businesses/${biz.id}/loans/${b.dataset.lndel}`, {}));
+  act('[data-lnforget]', (b) => api('POST', `/businesses/${biz.id}/loans/${b.dataset.lnforget}/forget`, { key: b.dataset.key }));
+}
+
 async function directorsView(biz) {
   const d = await api('GET', `/businesses/${biz.id}/directors`);
   const ed = d.editor;
   const ppl = d.families.flatMap((f) => f.people.map((p) => ({ ...p, family: f.family })));
   const bal = (p) => (p > 0 ? html`owes ₹${rs(p)}` : p < 0 ? html`hotel owes ₹${rs(-p)}` : html`₹0`);
-  const KINDS = [['taken', 'Taken (cash)'], ['stock_taken', 'Stock taken'], ['repaid', 'Repaid (paying them back)'], ['given', 'Paid for the hotel']];
+  const KINDS = [['taken', 'Taken (cash)'], ['stock_taken', 'Stock taken'], ['repaid', 'Repaid (paying them back)'], ['given', 'Paid to the company']];
   const opts = (sel) => ppl.map((p) => html`<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${p.family} · ${p.name}</option>`);
   const setup = html`<form id="dirsetup" class="inset">
     <div style="font-size:15px;font-weight:600">${d.from ? 'Add a family or people' : 'Start the ledger'}</div>
@@ -9846,14 +10001,14 @@ async function directorsView(biz) {
   const KW = DIR_KIND;
   const family = (f) => html`<section class="card" style="gap:10px">
     <div class="lane-h"><strong>${f.family}</strong><span class="tchip">${bal(f.balancePaise)}</span></div>
-    <div class="scroll"><table style="min-width:520px"><thead><tr><th>Person</th><th style="text-align:right">Opening ₹</th><th style="text-align:right">Took / got ₹</th><th style="text-align:right">Paid for the hotel ₹</th><th style="text-align:right">Balance</th></tr></thead>
+    <div class="scroll"><table style="min-width:520px"><thead><tr><th>Person</th><th style="text-align:right">Opening ₹</th><th style="text-align:right">Took / got ₹</th><th style="text-align:right">Paid to the company ₹</th><th style="text-align:right">Balance</th></tr></thead>
     <tbody>${f.people.map((p) => html`<tr><td>${p.name}</td>
       <td class="amount">${ed ? html`<form class="form-row" data-opening="${p.id}" style="gap:4px;justify-content:flex-end;flex-wrap:nowrap">
           <input name="amount" class="mono" style="width:90px" value="${p.opening == null ? '' : rupeesForInput(Math.abs(p.opening))}" placeholder="0">
           <select name="side"><option value="owes" ${p.opening < 0 ? '' : 'selected'}>owes</option><option value="owed" ${p.opening < 0 ? 'selected' : ''}>owed</option></select>
           <button class="btn plain dchip" type="submit">Save</button><span class="form-msg"></span></form>` : p.opening == null ? '–' : bal(p.opening)}</td>
       <td class="amount">${money(p.takenPaise)}</td><td class="amount">${money(p.givenPaise)}</td><td class="amount">${bal(p.balancePaise)}</td></tr>`)}</tbody></table></div>
-    ${f.lines.filter((l) => l.kind !== 'opening').length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Day</th><th>Person</th><th>What</th><th style="text-align:right">Took / got ₹</th><th style="text-align:right">Paid for the hotel ₹</th><th></th></tr></thead>
+    ${f.lines.filter((l) => l.kind !== 'opening').length ? html`<div class="scroll"><table style="min-width:560px"><thead><tr><th>Day</th><th>Person</th><th>What</th><th style="text-align:right">Took / got ₹</th><th style="text-align:right">Paid to the company ₹</th><th></th></tr></thead>
     <tbody>${f.lines.filter((l) => l.kind !== 'opening').map((l) => html`<tr><td>${dayLabel(l.day)}</td><td>${l.person}</td>
       <td><span class="chip">${KW[l.kind]}</span> ${l.note ?? ''}${l.uploadId ? html` <a class="tiny" href="#/b/${biz.id}/review/${l.uploadId}">page</a>` : ''}</td>
       <td class="amount">${l.kind !== 'given' ? money(l.amountPaise) : ''}</td>
@@ -9875,7 +10030,7 @@ async function directorsView(biz) {
     <tbody>${d.toMove.map((m) => html`<tr data-mv="${m.transactionId}"><td><input type="checkbox" data-mvon checked></td><td>${dayLabel(m.day)}</td>
       <td>${m.narration ?? ''}${m.party ? html` <span class="tiny">· ${m.party}</span>` : ''} <span class="tiny note">${m.head}</span></td><td class="amount">${money(m.amountPaise)}</td>
       <td><select data-mvp><option value="">Choose</option>${opts(m.directorId)}</select></td>
-      <td><select data-mvk>${[['taken', 'Taken'], ['repaid', 'Repaid'], ['given', 'Paid for the hotel']].map(([k, w]) => html`<option value="${k}" ${k === m.kind ? 'selected' : ''}>${w}</option>`)}</select></td></tr>`)}</tbody></table></div>
+      <td><select data-mvk>${[['taken', 'Taken'], ['repaid', 'Repaid'], ['given', 'Paid to the company']].map(([k, w]) => html`<option value="${k}" ${k === m.kind ? 'selected' : ''}>${w}</option>`)}</select></td></tr>`)}</tbody></table></div>
     <div class="form-msg" id="mvmsg"></div><div><button class="btn" type="button" id="mvgo">Move ticked lines</button></div></section>` : '';
   const names = ed && d.newNames.length ? html`<section class="card" style="gap:10px">
     <div class="lane-h"><strong>Whose bills?</strong><span class="tchip">${d.newNames.length} new name${d.newNames.length === 1 ? '' : 's'}</span></div>
@@ -9891,7 +10046,7 @@ async function directorsView(biz) {
     <div class="scroll"><table style="min-width:380px"><tbody>${d.names.map((n) => html`<tr><td class="mono">${n.key}</td>
       <td>${n.kind === 'director' ? (() => { const p = ppl.find((x) => x.id === n.directorId); return p ? `${p.family} · ${p.name}` : 'Director'; })() : NC_KIND[n.kind]}</td>
       <td>${ed ? html`<button class="btn plain dchip" type="button" data-ncunsort="${n.key}" title="Ask again for this name">Change</button>` : ''}</td></tr>`)}</tbody></table></div></details>` : '';
-  render(shell(biz, 'directors', 'Directors', d.from ? `Ledger from ${dayLabel(d.from)} · balance = took or got − paid for the hotel; above zero the person owes the hotel` : '', html`
+  render(shell(biz, 'directors', 'Directors', d.from ? `Ledger from ${dayLabel(d.from)} · balance = took or got − paid to the company; above zero the person owes the company` : '', html`
     <div id="dirmsg"></div>
     ${!d.from || !ppl.length ? (ed ? setup : html`<section class="card"><div class="note">An Owner or Accountant starts the ledger here.</div></section>`) : ''}
     ${names}${move}${d.families.map(family)}${addLine}${sorted}
@@ -11710,6 +11865,7 @@ async function routeInner() {
       if (screen === 'money-out') return moneyOutView(biz, query);
       if (screen === 'parties') return partiesView(biz, query);
       if (screen === 'directors') return biz.actions.includes('reports.view') ? directorsView(biz) : go(home(biz));
+      if (screen === 'loans') return biz.actions.includes('reports.view') ? loansView(biz) : go(home(biz));
       if (screen === 'whatsapp') return biz.actions.includes('wa.review') ? whatsappView(biz, query) : go(home(biz));
       if (screen === 'wagroups') return biz.actions.includes('wa.review') ? waGroupsView(biz) : go(home(biz));
       if (item?.phase) return laterView(biz, screen);

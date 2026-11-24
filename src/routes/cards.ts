@@ -15,6 +15,8 @@ import { matchStatements } from '../bank';
 import { syncCardFolder } from '../cardDrive';
 import { folderIdFrom, GoogleError, serviceAccountEmail } from '../google';
 import { addDays, istDay, shiftDayOf } from '../time';
+import { can } from '../permissions';
+import { cardKey } from '../directorCards';
 
 export const cardRoutes = new Hono<AppEnv>();
 
@@ -167,6 +169,8 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/unmatch', requireRole(
   await db.batch([
     stmt(db, 'DELETE FROM card_matches WHERE business_id = ? AND matched_at = ?', bid, first.matched_at),
     // A tip on the card, or a swipe booked to a head, was added with the match: it goes with it (kept in the audit log).
+    // A director's payment to the company (24 Nov 2026): its line in their account goes too.
+    ...added.map((x) => stmt(db, 'DELETE FROM director_entries WHERE business_id = ? AND transaction_id = ?', bid, x.id)),
     ...added.map((x) => stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", x.id)),
     ...[...new Set(set.map((m) => m.transaction_id))].map((tid) => stmt(db, `UPDATE transactions SET match_status = CASE payment_mode WHEN 'card' THEN 'awaiting_card_settlement' ELSE 'awaiting_bank_match' END
       WHERE id = ? AND match_status IS NULL AND (payment_mode = 'card' OR (payment_mode = 'upi' AND matched_bank_row IS NULL))
@@ -409,6 +413,58 @@ cardRoutes.post('/businesses/:businessId/cards/:paymentId/book', requireRole('ba
       note || `Card payment, card ${p.card_last4 ? `…${p.card_last4}` : ''} (no bill)`, day, cardAddedRow('booked', pid), t),
     ...cardMatchStatements(db, bid, [pid], [tx], c.get('user').id, t, { booked: true, headId }),
   ]);
+  return c.json({ ok: true });
+});
+
+/**
+ * Paid to the company by a director on the card machine (approved 24 Nov 2026): a line in their account, not income.
+ * The payment is matched to a transfer row (no account, no head) so the settlement still pairs with the bank; Undo on
+ * the payment takes both away. "Remember" keeps the card as theirs so its next payment with no bill is suggested.
+ */
+cardRoutes.post('/businesses/:businessId/cards/:paymentId/director', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  if (!can(c.get('role'), 'rows.approve')) fail(403, 'Only an Owner or Accountant books to a director\'s account.');
+  const pid = c.req.param('paymentId');
+  if (!isUuid(pid)) fail(404, 'Not found.');
+  const data = await body(c);
+  const directorId = typeof data.directorId === 'string' && isUuid(data.directorId) ? data.directorId : fail(400, 'Choose the person.');
+  const person = await one<{ name: string; family: string }>(db, 'SELECT name, family FROM directors WHERE id = ? AND business_id = ?', directorId, bid);
+  if (!person) fail(404, 'Choose the person.');
+  const note = text(data, 'note', 'Note', { optional: true, max: 200 });
+  const p = await one<CardPayment & { matched: number }>(db, `SELECT *, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = card_settlements.id) AS matched
+    FROM card_settlements WHERE id = ? AND business_id = ?`, pid, bid);
+  if (!p) fail(404, 'Card payment not found.');
+  if (p.matched || p.txn_type !== 'PURCHASE') fail(409, 'This payment is already matched, or is not a purchase.');
+  const day = shiftDayOf(p.paid_at);
+  const t = now();
+  const user = c.get('user').id;
+  const tx = newId();
+  const entry = newId();
+  const card = [p.scheme ?? p.card_type, p.card_last4 ? `··${p.card_last4}` : null].filter(Boolean).join(' ');
+  const what = `Paid to the company by ${person!.name}${card ? `, card ${card}` : ''}${note ? `: ${note}` : ''}`;
+  const key = data.remember === true ? cardKey(p) : null;
+  const rs = (v: number) => `₹${(v / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  await db.batch([
+    stmt(db, `INSERT INTO transactions (id, business_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, shift_day, match_status, ocr_original, created_at)
+      VALUES (?, ?, ?, ?, 'transfer', NULL, ?, 'bank_sheet', 'approved', 'card', ?, 'awaiting_card_settlement', json_set(?, '$.directorId', ?), ?)`, tx, bid, day, p.amount_paise,
+      `${what} — card payment`, day, cardAddedRow('booked', pid), directorId, t),
+    ...cardMatchStatements(db, bid, [pid], [tx], user, t, { booked: true, directorId }),
+    stmt(db, `INSERT INTO director_entries (id, business_id, director_id, day, kind, amount_paise, note, transaction_id, created_by, created_at) VALUES (?, ?, ?, ?, 'given', ?, ?, ?, ?, ?)`,
+      entry, bid, directorId, day, p.amount_paise, `Paid to the company on the card machine${card ? `, ${card}` : ''}${note ? `: ${note}` : ''}`, tx, user, t),
+    stmt(db, AUDIT, bid, user, 'directors.entry', 'director_entries', entry, null, JSON.stringify({ person: person!.name, family: person!.family, kind: 'given',
+      amountPaise: p.amount_paise, transactionId: tx, cardPaymentId: pid, changes: `${person!.family} · ${person!.name} · Paid to the company ${rs(p.amount_paise)} (card)` }), t),
+    ...(key ? [stmt(db, AUDIT, bid, user, 'directors.card_remember', 'card_settlements', key, null, JSON.stringify({ directorId, person: person!.name, changes: `Card ${card} remembered as ${person!.name}'s` }), t)] : []),
+  ]);
+  return c.json({ ok: true, entryId: entry });
+});
+
+/** Forget a remembered director card: its payments are no longer suggested for them. */
+cardRoutes.post('/businesses/:businessId/director-cards/forget', requireRole('rows.approve'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const key = text(await body(c), 'key', 'Card', { max: 40 })!;
+  await db.prepare(AUDIT).bind(bid, c.get('user').id, 'directors.card_forget', 'card_settlements', key, null, JSON.stringify({ changes: `Card ${key.replace('|', ' ··')} forgotten` }), now()).run();
   return c.json({ ok: true });
 });
 

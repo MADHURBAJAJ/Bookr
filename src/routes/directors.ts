@@ -8,7 +8,11 @@ import { body, date, fail, isUuid, paise, text } from '../http';
 import { can } from '../permissions';
 import { KIND_WORD, KINDS, ledgers, ledgerStart, nameKey, newNames, people, syncNc, toMove, type Kind } from '../directors';
 
+import { loanRoutes } from './loans';
+
 export const directorRoutes = new Hono<AppEnv>();
+// Loans sit with the directors (approved 24 Nov 2026).
+directorRoutes.route('/', loanRoutes);
 const AUDIT = `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
 const rs = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
@@ -161,6 +165,8 @@ directorRoutes.delete('/businesses/:businessId/director-entries/:id', requireRol
   const e = isUuid(id) ? await one<Record<string, unknown> & { kind: string }>(db, 'SELECT * FROM director_entries WHERE id = ? AND business_id = ?', id, bid) : null;
   if (!e) fail(404, 'Not found.');
   if (e!.kind === 'nc') fail(400, 'An NC line follows its bill: change the name on the bill, or sort the name again.');
+  if (e!.transaction_id && await one(db, "SELECT 1 AS x FROM transactions WHERE id = ? AND type = 'transfer' AND json_extract(ocr_original, '$.card') = 'booked'", e!.transaction_id))
+    fail(409, 'This line came from a card payment: Undo it on that shift\'s Card tab.');
   const made = await one<{ before: string | null }>(db, "SELECT before FROM audit_log WHERE business_id = ? AND action = 'directors.entry' AND row_id = ? ORDER BY id DESC LIMIT 1", bid, id);
   const removed = made?.before ? (JSON.parse(made.before) as { removedTx?: Record<string, unknown> }).removedTx : undefined;
   const s: D1PreparedStatement[] = [stmt(db, 'DELETE FROM director_entries WHERE id = ?', id)];

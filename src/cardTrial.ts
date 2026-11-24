@@ -8,6 +8,7 @@ import { autoPairs, cardCandidates, isCardCharge, isMachineUpi, machineLabel, up
 import { cardShiftChoices, plannedRows } from './sales';
 import { cardHere, settledHere } from './settledHere';
 import { cardAdvancePlans, cardAdvances } from './cardAdvance';
+import { cardKey, directorCards } from './directorCards';
 
 /** How near (minutes) a bill of another mode must be to a machine payment to be told as perhaps paid on the machine. */
 const NEAR_MIN = 60;
@@ -126,6 +127,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
       rowId: r.c.register_row_id ?? null, uploadId: r.c.register_row_id ? uploadOf.get(r.c.register_row_id) ?? null : null, swMode: r.c.sw_mode ?? null }))
     .filter((x): x is typeof x & { paidAt: number } => x.paidAt != null);
   const usedOther = new Set<string>();
+  // A remembered director's card (24 Nov 2026): its payment with no bill is suggested for them, never booked by itself.
+  const dirCards = await directorCards(db, businessId);
   const pay = (p: CardPayment) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, terminalId: p.terminal_id, upi: isMachineUpi(p), label: label(p) });
   const needs = left.flatMap((p) => {
     const mine = (candidates.get(p.id) ?? []).filter((k) => k.transactionIds.every((id) => own.has(id))).slice(0, 5);
@@ -152,6 +155,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
     return [{ payment: pay(p), why: !purchase ? 'not_purchase' : mine.length ? (mine.length > 1 ? 'several' : 'one') : tip ? 'tip' : written ? 'written' : 'no_bill',
       candidates: mine.map((k) => ({ comparisonIds: k.transactionIds, billNos: k.billNos, amountPaise: k.amountPaise, minutes: k.minutes,
         earlier: k.transactionIds.flatMap((id) => later.filter((x) => x.txId === id).map((x) => ({ billNo: x.billNo, fromDay: x.fromDay, amountPaise: x.amountPaise }))) })),
+      director: purchase && !mine.length && !tip && !written ? dirCards.get(cardKey(p) ?? '') ?? null : null,
       tip: tip ? { comparisonId: tip.id, billNo: tip.bill_no, amountPaise: tip.amount_paise, paidAt: tip.paid_at, tipPaise: p.amount_paise - tip.amount_paise } : null,
       written: written ? { comparisonId: written.id, billNo: written.billNo, mode: written.mode, amountPaise: written.amountPaise, paidAt: written.paidAt,
         minutes: Math.round(Math.abs(written.paidAt - p.paid_at) / 60000), rowId: written.rowId, uploadId: written.uploadId, swMode: written.swMode, upiNear: false } : null }];

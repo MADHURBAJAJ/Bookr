@@ -36,7 +36,7 @@ const TX_WHERE = `t.business_id = ? AND (a.kind = 'cash' AND t.type IN ('income'
 type Account = { id: string; name: string; kind: 'cash' | 'bank'; opening_balance_paise: number; opening_date: string };
 type BankRow = {
   id: string; account_id: string; direction: 'CR' | 'DR'; amount_paise: number; status: string; kind: string; description: string; note: string | null;
-  day: string; tx_id: string | null; tx_type: string | null; head_id: string | null; head: string | null; narration: string | null;
+  day: string; tx_id: string | null; tx_type: string | null; head_id: string | null; head: string | null; narration: string | null; tx_amount: number | null;
   cards: number; card_gross: number;
 };
 type Tx = {
@@ -78,7 +78,7 @@ fundsRoutes.get('/businesses/:businessId/reports/funds-flow', requireRole('bank.
       FROM transactions t JOIN accounts a ON a.id = t.account_id
       WHERE ${TX_WHERE} AND ${TX_DAY} >= a.opening_date AND ${TX_DAY} < ? GROUP BY t.account_id`, bid, from),
     all<BankRow>(db, `SELECT r.id, r.account_id, r.direction, r.amount_paise, r.status, r.kind, r.description, r.note, ${SHIFT_OF} AS day,
-        t.id AS tx_id, t.type AS tx_type, t.head_id, h.name AS head, t.narration,
+        t.id AS tx_id, t.type AS tx_type, t.head_id, h.name AS head, t.narration, t.amount_paise AS tx_amount,
         (SELECT count(*) FROM card_settlements s WHERE s.bank_row_id = r.id) AS cards,
         (SELECT coalesce(sum(s.amount_paise), 0) FROM card_settlements s WHERE s.bank_row_id = r.id) AS card_gross
       FROM bank_rows r JOIN accounts a ON a.id = r.account_id
@@ -144,6 +144,14 @@ fundsRoutes.get('/businesses/:businessId/reports/funds-flow', requireRole('bank.
       // Card payments gross, the card company's fees and GST out: the two net to what reached the bank.
       add('in:card', 'in', 'sales', 'Card settlements (card payments)', r.account_id, r.card_gross, r.day, `${r.description} (${r.cards} card payment${r.cards === 1 ? '' : 's'})`);
       if (r.card_gross !== r.amount_paise) add('out:card_fees', 'out', 'card_fees', 'Card machine fees and GST', r.account_id, r.card_gross - r.amount_paise, r.day, r.note || r.description);
+    } else if (r.tx_type === 'transfer' && /^Loan · /.test(r.narration ?? '')) {
+      // Booked to a loan (24 Nov 2026): money in and out of loans and deposits, not income or expenses. An EMI's interest
+      // is its own row under a head, so the loan row is the line less the interest.
+      const name = (r.narration ?? '').split(' · ')[1] ?? 'Loan';
+      const principal = r.tx_amount ?? r.amount_paise;
+      add(`loan:${cr ? 'in' : 'out'}:${name}`, cr ? 'in' : 'out', 'loans', `${name} (${cr ? 'loan in' : 'loan out'})`, r.account_id, principal, r.day, text);
+      if (r.amount_paise > principal) add(cr ? 'in:loan_interest' : 'out:loan_interest', cr ? 'in' : 'out', cr ? 'income' : 'expenses', cr ? 'Interest received on loans' : 'Interest paid on loans',
+        r.account_id, r.amount_paise - principal, r.day, text);
     } else if (r.tx_type === 'transfer') transfer(r.account_id, otherOf(r.tx_id, r.account_id), cr ? 'in' : 'out', r.amount_paise, r.day, text);
     else if (r.status === 'ignored') add(cr ? 'in:left_out' : 'out:left_out', cr ? 'in' : 'out', 'left_out', 'Left out on Bank (reversals and such)', r.account_id, r.amount_paise, r.day, `${r.description}${r.note ? ` · ${r.note}` : ''}`);
     else if (r.status === 'unmatched') {

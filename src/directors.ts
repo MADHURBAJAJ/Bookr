@@ -5,9 +5,9 @@
  * - stock taken: goods from the hotel's stock (a gas cylinder): no cash left, so the cash line goes;
  * - NC: a complimentary bill eaten by the family, at 50% of the bill; the other side is income under "Director NC";
  * - repaid: the hotel paying a director back for stock or bills they paid for it earlier: cash to them, so it adds;
- * - given ("Paid for the hotel"): money a director brings in, or a hotel bill they pay themselves: the only kind that lowers;
+ * - given ("Paid to the company", "Paid for the hotel" until 24 Nov 2026): money a director brings in, or a hotel bill they pay themselves: the only kind that lowers;
  * - opening: each person's balance on the day the ledger starts, typed in.
- * Balance = taken + stock + NC + repaid − paid for the hotel; above zero the person owes the hotel (fixed 23 Nov 2026).
+ * Balance = taken + stock + NC + repaid − paid to the company; above zero the person owes the hotel (fixed 23 Nov 2026).
  * Names on complimentary bills are sorted once (director's family member, staff, someone else); a director's NC lines
  * follow their bills by themselves (a bill no longer complimentary loses its line).
  */
@@ -19,7 +19,7 @@ import { istDay } from './time';
 export const KINDS = ['opening', 'taken', 'stock_taken', 'nc', 'given', 'repaid'] as const;
 export type Kind = (typeof KINDS)[number];
 export const TAKES: Kind[] = ['taken', 'stock_taken', 'nc', 'repaid'];
-export const KIND_WORD: Record<Kind, string> = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Paid for the hotel', repaid: 'Repaid' };
+export const KIND_WORD: Record<Kind, string> = { opening: 'Opening balance', taken: 'Taken', stock_taken: 'Stock taken', nc: 'NC', given: 'Paid to the company', repaid: 'Repaid' };
 export const NC_HEAD = 'Director NC';
 
 /** A name as a key: lower case, letters only, "sir", "madam", "ji" and "mr" dropped. */

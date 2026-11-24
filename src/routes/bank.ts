@@ -7,6 +7,7 @@ import { all, newId, now, one, stmt } from '../db';
 import { body, fail, isUuid, optionalPaise, text } from '../http';
 import { parseStatementRows, parseStatementText } from '../bankstatement';
 import { GoogleError, readSheet, serviceAccountEmail, sheetIdFrom } from '../google';
+import { loanKeys, loanOf } from '../loans';
 import { allocate, getRow, importLines, loadRules, matchedSet, matchStatements, ruleFor, settleOnCredit, suggestionsFor, type BankRow } from '../bank';
 import { byName, headFromItem, inText, loadHistory, loadItemHistory, loadParties, pickHead, resolveVendor } from '../parties';
 import { adjustStatements } from '../bankadjust';
@@ -185,8 +186,8 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
     LEFT JOIN transactions bt ON bt.id = r.transaction_id LEFT JOIN heads h ON h.id = bt.head_id
     WHERE r.business_id = ? AND r.day BETWEEN ? AND ? AND (? IS NULL OR r.account_id = ?) AND (? IS NULL OR r.status = ?)
     ORDER BY r.posted_at, r.tran_id LIMIT 3000`, bid, from, to, account, account, status, status);
-  const [rules, sug, parties, history, transfers] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to), loadParties(db, bid), loadHistory(db, bid),
-    transferHints(db, bid, rows)]);
+  const [rules, sug, parties, history, transfers, lkeys] = await Promise.all([loadRules(db, bid), suggestionsFor(db, bid, from, to), loadParties(db, bid), loadHistory(db, bid),
+    transferHints(db, bid, rows), loanKeys(db, bid)]);
   const itemHistory = rows.some((r) => r.status === 'unmatched' && r.direction === 'DR') ? await loadItemHistory(db, bid) : [];
   // Not a sale (Stage 5): interest named in the description suggests the interest head, when nothing better is known.
   const interestHead = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = 'interest received'", bid);
@@ -237,6 +238,8 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
         cashMove: r.status === 'unmatched' ? cashMoveOf(r) : null,
         // Money moved between the business's own accounts (approved 14 Nov 2026).
         transfer: transfers.get(r.id) ?? null,
+        // A remembered lender or borrower (24 Nov 2026): suggested, never booked by itself.
+        loan: r.status === 'unmatched' && r.kind !== 'card_settlement' ? loanOf(lkeys, r) : null,
         ownTransfer: r.status === 'booked' && /^Transfer (to|from) /.test(r.note ?? ''),
         refundOf: refundOf.has(r.id) ? { creditId: refundOf.get(r.id)!.id, postedAt: refundOf.get(r.id)!.posted_at, billNos: refundOf.get(r.id)!.bills } : null,
       };
@@ -1493,6 +1496,9 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/reopen', requireRole('
     ...(row.transaction_id ? [stmt(db, "DELETE FROM transactions WHERE id = ? AND source = 'bank_sheet'", row.transaction_id)] : []),
     // Cash moved between the drawer and the bank (Stage 6): both legs go.
     stmt(db, "DELETE FROM transactions WHERE business_id = ? AND type = 'transfer' AND json_extract(ocr_original, '$.bankRowId') = ?", bid, row.id),
+    // Booked to a loan (24 Nov 2026): its interest row and the loan's line go too.
+    stmt(db, "DELETE FROM transactions WHERE business_id = ? AND json_extract(ocr_original, '$.loanBankRowId') = ?", bid, row.id),
+    stmt(db, 'DELETE FROM loan_entries WHERE business_id = ? AND bank_row_id = ?', bid, row.id),
     stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.reopen', row.id, { status: row.status, note: row.note, transaction: tx }, { status: 'unmatched' }, t)),
   ]);
   return c.json({ ok: true });
