@@ -5,7 +5,8 @@ export default defineConfig({
   test: {
     testTimeout: 30000,
     // Worktrees made by Claude Code sit under .claude/ and hold copies of the tests.
-    exclude: ['**/node_modules/**', '.claude/**'],
+    // listener/ is a separate Node program with its own tests (node --test, run there with npm test).
+    exclude: ['**/node_modules/**', '.claude/**', 'listener/**'],
     hookTimeout: 60000,
   },
 });
