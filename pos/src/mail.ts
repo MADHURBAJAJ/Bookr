@@ -192,6 +192,17 @@ async function afterSave(db: DB, bid: string, id: string, x: ReadBooking) {
       `Settled: Djubo now has it as ${ref}.`, now(), bid, x.pnr).run();
   }
   await linkMatch(db, bid, id);
+  await adoptTwin(db, bid, id);
+}
+
+/** A MakeMyTrip booking whose mail has no room name (MakeMyTrip sometimes leaves it blank) takes the room type from its
+ *  Djubo twin, and goes in with it, when that is the only thing it was waiting for (24 Nov 2026). */
+async function adoptTwin(db: DB, bid: string, id: string) {
+  const pair = await one<{ mmt: string; type: string }>(db, `SELECT m.id AS mmt, d.room_type AS type FROM bookings a JOIN bookings b ON b.id = a.match_id
+    JOIN bookings m ON m.id IN (a.id, b.id) AND m.source = 'mmt' JOIN bookings d ON d.id IN (a.id, b.id) AND d.source = 'djubo'
+    WHERE a.id = ? AND a.business_id = ? AND m.status = 'new' AND m.problem = 'no room type' AND d.status IN ('approved', 'checked_in') AND d.room_type IS NOT NULL`, id, bid);
+  if (!pair) return;
+  await stmt(db, "UPDATE bookings SET room_type = ?, problem = NULL, status = 'approved', how = 'auto', updated_at = ? WHERE id = ? AND status = 'new'", pair.type, now(), pair.mmt).run();
 }
 
 /** Links a booking with the same stay read from the other source: same check-in, and the same phone or the same name. */
