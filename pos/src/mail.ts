@@ -3,13 +3,13 @@
 // once per Message-ID; then its bookings are read into `bookings`. A mail that cannot be read stays kept and can be read
 // again (after the reader is improved). Mail from anyone not listed in BOOKING_MAIL_FROM is turned away (it bounces back).
 import PostalMime, { type Address, type Email } from 'postal-mime';
-import { all, newId, now, one, stmt, type DB } from '../../src/db';
+import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../src/db';
 import type { Env } from './types';
-import { readerFor, type ReadBooking } from './booking-readers';
+import { readDjuboReport, readerFor, type DjuboReport, type ReadBooking, type ReportRoom } from './booking-readers';
 import { phoneKeySoft } from './booking-readers';
-import { linkWalkIn, recomputeDesk, syncStayRent } from './rooms';
+import { linkWalkIn, recomputeDesk, syncStay, syncStayRent } from './rooms';
 import { linkReservation } from './routes/frontdesk';
-import { CLOSED_TO, tableLayout, type Business } from './util';
+import { CLOSED_TO, clock, tableLayout, type Business } from './util';
 
 const GMAIL_CONFIRM = 'forwarding-noreply@google.com';
 export type MailSource = 'mmt' | 'djubo' | 'gmail' | 'other';
@@ -87,6 +87,15 @@ async function readMail(db: DB, businessId: string, mailId: string, source: Mail
     status = 'ignored'; note = 'Not a booking mail.';
   } else {
     try {
+      // Djubo's daily reports (24 Nov 2026): fill in bookings from before the POS read mails, and bring in guests staying.
+      const report = source === 'djubo' ? readDjuboReport(mail) : null;
+      if (report) {
+        const b = (await one<Business>(db, `SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp, ${CLOSED_TO} FROM businesses WHERE id = ?`, businessId))!;
+        note = await applyReport(db, b, mailId, report);
+        status = 'read';
+        await stmt(db, 'UPDATE inbound_mails SET status = ?, note = ? WHERE id = ?', status, note, mailId).run();
+        return;
+      }
       const found = readerFor(source)(mail);
       if (!found.length) { status = 'ignored'; note = 'No booking in this mail.'; } else {
         const b = (await one<Business>(db, `SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp, ${CLOSED_TO} FROM businesses WHERE id = ?`, businessId))!;
@@ -205,6 +214,69 @@ async function linkMatch(db: DB, bid: string, id: string) {
   const hits = others.filter((o) => (me.phone && o.phone === me.phone) || same(o.guest_name, me.guest_name));
   if (hits.length !== 1) return;   // none, or not sure which: a person links it
   await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', hits[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, hits[0].id)]);
+}
+
+/** Applies today's Djubo daily report (24 Nov 2026). An older report is kept but not applied, so reading mails again never
+ *  brings back guests who have left. */
+async function applyReport(db: DB, b: Business, mailId: string, rep: DjuboReport): Promise<string> {
+  const today = clock(b).shiftDay;
+  // Djubo sends them at about 7:30 am, before the 8 am day change: the report's date may be the day about to start.
+  const tomorrow = new Date(Date.parse(today) + 86_400_000).toISOString().slice(0, 10);
+  if (rep.day !== today && rep.day !== tomorrow) return `Djubo's daily report for ${rep.day}: only today's report is used.`;
+  const t = now();
+  if (rep.kind === 'front') {
+    const known = roomTypes(b);
+    let added = 0;
+    for (const x of rep.bookings.filter((y) => y.section === 'arriving' || y.section === 'staying')) {
+      if (await one(db, "SELECT 1 FROM bookings WHERE business_id = ? AND source = 'djubo' AND ext_ref = ?", b.id, x.extRef)) continue;
+      const problem = [!x.guestName && 'no guest name', !x.checkIn && 'no check-in date', !x.checkOut && 'no check-out date',
+        x.roomType && known.length && !known.includes(x.roomType.toLowerCase()) && `room type "${x.roomType}" is not in Settings`].filter(Boolean).join('; ') || null;
+      const id = newId();
+      await stmt(db, `INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, room_type, rooms, guests, check_in, check_out, status, how, problem, mail_id,
+          created_at, updated_at, pnr, channel, meal_plan, from_report, report_due_paise) VALUES (?, ?, 'djubo', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+        id, b.id, x.extRef, x.guestName ?? null, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null,
+        problem ? 'new' : 'approved', problem ? null : 'auto', problem, mailId, t, t, x.pnr ?? null, x.channel?.slice(0, 40) ?? null, x.mealPlan?.slice(0, 60) ?? null,
+        x.duePaise ?? null).run();
+      await linkMatch(db, b.id, id);
+      added++;
+    }
+    return added ? `Daily report: ${added} booking${added === 1 ? '' : 's'} from before the POS read Djubo's mails added.` : 'Daily report: every booking is already here.';
+  }
+  // Rooms: room numbers for bookings that have none, and guests already staying brought in as in house.
+  const byRef = new Map<string, ReportRoom[]>();
+  for (const r of rep.rooms) byRef.set(r.extRef, [...(byRef.get(r.extRef) ?? []), r]);
+  const layout = (tableLayout(b) ?? []).filter((s) => s.kind === 'rooms' || s.kind === 'dorms');
+  const tables = layout.flatMap((s) => s.tables);
+  const key = (x: string) => x.toLowerCase().replace(/\broom\b/g, '').replace(/[^a-z0-9]/g, '');
+  const tableOf = (label: string) => tables.find((x) => key(x) === key(label)) ?? null;
+  let labelled = 0;
+  let broughtIn = 0;
+  for (const [ref, rows] of byRef) {
+    const bk = await one<{ id: string; status: string; stay_id: string | null; room_labels: string | null; guest_name: string | null; check_in: string | null; check_out: string | null; guests: number | null }>(db,
+      "SELECT id, status, stay_id, room_labels, guest_name, check_in, check_out, guests FROM bookings WHERE business_id = ? AND source = 'djubo' AND ext_ref = ? AND status <> 'cancelled'", b.id, ref);
+    if (!bk) continue;
+    const labels = [...new Set(rows.map((r) => r.room))];
+    if (!bk.room_labels) { await stmt(db, 'UPDATE bookings SET room_labels = ?, updated_at = ? WHERE id = ?', labels.join(', ').slice(0, 200), t, bk.id).run(); labelled++; }
+    if (!rows.some((r) => r.status === 'staying') || bk.stay_id || bk.status === 'checked_in' || !bk.guest_name) continue;
+    const room = labels.map(tableOf).find((x): x is string => !!x);
+    if (!room) continue;
+    const stayId = newId();
+    try {
+      await db.batch([
+        stmt(db, `INSERT INTO stays (id, business_id, room, guest_name, check_in, created_at, check_out_plan, adults, before_pos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          stayId, b.id, room, bk.guest_name, bk.check_in ?? today, t, bk.check_out, rows.reduce((n, r) => n + (r.adults ?? 0), 0) || bk.guests || null),
+        stmt(db, "INSERT INTO debtor_accounts (id, business_id, kind, name, stay_id, created_at) VALUES (?, ?, 'room', ?, ?, ?)", newId(), b.id, `${room} · ${bk.guest_name}`, stayId, t),
+        stmt(db, `UPDATE bookings SET status = 'checked_in', stay_id = ?, updated_at = ? WHERE business_id = ? AND status IN ('approved', 'new')
+          AND (id = ?4 OR id = (SELECT match_id FROM bookings WHERE id = ?4))`, stayId, t, b.id, bk.id),
+      ]);
+    } catch (e) {
+      if (isUniqueViolation(e)) continue;   // the room already has a guest here
+      throw e;
+    }
+    await syncStay(db, b.id, stayId);
+    broughtIn++;
+  }
+  return `Daily rooms report: ${broughtIn} guest${broughtIn === 1 ? '' : 's'} already staying brought in; room numbers set on ${labelled} booking${labelled === 1 ? '' : 's'}.`;
 }
 
 async function sha256(b: Uint8Array) {

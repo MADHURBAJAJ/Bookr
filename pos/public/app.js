@@ -2190,7 +2190,8 @@ function roomPicker() {
 // Paid before arrival is Djubo's advance less what reception entered (money taken at the desk, collected here with a receipt),
 // and less any advance already taken here for the booking (24 Nov 2026).
 const prepaidOf = (b) => Math.max(0, (b?.paidPaise ?? 0) - (b?.deskPaidPaise ?? 0));
-const dueOf = (b) => (b && b.amountPaise ? Math.max(0, b.amountPaise - prepaidOf(b) - (b.heldPaise ?? 0)) : 0);
+const dueOf = (b) => (b && b.fromReport && b.amountPaise == null ? Math.max(0, (b.reportDuePaise ?? 0) - (b.heldPaise ?? 0))
+  : b && b.amountPaise ? Math.max(0, b.amountPaise - prepaidOf(b) - (b.heldPaise ?? 0)) : 0);
 /** '2026-11-23 15:51' (India time, as the booking mail says it) → '23 Nov, 3:51 pm'. */
 const stampText = (v) => {
   if (!v) return '';
@@ -2212,9 +2213,14 @@ function bookingCard(a, onBill = false) {
     <div class="small">Room: ${a.roomType ?? '?'}${a.roomLabels ? ` ${a.roomLabels}` : ''}${a.rooms > 1 ? ` × ${a.rooms}` : ''}${a.mealPlan ? ` · ${a.mealPlan}` : ''}</div>
     ${a.requests ? html`<div class="small">Requests: ${a.requests}</div>` : ''}
     ${a.deskPaidPaise ? html`<div class="small"><strong>Entered in Djubo as taken at reception: ${rs(a.deskPaidPaise)}</strong>${a.heldPaise ? ` · ${rs(a.heldPaise)} already taken here (advance receipt)` : ' · take it here so a receipt prints'}</div>` : ''}
+    ${a.fromReport ? html`<div class="small" style="margin-top:4px"><strong>From Djubo's daily report</strong> (made before the POS read Djubo's mails): no phone or total rent in it.${a.amountPaise == null ? html` Djubo says ${a.reportDuePaise ? html`<strong>${rs(a.reportDuePaise)} still to collect</strong>` : 'nothing left to collect'}.` : ''}</div>` : ''}
     ${a.amountPaise ? html`<div style="margin-top:4px">Total ${rs(a.amountPaise)}${prepaidOf(a) ? ` · Paid before arrival ${rs(prepaidOf(a))}` : ''} ${onBill ? '' : html` · ${due ? html`<strong>To collect ${rs(due)}</strong>` : html`<strong>To collect: nothing ✓</strong>`}`}</div>` : ''}
   </div>`;
 }
+actions.reportRent = async (d) => {
+  const r = await api('POST', `${B()}/stays/${d.id}/report-rent`, { total: ui.rptRent ?? '' });
+  ui.rptRent = ''; ui.roomBill = r; ui.error = null; flash = { kind: 'ok', text: `Total rent saved: ${rs(r.rentPaise)} on the room bill.` }; rerender();
+};
 /** One line of the room bill in plain words. */
 const MODE_NAME = { cash: 'Cash', upi: 'UPI', card: 'Card' };
 function folioLabel(l) {
@@ -2273,6 +2279,10 @@ function roomBillPanel(r) {
   return html`<section class="panel" style="margin-bottom:16px;max-width:820px;border-color:var(--pri-line)">
     <div class="line"><h2 class="grow" style="margin:0">${name}${out ? html` <span class="badge bad">checked out ${dateTime(st.checkedOutAt)}</span>` : ''}</h2><button class="btn ghost" type="button" data-act="rbClose">Close</button></div>${ui.recv || ui.refund || ui.adv ? '' : errorBox()}
     ${!out && st.foreign && !st.formCAt ? html`<div class="msg warn" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow">Foreign guest: Form C is due within 24 hours of arrival.</span><button class="btn" type="button" data-act="formC" data-id="${st.id}">Form C filed</button></div>` : ''}
+    ${r.booking?.fromReport && r.booking.amountPaise == null && !st.checkedOutAt ? html`<form class="msg warn" style="display:block;margin-top:8px"><strong>Type the total rent from Djubo</strong>
+      <div class="small">This booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}). The rest counts as paid before arrival. Needed before check-out.</div>
+      <div class="row" style="margin-top:6px"><input class="in" inputmode="decimal" data-model="rptRent" value="${ui.rptRent ?? ''}" placeholder="Total rent in Djubo (₹)" style="max-width:220px">
+        <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
     ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
       ${r.lines.map((l) => html`<tr><td>${folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}

@@ -984,7 +984,8 @@ export async function stayBill(c: Context<AppEnv>, id: string) {
   const [lines, booking, invoice] = await Promise.all([
     folioLines(db, s.account_id),
     one(db, `SELECT ext_ref AS extRef, source, guest_name AS guestName, channel, room_type AS roomType, room_labels AS roomLabels, rooms, guests, check_in AS checkIn, check_out AS checkOut,
-        amount_paise AS amountPaise, paid_paise AS paidPaise, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests, ota_ref AS otaRef, pnr
+        amount_paise AS amountPaise, paid_paise AS paidPaise, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests, ota_ref AS otaRef, pnr,
+        from_report AS fromReport, report_due_paise AS reportDuePaise
       FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1`, s.id),
     invoiceOut(c, s.id),
   ]);
@@ -999,6 +1000,30 @@ export async function stayBill(c: Context<AppEnv>, id: string) {
 }
 
 settingsRoutes.get(`${B}/stays/:id/bill`, requireAction('stays.edit'), async (c) => c.json(await stayBill(c, c.req.param('id'))));
+
+// The total rent of a booking filled in from Djubo's daily report (24 Nov 2026): the report has only what is still to
+// collect, so reception types the total from Djubo once. What Djubo said was still to collect when the booking was first
+// read stays to collect; the rest counts as paid before arrival.
+settingsRoutes.post(`${B}/stays/:id/report-rent`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const s = await openStay(c, c.req.param('id'));
+  if (s.checked_out_at) fail(409, 'This guest has checked out.');
+  const data = await body(c);
+  const total = paise(data, 'total', 'Total rent');
+  if (total <= 0) fail(400, 'Total rent must be above zero.');
+  const bk = await one<{ id: string; amount_paise: number | null; report_due_paise: number | null }>(c.env.DB,
+    'SELECT id, amount_paise, report_due_paise FROM bookings WHERE stay_id = ? AND business_id = ? AND from_report = 1 ORDER BY updated_at DESC LIMIT 1', s.id, bid);
+  if (!bk) fail(409, 'This stay is not from Djubo\'s daily report: add rent with Add charge.');
+  if (bk.amount_paise !== null) fail(409, 'The total rent is already on this bill.');
+  const due = Math.max(0, bk.report_due_paise ?? 0);
+  if (due > total) fail(400, `Djubo said ${rupeesText(due)} was still to collect, more than this total. Check the total in Djubo.`);
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE bookings SET amount_paise = ?, paid_paise = ?, updated_at = ? WHERE id = ?', total, total - due, now(), bk.id),
+    audit(c.env.DB, bid, c.get('staff').id, 'stay.report_rent', 'stays', s.id, null, { totalPaise: total, paidBeforePaise: total - due }),
+  ]);
+  await syncStay(c.env.DB, bid, s.id);
+  return c.json(await stayBill(c, s.id), 201);
+});
 
 // A charge on the room by hand: rent when no booking mail came (a direct guest), an extra bed, a late check-out. Taking
 // rent off (a discount at the desk, a mistake) needs a manager.
@@ -1037,6 +1062,8 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
     `SELECT coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balance, d.id AS account_id, s.room, s.guest_name, s.phone, s.check_in
     FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id WHERE s.id = ? AND s.business_id = ? AND s.checked_out_at IS NULL`, id, bid);
   if (!row) fail(404, 'Open stay not found.');
+  // A booking from Djubo's daily report needs its total rent typed first, so the invoice is right (24 Nov 2026).
+  if (await one(db, 'SELECT 1 FROM bookings WHERE stay_id = ? AND from_report = 1 AND amount_paise IS NULL', id)) fail(409, 'Type the total rent from Djubo on the room bill first: this booking came from Djubo\'s daily report, which has no total.');
   if (row.balance > 0) fail(409, `${rupeesText(row.balance)} is still to pay on this room. Take the guest's payment first.`);
   if (row.balance < 0) fail(409, `${rupeesText(-row.balance)} of the guest's deposit or advance is left. Refund it first.`);
   // Who the invoice is made out to (25 Nov 2026): a company that pays or claims GST, typed at check-out or from the reservation.

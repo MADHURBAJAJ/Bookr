@@ -276,3 +276,64 @@ const READERS: Record<'mmt' | 'djubo', (mail: Email) => ReadBooking[]> = {
 export const readerFor = (source: 'mmt' | 'djubo') => READERS[source];
 /** Tests only: put a reader in place. */
 export const setReader = (source: 'mmt' | 'djubo', fn: (mail: Email) => ReadBooking[]) => { READERS[source] = fn; };
+
+// ---------- Djubo's daily reports (24 Nov 2026) ----------
+// "XOXO HOSTEL: Daily Front Office Report - 24 Nov, 2026": sections (Today's Confirm Check-In, Staying Over, Today's
+// Check-Out, holds, Yesterday No Show), each with channel rows ("Direct", "MAKE MY TRIP") and one row per booking:
+// number (and the OTA's), guest (the channel's name after it), "TYPE X n", pax, "EP X n", check-in, check-out, outstanding.
+// "XOXO HOSTEL: Daily Occupied Rooms Report - …": one row per room or bed: room, "guest NUMBER", status, dates, A/C/I, meal.
+// Neither has a phone or the total amount.
+
+export interface ReportBooking { section: 'arriving' | 'staying' | 'leaving' | 'noshow' | 'other'; extRef: string; pnr?: string; guestName?: string; channel?: string;
+  roomType?: string; rooms?: number; guests?: number; mealPlan?: string; checkIn?: string; checkOut?: string; duePaise?: number }
+export interface ReportRoom { room: string; extRef: string; guestName?: string; status: 'arriving' | 'staying' | 'leaving' | 'other'; checkIn?: string; checkOut?: string; adults?: number }
+export type DjuboReport = { kind: 'front'; day: string; bookings: ReportBooking[] } | { kind: 'rooms'; day: string; rooms: ReportRoom[] };
+
+const looseDate = (s: string | undefined) => dateOf((s ?? '').replace(/-/g, ' '));
+const REF = /^([A-Z]{2,}\d{5,})(?:\s*\(([^)]+)\))?/;
+
+/** A Djubo daily report this POS uses, or null for any other mail. */
+export function readDjuboReport(mail: Pick<Email, 'subject' | 'html' | 'text'>): DjuboReport | null {
+  const subject = mail.subject ?? '';
+  const day = looseDate(/-\s*(\d{1,2}\s+[A-Za-z]{3},?\s+\d{4})\s*$/.exec(subject)?.[1]);
+  if (!day) return null;
+  const rows = mailRows(mail);
+  if (/Daily Front Office Report/i.test(subject)) {
+    let section: ReportBooking['section'] = 'other';
+    let channel: string | undefined;
+    const out: ReportBooking[] = [];
+    for (const r of rows) {
+      const line = r.join(' ');
+      if (/Confirm Check-?In\s*:/i.test(line)) { section = 'arriving'; continue; }
+      if (/Staying Over\s*:/i.test(line)) { section = 'staying'; continue; }
+      if (/Today'?s Check-?Out\s*:/i.test(line)) { section = 'leaving'; continue; }
+      if (/No Show Booking\s*:/i.test(line)) { section = 'noshow'; continue; }
+      if (/(Hold|Enquiry)[^:]*:\s*\d+ Bookings/i.test(line)) { section = 'other'; continue; }
+      if (r.length === 1 && !REF.test(r[0]) && /^[A-Za-z .&-]{3,40}$/.test(r[0])) { channel = r[0].trim(); continue; }
+      const m = REF.exec(r[0] ?? '');
+      if (!m || r.length < 7) continue;
+      const [, extRef, ota] = m;
+      const typeCell = r[2] ?? '';
+      const tm = /^(.*?)\s+X\s+(\d+)\s*$/i.exec(typeCell);
+      const guest = (r[1] ?? '').replace(new RegExp(`\\s*${(channel ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i'), '').trim();
+      out.push({ section, extRef, pnr: ota && /^\d{6,}$/.test(ota.trim()) ? ota.trim() : undefined, guestName: guest || undefined, channel,
+        roomType: tm ? roomTypeOf(tm[1]) : typeCell ? roomTypeOf(typeCell) : undefined, rooms: tm ? Number(tm[2]) : undefined,
+        guests: Number(r[3]) || undefined, mealPlan: (r[4] ?? '').replace(/\s+X\s+\d+$/i, '').trim() || undefined,
+        checkIn: looseDate(r[5]), checkOut: looseDate(r[6]), duePaise: paiseOf(r[7]) });
+    }
+    return { kind: 'front', day, bookings: out };
+  }
+  if (/Daily Occupied Rooms Report|Rooms Status Report/i.test(subject)) {
+    const out: ReportRoom[] = [];
+    for (const r of rows) {
+      const m = /^(.*?)\s*([A-Z]{2,}\d{5,})\s*$/.exec(r[1] ?? '');
+      if (!m || r.length < 5) continue;
+      const st = (r[2] ?? '').toLowerCase();
+      out.push({ room: r[0].trim(), extRef: m[2], guestName: m[1].trim() || undefined,
+        status: /check-?in/.test(st) ? 'arriving' : /stay/.test(st) ? 'staying' : /check-?out/.test(st) ? 'leaving' : 'other',
+        checkIn: looseDate(r[3]), checkOut: looseDate(r[4]), adults: Number(r[5]) || undefined });
+    }
+    return { kind: 'rooms', day, rooms: out };
+  }
+  return null;
+}

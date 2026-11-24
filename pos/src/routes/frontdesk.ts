@@ -195,7 +195,8 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
   const { t, shiftDay: today } = clock(b);
   const [arrivals, reservations, stays, chart, alerts, desk, unplaced] = await Promise.all([
     all<{ id: string; guestName: string | null; roomType: string | null; roomLabels: string | null; checkIn: string; checkOut: string; channel: string | null; source: string;
-      amountPaise: number | null; paidPaise: number | null; deskPaidPaise: number; heldPaise: number; problem: string | null }>(db, `SELECT id, guest_name AS guestName, room_type AS roomType,
+      amountPaise: number | null; paidPaise: number | null; deskPaidPaise: number; heldPaise: number; problem: string | null; fromReport: number; reportDuePaise: number | null }>(db, `SELECT id, guest_name AS guestName, room_type AS roomType,
+      from_report AS fromReport, report_due_paise AS reportDuePaise,
       room_labels AS roomLabels, check_in AS checkIn, check_out AS checkOut, channel, source, amount_paise AS amountPaise, paid_paise AS paidPaise, desk_paid_paise AS deskPaidPaise, problem,
       (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = bk.id OR d.booking_id = bk.match_id)) AS heldPaise
       FROM bookings bk WHERE business_id = ? AND status IN ('approved', 'new') AND unplaced = 0 AND check_in <= ? AND check_out > ? AND stay_id IS NULL
@@ -217,7 +218,9 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
   const live = reservations.filter((r) => !(r.status === 'hold' && (r.holdUntil ?? 0) < t));
   const rooms = chart.sections.reduce((n, s) => n + s.rooms.length, 0);
   const busy = new Set(chart.bars.map((x) => x.room)).size;
-  const due = (a: (typeof arrivals)[number]) => Math.max(0, (a.amountPaise ?? 0) - Math.max(0, (a.paidPaise ?? 0) - a.deskPaidPaise) - a.heldPaise);
+  // From Djubo's daily report with no total yet (24 Nov 2026): what the report says is still to collect.
+  const due = (a: (typeof arrivals)[number]) => (a.fromReport && a.amountPaise === null ? Math.max(0, (a.reportDuePaise ?? 0) - a.heldPaise)
+    : Math.max(0, (a.amountPaise ?? 0) - Math.max(0, (a.paidPaise ?? 0) - a.deskPaidPaise) - a.heldPaise));
   const toCollect = arrivals.reduce((n, a) => n + due(a), 0) + live.reduce((n, r) => n + Math.max(0, r.totalPaise - r.heldPaise), 0)
     + stays.reduce((n, s) => n + Math.max(0, s.balancePaise), 0);
   return c.json({

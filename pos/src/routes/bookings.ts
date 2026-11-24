@@ -18,7 +18,7 @@ bookingRoutes.use(`${B}/*`, requireStaff);
 const COLS = `id, source, ext_ref AS extRef, guest_name AS guestName, phone, room_type AS roomType, rooms, guests, check_in AS checkIn, check_out AS checkOut,
   amount_paise AS amountPaise, paid_paise AS paidPaise, status, how, problem, match_id AS matchId, mail_id AS mailId, stay_id AS stayId, created_at AS createdAt,
   ota_ref AS otaRef, pnr, room_labels AS roomLabels, channel, unplaced, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests,
-  desk_paid_paise AS deskPaidPaise, entered_by AS enteredBy,
+  desk_paid_paise AS deskPaidPaise, entered_by AS enteredBy, from_report AS fromReport, report_due_paise AS reportDuePaise,
   (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = bk.id OR d.booking_id = bk.match_id)) AS heldPaise`;
 const masked = <T extends { phone: string | null }>(x: T) => ({ ...x, phone: x.phone ? `••••${x.phone.slice(-4)}` : null });
 
