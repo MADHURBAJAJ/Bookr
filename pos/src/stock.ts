@@ -5,7 +5,7 @@
 import { all, newId, stmt, type DB } from '../../src/db';
 
 /** Orders opened from this time take stock at the KOT; older ones at payment. Tests set it to 0. */
-export const stockRule = { kotFrom: Date.parse('2026-11-24T19:30:00Z') };
+export const stockRule = { kotFrom: Date.parse('2026-11-25T02:30:00Z') };   // 25 Nov, 8 am India time: the shift start
 export const stockAtKot = (openedAt: number) => openedAt >= stockRule.kotFrom;
 
 const storesOf = (db: DB, bid: string) => all<{ id: string; kind: string }>(db, 'SELECT id, kind FROM stock_stores WHERE business_id = ? ORDER BY created_at', bid);
