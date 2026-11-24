@@ -984,3 +984,32 @@ body.desk main:has(> .drawer) { max-width: none; }
 .ctag.who { background: var(--warn); color: var(--panel); }
 .ctag.day { background: var(--pri); color: var(--on-pri); }
 .ctag.over { background: var(--bad); color: var(--panel); }
+
+/* ---------- Counter (24 Nov 2026): the shared front desk and restaurant desk */
+.ctrtop { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.ctrfind { display: flex; gap: 8px; max-width: 720px; }
+.ctrfind .in { flex: 1; }
+.ctralerts { display: flex; flex-wrap: wrap; gap: 6px; }
+.ctralerts a { text-decoration: none; }
+.ctr { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .ctr { grid-template-columns: minmax(0, 1fr); } }
+.ctrcol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+body .ctrcol .kpis { margin-bottom: 0; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); }
+.ctrlist, .ctrgroup { display: flex; flex-direction: column; }
+.ctrrooms { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 5px; }
+.ctrroom { display: flex; flex-direction: column; gap: 1px; border-radius: 7px; padding: 5px 7px; border: 1px solid var(--line); background: var(--panel); font-size: 12.5px; min-width: 0; }
+.ctrroom small { font-size: 10.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctrdorms { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.ctrdorm { border: 1px solid var(--line); border-radius: 8px; padding: 5px 7px; font-size: 11.5px; display: flex; flex-direction: column; gap: 4px; }
+.ctrdorm div { display: flex; flex-wrap: wrap; gap: 3px; }
+.ctrbed { width: 18px; height: 14px; border-radius: 3px; border: 1px solid var(--line); background: var(--panel); }
+.c-inh { background: var(--pri-tint); border-color: var(--pri); } .c-inh small { color: var(--pri); }
+.ctrbed.c-inh { background: var(--pri); }
+.c-arr { background: var(--warn-tint); border-color: var(--warn); } .c-arr small { color: var(--warn); }
+.ctrbed.c-arr { background: var(--warn); }
+.c-out { background: var(--soft); border-color: var(--ink); } .c-out small { color: var(--ink); }
+.ctrbed.c-out { background: var(--quiet); }
+.c-free { border-style: dashed; } .c-free small { color: var(--quiet); }
+.c-dirty { border-color: var(--bad); border-width: 2px; } .c-dirty small { color: var(--bad); }
+.c-ooo { background: var(--soft); } .c-ooo small { color: var(--quiet); }
+.ctrkeys { margin-top: 12px; }

@@ -125,7 +125,7 @@ const fullButton = () => (window.bookrDesktop?.minimize ? html`<button type="but
   <button type="button" class="themebtn" data-act="deskFull" title="Full screen on or off (F11)" aria-label="Full screen on or off">${FULL_ICON}</button>`
   : document.fullscreenEnabled ? html`<button type="button" class="themebtn" data-act="fullScreen" title="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}" aria-label="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}">${FULL_ICON}</button>` : '');
 function shell(active, body) {
-  const links = [['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/payments', 'Payments', 'pos.view'], ['#/shift', 'Day close', 'shift.close'],
+  const links = [['#/counter', 'Counter', 'stays.edit'], ['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/payments', 'Payments', 'pos.view'], ['#/shift', 'Day close', 'shift.close'],
     ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   const navLinks = links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`);
   const current = links.find(([h]) => h === active)?.[1] ?? 'Menu';
@@ -198,6 +198,7 @@ async function route() {
     if (path === 'done') return await doneScreen(a);
     refreshDeskAlerts();
     if (path === 'rooms') return await roomsScreen(a);
+    if (path === 'counter') return await counterScreen();
     if (path === 'credit') return await creditScreen();
     if (path === 'payments') return await paymentsScreen(a);
     if (path === 'shift') return await shiftScreen();
@@ -384,6 +385,9 @@ actions.pinGo = async () => {
   try { await api('POST', '/auth/pin', { staffId: ui.who, pin: ui.pin }); } catch (e) { ui.pin = ''; throw e; }
   me = null; go('#/');
 };
+/** The desk screens where the counter's shortcut keys work: Counter, Tables and Rooms. */
+const onDesk = () => /^#\/(counter|rooms)?(\/.*)?$|^#?$/.test(location.hash) && !/^#\/(order|bill|settle|done)/.test(location.hash);
+let pendingPick = null;   // a new order asked for by a shortcut on Rooms: opened on Tables
 // Keyboard shortcuts (25 Nov 2026): / searches the screen, N starts a new reservation (on Rooms), Esc closes the side
 // panel or the open form. Not while typing in a field (except Esc).
 const ESC_KEYS = ['roomBill', 'recv', 'refund', 'adv', 'rbForm', 'chartSel', 'resSel', 'drawer', 'approval', 'guestAsk'];
@@ -404,8 +408,15 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === '/') {
     const box = root.querySelector('input[type="search"], [data-search]');
     if (box) { ev.preventDefault(); box.focus(); box.select?.(); }
-  } else if ((ev.key === 'n' || ev.key === 'N') && location.hash.startsWith('#/rooms') && can('stays.edit')) {
+  } else if ((ev.key === 'n' || ev.key === 'N') && onDesk() && can('stays.edit')) {
     ev.preventDefault(); go('#/rooms/new');
+  } else if ((ev.key === 'c' || ev.key === 'C') && onDesk() && can('stays.edit')) {
+    ev.preventDefault(); go('#/rooms/checkin');
+  } else if (['t', 'r', 'k'].includes(ev.key.toLowerCase()) && onDesk() && can('orders.edit')) {
+    // New table (T), room service (R), takeaway (K) from Counter, Tables or Rooms (24 Nov 2026).
+    ev.preventDefault();
+    const kind = { t: 'table', r: 'room', k: 'takeaway' }[ev.key.toLowerCase()];
+    if (/^#\/(counter)?$|^$|^#$/.test(location.hash)) actions.newOrder({ kind }); else { pendingPick = kind; go('#/'); }
   }
 });
 // Sortable tables: a header with data-sort sorts its table's rows on click (numbers by value, ₹ and commas ignored).
@@ -454,9 +465,115 @@ const STATE_SHORT = { billed: 'To pay', tab: 'Tab', new: 'Not sent', open: 'With
 const orderHref = (o) => (o.status === 'billed' ? `#/settle/${o.bill.id}` : `#/order/${o.id}`);
 const KIND_TEXT = { table: 'Table', room: 'Room service', takeaway: 'Takeaway' };
 
+// ---------- Counter (24 Nov 2026): the shared front desk and restaurant billing desk on one screen. Restaurant on the left
+// (running tables, carried over first; room service, takeaway and tabs), front desk on the right (today's numbers, every
+// room and bed tonight, arriving, leaving, money owed), with one search and the alerts on top. Shortcut keys: / search,
+// T new table, R room service, K takeaway, C check in, N new reservation (also on Tables and Rooms).
+async function counterScreen() {
+  const today = me.business.shiftDay;
+  const [{ orders, tables, tablesFixed, sections }, fd, chart] = await Promise.all([
+    api('GET', B() + '/orders'),
+    api('GET', B() + '/frontdesk/today').catch(() => null),
+    api('GET', `${B()}/frontdesk/chart?from=${today}&days=1`).catch(() => null),
+    load('stays'),
+  ]);
+  ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.fd = fd; ui.cchart = chart;
+  ui.arrivals = (fd?.arrivals ?? []).filter((a) => a.kind === 'booking');
+  rerender = () => {
+    const orderN = (st) => ui.orders.filter((o) => orderState(o) === st).length;
+    const toPay = ui.orders.filter((o) => orderState(o) === 'billed').reduce((t, o) => t + (o.bill?.totalPaise ?? 0), 0);
+    const carried = ui.orders.filter(isCarried);
+    const overdue = carried.filter((o) => o.openedShiftDay < addDays(me.business.shiftDay, -1));
+    const rest = ui.orders.filter((o) => o.kind !== 'table').sort((a, b) => a.openedAt - b.openedAt);
+    const f = ui.fd;
+    const alerts = [
+      ...(f?.alerts.notInDjubo ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', text: `Not in Djubo yet: ${x.guestName} · ${x.rooms}`, href: '#/rooms/list' })),
+      ...overdue.map((o) => ({ tone: 'bad', text: `${o.place} open since ${dayName(o.openedShiftDay)}: clear before the day closes`, href: orderHref(o) })),
+      ...(f?.alerts.deskToTake ? [{ tone: 'warn', text: `Reception money to take: ${plural(f.alerts.deskToTake, 'booking')}`, href: '#/rooms' }] : []),
+      ...(f?.alerts.unplaced ? [{ tone: 'bad', text: `Djubo could not place ${plural(f.alerts.unplaced, 'booking')}`, href: '#/rooms/list' }] : []),
+      ...(f?.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'info', text: `Form C due: ${x.room} · ${x.guestName}`, href: '#/rooms' })),
+    ];
+    paint(shell('#/counter', html`
+      <div class="ctrtop">
+        ${can('bills.print') ? html`<form class="findbill ctrfind" role="search"><label class="vh" for="findNo">Search</label>
+          <input class="in" id="findNo" type="search" data-model="findNo" placeholder="Search: guest, phone, room, table or bill no.   /" value="${ui.findNo ?? ''}" autocomplete="off">
+          <button class="btn" type="submit" data-act="findBill" data-submit>Search</button></form>` : ''}
+        ${alerts.length ? html`<div class="ctralerts">${alerts.map((a) => html`<a class="status ${a.tone}" href="${a.href}">${a.text}</a>`)}</div>` : ''}
+      </div>
+      ${errorBox()}
+      ${ui.found ? searchResults(ui.found) : ''}
+      <div class="ctr">
+        <section class="panel ctrcol" aria-label="Restaurant">
+          <div class="row"><h2 class="grow" style="margin:0">Restaurant</h2>
+            ${can('orders.edit') ? html`<button class="btn pri sm" type="button" data-act="newOrder" data-kind="table">New table · T</button>
+              <button class="btn sm" type="button" data-act="newOrder" data-kind="room">Room service · R</button>
+              <button class="btn sm" type="button" data-act="newOrder" data-kind="takeaway">Takeaway · K</button>` : ''}</div>
+          ${ui.picking ? newOrderForm() : ''}
+          <div class="kpis">${kpi('Running', String(ui.orders.length))}${kpi('To pay', rs(toPay), plural(orderN('billed'), 'bill'))}${kpi('With kitchen', String(orderN('open')))}
+            ${kpi('Not sent', String(orderN('new')), '', orderN('new') ? 'warn' : '')}${kpi('Carried over', String(carried.length), overdue.length ? `${overdue.length} overdue` : '', overdue.length ? 'bad' : '')}</div>
+          ${can('orders.edit') && ui.tables.length ? tableGrid() : ''}
+          <div class="sect"><h3 style="margin:0">Room service, takeaway and tabs</h3><span class="small quiet">${rest.length}</span></div>
+          ${rest.length ? html`<div class="ctrlist">${rest.map((o) => { const st = orderState(o); return html`<a class="drow" href="${orderHref(o)}"><span class="grow"><strong>${o.place}</strong>
+            <small>${KIND_TEXT[o.kind] ?? o.kind}${o.guestName ? ` · ${o.guestName}` : ''} · ${since(o.openedAt)}</small></span>
+            <span class="dright">${carriedTag(o)}<span class="num">${rs(st === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span> <span class="badge ${st}">${st === 'billed' ? 'To pay' : st === 'tab' ? 'Tab' : STATE_TEXT[st]}</span></span></a>`; })}</div>`
+            : html`<p class="empty">No room service, takeaway or tab open.</p>`}
+        </section>
+        <section class="panel ctrcol" aria-label="Front desk">${f ? counterDesk(f) : html`<p class="empty">Could not load the front desk.</p>`}</section>
+      </div>
+      <p class="small quiet ctrkeys"><kbd>/</kbd> search · <kbd>T</kbd> new table · <kbd>R</kbd> room service · <kbd>K</kbd> takeaway · <kbd>C</kbd> check in · <kbd>N</kbd> new reservation · <kbd>Esc</kbd> close · the keys work on Tables and Rooms too</p>`));
+  };
+  rerender();
+}
+/** The front desk half of Counter: today's numbers, every room and bed tonight, then arriving, leaving and money owed. */
+function counterDesk(f) {
+  const today = f.today;
+  const leavingRooms = new Set(f.leaving.map((x) => roomKeyOf(x.room)));
+  const hk = ui.cchart?.housekeeping ?? {};
+  const tonight = (room) => {
+    const key = roomKeyOf(room);
+    if (leavingRooms.has(key)) return ['out', 'Leaving'];
+    const bar = (ui.cchart?.bars ?? []).find((b) => roomKeyOf(b.room) === key && b.from <= today && b.to > today);
+    if (bar?.kind === 'occ') return ['inh', (bar.guest ?? bar.label ?? 'In house').split(' ')[0]];
+    if (bar && ['arr', 'pos', 'hold'].includes(bar.kind)) return ['arr', 'Arriving'];
+    if (bar?.kind === 'ooo') return ['ooo', 'Out of order'];
+    return hk[room] === 'dirty' ? ['dirty', 'Dirty'] : ['free', 'Free'];
+  };
+  const secs = ui.cchart?.sections ?? [];
+  const roomSecs = secs.filter((x) => x.kind === 'rooms');
+  const dormSecs = secs.filter((x) => x.kind === 'dorms');
+  const beds = dormSecs.flatMap((x) => x.rooms);
+  const bedFree = beds.filter((b) => ['free', 'dirty'].includes(tonight(b)[0])).length;
+  const due = (p) => (p ? html`<span class="status warn">Collect ${rs(p)}</span>` : html`<span class="status ok">Prepaid</span>`);
+  const owes = (b) => (b > 0 ? html`<span class="status warn">Owes ${rs(b)}</span>` : b < 0 ? html`<span class="status info">Holds ${rs(-b)}</span>` : html`<span class="status ok">Settled</span>`);
+  const owing = f.inHouse.filter((x) => x.balancePaise > 0 && !(x.plan && x.plan <= today));
+  const group = (title, n, href, rows, empty) => html`<div class="ctrgroup"><div class="sect"><h3 style="margin:0">${title}</h3><a class="small" href="${href}">${n > rows.length ? `All ${n}` : 'Open'}</a></div>${rows.length ? rows : html`<p class="empty">${empty}</p>`}</div>`;
+  const dormOf = new Map(dormSecs.flatMap((x) => (x.rooms ?? []).map((b) => [b, b.replace(/\s*[A-Z]$|\s*·\s*Bed \d+$/, '')])));
+  const dorms = [...new Set(beds.map((b) => dormOf.get(b)))];
+  return html`<div class="row"><h2 class="grow" style="margin:0">Front desk</h2>
+      <a class="btn pri sm" href="#/rooms/checkin">Check in · C</a><a class="btn sm" href="#/rooms/new">New reservation · N</a>
+      <button class="btn sm" type="button" data-act="counterAdv">Take advance</button></div>
+    <div class="kpis">${kpi('Arriving', String(f.stats.arriving), f.stats.toCollectPaise ? `${rs(f.stats.toCollectPaise)} to collect today` : '')}${kpi('In house', String(f.stats.inHouse))}
+      ${kpi('Leaving', String(f.stats.leaving), '', f.leaving.some((x) => x.balancePaise > 0) ? 'warn' : '')}${kpi('Free tonight', String(f.stats.freeTonight), 'rooms and beds')}</div>
+    ${roomSecs.length ? html`<div class="sect"><h3 style="margin:0">Tonight · ${plural(roomSecs.reduce((n, x) => n + x.rooms.length, 0), 'room')}</h3><a class="small" href="#/rooms/chart">Room chart</a></div>
+      <div class="ctrrooms">${roomSecs.flatMap((x) => x.rooms).map((r) => { const [k, t] = tonight(r); return html`<span class="ctrroom c-${k}" title="${r}: ${t}"><strong>${r}</strong><small>${t}</small></span>`; })}</div>` : ''}
+    ${beds.length ? html`<div class="sect"><h3 style="margin:0">Dorms · ${plural(beds.length, 'bed')}</h3><span class="small quiet">${beds.length - bedFree} taken · ${bedFree} free</span></div>
+      <div class="ctrdorms">${dorms.map((d) => html`<div class="ctrdorm"><strong>${d}</strong><div>${beds.filter((b) => dormOf.get(b) === d).map((b) => { const [k, t] = tonight(b); return html`<span class="ctrbed c-${k}" title="${b}: ${t}"></span>`; })}</div></div>`)}</div>
+      <p class="small quiet" style="margin:0">Teal in house · amber arriving · grey leaving · dashed free · red outline dirty</p>` : ''}
+    ${group('Arriving today', f.arrivals.length, '#/rooms', f.arrivals.slice(0, 4).map((x) => html`<button type="button" class="drow" data-act="goCheckin" data-kind="${x.kind}" data-id="${x.id}"><span class="grow"><strong>${x.guestName ?? 'No name'}</strong>
+      <small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)}</small></span><span class="dright">${due(x.duePaise)}<span class="btn sm">Check in</span></span></button>`), 'No more arrivals today.')}
+    ${group('Leaving today', f.leaving.length, '#/rooms', f.leaving.slice(0, 4).map((x) => html`<button type="button" class="drow" data-act="counterBill" data-id="${x.id}"><span class="grow"><strong>${x.room} · ${x.guestName}</strong><small>check-out 11 am</small></span>
+      <span class="dright">${owes(x.balancePaise)}<span class="btn sm">Check out</span></span></button>`), 'Nobody is due to leave today.')}
+    ${group('In house with money owed', owing.length, '#/rooms', owing.slice(0, 4).map((x) => html`<button type="button" class="drow" data-act="counterBill" data-id="${x.id}"><span class="grow"><strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}</small></span>
+      <span class="dright">${owes(x.balancePaise)}<span class="btn sm">Room bill</span></span></button>`), 'Nobody in house owes anything.')}`;
+}
+actions.counterBill = (d) => { reopenStay = d.id; go('#/rooms'); };
+actions.counterAdv = () => { pendingAdv = true; go('#/rooms'); };
+let pendingAdv = false;   // "Take advance" on Counter opens the form on Rooms, where it lives
+
 async function tablesScreen() {
   const [{ orders, tables, tablesFixed, sections }, ev] = await Promise.all([api('GET', B() + '/orders'), api('GET', B() + '/event-mode/now').catch(() => ({ event: null })), load('stays')]);
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.event = ev.event;
+  if (pendingPick) { ui.picking = pendingPick; pendingPick = null; }
   rerender = () => {
     const showGrid = can('orders.edit') && ui.tables.length > 0;
     // Orders that need the cashier first: bills waiting for money, then dishes not yet sent, then the rest.
@@ -1524,6 +1641,7 @@ async function roomsScreen(view) {
     if (reopenStay) ui.roomBill = await api('GET', `${B()}/stays/${reopenStay}/bill`).catch(() => null);
   }
   reopenStay = null;
+  if (pendingAdv) { pendingAdv = false; actions.advNew(); }
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms', '')}
     ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, k === 'list' && inboxCount(ui.bk) ? html`${t} <span class="status warn" title="Waiting for you">${inboxCount(ui.bk)}</span>` : t, k]), v) : ''}
     ${drawerOpen() ? html`<aside class="drawer" aria-label="Details">${moneyForms()}${ui.roomBill ? roomBillPanel(ui.roomBill) : ui.chartSel ? chartSelPanel() : ui.drawer ? ui.drawer() : ''}</aside>` : moneyForms()}
