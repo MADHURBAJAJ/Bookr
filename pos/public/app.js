@@ -2415,7 +2415,9 @@ actions.bkLink = async (d) => {
   reopenStay = stayId; flash = { kind: 'ok', text: 'Booking linked to the room. Its rent is on the room bill.' }; route();
 };
 actions.bkDeskSave = async () => {
-  const users = String(ui.bkDesk ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  // An unchanged box keeps the names it shows (24 Nov 2026: saving it untouched used to clear them).
+  const users = String(ui.bkDesk ?? (ui.bk?.receptionUsers ?? []).join(', ')).split(',').map((x) => x.trim()).filter(Boolean);
+  if (!users.length && (ui.bk?.receptionUsers ?? []).length && !confirm('Remove every reception user? Money they enter in Djubo would then count as paid before arrival.')) return;
   await api('PUT', `${B()}/bookings/reception`, { users });
   flash = { kind: 'ok', text: users.length ? `Reception in Djubo: ${users.join(', ')}.` : 'No reception users set.' }; route();
 };
