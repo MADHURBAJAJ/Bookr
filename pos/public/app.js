@@ -1712,7 +1712,7 @@ function todayView() {
         <div class="dfoot"><button class="btn sm" type="button" data-act="advNew">Take advance (no booking yet)</button></div></section>
       <section class="dcol"><div class="dch"><h2>Arriving</h2><span class="faint">${fd.arrivals.length}</span></div>
         ${fd.arrivals.length ? fd.arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
-          html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}</small>`,
+          html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}${(() => { const c = (ui.arrivals ?? []).find((y) => y.id === x.id)?.continues; return c ? ` · already in ${c.map((y) => y.room).join(', ')}: extension` : ''; })()}</small>`,
           due(x.duePaise))) : html`<p class="empty">No more arrivals today.</p>`}</section>
       <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${fd.inHouse.length}</span></div>
         ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}</small>`, owes(x.balancePaise)))
@@ -1732,8 +1732,9 @@ actions.todayArrival = async (d) => {
     ui.drawer = () => html`<div class="dhead"><h2>${r.guestName}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${reservationCard(r, Date.now())}`;
   } else {
     const a = (ui.arrivals ?? []).find((x) => x.id === d.id);
+    if (a?.continues) ctPrepare(a);
     ui.drawer = () => html`<div class="dhead"><h2>${a?.guestName ?? 'Arrival'}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
-      <section class="panel">${a ? bookingCard(a) : html`<p class="quiet">Booking not found.</p>`}<div class="row"><button class="btn pri" type="button" data-act="goCheckin" data-kind="booking" data-id="${d.id}">Check in</button>
+      <section class="panel">${a ? bookingCard(a) : html`<p class="quiet">Booking not found.</p>`}${a?.continues ? continueBox(a) : ''}<div class="row">${a?.continues ? '' : html`<button class="btn pri" type="button" data-act="goCheckin" data-kind="booking" data-id="${d.id}">Check in</button>`}
         ${a && dueOf(a) && can('debtors.receive') ? html`<button class="btn" type="button" data-act="advTake" data-id="${d.id}" data-n="${a.guestName ?? ''}" data-amount="${rupees(dueOf(a))}">Take advance now</button>` : ''}</div></section>`;
   }
   rerender();
@@ -2651,19 +2652,7 @@ actions.pickArrival = async (d, _el, quiet) => {
   const free = pastOk ? hits : hits.filter((t) => !busy(t));
   ui.ciTaken = pastOk ? [] : hits.filter(busy);
   ui.ciHits = hits;
-  // A booking that continues a guest already in house (25 Nov 2026): pair each of their rooms with one Djubo gives.
-  if (a.continues) {
-    const left = [...hits];
-    const pairs = a.continues.map((x) => ({ ...x, djubo: null }));
-    for (const p of pairs) { const i = left.indexOf(p.room); if (i >= 0) { p.djubo = p.room; left.splice(i, 1); } }
-    for (const p of pairs) if (!p.djubo && left.length) p.djubo = left.shift();
-    ui.ctPairs = pairs; ui.ctExtra = left;
-    for (const p of pairs) {
-      const takenBy = p.djubo && p.djubo !== p.room ? (cache.stays ?? []).find((x) => roomKeyOf(x.room) === roomKeyOf(p.djubo) && !a.continues.some((y) => y.id === x.id)) : null;
-      p.takenBy = takenBy?.guestName ?? null;
-      ui[`ct_${p.id}`] = p.djubo && p.djubo !== p.room && !takenBy ? 'move' : 'keep';
-    }
-  } else { ui.ctPairs = null; ui.ctExtra = null; }
+  ctPrepare(a, hits);
   ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
   ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
   ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
@@ -2910,6 +2899,26 @@ actions.ciOutTog = (_d, el) => {
   if (hits.length) { ui.room = usable[0] ?? null; ui.ciRooms = usable.slice(1); }
   rerender();
 };
+/** A booking that continues a guest already in house (25 Nov 2026): pairs each of their rooms with one Djubo gives. */
+function ctPrepare(a, hits) {
+  if (!hits) {
+    const flat = (t) => String(t).toLowerCase().replace(/\s+/g, '');
+    const names = (ui.roomSecs ?? []).flatMap((x) => x.tables ?? []);
+    hits = [...new Set((a.roomLabels ?? '').split(',').map(flat).filter(Boolean).map((l) => names.find((t) => flat(t) === l)).filter(Boolean))];
+  }
+  if (a.continues) {
+    const left = [...hits];
+    const pairs = a.continues.map((x) => ({ ...x, djubo: null }));
+    for (const p of pairs) { const i = left.indexOf(p.room); if (i >= 0) { p.djubo = p.room; left.splice(i, 1); } }
+    for (const p of pairs) if (!p.djubo && left.length) p.djubo = left.shift();
+    ui.ctPairs = pairs; ui.ctExtra = left;
+    for (const p of pairs) {
+      const takenBy = p.djubo && p.djubo !== p.room ? (cache.stays ?? []).find((x) => roomKeyOf(x.room) === roomKeyOf(p.djubo) && !a.continues.some((y) => y.id === x.id)) : null;
+      p.takenBy = takenBy?.guestName ?? null;
+      ui[`ct_${p.id}`] = p.djubo && p.djubo !== p.room && !takenBy ? 'move' : 'keep';
+    }
+  } else { ui.ctPairs = null; ui.ctExtra = null; }
+}
 /** The extension box (25 Nov 2026): the guest's rooms against Djubo's, a choice where they differ, and one button. */
 function continueBox(a) {
   const pairs = ui.ctPairs ?? [];
