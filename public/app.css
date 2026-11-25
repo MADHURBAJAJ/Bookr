@@ -869,3 +869,4 @@ details.inst-slim[open] { display: grid; gap: 8px; }
 .dy-head .amount { margin-left: auto; font-weight: 600; }
 .td-day.dy-on { outline: 2px solid var(--teal); outline-offset: 1px; }
 .shiftbar .sb-dayst { text-decoration: none; margin-left: 6px; white-space: nowrap; }
+.pk-new { font-size: 11px; color: var(--teal-ink); background: #F0FDFA; border-radius: 10px; padding: 1px 7px; white-space: nowrap; }
