@@ -53,12 +53,24 @@ export async function receiveMail(message: ForwardableEmailMessage, env: Env) {
 
 // ---------- Old booking mails, brought in once (25 Nov 2026) ----------
 // The mails from before the POS read booking mails are forwarded once from the hotel's own mailbox (MAIL_IMPORT_FROM).
-// Each forward carries a line "Bookr import <key> <Gmail id> <when the mail came, ISO> <its sender>" with the key in the
+// Each forward carries a line "Bookr import <key> <Gmail id> <when the mail came, ISO, or - to take it from the forward's
+// own header> <its sender>" with the key in the
 // MAIL_IMPORT_KEY secret, which is set only while this runs. The forwarded mail is read with its sender's reader and
 // counts as having come when the original did, so it never overrides a newer mail the POS already has.
 
 export interface Imported { source: 'mmt' | 'djubo'; mail: Email; messageId: string; receivedAt: number }
-const IMPORT_LINE = /Bookr\s+import\s+([A-Za-z0-9_-]{20,})\s+([0-9a-f]{8,20})\s+(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?Z)\s+([^\s<>"]+@[^\s<>"]+)/;
+const IMPORT_LINE = /Bookr\s+import\s+([A-Za-z0-9_-]{20,})\s+([0-9a-f]{8,20})\s+(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?Z|-)\s+([^\s<>"]+@[^\s<>"]+)/;
+/** Gmail's forward header: "---------- Forwarded message ---------" then "Date: Wed, Nov 4, 2026 at 5:54 AM" (the
+ *  mailbox's time zone, UTC for this one). */
+const FWD_DATE = /Forwarded message[\s\S]{0,400}?Date:\s*(?:[A-Za-z]{3},\s*)?([A-Za-z]{3})[a-z]*\s+(\d{1,2}),\s*(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*([AP])M/i;
+const MONTHS_EN = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+export function forwardedAt(flat: string): number | null {
+  const m = FWD_DATE.exec(flat);
+  const mon = m ? MONTHS_EN.indexOf(m[1].toLowerCase()) : -1;
+  if (!m || mon < 0) return null;
+  const h = (Number(m[4]) % 12) + (/p/i.test(m[6]) ? 12 : 0);
+  return Date.UTC(Number(m[3]), mon, Number(m[2]), h, Number(m[5]));
+}
 const FWD = /^\s*(?:(?:fwd?|fw)\s*:\s*)+/i;
 
 /** A forwarded old booking mail: what it is and its inner mail; 'refused (why)' when it is from the hotel's mailbox but not
@@ -74,7 +86,9 @@ export async function importOf(env: Env, from: string, mail: Email): Promise<Imp
   if (!same(m[1], key)) return 'refused (wrong key)';
   const src = sourceOf(env, m[4].toLowerCase());
   if (src !== 'mmt' && src !== 'djubo') return 'refused (not a booking sender)';
-  return { source: src, mail: await innerOf(mail), messageId: `import:${m[2]}`, receivedAt: Date.parse(m[3]) };
+  const at = m[3] === '-' ? forwardedAt(flat) : Date.parse(m[3]);
+  if (at === null || Number.isNaN(at)) return 'refused (no date for the original mail)';
+  return { source: src, mail: await innerOf(mail), messageId: `import:${m[2]}`, receivedAt: at };
 }
 
 /** The original inside a forward: an attached mail when there is one, else the forward itself without its "Fwd:". */

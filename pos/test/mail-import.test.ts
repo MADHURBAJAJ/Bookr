@@ -90,6 +90,20 @@ describe('old booking mails brought in', () => {
       .toBe('Old mail brought in: DJ-5 total typed at the desk kept (mail says 6000.00); DJ-5 brought up to date.');
   });
 
+  it('takes the original mail\'s time from the forward\'s own header when the import line has none', async () => {
+    const s = await setupBusiness();
+    setReader('djubo', fake);
+    const e = mailEnv(s.businessId);
+    const day = (await s.ok(s.owner.get('/me'))).business.shiftDay;
+    const body = (head: string) => raw(BOX, 'Fwd: Reservation Confirmation', `fh-${head.length}`, `Bookr import ${KEY} 00000000aa - reports@djubo.example.test\n\n`
+      + `---------- Forwarded message ---------\nFrom: <reports@djubo.example.test>\n${head}\nSubject: Reservation Confirmation\n\n`
+      + `Booking DJ-7 | Header Date | 9800010007 | Deluxe | ${plus(day, 1)} | ${plus(day, 3)} | 3000 | 0 |`);
+    expect((await send(e, body('Sent: sometime'))).rejected).toMatch(/no date for the original mail/);
+    expect((await send(e, body('Date: Wed, Nov 4, 2026 at 5:54 PM'))).rejected).toBeNull();
+    expect((await q("SELECT received_at FROM inbound_mails WHERE business_id = ? AND message_id = 'import:00000000aa'", s.businessId))[0].received_at)
+      .toBe(Date.UTC(2026, 10, 4, 17, 54));
+  });
+
   it('reads MakeMyTrip\'s "Booked on" time', () => {
     expect(clock12("25 Nov '26 03:01 PM")).toBe('2026-11-25 15:01');
     expect(clock12("01 Dec '26 12:05 AM")).toBe('2026-12-01 00:05');
