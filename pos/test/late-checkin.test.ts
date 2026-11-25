@@ -48,9 +48,23 @@ describe('late check-in', () => {
     const out = await ok(counter.post(`${B}/stays/${st1}/check-out`, {}));
     expect(out.bill.invoice).toMatchObject({ checkIn: add(today, -1), checkOut: today, nights: 1 });
 
+    // A past stay: the guest left, and the room is taken today. It is recorded in that room without touching today's guest.
+    const gone = await bk('DJ-P', 'Sample Gone', add(today, -2), add(today, -1));
+    const occupied = (await q("SELECT id FROM stays WHERE room = '104' AND checked_out_at IS NULL"))[0].id;
+    expect((await counter.post(`${B}/stays`, { room: '104', guestName: 'Sample Gone', bookingId: gone })).status).toBe(409);
+    expect((await counter.post(`${B}/stays`, { room: '104', guestName: 'Sample Arriving', past: true, bookingId: now })).status).toBe(409);   // not ended
+    await q("UPDATE room_status SET status = 'inspected' WHERE room = '104'");
+    const past = (await ok(counter.post(`${B}/stays`, { room: '104', guestName: 'Sample Gone', bookingId: gone, past: true }))).id;
+    expect((await q('SELECT room, check_in FROM stays WHERE id = ?', past))[0]).toEqual({ room: '104 (past stay)', check_in: add(today, -2) });
+    const pastOut = await ok(counter.post(`${B}/stays/${past}/check-out`, {}));
+    expect(pastOut.bill.invoice).toMatchObject({ room: '104', checkIn: add(today, -2), checkOut: add(today, -1), nights: 1 });
+    expect((await q('SELECT room, checked_out_at IS NOT NULL AS out FROM stays WHERE id = ?', past))[0]).toEqual({ room: '104', out: 1 });
+    expect((await q('SELECT checked_out_at FROM stays WHERE id = ?', occupied))[0].checked_out_at).toBeNull();   // today's guest stays
+    expect((await q("SELECT status FROM room_status WHERE room = '104'"))[0]?.status ?? 'none').not.toBe('dirty');
+
     const dc = await ok(owner.get(`${B}/reports/daily-check?day=${today}`));
     expect(dc.lateCheckIns.map((x: any) => [x.guestName, x.checkIn, !!x.checkedOutAt])).toEqual([
-      ['Sample Late One', add(today, -1), true], ['Sample Late Three', add(today, -3), false]]);
+      ['Sample Late One', add(today, -1), true], ['Sample Late Three', add(today, -3), false], ['Sample Gone', add(today, -2), true]]);
     expect((await ok(counter.get(`${B}/bookings/arrivals`))).late).toEqual([]);
   });
 });

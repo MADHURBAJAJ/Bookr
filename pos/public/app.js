@@ -2295,8 +2295,9 @@ function checkinView() {
         ${step(4, 'Payment', html`<div class="row between"><span>${due ? html`To collect at check-in: <strong>${rs(due)}</strong>` : picked || ui.resPicked ? 'Nothing to collect for the room.' : 'Add the rent on the room bill after check-in.'}</span>
             <span class="small quiet">The room bill opens after check-in, to take it with a receipt.</span></div>
           ${ui.ciLate ? html`<div class="msg warn" style="display:block">Late check-in: the stay starts on <strong>${dayName(addDays(me.business.shiftDay, -ui.ciLate))}</strong>, the booking's date, so nights, rent and the register are right.
-            ${ui.ciLeft ? html`<label class="tickline" style="margin-top:6px"><input type="checkbox" data-model="ciOutToo" ${ui.ciOutToo ? 'checked' : ''}> The guest has already left: check in and out together (take what was paid, or move what is owed to Credit, then check out)</label>` : ''}
-            ${ui.ciLate > 2 && !isMgr() ? (ui.approvers?.length ? html`<div class="row" style="margin-top:6px"><span class="small">More than 2 days late: a manager approves.</span><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((x) => html`<option value="${x.id}" ${ui.apId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>
+            ${ui.ciLeft ? html`<label class="tickline" style="margin-top:6px"><input type="checkbox" data-model="ciOutToo" data-act-change="ciOutTog" ${ui.ciOutToo ? 'checked' : ''}> The guest has already left: check in and out together (take what was paid, or move what is owed to Credit, then check out)</label>` : ''}
+            ${ui.ciLeft && ui.ciOutToo && ui.room ? html`<div class="small" style="margin-top:4px">Recorded as a past stay in <strong>${[ui.room, ...(ui.ciRooms ?? [])].join(', ')}</strong>: whoever is in ${ui.ciRooms?.length ? 'them' : 'it'} today is not affected, and the room is not marked dirty.</div>` : ''}
+          ${ui.ciLate > 2 && !isMgr() ? (ui.approvers?.length ? html`<div class="row" style="margin-top:6px"><span class="small">More than 2 days late: a manager approves.</span><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((x) => html`<option value="${x.id}" ${ui.apId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>
               <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's PIN" style="max-width:160px"></div>`
               : html`<p class="small">More than 2 days late: a manager or owner must do this (no manager has a PIN yet).</p>`) : ''}</div>` : ''}
           <div class="row"><button class="btn pri" type="submit" data-act="openStay" data-submit>Check in and print registration card</button>
@@ -2332,8 +2333,8 @@ function roomPicker() {
     ${(ui.ciTaken ?? []).length ? html`<div class="msg warn">Djubo has ${ui.ciTaken.join(', ')} for this booking, but ${ui.ciTaken.length === 1 ? 'it is' : 'they are'} taken now. Choose ${ui.ciTaken.length === 1 ? 'another' : 'others'} below, or check the guest there out first.</div>` : ''}
     ${(ui.ciRooms ?? []).length ? html`<div class="msg ok">Checking in to <strong>${[ui.room, ...ui.ciRooms].join(', ')}</strong> · one bill, on ${ui.room}</div>` : ''}
     <div class="rpick">${groups.length ? groups.map((g) => html`<div class="rpg"><div class="rph"><strong>${g.x.name}</strong><span class="small quiet">${g.free} of ${g.total} free</span></div>
-      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
-        title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}">${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
+      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken && !(ui.ciLeft && ui.ciOutToo) ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
+        title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}" ${u.taken && ui.ciLeft && ui.ciOutToo ? 'data-past="1"' : ''}>${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
       : html`<p class="empty">No free room or bed matches. Turn off "Only free" to see taken ones.</p>`}</div>`;
 }
 /** What is still to pay on a booking (Djubo's total less its advance), or 0. */
@@ -2603,6 +2604,7 @@ actions.pickArrival = async (d, _el, quiet) => {
   // A late check-in (25 Nov 2026): the booking's own date; more than 2 days late, a manager approves.
   ui.ciLate = a.checkIn && a.checkIn < me.business.shiftDay ? Math.round((Date.parse(me.business.shiftDay) - Date.parse(a.checkIn)) / 86400000) : 0;
   ui.ciLeft = !!(a.checkOut && a.checkOut <= me.business.shiftDay);
+  ui.ciOutToo = !!(a.checkOut && a.checkOut < me.business.shiftDay);   // left before today: almost surely gone
   if (ui.ciLate > 2 && !isMgr() && !ui.approvers) { ui.approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers; ui.apId = ui.approvers[0]?.id; }
   ui.bookingId = a.id; ui.resPicked = null; ui.guest = a.guestName; ui.gPhone = a.phone ?? ''; ui.gFound = null;
   ui.ciOut = a.checkOut; ui.ciAdults = a.guests ? String(a.guests) : ui.ciAdults;
@@ -2614,8 +2616,11 @@ actions.pickArrival = async (d, _el, quiet) => {
   const labels = (a.roomLabels ?? '').split(',').map(flat).filter(Boolean);
   const hits = [...new Set(labels.map((l) => names.find((t) => flat(t) === l)).filter(Boolean))];
   const busy = (t) => (cache.stays ?? []).some((x) => roomKeyOf(x.room) === roomKeyOf(t));
-  const free = hits.filter((t) => !busy(t));
-  ui.ciTaken = hits.filter(busy);
+  // A guest who has left is recorded in Djubo's room as a past stay (25 Nov 2026), even when it is taken today.
+  const pastOk = ui.ciLeft && ui.ciOutToo;
+  const free = pastOk ? hits : hits.filter((t) => !busy(t));
+  ui.ciTaken = pastOk ? [] : hits.filter(busy);
+  ui.ciHits = hits;
   ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
   ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
   ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
@@ -2722,7 +2727,7 @@ actions.openStay = async (d = {}) => {
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
   const r = await api('POST', B() + '/stays', { room: ui.room, rooms: ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
     reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
-    goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign, ...(ui.ciLate > 2 && !isMgr() ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
+    goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign, past: !!(ui.ciLate && ui.ciLeft && ui.ciOutToo) || undefined, ...(ui.ciLate > 2 && !isMgr() ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
   if (!d.noprint) printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${r.id}/grc`)).grc)) }]);
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
   // The room bill opens, ready to take what is still to pay (24 Nov 2026).
@@ -2851,6 +2856,16 @@ actions.bedOut = async (d) => {
   await api('POST', `${B()}/stays/${d.id}/check-out`, {});
   ui.roomBill = await api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`); await load('stays');
   flash = { kind: 'ok', text: `${d.r} checked out and marked dirty.` }; rerender();
+};
+// Ticking "already left" lets Djubo's room be used even when taken today (a past stay); unticking needs a free room.
+actions.ciOutTog = (_d, el) => {
+  ui.ciOutToo = !!el.checked;
+  const busy = (t) => (cache.stays ?? []).some((x) => roomKeyOf(x.room) === roomKeyOf(t));
+  const hits = ui.ciHits ?? [];
+  const usable = ui.ciOutToo ? hits : hits.filter((t) => !busy(t));
+  ui.ciTaken = ui.ciOutToo ? [] : hits.filter(busy);
+  if (hits.length) { ui.room = usable[0] ?? null; ui.ciRooms = usable.slice(1); }
+  rerender();
 };
 actions.ciMultiTog = () => { ui.ciMulti = !ui.ciMulti; if (!ui.ciMulti) ui.ciRooms = []; rerender(); };
 // A phone number typed at check-in finds a returning guest: their name and city fill in, and their earlier stays show.
