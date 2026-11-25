@@ -26,6 +26,8 @@ describe('continuing a stay', () => {
     const xx = (await ok(counter.post(`${B}/stays`, { room: 'XX', guestName: 'Mr.Sample Guest', phone: '9800055555', bookingId: first }))).id;
     const x23 = (await ok(counter.post(`${B}/stays`, { room: 'XXIII', guestName: 'Mr.Sample Guest', phone: '9800055555', bookingId: second }))).id;
 
+    // Someone extended XXIII by hand first (₹2,500 typed): it is still offered, and that rent gives way to the booking's.
+    await ok(counter.post(`${B}/stays/${x23}/extend`, { to: add(today, 1), rate: '2500' }));
     // The extension is offered against both rooms.
     const arr = (await ok(counter.get(`${B}/bookings/arrivals`))).arrivals.find((a: any) => a.extRef === 'DJ-3');
     expect(arr.continues.map((x: any) => x.room)).toEqual(['XX', 'XXIII']);
@@ -35,6 +37,7 @@ describe('continuing a stay', () => {
     expect(bill.stay).toMatchObject({ id: xx, room: 'XX', checkOutPlan: add(today, 1) });
     expect(bill.rentPaise).toBe(750_000);
     expect((await q('SELECT room, check_out_plan AS p FROM stays WHERE id = ?', x23))[0]).toEqual({ room: 'XXIV', p: add(today, 1) });
+    expect((await ok(counter.get(`${B}/stays/${x23}/bill`))).rentPaise).toBe(250_000);   // its own night only: the hand-typed one gave way
     expect((await q("SELECT status FROM room_status WHERE room = 'XXIII'"))[0].status).toBe('dirty');
     expect((await ok(counter.get(`${B}/bookings/arrivals`))).arrivals.map((a: any) => a.extRef)).not.toContain('DJ-3');
     expect((await counter.post(`${B}/bookings/${ext}/continue`, { stays: [{ id: xx }] })).status).toBe(409);   // once

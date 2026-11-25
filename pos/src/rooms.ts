@@ -145,10 +145,10 @@ export async function linkWalkIn(db: DB, bid: string, bookingId: string) {
 }
 
 /** Links a booking (and its MakeMyTrip twin) to an in-house room: rent typed by hand as "Room rent…" gives way to the booking's. */
-export async function linkStay(db: DB, bid: string, bookingId: string, stayId: string) {
+export async function linkStay(db: DB, bid: string, bookingId: string, stayId: string, replaceHand = true) {
   const acc = await one<{ id: string }>(db, "SELECT id FROM debtor_accounts WHERE stay_id = ? AND business_id = ? AND kind = 'room'", stayId, bid);
   const ref = (await one<{ ext_ref: string }>(db, 'SELECT ext_ref FROM bookings WHERE id = ?', bookingId))!.ext_ref;
-  const byHand = acc ? (await one<{ s: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS s FROM debtor_entries
+  const byHand = acc && replaceHand ? (await one<{ s: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS s FROM debtor_entries
     WHERE account_id = ? AND kind = 'room_rent' AND booking_id IS NULL AND lower(note) LIKE 'room rent%'`, acc.id))!.s : 0;
   const t = now();
   await db.batch([
@@ -198,12 +198,13 @@ export const nameKey = (n: string | null | undefined) => String(n ?? '').toLower
  */
 export async function continuesOf(db: DB, bid: string, bookings: { id: string; phone: string | null; guestName: string | null; checkIn: string | null }[]) {
   if (!bookings.length) return new Map<string, { id: string; room: string; guestName: string }[]>();
-  const stays = await all<{ id: string; room: string; guest_name: string; phone: string | null; plan: string | null }>(db, `SELECT s.id, s.room, s.guest_name, s.phone,
+  const stays = await all<{ id: string; room: string; guest_name: string; phone: string | null; plan: string | null; check_in: string }>(db, `SELECT s.id, s.room, s.guest_name, s.phone, s.check_in,
       coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id)) AS plan
     FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.room NOT LIKE '%(past stay)' ORDER BY s.room`, bid);
   const out = new Map<string, { id: string; room: string; guestName: string }[]>();
   for (const b of bookings) {
-    const hits = stays.filter((s) => s.plan && s.plan === b.checkIn
+    // Ends on the booking's first day, or was already extended past it by hand (25 Nov 2026), having begun before it.
+    const hits = stays.filter((s) => s.plan && b.checkIn && s.plan >= b.checkIn && s.check_in < b.checkIn
       && ((b.phone && s.phone === b.phone) || (nameKey(b.guestName).length >= 4 && nameKey(s.guest_name) === nameKey(b.guestName))));
     if (hits.length) out.set(b.id, hits.map((s) => ({ id: s.id, room: s.room, guestName: s.guest_name })));
   }

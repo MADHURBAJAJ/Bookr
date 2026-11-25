@@ -351,7 +351,17 @@ roomDeskRoutes.post(`${B}/bookings/:id/continue`, requireAction('stays.edit'), a
     if (isUniqueViolation(e)) fail(409, `${stays.map((x) => x.moveTo).filter(Boolean).join(', ')}: another guest is in that room. Keep the room the guest has, or free it first.`);
     throw e;
   }
-  await linkStay(db, bid, b.id, stays[0].s.id);
+  // Extra nights typed by hand ("Extend stay" before the booking came) give way to the booking's rent, on every joined
+  // room, so nothing is counted twice. Rent typed for the stay's own nights stays as it is.
+  const handOff = [];
+  for (const { s } of stays) {
+    const hand = (await one<{ s: number }>(db, `SELECT coalesce(sum(amount_paise), 0) AS s FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent'
+      AND booking_id IS NULL AND lower(note) LIKE 'room rent · % extra night%'`, s.account_id))!.s;
+    if (hand > 0) handOff.push(stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, at) VALUES (?, ?, ?, 'room_rent', ?, ?, ?)",
+      newId(), bid, s.account_id, -hand, `Extra nights by hand, replaced by Djubo ${b.ext_ref}${s.id === stays[0].s.id ? '' : ` (on ${stays[0].s.room}'s bill)`}`, t));
+  }
+  if (handOff.length) await db.batch(handOff);
+  await linkStay(db, bid, b.id, stays[0].s.id, false);
   return c.json(await stayBill(c, stays[0].s.id));
 });
 
