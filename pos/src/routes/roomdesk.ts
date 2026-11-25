@@ -6,7 +6,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../..
 import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, isTrigger, tableLayout } from '../util';
-import { phoneKey, openStay, stayBill } from './settings';
+import { phoneKey, openStay, PAST_STAY, stayBill } from './settings';
 import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
@@ -305,6 +305,36 @@ export async function roomIsDirty(db: DB, bid: string, room: string) {
 }
 
 // ---------- 12: moving a guest to another room (the bill, open orders and history go with them)
+
+// Swapping two in-house guests' rooms (25 Nov 2026): each guest takes the other's room in one step, with their bill and
+// open food orders; neither room is marked dirty (both stay occupied). Recorded once on each stay, with the reason.
+roomDeskRoutes.post(`${B}/stays/:id/swap`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const a = await openStay(c, c.req.param('id'), true);
+  const data = await body(c);
+  const b = await openStay(c, typeof data.withStayId === 'string' ? data.withStayId : '', true);
+  if (a.checked_out_at || b.checked_out_at) fail(409, 'Both guests must still be in house.');
+  if (a.id === b.id) fail(400, 'Choose another guest\'s room.');
+  if (a.room.endsWith(PAST_STAY) || b.room.endsWith(PAST_STAY)) fail(409, 'A past stay keeps its room: finish its check-out first.');
+  const reason = text(data, 'reason', 'Why the rooms are swapped', { max: 80 })!;
+  const name = (room: string, guest: string) => `${/^\d/.test(room) ? 'Room ' : ''}${room} · ${guest}`;
+  const staff = c.get('staff').id;
+  // One open stay per room: the first guest waits under a name no room has while the second moves in.
+  const holding = `swap ${a.id}`;
+  await db.batch([
+    stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', holding, a.id),
+    stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', a.room, b.id),
+    stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', b.room, a.id),
+    stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', name(b.room, a.guest_name), a.account_id),
+    stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', name(a.room, b.guest_name), b.account_id),
+    stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", b.room, a.id),
+    stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", a.room, b.id),
+    audit(db, bid, staff, 'stay.swap', 'stays', a.id, { room: a.room }, { room: b.room, with: b.guest_name, reason }),
+    audit(db, bid, staff, 'stay.swap', 'stays', b.id, { room: b.room }, { room: a.room, with: a.guest_name, reason }),
+  ]);
+  return c.json(await stayBill(c, a.id));
+});
 
 roomDeskRoutes.post(`${B}/stays/:id/move`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');

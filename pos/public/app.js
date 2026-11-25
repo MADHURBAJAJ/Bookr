@@ -2410,7 +2410,14 @@ function roomBillPanel(r) {
           ${ui.tfAcc === 'new' ? html`<div class="grid2"><label class="f">Company or person<input class="in" data-model="tfName" value="${ui.tfName ?? st.company ?? ''}"></label><label class="f">Phone<input class="in" inputmode="tel" data-model="tfPhone" value="${ui.tfPhone ?? ''}"></label></div>` : ''}`}
       <label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="tfAmt" value="${ui.tfAmt ?? rupees(r.balancePaise)}"></label>
       <div class="row"><button class="btn pri" type="submit" data-act="rbTransfer" data-submit>Move it</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    if (f === 'move' && ui.mvSwap) return html`<form class="panel" style="margin-top:10px"><h3>Swap rooms with another guest</h3>
+      <div class="chips"><button type="button" class="chip" aria-pressed="false" data-act="pick" data-k="mvSwap" data-id="">To a free room</button><button type="button" class="chip" aria-pressed="true">Swap with another guest</button></div>
+      <div class="grid2"><label class="f">Swap with<select class="in" data-model="swWith"><option value="">Choose</option>${(cache.stays ?? []).filter((y) => y.id !== st.id && !/\(past stay\)$/.test(y.room)).map((y) => html`<option value="${y.id}" ${ui.swWith === y.id ? 'selected' : ''}>${y.room} · ${y.guestName}</option>`)}</select></label>
+        <label class="f">Why<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. guests asked to exchange"></label></div>
+      <p class="small quiet">${st.guestName} goes to the other room and that guest comes to ${st.room}, each with their bill and open food orders. Neither room is marked dirty. Change both in Djubo too.</p>
+      <div class="row"><button class="btn pri" type="submit" data-act="rbSwap" data-submit>Swap rooms</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
     if (f === 'move') return html`<form class="panel" style="margin-top:10px"><h3>Move the guest to another room</h3>
+      <div class="chips"><button type="button" class="chip" aria-pressed="true">To a free room</button><button type="button" class="chip" aria-pressed="false" data-act="pick" data-k="mvSwap" data-id="1">Swap with another guest</button></div>
       <div class="grid2"><label class="f">New room or bed<select class="in" data-model="mvRoom"><option value="">Choose</option>${ui.roomSecs.flatMap((x) => x.tables ?? []).filter((t) => t !== st.room && !/· whole$/.test(t) && !(cache.stays ?? []).some((y) => y.room === t)).map((t) => html`<option ${ui.mvRoom === t ? 'selected' : ''}>${t}</option>`)}</select></label>
         <label class="f">Why<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. AC not working, upgrade"></label></div>
       <p class="small quiet">The bill, open food orders and history go with the guest. ${st.room} is marked dirty. Change the room in Djubo too.</p>
@@ -2471,7 +2478,7 @@ function roomBillPanel(r) {
 actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbForm = null; ui.error = null; if (!cache.credit) await load('credit'); rerender(); scrollTo(0, 0); };
 actions.rbClose = () => { ui.roomBill = null; ui.rbForm = null; rerender(); };
 actions.rbForm = async (d) => {
-  ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.error = null;
+  ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.mvSwap = null; ui.error = null;
   if (d.f === 'transfer') await load('credit');
   // No room rent on the bill: a manager approves the check-out (25 Nov 2026).
   if (d.f === 'checkout' && !isMgr() && (ui.roomBill?.rentPaise ?? 0) <= 0 && !ui.approvers) { ui.approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers; ui.apId = ui.approvers[0]?.id; ui.apPin = ''; }
@@ -2493,6 +2500,16 @@ actions.rbMove = async (d) => {
   if (!ui.mvRoom) throw new Error('Choose the new room.');
   ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/move`, { room: ui.mvRoom, reason: ui.mvWhy ?? '', dirtyOk: d.dirtyOk === '1' || undefined });
   ui.rbForm = null; flash = { kind: 'ok', text: `Moved to ${ui.mvRoom}. Change it in Djubo too.` }; reopenStay = ui.roomBill.stay.id; route();
+};
+// Two in-house guests exchange rooms (25 Nov 2026).
+actions.rbSwap = async () => {
+  if (!ui.swWith) throw new Error('Choose the guest to swap with.');
+  const other = (cache.stays ?? []).find((y) => y.id === ui.swWith);
+  const from = ui.roomBill.stay.room;
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/swap`, { withStayId: ui.swWith, reason: ui.mvWhy ?? '' });
+  ui.rbForm = null; ui.mvSwap = null; await load('stays');
+  flash = { kind: 'ok', text: `Swapped: ${ui.roomBill.stay.guestName} is now in ${ui.roomBill.stay.room}${other ? `, ${other.guestName} in ${from}` : ''}. Change both in Djubo too.` };
+  reopenStay = ui.roomBill.stay.id; route();
 };
 actions.rbExtend = async () => {
   ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/extend`, { to: ui.exTo ?? addDays(ui.roomBill.stay.checkOutPlan ?? me.business.shiftDay, 1), rate: ui.exRate || undefined });
