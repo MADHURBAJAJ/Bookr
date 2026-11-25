@@ -2866,31 +2866,36 @@ async function paymentsScreen(tab = '') {
 }
 
 // ---------- Payments › Bills (25 Nov 2026): every bill of a shift, filtered and searched; a tap opens the bill.
-const BILL_FILTERS = [['', 'All'], ['topay', 'To pay'], ['room', 'To room'], ['credit', 'Credit'], ['nc', 'NC'], ['void', 'Void']];
+const BILL_FILTERS = [['', 'All'], ['topay', 'To pay'], ['room', 'To room'], ['credit', 'Credit'], ['nc', 'NC'], ['void', 'Void'], ['roominv', 'Room invoices']];
 async function billsScreen(dayArg) {
   const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : me.business.shiftDay;
   const r = await api('GET', `${B()}/bill-list?day=${day}`);
-  const kindOf = (b) => (b.status === 'void' ? 'void' : b.status === 'printed' ? 'topay' : b.modes.includes('comp') ? 'nc' : b.modes.includes('room') ? 'room' : b.modes.includes('credit') ? 'credit' : 'paid');
-  const paidBy = (b) => b.status === 'void' ? html`<span class="quiet">—</span>` : b.status === 'printed' ? html`<span class="quiet">not paid</span>`
+  // Room invoices (made at check-out) sit in the same list, marked Room; a tap opens the guest's room bill.
+  r.bills = [...r.bills, ...(r.roomInvoices ?? []).map((i) => ({ id: i.id, roomInvoice: true, stayId: i.stayId, billNo: i.invoiceNo, status: 'settled', totalPaise: i.totalPaise, printedAt: i.at,
+    place: i.room, guestName: i.billToName ? `${i.guestName} · ${i.billToName}` : i.guestName, modes: [], creditNotes: i.creditNotes }))].sort((x, y) => y.printedAt - x.printedAt);
+  const kindOf = (b) => (b.roomInvoice ? 'roominv' : b.status === 'void' ? 'void' : b.status === 'printed' ? 'topay' : b.modes.includes('comp') ? 'nc' : b.modes.includes('room') ? 'room' : b.modes.includes('credit') ? 'credit' : 'paid');
+  const paidBy = (b) => b.roomInvoice ? html`Room invoice${b.creditNotes ? html` <span class="small quiet">· ${plural(b.creditNotes, 'credit note')}</span>` : ''}` : b.status === 'void' ? html`<span class="quiet">—</span>` : b.status === 'printed' ? html`<span class="quiet">not paid</span>`
     : b.modes.map((m) => (m === 'room' && b.room ? `To room ${b.room.split(' · ')[0].replace(/^Room /, '')}` : m === 'credit' && b.credit ? `Credit · ${b.credit}` : PAID_BY[m] ?? m)).join(' + ');
-  const tone = { void: ['bad', 'Void'], topay: ['warn', 'To pay'], nc: ['mute', 'NC'], room: ['info', 'On room'], credit: ['info', 'On credit'], paid: ['ok', 'Paid'] };
+  const tone = { void: ['bad', 'Void'], topay: ['warn', 'To pay'], nc: ['mute', 'NC'], room: ['info', 'On room'], credit: ['info', 'On credit'], paid: ['ok', 'Paid'], roominv: ['info', 'Room'] };
   rerender = () => {
     const f = ui.bF ?? '';
     const q = String(ui.bQ ?? '').trim().toLowerCase();
     const shown = r.bills.filter((b) => (!f || kindOf(b) === f) && (!q || `${b.billNo} ${b.place} ${b.guestName ?? ''}`.toLowerCase().includes(q)));
-    const live = r.bills.filter((b) => b.status !== 'void');
+    const live = r.bills.filter((b) => b.status !== 'void' && !b.roomInvoice);
     const n = (k) => r.bills.filter((b) => kindOf(b) === k).length;
-    paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(day)}`, 'Every bill of the shift. Tap one to open it: the bill as printed, a copy, take payment if unpaid, or give money back.')}
+    paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(day)}`, 'Every bill of the shift, restaurant and room. Tap a restaurant bill to open it (a copy, take payment if unpaid, give money back); a room invoice opens the guest\'s room bill.')}
       ${tabsNav('Payments', PROOF_TABS.map(([k, t]) => [k ? `#/payments/${k}` : '#/payments', t, k]), 'bills')}
       <div class="row" style="align-items:end;flex-wrap:wrap;margin-bottom:12px"><a class="btn" href="#/payments/bills/${addDays(day, -1)}" aria-label="Previous shift">‹</a>
         <label class="f">Shift<input class="in" type="date" data-model="bDay" value="${ui.bDay ?? day}" style="width:auto"></label>
         <a class="btn" href="#/payments/bills/${addDays(day, 1)}" aria-label="Next shift">›</a><button class="btn" type="button" data-act="bDayGo">Show</button>
         <input class="in grow" type="search" data-model="bQ" data-live value="${ui.bQ ?? ''}" placeholder="Search bill no., table or guest" aria-label="Search bills" style="flex:1 1 220px"></div>
-      <div class="kpis">${kpi('Bills', String(live.length), `${rs(live.reduce((t, b) => t + b.totalPaise, 0))} with GST`)}${kpi('To pay', String(n('topay')), n('topay') ? 'printed, not paid' : 'none', n('topay') ? 'warn' : '')}
+      <div class="kpis">${kpi('Restaurant bills', String(live.length), `${rs(live.reduce((t, b) => t + b.totalPaise, 0))} with GST`)}${n('roominv') ? kpi('Room invoices', String(n('roominv')), rs(r.bills.filter((b) => b.roomInvoice).reduce((t, b) => t + b.totalPaise, 0))) : ''}${kpi('To pay', String(n('topay')), n('topay') ? 'printed, not paid' : 'none', n('topay') ? 'warn' : '')}
         ${kpi('On room or credit', String(n('room') + n('credit')), 'paid later')}${kpi('Void', String(n('void')), '', n('void') ? 'warn' : '')}</div>
       <div class="chips" style="margin-bottom:10px">${BILL_FILTERS.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="bF" data-id="${k}">${t}${k ? ` ${n(k)}` : ` ${r.bills.length}`}</button>`)}</div>
       <section class="panel">${shown.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Time</th><th>Bill</th><th>Table / room</th><th>Guest</th><th class="num">Amount</th><th>Paid by</th><th>Status</th></tr></thead><tbody>
-        ${shown.map((b) => html`<tr class="rowlink" data-act="goTo" data-href="#/done/${b.id}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><a href="#/done/${b.id}">${b.billNo}</a></td>
+        ${shown.map((b) => b.roomInvoice ? html`<tr class="rowlink" data-act="counterBill" data-id="${b.stayId}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><span style="color:var(--pri);text-decoration:underline">${b.billNo}</span></td>
+          <td data-label="Room">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td><td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status info">Room</span></td></tr>`
+          : html`<tr class="rowlink" data-act="goTo" data-href="#/done/${b.id}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><a href="#/done/${b.id}">${b.billNo}</a></td>
           <td data-label="Table">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}${b.phone ? html`<div class="small quiet">${b.phone}</div>` : ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td>
           <td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status ${tone[kindOf(b)][0]}">${tone[kindOf(b)][1]}</span></td></tr>`)}</tbody></table></div>`
         : html`<p class="empty">${r.bills.length ? 'No bill matches.' : 'No bills in this shift.'}</p>`}</section>`));

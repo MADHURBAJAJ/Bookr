@@ -27,5 +27,12 @@ describe('bills of a shift', () => {
     expect(by(room.bill.id)).toMatchObject({ status: 'settled', modes: ['room'], room: 'Room 101 · Sample Room Guest' });
     expect(by(unpaid.bill.id)).toMatchObject({ status: 'printed', modes: [] });
     expect(by(voided.bill.id)).toMatchObject({ status: 'void' });
+    // A room invoice made at check-out is listed too, with its stay to open the room bill.
+    await ok(counter.post(`${B}/stays/${stay}/charges`, { amount: '1050', note: 'Room rent' }));
+    const bill = await ok(counter.get(`${B}/stays/${stay}/bill`));
+    await ok(counter.post(`${B}/debtors/${acc}/receipts`, { kind: 'receipt', payments: [{ mode: 'cash', amount: String(bill.balancePaise / 100) }] }));
+    await ok(counter.post(`${B}/stays/${stay}/check-out`, {}));
+    const r2 = await ok(counter.get(`${B}/bill-list`));
+    expect(r2.roomInvoices).toEqual([expect.objectContaining({ room: '101', guestName: 'Sample Room Guest', totalPaise: 105_000, stayId: stay })]);
   });
 });
