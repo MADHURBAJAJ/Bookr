@@ -56,9 +56,8 @@ describe("Djubo's daily reports", () => {
     await send(businessId, `SAMPLE HOSTEL: Daily Front Office Report - ${long(day)}`, front(day));
     expect(await q('SELECT 1 FROM bookings WHERE business_id = ?', businessId)).toHaveLength(2);
 
-    // Check-out waits for the total rent; Djubo said nothing was left to collect, so all of it was paid before.
+    // The total rent typed from Djubo (optional): Djubo said nothing was left to collect, so all of it was paid before.
     const sid = stay[0].id;
-    expect((await counter.post(`${B}/stays/${sid}/check-out`, {})).json.error).toMatch(/total rent/);
     const bill = await ok(counter.post(`${B}/stays/${sid}/report-rent`, { total: '4000' }));
     expect(bill).toMatchObject({ rentPaise: 400_000, prepaidPaise: 400_000, balancePaise: 0 });
     expect((await counter.post(`${B}/stays/${sid}/report-rent`, { total: '4000' })).status).toBe(409);

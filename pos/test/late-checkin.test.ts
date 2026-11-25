@@ -62,9 +62,21 @@ describe('late check-in', () => {
     expect((await q('SELECT checked_out_at FROM stays WHERE id = ?', occupied))[0].checked_out_at).toBeNull();   // today's guest stays
     expect((await q("SELECT status FROM room_status WHERE room = '104'"))[0]?.status ?? 'none').not.toBe('dirty');
 
+    // A stay from before the POS (booking from Djubo's daily report, no total rent): checks out without a POS invoice.
+    const rep = crypto.randomUUID();
+    await q(`INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, room_type, check_in, check_out, status, from_report, report_due_paise, created_at, updated_at)
+      VALUES (?, ?, 'djubo', 'DJ-R', 'Sample Report Guest', 'Deluxe', ?, ?, 'approved', 1, 0, ?, ?)`, rep, s.businessId, add(today, -1), today, t, t);
+    await q("UPDATE room_status SET status = 'inspected' WHERE room = '103'");
+    const repStay = (await ok(owner.post(`${B}/stays`, { room: '103', guestName: 'Sample Report Guest', bookingId: rep }))).id;
+    expect((await ok(owner.post(`${B}/stays/${repStay}/check-out`, {}))).bill.invoice).toBeNull();
+    // A walk-in whose rent was never added also checks out with no invoice: listed apart, as worth a look.
+    const walk = (await ok(counter.post(`${B}/stays`, { room: '103', guestName: 'Sample Walk-in', dirtyOk: true }))).id;
+    await ok(counter.post(`${B}/stays/${walk}/check-out`, {}));
+
     const dc = await ok(owner.get(`${B}/reports/daily-check?day=${today}`));
+    expect(dc.noInvoice.map((x: any) => [x.guestName, !!x.rentUnknown])).toEqual([['Sample Report Guest', true], ['Sample Walk-in', false]]);
     expect(dc.lateCheckIns.map((x: any) => [x.guestName, x.checkIn, !!x.checkedOutAt])).toEqual([
-      ['Sample Late One', add(today, -1), true], ['Sample Late Three', add(today, -3), false], ['Sample Gone', add(today, -2), true]]);
+      ['Sample Late One', add(today, -1), true], ['Sample Late Three', add(today, -3), false], ['Sample Gone', add(today, -2), true], ['Sample Report Guest', add(today, -1), true]]);
     expect((await ok(counter.get(`${B}/bookings/arrivals`))).late).toEqual([]);
   });
 });

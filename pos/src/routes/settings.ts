@@ -1154,8 +1154,10 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
     return c.json({ ok: true, bill: await stayBill(c, id) });
   }
   const allRooms = [row.room, ...(await all<{ room: string }>(db, 'SELECT room FROM stays WHERE group_stay_id = ? ORDER BY room', id)).map((x) => x.room)].map(realRoom).join(', ');
-  // A booking from Djubo's daily report needs its total rent typed first, so the invoice is right (24 Nov 2026).
-  if (await one(db, 'SELECT 1 FROM bookings WHERE stay_id = ? AND from_report = 1 AND amount_paise IS NULL', id)) fail(409, 'Type the total rent from Djubo on the room bill first: this booking came from Djubo\'s daily report, which has no total.');
+  // A stay that began before the POS (25 Nov 2026, the owner's choice): its booking came from Djubo's daily report, with no
+  // total rent. Unless the total is typed, it checks out without a POS invoice (Djubo or the OTA has the stay's invoice);
+  // what Djubo said was still to collect must still be paid first. The Daily check lists every check-out without one.
+  const rentUnknown = !!(await one(db, 'SELECT 1 FROM bookings WHERE stay_id = ? AND from_report = 1 AND amount_paise IS NULL', id));
   if (row.balance > 0) fail(409, `${rupeesText(row.balance)} is still to pay on this room. Take the guest's payment first.`);
   if (row.balance < 0) fail(409, `${rupeesText(-row.balance)} of the guest's deposit or advance is left. Refund it first.`);
   // Who the invoice is made out to (25 Nov 2026): a company that pays or claims GST, typed at check-out or from the reservation.
@@ -1207,7 +1209,7 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
     ...members.map((m) => stmt(db, 'UPDATE stays SET checked_out_at = ?, room = ? WHERE id = ? AND checked_out_at IS NULL', t, realRoom(m.room), m.id)),
     // Housekeeping (25 Nov 2026): the room is dirty until cleaned (each of a group's rooms and beds; not a past stay's).
     ...[row.room, ...members.map((m) => m.room)].flatMap((r) => dirtyStmt(r, t)),
-    audit(db, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, null),
+    audit(db, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, total > 0 ? null : { noInvoice: rentUnknown ? 'rent not known (Djubo daily report)' : 'no room rent on the bill' }),
   ]);
   return c.json({ ok: true, bill: await stayBill(c, id) });
 });

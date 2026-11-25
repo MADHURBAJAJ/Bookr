@@ -2417,7 +2417,7 @@ function roomBillPanel(r) {
         <label class="f">Rate per extra night (₹, GST incl.; empty if Djubo will send it)<input class="in" inputmode="decimal" data-model="exRate" value="${ui.exRate ?? ''}"></label></div>
       ${r.booking ? html`<p class="small quiet">This guest came through Djubo: extend it in Djubo too. Leave the rate empty if Djubo's revised mail will add the rent.</p>` : ''}
       <div class="row"><button class="btn pri" type="submit" data-act="rbExtend" data-submit>Extend</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
-    if (f === 'checkout') return html`<form class="panel" style="margin-top:10px"><h3>Check out and print the room invoice</h3>
+    if (f === 'checkout') return html`<form class="panel" style="margin-top:10px"><h3>${r.rentPaise > 0 ? 'Check out and print the room invoice' : r.booking?.fromReport && r.booking.amountPaise == null ? 'Check out (no POS invoice: total rent not known, stay began before the POS)' : 'Check out (no room rent on this bill: no invoice)'}</h3>
       <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-model="coCo" data-live ${ui.coCo ?? !!st.company ? 'checked' : ''}> Invoice in a company's name (GST claim)</label>
       ${ui.coCo ?? !!st.company ? html`<div class="grid3"><label class="f">Company<input class="in" data-model="coName" value="${ui.coName ?? st.company ?? ''}"></label>
         <label class="f">GSTIN<input class="in" data-model="coGstin" maxlength="15" value="${ui.coGstin ?? st.gstin ?? ''}"></label><label class="f">Address<input class="in" data-model="coAddr" value="${ui.coAddr ?? ''}"></label></div>` : ''}
@@ -2433,8 +2433,8 @@ function roomBillPanel(r) {
     ${!out && grp.length ? html`<div class="msg ok" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="grow">One bill for ${st.room} and ${grp.map((g) => g.room).join(', ')}: food and payments of all of them come here. Checking out ${st.room} checks out all.</span>
       ${grp.map((g) => html`<button class="btn sm" type="button" data-act="bedOut" data-id="${g.id}" data-r="${g.room}">${g.room} leaves early</button>`)}</div>` : ''}
     ${!out && st.foreign && !st.formCAt ? html`<div class="msg warn" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow">Foreign guest: Form C is due within 24 hours of arrival.</span><button class="btn" type="button" data-act="formC" data-id="${st.id}">Form C filed</button></div>` : ''}
-    ${r.booking?.fromReport && r.booking.amountPaise == null && !st.checkedOutAt ? html`<form class="msg warn" style="display:block;margin-top:8px"><strong>Type the total rent from Djubo</strong>
-      <div class="small">This booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}). The rest counts as paid before arrival. Needed before check-out.</div>
+    ${r.booking?.fromReport && r.booking.amountPaise == null && !st.checkedOutAt ? html`<form class="msg warn" style="display:block;margin-top:8px"><strong>Total rent not known: check-out goes without a POS invoice</strong>
+      <div class="small">This stay began before the POS: its booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}), and that must be paid first. Djubo or the OTA has its invoice. To print a POS invoice instead, type the total rent from Djubo (optional).</div>
       <div class="row" style="margin-top:6px"><input class="in" inputmode="decimal" data-model="rptRent" value="${ui.rptRent ?? ''}" placeholder="Total rent in Djubo (₹)" style="max-width:220px">
         <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
     ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
@@ -4281,6 +4281,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
     ...(broken.length ? ['Bill numbers missing'] : []),
     ...(d.bar.missingPaise ? [`Bar count: ${rs(d.bar.missingPaise)} missing`] : []),
     ...((d.lateCheckIns ?? []).length ? [`${plural(d.lateCheckIns.length, 'guest')} checked in late`] : []),
+    ...((d.noInvoice ?? []).filter((x) => !x.rentUnknown).length ? [`${plural(d.noInvoice.filter((x) => !x.rentUnknown).length, 'stay')} checked out with no room rent`] : []),
   ];
   const prevNet = ui.exPrev?.sales?.netPaise ?? null;
   const change = prevNet ? Math.round(((d.sales.netPaise - prevNet) / prevNet) * 100) : null;
@@ -4362,6 +4363,10 @@ async function exceptionsScreen(day = me.business.shiftDay) {
       <p class="quiet small">Bookings missed at the desk and checked in afterwards, with the booking's date. Many of these mean check-ins are being missed.</p>
       <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Was due</th><th>Checked in</th><th>By</th></tr></thead><tbody>
         ${d.lateCheckIns.map((x) => html`<tr><td>${x.room}</td><td>${x.guestName}${x.checkedOutAt ? html` <span class="small quiet">· in and out together</span>` : ''}</td><td>${dayName(x.checkIn)}</td><td>${dateTime(x.at)}</td><td>${x.byName ?? ''}</td></tr>`)}</tbody></table></div></section>` : ''}
+    ${(d.noInvoice ?? []).length ? html`<section class="panel" style="margin-top:16px"><h2>Checked out without a POS invoice</h2>
+      <p class="quiet small">Stays that began before the POS (total rent not known: Djubo or the OTA has the invoice), and any stay with no room rent on its bill, which needs a look.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Stayed from</th><th>Why</th><th>Checked out by</th></tr></thead><tbody>
+        ${d.noInvoice.map((x) => html`<tr><td>${x.room}</td><td>${x.guestName}</td><td>${dayName(x.checkIn)}</td><td>${x.rentUnknown ? 'Rent not known · before the POS' : html`<span style="color:var(--bad)">No room rent on the bill</span>`}</td><td>${x.byName ?? ''}</td></tr>`)}</tbody></table></div></section>` : ''}
     ${(d.typedPrices ?? []).length ? html`<section class="panel" style="margin-top:16px"><h2>Prices typed at billing</h2>
       <p class="quiet small">Bottles and other price-at-billing items, with the price typed and who typed it.</p>
       <div class="scroll"><table class="t"><thead><tr><th>Bill</th><th>Item</th><th class="num">Qty</th><th class="num">Price typed</th><th class="num">Lowest allowed</th><th>Typed by</th></tr></thead><tbody>

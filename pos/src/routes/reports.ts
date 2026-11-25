@@ -214,6 +214,15 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
       WHERE s.business_id = ? AND s.group_stay_id IS NULL AND s.check_in < ? AND s.created_at >= ? AND s.created_at < ? ORDER BY s.created_at`, bid, day,
       Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000,
       Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000 + 86_400_000),
+    // Checked out this shift without a POS room invoice (25 Nov 2026): a stay from before the POS whose total rent was not
+    // known, or a stay with no room rent on its bill at all (a walk-in whose rent was never added: worth a look).
+    noInvoice: await all(db, `SELECT s.room, s.guest_name AS guestName, s.check_in AS checkIn, s.checked_out_at AS at,
+        EXISTS (SELECT 1 FROM bookings k WHERE k.stay_id = s.id AND k.from_report = 1 AND k.amount_paise IS NULL) AS rentUnknown,
+        (SELECT st.name FROM audit_log a JOIN staff st ON st.id = a.staff_id WHERE a.row_table = 'stays' AND a.row_id = s.id AND a.action = 'stay.check_out' ORDER BY a.id DESC LIMIT 1) AS byName
+      FROM stays s WHERE s.business_id = ? AND s.group_stay_id IS NULL AND s.checked_out_at >= ? AND s.checked_out_at < ?
+        AND NOT EXISTS (SELECT 1 FROM room_invoices i WHERE i.stay_id = s.id) ORDER BY s.checked_out_at`, bid,
+      Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000,
+      Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000 + 86_400_000),
     cancelReturns: await all(db, `SELECT i.name, ss.name AS store, i.unit, sum(m.qty) AS qty FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
       JOIN stock_stores ss ON ss.id = m.store_id WHERE m.business_id = ? AND m.shift_day = ? AND m.kind = 'sale' AND m.qty > 0 AND m.ref LIKE '% · cancelled'
       GROUP BY i.id, ss.id ORDER BY i.name`, bid, day),
