@@ -246,6 +246,8 @@ const NAV = [
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts', when: (b) => !b.cashBooks },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
+  // Days (approved 25 Nov 2026): is each day's money finished. Needs the shift and the bank, so it is on its own.
+  { key: 'days', label: 'Days', needs: 'bank.link', group: 'Daily work', badge: 'days', when: (b) => !b.cashBooks },
   // WhatsApp inbox (approved 24 Nov 2026): guest payment photos and bills from the WhatsApp groups.
   { key: 'whatsapp', label: 'WhatsApp', needs: 'wa.review', group: 'Daily work', when: (b) => !b.cashBooks },
   // Restaurant POS (approved 14 Nov 2026): its bills, receipts and shift closes, and Connect POS.
@@ -284,7 +286,7 @@ async function fillNavCounts(biz) {
 /** What each menu count shows, from the Today figures. */
 function todayCounts(h, biz) {
   const bank = (h.bookExpenses?.count ?? 0) + (h.upi?.credits.count ?? 0) + (h.cards?.days ?? 0);
-  return { shifts: h.shifts?.count ?? 0, bank, today: todayItems(h, biz).length };
+  return { shifts: h.shifts?.count ?? 0, bank, today: todayItems(h, biz).length, days: h.days ? h.days.total - h.days.closed : 0 };
 }
 
 // The shift being worked on (7 Nov 2026): Review, Compare sales and Reconcile open on the day last worked on anywhere,
@@ -330,7 +332,8 @@ function shiftBar(biz, day, screen) {
   return html`<nav class="shiftbar" aria-label="Shift" data-day="${day}" data-screen="${screen}">
     <div class="sb-day"><a class="btn plain" data-sbstep="-1" href="#" aria-label="Previous shift">‹</a>
       <span class="sb-cal"><button class="btn plain sb-pick" type="button" data-sbpick aria-haspopup="dialog" aria-expanded="false">${dayLabel(day)} shift <span aria-hidden="true">▾</span></button></span>
-      <a class="btn plain" data-sbstep="1" href="#" aria-label="Next shift">›</a></div>
+      <a class="btn plain" data-sbstep="1" href="#" aria-label="Next shift">›</a>
+      ${biz.actions.includes('bank.link') && !biz.cashBooks ? html`<a class="chip mute sb-dayst" data-sbday href="#/b/${biz.id}/days/${day}" hidden></a>` : ''}</div>
     <div class="sb-tabs" role="tablist">${tabs.map(([k, label], i) => html`<a role="tab" class="${k === screen ? 'on' : ''}" aria-selected="${k === screen}" href="${screenHref(biz, k, day)}">
       <span class="sb-i">${i + 1}</span>${label}<span class="sb-n" data-sbn="${k}"></span></a>`)}</div>
   </nav>`;
@@ -353,6 +356,7 @@ async function wireShiftBar(biz) {
     a.addEventListener('click', (e) => { e.preventDefault(); to(d); });
   });
   wireShiftCalendar(biz, bar.querySelector('.sb-cal'), day, cal, to);
+  fillDayChip(biz, bar, day);
   if (!p) return;
   const set = (k, text, cls) => { const el = bar.querySelector(`[data-sbn="${k}"]`); if (el) { el.textContent = text; el.className = `sb-n ${cls}`; } };
   set('bringin', !p.software && !p.rows ? 'to bring in' : !p.software ? 'no sales report' : !p.rows ? 'no register' : '✓', p.software && p.rows ? 'ok' : 'wait');
@@ -360,6 +364,29 @@ async function wireShiftBar(biz) {
   const left = p.bank ? p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0) : 0;
   set('reconcile', p.status !== 'confirmed' ? (p.toDecide ? `${p.toDecide} to decide · not saved` : 'not saved') : left ? `${left} left` : '✓',
     p.status !== 'confirmed' ? (p.toDecide ? 'wait' : '') : left ? 'wait' : 'ok');
+}
+
+/** The day's state on the shift bar (Days, 25 Nov 2026): not saved, things left, waiting for files, or closed. Opens Days. */
+let DAYS_CACHE = { bizId: null, at: 0, data: null };
+async function daysList(biz, fresh = false) {
+  if (fresh || DAYS_CACHE.bizId !== biz.id || Date.now() - DAYS_CACHE.at > 60e3) {
+    DAYS_CACHE = { bizId: biz.id, at: Date.now(), data: await api('GET', `/businesses/${biz.id}/days`) };
+  }
+  return DAYS_CACHE.data;
+}
+const dayLeft = (d) => d.creditsOpen + d.billsWaiting;
+const DAY_STATES = { closed: ['td-g', 'ok', 'Closed'], open: ['td-a', 'wait', 'Things left'], waiting: ['td-n', 'mute', 'Waiting for a file'], unsaved: ['td-u', 'mute', 'Shift not saved'] };
+const dayChipText = (d) => (d.status === 'closed' ? 'closed ✓' : d.status === 'unsaved' ? 'not saved' : d.status === 'waiting' ? 'waiting for a file' : `${dayLeft(d)} left`);
+async function fillDayChip(biz, bar, day) {
+  const el = bar.querySelector('[data-sbday]');
+  if (!el) return;
+  const data = await daysList(biz).catch(() => null);
+  const d = data?.days.find((x) => x.day === day);
+  if (!d || !el.isConnected) return;
+  el.textContent = `Day ${dayChipText(d)}`;
+  el.className = `chip ${DAY_STATES[d.status][1]} sb-dayst`;
+  el.title = 'Open this day on Days';
+  el.hidden = false;
 }
 
 /**
@@ -689,6 +716,9 @@ async function dashboardView(biz) {
       ${legend}
     </section>` : ''}
     ${tiles.length ? html`<section class="card" style="gap:10px"><h2>Money</h2><div class="td-tiles">${tiles}</div></section>` : ''}
+    ${h.days ? html`<section class="card td-row"><div><h2 style="margin:0">${h.days.closed} of ${nOf(h.days.total, 'day')} closed</h2>
+      <div class="note">${h.days.closed === h.days.total ? 'Every day\'s money is finished' : `${nOf(h.days.credits, 'credit')} and ${nOf(h.days.bills, 'bill')} left · oldest ${short(h.days.oldestOpen)}`}</div></div>
+      <a class="btn plain" href="#/b/${biz.id}/days">Close days ›</a></section>` : ''}
     ${h.creditRed?.length ? html`<section class="card td-row" style="border-left:3px solid #DC2626"><div><h2 style="margin:0"><span class="chip bad">Credit 30+ days</span> ${h.creditRed.map((k) => `${k.guestName} ₹ ${rs(k.amountPaise)}`).join(' · ')}</h2>
       <div class="note">${h.creditRed.map((k) => `${k.billNo}: ${k.days} days`).join(' · ')}</div></div>
       <a class="btn plain" href="#/b/${biz.id}/reports">Open ›</a></section>` : ''}
@@ -12156,6 +12186,7 @@ async function routeInner() {
       if (screen === 'parties') return partiesView(biz, query);
       if (screen === 'directors') return biz.actions.includes('reports.view') ? directorsView(biz) : go(home(biz));
       if (screen === 'loans') return biz.actions.includes('reports.view') ? loansView(biz) : go(home(biz));
+      if (screen === 'days') return biz.actions.includes('bank.link') && !biz.cashBooks ? daysView(biz, isDay(parts[3]) ? parts[3] : null) : go(home(biz));
       if (screen === 'whatsapp') return biz.actions.includes('wa.review') ? whatsappView(biz, query) : go(home(biz));
       if (screen === 'wagroups') return biz.actions.includes('wa.review') ? waGroupsView(biz) : go(home(biz));
       if (screen === 'pos') return posView(biz, query);
@@ -12168,6 +12199,77 @@ async function routeInner() {
   } catch (e) {
     if (me) render(html`<div class="center"><section class="card"><div class="error">${e.message}</div><a href="#/choose">Back</a></section></div>`);
   }
+}
+
+/**
+ * Days (approved 25 Nov 2026). A day is closed when its shift is saved, every bank credit of it is matched, booked,
+ * settled or left out, and no bill of it waits for its money. The page only shows what is left and where it is dealt
+ * with; it books nothing. Days turn green by themselves (no lock).
+ */
+async function daysView(biz, day) {
+  const [p, d] = await Promise.all([daysList(biz, true), day ? api('GET', `/businesses/${biz.id}/days/${day}`) : null]);
+  const short = (x) => (x ? new Date(`${x}T12:00:00+05:30`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' }) : '–');
+  const nOf = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const range = (days) => `from=${addDaysIso(days[0], -1)}&to=${addDaysIso(days.at(-1), 1)}`;
+  const moneyIn = (days) => `#/b/${biz.id}/bank?tab=in&${range(days)}`;
+  const daysText = (xs) => (xs.length > 3 ? `${short(xs[0])} – ${short(xs.at(-1))} · ${xs.length} days` : xs.map(short).join(', '));
+  // Where each cause is dealt with. Nothing is booked from here.
+  const act = (cause, days) => (cause === 'unsaved' || cause === 'chosen' ? [`Open ${short(days[0])}`, screenHref(biz, 'reconcile', days[0])]
+    : cause === 'card' ? ['Card settlements', `#/b/${biz.id}/cards`] : ['Open in Money in', moneyIn(days)]);
+  const strip = p.days.map((x, i) => {
+    const [cls, , word] = DAY_STATES[x.status];
+    const n = dayLeft(x);
+    return html`<a class="td-day ${cls} ${x.day === day ? 'dy-on' : ''}" href="#/b/${biz.id}/days/${x.day}" title="${dayLabel(x.day)} · ${word}${n ? ` · ${n} left` : ''}">
+      ${short(x.day).split(' ')[0]}<small>${x.status === 'closed' ? '✓' : n ? n : i === 0 || x.day.slice(5, 7) !== p.days[i - 1].day.slice(5, 7) ? short(x.day).split(' ')[1] : ''}</small></a>`;
+  });
+  const legend = Object.entries(DAY_STATES).map(([k, [cls, , word]]) => {
+    const n = p.days.filter((x) => x.status === k).length;
+    return n ? html`<span style="display:inline-flex;gap:6px;align-items:center"><span class="td-dot ${cls}"></span>${word} · ${n}</span>` : '';
+  });
+  const dayCard = d ? (() => {
+    const row = d.row;
+    const [, chipCls, word] = DAY_STATES[row?.status ?? 'open'];
+    const done = d.lines.filter((l) => l.state === 'done');
+    const open = d.lines.filter((l) => l.state === 'open');
+    const sum = d.lines.reduce((t, l) => t + l.paise, 0);
+    const main = row?.status === 'unsaved' ? ['Open Reconcile', screenHref(biz, 'reconcile', d.day)]
+      : d.credits.length ? act(d.credits[0].cause, [d.day]) : d.bills.length ? ['Bills to look at', `#/b/${biz.id}/pending`] : null;
+    const line = (l) => html`<div class="dy-line"><span class="chip ${l.state === 'done' ? 'ok' : 'wait'}">${l.state === 'done' ? 'done' : 'open'}</span>
+      <span style="flex:1">${l.label} · ${l.n}</span><span class="amount">₹ ${money(l.paise)}</span></div>`;
+    return html`<section class="card" style="gap:6px">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><h2 style="margin:0">${dayLabel(d.day)} · money in</h2>
+        <span class="chip ${chipCls}">${row?.status === 'open' ? `${dayLeft(row)} left` : word}</span><span class="amount" style="margin-left:auto;font-weight:600">₹ ${money(d.inPaise)}</span></div>
+      ${done.map(line)}${open.map(line)}
+      <div class="dy-line" style="font-weight:600"><span style="flex:1">${sum === d.inPaise ? '= adds up ✓' : '≠ does not add up'}</span><span class="amount">₹ ${money(sum)}</span></div>
+      ${d.credits.length ? html`<details class="cmp-fold"><summary class="note">${nOf(d.credits.length, 'open credit')}</summary>
+        ${d.credits.map((c) => html`<div class="dy-line"><span class="tiny note" style="width:46px">${new Date(c.at + 19800000).toISOString().slice(11, 16)}</span>
+          <span style="flex:1;min-width:0;overflow-wrap:anywhere">${c.description} <span class="tiny note">· ${c.accountName}</span></span><span class="amount">₹ ${money(c.amountPaise)}</span></div>`)}</details>` : ''}
+      <div class="dy-line"><span style="flex:1">${d.bills.length ? html`Bills waiting: ${d.bills.map((b) => html`<span style="${b.overdue ? 'color:#B91C1C' : ''}">${b.billNo} ₹ ${rs(b.amountPaise)}${b.mode ? ` ${b.mode}` : ''} ✗</span>`).reduce((a, b) => html`${a} · ${b}`)}`
+        : d.grey.length ? `Bills waiting for a file: ${d.grey.map((g) => `${g.billNo} (${g.reason})`).join(', ')}` : 'Bills waiting: none'}</span></div>
+      ${main ? html`<div style="display:flex;gap:8px;align-items:center"><a class="btn" href="${main[1]}">${main[0]} ›</a>
+        <a class="note" style="margin-left:auto" href="#/b/${biz.id}/days">Close ✕</a></div>` : ''}
+    </section>`;
+  })() : '';
+  const groupTile = (g) => {
+    const [label, href] = act(g.cause, g.days);
+    return html`<section class="card dy-tile"><div class="dy-head"><strong>${g.label}</strong><span class="amount">${g.n} · ₹ ${rs(g.paise)}</span></div>
+      <div class="note">${daysText(g.days)}${g.cause === 'unsaved' ? ' · save the oldest first' : ''}</div>
+      ${g.cause !== 'unsaved' && g.cause !== 'upi' ? html`<div class="tiny note" style="overflow-wrap:anywhere">${g.sample.map((s) => `${short(s.day)} ₹ ${rs(s.amountPaise)} ${s.description.slice(0, 48)}`).join(' · ')}${g.n > g.sample.length ? ' · …' : ''}</div>` : ''}
+      <div style="display:flex"><a class="btn plain" style="margin-left:auto" href="${href}">${label} ›</a></div></section>`;
+  };
+  const MODE = { upi: 'UPI bills waiting', card: 'Card bills waiting', cash: 'Cash bills not in the count', other: 'Bills with no mode' };
+  const billTile = (g) => html`<section class="card dy-tile"><div class="dy-head"><strong>${MODE[g.mode]}</strong><span class="amount">${g.n} · ₹ ${rs(g.paise)}</span></div>
+      <div class="note">${g.overdue ? html`<span style="color:#B91C1C">${g.overdue} over ${p.watchDays} days</span> · ` : ''}${g.bills.map((b) => `${b.billNo} ₹ ${rs(b.amountPaise)}`).join(' · ')}${g.n > g.bills.length ? ' · …' : ''}</div>
+      <div style="display:flex"><a class="btn plain" style="margin-left:auto" href="#/b/${biz.id}/pending">Match or close ›</a></div></section>`;
+  render(shell(biz, 'days', 'Days', 'A day is closed when its shift is saved, every bank credit of it is dealt with and no bill of it waits for its money.', html`
+    <section class="card td-row"><div><h2 style="margin:0">${p.closed} of ${nOf(p.days.length, 'day')} closed</h2>
+      <div class="note">${p.closed === p.days.length ? 'Every day\'s money is finished' : `${nOf(p.left.credits, 'credit')} and ${nOf(p.left.bills, 'bill')} left · oldest ${short(p.oldestOpen)}`}</div></div></section>
+    <section class="card" style="gap:8px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>Days</h2><span class="note">Press a day to see it add up</span></div>
+      <div class="td-strip">${strip}</div><div class="note" style="display:flex;gap:14px;flex-wrap:wrap">${legend}</div></section>
+    ${dayCard}
+    ${p.groups.length || p.billGroups.length ? html`<h2 style="margin:8px 0 0">What is left · biggest first</h2>${p.groups.map(groupTile)}${p.billGroups.map(billTile)}` : ''}`));
+  wireShell();
+  if (day) document.querySelector('.dy-on')?.scrollIntoView({ block: 'nearest' });
 }
 
 // Bookr on the phone (approved 20 Nov 2026): installable as an app. The service worker keeps only an offline page.
