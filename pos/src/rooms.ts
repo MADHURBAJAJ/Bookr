@@ -13,10 +13,6 @@ export function prepaidNote(channel: string | null, source: string): string {
 }
 
 /** The booking a stay's rent follows: of a Djubo and MakeMyTrip pair, Djubo's (it has the advance and the GST). */
-async function bookingOfStay(db: DB, stayId: string) {
-  return one<{ id: string; source: string; amount_paise: number | null; paid_paise: number | null; desk_paid_paise: number; channel: string | null; status: string }>(db,
-    `SELECT id, source, amount_paise, paid_paise, desk_paid_paise, channel, status FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1`, stayId);
-}
 
 /**
  * Brings a stay's room rent and prepaid amount in step with its booking: the difference from what is on the folio is
@@ -26,7 +22,6 @@ async function bookingOfStay(db: DB, stayId: string) {
 export async function syncStay(db: DB, bid: string, stayId: string) {
   if (await one(db, 'SELECT 1 FROM room_invoices WHERE stay_id = ?', stayId)) return;
   const acc = await one<{ id: string }>(db, "SELECT id FROM debtor_accounts WHERE stay_id = ? AND business_id = ? AND kind = 'room'", stayId, bid);
-  const bk = await bookingOfStay(db, stayId);
   if (!acc) return;
   const t0 = now();
   // Advances taken with a reservation made here (25 Nov 2026) move onto the room's bill, booking or not.
@@ -37,24 +32,49 @@ export async function syncStay(db: DB, bid: string, stayId: string) {
       SELECT ?, ?, ?, 'advance', ?, ?, 'Advance taken at hotel', ? WHERE NOT EXISTS (SELECT 1 FROM debtor_entries WHERE payment_id = ? AND account_id = ?)`,
       newId(), bid, acc.id, -h.amount_paise, h.payment_id, t0, h.payment_id, acc.id)),
     ...[...new Set(fromRes.map((h) => h.id))].map((id) => stmt(db, "UPDATE desk_advances SET status = 'applied', stay_id = ? WHERE id = ? AND status = 'held'", stayId, id))]);
-  if (!bk) return;
-  const live = bk.status !== 'cancelled';
-  const rent = live ? Math.max(0, bk.amount_paise ?? 0) : 0;
-  // Of Djubo's advance, the part reception entered was taken at the desk: it is collected here with a receipt (24 Nov 2026),
-  // so only the rest counts as paid before arrival.
-  const paid = live ? Math.min(Math.max(0, (bk.paid_paise ?? 0) - bk.desk_paid_paise), rent) : 0;
+  const units = await bookingUnits(db, stayId);
+  if (!units.length) return;
   const t = now();
-  const put = (kind: 'room_rent' | 'prepaid', target: number, note: string | null) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, booking_id, note, at)
-    SELECT ?, ?, ?, ?, x.d, ?, ?, ? FROM (SELECT ? - coalesce((SELECT sum(amount_paise) FROM debtor_entries WHERE account_id = ? AND kind = ? AND booking_id IS NOT NULL), 0) AS d) x
-    WHERE x.d <> 0`, newId(), bid, acc.id, kind, bk.id, note, t, target, acc.id, kind);
-  // Advances taken at the desk before check-in, for this booking (or its MakeMyTrip twin), move onto the room's bill.
+  const stmts: D1PreparedStatement[] = [];
+  for (const { bk, ids } of units) {
+    const live = bk.status !== 'cancelled';
+    const rent = live ? Math.max(0, bk.amount_paise ?? 0) : 0;
+    // Of Djubo's advance, the part reception entered was taken at the desk: it is collected here with a receipt (24 Nov 2026),
+    // so only the rest counts as paid before arrival.
+    const paid = live ? Math.min(Math.max(0, (bk.paid_paise ?? 0) - bk.desk_paid_paise), rent) : 0;
+    const put = (kind: 'room_rent' | 'prepaid', target: number, note: string | null) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, booking_id, note, at)
+      SELECT ?, ?, ?, ?, x.d, ?, ?, ? FROM (SELECT ? - coalesce((SELECT sum(amount_paise) FROM debtor_entries WHERE account_id = ? AND kind = ?
+        AND booking_id IN (SELECT value FROM json_each(?))), 0) AS d) x WHERE x.d <> 0`, newId(), bid, acc.id, kind, bk.id, note, t, target, acc.id, kind, JSON.stringify(ids));
+    stmts.push(put('room_rent', rent, null), put('prepaid', -paid, prepaidNote(bk.channel, bk.source)));
+  }
+  // Advances taken at the desk before check-in, for its bookings (or their MakeMyTrip twins), move onto the room's bill.
   const held = await all<{ id: string; payment_id: string; amount_paise: number }>(db, `SELECT d.id, p.id AS payment_id, p.amount_paise FROM desk_advances d
     JOIN payments p ON p.settlement_id = d.settlement_id WHERE d.business_id = ? AND d.status = 'held' AND d.booking_id IN (SELECT id FROM bookings WHERE stay_id = ?)`, bid, stayId);
-  await db.batch([put('room_rent', rent, null), put('prepaid', -paid, prepaidNote(bk.channel, bk.source)),
+  await db.batch([...stmts,
     ...held.map((h) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, note, at)
       SELECT ?, ?, ?, 'advance', ?, ?, 'Advance taken at hotel', ? WHERE NOT EXISTS (SELECT 1 FROM debtor_entries WHERE payment_id = ? AND account_id = ?)`,
       newId(), bid, acc.id, -h.amount_paise, h.payment_id, t, h.payment_id, acc.id)),
     ...[...new Set(held.map((h) => h.id))].map((id) => stmt(db, "UPDATE desk_advances SET status = 'applied', stay_id = ? WHERE id = ? AND status = 'held'", stayId, id))]);
+}
+
+type UnitBooking = { id: string; source: string; amount_paise: number | null; paid_paise: number | null; desk_paid_paise: number; channel: string | null; status: string;
+  match_id: string | null; check_in: string | null; check_out: string | null; rooms: number | null; ext_ref: string; room_labels: string | null };
+/**
+ * A stay's bookings as stays of their own (25 Nov 2026): usually one (Djubo's, with MakeMyTrip's copy of the same stay); an
+ * extension made in Djubo as a new booking is a second. Each has the booking whose amounts count (Djubo's first) and the ids
+ * of all its copies, so rent already on the bill under any copy is not added twice. With one, every booking of the stay is
+ * its copy, as before.
+ */
+export async function bookingUnits(db: DB, stayId: string): Promise<{ bk: UnitBooking; ids: string[] }[]> {
+  const all_ = await all<UnitBooking>(db, `SELECT id, source, amount_paise, paid_paise, desk_paid_paise, channel, status, match_id, check_in, check_out, rooms, ext_ref, room_labels
+    FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC`, stayId);
+  const units: { bk: UnitBooking; ids: string[] }[] = [];
+  for (const b of all_) {
+    const twin = units.find((u) => u.ids.includes(b.match_id ?? '') || (b.id && all_.some((x) => u.ids.includes(x.id) && x.match_id === b.id)));
+    if (twin) twin.ids.push(b.id); else units.push({ bk: b, ids: [b.id] });
+  }
+  if (units.length === 1) units[0].ids = all_.map((b) => b.id);
+  return units;
 }
 
 // ---------- money taken at reception (24 Nov 2026)
@@ -167,4 +187,25 @@ export async function folioLines(db: DB, accountId: string) {
     `SELECT e.kind, e.amount_paise AS amountPaise, e.at, e.note, b.bill_no AS billNo, p.mode, s.receipt_no AS receiptNo, k.ext_ref AS bookingRef
      FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN settlements s ON s.id = p.settlement_id
      LEFT JOIN bookings k ON k.id = e.booking_id WHERE e.account_id = ? ORDER BY e.at, e.kind <> 'room_rent', e.id`, accountId);
+}
+
+/** A guest's name compared loosely: no Mr / Mrs / Ms / Dr, no spaces or dots, lower case. */
+export const nameKey = (n: string | null | undefined) => String(n ?? '').toLowerCase().replace(/\b(mr|mrs|ms|miss|dr)\b\.?/g, ' ').replace(/[^a-z]/g, '');
+
+/**
+ * Who a new booking continues (25 Nov 2026): Djubo makes an extension as a new booking from the day the stay ends. The
+ * guest's in-house rooms whose stay ends on the booking's first day, with the same phone or the same name.
+ */
+export async function continuesOf(db: DB, bid: string, bookings: { id: string; phone: string | null; guestName: string | null; checkIn: string | null }[]) {
+  if (!bookings.length) return new Map<string, { id: string; room: string; guestName: string }[]>();
+  const stays = await all<{ id: string; room: string; guest_name: string; phone: string | null; plan: string | null }>(db, `SELECT s.id, s.room, s.guest_name, s.phone,
+      coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id)) AS plan
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.room NOT LIKE '%(past stay)' ORDER BY s.room`, bid);
+  const out = new Map<string, { id: string; room: string; guestName: string }[]>();
+  for (const b of bookings) {
+    const hits = stays.filter((s) => s.plan && s.plan === b.checkIn
+      && ((b.phone && s.phone === b.phone) || (nameKey(b.guestName).length >= 4 && nameKey(s.guest_name) === nameKey(b.guestName))));
+    if (hits.length) out.set(b.id, hits.map((s) => ({ id: s.id, room: s.room, guestName: s.guest_name })));
+  }
+  return out;
 }

@@ -11,6 +11,7 @@ import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
+import { linkStay } from '../rooms';
 
 export const roomDeskRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -305,6 +306,54 @@ export async function roomIsDirty(db: DB, bid: string, room: string) {
 }
 
 // ---------- 12: moving a guest to another room (the bill, open orders and history go with them)
+
+// A booking that continues a stay (25 Nov 2026): Djubo made the extension as a new booking. It joins the guest's stay
+// instead of being a new arrival: the stays run to its last day, its rent goes on the first room's bill, and each room
+// can move to the one Djubo gives (the person chooses where Djubo and the POS differ). One invoice at check-out.
+roomDeskRoutes.post(`${B}/bookings/:id/continue`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const bookingId = c.req.param('id');
+  const b = isUuid(bookingId) ? await one<{ id: string; status: string; stay_id: string | null; check_in: string | null; check_out: string | null; ext_ref: string }>(db,
+    'SELECT id, status, stay_id, check_in, check_out, ext_ref FROM bookings WHERE id = ? AND business_id = ?', bookingId, bid) : null;
+  if (!b) fail(404, 'Booking not found.');
+  if (b.status !== 'approved' || b.stay_id) fail(409, 'This booking is already checked in, or not approved.');
+  if (!b.check_in || !b.check_out || b.check_in > clock(bizOf(c)).shiftDay) fail(409, 'This booking starts on a later day.');
+  const data = await body(c);
+  const asked = Array.isArray(data.stays) ? (data.stays as { id?: unknown; moveTo?: unknown }[]).slice(0, 10) : [];
+  if (!asked.length) fail(400, 'Choose the guest\'s rooms that this booking continues.');
+  const stays = [];
+  for (const a of asked) {
+    const s = await openStay(c, typeof a.id === 'string' ? a.id : '', true);
+    if (s.checked_out_at || s.room.endsWith(PAST_STAY)) fail(409, `${s.room}: this guest is not in house.`);
+    stays.push({ s, moveTo: typeof a.moveTo === 'string' && a.moveTo && a.moveTo !== s.room ? a.moveTo : null });
+  }
+  const rooms = (tableLayout(bizOf(c)) ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms').flatMap((x) => x.tables);
+  const t = now();
+  const staff = c.get('staff').id;
+  const batch = [];
+  for (const { s, moveTo } of stays) {
+    if (moveTo) {
+      if (!rooms.includes(moveTo)) fail(400, `${moveTo} is not a room in Settings.`);
+      batch.push(
+        stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', moveTo, s.id),
+        stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', `${/^\d/.test(moveTo) ? 'Room ' : ''}${moveTo} · ${s.guest_name}`, s.account_id),
+        stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", moveTo, s.id),
+        dirtyUpsert(db, bid, s.room, 'dirty', staff, t, `Guest moved to ${moveTo} (Djubo ${b.ext_ref})`),
+        audit(db, bid, staff, 'stay.move', 'stays', s.id, { room: s.room }, { room: moveTo, reason: `Djubo's room for booking ${b.ext_ref}` }));
+    }
+    batch.push(stmt(db, 'UPDATE stays SET check_out_plan = max(coalesce(check_out_plan, ?), ?) WHERE id = ?', b.check_out, b.check_out, s.id),
+      audit(db, bid, staff, 'stay.continue', 'stays', s.id, null, { booking: b.ext_ref, till: b.check_out }));
+  }
+  try {
+    await db.batch(batch);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, `${stays.map((x) => x.moveTo).filter(Boolean).join(', ')}: another guest is in that room. Keep the room the guest has, or free it first.`);
+    throw e;
+  }
+  await linkStay(db, bid, b.id, stays[0].s.id);
+  return c.json(await stayBill(c, stays[0].s.id));
+});
 
 // Swapping two in-house guests' rooms (25 Nov 2026): each guest takes the other's room in one step, with their bill and
 // open food orders; neither room is marked dirty (both stay occupied). Recorded once on each stay, with the reason.

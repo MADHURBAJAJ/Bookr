@@ -5,7 +5,7 @@ import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
-import { folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
+import { bookingUnits, folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
 import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { isOnline, syncItemStations } from '../stations';
@@ -1185,8 +1185,12 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   const { t, shiftDay, fy } = clock(b);
   const batch = [];
   if (total > 0) {
-    const bk = await one<{ check_in: string | null; check_out: string | null; rooms: number | null; room_labels: string | null }>(db,
-      "SELECT check_in, check_out, rooms, room_labels FROM bookings WHERE stay_id = ? AND status <> 'cancelled' ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1", id);
+    // The stay's bookings (25 Nov 2026: an extension made in Djubo as a new booking is a second one): the invoice runs from
+    // the first check-in to the last check-out, with a line per booking.
+    const units = (await bookingUnits(db, id)).filter((u) => u.bk.status !== 'cancelled');
+    const ins = units.map((u) => u.bk.check_in).filter((x): x is string => !!x).sort();
+    const outs = units.map((u) => u.bk.check_out).filter((x): x is string => !!x).sort();
+    const bk = units.length ? { check_in: ins[0] ?? null, check_out: outs[outs.length - 1] ?? null, rooms: Math.max(...units.map((u) => u.bk.rooms ?? 1)) } : null;
     const plan = (await one<{ p: string | null }>(db, 'SELECT check_out_plan AS p FROM stays WHERE id = ?', id))?.p ?? null;
     // Leaving on the day of arrival (a day use, or a check-out after midnight within the shift): the planned date, else the next day.
     const checkOut = shiftDay > row.check_in ? shiftDay : bk?.check_out ?? (plan && plan > row.check_in ? plan : new Date(Date.parse(row.check_in) + 86_400_000).toISOString().slice(0, 10));
@@ -1196,8 +1200,12 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
     if (!ent) fail(409, 'Add a billing name in Settings first: the room invoice is made in it.');
     const tax = roomTax(total, Math.round(total / nights / Math.max(1, bk?.rooms ?? 1)), ent.gst_registered === 1);
     const fromBooking = rent.filter((r) => r.booking_id).reduce((s0, r) => s0 + r.amount_paise, 0);
+    const perBooking = units.length > 1 ? [...units].sort((x, y) => String(x.bk.check_in).localeCompare(String(y.bk.check_in))).map((u) => {
+      const n = u.bk.check_in && u.bk.check_out ? nightsBetween(u.bk.check_in, u.bk.check_out) : 1;
+      return { name: `Room ${allRooms} · ${n} night${n === 1 ? '' : 's'} (Djubo ${u.bk.ext_ref})`, amountPaise: rent.filter((r) => r.booking_id && u.ids.includes(r.booking_id)).reduce((s0, r) => s0 + r.amount_paise, 0) };
+    }).filter((l) => l.amountPaise) : null;
     const lines = [
-      ...(fromBooking ? [{ name: `Room ${allRooms} · ${nights} night${nights === 1 ? '' : 's'}`, amountPaise: fromBooking }] : []),
+      ...(perBooking ?? (fromBooking ? [{ name: `Room ${allRooms} · ${nights} night${nights === 1 ? '' : 's'}`, amountPaise: fromBooking }] : [])),
       ...rent.filter((r) => !r.booking_id).map((r) => ({ name: r.note ?? 'Room charge', amountPaise: r.amount_paise })),
     ];
     batch.push(

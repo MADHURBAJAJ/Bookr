@@ -7,7 +7,7 @@ import { body, date, fail, isUuid, text } from '../../../src/http';
 import { isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock } from '../util';
 import { readAgain } from '../mail';
-import { deskPending, linkStay, recomputeDesk } from '../rooms';
+import { continuesOf, deskPending, linkStay, recomputeDesk } from '../rooms';
 import { phoneKey } from './settings';
 import type { AppEnv } from '../types';
 
@@ -69,7 +69,9 @@ bookingRoutes.get(`${B}/bookings/arrivals`, requireAction('stays.edit'), async (
     all(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in < ? AND check_in >= ?
       AND check_out <= ? AND ${pairOk} ORDER BY check_in, guest_name`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10), day),
   ]);
-  return c.json({ arrivals, late });
+  // A booking that continues a guest already in house (an extension made in Djubo as a new booking): their rooms.
+  const cont = await continuesOf(c.env.DB, bid, (arrivals as { id: string; phone: string | null; guestName: string | null; checkIn: string | null }[]));
+  return c.json({ arrivals: (arrivals as { id: string }[]).map((a) => ({ ...a, continues: cont.get(a.id) ?? null })), late });
 });
 
 async function booking(c: Context<AppEnv>, id: string) {

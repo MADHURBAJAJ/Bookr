@@ -2268,7 +2268,7 @@ function checkinView() {
       <div class="cicol">
         ${step(1, 'Guest', html`
           ${ui.arrivals?.length || resArr.length ? html`<div class="f">Arriving today<div class="cilist">
-            ${ui.arrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}${a.checkIn < me.business.shiftDay ? ` · was due ${dayName(a.checkIn)}` : ''}</small></span>
+            ${ui.arrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}${a.checkIn < me.business.shiftDay ? ` · was due ${dayName(a.checkIn)}` : ''}${a.continues ? ` · already in ${a.continues.map((x) => x.room).join(', ')}: extension` : ''}</small></span>
               <span class="dright">${dueOf(a) ? html`<span class="status warn">Collect ${rs(dueOf(a))}</span>` : html`<span class="status ok">Prepaid</span>`}</span></button>`)}
             ${resArr.map((a) => html`<button type="button" class="drow ${ui.resPicked?.id === a.id ? 'on' : ''}" data-act="pickRes" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.rooms} · made here, not in Djubo</small></span>
               <span class="dright">${a.duePaise ? html`<span class="status warn">Collect ${rs(a.duePaise)}</span>` : html`<span class="status ok">Paid</span>`}</span></button>`)}</div></div>`
@@ -2277,6 +2277,7 @@ function checkinView() {
             ${ui.lateArrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName ?? 'No name'}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · ${dayName(a.checkIn)} → ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}</small></span>
               <span class="dright"><span class="status bad">was due ${dayName(a.checkIn)}</span></span></button>`)}</div></div>` : ''}
           ${picked ? bookingCard(picked) : ''}
+          ${picked?.continues ? continueBox(picked) : ''}
           ${ui.resPicked ? html`<div class="msg warn" style="display:block"><strong>${ui.resPicked.guestName}</strong> · reservation made here, not in Djubo yet · total ${rs(ui.resPicked.totalPaise)} · advance ${rs(ui.resPicked.advancePaise)}
             <div class="small">Its rate goes on the room bill now; Djubo's amount replaces it when Djubo's mail arrives.</div></div>` : ''}
           <div class="grid2"><label class="f">Mobile<input class="in" type="tel" inputmode="tel" data-model="gPhone" data-act-change="gLookup" value="${ui.gPhone ?? ''}" placeholder="Finds a returning guest" autocomplete="off" autofocus></label>
@@ -2650,6 +2651,19 @@ actions.pickArrival = async (d, _el, quiet) => {
   const free = pastOk ? hits : hits.filter((t) => !busy(t));
   ui.ciTaken = pastOk ? [] : hits.filter(busy);
   ui.ciHits = hits;
+  // A booking that continues a guest already in house (25 Nov 2026): pair each of their rooms with one Djubo gives.
+  if (a.continues) {
+    const left = [...hits];
+    const pairs = a.continues.map((x) => ({ ...x, djubo: null }));
+    for (const p of pairs) { const i = left.indexOf(p.room); if (i >= 0) { p.djubo = p.room; left.splice(i, 1); } }
+    for (const p of pairs) if (!p.djubo && left.length) p.djubo = left.shift();
+    ui.ctPairs = pairs; ui.ctExtra = left;
+    for (const p of pairs) {
+      const takenBy = p.djubo && p.djubo !== p.room ? (cache.stays ?? []).find((x) => roomKeyOf(x.room) === roomKeyOf(p.djubo) && !a.continues.some((y) => y.id === x.id)) : null;
+      p.takenBy = takenBy?.guestName ?? null;
+      ui[`ct_${p.id}`] = p.djubo && p.djubo !== p.room && !takenBy ? 'move' : 'keep';
+    }
+  } else { ui.ctPairs = null; ui.ctExtra = null; }
   ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
   ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
   ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
@@ -2895,6 +2909,26 @@ actions.ciOutTog = (_d, el) => {
   ui.ciTaken = ui.ciOutToo ? [] : hits.filter(busy);
   if (hits.length) { ui.room = usable[0] ?? null; ui.ciRooms = usable.slice(1); }
   rerender();
+};
+/** The extension box (25 Nov 2026): the guest's rooms against Djubo's, a choice where they differ, and one button. */
+function continueBox(a) {
+  const pairs = ui.ctPairs ?? [];
+  return html`<div class="msg ok" style="display:block;margin-top:8px"><strong>${a.guestName} is already in house: this booking continues the stay.</strong>
+    <div class="small">Djubo made the extension as a new booking. It is added to the guest's stay: the stay runs to ${dayName(a.checkOut)}, its rent goes on the bill of ${pairs[0]?.room ?? 'the first room'}, and the booking leaves the arrivals.</div>
+    ${pairs.map((p) => html`<div class="line" style="gap:8px;border-top:1px solid var(--go-line);padding:6px 0;flex-wrap:wrap"><span class="grow"><strong>${p.room}</strong> · ${p.guestName}${p.djubo ? (p.djubo === p.room ? html` <span class="status ok">Djubo has ${p.djubo} too</span>` : html` <span class="status warn">Djubo has ${p.djubo}</span>`) : html` <span class="status mute">no room in Djubo for it</span>`}</span>
+      ${p.djubo && p.djubo !== p.room ? (p.takenBy ? html`<span class="small">${p.djubo} has ${p.takenBy}: keeps ${p.room} (change it in Djubo, or free ${p.djubo} first)</span>`
+        : html`<span class="chips"><button type="button" class="chip" aria-pressed="${ui[`ct_${p.id}`] === 'move'}" data-act="pick" data-k="ct_${p.id}" data-id="move">Move to ${p.djubo} (Djubo's room)</button>
+          <button type="button" class="chip" aria-pressed="${ui[`ct_${p.id}`] === 'keep'}" data-act="pick" data-k="ct_${p.id}" data-id="keep">Keep ${p.room} (change it in Djubo)</button></span>`) : ''}</div>`)}
+    ${(ui.ctExtra ?? []).length ? html`<div class="small" style="margin-top:4px">Djubo also has ${ui.ctExtra.join(', ')} for this booking: check that room in separately if the guest takes it.</div>` : ''}
+    <div class="row" style="margin-top:8px"><button class="btn pri" type="button" data-act="ciContinue" data-id="${a.id}">Extend the stay to ${dayName(a.checkOut)}</button></div></div>`;
+}
+actions.ciContinue = async (d) => {
+  const pairs = ui.ctPairs ?? [];
+  const bill = await api('POST', `${B()}/bookings/${d.id}/continue`, { stays: pairs.map((p) => ({ id: p.id, moveTo: ui[`ct_${p.id}`] === 'move' ? p.djubo : undefined })) });
+  const moved = pairs.filter((p) => ui[`ct_${p.id}`] === 'move');
+  reopenStay = bill.stay.id;
+  flash = { kind: 'ok', text: `Stay extended${moved.length ? `; moved ${moved.map((p) => `${p.room} → ${p.djubo}`).join(', ')}` : ''}. The booking's rent is on ${bill.stay.room}'s bill.` };
+  await refreshDeskAlerts(); go('#/rooms');
 };
 actions.ciMultiTog = () => { ui.ciMulti = !ui.ciMulti; if (!ui.ciMulti) ui.ciRooms = []; rerender(); };
 // A phone number typed at check-in finds a returning guest: their name and city fill in, and their earlier stays show.
