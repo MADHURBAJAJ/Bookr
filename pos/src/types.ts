@@ -23,6 +23,10 @@ export interface Env {
   BOOKING_MAIL_FROM?: string;
   /** Worker secret: the key the WhatsApp listener uses to fetch each morning's Daily check for the owner, JSON {"<business id>": "<key>"}. */
   REPORT_KEYS?: string;
+  /** Worker secret, set only while old booking mails are brought in (25 Nov 2026): the key a forwarded old mail must carry. */
+  MAIL_IMPORT_KEY?: string;
+  /** The hotel's own mailbox that forwards old booking mails for import (a setting), e.g. "hotel@gmail.com". */
+  MAIL_IMPORT_FROM?: string;
 }
 
 export interface Staff {

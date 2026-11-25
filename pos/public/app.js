@@ -1959,8 +1959,8 @@ function listView() {
         <td data-label="Room">${kind === 'res' ? x.lines.map((l) => `${l.type}${l.roomNames.length ? ` ${l.roomNames.join(', ')}` : ` × ${l.rooms}`}`).join(' · ') : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`}</td>
         <td data-label="Source">${kind === 'res' ? x.source : x.channel ?? '—'}</td>
         <td data-label="Status"><span class="badge ${st[0]}">${st[1]}</span></td>
-        <td class="num" data-label="Total">${rs(kind === 'res' ? x.totalPaise : x.amountPaise ?? 0)}</td>
-        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
+        <td class="num" data-label="Total">${kind === 'res' ? rs(x.totalPaise) : x.amountPaise != null ? rs(x.amountPaise) : x.fromReport ? html`—<div class="small quiet">Djubo's report</div>` : '—'}</td>
+        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise || (x.fromReport && x.amountPaise == null) ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
     </tbody></table></div></section>`;
 }
 actions.resSearch = async () => { ui.res = await api('GET', `${B()}/reservations${ui.resQ ? `?q=${encodeURIComponent(ui.resQ)}` : ''}`); ui.resF = 'all'; rerender(); };
