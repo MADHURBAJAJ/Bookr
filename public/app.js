@@ -5804,6 +5804,7 @@ async function bankView(biz, query = '') {
           <div style="display:flex;gap:4px"><button class="btn plain" type="button" style="${SMALL}" data-fixbill="${r.id}" title="Correct the bill (number, amount, discount) to what the bank shows, and match">Fix bill</button>${skipLink(r)}</div>`, 'match')}
         ${section('nobill', 'No bill found', 'A sale nobody billed (e.g. drinks in a rush), or other money received', rest, (r) => html`
           ${lineFields(r)}<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+            ${r.remark === 'UPI collection settlement' ? html`<button class="btn plain" type="button" style="${SMALL}" data-deskbills="${r.id}" title="A desk guest paid into this account: match their bill and book the rest">Desk bills in this</button>` : ''}
             <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="fnb" title="A sale nobody billed: booked as F&B income">Unbilled F&amp;B</button>
             <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="room" title="A sale nobody billed: booked as Room income">Unbilled Room</button>
             ${cashLink(r)}${ownLink(r)}${loanLink(r)}${skipLink(r)}</div>`, 'book')}`;
@@ -6082,6 +6083,49 @@ async function bankView(biz, query = '') {
     if (day === null) return;
     run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/${b.dataset.cashmove}/cash-move`, { shiftDay: day.trim() || null }),
       dep ? 'Booked as cash deposited: not income. It comes off that shift\'s cash in hand.' : 'Booked as cash for the drawer: not an expense. It is added to that shift\'s cash in hand.');
+  }));
+  // Desk bills in a Yes Bank settlement (approved 25 Nov 2026): tick the desk bills paid into it; the rest is booked
+  // as direct bookings under the head chosen (Room income).
+  app.querySelectorAll('[data-deskbills]').forEach((b) => b.addEventListener('click', async () => {
+    const line = rows.find((x) => x.id === b.dataset.deskbills);
+    let d;
+    try { d = await api('GET', `/businesses/${biz.id}/bank-rows/${line.id}/desk-bills`); } catch (err) { showError(document.getElementById('bmsg'), err); return; }
+    const dlg = document.createElement('dialog');
+    dlg.className = 'rowdlg';
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:10px;max-width:480px">
+      <div><strong>Desk bills in this settlement</strong><div class="tiny">${dayLabel(line.day)} · ₹ ${money(line.amountPaise)} · ${line.tranId}</div></div>
+      ${d.bills.length ? html`<div class="tiny note">Desk UPI bills still waiting, ${dayLabel(d.from)} to ${dayLabel(d.to)} (saved shifts)</div>
+        ${d.bills.map((x) => html`<label class="um-line"><input type="checkbox" data-db="${x.id}" data-amt="${x.amountPaise}"><span class="mono">${x.billNo ?? '—'}</span><span class="tiny" style="flex:1">${dayLabel(x.shiftDay)} shift · not in the bank yet</span><strong class="amount">₹ ${money(x.amountPaise)}</strong></label>`)}`
+        : html`<div class="note">No desk UPI bill is waiting from ${dayLabel(d.from)} to ${dayLabel(d.to)}. Book the whole settlement with Book.</div>`}
+      <div class="note" data-dbsum></div>
+      <label class="tiny">Direct bookings head <select data-dbhead style="width:auto">${d.heads.map((x) => html`<option value="${x.id}" ${x.id === d.headId ? 'selected' : ''}>${x.name}</option>`)}</select></label>
+      <div class="form-msg" data-dbmsg></div>
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button><button class="btn" type="button" data-dbgo disabled>Match and book</button></div>
+    </form>`.__html;
+    document.body.append(dlg);
+    const ticked = () => [...dlg.querySelectorAll('[data-db]')].filter((x) => x.checked);
+    const go = dlg.querySelector('[data-dbgo]');
+    const draw = () => {
+      const desk = ticked().reduce((t, x) => t + Number(x.dataset.amt), 0);
+      const rest = line.amountPaise - desk;
+      dlg.querySelector('[data-dbsum]').innerHTML = ticked().length
+        ? html`Settlement ₹ ${money(line.amountPaise)} = desk bills ₹ ${money(desk)} ${rest >= 0 ? '✓' : '✗'} + direct bookings ₹ ${money(Math.max(rest, 0))}${rest < 0 ? html`<div style="color:var(--danger)">The bills come to more than the settlement.</div>` : ''}`.__html : '';
+      go.disabled = !ticked().length || rest < 0;
+      go.textContent = ticked().length && rest >= 0 ? `Match and book ₹ ${money(rest)}` : 'Match and book';
+    };
+    dlg.addEventListener('change', draw);
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      try {
+        await apiFull('POST', `/businesses/${biz.id}/bank-rows/${line.id}/settlement-split`, { transactionIds: ticked().map((x) => x.dataset.db), headId: dlg.querySelector('[data-dbhead]').value });
+        dlg.close('done');
+        await bankView(biz, query);
+        document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Desk bills matched; the rest booked as direct bookings. Unmatch is on Done.</div>`.__html;
+      } catch (err) { go.disabled = false; showError(dlg.querySelector('[data-dbmsg]'), err); }
+    });
+    dlg.addEventListener('close', () => dlg.remove());
+    dlg.showModal();
+    draw();
   }));
   app.querySelectorAll('[data-unbilled]').forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.unbilled;

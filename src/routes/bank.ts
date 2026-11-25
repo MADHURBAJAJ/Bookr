@@ -191,6 +191,10 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
   const itemHistory = rows.some((r) => r.status === 'unmatched' && r.direction === 'DR') ? await loadItemHistory(db, bid) : [];
   // Not a sale (Stage 5): interest named in the description suggests the interest head, when nothing better is known.
   const interestHead = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = 'interest received'", bid);
+  // A Yes Bank UPI collection settlement (25 Nov 2026): direct bookings, so the Room income head is suggested.
+  const SETTLEMENT = 'UPI collection settlement';
+  const roomHead = rows.some((r) => r.remark === SETTLEMENT && r.status === 'unmatched')
+    ? await one<{ id: string }>(db, "SELECT head_id AS id FROM bill_type_heads WHERE business_id = ? AND bill_type = 'room'", bid) : null;
   const looksInterest = (r: { direction: string; description: string }) => r.direction === 'CR' && /\bINT(EREST)?\.?\s*(PD|PAID|CR|CREDIT)\b|\bINTEREST\b/i.test(r.description);
   // A bill cancelled after it was paid (Stage 7, approved 10 Nov 2026): money sent back to the UPI ID that paid a bill,
   // of the same amount, within REFUND_BILL_DAYS. Told on the line with the bill, booked as a refund (an expense head
@@ -229,7 +233,7 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           const fromItem = !head?.headId && !rule && item && r.direction === 'DR' ? headFromItem(itemHistory, item) : null;
           // A note that runs words together (approved 23 Nov 2026): "hemantsalary" → salary, Hemant, Salaries.
           const read = !party && !rule && r.direction === 'DR' ? readNote(r.remark, expenseHeads) : null;
-          const guessHead = head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null);
+          const guessHead = head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null) ?? (r.remark === SETTLEMENT && r.direction === 'CR' ? roomHead?.id ?? null : null);
           return { item: read?.item ?? item, party: party?.name ?? read?.party ?? null, headId: guessHead ?? read?.headId ?? null, headChoices: head?.choices ?? [], learned: !!head?.headId,
             from: head?.headId ? 'party' : rule?.head_id ? 'rule' : fromItem ? 'item' : read?.headId ? 'note' : null, ruleName: rule?.name ?? null,
             fromNote: read ? { item: read.item, party: read.party } : null };
@@ -1173,6 +1177,61 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match-with-difference'
   }
   await db.batch(statements);
   return c.json({ ok: true, differencePaise: diff });
+});
+
+/**
+ * Desk bills in a Yes Bank settlement (approved 25 Nov 2026). A settlement is one day's direct-booking UPI paid out in
+ * one sum; rarely a desk guest paid into it. The desk UPI sales still waiting for their money, from saved shifts of the
+ * settlement's date and the 3 days before, can be matched to it, and the rest is booked under an income head (Room
+ * income). Unmatch on the line undoes both.
+ */
+const SETTLEMENT_REMARK = 'UPI collection settlement';
+const SETTLEMENT_BACK_DAYS = 3;
+bankRoutes.get('/businesses/:businessId/bank-rows/:rowId/desk-bills', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row!.remark !== SETTLEMENT_REMARK || row!.direction !== 'CR') fail(400, 'Only a UPI collection settlement holds desk bills.');
+  const [bills, heads, room] = await Promise.all([
+    all<{ id: string; billNo: string | null; amountPaise: number; shiftDay: string }>(db, `SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.shift_day AS shiftDay
+      FROM transactions t WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
+        AND t.shift_day BETWEEN ? AND ? ORDER BY t.shift_day, t.bill_no`, bid, addDays(row!.day, -SETTLEMENT_BACK_DAYS), row!.day),
+    all<{ id: string; name: string }>(db, "SELECT id, name FROM heads WHERE business_id = ? AND type = 'income' ORDER BY name", bid),
+    one<{ id: string }>(db, "SELECT head_id AS id FROM bill_type_heads WHERE business_id = ? AND bill_type = 'room'", bid),
+  ]);
+  return c.json({ bills, heads, headId: room?.id ?? null, from: addDays(row!.day, -SETTLEMENT_BACK_DAYS), to: row!.day });
+});
+
+bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/settlement-split', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const row = await getRow(db, bid, c.req.param('rowId'));
+  if (!row) fail(404, 'Not found.');
+  if (row!.remark !== SETTLEMENT_REMARK || row!.direction !== 'CR') fail(400, 'Only a UPI collection settlement holds desk bills.');
+  const data = await body(c);
+  const ids = [...new Set(Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string') : [])].slice(0, 30);
+  const total = await checkMatch(db, bid, row!, ids, true);
+  const days = await all<{ shift_day: string | null }>(db, `SELECT shift_day FROM transactions WHERE business_id = ? AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids);
+  if (days.some((d) => !d.shift_day || d.shift_day < addDays(row!.day, -SETTLEMENT_BACK_DAYS) || d.shift_day > row!.day)) fail(400, 'A bill is not from this settlement\'s days.');
+  const rest = row!.amount_paise - total;
+  if (rest < 0) fail(400, `The bills add up to ₹${(total / 100).toFixed(2)}, more than the settlement.`);
+  const t = now();
+  const user = c.get('user').id;
+  const statements = matchStatements(db, bid, row!.id, ids, user, t);
+  let txId: string | null = null;
+  if (rest > 0) {
+    const headId = typeof data.headId === 'string' && isUuid(data.headId) ? data.headId : fail(400, 'Choose the head for the direct bookings.');
+    const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', headId, bid);
+    if (!head || head.type !== 'income') fail(400, 'Choose an income head for the direct bookings.');
+    txId = newId();
+    statements.push(stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, matched_bank_row, created_at)
+      VALUES (?, ?, ?, ?, ?, 'income', ?, ?, 'bank_sheet', 'approved', 'upi', ?, ?)`, txId, bid, row!.account_id, row!.day, rest, headId,
+      `Direct bookings in UPI settlement ${row!.tran_id}`, row!.id, t));
+  }
+  statements.push(stmt(db, AUDIT, ...audit(bid, user, 'bank.settlement_split', row!.id, null, { sales: ids, deskPaise: total, restPaise: rest, headId: data.headId ?? null, transactionId: txId }, t)));
+  await db.batch(statements);
+  return c.json({ ok: true, deskPaise: total, restPaise: rest });
 });
 
 /**

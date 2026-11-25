@@ -27,6 +27,19 @@ function headerMap(cells: string[]): Record<Col, number> | null {
   return Object.values(m).every((i) => i >= 0) ? m : null;
 }
 
+/**
+ * Yes Bank (25 Nov 2026): "Transaction Date | Value Date | Description | Reference Number | Withdrawals | Deposits |
+ * Running Balance", dates only, money in and out in their own columns, the balance written "INR 6,31,158.14".
+ */
+const YES_COLS = ['date', 'value', 'description', 'ref', 'out', 'in', 'balance'] as const;
+type YesCol = (typeof YES_COLS)[number];
+function yesHeaderMap(cells: string[]): Record<YesCol, number> | null {
+  const at = (re: RegExp) => cells.findIndex((c) => re.test(c.trim()));
+  const m = { date: at(/^transaction date$/i), value: at(/^value date$/i), description: at(/^description$/i), ref: at(/^reference (number|no\.?)$/i),
+    out: at(/^withdrawals?$/i), in: at(/^deposits?$/i), balance: at(/balance/i) };
+  return Object.values(m).every((i) => i >= 0) ? m : null;
+}
+
 /** dd/mm/yyyy → yyyy-mm-dd */
 function isoDate(v: string): string | null {
   const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(v.trim());
@@ -66,12 +79,16 @@ export function parseStatementRows(rows: string[][]): ParsedStatement {
   const lines: BankLine[] = [];
   const problems: string[] = [];
   let map: Record<Col, number> = DEFAULT_AT;
+  let yes: Record<YesCol, number> | null = null;
   const seen = new Set<string>();
   rows.forEach((raw, i) => {
     const cells = raw.map((c) => String(c ?? '').trim());
     if (!cells.some(Boolean)) return;
     const h = headerMap(cells);
-    if (h) { map = h; return; }
+    if (h) { map = h; yes = null; return; }
+    const y = yesHeaderMap(cells);
+    if (y) { yes = y; return; }
+    if (yes) { yesLine(cells, i, yes); return; }
     const tran = cells[map.tran] ?? '';
     const crdr = (cells[map.crdr] ?? '').toUpperCase();
     if (!/^[A-Z]?\d{3,}$/i.test(tran) || (crdr !== 'CR' && crdr !== 'DR')) return; // title, totals or other text
@@ -91,6 +108,37 @@ export function parseStatementRows(rows: string[][]): ParsedStatement {
       ...classify(description, crdr as 'CR' | 'DR') });
   });
   return { lines, problems };
+
+  // A Yes Bank line: the date only, so it is put at noon (India time) and stays on that day's shift.
+  function yesLine(cells: string[], i: number, m: Record<YesCol, number>) {
+    const ref = cells[m.ref] ?? '';
+    const date = isoDate(cells[m.date] ?? '');
+    if (!/^[A-Z0-9]{6,}$/i.test(ref) || !date) return; // title, totals or other text
+    const where = `Line ${i + 1} (${ref})`;
+    const money = (v: string | undefined) => { const t = (v ?? '').replace(/^INR\s*/i, '').replace(/,/g, '').trim(); return t ? parsePaise(t) : null; };
+    const got = money(cells[m.in]);
+    const paid = money(cells[m.out]);
+    const crdr = got && got > 0 ? 'CR' as const : paid && paid > 0 ? 'DR' as const : null;
+    const amount = crdr === 'CR' ? got : paid;
+    if (!crdr || amount === null) { problems.push(`${where}: the amount could not be read.`); return; }
+    if (seen.has(ref)) return;
+    seen.add(ref);
+    const [yy, mm, dd] = date.split('-').map(Number);
+    const description = cells[m.description] ?? '';
+    lines.push({ tranId: ref, valueDate: isoDate(cells[m.value] ?? '') ?? date, postedAt: istToMs(yy, mm, dd, 12, 0, 0), day: date, description, direction: crdr,
+      amountPaise: amount, balancePaise: money(cells[m.balance]), ...yesKind(description) });
+  }
+}
+
+/**
+ * What a Yes Bank line is. A "UPI Collection Settlement" is one day's direct-booking UPI paid out in one sum, not a
+ * guest's payment: it is booked like any other line, never matched to the desk's bills.
+ */
+function yesKind(description: string): Pick<BankLine, 'kind' | 'upiRef' | 'vpa' | 'remark'> {
+  if (/UPI Collection Settlement/i.test(description)) return { kind: 'other', upiRef: null, vpa: null, remark: 'UPI collection settlement' };
+  const imps = /^IMPS\/[^/]*\/[^/]*\/RRN:(\d+)\/[^/]*\/([^/]*)\/([^/]*)/i.exec(description.trim());
+  if (imps) return { kind: 'other', upiRef: imps[1], vpa: null, remark: `IMPS · ${imps[2].trim()} · ${imps[3].trim()}` };
+  return { kind: 'other', upiRef: null, vpa: null, remark: null };
 }
 
 /** Text pasted from a sheet: one row per line, cells separated by tabs. */
