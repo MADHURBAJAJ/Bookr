@@ -6508,7 +6508,7 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
       <div class="lane-h"><strong>Pairs to match on save (${pairs.length})</strong><span class="tiny">Pairs follow the order you tick</span></div>
       ${pairs.map((p, i) => row(p, ts[i], i))}
       ${preview && ready.length ? html`<div class="tray-preview"><strong>Saving ${ready.length} pair${ready.length === 1 ? '' : 's'} will:</strong>
-        <ul class="note" style="margin:6px 0 0;padding-left:18px">${writes.map((w) => html`<li>${w}</li>`)}${matchN ? html`<li>Match ${matchN} pair${matchN === 1 ? '' : 's'} when you save the shift</li>` : ''}${matchN < ready.length ? html`<li>A bill paid in several goes is matched to its credits on save</li>` : ''}</ul>
+        <ul class="note" style="margin:6px 0 0;padding-left:18px">${writes.map((w) => html`<li>${w}</li>`)}${matchN ? html`<li>Match ${matchN} pair${matchN === 1 ? '' : 's'} when you save the shift</li>` : ''}${matchN < ready.length ? html`<li>Match each bill paid in several goes to its credits when you save the shift</li>` : ''}</ul>
         <div class="form-row" style="gap:8px;margin-top:8px"><button class="btn" type="button" data-traygo style="min-height:36px">${writes.length ? `Write and match ${ready.length}` : `Match ${ready.length}`}</button><button class="btn plain" type="button" data-trayback style="min-height:36px">Back</button></div></div>`
       : html`<div class="tray-foot"><span class="tiny">Ready ₹ ${money(ready.reduce((a, p) => a + p.credits.reduce((t, c) => t + c.amountPaise, 0), 0))} in ${ready.length} pair${ready.length === 1 ? '' : 's'}${notes.length ? ` · ${notes.join(' · ')}` : ''}</span>
         <span class="form-row" style="gap:8px"><button class="btn plain" type="button" data-trayclear style="min-height:36px">Clear ticks</button>
@@ -6569,6 +6569,12 @@ function wireTray({ biz, day, reload, root, open, lone = [], mode, post, nearby 
             await apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: 'use_register', note: `${card ? 'Card machine' : 'Bank'} ₹ ${money(got)} at ${hhmm(p.credits[0].postedAt)}: ${why}` });
             undos.push(() => apiFull('PUT', `/businesses/${biz.id}/comparisons/${c.id}`, { decision: c.decision ?? null, note: c.note ?? undefined }));
           }
+        }
+        // A bill paid in several goes: its ticked credits are kept for it (25 Nov 2026), so saving matches them whatever
+        // the time between the credits and the bill.
+        for (const p of ready.filter((x) => tOf(x).kind === 'parts')) {
+          const k = await apiFull('POST', `/businesses/${biz.id}/shifts/${day}/bill-parts`, { comparisonId: p.bills[0].id, creditIds: p.credits.map((c) => c.id) });
+          undos.push(() => apiFull('POST', `/businesses/${biz.id}/bill-parts/${k.auditId}/undo`, {}));
         }
         const matches = ready.filter((p) => tOf(p).kind !== 'parts').map((p) => ({ credit: p.credits[0], bills: p.bills }));
         const res = matches.length ? await post(matches) : { ids: [] };
@@ -7594,7 +7600,7 @@ async function reconcileView(biz, dayArg) {
     .filter((k) => !(k.kind === 'no_bill' && (k.uses ?? []).some((u) => listedCredit.has(u))));
   // Left on top, done below in green (approved 20 Nov 2026): a Same sale a person chose is not a question; it is told
   // under Done as On save, with Undo.
-  const planCards = isSameCards.filter((k) => String(k.key ?? '').startsWith('same-sale-plan:'));
+  const planCards = isSameCards.filter((k) => /^(same-sale-plan|bill-parts-plan):/.test(String(k.key ?? '')));
   isSameCards = isSameCards.filter((k) => !planCards.includes(k));
   const onSaveHtml = planCards.length ? html`<section class="card done-box" style="gap:6px"><div class="lane-h"><strong>✓ On save (${planCards.length})</strong><span class="tiny">your choices, done when the shift is saved</span></div>
     ${planCards.map((k, i) => html`<div class="done-line"><span>${k.title.replace(' will join the ', ' joins the ')}</span>${k.actions?.[0] ? html`<button class="btn plain dchip" type="button" data-plandel="${i}">Undo</button>` : ''}</div>`)}

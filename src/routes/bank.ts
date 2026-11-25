@@ -419,6 +419,70 @@ bankRoutes.post('/businesses/:businessId/group-parts/:auditId/undo', requireRole
   return c.json({ ok: true });
 });
 
+// A bill paid in several goes, its credits ticked by a person (25 Nov 2026): kept in the audit log and used when the
+// shift is saved, whatever the time between the credits and the bill. Each credit must equal one UPI payment written
+// on the bill's register row.
+bankRoutes.post('/businesses/:businessId/shifts/:day/bill-parts', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Unknown shift.');
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const cmpId = typeof data.comparisonId === 'string' && isUuid(data.comparisonId) ? data.comparisonId : fail(400, 'Choose the bill.');
+  const creditIds = Array.isArray(data.creditIds) ? [...new Set(data.creditIds.filter((x): x is string => typeof x === 'string' && isUuid(x)))] : [];
+  if (creditIds.length < 2 || creditIds.length > 6) fail(400, 'Choose two to six credits.');
+  const shift = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  if (!shift) fail(404, 'Unknown shift.');
+  if (shift!.status === 'confirmed') fail(409, 'This shift is saved: match it on Reconcile directly.');
+  const cmp = await one<{ id: string; bill_no: string | null; register_row_id: string | null }>(db,
+    'SELECT id, bill_no, register_row_id FROM bill_comparisons WHERE id = ? AND business_id = ? AND shift_day = ?', cmpId, bid, day);
+  if (!cmp) fail(404, 'A bill was not found in this shift.');
+  const named = cmp!.bill_no ? `Bill ${cmp!.bill_no}` : 'This bill';
+  if (!cmp!.register_row_id) fail(409, `${named} has no register row to hold its payments.`);
+  const row = await one<{ paid_with_row_id: string | null }>(db, 'SELECT paid_with_row_id FROM register_rows WHERE id = ? AND business_id = ?', cmp!.register_row_id, bid);
+  if (!row || row.paid_with_row_id) fail(409, `${named} is paid together with another row.`);
+  const upi = (await all<{ amount_paise: number }>(db, "SELECT amount_paise FROM register_payments WHERE register_row_id = ? AND mode = 'upi'", cmp!.register_row_id)).map((p) => p.amount_paise);
+  const credits = await all<{ id: string; kind: string; direction: string; status: string; amount_paise: number }>(db,
+    `SELECT id, kind, direction, status, amount_paise FROM bank_rows WHERE business_id = ? AND id IN (${creditIds.map(() => '?').join(',')})`, bid, ...creditIds);
+  if (credits.length !== creditIds.length) fail(404, 'Bank line not found.');
+  if (credits.some((r) => r.kind !== 'upi_in' || r.direction !== 'CR' || r.status !== 'unmatched')) fail(409, 'Choose open UPI credits.');
+  const key = (xs: number[]) => [...xs].sort((a, b) => a - b).join(',');
+  if (key(upi) !== key(credits.map((r) => r.amount_paise))) fail(409, `${named}'s register row does not have one UPI payment for each credit: write them on its row first.`);
+  if (await one(db, "SELECT 1 AS x FROM shift_choices WHERE business_id = ? AND kind = 'bank_match' AND (comparison_ids LIKE ? OR bank_row_id IN (" + creditIds.map(() => '?').join(',') + '))', bid, `%"${cmpId}"%`, ...creditIds))
+    fail(409, `${named} or one of these credits is already matched on save.`);
+  const live = `a.business_id = ? AND a.action = 'bank.bill_parts' AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'bank.bill_parts_undone' AND x.row_id = CAST(a.id AS TEXT))`;
+  for (const id of creditIds) {
+    if (await one(db, `SELECT 1 AS x FROM audit_log a WHERE ${live} AND a.row_id <> ? AND a.after LIKE ?`, bid, cmpId, `%"${id}"%`)) fail(409, 'A credit is already chosen for another bill.');
+  }
+  const mine = await all<{ id: number; after: string }>(db, `SELECT a.id, a.after FROM audit_log a WHERE ${live} AND a.row_id = ? ORDER BY a.id`, bid, cmpId);
+  const last = mine[mine.length - 1];
+  const ids = (xs: string[]) => [...xs].sort().join(',');
+  if (last && ids((JSON.parse(last.after) as { creditIds: string[] }).creditIds) === ids(creditIds)) return c.json({ ok: true, auditId: last.id, unchanged: true });
+  const user = c.get('user').id;
+  if (mine.length) await db.batch(mine.map((m) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'bank.bill_parts_undone', 'audit_log', ?, NULL, NULL, ?)`, bid, user, String(m.id), now())));
+  const r = await one<{ id: number }>(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'bank.bill_parts', 'bill_comparisons', ?, NULL, ?, ?) RETURNING id`, bid, user, cmpId,
+    JSON.stringify({ shiftDay: day, billNo: cmp!.bill_no, creditIds, amounts: credits.map((x) => x.amount_paise) }), now());
+  return c.json({ ok: true, auditId: r!.id });
+});
+
+bankRoutes.post('/businesses/:businessId/bill-parts/:auditId/undo', requireRole('bank.link'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = Number(c.req.param('auditId'));
+  if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
+  const a = await one<{ id: number; after: string }>(db, "SELECT id, after FROM audit_log WHERE id = ? AND business_id = ? AND action = 'bank.bill_parts'", id, bid);
+  if (!a) fail(404, 'Not found.');
+  const day = (JSON.parse(a!.after) as { shiftDay: string }).shiftDay;
+  const s = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  if (s?.status === 'confirmed') fail(409, 'This shift is saved: unmatch the credits on Reconcile.');
+  if (await one(db, "SELECT 1 AS x FROM audit_log WHERE business_id = ? AND action = 'bank.bill_parts_undone' AND row_id = ?", bid, String(id))) return c.json({ ok: true, unchanged: true });
+  await db.prepare(`INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
+    VALUES (?, ?, 'bank.bill_parts_undone', 'audit_log', ?, NULL, NULL, ?)`).bind(bid, c.get('user').id, String(id), now()).run();
+  return c.json({ ok: true });
+});
+
 // A card machine payment matched to its bill(s) before saving (approved 10 Nov 2026), made on Save like a UPI match.
 bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole('bank.link'), async (c) => {
   const day = c.req.param('day');

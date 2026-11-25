@@ -544,8 +544,9 @@ export async function cashAccountId(db: DB, businessId: string): Promise<string 
 const REISSUE_MIN = 30;
 
 /** Comparisons as the bank evidence sees them; bills paid together are left to UPI matching (one credit, many bills). */
-function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>, paysByRow: Map<string, RgPay[]>): EvidenceBill[] {
-  return comps.map((c) => ({
+function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>, paysByRow: Map<string, RgPay[]>,
+  chosen: Map<string, { id: number; creditIds: string[] }> = new Map()): EvidenceBill[] {
+  return comps.map((c) => ({ chosen: chosen.get(c.id),
     id: c.id, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
     // Sides that agree after a discount or tip (24 Nov 2026): saving books what the register says was received, so only
     // that amount can pair. Pairing the software's bill amount here showed the bill as paid, and saving then dropped it.
@@ -573,8 +574,25 @@ export async function creditsForShift(db: DB, businessId: string, day: string) {
     shiftCredits(db, businessId, prev),
   ]);
   const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
-  const { used } = pairEvidence(evidenceBills(comps, grouped, paysByRow), earlier, shiftWindow(prev));
+  const { used } = pairEvidence(evidenceBills(comps, grouped, paysByRow, await billPartsChosen(db, businessId, comps.map((c) => c.id))), earlier, shiftWindow(prev));
   return credits.filter((c) => !used.has(c.id));
+}
+
+/**
+ * A bill paid in several goes, its credits ticked by a person (25 Nov 2026): audit 'bank.bill_parts' on the bill's
+ * comparison with the credits; Undo adds 'bank.bill_parts_undone' with row_id = that audit's id. The latest not undone counts.
+ */
+export async function billPartsChosen(db: DB, businessId: string, comparisonIds: string[]) {
+  if (!comparisonIds.length) return new Map<string, { id: number; creditIds: string[] }>();
+  const rows: { id: number; row_id: string; after: string }[] = [];
+  for (let i = 0; i < comparisonIds.length; i += 80) {
+    const ids = comparisonIds.slice(i, i + 80);
+    rows.push(...await all<{ id: number; row_id: string; after: string }>(db, `SELECT a.id, a.row_id, a.after FROM audit_log a WHERE a.business_id = ? AND a.action = 'bank.bill_parts'
+      AND a.row_id IN (${ids.map(() => '?').join(',')})
+      AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'bank.bill_parts_undone' AND x.row_id = CAST(a.id AS TEXT))`, businessId, ...ids));
+  }
+  rows.sort((a, b) => a.id - b.id);
+  return new Map(rows.map((r) => [r.row_id, { id: r.id, creditIds: (JSON.parse(r.after) as { creditIds: string[] }).creditIds }]));
 }
 
 /**
@@ -767,7 +785,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     // own credit, and into no UPI column's account. The closer of a credit and a machine payment pays a bill.
     const machineCredits: EvidenceCredit[] = onMachine.map((p) => ({ id: p.id, amount: p.amount_paise, postedAt: p.paid_at, label: null, machine: { settledOn: p.settled_on, label: machineLabel(p) } }));
     const witnesses = [...credits, ...machineCredits];
-    const ebills = evidenceBills(comparisons, grouped, paysByRow);
+    const ebills = evidenceBills(comparisons, grouped, paysByRow, await billPartsChosen(db, businessId, comparisons.map((c) => c.id)));
     const { evidence, used } = pairEvidence(ebills, witnesses, cov.window);
     groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), witnesses, used, cov.window);
     // Paid in parts (approved 23 Nov 2026): a group with no one credit, paid in two to four.

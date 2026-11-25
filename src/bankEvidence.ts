@@ -22,6 +22,8 @@ export interface EvidenceBill {
   labels?: string | null;
   /** UPI payments written for a bill paid in several goes (or partly another way): each needs its own credit. */
   parts?: number[];
+  /** Credits a person ticked for this bill paid in several goes (25 Nov 2026): they pay it whatever the time gap. */
+  chosen?: { id: number; creditIds: string[] };
 }
 export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null; remark?: string | null;
   /** A UPI payment on the card machine (approved 9 Nov 2026): it reaches the bank in the machine's settlement of that day. */
@@ -42,6 +44,8 @@ export interface Evidence {
   split?: boolean;
   /** The credit's UPI note names this bill. */
   byNote?: boolean;
+  /** The parts a person ticked (audit id of 'bank.bill_parts'), so Undo can take them back. */
+  chosenId?: number;
 }
 
 /** A bill the register splits (cash + UPI) where the software has one mode, for a different amount than the UPI part. */
@@ -109,9 +113,25 @@ export function pairEvidence(bills: EvidenceBill[], credits: EvidenceCredit[], w
     return { creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt, minutes, fits: sw && rg ? 'both' : sw ? 'software' : 'register', suggest: suggestion(b, c.amount),
       ...(c.machine ? { machine: c.machine } : {}) };
   };
+  // A bill paid in several goes whose credits a person ticked (25 Nov 2026): those credits pay it, before anything else
+  // and whatever the time gap (a room guest paying at check-in, the bill closed at check-out). Only while each credit
+  // still equals one UPI payment written on its row and no other bill took it.
+  for (const b of bills) {
+    if (!b.chosen || !b.parts?.length || b.grouped || out.has(b.id) || b.decision === 'leave_out' || b.decision === 'carry_forward') continue;
+    const picks = b.chosen.creditIds.map((id) => credits.find((c) => c.id === id && !used.has(c.id) && !c.machine));
+    if (picks.some((c) => !c) || picks.length !== b.parts.length) continue;
+    const want = [...b.parts].sort((x, y) => x - y).join(',');
+    if (picks.map((c) => c!.amount).sort((x, y) => x - y).join(',') !== want) continue;
+    const ordered = (picks as EvidenceCredit[]).slice().sort((x, y) => x.postedAt - y.postedAt);
+    const total = ordered.reduce((t, c) => t + c.amount, 0);
+    out.set(b.id, { ...make(b, ordered[0], b.paidAt != null ? Math.max(...ordered.map((c) => Math.round(Math.abs(c.postedAt - b.paidAt!) / 60000))) : null), amountPaise: total,
+      fits: b.swAmount === total ? 'both' : 'register', suggest: suggestion(b, total), chosenId: b.chosen.id,
+      parts: ordered.map((c) => ({ creditId: c.id, amountPaise: c.amount, postedAt: c.postedAt })) });
+    for (const c of ordered) used.add(c.id);
+  }
   // A credit whose UPI note names a bill of its amount pays that bill, before any pairing by time (audit, 9 Nov 2026).
   for (const c of credits) {
-    if (!c.remark) continue;
+    if (!c.remark || used.has(c.id)) continue;
     const named = bills.filter((b) => !b.grouped && b.decision !== 'leave_out' && b.decision !== 'carry_forward' && noteNames(c.remark, b.billNo)
       && upiAmounts(b).some((a) => a.amount === c.amount) && labelFits(b.labels ?? null, c.label ?? null)
       && (b.paidAt != null ? Math.abs(c.postedAt - b.paidAt) <= NOTE_MIN * 60000 : c.postedAt >= window.from && c.postedAt < window.to + 3600e3));

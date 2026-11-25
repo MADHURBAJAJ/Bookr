@@ -441,6 +441,14 @@ export async function trialReconcile(db: DB, businessId: string, day: string) {
         counted: true, trial: true, others: 0, chosen: true },
       actions: [{ label: 'Keep them apart', method: 'DELETE', path: `${base}/comparisons/${b.c.id}/same-sale`, body: { rowId: m.id } }] });
   }
+  // A bill paid in several goes whose credits a person ticked (25 Nov 2026): told under On save, with Undo.
+  for (const c of view.comparisons) {
+    const e = c.bank;
+    if (!e?.chosenId || !e.parts) continue;
+    cards.push({ key: `bill-parts-plan:${c.id}`, kind: 'paid_in_parts', billNos: [c.billNo], title: `Bill ${c.billNo} will join the credits ${e.parts.map((p) => rs(p.amountPaise)).join(' + ')}`,
+      evidence: ['You ticked them as one bill paid in several goes. Saving the shift matches them.'], score: 90, uses: [`cmp:${c.id}`, ...e.parts.map((p) => `cr:${p.creditId}`)],
+      actions: [{ label: 'Undo', method: 'POST', path: `${base}/bill-parts/${e.chosenId}/undo`, body: {} }] });
+  }
   const single = left.filter((x) => !x.grouped && !billOf.has(x.c.id) && !x.c.bank && !(paysOf(x.c.register?.rowId ?? '').length > 1));
   const waiting: WaitingBill[] = single.map((x) => ({ billNo: x.c.billNo, amountPaise: x.amount, day, comparisonId: x.c.id, swPaise: (x.c.software?.amountPaise as number | null) ?? null, rgPaise: (x.c.register?.amountPaise as number | null) ?? null,
     headName: headOfType.get((x.c.register?.billType ?? '') as string) ?? null, paidAt: (x.c.paidAt as number | null) ?? null }));
