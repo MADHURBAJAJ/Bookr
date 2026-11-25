@@ -349,7 +349,7 @@ reportRoutes.get(`${B}/reports/rooms`, requireAction('reports.view'), async (c) 
   const from = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('from') ?? '') ? c.req.query('from')! : today;
   const to = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('to') ?? '') ? c.req.query('to')! : from;
   const hour = bizOf(c).shift_start_hour * 3_600_000;   // a shift day starts at the shift's hour, India time
-  const [invoices, cns, kept] = await Promise.all([
+  const [invoices, cns, kept, noRent] = await Promise.all([
     all(db, `SELECT invoice_no AS invoiceNo, shift_day AS day, guest_name AS guestName, room, check_in AS checkIn, check_out AS checkOut, nights, gst_rate_bp AS gstRateBp,
       taxable_paise AS taxablePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise, total_paise AS totalPaise, bill_to_name AS billToName, bill_to_gstin AS billToGstin
       FROM room_invoices WHERE business_id = ? AND shift_day BETWEEN ? AND ? ORDER BY seq`, bid, from, to),
@@ -357,6 +357,14 @@ reportRoutes.get(`${B}/reports/rooms`, requireAction('reports.view'), async (c) 
       n.total_paise AS totalPaise, n.refund_mode AS refundMode FROM room_credit_notes n JOIN room_invoices i ON i.id = n.invoice_id WHERE n.business_id = ? AND n.shift_day BETWEEN ? AND ? ORDER BY n.seq`, bid, from, to),
     all(db, `SELECT d.guest_name AS guestName, d.amount_paise AS amountPaise, d.kept_at AS at, s.receipt_no AS receiptNo FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id
       WHERE d.business_id = ? AND d.status = 'kept' AND d.kept_at >= ? AND d.kept_at < ?`, bid, Date.parse(from) + hour - 19_800_000, Date.parse(to) + 86_400_000 + hour - 19_800_000),
+    // Checked out with no room rent on the bill (25 Nov 2026): approved by a manager, listed here to be looked at.
+    all(db, `SELECT s.room, s.guest_name AS guestName, s.check_in AS checkIn, s.checked_out_at AS at, st.name AS byName,
+        json_extract(a.after, '$.approvedBy') AS approvedBy
+      FROM stays s LEFT JOIN audit_log a ON a.row_table = 'stays' AND a.row_id = s.id AND a.action = 'stay.check_out' LEFT JOIN staff st ON st.id = a.staff_id
+      WHERE s.business_id = ? AND s.group_stay_id IS NULL AND s.checked_out_at >= ? AND s.checked_out_at < ?
+        AND NOT EXISTS (SELECT 1 FROM room_invoices i WHERE i.stay_id = s.id)
+        AND NOT EXISTS (SELECT 1 FROM bookings k WHERE k.stay_id = s.id AND k.from_report = 1 AND k.amount_paise IS NULL)
+      ORDER BY s.checked_out_at`, bid, Date.parse(from) + hour - 19_800_000, Date.parse(to) + 86_400_000 + hour - 19_800_000),
   ]);
   const sum = (rows: Record<string, unknown>[], k: string) => rows.reduce((t, r) => t + Number(r[k] ?? 0), 0);
   // Occupancy, ADR and RevPAR (25 Nov 2026). ADR is room sales before GST per night invoiced (invoices are made at
@@ -369,7 +377,7 @@ reportRoutes.get(`${B}/reports/rooms`, requireAction('reports.view'), async (c) 
   const occAll = avail ? (occ.rooms.sold + occ.beds.sold) / avail : null;
   const kpis = { ...occ, adrPaise, revparPaise: adrPaise != null && occAll != null ? Math.round(adrPaise * occAll) : null,
     pct: occAll == null ? null : Math.round(occAll * 1000) / 10 };
-  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept, occupancy: kpis,
+  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept, noRent, occupancy: kpis,
     totals: { invoices: invoices.length, nights: sum(invoices, 'nights'), taxablePaise: sum(invoices, 'taxablePaise') - sum(cns, 'taxablePaise'),
       gstPaise: sum(invoices, 'cgstPaise') + sum(invoices, 'sgstPaise') - sum(cns, 'cgstPaise') - sum(cns, 'sgstPaise'),
       totalPaise: sum(invoices, 'totalPaise') - sum(cns, 'totalPaise'), noShowPaise: sum(kept, 'amountPaise') } });

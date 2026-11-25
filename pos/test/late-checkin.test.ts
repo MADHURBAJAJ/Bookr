@@ -71,7 +71,10 @@ describe('late check-in', () => {
     expect((await ok(owner.post(`${B}/stays/${repStay}/check-out`, {}))).bill.invoice).toBeNull();
     // A walk-in whose rent was never added also checks out with no invoice: listed apart, as worth a look.
     const walk = (await ok(counter.post(`${B}/stays`, { room: '103', guestName: 'Sample Walk-in', dirtyOk: true }))).id;
-    await ok(counter.post(`${B}/stays/${walk}/check-out`, {}));
+    expect((await counter.post(`${B}/stays/${walk}/check-out`, {})).status).toBe(403);   // no rent: a manager approves
+    await ok(counter.post(`${B}/stays/${walk}/check-out`, { ...mgr }));
+    const rr = await ok(owner.get(`${B}/reports/rooms?from=${today}&to=${today}`));
+    expect(rr.noRent.map((x: any) => [x.guestName, x.approvedBy])).toEqual([['Sample Walk-in', 'Sample Manager']]);
 
     const dc = await ok(owner.get(`${B}/reports/daily-check?day=${today}`));
     expect(dc.noInvoice.map((x: any) => [x.guestName, !!x.rentUnknown])).toEqual([['Sample Report Guest', true], ['Sample Walk-in', false]]);

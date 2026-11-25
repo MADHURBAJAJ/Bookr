@@ -183,7 +183,7 @@ describe('settle', () => {
     expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(409);
     const r = await s.counter.post(`${s.B}/debtors/${folio}/receipts`, { kind: 'receipt', payments: [{ mode: 'upi', amount: '189', payAccountId: s.upiCompany }] });
     expect(r.json.balancePaise).toBe(0);
-    expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(200);
+    expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`, { ...s.mgr })).status).toBe(200);   // no room rent: a manager approves
     expect((await q("SELECT kind FROM outbox WHERE business_id = ? AND kind = 'receipt'", s.businessId)).length).toBe(1);
   });
 
@@ -251,7 +251,7 @@ describe('money out and reports', () => {
     expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(409); // ₹622 of advance still held
     expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { mode: 'cash', amount: '700' })).json.error).toMatch(/only ₹622/);
     expect((await s.counter.post(`${s.B}/debtors/${folio}/refund`, { ...s.mgr, mode: 'cash', amount: '622' })).json.balancePaise).toBe(0);
-    expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`)).status).toBe(200);
+    expect((await s.counter.post(`${s.B}/stays/${stay}/check-out`, { ...s.mgr })).status).toBe(200);   // no room rent: a manager approves
 
     expect((await s.counter.post(`${s.B}/drawer-outs`, { amount: '150' })).status).toBe(400); // needs what it was for
     expect((await s.counter.post(`${s.B}/drawer-outs`, { amount: '150', note: 'Vegetables' })).status).toBe(201);

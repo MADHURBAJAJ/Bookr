@@ -87,7 +87,7 @@ describe('room billing', () => {
 
   it('OTA prepaid: nothing to collect for the room, the invoice still made; a walk-in with no rent has none', async () => {
     const s = await setupBusiness();
-    const { B, owner, counter, ok } = s;
+    const { B, owner, counter, ok, mgr } = s;
     setReader('djubo', fake);
     await ok(owner.call('PUT', `${B}/tables`, { sections: [{ name: 'Deluxe', kind: 'rooms', tables: ['XI', 'X'] }] }));
     await ok(owner.call('PUT', `${B}/bookings/auto`, { from: '2026-01-01' }));
@@ -100,8 +100,9 @@ describe('room billing', () => {
     expect(bill.lines.map((l: any) => l.note)).toEqual([null, 'Paid to MAKE MY TRIP']);
     expect(bill.balancePaise).toBe(0);
     expect((await ok(counter.post(`${B}/stays/${stay}/check-out`))).bill.invoice).toMatchObject({ totalPaise: 160_000 });
-    // A walk-in with no booking and no rent added: checks out with no invoice, as before.
+    // A walk-in with no booking and no rent added: a manager approves checking out without rent; no invoice.
     const walk = (await ok(counter.post(`${B}/stays`, { room: 'X', guestName: 'Walk Guest' }))).id;
-    expect((await ok(counter.post(`${B}/stays/${walk}/check-out`))).bill.invoice).toBeNull();
+    expect((await counter.post(`${B}/stays/${walk}/check-out`)).status).toBe(403);
+    expect((await ok(counter.post(`${B}/stays/${walk}/check-out`, { ...mgr }))).bill.invoice).toBeNull();
   });
 });

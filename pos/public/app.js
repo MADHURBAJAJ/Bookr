@@ -1648,7 +1648,10 @@ async function roomsScreen(view) {
     // A room bill open before a payment or refund stays open after it.
     if (reopenStay) ui.roomBill = await api('GET', `${B()}/stays/${reopenStay}/bill`).catch(() => null);
     // Checked in and out together (25 Nov 2026): the bill opens at check-out, after what was paid is taken.
-    if (reopenStay && pendingOut && ui.roomBill) ui.rbForm = ui.roomBill.balancePaise === 0 ? 'checkout' : null;
+    if (reopenStay && pendingOut && ui.roomBill && ui.roomBill.balancePaise === 0) {
+      ui.rbForm = 'checkout';
+      if (!isMgr() && ui.roomBill.rentPaise <= 0) { ui.approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers; ui.apId = ui.approvers[0]?.id; }
+    }
   }
   reopenStay = null; pendingOut = false;
   if (pendingAdv) { pendingAdv = false; actions.advNew(); }
@@ -2421,6 +2424,9 @@ function roomBillPanel(r) {
       <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-model="coCo" data-live ${ui.coCo ?? !!st.company ? 'checked' : ''}> Invoice in a company's name (GST claim)</label>
       ${ui.coCo ?? !!st.company ? html`<div class="grid3"><label class="f">Company<input class="in" data-model="coName" value="${ui.coName ?? st.company ?? ''}"></label>
         <label class="f">GSTIN<input class="in" data-model="coGstin" maxlength="15" value="${ui.coGstin ?? st.gstin ?? ''}"></label><label class="f">Address<input class="in" data-model="coAddr" value="${ui.coAddr ?? ''}"></label></div>` : ''}
+      ${r.rentPaise <= 0 && !(r.booking?.fromReport && r.booking.amountPaise == null) && !isMgr() ? html`<div class="msg warn" style="display:block">No room rent on this bill. Add it (Add charge, "Room rent"), or a manager approves checking out without it.
+        ${ui.approvers?.length ? html`<div class="row" style="margin-top:6px"><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((x) => html`<option value="${x.id}" ${ui.apId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>
+          <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's PIN" style="max-width:160px"></div>` : html`<div class="small">No manager has a PIN yet.</div>`}</div>` : ''}
       <div class="row"><button class="btn pri" type="submit" data-act="checkOut" data-id="${st.id}" data-submit>Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
     if (f === 'cn') return html`<form class="panel" style="margin-top:10px"><h3>Room credit note on ${inv.invoiceNo}</h3>
       <div class="grid2"><label class="f">Amount given back (₹, GST included)<input class="in" inputmode="decimal" data-model="cnAmt" value="${ui.cnAmt ?? ''}"></label><label class="f">Reason<input class="in" data-model="cnWhy" value="${ui.cnWhy ?? ''}"></label></div>
@@ -2464,7 +2470,13 @@ function roomBillPanel(r) {
 }
 actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbForm = null; ui.error = null; if (!cache.credit) await load('credit'); rerender(); scrollTo(0, 0); };
 actions.rbClose = () => { ui.roomBill = null; ui.rbForm = null; rerender(); };
-actions.rbForm = async (d) => { ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.error = null; if (d.f === 'transfer') await load('credit'); rerender(); };
+actions.rbForm = async (d) => {
+  ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.error = null;
+  if (d.f === 'transfer') await load('credit');
+  // No room rent on the bill: a manager approves the check-out (25 Nov 2026).
+  if (d.f === 'checkout' && !isMgr() && (ui.roomBill?.rentPaise ?? 0) <= 0 && !ui.approvers) { ui.approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers; ui.apId = ui.approvers[0]?.id; ui.apPin = ''; }
+  rerender();
+};
 actions.rbFormNo = () => { ui.rbForm = null; rerender(); };
 actions.rbChargeGo = async () => {
   ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/charges`, { amount: ui.rbAmt ?? '', note: ui.rbNote ?? '', lower: ui.rbForm === 'lower' });
@@ -2880,7 +2892,8 @@ actions.gLookup = async (_d, el) => {
 actions.checkOut = async (d) => {
   const st = ui.roomBill?.stay;
   const co = ui.coCo ?? !!st?.company;
-  const r = await api('POST', `${B()}/stays/${d.id}/check-out`, co ? { billTo: { name: ui.coName ?? st?.company ?? '', gstin: ui.coGstin ?? st?.gstin ?? '', address: ui.coAddr ?? '' } } : {});
+  const r = await api('POST', `${B()}/stays/${d.id}/check-out`, { ...(co ? { billTo: { name: ui.coName ?? st?.company ?? '', gstin: ui.coGstin ?? st?.gstin ?? '', address: ui.coAddr ?? '' } } : {}),
+    ...(ui.approvers?.length && ui.apPin ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
   // The stay's tax invoice for the room rent prints at check-out (24 Nov 2026).
   if (r.bill?.invoice) printJobs([{ kind: 'bill', html: asHtml(roomInvoiceSlip(r.bill)) }]);
   ui.roomBill = null;
@@ -3173,6 +3186,10 @@ async function roomsReportTab(head, from, to) {
         ${r.invoices.length ? r.invoices.map((x) => html`<tr><td>${x.invoiceNo}</td><td>${dayName(x.day)}</td><td>${x.guestName}${x.billToName ? html`<div class="small quiet">${x.billToName}${x.billToGstin ? ` · ${x.billToGstin}` : ''}</div>` : ''}</td><td>${x.room}</td>
           <td class="num">${x.nights}</td><td>${x.gstRateBp / 100}%</td><td class="num">${rs(x.taxablePaise)}</td><td class="num">${rs(x.cgstPaise + x.sgstPaise)}</td><td class="num">${rs(x.totalPaise)}</td></tr>`) : html`<tr><td colspan="9" class="quiet">No room invoices in these shifts.</td></tr>`}</tbody></table></div></section>
     ${r.creditNotes.length ? html`<section class="panel" style="margin-top:16px"><h2>Room credit notes</h2><div class="sums">${r.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.invoiceNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div></section>` : ''}
+    ${(r.noRent ?? []).length ? html`<section class="panel" style="margin-top:16px;border-color:var(--bad-line)"><h2>Checked out with no room rent</h2>
+      <p class="small quiet">Stays that brought in no room rent (a walk-in whose rent was never added, or a free room), each approved by a manager.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Stayed from</th><th>Checked out</th><th>By</th><th>Approved by</th></tr></thead><tbody>
+        ${r.noRent.map((x) => html`<tr><td>${x.room}</td><td>${x.guestName}</td><td>${dayName(x.checkIn)}</td><td>${dateTime(x.at)}</td><td>${x.byName ?? ''}</td><td>${x.approvedBy ?? ''}</td></tr>`)}</tbody></table></div></section>` : ''}
     ${r.noShowsKept.length ? html`<section class="panel" style="margin-top:16px"><h2>No-show charges kept</h2><div class="sums">${r.noShowsKept.map((n) => html`<div><span>${n.guestName} · ${n.receiptNo}</span><span>${rs(n.amountPaise)}</span></div>`)}</div></section>` : ''}`));
   ui.roomsRep = r;
   rerender();

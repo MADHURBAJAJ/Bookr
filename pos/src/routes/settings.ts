@@ -1160,6 +1160,14 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   const rentUnknown = !!(await one(db, 'SELECT 1 FROM bookings WHERE stay_id = ? AND from_report = 1 AND amount_paise IS NULL', id));
   if (row.balance > 0) fail(409, `${rupeesText(row.balance)} is still to pay on this room. Take the guest's payment first.`);
   if (row.balance < 0) fail(409, `${rupeesText(-row.balance)} of the guest's deposit or advance is left. Refund it first.`);
+  // No room rent on the bill at all (a walk-in whose rent was never added, or a free room): a manager approves, so a
+  // cashier cannot check out a stay that brought in nothing on their own (25 Nov 2026).
+  const rentOnBill = (await one<{ s: number }>(db, "SELECT coalesce(sum(amount_paise), 0) AS s FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent'", row.account_id))!.s;
+  let freeApprovedBy: string | null = null;
+  if (!row.group_stay_id && !rentUnknown && rentOnBill <= 0) {
+    const data0 = await c.req.raw.clone().json().catch(() => ({})) as Record<string, unknown>;
+    freeApprovedBy = isManager(c) ? c.get('staff').name : (await approverOf(c, data0.approverId, data0.approverPin)).name;
+  }
   // Who the invoice is made out to (25 Nov 2026): a company that pays or claims GST, typed at check-out or from the reservation.
   let data: Record<string, unknown> = {};
   try { data = await c.req.json(); } catch { /* no body */ }
@@ -1209,7 +1217,7 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
     ...members.map((m) => stmt(db, 'UPDATE stays SET checked_out_at = ?, room = ? WHERE id = ? AND checked_out_at IS NULL', t, realRoom(m.room), m.id)),
     // Housekeeping (25 Nov 2026): the room is dirty until cleaned (each of a group's rooms and beds; not a past stay's).
     ...[row.room, ...members.map((m) => m.room)].flatMap((r) => dirtyStmt(r, t)),
-    audit(db, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, total > 0 ? null : { noInvoice: rentUnknown ? 'rent not known (Djubo daily report)' : 'no room rent on the bill' }),
+    audit(db, bid, c.get('staff').id, 'stay.check_out', 'stays', id, null, total > 0 ? null : { noInvoice: rentUnknown ? 'rent not known (Djubo daily report)' : 'no room rent on the bill', ...(freeApprovedBy ? { approvedBy: freeApprovedBy } : {}) }),
   ]);
   return c.json({ ok: true, bill: await stayBill(c, id) });
 });
