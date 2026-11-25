@@ -34,7 +34,7 @@ describe('owner report link', () => {
     // Changed in any part, or expired: refused.
     expect((await call('GET', q({ b: bid, d: today, e: exp, s: sig }))).status).toBe(403);
     expect((await call('GET', q({ b: bid, d: day, e: String(Number(exp) + 1), s: sig }))).status).toBe(403);
-    expect((await call('GET', q({ b: bid, d: day, e: exp, s: sig.slice(0, -2) + 'AA' }))).status).toBe(403);
+    expect((await call('GET', q({ b: bid, d: day, e: exp, s: sig.slice(0, -2) + (sig.endsWith('AA') ? 'BB' : 'AA') }))).status).toBe(403);
     expect((await call('GET', q({ b: bid, d: day, e: '1000', s: sig }))).status).toBe(403);
   });
 });
