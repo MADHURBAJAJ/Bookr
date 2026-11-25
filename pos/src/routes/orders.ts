@@ -625,7 +625,11 @@ orderRoutes.get(`${B}/bill-list`, requireAction('bills.print'), async (c) => {
       (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room,
       (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1) AS credit
     FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.business_id = ? AND b.shift_day = ? ORDER BY b.printed_at DESC LIMIT 500`, bid, day);
-  return c.json({ day, bills: rows.map((b) => ({ id: b.id, billNo: b.bill_no, status: b.status, totalPaise: b.total, printedAt: b.printed_at, place: b.place, guestName: b.guest_name,
+  // The shift's room invoices too (made at check-out): a tap opens the guest's room bill.
+  const roomInvoices = await all(c.env.DB, `SELECT i.id, i.invoice_no AS invoiceNo, i.at, i.room, i.guest_name AS guestName, i.total_paise AS totalPaise, i.stay_id AS stayId,
+      i.bill_to_name AS billToName, (SELECT count(*) FROM room_credit_notes n WHERE n.invoice_id = i.id) AS creditNotes
+    FROM room_invoices i WHERE i.business_id = ? AND i.shift_day = ? ORDER BY i.at DESC`, bid, day);
+  return c.json({ day, roomInvoices, bills: rows.map((b) => ({ id: b.id, billNo: b.bill_no, status: b.status, totalPaise: b.total, printedAt: b.printed_at, place: b.place, guestName: b.guest_name,
     phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [], room: b.room, credit: b.credit })) });
 });
 
