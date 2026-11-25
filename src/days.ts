@@ -24,6 +24,12 @@ import { addDays, shiftDayOf } from './time';
 const SHIFT_OF = "date((r.posted_at - 9000000) / 1000, 'unixepoch')";
 /** Booking sites whose payouts come by NEFT. Only their names: "MMT/IMPS" in a bank line is a mobile transfer, not MakeMyTrip. */
 const BOOKING_SITE = /MAKE\s*MY\s*TRIP|MAKEMYTRIP|GOIBIBO|AGODA|BOOKING\.COM|EXPEDIA|CLEARTRIP|YATRA/i;
+/**
+ * The owner's own company (26 Nov 2026): a credit naming Exospark is money from its own accounts (XOXO's bank accounts
+ * are Exospark Goa Inn's), so it is a transfer, not money in. A Yes Bank UPI collection settlement names it too but is
+ * sales: settlements are told apart first.
+ */
+const OWN_COMPANY = /EXOSPARK/i;
 
 export type DayStatus = 'unsaved' | 'open' | 'waiting' | 'closed';
 export type CreditCause = 'chosen' | 'unsaved' | 'card' | 'settlement' | 'transfer' | 'cash' | 'site' | 'upi' | 'other';
@@ -41,8 +47,10 @@ export const CAUSE_WORDS: Record<CreditCause, string> = {
 
 export interface OpenCredit { id: string; day: string; amountPaise: number; at: number; cause: CreditCause; description: string; accountName: string }
 export interface DayLine { label: string; n: number; paise: number; state: 'done' | 'open' }
+/** Money moved between own accounts: shown on the day, not counted in its money in. */
+export interface DayTransfer { id: string; amountPaise: number; at: number; description: string; accountName: string; state: 'done' | 'open' }
 export interface DayRow {
-  day: string; status: DayStatus; inPaise: number; credits: number; creditsOpen: number; billsWaiting: number; billsOverdue: number;
+  day: string; status: DayStatus; inPaise: number; transfersPaise: number; credits: number; creditsOpen: number; billsWaiting: number; billsOverdue: number;
   /** Bills of the day that wait for a file, not for a person. */
   billsGrey: number;
 }
@@ -67,9 +75,13 @@ export async function daysPicture(db: DB, businessId: string, today: string, wai
   const hints = await transferHints(db, businessId, open);
   const credits: OpenCredit[] = open.map((r) => ({
     id: r.id, day: r.shift, amountPaise: r.amount_paise, at: r.posted_at, description: r.description, accountName: r.account_name,
-    cause: r.held ? 'chosen' : r.kind === 'card_settlement' ? 'card' : r.remark === SETTLEMENT_REMARK ? 'settlement' : hints.has(r.id) ? 'transfer'
+    cause: r.held ? 'chosen' : r.kind === 'card_settlement' ? 'card' : r.remark === SETTLEMENT_REMARK ? 'settlement' : hints.has(r.id) || OWN_COMPANY.test(r.description) ? 'transfer'
       : cashMoveOf(r) === 'deposit' ? 'cash' : r.kind === 'upi_in' ? (saved.has(r.shift) ? 'upi' : 'unsaved') : BOOKING_SITE.test(r.description) ? 'site' : 'other',
   }));
+  const causeOf = new Map(credits.map((c) => [c.id, c.cause]));
+  /** A transfer between own accounts: booked as one, left out as one, or an open credit that is one. */
+  const isTransfer = (r: Row) => (r.status === 'booked' && r.tx_type === 'transfer') || (r.status === 'ignored' && /^transfer/i.test(r.note ?? ''))
+    || causeOf.get(r.id) === 'transfer';
   const inRange = (d: string) => d >= start && d <= lastDay;
   const bills = w.look.filter((b) => inRange(b.day));
   const grey = w.grey.filter((g) => inRange(g.day) && g.waitFor !== 'unsaved' && g.waitFor !== 'chosen');
@@ -81,7 +93,8 @@ export async function daysPicture(db: DB, businessId: string, today: string, wai
     const waitingN = bills.filter((b) => b.day === d);
     const greyN = grey.filter((g) => g.day === d).length;
     const status: DayStatus = !saved.has(d) ? 'unsaved' : left || waitingN.length ? 'open' : greyN ? 'waiting' : 'closed';
-    days.push({ day: d, status, inPaise: mine.reduce((t, r) => t + r.amount_paise, 0), credits: mine.length, creditsOpen: left,
+    days.push({ day: d, status, inPaise: mine.filter((r) => !isTransfer(r)).reduce((t, r) => t + r.amount_paise, 0),
+      transfersPaise: mine.filter(isTransfer).reduce((t, r) => t + r.amount_paise, 0), credits: mine.length, creditsOpen: left,
       billsWaiting: waitingN.length, billsOverdue: waitingN.filter((b) => b.unresolved).length, billsGrey: greyN });
   }
 
@@ -105,23 +118,30 @@ export async function daysPicture(db: DB, businessId: string, today: string, wai
     oldestOpen: days.find((d) => d.status !== 'closed')?.day ?? null,
     left: { credits: credits.length, creditsPaise: credits.reduce((t, c) => t + c.amountPaise, 0), bills: bills.length },
     groups, billGroups,
-    /** For the day opened: its credits by state (they add up to money in), and its open credits and waiting bills. */
+    /**
+     * For the day opened: its credits by state (they add up to money in), its open credits and waiting bills, and the
+     * transfers between own accounts (not in money in; an open one still keeps the day open).
+     */
     detail: (day: string) => {
-      const mine = rows.filter((r) => r.shift === day);
+      const dayRows = rows.filter((r) => r.shift === day);
+      const mine = dayRows.filter((r) => !isTransfer(r));
       const lines = new Map<string, DayLine>();
       const add = (label: string, state: DayLine['state'], p: number) => { const k = `${state}|${label}`; const x = lines.get(k) ?? { label, n: 0, paise: 0, state }; x.n += 1; x.paise += p; lines.set(k, x); };
       for (const r of mine) {
         if (r.status === 'matched') add(r.kind === 'card_settlement' ? 'Card settlement' : 'Matched to bills', 'done', r.amount_paise);
-        else if (r.status === 'booked') add(r.kind === 'card_settlement' ? 'Card settlement' : r.tx_type === 'transfer' ? 'Transfer between own accounts' : `Booked · ${r.head_name ?? 'no head'}`, 'done', r.amount_paise);
+        else if (r.status === 'booked') add(r.kind === 'card_settlement' ? 'Card settlement' : `Booked · ${r.head_name ?? 'no head'}`, 'done', r.amount_paise);
         else if (r.status === 'ignored') add(`Left out · ${r.note ?? 'no reason'}`, 'done', r.amount_paise);
       }
-      const mineOpen = credits.filter((c) => c.day === day);
+      const mineOpen = credits.filter((c) => c.day === day && c.cause !== 'transfer');
       for (const c of mineOpen) add(CAUSE_WORDS[c.cause], 'open', c.amountPaise);
       return {
         day, row: days.find((d) => d.day === day) ?? null,
         inPaise: mine.reduce((t, r) => t + r.amount_paise, 0),
         lines: [...lines.values()].sort((a, b) => (a.state === b.state ? b.paise - a.paise : a.state === 'done' ? -1 : 1)),
         credits: mineOpen.sort((a, b) => a.at - b.at),
+        transfers: dayRows.filter(isTransfer).sort((a, b) => a.posted_at - b.posted_at).map((r): DayTransfer => ({ id: r.id, amountPaise: r.amount_paise, at: r.posted_at,
+          description: r.description, accountName: r.account_name, state: r.status === 'unmatched' ? 'open' : 'done' })),
+        transfersPaise: dayRows.filter(isTransfer).reduce((t, r) => t + r.amount_paise, 0),
         bills: bills.filter((b) => b.day === day).map((b) => ({ billNo: b.billNo, amountPaise: b.amountPaise, mode: b.mode, kind: b.kind ?? null, reason: b.reason, overdue: b.unresolved })),
         grey: grey.filter((g) => g.day === day).map((g) => ({ billNo: g.billNo, amountPaise: g.amountPaise, waitFor: g.waitFor, reason: g.reason })),
       };

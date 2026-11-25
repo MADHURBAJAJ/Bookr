@@ -12240,7 +12240,7 @@ async function daysView(biz, day) {
     const open = d.lines.filter((l) => l.state === 'open');
     const sum = d.lines.reduce((t, l) => t + l.paise, 0);
     const main = row?.status === 'unsaved' ? ['Open Reconcile', screenHref(biz, 'reconcile', d.day)]
-      : d.credits.length ? act(d.credits[0].cause, [d.day]) : d.bills.length ? ['Bills to look at', `#/b/${biz.id}/pending`] : null;
+      : d.credits.length ? act(d.credits[0].cause, [d.day]) : d.transfers?.some((t) => t.state === 'open') ? ['Book as transfer', moneyIn([d.day])] : d.bills.length ? ['Bills to look at', `#/b/${biz.id}/pending`] : null;
     const line = (l) => html`<div class="dy-line"><span class="chip ${l.state === 'done' ? 'ok' : 'wait'}">${l.state === 'done' ? 'done' : 'open'}</span>
       <span style="flex:1">${l.label} · ${l.n}</span><span class="amount">₹ ${money(l.paise)}</span></div>`;
     return html`<section class="card" style="gap:6px">
@@ -12248,6 +12248,10 @@ async function daysView(biz, day) {
         <span class="chip ${chipCls}">${row?.status === 'open' ? `${dayLeft(row)} left` : word}</span><span class="amount" style="margin-left:auto;font-weight:600">₹ ${money(d.inPaise)}</span></div>
       ${done.map(line)}${open.map(line)}
       <div class="dy-line" style="font-weight:600"><span style="flex:1">${sum === d.inPaise ? '= adds up ✓' : '≠ does not add up'}</span><span class="amount">₹ ${money(sum)}</span></div>
+      ${d.transfers?.length ? html`<div class="dy-tr"><div class="note" style="display:flex;gap:8px"><span style="flex:1">Moved between own accounts · not in the total</span><span class="amount">₹ ${money(d.transfersPaise)}</span></div>
+        ${d.transfers.map((t) => html`<div class="dy-line"><span class="chip ${t.state === 'done' ? 'ok' : 'wait'}">${t.state === 'done' ? 'done' : 'open'}</span>
+          <span class="tiny note" style="width:40px">${new Date(t.at + 19800000).toISOString().slice(11, 16)}</span>
+          <span style="flex:1;min-width:0;overflow-wrap:anywhere">${t.description.slice(0, 60)} <span class="tiny note">· into ${t.accountName}</span></span><span class="amount">₹ ${money(t.amountPaise)}</span></div>`)}</div>` : ''}
       ${d.credits.length ? html`<details class="cmp-fold"><summary class="note">${nOf(d.credits.length, 'open credit')}</summary>
         ${d.credits.map((c) => html`<div class="dy-line"><span class="tiny note" style="width:46px">${new Date(c.at + 19800000).toISOString().slice(11, 16)}</span>
           <span style="flex:1;min-width:0;overflow-wrap:anywhere">${c.description} <span class="tiny note">· ${c.accountName}</span></span><span class="amount">₹ ${money(c.amountPaise)}</span></div>`)}</details>` : ''}
