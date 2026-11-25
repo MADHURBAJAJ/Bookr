@@ -2472,7 +2472,14 @@ function roomBillPanel(r) {
       <button class="btn" type="button" data-act="rbForm" data-f="extend">Extend stay</button>
       <button class="btn ghost" type="button" data-act="rbGrc" data-id="${st.id}">Registration card</button>
       ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
-      ${r.balancePaise === 0 ? html`<button class="btn pri" type="button" data-act="rbForm" data-f="checkout">Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button>` : ''}
+      ${r.balancePaise === 0 ? (() => {
+        // One click (25 Nov 2026): the form opens only for a company invoice, or when a manager must approve (no room rent).
+        const rentUnknown = !!(r.booking?.fromReport && r.booking.amountPaise == null);
+        return r.rentPaise <= 0 && !rentUnknown && !isMgr()
+          ? html`<button class="btn pri" type="button" data-act="rbForm" data-f="checkout">Check out</button>`
+          : html`<button class="btn pri" type="button" data-act="checkOut" data-id="${st.id}">Check out${r.rentPaise > 0 ? ' and print invoice' : ''}</button>
+            ${r.rentPaise > 0 ? html`<button class="btn ghost" type="button" data-act="rbForm" data-f="checkout">Company invoice (GST)…</button>` : ''}`;
+      })() : ''}
     </div>`}
     <p class="small quiet" style="margin-top:8px">Room rent comes from Djubo's booking (GST included). Food bills are invoiced on their own; the room invoice prints at check-out.</p>
   </section>`;
