@@ -968,9 +968,11 @@ actions.dish = (d) => {
   if (needsPicker(m)) { ui.pick = { itemId: m.id, chosen: [], qty: 1, opening: true }; ui.pickPrice = ''; ui.error = null; rerender(); return; }
   change({ itemId: m.id }, 1);
 };
+// Put on the room's bill (25 Nov 2026): straight back to Tables; the guest pays it at check-out.
 actions.folioPost = async () => {
   await api('POST', `${B()}/settlements`, { billIds: [ui.bill.id], payments: [{ mode: 'room', amount: rupees(ui.bill.totalPaise), debtorAccountId: ui.folio.accountId }] });
-  go(`#/done/${ui.bill.id}`);
+  flash = { kind: 'ok', text: `${rs(ui.bill.totalPaise)} put on ${ui.folio.room} · ${ui.folio.guestName}'s room bill (${ui.bill.billNo}). Paid at check-out.`, link: [`#/done/${ui.bill.id}`, 'View bill'] };
+  go('#/');
 };
 actions.ncClose = async () => {
   if (!confirm(`Close bill ${ui.bill.billNo} as NC (complimentary for ${ui.ncPlace})?`)) return;
