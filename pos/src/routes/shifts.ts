@@ -80,6 +80,11 @@ shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
   return c.json({ summary: await shiftSummary(db, bid, day, b.tab_age_days, b.shift_start_hour), closed, current: clock(b).shiftDay,
     lastClosed: last ? { shiftDay: last.shift_day, countedAt: last.counted_at, auto: !!last.auto, closedAt: last.closed_at, by: last.by } : null,
     endsAt: shiftEnd(clock(b).shiftDay, b.shift_start_hour), overdue: await overdueOrders(db, bid, day), floatPaise: float,
+    // Arrivals of this shift and the 7 days before that were never checked in here (25 Nov 2026): a reminder, not a block.
+    notCheckedIn: await all(db, `SELECT guest_name AS guestName, check_in AS checkIn, room_labels AS roomLabels FROM bookings bk
+      WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in <= ? AND check_in >= ?
+        AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
+      ORDER BY check_in, guest_name LIMIT 50`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10)),
     drawer: dr ? { holder: dr.holder, heldBy: dr.held_by, since: dr.opened_at, openingPaise: dr.opening_paise, openingFrom: dr.opening_from } : null });
 });
 

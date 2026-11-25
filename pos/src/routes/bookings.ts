@@ -60,9 +60,16 @@ bookingRoutes.get(`${B}/bookings/arrivals`, requireAction('stays.edit'), async (
   const day = date({ d: c.req.query('day') ?? clock(bizOf(c)).shiftDay }, 'd', 'Day');
   // One guest once: of a Djubo and MakeMyTrip pair of the same stay, the Djubo one is offered (it has the phone, Djubo's room
   // numbers and what is still to pay).
-  return c.json({ arrivals: await all(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'approved' AND check_in <= ? AND check_out > ? AND stay_id IS NULL
-    AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
-    ORDER BY guest_name`, bid, day, day) });
+  const pairOk = `NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))`;
+  const [arrivals, late] = await Promise.all([
+    all(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'approved' AND check_in <= ? AND check_out > ? AND stay_id IS NULL
+      AND ${pairOk} ORDER BY guest_name`, bid, day, day),
+    // Not checked in from earlier days (25 Nov 2026): bookings of the last 7 days whose stay has ended or ends today, never
+    // checked in here. Checked in late (with the booking's own dates), or in and out together when the guest has left.
+    all(c.env.DB, `SELECT ${COLS} FROM bookings bk WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in < ? AND check_in >= ?
+      AND check_out <= ? AND ${pairOk} ORDER BY check_in, guest_name`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10), day),
+  ]);
+  return c.json({ arrivals, late });
 });
 
 async function booking(c: Context<AppEnv>, id: string) {

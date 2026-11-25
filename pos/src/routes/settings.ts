@@ -4,7 +4,7 @@ import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
-import { approval, isManager, requireAction, requireStaff } from '../auth';
+import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
 import { folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
 import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
@@ -880,6 +880,19 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
       'SELECT id, status, check_out, lines, check_in, booking_id, stay_id FROM reservations WHERE id = ? AND business_id = ?', data.reservationId, bid) : null;
   if (typeof data.reservationId === 'string' && (!res || res.status === 'cancelled')) fail(404, 'Reservation not found, or cancelled.');
   const { fy } = clock(b, t);
+  // A late check-in (25 Nov 2026): a booking from an earlier day, missed at the desk, is checked in with its own date, so its
+  // nights, rent and register are right. Up to 2 days late any counter staff may; older (up to 7 days) needs a manager.
+  let checkInDay = clock(b, t).shiftDay;
+  let daysLate = 0;
+  if (typeof data.bookingId === 'string' && isUuid(data.bookingId)) {
+    const bk = await one<{ check_in: string | null }>(c.env.DB, 'SELECT check_in FROM bookings WHERE id = ? AND business_id = ?', data.bookingId, bid);
+    if (bk?.check_in && bk.check_in < checkInDay) {
+      daysLate = Math.round((Date.parse(checkInDay) - Date.parse(bk.check_in)) / 86_400_000);
+      if (daysLate > 7) fail(409, 'This booking is more than 7 days old: it cannot be checked in late.');
+      if (daysLate > 2 && !isManager(c)) await approverOf(c, data.approverId, data.approverPin);
+      checkInDay = bk.check_in;
+    }
+  }
   // The guest is kept for next time, by phone: a returning guest's name and city are brought up to date.
   const known = phone ? await one<{ id: string }>(c.env.DB, 'SELECT id FROM guests WHERE business_id = ? AND phone = ?', bid, phone) : null;
   const guestId = phone ? known?.id ?? newId() : null;
@@ -890,7 +903,7 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
         : stmt(c.env.DB, 'INSERT INTO guests (id, business_id, name, phone, city, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', guestId, bid, guest, phone, city, t, t)] : []),
       stmt(c.env.DB, `INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at, guest_id, phone, adults, children, id_docs, address, coming_from,
           going_to, nationality, foreign_info, check_out_plan, reservation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        id, bid, room, guest, clock(b, t).shiftDay, c.get('staff').id, t, guestId, phone, ci.adults, ci.children, ci.idDocs, ci.address, ci.comingFrom, ci.goingTo,
+        id, bid, room, guest, checkInDay, c.get('staff').id, t, guestId, phone, ci.adults, ci.children, ci.idDocs, ci.address, ci.comingFrom, ci.goingTo,
         ci.nationality, ci.foreign, ci.checkOutPlan ?? res?.check_out ?? null, res?.id ?? null),
       stmt(c.env.DB, 'INSERT OR IGNORE INTO grc_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
       stmt(c.env.DB, `UPDATE stays SET grc_no = (SELECT 'GRC-' || substr(?, 3, 2) || substr(?, 6, 2) || '-' || printf('%04d', next_no) FROM grc_series WHERE business_id = ? AND fy = ?) WHERE id = ?`,
@@ -903,12 +916,12 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
         const m = newId();
         return [
           stmt(c.env.DB, `INSERT INTO stays (id, business_id, room, guest_name, check_in, opened_by, created_at, guest_id, phone, check_out_plan, group_stay_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, m, bid, r, guest, clock(b, t).shiftDay, c.get('staff').id, t, guestId, phone, ci.checkOutPlan ?? res?.check_out ?? null, id),
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, m, bid, r, guest, checkInDay, c.get('staff').id, t, guestId, phone, ci.checkOutPlan ?? res?.check_out ?? null, id),
           stmt(c.env.DB, "INSERT INTO debtor_accounts (id, business_id, kind, name, stay_id, created_by, created_at) VALUES (?, ?, 'room', ?, ?, ?, ?)",
             newId(), bid, `${/^\d/.test(r) ? 'Room ' : ''}${r} · ${guest} (with ${room})`, m, c.get('staff').id, t),
         ];
       }),
-      audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest, returning: !!known, ...(extra.length ? { withRooms: extra } : {}) }),
+      audit(c.env.DB, bid, c.get('staff').id, 'stay.open', 'stays', id, null, { room, guest, returning: !!known, ...(extra.length ? { withRooms: extra } : {}), ...(daysLate ? { lateDays: daysLate, checkIn: checkInDay } : {}) }),
       // Checked in from a booking read from mail (23 Nov 2026): the booking is marked checked in, with its stay.
       ...(typeof data.bookingId === 'string' && isUuid(data.bookingId)
         ? [stmt(c.env.DB, `UPDATE bookings SET status = 'checked_in', stay_id = ?, updated_at = ? WHERE business_id = ? AND status IN ('approved', 'new')

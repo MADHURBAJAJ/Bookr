@@ -63,6 +63,7 @@ async function api(method, path, body, extraHeaders = {}) {
 let me = null;          // { staff, business, actions }
 let cache = {};         // menu, reasons, entities, payAccounts, stays, credit (loaded per screen)
 let reopenStay = null;  // the room bill to show again after the rooms screen reloads (a payment or refund taken on it)
+let pendingOut = false;  // a late check-in of a guest who has already left: the bill opens for payment and check-out
 let ui = {};            // the current screen's own state; reset on every route change
 let flash = null;       // { kind, text, link?: [href, text] } shown once at the top
 const can = (a) => !!me?.actions.includes(a);
@@ -1618,7 +1619,7 @@ async function roomsScreen(view) {
   ui.view = v;
   if (can('stays.edit')) {
     const today = me.business.shiftDay;
-    [ui.bk, ui.arrivals, ui.fd] = await Promise.all([api('GET', B() + '/bookings').catch(() => null), api('GET', B() + '/bookings/arrivals').then((r) => r.arrivals).catch(() => []),
+    [ui.bk, ui.arrivals, ui.fd] = await Promise.all([api('GET', B() + '/bookings').catch(() => null), api('GET', B() + '/bookings/arrivals').then((r) => { ui.lateArrivals = r.late ?? []; return r.arrivals; }).catch(() => []),
       v === 'today' || v === 'checkin' ? api('GET', B() + '/frontdesk/today').catch(() => null) : null]);
     if (v === 'chart') { ui.chartFrom = today; await loadChart(); }
     if (v === 'list') ui.res = await api('GET', `${B()}/reservations`);
@@ -1642,12 +1643,14 @@ async function roomsScreen(view) {
     }
     if (v === 'checkin' && pendingCheckin) {
       const p = pendingCheckin; pendingCheckin = null;
-      if (p.kind === 'booking') actions.pickArrival({ id: p.id }, null, true); else await pickReservation(p.id);
+      if (p.kind === 'booking') await actions.pickArrival({ id: p.id }, null, true); else await pickReservation(p.id);
     }
     // A room bill open before a payment or refund stays open after it.
     if (reopenStay) ui.roomBill = await api('GET', `${B()}/stays/${reopenStay}/bill`).catch(() => null);
+    // Checked in and out together (25 Nov 2026): the bill opens at check-out, after what was paid is taken.
+    if (reopenStay && pendingOut && ui.roomBill) ui.rbForm = ui.roomBill.balancePaise === 0 ? 'checkout' : null;
   }
-  reopenStay = null;
+  reopenStay = null; pendingOut = false;
   if (pendingAdv) { pendingAdv = false; actions.advNew(); }
   rerender = () => paint(shell('#/rooms', html`${pageHead('Rooms', '')}
     ${can('stays.edit') ? tabsNav('Rooms', ROOM_VIEWS.map(([k, t]) => [k === 'today' ? '#/rooms' : `#/rooms/${k}`, k === 'list' && inboxCount(ui.bk) ? html`${t} <span class="status warn" title="Waiting for you">${inboxCount(ui.bk)}</span>` : t, k]), v) : ''}
@@ -2262,11 +2265,14 @@ function checkinView() {
       <div class="cicol">
         ${step(1, 'Guest', html`
           ${ui.arrivals?.length || resArr.length ? html`<div class="f">Arriving today<div class="cilist">
-            ${ui.arrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}</small></span>
+            ${ui.arrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}${a.checkIn < me.business.shiftDay ? ` · was due ${dayName(a.checkIn)}` : ''}</small></span>
               <span class="dright">${dueOf(a) ? html`<span class="status warn">Collect ${rs(dueOf(a))}</span>` : html`<span class="status ok">Prepaid</span>`}</span></button>`)}
             ${resArr.map((a) => html`<button type="button" class="drow ${ui.resPicked?.id === a.id ? 'on' : ''}" data-act="pickRes" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.rooms} · made here, not in Djubo</small></span>
               <span class="dright">${a.duePaise ? html`<span class="status warn">Collect ${rs(a.duePaise)}</span>` : html`<span class="status ok">Paid</span>`}</span></button>`)}</div></div>`
             : html`<p class="small quiet">No bookings due today: check in a walk-in below.</p>`}
+          ${(ui.lateArrivals ?? []).length ? html`<div class="f">Not checked in from earlier days <span class="small quiet">· missed at the desk: check in late, or in and out together if the guest has left</span><div class="cilist">
+            ${ui.lateArrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName ?? 'No name'}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · ${dayName(a.checkIn)} → ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}</small></span>
+              <span class="dright"><span class="status bad">was due ${dayName(a.checkIn)}</span></span></button>`)}</div></div>` : ''}
           ${picked ? bookingCard(picked) : ''}
           ${ui.resPicked ? html`<div class="msg warn" style="display:block"><strong>${ui.resPicked.guestName}</strong> · reservation made here, not in Djubo yet · total ${rs(ui.resPicked.totalPaise)} · advance ${rs(ui.resPicked.advancePaise)}
             <div class="small">Its rate goes on the room bill now; Djubo's amount replaces it when Djubo's mail arrives.</div></div>` : ''}
@@ -2288,6 +2294,11 @@ function checkinView() {
             <label class="tickline" style="margin-top:6px"><input type="checkbox" data-model="fFormC" ${ui.fFormC ? 'checked' : ''}> Form C filed</label></div>` : ''}`)}
         ${step(4, 'Payment', html`<div class="row between"><span>${due ? html`To collect at check-in: <strong>${rs(due)}</strong>` : picked || ui.resPicked ? 'Nothing to collect for the room.' : 'Add the rent on the room bill after check-in.'}</span>
             <span class="small quiet">The room bill opens after check-in, to take it with a receipt.</span></div>
+          ${ui.ciLate ? html`<div class="msg warn" style="display:block">Late check-in: the stay starts on <strong>${dayName(addDays(me.business.shiftDay, -ui.ciLate))}</strong>, the booking's date, so nights, rent and the register are right.
+            ${ui.ciLeft ? html`<label class="tickline" style="margin-top:6px"><input type="checkbox" data-model="ciOutToo" ${ui.ciOutToo ? 'checked' : ''}> The guest has already left: check in and out together (take what was paid, or move what is owed to Credit, then check out)</label>` : ''}
+            ${ui.ciLate > 2 && !isMgr() ? (ui.approvers?.length ? html`<div class="row" style="margin-top:6px"><span class="small">More than 2 days late: a manager approves.</span><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((x) => html`<option value="${x.id}" ${ui.apId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>
+              <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's PIN" style="max-width:160px"></div>`
+              : html`<p class="small">More than 2 days late: a manager or owner must do this (no manager has a PIN yet).</p>`) : ''}</div>` : ''}
           <div class="row"><button class="btn pri" type="submit" data-act="openStay" data-submit>Check in and print registration card</button>
             <button class="btn" type="button" data-act="openStay" data-noprint="1">Check in without printing</button><span class="small quiet">Enter checks in</span></div>`)}
       </div>
@@ -2586,9 +2597,13 @@ function roomInvoiceSlip(bill) {
     <div class="rl" style="font-weight:700"><span>BALANCE</span><span>${rs(0)}</span></div>
     <div class="c small">Thank you for staying with us</div></div>`;
 }
-actions.pickArrival = (d, _el, quiet) => {
-  const a = ui.arrivals.find((x) => x.id === d.id);
+actions.pickArrival = async (d, _el, quiet) => {
+  const a = ui.arrivals.find((x) => x.id === d.id) ?? (ui.lateArrivals ?? []).find((x) => x.id === d.id);
   if (!a) return;
+  // A late check-in (25 Nov 2026): the booking's own date; more than 2 days late, a manager approves.
+  ui.ciLate = a.checkIn && a.checkIn < me.business.shiftDay ? Math.round((Date.parse(me.business.shiftDay) - Date.parse(a.checkIn)) / 86400000) : 0;
+  ui.ciLeft = !!(a.checkOut && a.checkOut <= me.business.shiftDay);
+  if (ui.ciLate > 2 && !isMgr() && !ui.approvers) { ui.approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers; ui.apId = ui.approvers[0]?.id; }
   ui.bookingId = a.id; ui.resPicked = null; ui.guest = a.guestName; ui.gPhone = a.phone ?? ''; ui.gFound = null;
   ui.ciOut = a.checkOut; ui.ciAdults = a.guests ? String(a.guests) : ui.ciAdults;
   // Djubo's room or bed number when a room here is named the same; else the room type, to narrow the list.
@@ -2707,11 +2722,13 @@ actions.openStay = async (d = {}) => {
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
   const r = await api('POST', B() + '/stays', { room: ui.room, rooms: ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
     reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
-    goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign });
+    goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign, ...(ui.ciLate > 2 && !isMgr() ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
   if (!d.noprint) printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${r.id}/grc`)).grc)) }]);
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
   // The room bill opens, ready to take what is still to pay (24 Nov 2026).
   reopenStay = r.id;
+  pendingOut = !!(ui.ciLate && ui.ciLeft && ui.ciOutToo);
+  if (pendingOut) { flash = { kind: 'warn', text: `${ui.guest} checked in late to ${(r.rooms ?? [ui.room]).join(', ')}. ${due ? `Take the ${rs(due)} that was paid (Take payment), or move it to Credit if it was not, then` : 'Now'} check out below.` }; await refreshDeskAlerts(); go('#/rooms'); return; }
   flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in to ${(r.rooms ?? [ui.room]).join(', ')}${r.grcNo ? ` · ${r.grcNo}` : ''}.${due ? ` Collect ${rs(due)} still to pay (Take payment, below).` : ''}` };
   await refreshDeskAlerts(); go('#/rooms');
 };
@@ -2880,7 +2897,7 @@ async function shiftScreen() {
   try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
   const day = me.business.shiftDay;
   const d = await api('GET', `${B()}/shifts/${day}`);
-  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue;
+  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue; ui.notIn = d.notCheckedIn ?? [];
   const notes = NOTE_VALUES;
   rerender = () => {
     const s = ui.s;
@@ -2894,6 +2911,9 @@ async function shiftScreen() {
         ${kpi('Float kept', ui.floatSet ? rs(ui.floatSet) : 'Not set', ui.floatSet ? 'the rest goes to the safe' : 'set it in Settings, Staff')}
         ${kpi('Tables carried on', String(carried.length), carried.length ? 'into the next day, with their holder' : 'none open')}
         ${ui.overdue.length ? kpi('Open since an earlier day', String(ui.overdue.length), 'clear before closing', 'bad') : ''}</div>
+      ${ui.notIn.length && can('stays.edit') ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><strong>Arrivals not checked in: ${ui.notIn.length}</strong> · check each in (late, if the guest has left), or mark a no-show.
+        <div class="small">${ui.notIn.slice(0, 12).map((x) => `${x.guestName ?? 'No name'}${x.roomLabels ? ` (${x.roomLabels})` : ''} · ${dayName(x.checkIn)}`).join(' · ')}${ui.notIn.length > 12 ? ` · and ${ui.notIn.length - 12} more` : ''}</div>
+        <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms/checkin">Go to Check-in</a><a class="btn ghost" href="#/rooms/audit">Night audit (no-shows)</a></div></div>` : ''}
       ${ui.last && !ui.last.countedAt ? html`<section class="panel blockers"><div class="bh"><h2>${dayName(ui.last.shiftDay)} closed by itself</h2><span class="status warn">Drawer not counted</span></div>
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
@@ -4245,6 +4265,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
     ...heavy.map((p) => `${p.name} cancelled ${plural(p.cancels + p.orders.size, 'KOT line')}`),
     ...(broken.length ? ['Bill numbers missing'] : []),
     ...(d.bar.missingPaise ? [`Bar count: ${rs(d.bar.missingPaise)} missing`] : []),
+    ...((d.lateCheckIns ?? []).length ? [`${plural(d.lateCheckIns.length, 'guest')} checked in late`] : []),
   ];
   const prevNet = ui.exPrev?.sales?.netPaise ?? null;
   const change = prevNet ? Math.round(((d.sales.netPaise - prevNet) / prevNet) * 100) : null;
@@ -4322,6 +4343,10 @@ async function exceptionsScreen(day = me.business.shiftDay) {
           : html`<div class="msg ok">${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</div>`}
         <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span class="quiet">${x.count} bills, last ${x.lastNo ?? x.last}</span></div>`)}</div></section>
     </div>
+    ${(d.lateCheckIns ?? []).length ? html`<section class="panel" style="margin-top:16px"><h2>Checked in late</h2>
+      <p class="quiet small">Bookings missed at the desk and checked in afterwards, with the booking's date. Many of these mean check-ins are being missed.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Was due</th><th>Checked in</th><th>By</th></tr></thead><tbody>
+        ${d.lateCheckIns.map((x) => html`<tr><td>${x.room}</td><td>${x.guestName}${x.checkedOutAt ? html` <span class="small quiet">· in and out together</span>` : ''}</td><td>${dayName(x.checkIn)}</td><td>${dateTime(x.at)}</td><td>${x.byName ?? ''}</td></tr>`)}</tbody></table></div></section>` : ''}
     ${(d.typedPrices ?? []).length ? html`<section class="panel" style="margin-top:16px"><h2>Prices typed at billing</h2>
       <p class="quiet small">Bottles and other price-at-billing items, with the price typed and who typed it.</p>
       <div class="scroll"><table class="t"><thead><tr><th>Bill</th><th>Item</th><th class="num">Qty</th><th class="num">Price typed</th><th class="num">Lowest allowed</th><th>Typed by</th></tr></thead><tbody>
