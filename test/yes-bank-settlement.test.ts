@@ -30,6 +30,7 @@ describe('a Yes Bank settlement with a desk bill in it', () => {
       VALUES (${id}, ${h.bid}, ${day}, ${paise}, 'income', ${fnb}, 'software_report', 'approved', 'upi', ${bill}, ${day}, 'awaiting_bank_match', 0)`.then(() => id); };
     const desk = await sale('2610310', 200000, '2026-10-31');
     await sale('2610210', 50000, '2026-10-21'); // too early for the 1 Nov settlement
+    const sameDay = await sale('2611015', 30000, '2026-11-01'); // paid on the settlement's own day: in the next one
 
     const rows = (await o.get(`/businesses/${h.bid}/bank-rows?from=2026-10-01&to=2026-11-30`)).json.rows;
     const line = rows.find((r: { tranId: string }) => r.tranId === 'YESF26305000000001');
@@ -39,9 +40,11 @@ describe('a Yes Bank settlement with a desk bill in it', () => {
     const found = (await o.get(`/businesses/${h.bid}/bank-rows/${line.id}/desk-bills`)).json;
     expect(found.bills.map((b: { billNo: string }) => b.billNo)).toEqual(['2610310']);
     expect(found.headId).toBe(room);
+    expect(found).toMatchObject({ from: '2026-10-29', to: '2026-10-31' });
 
     const split = (x: Record<string, unknown>) => o.post(`/businesses/${h.bid}/bank-rows/${line.id}/settlement-split`, x);
     expect((await split({ transactionIds: [desk], headId: veg })).status).toBe(400);
+    expect((await split({ transactionIds: [sameDay], headId: room })).status).toBe(400);
     const ok = await split({ transactionIds: [desk], headId: room });
     expect(ok.json).toMatchObject({ deskPaise: 200000, restPaise: 1800000 });
     expect((await sql`SELECT match_status, matched_bank_row FROM transactions WHERE id = ${desk}`)[0]).toEqual({ match_status: null, matched_bank_row: line.id });

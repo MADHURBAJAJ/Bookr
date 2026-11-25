@@ -5780,6 +5780,51 @@ async function bankView(biz, query = '') {
         <details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary><div class="menu-pop" style="min-width:220px;gap:6px">
           <button class="btn plain dchip" type="button" data-nottr="${r.id}">Not a transfer: book as ${r.direction === 'DR' ? 'expense' : 'income'}</button></div></details></div></div>`)}</div>` : '';
   };
+  // Money in as tiles (approved 26 Nov 2026): one tile per line, named for what it is, the account as a chip, the
+  // description in full, one button for the likely action and the rest under ⋯. A Yes Bank line has a date only.
+  const lineNote = (r) => (r.remark && !/^(UPI|UPI Pay|NA|NO REMARKS?|Payment from Ph|Sent using Payt|Paid via SuperM|Paid via CRED|Scan and Pay)$/i.test(r.remark) ? r.remark : '');
+  const tileTitle = (r) => (r.known === 'settlement' ? 'Direct bookings · UPI settlement' : r.known === 'mmt' ? 'MakeMyTrip payout' : lineNote(r) || r.vpa || BANK_KIND[r.kind] || 'Money in');
+  const tileWhen = (r) => (r.dateOnly ? `${dayLabel(r.day)} · date only` : hhmm(r.postedAt));
+  const tileTop = (r, title, pick, tag = '') => html`<div class="bk-top">${pick}<strong>${title}</strong><span class="bk-acc">${r.accountName}</span><span class="tiny note">${tileWhen(r)}</span>${tag}${amt(r)}</div>`;
+  const headName = (id) => heads.find((h) => h.id === id)?.name ?? '';
+  const moreMenu = (items) => (items.filter(Boolean).length ? html`<details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary><div class="menu-pop" style="min-width:180px;gap:6px">${items}</div></details>` : '');
+  const bookTile = (r, id) => {
+    const sg = r.suggest ?? {};
+    const desk = r.desk;
+    const deskBtn = r.known === 'settlement' ? html`<button class="btn plain" type="button" style="${SMALL}" data-deskbills="${r.id}" title="A desk guest paid into this account: match their bill and book the rest">Desk bills in this</button>` : '';
+    const sub = r.known === 'settlement' ? html`One day's direct-booking UPI, paid out in one sum · ${desk?.waiting ? html`<strong>${desk.waiting} desk UPI bill${desk.waiting === 1 ? '' : 's'} waiting ${dayLabel(desk.from)} to ${dayLabel(desk.to)}</strong>: check Desk bills in this first` : desk ? `no desk bill waiting ${dayLabel(desk.from)} to ${dayLabel(desk.to)}` : ''}`
+      : r.known === 'mmt' ? 'Room bookings, paid net of its commission' : '';
+    return html`<div class="bk-tile" data-line="${r.id}">
+      ${tileTop(r, tileTitle(r), html`<input type="checkbox" data-pick="${id}" value="${r.id}" ${sg.headId && sg.from !== 'note' ? 'checked' : ''} aria-label="Select this line">`)}
+      <div class="mono tiny bk-desc">${r.description}</div>${sub ? html`<div class="tiny">${sub}</div>` : ''}
+      <div class="bk-act">
+        <input class="compact" data-item="${r.id}" value="${sg.item ?? ''}" placeholder="Item" aria-label="Item" style="width:130px">
+        <input class="compact" data-party="${r.id}" value="${sg.party ?? ''}" list="bankparties" placeholder="Party" aria-label="Party" style="width:130px" autocomplete="off">
+        ${headSelect(r, sg.headId)}${headFromChip(sg, sg.party)}
+        ${desk?.waiting ? deskBtn : ''}${r.cashMove ? cashLink(r) : ''}${r.loan && canLoan ? html`<button class="btn" type="button" style="${SMALL}" data-loango="${r.id}" data-loan="${r.loan.id}" data-name="${r.loan.name}" title="Remembered for this loan: check it is right">${r.loan.name} · loan</button>` : ''}
+        <button class="btn" type="button" style="${SMALL}" data-bookone="${r.id}">${sg.headId ? `Book to ${headName(sg.headId)}` : 'Book'}</button>
+        ${moreMenu([desk?.waiting ? '' : deskBtn,
+          html`<button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="fnb" title="A sale nobody billed: booked as F&B income">Unbilled F&amp;B</button>`,
+          html`<button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="room" title="A sale nobody billed: booked as Room income">Unbilled Room</button>`,
+          r.cashMove ? '' : cashLink(r), ownLink(r), canLoan ? html`<button class="btn plain" type="button" style="${SMALL}" data-loanpick="${r.id}" title="Money in or out of a loan or deposit: not income or an expense">Loan…</button>` : '', rulePill(r), skipLink(r)])}
+      </div></div>`;
+  };
+  const tileSection = (id, title, help, items) => !items.length ? '' : html`
+    <div data-sec="${id}" class="bk-sec">
+      <div class="bk-sechead"><label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" data-selall="${id}" style="width:18px;height:18px;min-height:0"> ${title} <span class="chip">${items.length}</span></label>
+        <span style="display:flex;gap:8px;align-items:center"><span class="tiny">${help}</span><button class="btn" type="button" style="${SMALL}" data-bulk="${id}" data-action="book" disabled>Book 0 selected</button></span></div>
+      <div class="bk-tiles">${items.map((r) => bookTile(r, id))}</div></div>`;
+  // A transfer whose other side is already booked under a head (approved 26 Nov 2026): one press puts that back and
+  // books both as a transfer.
+  const legTiles = (list) => {
+    const legs = list.filter((r) => r.bookedLeg && !isTr(r));
+    return legs.length ? html`<div class="bk-tiles">${legs.map((r) => { const o = r.bookedLeg; const into = r.direction === 'CR';
+      return html`<div class="bk-tile bk-warn">${tileTop(r, `Transfer, other side booked as ${into ? 'an expense' : 'income'}`, '', html`<span class="tchip warn">fix</span>`)}
+        <div class="tiny">${r.accountName} ${into ? 'got' : 'paid'} ₹ ${money(r.amountPaise)} · ${tileWhen(r)} · ref ${o.ref} = ${o.accountName} ₹ ${money(r.amountPaise)} ${into ? 'out' : 'in'} ${when(o.postedAt)}, booked as ${o.headName ?? 'a head'} ✗</div>
+        <div class="mono tiny bk-desc">${r.description}</div>
+        <div class="bk-act"><button class="btn" type="button" style="${SMALL}" data-legfix="${r.id}" data-other="${o.accountId}" data-pair="${o.rowId}">Put back ${o.headName ?? 'the booking'} and book as transfer</button>
+          ${moreMenu([ownLink(r), skipLink(r)])}</div></div>`; })}</div>` : '';
+  };
   // Cash moved between the drawer and the bank (Stage 6): offered first where the description says so.
   const cashLink = (r) => r.kind === 'upi_in' || r.kind === 'upi_out' || r.kind === 'card_settlement' || r.kind === 'upi_fee' || (r.direction === 'DR' && !r.cashMove) ? ''
     : html`<button class="btn ${r.cashMove ? '' : 'plain'}" type="button" style="${SMALL}" data-cashmove="${r.id}" data-dir="${r.direction}" data-shift="${shiftOfMs(r.postedAt)}"
@@ -5796,26 +5841,21 @@ async function bankView(biz, query = '') {
     }
     if (tab === 'in') {
       const found = list.filter((r) => r.candidates.length && !isTr(r));
-      const rest = list.filter((r) => !r.candidates.length && !isTr(r));
-      return html`${transferCards(list)}${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
+      const rest = list.filter((r) => !r.candidates.length && !isTr(r) && !r.bookedLeg);
+      return html`${transferCards(list)}${legTiles(list)}${section('found', 'Bill found', 'Same amount as a confirmed UPI bill', found, (r) => html`
           <div>${r.candidates.length === 1 ? html`<span class="${r.candidates[0].strong ? '' : 'note'}">${candText(r.candidates[0])}</span><input type="hidden" data-cand="${r.id}" value="${candValue(r.candidates[0])}">`
             : html`<select class="compact" data-cand="${r.id}" aria-label="Which bill">${r.candidates.map((k) => html`<option value="${candValue(k)}">${candText(k)}</option>`)}</select>`}
             ${r.candidates[0].adjust ? adjustNote(r.candidates[0]) : ''}</div>
           <div style="display:flex;gap:4px"><button class="btn plain" type="button" style="${SMALL}" data-fixbill="${r.id}" title="Correct the bill (number, amount, discount) to what the bank shows, and match">Fix bill</button>${skipLink(r)}</div>`, 'match')}
-        ${section('nobill', 'No bill found', 'A sale nobody billed (e.g. drinks in a rush), or other money received', rest, (r) => html`
-          ${lineFields(r)}<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
-            ${r.remark === 'UPI collection settlement' ? html`<button class="btn plain" type="button" style="${SMALL}" data-deskbills="${r.id}" title="A desk guest paid into this account: match their bill and book the rest">Desk bills in this</button>` : ''}
-            <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="fnb" title="A sale nobody billed: booked as F&B income">Unbilled F&amp;B</button>
-            <button class="btn plain" type="button" style="${SMALL}" data-unbilled="${r.id}" data-type="room" title="A sale nobody billed: booked as Room income">Unbilled Room</button>
-            ${cashLink(r)}${ownLink(r)}${loanLink(r)}${skipLink(r)}</div>`, 'book')}`;
+        ${tileSection('nobill', 'No bill found', 'A sale nobody billed (e.g. drinks in a rush), or other money received', rest)}`;
     }
-    const known = list.filter((r) => r.suggest?.headId && !isTr(r));
-    const rest = list.filter((r) => !r.suggest?.headId && !isTr(r));
+    const known = list.filter((r) => r.suggest?.headId && !isTr(r) && !r.bookedLeg);
+    const rest = list.filter((r) => !r.suggest?.headId && !isTr(r) && !r.bookedLeg);
     // Only the buttons that fit (approved 23 Nov 2026): Cash for the drawer on cash withdrawals; the rest under ⋯.
     const outActs = (r) => r.kind === 'upi_fee' ? html`<div style="display:flex;gap:4px">${skipLink(r)}</div>`
       : html`<div style="display:flex;gap:4px;align-items:center">${cashLink(r)}${r.loan && canLoan ? html`<button class="btn" type="button" style="${SMALL}" data-loango="${r.id}" data-loan="${r.loan.id}" data-name="${r.loan.name}" title="Remembered for this loan: check it is right">${r.loan.name} · loan</button>` : ''}<details class="menu"><summary class="btn plain" style="${SMALL}" aria-label="More">⋯</summary>
         <div class="menu-pop" style="min-width:160px;gap:6px">${ownLink(r)}${canLoan ? html`<button class="btn plain" type="button" style="${SMALL}" data-loanpick="${r.id}" title="Money in or out of a loan or deposit: not income or an expense">Loan…</button>` : ''}${rulePill(r)}${skipLink(r)}</div></details></div>`;
-    return html`${transferCards(list)}${section('ruled', 'Head suggested', 'From the party\'s past lines, a rule or the note; change anything that is wrong', known, (r) => html`
+    return html`${transferCards(list)}${legTiles(list)}${section('ruled', 'Head suggested', 'From the party\'s past lines, a rule or the note; change anything that is wrong', known, (r) => html`
         ${lineFields(r)}${outActs(r)}`, 'book')}
       ${section('needs', 'Needs a head', 'Give the item, party and head once: next time the party fills in its head', rest, (r) => html`
         ${lineFields(r)}${outActs(r)}`, 'book')}`;
@@ -6006,6 +6046,21 @@ async function bankView(biz, query = '') {
     const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/${rowId}/own-transfer`, payload);
     return r;
   };
+  app.querySelectorAll('[data-legfix]').forEach((x) => x.addEventListener('click', () => run(async () => {
+    await apiFull('POST', `/businesses/${biz.id}/bank-rows/${x.dataset.pair}/reopen`, {});
+    return ownTransfer(x.dataset.legfix, { otherAccountId: x.dataset.other, pairRowId: x.dataset.pair, legId: null });
+  }, 'The booking was put back and both lines booked as a transfer between your accounts. Undo is on Done.')));
+  app.querySelectorAll('[data-bookone]').forEach((x) => x.addEventListener('click', () => {
+    const id = x.dataset.bookone;
+    const item = { rowId: id, headId: app.querySelector(`[data-head="${id}"]`)?.value || null, party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null,
+      item: app.querySelector(`[data-item="${id}"]`)?.value.trim() || null };
+    if (!item.headId && !item.party) { showError(msg, new Error('Choose a head (or a known party) first.')); return; }
+    run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: [item] }), (r) => (r.booked ? 'Booked. Undo is on Done.' : `Not booked: ${r.skipped.join(' ')}`));
+  }));
+  app.querySelectorAll('[data-head]').forEach((h) => h.addEventListener('change', () => {
+    const btn = app.querySelector(`[data-bookone="${h.dataset.head}"]`);
+    if (btn) btn.textContent = h.value ? `Book to ${h.selectedOptions[0]?.textContent ?? ''}` : 'Book';
+  }));
   app.querySelectorAll('[data-owntr]').forEach((x) => x.addEventListener('click', () => run(() => ownTransfer(x.dataset.owntr,
     { otherAccountId: x.dataset.other, pairRowId: x.dataset.pair || null, legId: x.dataset.leg || null }), 'Booked as a transfer between your accounts: not an expense or income. Undo is on Done.')));
   app.querySelectorAll('[data-nottr]').forEach((x) => x.addEventListener('click', async () => {

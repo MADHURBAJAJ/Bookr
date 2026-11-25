@@ -193,8 +193,31 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
   const interestHead = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'income' AND lower(name) = 'interest received'", bid);
   // A Yes Bank UPI collection settlement (25 Nov 2026): direct bookings, so the Room income head is suggested.
   const SETTLEMENT = 'UPI collection settlement';
-  const roomHead = rows.some((r) => r.remark === SETTLEMENT && r.status === 'unmatched')
+  // A MakeMyTrip payout (26 Nov 2026): room bookings, paid net of its commission; party MakeMyTrip and Room income.
+  const isMmt = (r: { direction: string; description: string }) => r.direction === 'CR' && /MAKEMYTRIP/i.test(r.description);
+  const roomHead = rows.some((r) => (r.remark === SETTLEMENT || isMmt(r)) && r.status === 'unmatched')
     ? await one<{ id: string }>(db, "SELECT head_id AS id FROM bill_type_heads WHERE business_id = ? AND bill_type = 'room'", bid) : null;
+  // A settlement tells whether a desk UPI bill is waiting from the 3 days before it (26 Nov 2026).
+  const settlements = rows.filter((r) => r.remark === SETTLEMENT && r.status === 'unmatched' && r.direction === 'CR');
+  const waitingSales = settlements.length ? await all<{ shift_day: string }>(db, `SELECT shift_day FROM transactions WHERE business_id = ? AND type = 'income' AND payment_mode = 'upi'
+    AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL AND shift_day BETWEEN ? AND ?`, bid, addDays(from, -SETTLEMENT_BACK_DAYS), to) : [];
+  const deskOf = (day: string) => ({ from: addDays(day, -SETTLEMENT_BACK_DAYS), to: addDays(day, -1),
+    waiting: waitingSales.filter((t) => t.shift_day >= addDays(day, -SETTLEMENT_BACK_DAYS) && t.shift_day <= addDays(day, -1)).length });
+  // A transfer whose other side was already booked under a head (26 Nov 2026, ₹101 Icici → Yes Bank booked as GENERAL
+  // EXP): the same bank reference (9 digits or more) in both lines, the same amount, the other direction, another own account.
+  const refsOf = (d: string) => new Set(d.match(/\d{9,}/g) ?? []);
+  const lonely = rows.filter((r) => r.status === 'unmatched' && !transfers.get(r.id) && refsOf(r.description).size);
+  const bookedSides = lonely.length ? await all<{ id: string; account_id: string; account_name: string; direction: string; amount_paise: number; description: string; posted_at: number; head_name: string | null }>(db, `
+    SELECT r.id, r.account_id, a.name AS account_name, r.direction, r.amount_paise, r.description, r.posted_at, h.name AS head_name
+    FROM bank_rows r JOIN accounts a ON a.id = r.account_id LEFT JOIN transactions bt ON bt.id = r.transaction_id LEFT JOIN heads h ON h.id = bt.head_id
+    WHERE r.business_id = ? AND r.status = 'booked' AND r.day BETWEEN ? AND ? AND r.amount_paise IN (SELECT value FROM json_each(?))`,
+    bid, addDays(from, -3), addDays(to, 3), JSON.stringify([...new Set(lonely.map((r) => r.amount_paise))])) : [];
+  const bookedLeg = new Map(lonely.flatMap((r) => {
+    const mine = refsOf(r.description);
+    const o = bookedSides.find((x) => x.account_id !== r.account_id && x.direction !== r.direction && x.amount_paise === r.amount_paise
+      && Math.abs(x.posted_at - r.posted_at) <= 3 * 86400e3 && [...refsOf(x.description)].some((k) => mine.has(k)));
+    return o ? [[r.id, { rowId: o.id, accountId: o.account_id, accountName: o.account_name, postedAt: o.posted_at, headName: o.head_name, ref: [...refsOf(o.description)].find((k) => mine.has(k))! }] as const] : [];
+  }));
   const looksInterest = (r: { direction: string; description: string }) => r.direction === 'CR' && /\bINT(EREST)?\.?\s*(PD|PAID|CR|CREDIT)\b|\bINTEREST\b/i.test(r.description);
   // A bill cancelled after it was paid (Stage 7, approved 10 Nov 2026): money sent back to the UPI ID that paid a bill,
   // of the same amount, within REFUND_BILL_DAYS. Told on the line with the bill, booked as a refund (an expense head
@@ -233,7 +256,8 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
           const fromItem = !head?.headId && !rule && item && r.direction === 'DR' ? headFromItem(itemHistory, item) : null;
           // A note that runs words together (approved 23 Nov 2026): "hemantsalary" → salary, Hemant, Salaries.
           const read = !party && !rule && r.direction === 'DR' ? readNote(r.remark, expenseHeads) : null;
-          const guessHead = head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null) ?? (r.remark === SETTLEMENT && r.direction === 'CR' ? roomHead?.id ?? null : null);
+          const guessHead = head?.headId ?? rule?.head_id ?? fromItem ?? (looksInterest(r) ? interestHead?.id ?? null : null) ?? ((r.remark === SETTLEMENT && r.direction === 'CR') || isMmt(r) ? roomHead?.id ?? null : null);
+          if (isMmt(r) && !head?.headId && !rule) return { item: 'MakeMyTrip payout', party: party?.name ?? 'MakeMyTrip', headId: roomHead?.id ?? null, headChoices: [], learned: false, from: null, ruleName: null, fromNote: null };
           return { item: read?.item ?? item, party: party?.name ?? read?.party ?? null, headId: guessHead ?? read?.headId ?? null, headChoices: head?.choices ?? [], learned: !!head?.headId,
             from: head?.headId ? 'party' : rule?.head_id ? 'rule' : fromItem ? 'item' : read?.headId ? 'note' : null, ruleName: rule?.name ?? null,
             fromNote: read ? { item: read.item, party: read.party } : null };
@@ -245,6 +269,12 @@ bankRoutes.get('/businesses/:businessId/bank-rows', requireRole('bank.link'), as
         // A remembered lender or borrower (24 Nov 2026): suggested, never booked by itself.
         loan: r.status === 'unmatched' && r.kind !== 'card_settlement' ? loanOf(lkeys, r) : null,
         ownTransfer: r.status === 'booked' && /^Transfer (to|from) /.test(r.note ?? ''),
+        // Kinds the page names (26 Nov 2026): a Yes Bank settlement (with the desk bills waiting before it), a MakeMyTrip
+        // payout; a line with a date only (Yes Bank), so no time is shown; a transfer whose other side is booked.
+        known: r.remark === SETTLEMENT && r.direction === 'CR' ? 'settlement' : isMmt(r) ? 'mmt' : null,
+        desk: r.remark === SETTLEMENT && r.direction === 'CR' && r.status === 'unmatched' ? deskOf(r.day) : null,
+        dateOnly: !/^[A-Z]?\d{3,}$/i.test(r.tran_id) && new Date(r.posted_at + 19800e3).toISOString().slice(11, 23) === '12:00:00.000',
+        bookedLeg: bookedLeg.get(r.id) ?? null,
         refundOf: refundOf.has(r.id) ? { creditId: refundOf.get(r.id)!.id, postedAt: refundOf.get(r.id)!.posted_at, billNos: refundOf.get(r.id)!.bills } : null,
       };
     }),
@@ -1182,7 +1212,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match-with-difference'
 /**
  * Desk bills in a Yes Bank settlement (approved 25 Nov 2026). A settlement is one day's direct-booking UPI paid out in
  * one sum; rarely a desk guest paid into it. The desk UPI sales still waiting for their money, from saved shifts of the
- * settlement's date and the 3 days before, can be matched to it, and the rest is booked under an income head (Room
+ * 3 days before the settlement's date (it pays out money collected before that day: 26 Nov 2026), can be matched to it, and the rest is booked under an income head (Room
  * income). Unmatch on the line undoes both.
  */
 const SETTLEMENT_REMARK = 'UPI collection settlement';
@@ -1196,11 +1226,11 @@ bankRoutes.get('/businesses/:businessId/bank-rows/:rowId/desk-bills', requireRol
   const [bills, heads, room] = await Promise.all([
     all<{ id: string; billNo: string | null; amountPaise: number; shiftDay: string }>(db, `SELECT t.id, t.bill_no AS billNo, t.amount_paise AS amountPaise, t.shift_day AS shiftDay
       FROM transactions t WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
-        AND t.shift_day BETWEEN ? AND ? ORDER BY t.shift_day, t.bill_no`, bid, addDays(row!.day, -SETTLEMENT_BACK_DAYS), row!.day),
+        AND t.shift_day BETWEEN ? AND ? ORDER BY t.shift_day, t.bill_no`, bid, addDays(row!.day, -SETTLEMENT_BACK_DAYS), addDays(row!.day, -1)),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM heads WHERE business_id = ? AND type = 'income' ORDER BY name", bid),
     one<{ id: string }>(db, "SELECT head_id AS id FROM bill_type_heads WHERE business_id = ? AND bill_type = 'room'", bid),
   ]);
-  return c.json({ bills, heads, headId: room?.id ?? null, from: addDays(row!.day, -SETTLEMENT_BACK_DAYS), to: row!.day });
+  return c.json({ bills, heads, headId: room?.id ?? null, from: addDays(row!.day, -SETTLEMENT_BACK_DAYS), to: addDays(row!.day, -1) });
 });
 
 bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/settlement-split', requireRole('bank.link'), async (c) => {
@@ -1213,7 +1243,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/settlement-split', req
   const ids = [...new Set(Array.isArray(data.transactionIds) ? data.transactionIds.filter((x): x is string => typeof x === 'string') : [])].slice(0, 30);
   const total = await checkMatch(db, bid, row!, ids, true);
   const days = await all<{ shift_day: string | null }>(db, `SELECT shift_day FROM transactions WHERE business_id = ? AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids);
-  if (days.some((d) => !d.shift_day || d.shift_day < addDays(row!.day, -SETTLEMENT_BACK_DAYS) || d.shift_day > row!.day)) fail(400, 'A bill is not from this settlement\'s days.');
+  if (days.some((d) => !d.shift_day || d.shift_day < addDays(row!.day, -SETTLEMENT_BACK_DAYS) || d.shift_day > addDays(row!.day, -1))) fail(400, 'A bill is not from this settlement\'s days.');
   const rest = row!.amount_paise - total;
   if (rest < 0) fail(400, `The bills add up to ₹${(total / 100).toFixed(2)}, more than the settlement.`);
   const t = now();
