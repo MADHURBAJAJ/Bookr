@@ -58,4 +58,30 @@ describe('Days', () => {
     expect((await h.clients.viewer.get(`/businesses/${h.bid}/days`)).status).toBe(403);
     expect((await o.get(`/businesses/${h.bid}/days/31-10-2026`)).status).toBe(400);
   });
+
+  it('keeps money between own accounts out of money in: lines naming the own company are transfers, settlements are not', async () => {
+    const h = await hotel();
+    await h.account('HUF A', 'UPI XOXO');
+    await h.software([['2610701', '31 14:00', 'UPI', '450']]);
+    await h.register([{ no: '2610701', amount: '450', pays: [['upi', '450']] }]);
+    await h.decideRest('2026-10-31', () => 'use_register');
+    await h.credits([['31 14:05', 450]]);
+    const [own, settle] = (await h.lines([['31 12:00', 52000, 'CR', 'NEFT Cr-ICIC0SF0002-EXOSPARK GOA INN PRIVATE -EXOSPARK GOA INN PRIVATE'],
+      ['31 13:00', 1600, 'CR', '115000000001/800000009 UPI Collection Settlement/EXOSPARK GOA IN/CB']])).ids;
+    await sql`UPDATE bank_rows SET remark = 'UPI collection settlement' WHERE id = ${settle}`;
+    await h.confirm();
+    const o = h.clients.owner;
+
+    const d = (await o.get(`/businesses/${h.bid}/days/2026-10-31`)).json;
+    // Money in: the bill's credit and the settlement. The ₹52,000 is listed apart, open, and still keeps the day open.
+    expect(d.inPaise).toBe(45000 + 160000);
+    expect(d.lines.reduce((t: number, l: { paise: number }) => t + l.paise, 0)).toBe(d.inPaise);
+    expect(d.lines).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'Yes Bank UPI settlements', state: 'open', paise: 160000 })]));
+    expect(d.transfers).toEqual([expect.objectContaining({ id: own, amountPaise: 5200000, state: 'open' })]);
+    expect(d.transfersPaise).toBe(5200000);
+    expect(d.credits.map((c: { id: string }) => c.id)).toEqual([settle]);
+    expect(d.row).toMatchObject({ status: 'open', creditsOpen: 2, inPaise: 205000, transfersPaise: 5200000 });
+    const p = (await o.get(`/businesses/${h.bid}/days`)).json;
+    expect(p.groups.find((g: { cause: string }) => g.cause === 'transfer')).toMatchObject({ n: 1, paise: 5200000 });
+  });
 });
