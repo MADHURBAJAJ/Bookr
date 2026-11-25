@@ -208,7 +208,13 @@ async function route() {
     if (path === 'rooms') return await roomsScreen(a);
     if (path === 'counter') return await counterScreen();
     if (path === 'credit') return await creditScreen();
-    if (path === 'payments') return await paymentsScreen(a);
+    if (path === 'payments') return a === 'bills' ? await billsScreen(b) : await paymentsScreen(a);
+    // A bill by its number (25 Nov 2026): opens it, from Daily check, a room bill or anywhere a number is shown.
+    if (path === 'billno') {
+      const r = await api('GET', `${B()}/bills?no=${encodeURIComponent(a ?? '')}`).catch(() => ({ bills: [] }));
+      const hit = r.bills.find((x) => x.billNo === a) ?? r.bills[0];
+      location.replace(hit ? `#/done/${hit.id}` : '#/payments/bills'); return;
+    }
     if (path === 'shift') return await shiftScreen();
     if (path === 'handover') return await handoverScreen(a);
     if (path === 'exceptions') return await exceptionsScreen(a);
@@ -968,9 +974,11 @@ actions.dish = (d) => {
   if (needsPicker(m)) { ui.pick = { itemId: m.id, chosen: [], qty: 1, opening: true }; ui.pickPrice = ''; ui.error = null; rerender(); return; }
   change({ itemId: m.id }, 1);
 };
+// Put on the room's bill (25 Nov 2026): straight back to Tables; the guest pays it at check-out.
 actions.folioPost = async () => {
   await api('POST', `${B()}/settlements`, { billIds: [ui.bill.id], payments: [{ mode: 'room', amount: rupees(ui.bill.totalPaise), debtorAccountId: ui.folio.accountId }] });
-  go(`#/done/${ui.bill.id}`);
+  flash = { kind: 'ok', text: `${rs(ui.bill.totalPaise)} put on ${ui.folio.room} · ${ui.folio.guestName}'s room bill (${ui.bill.billNo}). Paid at check-out.`, link: [`#/done/${ui.bill.id}`, 'View bill'] };
+  go('#/');
 };
 actions.ncClose = async () => {
   if (!confirm(`Close bill ${ui.bill.billNo} as NC (complimentary for ${ui.ncPlace})?`)) return;
@@ -2454,7 +2462,7 @@ function roomBillPanel(r) {
         <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
     ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
-      ${r.lines.map((l) => html`<tr><td>${folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
+      ${r.lines.map((l) => html`<tr><td>${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
       <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
     </tbody></table>
     ${inv ? html`<div class="msg ok" style="margin-top:8px;display:block">Invoice <strong>${inv.invoiceNo}</strong> · ${rs(inv.totalPaise)}${inv.billToName ? ` · to ${inv.billToName}${inv.billToGstin ? ` (${inv.billToGstin})` : ''}` : ''}
@@ -2800,7 +2808,7 @@ function grcSlip(g) {
 
 let proofTimer = null;
 function stopProof() { if (proofTimer) { clearInterval(proofTimer); proofTimer = null; } }
-const PROOF_TABS = [['', 'All'], ['diff', 'Differences'], ['missing', 'No proof'], ['extras', 'Extras']];
+const PROOF_TABS = [['', 'All'], ['diff', 'Differences'], ['missing', 'No proof'], ['extras', 'Extras'], ['bills', 'Bills']];
 const PROOF_STATUS = {
   matched: ['ok', '✓ Matched'], waiting: ['warn', 'Printed, no proof yet'], missing: ['bad', 'Settled, no proof'],
   difference: ['info', 'Difference'], not_needed: ['', 'No proof needed'], unknown: ['', '—'],
@@ -2823,7 +2831,7 @@ async function paymentsScreen(tab = '') {
     const proofText = (e) => `${{ upi: 'UPI', card: 'Card slip', bill: 'Bill photo' }[e.kind]}${e.amountPaise ? ` ${rs(e.amountPaise)}` : ''} · ${time(e.sentAt)}${e.caption ? ` · “${e.caption}”` : ''}`;
     const row = (r) => {
       const [tone, label] = PROOF_STATUS[r.status] ?? PROOF_STATUS.unknown;
-      return html`<tr><td>${time(r.at)}</td><td class="mono">${r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
+      return html`<tr><td>${time(r.at)}</td><td class="mono">${r.billNo && r.kind !== 'receipt' ? html`<a href="#/done/${r.key}">${r.billNo}</a>` : r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
         <td>${r.modes.length ? r.modes.map((m) => `${PROOF_MODE[m.mode] ?? m.mode} ${rs(m.amountPaise)}`).join(' + ') : html`<span class="quiet">not paid</span>`}</td>
         <td class="small">${r.proof.length ? r.proof.map((e) => html`<div>${proofText(e)}</div>`) : html`<span class="quiet">—</span>`}</td>
         <td>${tone ? html`<span class="status ${tone}">${label}</span>` : html`<span class="quiet small">${label}</span>`}
@@ -2856,6 +2864,40 @@ async function paymentsScreen(tab = '') {
     try { await load(); rerender(); } catch { /* the next tick tries again */ }
   }, 12_000);
 }
+
+// ---------- Payments › Bills (25 Nov 2026): every bill of a shift, filtered and searched; a tap opens the bill.
+const BILL_FILTERS = [['', 'All'], ['topay', 'To pay'], ['room', 'To room'], ['credit', 'Credit'], ['nc', 'NC'], ['void', 'Void']];
+async function billsScreen(dayArg) {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : me.business.shiftDay;
+  const r = await api('GET', `${B()}/bill-list?day=${day}`);
+  const kindOf = (b) => (b.status === 'void' ? 'void' : b.status === 'printed' ? 'topay' : b.modes.includes('comp') ? 'nc' : b.modes.includes('room') ? 'room' : b.modes.includes('credit') ? 'credit' : 'paid');
+  const paidBy = (b) => b.status === 'void' ? html`<span class="quiet">—</span>` : b.status === 'printed' ? html`<span class="quiet">not paid</span>`
+    : b.modes.map((m) => (m === 'room' && b.room ? `To room ${b.room.split(' · ')[0].replace(/^Room /, '')}` : m === 'credit' && b.credit ? `Credit · ${b.credit}` : PAID_BY[m] ?? m)).join(' + ');
+  const tone = { void: ['bad', 'Void'], topay: ['warn', 'To pay'], nc: ['mute', 'NC'], room: ['info', 'On room'], credit: ['info', 'On credit'], paid: ['ok', 'Paid'] };
+  rerender = () => {
+    const f = ui.bF ?? '';
+    const q = String(ui.bQ ?? '').trim().toLowerCase();
+    const shown = r.bills.filter((b) => (!f || kindOf(b) === f) && (!q || `${b.billNo} ${b.place} ${b.guestName ?? ''}`.toLowerCase().includes(q)));
+    const live = r.bills.filter((b) => b.status !== 'void');
+    const n = (k) => r.bills.filter((b) => kindOf(b) === k).length;
+    paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(day)}`, 'Every bill of the shift. Tap one to open it: the bill as printed, a copy, take payment if unpaid, or give money back.')}
+      ${tabsNav('Payments', PROOF_TABS.map(([k, t]) => [k ? `#/payments/${k}` : '#/payments', t, k]), 'bills')}
+      <div class="row" style="align-items:end;flex-wrap:wrap;margin-bottom:12px"><a class="btn" href="#/payments/bills/${addDays(day, -1)}" aria-label="Previous shift">‹</a>
+        <label class="f">Shift<input class="in" type="date" data-model="bDay" value="${ui.bDay ?? day}" style="width:auto"></label>
+        <a class="btn" href="#/payments/bills/${addDays(day, 1)}" aria-label="Next shift">›</a><button class="btn" type="button" data-act="bDayGo">Show</button>
+        <input class="in grow" type="search" data-model="bQ" data-live value="${ui.bQ ?? ''}" placeholder="Search bill no., table or guest" aria-label="Search bills" style="flex:1 1 220px"></div>
+      <div class="kpis">${kpi('Bills', String(live.length), `${rs(live.reduce((t, b) => t + b.totalPaise, 0))} with GST`)}${kpi('To pay', String(n('topay')), n('topay') ? 'printed, not paid' : 'none', n('topay') ? 'warn' : '')}
+        ${kpi('On room or credit', String(n('room') + n('credit')), 'paid later')}${kpi('Void', String(n('void')), '', n('void') ? 'warn' : '')}</div>
+      <div class="chips" style="margin-bottom:10px">${BILL_FILTERS.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="bF" data-id="${k}">${t}${k ? ` ${n(k)}` : ` ${r.bills.length}`}</button>`)}</div>
+      <section class="panel">${shown.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Time</th><th>Bill</th><th>Table / room</th><th>Guest</th><th class="num">Amount</th><th>Paid by</th><th>Status</th></tr></thead><tbody>
+        ${shown.map((b) => html`<tr class="rowlink" data-act="goTo" data-href="#/done/${b.id}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><a href="#/done/${b.id}">${b.billNo}</a></td>
+          <td data-label="Table">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}${b.phone ? html`<div class="small quiet">${b.phone}</div>` : ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td>
+          <td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status ${tone[kindOf(b)][0]}">${tone[kindOf(b)][1]}</span></td></tr>`)}</tbody></table></div>`
+        : html`<p class="empty">${r.bills.length ? 'No bill matches.' : 'No bills in this shift.'}</p>`}</section>`));
+  };
+  rerender();
+}
+actions.bDayGo = () => go(`#/payments/bills/${ui.bDay ?? me.business.shiftDay}`);
 
 async function creditScreen() {
   await load('credit', 'payAccounts');
@@ -3247,7 +3289,8 @@ async function roomsReportTab(head, from, to) {
       ${kpi('RevPAR', r.occupancy.revparPaise == null ? '—' : rs(r.occupancy.revparPaise), 'per room or bed available')}
       ${kpi('Nights sold', String(r.occupancy.rooms.sold + r.occupancy.beds.sold), `of ${r.occupancy.rooms.available + r.occupancy.beds.available} available${r.occupancy.upTo < r.to ? ` · up to ${dayName(r.occupancy.upTo)}` : ''}`)}</div>` : ''}
     <div class="kpis">${kpi('Room invoices', String(t.invoices))}${kpi('Room nights', String(t.nights))}${kpi('Room sales (before GST)', rs(t.taxablePaise))}${kpi('GST on rooms', rs(t.gstPaise))}${kpi('No-show charges kept', rs(t.noShowPaise))}</div>
-    <p class="small quiet">Occupancy counts the guests who stayed each night, rooms and dorm beds together. ADR is room sales before GST per night invoiced (a room is invoiced at check-out). RevPAR is ADR × occupancy.</p>
+    <p class="small quiet">Occupancy counts the guests who stayed each night, rooms and dorm beds together. ADR is room revenue before GST per night sold, as earned each night (see Room revenue by day). RevPAR is ADR × occupancy. Room invoices are made at check-out.</p>
+    ${r.byDay?.days?.length ? roomRevenueTable(r.byDay, t.taxablePaise) : ''}
     <section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Room invoices</h2>${r.invoices.length ? html`<button class="btn" type="button" data-act="roomsCsv">Download (CSV)</button>` : ''}</div>
       <div class="scroll"><table class="t"><thead><tr><th>Invoice</th><th>Day</th><th>Guest / company</th><th>Room</th><th class="num">Nights</th><th>Rate</th><th class="num">Value</th><th class="num">GST</th><th class="num">Total</th></tr></thead><tbody>
         ${r.invoices.length ? r.invoices.map((x) => html`<tr><td>${x.invoiceNo}</td><td>${dayName(x.day)}</td><td>${x.guestName}${x.billToName ? html`<div class="small quiet">${x.billToName}${x.billToGstin ? ` · ${x.billToGstin}` : ''}</div>` : ''}</td><td>${x.room}</td>
@@ -3261,6 +3304,22 @@ async function roomsReportTab(head, from, to) {
   ui.roomsRep = r;
   rerender();
 }
+/** Room revenue by day (25 Nov 2026): what each night earned, rooms and beds, with and without GST; not advances or payments. */
+function roomRevenueTable(rv, invoicedTaxable) {
+  const T = rv.totals;
+  const tot = (k) => rs(T[k]);
+  return html`<section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Room revenue by day</h2><button class="btn" type="button" data-act="revCsv">Download (CSV)</button></div>
+    <p class="small quiet">What each night earned: each stay's room rent split equally over its nights, guests in house counted up to ${dayName(rv.upTo)}. Advances and payments are not revenue and are not here. Extra charges and discounts count on the day they were added.</p>
+    <div class="scroll"><table class="t"><thead><tr><th>Date</th><th class="num">Rooms</th><th class="num">Beds</th><th class="num">Rooms revenue</th><th class="num">Beds revenue</th><th class="num">Before GST</th><th class="num">GST</th><th class="num">With GST</th><th class="num">ADR</th><th class="num">Occupancy</th></tr></thead><tbody>
+      ${rv.days.map((d) => html`<tr><td>${dayName(d.day)}${d.notInvoicedPaise ? html`<div class="small quiet">${rs(d.notInvoicedPaise)} not invoiced yet</div>` : ''}${d.unknownNights ? html`<div class="small" style="color:var(--warn)">${plural(d.unknownNights, 'night')} rent not known</div>` : ''}${d.noShowPaise ? html`<div class="small quiet">+ ${rs(d.noShowPaise)} no-show kept</div>` : ''}</td>
+        <td class="num">${d.roomsSold}</td><td class="num">${d.bedsSold}</td><td class="num">${rs(d.roomsPaise)}</td><td class="num">${rs(d.bedsPaise)}</td>
+        <td class="num">${rs(d.taxablePaise)}</td><td class="num">${rs(d.gstPaise)}</td><td class="num"><strong>${rs(d.grossPaise)}</strong></td><td class="num">${d.adrPaise == null ? '—' : rs(d.adrPaise)}</td><td class="num">${d.occupancyPct == null ? '—' : `${d.occupancyPct}%`}</td></tr>`)}
+      <tr style="font-weight:700"><td>Total</td><td class="num">${T.roomsSold}</td><td class="num">${T.bedsSold}</td><td class="num">${tot('roomsPaise')}</td><td class="num">${tot('bedsPaise')}</td><td class="num">${tot('taxablePaise')}</td><td class="num">${tot('gstPaise')}</td><td class="num">${tot('grossPaise')}</td><td></td><td></td></tr>
+    </tbody></table></div>
+    <div class="small quiet" style="margin-top:6px">${T.notInvoicedPaise ? `${rs(T.notInvoicedPaise)} of it is from guests not checked out yet (invoiced at check-out). ` : ''}${T.unknownNights ? `${plural(T.unknownNights, 'night')} from before the POS have no known rent. ` : ''}${T.noShowPaise ? `No-show charges kept: ${rs(T.noShowPaise)}. ` : ''}Room invoices in these dates (made at check-out, before GST): ${rs(invoicedTaxable)}.</div></section>`;
+}
+actions.revCsv = () => downloadCsv(`room-revenue-${ui.roomsRep.from}-to-${ui.roomsRep.to}.csv`, [['Date', 'Rooms sold', 'Beds sold', 'Rooms revenue', 'Beds revenue', 'Before GST', 'GST', 'With GST', 'ADR', 'Occupancy %', 'Not invoiced yet', 'Nights rent not known', 'No-show kept'],
+  ...ui.roomsRep.byDay.days.map((d) => [d.day, d.roomsSold, d.bedsSold, rupees(d.roomsPaise), rupees(d.bedsPaise), rupees(d.taxablePaise), rupees(d.gstPaise), rupees(d.grossPaise), d.adrPaise == null ? '' : rupees(d.adrPaise), d.occupancyPct ?? '', rupees(d.notInvoicedPaise), d.unknownNights, rupees(d.noShowPaise)])]);
 actions.roomsCsv = () => downloadCsv(`room-invoices-${ui.roomsRep.from}-to-${ui.roomsRep.to}.csv`, [['Invoice', 'Shift day', 'Guest', 'Company', 'GSTIN', 'Room', 'Check-in', 'Check-out', 'Nights', 'GST rate', 'Value', 'CGST', 'SGST', 'Total'],
   ...ui.roomsRep.invoices.map((x) => [x.invoiceNo, x.day, x.guestName, x.billToName ?? '', x.billToGstin ?? '', x.room, x.checkIn, x.checkOut, x.nights, `${x.gstRateBp / 100}%`, rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise), rupees(x.totalPaise)])]);
 async function gstTab(head, month) {
@@ -4464,7 +4523,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
       <div class="chips">${chip('all', 'All', events.length)}${chip('kot_cancel', 'Cancels', events.filter((e) => e.kind === 'kot_cancel').length)}${chip('discount', 'Discounts', events.filter((e) => e.kind === 'discount').length)}${chip('void', 'Voids', events.filter((e) => e.kind === 'void').length)}${chip('other', 'Other', events.filter((e) => !evKind[e.kind]).length)}</div></div>
     <p class="quiet small">Every void, reprint, cancelled KOT line, discount and complimentary bill, with who and why. Nothing here can be changed.</p>
     <div class="scroll"><table class="t"><thead><tr><th>Time</th><th>What</th><th>Bill or item</th><th class="num">Amount</th><th>By</th><th>Reason</th></tr></thead><tbody>
-      ${shown.length ? shown.map((e) => html`<tr><td>${time(e.at)}</td><td><span class="status ${tone[e.kind] ?? 'mute'}">${kind[e.kind]}</span></td><td><strong>${e.ref}</strong></td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
+      ${shown.length ? shown.map((e) => html`<tr><td>${time(e.at)}</td><td><span class="status ${tone[e.kind] ?? 'mute'}">${kind[e.kind]}</span></td><td><strong>${String(e.ref ?? '').split(/,\s*/).map((x, i) => html`${i ? ', ' : ''}${/^[A-Z0-9]+\d{6,}$/.test(x.trim()) ? html`<a href="#/billno/${x.trim()}">${x.trim()}</a>` : x}`)}</strong></td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
         : html`<tr><td colspan="6" class="quiet">Nothing in this shift.</td></tr>`}</tbody></table></div></section>`));
   rerender();
 }

@@ -9,7 +9,7 @@ import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, dormBed, dormWhole, tableLayout, type Business } from '../util';
 import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
-import { deskPending } from '../rooms';
+import { bookingUnits, deskPending, roomTax } from '../rooms';
 import { shiftDayAt } from '../billing';
 import { formCPending } from './roomdesk';
 import type { AppEnv } from '../types';
@@ -62,6 +62,98 @@ export async function occupancy(db: DB, b: Business, from: string, to: string, t
   }
   const part = (n: number, set: Set<string>) => ({ available: n * days, sold: set.size, pct: n * days ? Math.round((set.size * 1000) / (n * days)) / 10 : null });
   return { days, upTo: last, rooms: part(rooms.length, sold.rooms), beds: part(beds.length, sold.beds) };
+}
+
+/**
+ * Room revenue earned night by night (25 Nov 2026): each stay's room rent spread equally over its nights, counted on each
+ * night the guest stayed (in-house guests up to today), never advances or payments. A booking's rent over that booking's
+ * own dates (an extension is a second booking); rent typed by hand over the stay's nights (an "extra night" over the last
+ * ones); other charges and discounts on the day they were added. GST taken out at each stay's rate. No-show charges kept
+ * count on the day they were kept. Nights of a stay from before the POS with no known rent are counted apart.
+ */
+export async function roomRevenueByDay(db: DB, b: Business, from: string, to: string, t = now()) {
+  const today = clock(b, t).shiftDay;
+  const last = to < today ? to : today;
+  const days: string[] = [];
+  for (let d = from; d <= last && days.length < 93; d = addDays(d, 1)) days.push(d);
+  const secs = roomsOf(b);
+  const rooms = secs.filter((x) => x.kind === 'rooms').flatMap((x) => x.rooms);
+  const beds = secs.filter((x) => x.kind === 'dorms').flatMap((x) => x.rooms);
+  const wholes: Record<string, string[]> = Object.assign({}, ...secs.map((x) => x.wholes));
+  const startOf = (d: string) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), b.shift_start_hour) - 19_800_000;
+  const real = (r: string) => r.replace(/ \(past stay\)$/, '');
+  const unitsOf = (room: string) => {
+    const w = Object.entries(wholes).find(([k]) => flat(k) === flat(real(room)));
+    return w ? w[1] : [rooms.find((x) => flat(x) === flat(real(room))) ?? beds.find((x) => flat(x) === flat(real(room)))].filter((x): x is string => !!x);
+  };
+  const row = Object.fromEntries(days.map((d) => [d, { day: d, roomsSold: new Set<string>(), bedsSold: new Set<string>(), roomsPaise: 0, bedsPaise: 0, taxablePaise: 0,
+    notInvoicedPaise: 0, unknownNights: 0, noShowPaise: 0 }]));
+  const ent = await one<{ gst_registered: number }>(db, 'SELECT gst_registered FROM billing_entities WHERE business_id = ? AND active = 1 ORDER BY is_default DESC, created_at LIMIT 1', b.id);
+  const stays = days.length ? await all<{ id: string; room: string; check_in: string; out: number | null; plan: string | null; group_stay_id: string | null; account_id: string | null;
+    invoiced: number; unknown: number }>(db, `SELECT s.id, s.room, s.check_in, s.checked_out_at AS out, coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id)) AS plan,
+      s.group_stay_id, (SELECT d.id FROM debtor_accounts d WHERE d.stay_id = s.id) AS account_id, EXISTS (SELECT 1 FROM room_invoices i WHERE i.stay_id = s.id) AS invoiced,
+      EXISTS (SELECT 1 FROM bookings k WHERE k.stay_id = s.id AND k.from_report = 1 AND k.amount_paise IS NULL) AS unknown
+    FROM stays s WHERE s.business_id = ? AND s.check_in <= ? AND (s.checked_out_at IS NULL OR s.checked_out_at >= ?)`, b.id, last, startOf(from)) : [];
+  const members = new Map<string, number>();
+  for (const st of stays) if (st.group_stay_id) members.set(st.group_stay_id, (members.get(st.group_stay_id) ?? 0) + 1);
+  for (const st of stays) {
+    const units = unitsOf(st.room);
+    const outDay = st.out == null ? null : shiftDayAt(st.out, b.shift_start_hour);
+    // The nights the stay covers: to check-out, or (in house) to the planned day; at least one.
+    const endAll = outDay ?? (st.plan && st.plan > st.check_in ? st.plan : addDays(today > st.check_in ? today : st.check_in, 1));
+    const end = endAll > st.check_in ? endAll : addDays(st.check_in, 1);
+    const nightsOf = (a: string, z: string) => { const out: string[] = []; for (let d = a; d < z; d = addDays(d, 1)) out.push(d); return out.length ? out : [a]; };
+    const stayNights = nightsOf(st.check_in, end);
+    for (const d of stayNights) if (row[d]) for (const u of units) (rooms.includes(u) ? row[d].roomsSold : row[d].bedsSold).add(`${u}`);
+    if (st.group_stay_id || !st.account_id) continue;   // a group's other beds: the rent is on its first room's bill
+    const isBed = units.length > 0 && units.every((u) => !rooms.includes(u));
+    const add = new Map<string, number>();
+    const spread = (amount: number, nights: string[]) => {
+      const base = Math.trunc(amount / nights.length);
+      nights.forEach((d, i) => add.set(d, (add.get(d) ?? 0) + base + (i === nights.length - 1 ? amount - base * nights.length : 0)));
+    };
+    const entries = await all<{ amount_paise: number; booking_id: string | null; note: string | null; at: number }>(db,
+      "SELECT amount_paise, booking_id, note, at FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent'", st.account_id);
+    const unitsB = await bookingUnits(db, st.id);
+    for (const u of unitsB) {
+      const amt = entries.filter((e) => e.booking_id && u.ids.includes(e.booking_id)).reduce((x, e) => x + e.amount_paise, 0);
+      if (amt) spread(amt, u.bk.check_in && u.bk.check_out ? nightsOf(u.bk.check_in, u.bk.check_out) : stayNights);
+    }
+    const linked = new Set(unitsB.flatMap((u) => u.ids));
+    for (const e of entries.filter((x) => x.booking_id && !linked.has(x.booking_id))) spread(e.amount_paise, stayNights);
+    for (const e of entries.filter((x) => !x.booking_id)) {
+      const n = /(\d+)\s+extra nights?/i.exec(e.note ?? '');
+      if (n && /^(room rent|extra nights)/i.test(e.note ?? '')) spread(e.amount_paise, stayNights.slice(-Math.max(1, Number(n[1]))));
+      else if (/^(room rent|extra nights)/i.test(e.note ?? '')) spread(e.amount_paise, stayNights);
+      else { const d = shiftDayAt(e.at, b.shift_start_hour); spread(e.amount_paise, [d < st.check_in ? st.check_in : d]); }
+    }
+    const total = entries.reduce((x, e) => x + e.amount_paise, 0);
+    const roomsInStay = 1 + (members.get(st.id) ?? 0);
+    const bp = roomTax(Math.max(0, total), Math.round(Math.max(0, total) / stayNights.length / roomsInStay), ent?.gst_registered === 1).bp;
+    if (st.unknown && total <= 0) for (const d of stayNights) if (row[d]) row[d].unknownNights += roomsInStay;
+    for (const [d, amt] of add) {
+      const r = row[d];
+      if (!r) continue;
+      if (isBed) r.bedsPaise += amt; else r.roomsPaise += amt;
+      r.taxablePaise += Math.round((amt * 10_000) / (10_000 + bp));
+      if (!st.invoiced) r.notInvoicedPaise += amt;
+    }
+  }
+  // No-show charges kept, on the day they were kept.
+  const kept = days.length ? await all<{ amount_paise: number; kept_at: number }>(db, "SELECT amount_paise, kept_at FROM desk_advances WHERE business_id = ? AND status = 'kept' AND kept_at >= ? AND kept_at < ?",
+    b.id, startOf(from), startOf(addDays(last, 1))) : [];
+  for (const k of kept) { const r = row[shiftDayAt(k.kept_at, b.shift_start_hour)]; if (r) r.noShowPaise += k.amount_paise; }
+  const out = days.map((d) => {
+    const r = row[d];
+    const gross = r.roomsPaise + r.bedsPaise;
+    const sold = r.roomsSold.size + r.bedsSold.size;
+    return { day: d, roomsSold: r.roomsSold.size, bedsSold: r.bedsSold.size, roomsPaise: r.roomsPaise, bedsPaise: r.bedsPaise, grossPaise: gross, taxablePaise: r.taxablePaise,
+      gstPaise: gross - r.taxablePaise, notInvoicedPaise: r.notInvoicedPaise, unknownNights: r.unknownNights, noShowPaise: r.noShowPaise,
+      adrPaise: sold ? Math.round(r.taxablePaise / sold) : null, occupancyPct: rooms.length + beds.length ? Math.round((sold * 1000) / (rooms.length + beds.length)) / 10 : null };
+  });
+  const sum = (k: keyof (typeof out)[number]) => out.reduce((x, r) => x + (Number(r[k]) || 0), 0);
+  return { from, to, upTo: last, days: out, totals: { roomsSold: sum('roomsSold'), bedsSold: sum('bedsSold'), roomsPaise: sum('roomsPaise'), bedsPaise: sum('bedsPaise'),
+    grossPaise: sum('grossPaise'), taxablePaise: sum('taxablePaise'), gstPaise: sum('gstPaise'), notInvoicedPaise: sum('notInvoicedPaise'), unknownNights: sum('unknownNights'), noShowPaise: sum('noShowPaise') } };
 }
 
 export interface Bar { room: string; from: string; to: string; kind: 'occ' | 'arr' | 'hold' | 'pos' | 'ooo'; label: string; ref: { type: string; id: string };

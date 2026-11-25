@@ -611,6 +611,24 @@ orderRoutes.get(`${B}/search`, requireAction('bills.print'), async (c) => {
       phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [] })) });
 });
 
+// The bills of one shift (25 Nov 2026), for Payments › Bills: every bill printed that shift, newest first, with how it
+// was paid (cash, UPI, card, room, credit, NC). Staff who are not managers see the last 90 days, as in the search.
+orderRoutes.get(`${B}/bill-list`, requireAction('bills.print'), async (c) => {
+  const bid = c.get('businessId');
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('day') ?? '') ? c.req.query('day')! : clock(bizOf(c)).shiftDay;
+  if (!isManager(c) && Date.parse(day) < Date.now() - 90 * 86_400_000) fail(403, 'Older bills: a manager or owner looks them up.');
+  const rows = await all<{ id: string; bill_no: string; status: string; total: number; printed_at: number; place: string; guest_name: string | null; guest_phone: string | null;
+    modes: string | null; room: string | null; credit: string | null }>(c.env.DB, `
+    SELECT b.id, b.bill_no, b.status, b.total_paise AS total, b.printed_at, o.place, coalesce(b.guest_name, o.guest_name) AS guest_name,
+      coalesce(b.guest_phone, o.guest_phone) AS guest_phone,
+      (SELECT group_concat(DISTINCT p.mode) FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = b.id) AS modes,
+      (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room,
+      (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1) AS credit
+    FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.business_id = ? AND b.shift_day = ? ORDER BY b.printed_at DESC LIMIT 500`, bid, day);
+  return c.json({ day, bills: rows.map((b) => ({ id: b.id, billNo: b.bill_no, status: b.status, totalPaise: b.total, printedAt: b.printed_at, place: b.place, guestName: b.guest_name,
+    phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [], room: b.room, credit: b.credit })) });
+});
+
 // Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.
 orderRoutes.get(`${B}/bills`, requireAction('bills.print'), async (c) => {
   const no = (c.req.query('no') ?? '').trim().toUpperCase();

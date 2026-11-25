@@ -7,7 +7,7 @@ import { requireAction, requireStaff } from '../auth';
 import { clock, bizOf, loadBusiness, type Business } from '../util';
 import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
-import { occupancy } from './frontdesk';
+import { occupancy, roomRevenueByDay } from './frontdesk';
 import { drawersOfDay } from './drawers';
 
 export const reportRoutes = new Hono<AppEnv>();
@@ -375,9 +375,14 @@ reportRoutes.get(`${B}/reports/rooms`, requireAction('reports.view'), async (c) 
   const adrPaise = nightsInvoiced ? Math.round(salesNet / nightsInvoiced) : null;
   const avail = occ.rooms.available + occ.beds.available;
   const occAll = avail ? (occ.rooms.sold + occ.beds.sold) / avail : null;
-  const kpis = { ...occ, adrPaise, revparPaise: adrPaise != null && occAll != null ? Math.round(adrPaise * occAll) : null,
+  // Room revenue earned night by night (25 Nov 2026), not when invoiced or paid. ADR and RevPAR follow it: revenue before
+  // GST per night sold, earned each night (not only once a guest has checked out).
+  const byDay = await roomRevenueByDay(db, bizOf(c), from, to);
+  const soldNights = byDay.totals.roomsSold + byDay.totals.bedsSold;
+  const adrEarned = soldNights ? Math.round(byDay.totals.taxablePaise / soldNights) : adrPaise;
+  const kpis = { ...occ, adrPaise: adrEarned, revparPaise: adrEarned != null && occAll != null ? Math.round(adrEarned * occAll) : null,
     pct: occAll == null ? null : Math.round(occAll * 1000) / 10 };
-  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept, noRent, occupancy: kpis,
+  return c.json({ from, to, invoices, creditNotes: cns, noShowsKept: kept, noRent, occupancy: kpis, byDay,
     totals: { invoices: invoices.length, nights: sum(invoices, 'nights'), taxablePaise: sum(invoices, 'taxablePaise') - sum(cns, 'taxablePaise'),
       gstPaise: sum(invoices, 'cgstPaise') + sum(invoices, 'sgstPaise') - sum(cns, 'cgstPaise') - sum(cns, 'sgstPaise'),
       totalPaise: sum(invoices, 'totalPaise') - sum(cns, 'totalPaise'), noShowPaise: sum(kept, 'amountPaise') } });
