@@ -137,6 +137,10 @@ function buildMenu() {
 
 // ---------- start: one window only, starts with Windows, updates itself
 
+// Windows groups a window with its pinned taskbar shortcut only when both carry the same app id: the installer's
+// shortcut has the appId of package.json, so the window takes it too (25 Nov 2026: a second taskbar icon appeared).
+if (process.platform === 'win32') app.setAppUserModelId('co.thebajajgroup.bookrpos');
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {

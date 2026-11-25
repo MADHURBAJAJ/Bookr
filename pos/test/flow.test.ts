@@ -370,7 +370,7 @@ describe('bar stock', () => {
     expect((await s.owner.post(`${B}/stock/transfers`, { fromStoreId: main, toStoreId: bar, lines: [{ itemId: whisky, qty: 2000 }] })).json.error).toMatch(/only 1500 ml/);
     await ok(s.owner.post(`${B}/stock/transfers`, { fromStoreId: main, toStoreId: bar, lines: [{ itemId: whisky, qty: 1500 }, { itemId: beer, qty: 12 }] }));
 
-    // 3 pegs and 2 beers sold; a voided bill takes nothing.
+    // 3 pegs and 2 beers sold. Stock leaves at the KOT (25 Nov 2026): the voided bill's peg was poured, so it stays used.
     const { bill } = await billed(s, [['Whisky 30 ml', 3], ['Beer 650 ml', 2]]);
     await s.counter.post(`${B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: rupees(bill.totalPaise) }] });
     const voided = (await billed(s, [['Whisky 30 ml', 1]])).bill;
@@ -378,16 +378,15 @@ describe('bar stock', () => {
 
     await ok(s.owner.post(`${B}/stock/waste`, { storeId: bar, itemId: whisky, qty: 30, reason: 'Spilt' }));
     const count = (await ok(s.owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: whisky, counted: 1350 }, { itemId: beer, counted: 10 }] }))).lines;
-    expect(count.map((l: any) => [l.name, l.book, l.counted, l.variance])).toEqual([['Sample Whisky', 1380, 1350, -30], ['Sample Beer 650 ml', 10, 10, 0]]);
-    expect(count[0].valuePaise).toBe(-7200); // 30 ml of a ₹1,800 bottle
+    expect(count.map((l: any) => [l.name, l.book, l.counted, l.variance])).toEqual([['Sample Whisky', 1350, 1350, 0], ['Sample Beer 650 ml', 10, 10, 0]]);
 
     const day = bill.shiftDay;
     const r = (await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${bar}`))).items;
-    expect(r.find((x: any) => x.name === 'Sample Whisky')).toMatchObject({ opening: 0, transferIn: 1500, sold: 90, waste: 30, variance: -30, closing: 1350 });
+    expect(r.find((x: any) => x.name === 'Sample Whisky')).toMatchObject({ opening: 0, transferIn: 1500, sold: 120, waste: 30, variance: 0, closing: 1350 });
     expect(r.find((x: any) => x.name === 'Sample Beer 650 ml')).toMatchObject({ transferIn: 12, sold: 2, closing: 10 });
-    // Bar cost: 3 pegs (₹660) + 2 beers (₹640) sold; recipes used 90 ml whisky (₹216) + 2 beers (₹300); 30 ml spilt and 30 ml missing (₹72 each).
+    // Bar cost: 3 pegs (₹660) + 2 beers (₹640) sold; recipes used 120 ml whisky (₹288, the voided peg too) + 2 beers (₹300); 30 ml spilt (₹72), nothing missing.
     const cost = (await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${bar}`))).cost;
-    expect(cost).toEqual({ salesPaise: 130000, expectedCostPaise: 51600, wastePaise: 7200, missingPaise: 7200, actualCostPaise: 66000 });
+    expect(cost).toEqual({ salesPaise: 130000, expectedCostPaise: 58800, wastePaise: 7200, missingPaise: 0, actualCostPaise: 66000 });
     expect((await ok(s.owner.get(`${B}/stock/report?from=${day}&to=${day}&storeId=${main}`))).cost).toBeNull();
     const onHand = (await ok(s.owner.get(`${B}/stock`))).items.find((x: any) => x.name === 'Sample Whisky');
     expect(onHand).toMatchObject({ total: 1350, low: false, valuePaise: 324000 });

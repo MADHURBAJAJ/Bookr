@@ -27,6 +27,10 @@ describe('group check-in', () => {
     const open = (await ok(counter.get(`${B}/stays`))).stays.filter((x: any) => x.guestName === 'Sample Group');
     expect(open.map((x: any) => [x.room, x.groupRoom])).toEqual([[b1, null], [b2, b1], [b3, b1]].sort());
     const member = open.find((x: any) => x.room === b2);
+    // The group's other beds have their booking on the first bed: they are not "a guest with no booking" to link to.
+    const inbox = await ok(counter.get(`${B}/bookings`));
+    expect(inbox.unbooked.map((x: any) => x.room)).toEqual([b1, b4].sort());
+    expect((await counter.post(`${B}/bookings/${crypto.randomUUID()}/link-stay`, { stayId: member.id })).status).toBe(404);
 
     // The room bill of any bed is the group's one bill, on the first bed.
     await ok(counter.post(`${B}/stays/${r.id}/charges`, { amount: '1500', note: 'Room rent' }));

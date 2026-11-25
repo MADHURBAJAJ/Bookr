@@ -1,7 +1,7 @@
 {
   "name": "bookr-pos-desktop",
   "productName": "Bookr POS",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Bookr POS for a Windows counter PC: full screen, and each print straight to its own printer.",
   "main": "main.js",
   "private": true,

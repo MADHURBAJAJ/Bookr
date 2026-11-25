@@ -38,7 +38,7 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
   ]);
   // Money taken at reception (24 Nov 2026): what reception entered in Djubo with no POS receipt yet (before check-in; once
   // checked in, the room bill shows it as to collect), advances taken here waiting for their Djubo booking, and the rooms
-  // checked in by hand with no booking (to link a booking to).
+  // checked in by hand with no booking (to link a booking to); a group's other beds have theirs on its first room.
   const [pending, advancesWaiting, unbooked] = await Promise.all([
     deskPending(c.env.DB, bid),
     all(c.env.DB, `SELECT d.id, d.guest_name AS guestName, d.phone, d.check_in AS checkIn, d.amount_paise AS amountPaise, d.at, s.receipt_no AS receiptNo,
@@ -46,7 +46,7 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
       FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id LEFT JOIN bookings k ON k.id = d.booking_id LEFT JOIN reservations r ON r.id = d.reservation_id
       WHERE d.business_id = ? AND d.status = 'held' AND ((d.booking_id IS NULL AND (d.reservation_id IS NULL OR r.status = 'cancelled')) OR k.status = 'cancelled') ORDER BY d.at`, bid),
     all(c.env.DB, `SELECT s.id, s.room, s.guest_name AS guestName FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id) ORDER BY s.room`, bid),
+      AND s.group_stay_id IS NULL AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id) ORDER BY s.room`, bid),
   ]);
   let users: string[] = [];
   try { users = JSON.parse(autoRow?.u ?? '[]'); } catch { /* none */ }
@@ -155,8 +155,9 @@ bookingRoutes.post(`${B}/bookings/:id/link-stay`, requireAction('stays.edit'), a
   const b = await booking(c, c.req.param('id'));
   if (b.status === 'cancelled' || b.status === 'checked_in') fail(409, b.status === 'cancelled' ? 'This booking was cancelled.' : 'This booking is already checked in.');
   const data = await body(c);
+  // A group's other rooms and beds (24 Nov 2026) have their booking on the group's first room: never linked on their own.
   const s = await one<{ id: string }>(c.env.DB, `SELECT s.id FROM stays s WHERE s.id = ? AND s.business_id = ? AND s.checked_out_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id)`, typeof data.stayId === 'string' && isUuid(data.stayId) ? data.stayId : null, bid);
+    AND s.group_stay_id IS NULL AND NOT EXISTS (SELECT 1 FROM bookings x WHERE x.stay_id = s.id)`, typeof data.stayId === 'string' && isUuid(data.stayId) ? data.stayId : null, bid);
   if (!s) fail(404, 'Choose an in-house room that has no booking.');
   await linkStay(c.env.DB, bid, b.id, s.id);
   await audit(c.env.DB, bid, c.get('staff').id, 'booking.link_stay', 'bookings', b.id, null, { stayId: s.id }).run();
