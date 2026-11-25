@@ -7775,9 +7775,14 @@ async function reconcileView(biz, dayArg) {
   const cashN = ent.cash.left + (cashDiff ? 1 : 0);
   const cardN = Math.max(ent.card.left, cardLeft);
   const compLook = comp.lines.filter((l) => l.status === 'look').length;
+  // A saved shift's UPI credits with no bill count on the UPI tab too (25 Nov 2026), the same as the shift bar: before,
+  // the tab counted bills only, so a shift with only such credits looked done. Before saving they pair on save.
+  const upiCredits = r.confirmed ? s.creditsLeft ?? 0 : 0;
+  const upiN = ent.upi.left + upiCredits;
   const leftLines = [
     cashN && [`Cash: ${ent.cash.left ? `${ent.cash.left} bill${ent.cash.left === 1 ? '' : 's'} left` : ''}${ent.cash.left && cashDiff ? ', and ' : ''}${cashDiff ? `the cash count is ${cashDiff < 0 ? 'short' : 'over'} by ₹ ${money(Math.abs(cashDiff))}${cash.confirmed ? '' : ' (draft)'}` : ''}`, 'pay:cash'],
-    ent.upi.left && [`UPI: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched`, 'pay:upi'],
+    upiN && [`UPI: ${[ent.upi.left && `${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet`,
+      upiCredits && `${upiCredits} credit${upiCredits === 1 ? '' : 's'} with no bill · ₹ ${rs(s.creditsLeftPaise ?? 0)}`].filter(Boolean).join(', ')}`, 'pay:upi'],
     cardN && [`Card: ${cardN} left${r.cards?.waitingReport ? `, ${r.cards.waitingReport} waiting for the card report` : ''}`, 'pay:card'],
     compLook && [`Complimentary: ${compLook} bill${compLook === 1 ? '' : 's'} need${compLook === 1 ? 's' : ''} a look`, 'comp'],
 
@@ -7897,7 +7902,7 @@ async function reconcileView(biz, dayArg) {
       <div style="display:flex;gap:8px;align-items:center">${!r.confirmed && biz.actions.includes('sales.decide') ? html`<button class="btn" type="button" id="savehead">Save shift</button>` : ''}${P.shiftMenu}</div></div>
     <div id="recmsg"></div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
-      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${(comp.lines.length || comp.credit?.length) ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
+      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', upiN)}${oneTab('card', 'Card', cardN)}${(comp.lines.length || comp.credit?.length) ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
     <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
     </div>
     ${(comp.lines.length || comp.credit?.length) ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
