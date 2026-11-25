@@ -44,7 +44,7 @@ export async function receiveMail(message: ForwardableEmailMessage, env: Env) {
   const mail = await PostalMime.parse(raw);
   const from = addressOf(mail.from);
   const imp = await importOf(env, from, mail);
-  if (imp === 'refused') { message.setReject('Bookr POS only reads booking mails from Djubo and MakeMyTrip.'); return; }
+  if (typeof imp === 'string') { message.setReject(`Bookr POS only reads booking mails from Djubo and MakeMyTrip: ${imp.slice(8).replace(/[()]/g, '').trim()}.`); return; }
   if (imp) { await storeMail(env, businessId, raw, imp.source, imp.mail, imp); return; }
   const source = sourceOf(env, from);
   if (!source) { message.setReject('Bookr POS only reads booking mails from Djubo and MakeMyTrip.'); return; }
@@ -58,19 +58,22 @@ export async function receiveMail(message: ForwardableEmailMessage, env: Env) {
 // counts as having come when the original did, so it never overrides a newer mail the POS already has.
 
 export interface Imported { source: 'mmt' | 'djubo'; mail: Email; messageId: string; receivedAt: number }
-const IMPORT_LINE = /Bookr import ([A-Za-z0-9_-]{20,}) ([0-9a-f]{8,20}) (\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?Z) ([^\s<>"]+@[^\s<>"]+)/;
+const IMPORT_LINE = /Bookr\s+import\s+([A-Za-z0-9_-]{20,})\s+([0-9a-f]{8,20})\s+(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?Z)\s+([^\s<>"]+@[^\s<>"]+)/;
 const FWD = /^\s*(?:(?:fwd?|fw)\s*:\s*)+/i;
 
-/** A forwarded old booking mail: what it is and its inner mail; 'refused' when it is from the hotel's mailbox but not a
- *  valid import (no key, a wrong one, imports not open); null when it is not from the hotel's mailbox at all. */
-export async function importOf(env: Env, from: string, mail: Email): Promise<Imported | 'refused' | null> {
+/** A forwarded old booking mail: what it is and its inner mail; 'refused (why)' when it is from the hotel's mailbox but not
+ *  a valid import (no key, a wrong one, imports not open); null when it is not from the hotel's mailbox at all. */
+export async function importOf(env: Env, from: string, mail: Email): Promise<Imported | `refused${string}` | null> {
   const box = (env.MAIL_IMPORT_FROM ?? '').trim().toLowerCase();
   if (!box || from !== box) return null;
   const key = env.MAIL_IMPORT_KEY ?? '';
-  const m = IMPORT_LINE.exec(`${mail.text ?? ''}\n${(mail.html ?? '').replace(/<[^>]+>/g, ' ')}`);
-  if (!m || key.length < 20 || !same(m[1], key)) return 'refused';
+  if (key.length < 20) return 'refused (imports are closed)';
+  const flat = `${mail.text ?? ''}\n${(mail.html ?? '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&#64;/g, '@')}`;
+  const m = IMPORT_LINE.exec(flat);
+  if (!m) return 'refused (no import line)';
+  if (!same(m[1], key)) return 'refused (wrong key)';
   const src = sourceOf(env, m[4].toLowerCase());
-  if (src !== 'mmt' && src !== 'djubo') return 'refused';
+  if (src !== 'mmt' && src !== 'djubo') return 'refused (not a booking sender)';
   return { source: src, mail: await innerOf(mail), messageId: `import:${m[2]}`, receivedAt: Date.parse(m[3]) };
 }
 

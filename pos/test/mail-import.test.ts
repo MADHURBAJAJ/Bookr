@@ -37,13 +37,15 @@ describe('old booking mails brought in', () => {
     const day = (await s.ok(s.owner.get('/me'))).business.shiftDay;
     const line = `Booking DJ-1 | Asha Rao | 9800010001 | Deluxe | ${plus(day, 3)} | ${plus(day, 5)} | 5000 | 1000 | 2026-10-04 11:24`;
     // No key, a wrong key, or imports closed: turned away.
-    expect((await send(mailEnv(s.businessId), raw(BOX, 'Fwd: x', 'n1', line))).rejected).toMatch(/only reads booking mails/);
-    expect((await send(mailEnv(s.businessId), forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line, 'wrong-key-wrong-key-wrong-key-00'))).rejected).toMatch(/only reads/);
-    expect((await send(mailEnv(s.businessId, ''), forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line))).rejected).toMatch(/only reads/);
+    expect((await send(mailEnv(s.businessId), raw(BOX, 'Fwd: x', 'n1', line))).rejected).toMatch(/only reads booking mails.*no import line/);
+    expect((await send(mailEnv(s.businessId), forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line, 'wrong-key-wrong-key-wrong-key-00'))).rejected).toMatch(/wrong key/);
+    expect((await send(mailEnv(s.businessId, ''), forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line))).rejected).toMatch(/imports are closed/);
     expect(await q('SELECT 1 FROM bookings WHERE business_id = ?', s.businessId)).toEqual([]);
 
     const e = mailEnv(s.businessId);
-    for (let i = 0; i < 2; i++) expect((await send(e, forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line))).rejected).toBeNull();
+    // The mail program may wrap the import line: still read. The same forward again is not kept twice.
+    expect((await send(e, forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line).replace(' a1b2c3d4e5 ', '\r\n a1b2c3d4e5\r\n '))).rejected).toBeNull();
+    expect((await send(e, forward('a1b2c3d4e5', '2026-10-04T05:54:51Z', line))).rejected).toBeNull();
     expect(await q('SELECT message_id, source, received_at, subject, note FROM inbound_mails WHERE business_id = ?', s.businessId)).toEqual([
       { message_id: 'import:a1b2c3d4e5', source: 'djubo', received_at: Date.parse('2026-10-04T05:54:51Z'), subject: 'Reservation Confirmation', note: 'Old mail brought in: DJ-1 added.' }]);
     expect(await q('SELECT ext_ref, guest_name, amount_paise, paid_paise, booked_at, desk_paid_paise FROM bookings WHERE business_id = ?', s.businessId)).toEqual([
