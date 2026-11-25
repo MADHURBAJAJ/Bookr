@@ -31,6 +31,8 @@ export const PERMISSIONS = {
   'rows.edit': PREPARERS,
   'rows.approve': BOOKS,
   'bank.link': BOOKS,
+  // Booking money received past the booking gate ("Book anyway", with a reason): Owner or Accountant (25 Nov 2026).
+  'bank.book_anyway': BOOKS,
   'export.run': BOOKS,
   'reports.view': ['owner', 'accountant', 'viewer'],
   // Phase 2: daily sales. See docs/phase2-context.md, "New permission actions".

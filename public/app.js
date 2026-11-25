@@ -5604,7 +5604,8 @@ function wireRepeats(biz, rep, rows, reload, msg, canRules) {
     const items = on.map((c) => ({ rowId: c.value, headId, party: c.dataset.party || shared, item: itemOf(c) }));
     b.disabled = true;
     try {
-      const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items });
+      const r = await bookMany(biz, items);
+      if (r.cancelled || r.done) { b.disabled = false; if (r.done) await reload(); return; }
       if (b.dataset.rule) await api('POST', `/businesses/${biz.id}/rules`, { name: shared || x.label.replace(/"/g, ''), direction: 'DR', headId,
         ...(x.vpa ? { vpa: x.vpa } : { contains: x.contains }) });
       await reload();
@@ -6055,7 +6056,7 @@ async function bankView(biz, query = '') {
     const item = { rowId: id, headId: app.querySelector(`[data-head="${id}"]`)?.value || null, party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null,
       item: app.querySelector(`[data-item="${id}"]`)?.value.trim() || null };
     if (!item.headId && !item.party) { showError(msg, new Error('Choose a head (or a known party) first.')); return; }
-    run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: [item] }), (r) => (r.booked ? 'Booked. Undo is on Done.' : `Not booked: ${r.skipped.join(' ')}`));
+    run(() => bookMany(biz, [item]), (r) => bookedSay(r, () => 'Booked. Undo is on Done.'));
   }));
   app.querySelectorAll('[data-head]').forEach((h) => h.addEventListener('change', () => {
     const btn = app.querySelector(`[data-bookone="${h.dataset.head}"]`);
@@ -6186,8 +6187,8 @@ async function bankView(biz, query = '') {
     const id = b.dataset.unbilled;
     const what = (prompt(`Sale not billed (${b.dataset.type === 'fnb' ? 'F&B' : 'Room'}). What was it? (e.g. 2 beers, water)`, app.querySelector(`[data-item="${id}"]`)?.value ?? '') ?? null);
     if (what === null) return;
-    run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: [{ rowId: id, billType: b.dataset.type, item: what.trim() || null,
-      party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null }] }), (r) => r.booked ? 'Booked as a sale not billed.' : `Not booked: ${r.skipped.join(' ')}`);
+    run(() => bookMany(biz, [{ rowId: id, billType: b.dataset.type, item: what.trim() || null,
+      party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null }]), (r) => bookedSay(r, () => 'Booked as a sale not billed.'));
   }));
   // Sections: Select all, ticked count on the button, one button for the ticked lines of that section.
   app.querySelectorAll('[data-sec]').forEach((sec) => {
@@ -6231,7 +6232,7 @@ async function bankView(biz, query = '') {
         const seen = new Set();
         rememberAfter = firsts.filter((x) => !seen.has(x.r.vpa) && seen.add(x.r.vpa)).slice(0, 5)
           .map((x) => ({ vpa: x.r.vpa, party: x.party, headId: x.headId, headName: heads.find((h) => h.id === x.headId)?.name ?? '' }));
-        run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`);
+        run(() => bookMany(biz, items), (r) => (r.done || r.cancelled ? bookedSay(r) : `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`));
       }
     });
   });
@@ -8098,7 +8099,7 @@ async function reconcileView(biz, dayArg) {
   const nbBase = `/businesses/${biz.id}/bank-rows`;
   const nbWhat = (id) => app.querySelector(`[data-nbwhat="${id}"]`)?.value.trim() || null;
   const nbReopen = (ids) => () => eachAtOnce(ids, (id) => apiFull('POST', `${nbBase}/${id}/reopen`, {}));
-  const nbMany = async (items) => { const res = await apiFull('POST', `${nbBase}/book-many`, { items }); if (!res.booked) throw new Error(res.skipped.join(' ') || 'Not booked.'); return res; };
+  const nbMany = async (items) => { const res = await bookMany(biz, items); if (!res.booked && !res.done) throw new Error(res.skipped.join(' ') || 'Not booked.'); return res; };
   // Ticked in Money with no bill (a saved shift), or credits with no bill ticked on Not matched yet with no bill ticked.
   const loTicked = (side) => [...app.querySelectorAll(`#trialopen [data-tside="${side}"]`)].filter((x) => x.checked);
   const nbTicks = () => [...[...app.querySelectorAll('[data-nbtick]')].filter((x) => x.checked).map((x) => x.dataset.nbtick),
@@ -9032,45 +9033,133 @@ function wireCardSection(biz, k, act) {
 }
 
 /**
- * Books a credit, asking first if a bill of its amount is waiting (the whole bill, or the UPI part of a cash + UPI
- * bill: approved 24 Nov 2026): both would count one sale twice. A saved sale can be matched from the card instead.
- * True when booked or matched; false if the person stops.
+ * Books a credit through the booking gate (E1, 25 Nov 2026): the server checks every booking. When it finds something
+ * (a bill waiting for this amount, the other half of a transfer, cash deposited, a settlement holding desk bills, card
+ * money, a credit chosen on Reconcile) the gate box asks first. True when booked or settled another way; false if stopped.
  */
 async function bookCredit(biz, rowId, payload) {
   const path = `/businesses/${biz.id}/bank-rows/${rowId}/book`;
-  const first = await apiFull('POST', path, { ...payload, checkBills: true });
+  const first = await apiFull('POST', path, payload);
   if (first.ok) return true;
-  const pick = await askWaitingBill(first.waitingBills);
-  if (!pick) return false;
-  if (pick === 'book') { await apiFull('POST', path, payload); return true; }
-  await apiFull('POST', `/businesses/${biz.id}/bank-rows/${rowId}/match`, { transactionIds: [pick] });
-  return true;
+  if (!first.gate) return false;
+  const r = await resolveGate(biz, rowId, first.gate);
+  if (r?.override) { const again = await apiFull('POST', path, { ...payload, override: r.override }); return !!again.ok; }
+  return !!r?.done;
 }
 
-/** The waiting bills as suggestion cards: Match (saved sale), Book anyway or Cancel. Resolves a txId, 'book' or null. */
-function askWaitingBill(bills) {
+/**
+ * Books lines through the gate. One line: a stopped line opens the gate box. Several: Bookr checks them first and shows
+ * one summary ("3 can be booked · 2 need a look"); the clear ones are booked, the rest stay as they are.
+ * Returns the server's { booked, skipped }, with done (what was done instead) or cancelled.
+ */
+async function bookMany(biz, items) {
+  const path = `/businesses/${biz.id}/bank-rows/book-many`;
+  if (items.length === 1) {
+    const res = await apiFull('POST', path, { items });
+    if (!res.look?.length) return res;
+    const r = await resolveGate(biz, items[0].rowId, res.look[0]);
+    if (r?.override) return apiFull('POST', path, { items: [{ ...items[0], override: r.override }] });
+    return r?.done ? { booked: 0, skipped: [], done: r.done } : { booked: 0, skipped: [], cancelled: true };
+  }
+  const check = await apiFull('POST', path, { items, check: true });
+  if (!check.look?.length) return apiFull('POST', path, { items });
+  const go = await askGateSummary(check);
+  if (!go || !check.clear.length) return { booked: 0, skipped: [], cancelled: true };
+  const res = await apiFull('POST', path, { items: items.filter((x) => check.clear.includes(x.rowId)) });
+  return { ...res, skipped: [...res.skipped, ...check.look.map((l) => `${l.tranId}: ${gateWords(l.checks)}.`)] };
+}
+
+/** A message for a booking result: what was done instead, or booked / not booked. */
+const bookedSay = (r, ok) => (r.done ? r.done : r.cancelled ? 'Not booked.' : r.booked ? ok(r) : `Not booked: ${r.skipped.join(' ')}`);
+
+const gateWords = (checks) => ({ card: 'card machine money', held: `chosen on ${dayLabel(checks[0]?.day)} Reconcile`, waiting: 'a bill of this amount is waiting',
+  settlement: 'a desk bill may be inside', transfer: `transfer from ${checks[0]?.otherAccountName ?? 'another account'}`, cash: 'cash deposited' })[checks[0]?.check] ?? 'needs a look';
+
+/** "Book N selected" when some lines need a look: one summary. Resolves true to book the clear ones. */
+function askGateSummary(check) {
   return new Promise((resolve) => {
     const dlg = document.createElement('dialog');
     dlg.className = 'rowdlg';
-    const line = (b) => b.billPaise !== b.upiPaise
-      ? `Bill ₹ ${rs(b.billPaise)} = other ₹ ${rs(b.billPaise - b.upiPaise)} ✓ + UPI ₹ ${rs(b.upiPaise)} ✗ · ${dayLabel(b.day)} shift`
-      : `Bill ₹ ${rs(b.billPaise)} UPI ✗ · ${dayLabel(b.day)} shift`;
-    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:10px;max-width:460px">
-      ${bills.map((b) => html`<div style="border-bottom:1px solid var(--line-soft);padding-bottom:10px">
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="mono">${b.billNo}</span>
-          <span class="chip wait">${b.billPaise !== b.upiPaise ? 'UPI part waiting' : 'UPI waiting'}</span></div>
-        <div class="tiny" style="margin-top:4px">${line(b)}</div>
-        ${b.txId ? '' : html`<div class="tiny note">Shift not saved: the credit is matched when it is.</div>`}
-        ${b.txId ? html`<div class="form-row" style="margin-top:8px"><button class="btn" value="m:${b.txId}" type="submit">Match to ${b.billNo}</button></div>` : ''}
-      </div>`)}
-      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button><button class="btn plain" value="book" type="submit">Book anyway</button></div>
+    const n = check.clear.length;
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:8px;max-width:480px">
+      <strong>${n + check.look.length} ticked · ${n} can be booked · ${check.look.length} need${check.look.length === 1 ? 's' : ''} a look</strong>
+      ${check.look.map((l) => html`<div style="display:flex;gap:8px;align-items:baseline;border-top:1px solid var(--line-soft);padding-top:6px">
+        <span class="chip wait">look</span><span>${gateWords(l.checks)}</span><span class="mono" style="margin-left:auto">₹ ${rs(l.amountPaise)}</span></div>`)}
+      <div class="tiny note">The ones that need a look stay as they are: book or settle them one by one.</div>
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button>
+        ${n ? html`<button class="btn" value="go" type="submit">Book ${n}, leave ${check.look.length}</button>` : ''}</div>
     </form>`.__html;
     document.body.append(dlg);
-    dlg.addEventListener('close', () => {
-      const v = dlg.returnValue;
-      resolve(v === 'book' ? 'book' : v.startsWith('m:') ? v.slice(2) : null);
-      dlg.remove();
+    dlg.addEventListener('close', () => { resolve(dlg.returnValue === 'go'); dlg.remove(); });
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
+    dlg.showModal();
+  });
+}
+
+/**
+ * The gate box for one line: what Bookr found, with the likely fix as the main button. Does that fix itself (match the
+ * bill, book as a transfer, cash deposited, open Reconcile or Card settlements). Resolves { done: message }, { override:
+ * { reason } } for Book anyway (Owner or Accountant, with a reason), or null.
+ */
+function resolveGate(biz, rowId, gate) {
+  const base = `/businesses/${biz.id}/bank-rows`;
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.className = 'rowdlg';
+    const btns = [];
+    const act = (label, fn, main = true) => { btns.push({ label, fn, main }); return btns.length - 1; };
+    const part = (k) => {
+      if (k.check === 'card') { const i = act('Settle on Card settlements', async () => { location.hash = `#/b/${biz.id}/cards`; return null; }); return html`<div class="tiny">${k.text}</div>${btnOf(i)}`; }
+      if (k.check === 'held') { const i = act(`Open ${dayLabel(k.day)} Reconcile`, async () => { location.hash = `#/b/${biz.id}/reconcile/${k.day}`; return null; }); return html`<div class="tiny">${k.text}</div>${btnOf(i)}`; }
+      if (k.check === 'waiting') return html`<div class="tiny">${k.text}</div>${k.bills.map((b) => html`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:6px">
+        <span class="mono">${b.billNo}</span><span class="chip wait">${b.billPaise !== b.upiPaise ? 'UPI part waiting' : 'UPI waiting'}</span>
+        <span class="tiny">${dayLabel(b.day)} shift${b.txId ? '' : ' · not saved'}</span><span class="mono" style="margin-left:auto">₹ ${rs(b.upiPaise)}</span>
+        ${b.txId ? btnOf(act(`Match to ${b.billNo}`, async () => { await apiFull('POST', `${base}/${rowId}/match`, { transactionIds: [b.txId] }); return `Matched to bill ${b.billNo}.`; }))
+          : btnOf(act(`Open ${dayLabel(b.day)} Reconcile`, async () => { location.hash = `#/b/${biz.id}/reconcile/${b.day}`; return null; }))}</div>`)}`;
+      if (k.check === 'settlement') return html`<div class="tiny">${k.text}</div>${k.bills.map((b) => html`<div style="display:flex;gap:8px;padding-top:4px"><span class="mono">${b.billNo ?? '?'}</span>
+        <span class="tiny">${dayLabel(b.day)}</span><span class="mono" style="margin-left:auto">₹ ${rs(b.amountPaise)}</span></div>`)}
+        ${btnOf(act('Desk bills in this', async () => {
+          const desk = document.querySelector(`[data-deskbills="${rowId}"]`);
+          if (desk) desk.click(); else location.hash = `#/b/${biz.id}/bank?tab=in&from=${gate.day}&to=${gate.day}`;
+          return null;
+        }))}`;
+      if (k.check === 'transfer') return html`<div class="tiny">${k.text}</div>${btnOf(act(k.booked ? `Put back ${k.booked.headName ?? 'the booking'} and book as transfer` : 'Book as transfer', async () => {
+          if (k.booked) await apiFull('POST', `${base}/${k.booked.rowId}/reopen`, {});
+          await apiFull('POST', `${base}/${rowId}/own-transfer`, { otherAccountId: k.otherAccountId, pairRowId: k.pairRowId, legId: k.legId });
+          return 'Booked as a transfer between your accounts: not income. Undo is on Done.';
+        }))}`;
+      if (k.check === 'cash') return html`<div class="tiny">${k.text}</div>${btnOf(act('Cash deposited', async () => {
+          const day = prompt('Cash deposited into the bank: which shift\'s cash did it come from? (YYYY-MM-DD, or leave blank for the shift it came in)', '');
+          if (day === null) return null;
+          await apiFull('POST', `${base}/${rowId}/cash-move`, { shiftDay: day.trim() || null });
+          return 'Booked as cash deposited: not income. It comes off that shift\'s cash in hand.';
+        }))}`;
+      return '';
+    };
+    const btnOf = (i) => html`<div class="form-row" style="justify-content:flex-end;margin-top:6px"><button class="btn" type="button" data-gatebtn="${i}">${btns[i].label}</button></div>`;
+    const body = gate.checks.map((k) => html`<div style="border-top:1px solid var(--line-soft);padding-top:8px">${part(k)}</div>`);
+    const anyway = gate.canOverride ? html`<button class="btn plain" type="button" data-gateanyway="1">Book anyway…</button>` : '';
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:8px;max-width:500px">
+      <strong>Before booking${gate.amountPaise ? ` ₹ ${rs(gate.amountPaise)}` : ''}${gate.day ? ` · ${dayLabel(gate.day)}` : ''}</strong>
+      ${body}
+      <div class="form-msg"></div>
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button>${anyway}</div>
+      ${gate.canOverride ? html`<div class="tiny note" style="text-align:right">Book anyway asks for a reason; it is kept with the line.</div>` : ''}
+    </form>`.__html;
+    document.body.append(dlg);
+    let result = null;
+    dlg.querySelectorAll('[data-gatebtn]').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try { const done = await btns[Number(b.dataset.gatebtn)].fn(); result = done ? { done } : null; dlg.close('done'); }
+      catch (err) { b.disabled = false; showError(dlg.querySelector('.form-msg'), err); }
+    }));
+    dlg.querySelector('[data-gateanyway]')?.addEventListener('click', () => {
+      const why = prompt('Book anyway: why is this not the bill, transfer or deposit Bookr found? (kept with the line)', '');
+      if (!why || why.trim().length < 3) return;
+      result = { override: { reason: why.trim() } };
+      dlg.close('anyway');
     });
+    dlg.addEventListener('close', () => { resolve(result); dlg.remove(); });
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
     dlg.showModal();
   });
@@ -9236,7 +9325,7 @@ async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
     'Matched to the owed bill.', () => apiFull('DELETE', `${base}/bank-rows/${x.id}/match`, {}))));
   body.querySelector('[data-umadvance]')?.addEventListener('click', () => {
     const who = reason('Advance received: from which guest (name, room or booking)?');
-    if (who) run(async () => { const res = await apiFull('POST', `${base}/bank-rows/book-many`, { items: [{ rowId: x.id, billType: 'room', item: `Advance: ${who}` }] }); if (!res.booked) throw new Error(res.skipped.join(' ')); },
+    if (who) run(async () => { const res = await bookMany(biz, [{ rowId: x.id, billType: 'room', item: `Advance: ${who}` }]); if (!res.booked && !res.done) throw new Error(res.skipped.join(' ') || 'Not booked.'); },
       'Booked as an advance. Its room bill joins it when it comes.', () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}));
   });
   body.querySelectorAll('[data-umhold]').forEach((b) => b.addEventListener('click', () => {

@@ -20,7 +20,7 @@ describe('an advance booked the day before its bill', () => {
     await h.confirm();
     const [cr] = await h.credits([['31 12:03', 1950]]);
     const acc = h.clients.accountant;
-    expect((await acc.post(`${base}/bank-rows/book-many`, { items: [{ rowId: cr, billType: 'fnb' }] })).json.booked).toBe(1);
+    expect((await acc.post(`${base}/bank-rows/book-many`, { items: [{ rowId: cr, billType: 'fnb', override: { reason: 'Booked before its bill (test)' } }] })).json.booked).toBe(1);
 
     await h.register([{ no: '26110129', amount: '1950', pays: [['upi', '1950']], day: '2026-11-01' }]);
     const r = await h.reconcile('2026-11-01');

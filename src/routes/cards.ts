@@ -17,6 +17,7 @@ import { folderIdFrom, GoogleError, serviceAccountEmail } from '../google';
 import { addDays, istDay, shiftDayOf } from '../time';
 import { can } from '../permissions';
 import { cardKey } from '../directorCards';
+import { addPlanStatements, dropPlanStatements, isClash, planClash } from '../plans';
 
 export const cardRoutes = new Hono<AppEnv>();
 
@@ -359,10 +360,16 @@ cardRoutes.post('/businesses/:businessId/shifts/:day/card-advance', requireRole(
   const adv = (await cardAdvances(db, bid, day)).find((x) => x.paymentId === pid) ?? fail(409, 'This card payment is not booked as an advance.');
   if (!await one(db, 'SELECT 1 AS x FROM bill_comparisons WHERE id = ? AND business_id = ? AND shift_day = ?', cmp, bid, day)) fail(404, 'Bill not found on this shift.');
   if (await plannedCardPaise(db, bid, day, [cmp]) !== adv.amountPaise) fail(409, 'The bill\'s card payment is not the advance\'s amount.');
-  const taken = (await cardAdvancePlans(db, bid, day)).some((x) => x.paymentId === pid || x.comparisonId === cmp) || await planElsewhere(db, bid, pid, day);
-  if (taken) fail(409, 'This advance or this bill is already chosen.');
-  await db.prepare(AUDIT).bind(bid, c.get('user').id, 'card.advance_planned', 'card_settlements', pid, null, JSON.stringify({ shiftDay: day, comparisonId: cmp }), now()).run();
-  return c.json({ ok: true });
+  const clash = await planClash(db, bid, { cardPaymentIds: [pid], comparisonIds: [cmp] }, [], 'This bill');
+  if (clash) fail(409, clash);
+  const plan = addPlanStatements(db, bid, day, 'card_advance', { comparisonIds: [cmp], cardPaymentIds: [pid] }, c.get('user').id);
+  try {
+    await db.batch([...plan.statements, stmt(db, AUDIT, bid, c.get('user').id, 'card.advance_planned', 'card_settlements', pid, null, JSON.stringify({ shiftDay: day, comparisonId: cmp, planId: plan.id }), now())]);
+  } catch (e) {
+    if (isClash(e)) fail(409, 'This advance or this bill is already chosen.');
+    throw e;
+  }
+  return c.json({ ok: true, planId: plan.id });
 });
 
 cardRoutes.delete('/businesses/:businessId/shifts/:day/card-advance', requireRole('bank.link'), async (c) => {
@@ -373,17 +380,10 @@ cardRoutes.delete('/businesses/:businessId/shifts/:day/card-advance', requireRol
   const data = await body(c);
   const pid = typeof data.paymentId === 'string' && isUuid(data.paymentId) ? data.paymentId : fail(400, 'Choose the advance.');
   const plan = (await cardAdvancePlans(db, bid, day)).find((x) => x.paymentId === pid) ?? fail(409, 'This advance is not chosen for a bill here.');
-  await db.prepare(AUDIT).bind(bid, c.get('user').id, 'card.advance_unplanned', 'card_settlements', pid, null, JSON.stringify({ shiftDay: day, comparisonId: plan.comparisonId }), now()).run();
+  await db.batch([...dropPlanStatements(db, [plan.planId]),
+    stmt(db, AUDIT, bid, c.get('user').id, 'card.advance_unplanned', 'card_settlements', pid, null, JSON.stringify({ shiftDay: day, comparisonId: plan.comparisonId }), now())]);
   return c.json({ ok: true });
 });
-
-/** Is this advance chosen for a bill on another unsaved shift? */
-async function planElsewhere(db: D1Database, bid: string, pid: string, day: string) {
-  const days = (await all<{ d: string }>(db, `SELECT DISTINCT json_extract(after, '$.shiftDay') AS d FROM audit_log WHERE business_id = ? AND action = 'card.advance_planned' AND row_id = ?`, bid, pid))
-    .map((x) => x.d).filter((d) => d !== day);
-  for (const d of days) if ((await cardAdvancePlans(db, bid, d)).some((x) => x.paymentId === pid)) return true;
-  return false;
-}
 
 /** A card payment with no bill (an advance, a room payment taken on the restaurant machine): booked to an income head. */
 cardRoutes.post('/businesses/:businessId/cards/:paymentId/book', requireRole('bank.link'), async (c) => {

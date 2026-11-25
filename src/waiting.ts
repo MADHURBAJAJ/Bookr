@@ -15,6 +15,7 @@ import { addDays, shiftWindow } from './time';
 import { cardShiftChoices, coverage, shiftChoices, waitingBills, WATCH_DAYS } from './sales';
 import { cashCheck } from './cash';
 import { isMachineUpi, machineLabel } from './cards';
+import { heldCredit, heldPayment } from './plans';
 
 export type WaitFor = 'register' | 'software' | 'bank' | 'card' | 'count' | 'carry' | 'unsaved' | 'chosen';
 export interface Offer { id: string; kind: 'credit' | 'payment'; amountPaise: number; at: number; shiftDay: string; label: string | null }
@@ -64,7 +65,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     one<{ paid: number | null; settled: string | null }>(db, 'SELECT max(paid_at) AS paid, max(settled_on) AS settled FROM card_settlements WHERE business_id = ?', businessId),
     all<{ day: string }>(db, 'SELECT DISTINCT shift_day AS day FROM register_rows WHERE business_id = ?', businessId),
     all<{ day: string; status: string }>(db, 'SELECT shift_day AS day, status FROM shifts WHERE business_id = ?', businessId),
-    all<{ d: string }>(db, `SELECT DISTINCT k.shift_day AS d FROM shift_choices k LEFT JOIN shifts s ON s.business_id = k.business_id AND s.shift_day = k.shift_day
+    all<{ d: string }>(db, `SELECT DISTINCT k.shift_day AS d FROM shift_plans k LEFT JOIN shifts s ON s.business_id = k.business_id AND s.shift_day = k.shift_day
       WHERE k.business_id = ? AND coalesce(s.status, '') <> 'confirmed'`, businessId),
     // A credit matched to a bill, then reversed by the bank (Stage 6, 10 Nov 2026): the bill is paid by money that went back.
     all<{ revId: string; revAt: number; amount: number; creditAt: number; txId: string; billNo: string | null; day: string; comparisonId: string | null }>(db, `
@@ -101,7 +102,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     const rows = await all<{ id: string; amount: number; at: number; label: string | null }>(db, `SELECT r.id, r.amount_paise AS amount, r.posted_at AS at, a.name AS label
       FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id
       WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ? AND abs(r.amount_paise - ?) <= ?
-        AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id)`, businessId, w.from, w.to, amount, GAP);
+        AND NOT ${heldCredit('r.id')}`, businessId, w.from, w.to, amount, GAP);
     return rank(rows.map((r) => ({ id: r.id, kind: 'credit' as const, amountPaise: r.amount, at: r.at, shiftDay: dayOf(r.at, day), label: r.label })), amount, at);
   };
   const payments = async (day: string, amount: number, at: number | null): Promise<Offer[]> => {
@@ -109,7 +110,7 @@ export async function waitingPicture(db: DB, businessId: string, today: string) 
     const rows = await all<{ id: string; amount_paise: number; paid_at: number; pay_mode: string | null; scheme: string | null; card_type: string | null; card_last4: string | null }>(db, `
       SELECT s.id, s.amount_paise, s.paid_at, s.pay_mode, s.scheme, s.card_type, s.card_last4 FROM card_settlements s
       WHERE s.business_id = ? AND s.txn_type = 'PURCHASE' AND s.paid_at >= ? AND s.paid_at < ? AND abs(s.amount_paise - ?) <= ?
-        AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.card_payment_id = s.id)`,
+        AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AND NOT ${heldPayment('s.id')}`,
       businessId, w.from, w.to, amount, GAP);
     return rank(rows.filter((p) => !isMachineUpi(p)).map((p) => ({ id: p.id, kind: 'payment' as const, amountPaise: p.amount_paise, at: p.paid_at, shiftDay: dayOf(p.paid_at, day), label: machineLabel(p) })), amount, at);
   };

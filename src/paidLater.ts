@@ -7,6 +7,7 @@
 
 import { all, type DB } from './db';
 import { shiftWindow } from './time';
+import { heldCredit } from './plans';
 
 // As cards.ts isMachineUpi; kept here so cash.ts does not import cards.ts (which imports cash.ts).
 const machineUpi = (p: { pay_mode: string | null; scheme: string | null }) => (p.pay_mode ? /^upi/i.test(p.pay_mode.trim()) : (p.scheme ?? '').toUpperCase() === 'UPI');
@@ -67,7 +68,7 @@ export async function evidenceFor(db: DB, businessId: string, line: { mode: 'car
     : (await all<{ id: string; amount_paise: number; posted_at: number; account: string | null }>(db, `
         SELECT r.id, r.amount_paise, r.posted_at, a.name AS account FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id
         WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.direction = 'CR' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
-          AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`, businessId, w.from, w.to))
+          AND NOT ${heldCredit('r.id')} ORDER BY r.posted_at`, businessId, w.from, w.to))
       .map((p) => ({ id: p.id, amount: p.amount_paise, at: p.posted_at, label: `Bank UPI${p.account ? ` · ${p.account}` : ''}` }));
   if (!pays.length) return null;
   const pick = (want: number) => pays.filter((p) => p.amount === want);

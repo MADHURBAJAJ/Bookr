@@ -7,6 +7,7 @@
 import type { DB } from './db';
 import { all, one, stmt } from './db';
 import { istDay } from './time';
+import { heldCredit } from './plans';
 
 /** A credit still owed this many days after its bill is shown in red on Home. */
 export const CREDIT_RED_DAYS = 30;
@@ -36,7 +37,7 @@ export async function creditList(db: DB, businessId: string) {
     SELECT r.id, r.amount_paise AS amount, r.posted_at AS postedAt, a.name AS account, r.vpa FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id
     WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.direction = 'CR' AND r.status = 'unmatched'
       AND r.amount_paise IN (${[...new Set(owed.map((r) => r.amount_paise))].map(() => '?').join(',')})
-      AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`,
+      AND NOT ${heldCredit('r.id')} ORDER BY r.posted_at`,
     businessId, ...new Set(owed.map((r) => r.amount_paise))) : [];
   const right = await creditRight(db, businessId);
   const lines = rows.map((r) => {

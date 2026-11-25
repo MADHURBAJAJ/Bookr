@@ -66,7 +66,7 @@ describe('card machine payments before saving a shift', () => {
     const matchOf = async (pid: string) => (await sql`SELECT t.bill_no FROM card_matches m JOIN transactions t ON t.id = m.transaction_id WHERE m.settlement_id = ${pid}`).map((r: any) => r.bill_no);
     expect(await matchOf(safe)).toEqual(['2610311']);
     expect(await matchOf(two)).toEqual(['2610313']);
-    expect((await sql`SELECT count(*) AS n FROM shift_choices WHERE business_id = ${h.bid}`)[0].n).toBe(0);
+    expect((await sql`SELECT count(*) AS n FROM shift_plans WHERE business_id = ${h.bid}`)[0].n).toBe(0);
     const after = (await h.reconcile()).cards;
     expect(after.trial).toBeUndefined();
     expect(after.noSwipe.map((x: any) => x.billNo)).toEqual(['2610312']);
@@ -125,7 +125,7 @@ describe('card machine payments before saving a shift', () => {
     expect(bill('2610312').uploadId).toBeTruthy();
     const B = `/businesses/${h.bid}/shifts/2026-10-31/card-choices`;
     const acc = h.clients.accountant;
-    const count = async () => (await sql`SELECT count(*) AS n FROM shift_choices WHERE business_id = ${h.bid}`)[0].n;
+    const count = async () => (await sql`SELECT count(*) AS n FROM shift_plans WHERE business_id = ${h.bid}`)[0].n;
     expect((await acc.post(B, { pairs: [{ paymentId: a, comparisonIds: [bill('2610312').id] }, { paymentId: a, comparisonIds: [bill('2610313').id] }] })).status).toBe(409);
     const bad = await acc.post(B, { pairs: [{ paymentId: a, comparisonIds: [bill('2610312').id] }, { paymentId: odd, comparisonIds: [bill('2610313').id] }] });
     expect(bad.status).toBe(409);

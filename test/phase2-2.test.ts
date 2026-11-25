@@ -74,10 +74,12 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000011'`;
     const book = (more = {}) => h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb, note: 'Sale', ...more });
     // Before booking the screen is told a bill of this amount waits, and nothing is booked; the person may go on.
-    const asked = await book({ checkBills: true });
+    const asked = await book();
     expect(asked.json.ok).toBe(false);
-    expect(asked.json.waitingBills.map((b: any) => b.billNo)).toContain('2610318');
-    expect((await book()).status).toBe(200);
+    expect(asked.json.gate.checks[0].bills.map((b: any) => b.billNo)).toContain('2610318');
+    // Book anyway needs a reason (the booking gate, 25 Nov 2026).
+    expect((await book({ override: { reason: '' } })).json.ok).toBe(false);
+    expect((await book({ override: { reason: 'Room advance, not this bill' } })).json.ok).toBe(true);
     await decideAll(h);
     const url = `/businesses/${h.bid}/shifts/2026-10-31/reconcile`;
     let r = (await h.clients.owner.get(url)).json;
@@ -107,7 +109,7 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     expect(income.length).toBe(2);
     expect(income.find((x: any) => x.source === 'bank_sheet')).toMatchObject({ day: '2026-10-30', matched_bank_row: credit.id });
     expect(income.find((x: any) => x.source === 'software_report')).toMatchObject({ day: '2026-10-31', match_status: 'awaiting_bank_match', matched_bank_row: null });
-    expect((await sql`SELECT status, note FROM bank_rows WHERE id = ${credit.id}`)[0]).toMatchObject({ status: 'booked', note: 'Sale' });
+    expect((await sql`SELECT status, note FROM bank_rows WHERE id = ${credit.id}`)[0]).toMatchObject({ status: 'booked', note: expect.stringContaining('Sale') });
     expect((await sql`SELECT count(*) AS n FROM bank_matches WHERE bank_row_id = ${credit.id}`)[0].n).toBe(0);
   });
 
@@ -117,7 +119,7 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     const acc = await upiAccount(h, 'UPI Bank 2');
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(1, 'S40000012', '30/10/2026 7:00:00 PM', 650)].join('\n') })).status).toBe(200);
     const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000012'`;
-    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb })).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb, override: { reason: 'Booked before its bill (test)' } })).json.ok).toBe(true);
     await decideAll(h);
     const url = `/businesses/${h.bid}/shifts/2026-10-31/reconcile`;
     const find = async () => (await h.clients.owner.get(url)).json.fixes.find((c: any) => c.kind === 'same_sale');
@@ -145,7 +147,7 @@ describe('Reconcile: one screen per confirmed shift (approved 5 Nov 2026)', () =
     const acc = await upiAccount(h, 'UPI Bank 2');
     expect((await h.clients.owner.post(`/businesses/${h.bid}/bank/${acc}/paste`, { text: [HEAD, line(1, 'S40000013', '30/10/2026 7:00:00 PM', 1111)].join('\n') })).status).toBe(200);
     const [credit] = await sql`SELECT id FROM bank_rows WHERE tran_id = 'S40000013'`;
-    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb })).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${credit.id}/book`, { headId: h.fnb, override: { reason: 'Booked before its bill (test)' } })).json.ok).toBe(true);
     await decideAll(h);
     const v = await view(h);
     expect((await h.clients.accountant.put(`/businesses/${h.bid}/comparisons/${byBill(v, '26103199').id}`, { decision: 'use_register' })).status).toBe(200);
@@ -397,7 +399,7 @@ describe('Save reconcile: matches are drafts until the shift is saved (approved 
     const saved = (await o.post(`/businesses/${h.bid}/shifts/2026-10-31/confirm`)).json;
     expect(saved.skipped).toEqual([]);
     expect((await sql`SELECT matched_bank_row, match_status FROM transactions WHERE bill_no = '2610318' AND type = 'income'`)[0]).toEqual({ matched_bank_row: cr.id, match_status: null });
-    expect((await sql`SELECT count(*) AS n FROM shift_choices`)[0].n).toBe(0);
+    expect((await sql`SELECT count(*) AS n FROM shift_plans`)[0].n).toBe(0);
     expect((await o.del(`${url}/${k2.id}`)).status).toBe(404);
     expect((await o.post(url, { bankRowId: odd.id, comparisonIds: [cmp] })).status).toBe(409);   // saved: match directly
   });

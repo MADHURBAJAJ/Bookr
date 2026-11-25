@@ -22,7 +22,8 @@ export async function plannedLater(db: DB, businessId: string, txIds: string[]):
     SELECT sc.id, sc.shift_day, sc.kind, sc.comparison_ids, u.name AS who,
       cs.amount_paise AS card_amount, cs.paid_at AS card_at, cs.scheme, cs.card_type, cs.card_last4, cs.pay_mode,
       br.amount_paise AS bank_amount, br.posted_at AS bank_at, a.name AS account
-    FROM shift_choices sc
+    FROM (SELECT p.id, p.business_id, p.shift_day, p.kind, p.comparison_ids, p.created_by, i.bank_row_id, i.card_payment_id
+      FROM shift_plans p JOIN shift_plan_items i ON i.plan_id = p.id WHERE p.kind IN ('bank_match', 'card_match')) sc
     LEFT JOIN users u ON u.id = sc.created_by
     LEFT JOIN card_settlements cs ON cs.id = sc.card_payment_id
     LEFT JOIN bank_rows br ON br.id = sc.bank_row_id
