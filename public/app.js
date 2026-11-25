@@ -7775,9 +7775,14 @@ async function reconcileView(biz, dayArg) {
   const cashN = ent.cash.left + (cashDiff ? 1 : 0);
   const cardN = Math.max(ent.card.left, cardLeft);
   const compLook = comp.lines.filter((l) => l.status === 'look').length;
+  // A saved shift's UPI credits with no bill count on the UPI tab too (25 Nov 2026), the same as the shift bar: before,
+  // the tab counted bills only, so a shift with only such credits looked done. Before saving they pair on save.
+  const upiCredits = r.confirmed ? s.creditsLeft ?? 0 : 0;
+  const upiN = ent.upi.left + upiCredits;
   const leftLines = [
     cashN && [`Cash: ${ent.cash.left ? `${ent.cash.left} bill${ent.cash.left === 1 ? '' : 's'} left` : ''}${ent.cash.left && cashDiff ? ', and ' : ''}${cashDiff ? `the cash count is ${cashDiff < 0 ? 'short' : 'over'} by ₹ ${money(Math.abs(cashDiff))}${cash.confirmed ? '' : ' (draft)'}` : ''}`, 'pay:cash'],
-    ent.upi.left && [`UPI: ${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet, ${s.creditsLeft} credit${s.creditsLeft === 1 ? '' : 's'} not matched`, 'pay:upi'],
+    upiN && [`UPI: ${[ent.upi.left && `${s.billsLeft} bill${s.billsLeft === 1 ? '' : 's'} not in the bank yet`,
+      upiCredits && `${upiCredits} credit${upiCredits === 1 ? '' : 's'} with no bill · ₹ ${rs(s.creditsLeftPaise ?? 0)}`].filter(Boolean).join(', ')}`, 'pay:upi'],
     cardN && [`Card: ${cardN} left${r.cards?.waitingReport ? `, ${r.cards.waitingReport} waiting for the card report` : ''}`, 'pay:card'],
     compLook && [`Complimentary: ${compLook} bill${compLook === 1 ? '' : 's'} need${compLook === 1 ? 's' : ''} a look`, 'comp'],
 
@@ -7865,7 +7870,9 @@ async function reconcileView(biz, dayArg) {
   ];
   const stepsLeft = steps.filter((x) => x.left).length;
   const openStep = todoOpenStep(day);
-  const todoN = r.confirmed ? 0 : stepsLeft + 1;
+  // The steps left before saving (owner, 25 Nov 2026): Save itself is not counted, nor are "Paid, bill missing" bills
+  // (the money is in; only the paperwork differs). They still show on the Waiting card.
+  const todoN = r.confirmed ? 0 : stepsLeft;
   const todoHtml = html`
     ${r.confirmed ? html`<div class="note">Saved shift: each fix here is a recorded correction, and can be undone.</div>` : html`<section class="card todo-top">
       <div><strong>${dayLabel(day)} shift · not saved</strong><div class="note">${stepsLeft ? `Before you can save: ${stepsLeft} step${stepsLeft === 1 ? '' : 's'} left` : 'Ready to save ✓'} · matches and decisions are drafts until then.</div></div>
@@ -7893,11 +7900,11 @@ async function reconcileView(biz, dayArg) {
   render(shell(biz, 'reconcile', 'Reconcile', '', html`
     ${shiftBar(biz, day, 'reconcile')}
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-      <span class="note">${r.confirmed ? 'Saved' : 'Not saved'}${todoN - (r.confirmed ? 0 : 1) > 0 ? ` · ${todoN - (r.confirmed ? 0 : 1)} to do` : ''}</span>
+      <span class="note">${r.confirmed ? 'Saved' : 'Not saved'}${todoN > 0 ? ` · ${todoN} to do` : ''}</span>
       <div style="display:flex;gap:8px;align-items:center">${!r.confirmed && biz.actions.includes('sales.decide') ? html`<button class="btn" type="button" id="savehead">Save shift</button>` : ''}${P.shiftMenu}</div></div>
     <div id="recmsg"></div>
     <div class="seg mode-tabs" role="tablist" aria-label="Shift" style="margin:4px 0 10px">
-      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', ent.upi.left)}${oneTab('card', 'Card', cardN)}${(comp.lines.length || comp.credit?.length) ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
+      ${oneTab('todo', 'To do', todoN + waitN)}${oneTab('cash', 'Cash', cashN)}${oneTab('upi', 'UPI', upiN)}${oneTab('card', 'Card', cardN)}${(comp.lines.length || comp.credit?.length) ? oneTab('comp', 'Complimentary', compLook) : ''}${oneTab('all', 'All bills', allLeft)}${oneTab('stmt', 'Statement', 0)}${oneTab('chg', 'Changes', 0)}</div>
     <div data-rtop="todo" ${top === 'todo' ? '' : 'hidden'}>${todoHtml}
     </div>
     ${(comp.lines.length || comp.credit?.length) ? html`<div data-rtop="comp" ${curTab === 'comp' ? '' : 'hidden'}><div data-rsec="comp">${compPanelHtml(biz, comp, !r.confirmed && biz.actions.includes('sales.decide'))}</div></div>` : ''}
@@ -12296,6 +12303,151 @@ document.addEventListener('click', async (e) => {
   document.querySelectorAll('[data-install]').forEach((x) => { x.hidden = true; });
 });
 const installButton = (cls = 'btn plain') => html`<button type="button" class="${cls}" data-install ${installPrompt ? '' : 'hidden'}>Install Bookr on this phone</button>`;
+
+/**
+ * New head, party or item from wherever they are chosen (owner, 25 Nov 2026). Every head list gets "+ New head…" for
+ * an Owner or Accountant (heads.edit): it asks the name, adds the head (of the list's type) and chooses it there, and
+ * the page carries on. Party and item boxes suggest the ones Bookr knows; a name it does not know is marked "new" and
+ * is added when the line is saved, as before.
+ */
+const NEW_HEAD = '__newhead';
+const HEAD_SELECTS = 'select[name="headId"], select[data-head], select[data-rephead], select[data-nbhead], select[data-lnhead], select[data-tcardhead], select[data-cardhead], select[data-dbhead], select[aria-label="Expense head"], select#pairhead';
+const PARTY_INPUTS = 'input[data-party], input[data-repparty], input[name="vendor"], input[name="party"]';
+const ITEM_INPUTS = 'input[data-item]:not([type="hidden"])';
+const pageBiz = () => { const id = /^#\/b\/([^/?]+)/.exec(location.hash)?.[1]; return me?.businesses?.find((b) => b.id === id) ?? null; };
+let pickLists = { bizId: null, at: 0, heads: null, items: null, parties: null, busy: null };
+async function loadPickLists(biz, fresh = false) {
+  if (!fresh && pickLists.bizId === biz.id && Date.now() - pickLists.at < 120e3) return pickLists;
+  if (!fresh && pickLists.busy && pickLists.bizId === biz.id) return pickLists.busy;
+  const busy = Promise.all([api('GET', `/businesses/${biz.id}/heads`).catch(() => ({ heads: [] })),
+    api('GET', `/businesses/${biz.id}/learned-items`).catch(() => ({ items: [] })), api('GET', `/businesses/${biz.id}/parties`).catch(() => ({ parties: [] }))])
+    .then(([h, i, p]) => (pickLists = { bizId: biz.id, at: Date.now(), heads: h.heads ?? [], items: (i.items ?? []).map((x) => x.word), parties: (p.parties ?? []).map((x) => x.name), busy: null }));
+  pickLists = { ...pickLists, bizId: biz.id, busy };
+  return busy;
+}
+/** The type of a head list: the type of the heads in it, when they are all one type. */
+const headListType = (sel, heads) => {
+  const types = new Set([...sel.options].map((o) => heads.find((h) => h.id === o.value)?.type).filter(Boolean));
+  return types.size === 1 ? [...types][0] : null;
+};
+const norm = (v) => v.trim().toLowerCase();
+function markNew(input, known, word) {
+  let tag = input.nextElementSibling?.classList?.contains('pk-new') ? input.nextElementSibling : null;
+  const v = norm(input.value);
+  const isNew = !!v && !known.some((k) => norm(k) === v);
+  if (!isNew) { tag?.remove(); return; }
+  if (!tag) { tag = document.createElement('span'); tag.className = 'pk-new'; input.after(tag); }
+  tag.textContent = `+ new ${word}`;
+  tag.title = `Not in Bookr yet: the ${word} is added when this is saved.`;
+}
+let pickBusy = false;
+function wirePickers() {
+  if (pickBusy) return;
+  pickBusy = true;
+  requestAnimationFrame(async () => {
+    pickBusy = false;
+    const biz = pageBiz();
+    if (!biz) return;
+    const heads = biz.actions.includes('heads.edit') ? [...app.querySelectorAll(HEAD_SELECTS)].filter((x) => x.id !== 'mohead' && !x.querySelector('option[value="__new"], option[value="__newhead"]')) : [];
+    const parties = [...app.querySelectorAll(PARTY_INPUTS)].filter((x) => !x.dataset.pk);
+    const items = [...app.querySelectorAll(ITEM_INPUTS)].filter((x) => !x.dataset.pk);
+    if (!heads.length && !parties.length && !items.length) return;
+    const L = await loadPickLists(biz);
+    for (const sel of heads) {
+      if (sel.querySelector(`option[value="${NEW_HEAD}"]`)) continue;
+      const o = document.createElement('option');
+      o.value = NEW_HEAD; o.textContent = '+ New head…';
+      sel.append(o);
+      sel.dataset.pkPrev = sel.value;
+    }
+    const list = (id, words) => {
+      let dl = document.getElementById(id);
+      if (!dl) { dl = document.createElement('datalist'); dl.id = id; document.body.append(dl); }
+      dl.innerHTML = words.map((w) => `<option value="${String(w).replace(/[&"<>]/g, (c) => `&#${c.charCodeAt(0)};`)}">`).join('');
+    };
+    if (parties.length) list('pk-parties', L.parties);
+    if (items.length) list('pk-items', L.items);
+    for (const x of parties) {
+      x.dataset.pk = '1';
+      if (!x.getAttribute('list')) x.setAttribute('list', 'pk-parties');
+      x.addEventListener('input', () => markNew(x, L.parties, 'party'));
+      x.addEventListener('change', () => markNew(x, L.parties, 'party'));
+      markNew(x, L.parties, 'party');
+    }
+    for (const x of items) {
+      x.dataset.pk = '1';
+      if (!x.getAttribute('list')) x.setAttribute('list', 'pk-items');
+      x.addEventListener('input', () => markNew(x, L.items, 'item'));
+      markNew(x, L.items, 'item');
+    }
+  });
+}
+new MutationObserver(wirePickers).observe(app, { childList: true, subtree: true });
+document.addEventListener('focusin', (e) => { if (e.target.matches?.(HEAD_SELECTS) && e.target.value !== NEW_HEAD) e.target.dataset.pkPrev = e.target.value; });
+// Captured before the page's own listeners, so they never see "+ New head…" chosen.
+document.addEventListener('change', async (e) => {
+  const sel = e.target;
+  if (!(sel instanceof HTMLSelectElement) || sel.value !== NEW_HEAD) { if (sel?.matches?.(HEAD_SELECTS)) sel.dataset.pkPrev = sel.value; return; }
+  e.stopImmediatePropagation();
+  sel.value = sel.dataset.pkPrev ?? '';
+  const biz = pageBiz();
+  if (!biz) return;
+  const L = await loadPickLists(biz);
+  const fixed = headListType(sel, L.heads);
+  const made = await askNewHead(biz, fixed);
+  if (!made) return;
+  const L2 = await loadPickLists(biz, true);
+  // Every head list of that type on the page gets it; this one chooses it.
+  for (const other of app.querySelectorAll(HEAD_SELECTS)) {
+    if (other.querySelector(`option[value="${made.id}"]`)) continue;
+    const t = headListType(other, L2.heads);
+    if (other !== sel && t && t !== made.type) continue;
+    if (other !== sel && !other.querySelector(`option[value="${NEW_HEAD}"]`)) continue;
+    const o = document.createElement('option');
+    o.value = made.id; o.textContent = made.name;
+    other.insertBefore(o, other.querySelector(`option[value="${NEW_HEAD}"]`));
+  }
+  sel.value = made.id;
+  sel.dataset.pkPrev = made.id;
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  doneToast(`Head ${made.name} added and chosen.`, null, null);
+}, true);
+function askNewHead(biz, fixedType) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.className = 'rowdlg';
+    const typeRow = fixedType ? html`<input type="hidden" name="type" value="${fixedType}"><div class="tiny note">${fixedType === 'income' ? 'Income' : 'Expense'} head</div>`
+      : html`<div class="form-row" style="gap:12px"><label><input type="radio" name="type" value="expense" checked> Expense</label><label><input type="radio" name="type" value="income"> Income</label></div>`;
+    dlg.innerHTML = html`<form class="inset" style="display:grid;gap:8px;min-width:280px;max-width:420px">
+      <strong>New head</strong>${typeRow}
+      <div class="field"><label for="pk-hn">Head name</label><input id="pk-hn" name="name" maxlength="80" required autocomplete="off"></div>
+      <div class="field"><label for="pk-ht">Tally ledger name</label><input id="pk-ht" name="tallyLedger" maxlength="120" placeholder="optional"></div>
+      <div class="form-msg"></div>
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" type="button" data-pkcancel>Cancel</button><button class="btn" type="submit">Add head</button></div>
+    </form>`.__html;
+    document.body.append(dlg);
+    let result = null;
+    const form = dlg.querySelector('form');
+    dlg.querySelector('[data-pkcancel]').addEventListener('click', () => dlg.close());
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+    dlg.addEventListener('close', () => { resolve(result); dlg.remove(); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = form.name.value.trim();
+      const type = fixedType ?? form.querySelector('[name="type"]:checked')?.value ?? 'expense';
+      const msg = form.querySelector('.form-msg');
+      if (!name) return;
+      form.querySelector('button[type="submit"]').disabled = true;
+      try {
+        const { id } = await api('POST', `/businesses/${biz.id}/heads`, { name, type, tallyLedger: form.tallyLedger.value.trim() || undefined });
+        result = { id, name, type };
+        dlg.close();
+      } catch (err) { form.querySelector('button[type="submit"]').disabled = false; showError(msg, err); }
+    });
+    dlg.showModal();
+    form.name.focus();
+  });
+}
 
 window.addEventListener('hashchange', route);
 route();
