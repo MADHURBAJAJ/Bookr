@@ -208,7 +208,13 @@ async function route() {
     if (path === 'rooms') return await roomsScreen(a);
     if (path === 'counter') return await counterScreen();
     if (path === 'credit') return await creditScreen();
-    if (path === 'payments') return await paymentsScreen(a);
+    if (path === 'payments') return a === 'bills' ? await billsScreen(b) : await paymentsScreen(a);
+    // A bill by its number (25 Nov 2026): opens it, from Daily check, a room bill or anywhere a number is shown.
+    if (path === 'billno') {
+      const r = await api('GET', `${B()}/bills?no=${encodeURIComponent(a ?? '')}`).catch(() => ({ bills: [] }));
+      const hit = r.bills.find((x) => x.billNo === a) ?? r.bills[0];
+      location.replace(hit ? `#/done/${hit.id}` : '#/payments/bills'); return;
+    }
     if (path === 'shift') return await shiftScreen();
     if (path === 'handover') return await handoverScreen(a);
     if (path === 'exceptions') return await exceptionsScreen(a);
@@ -2456,7 +2462,7 @@ function roomBillPanel(r) {
         <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
     ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
-      ${r.lines.map((l) => html`<tr><td>${folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
+      ${r.lines.map((l) => html`<tr><td>${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
       <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
     </tbody></table>
     ${inv ? html`<div class="msg ok" style="margin-top:8px;display:block">Invoice <strong>${inv.invoiceNo}</strong> · ${rs(inv.totalPaise)}${inv.billToName ? ` · to ${inv.billToName}${inv.billToGstin ? ` (${inv.billToGstin})` : ''}` : ''}
@@ -2802,7 +2808,7 @@ function grcSlip(g) {
 
 let proofTimer = null;
 function stopProof() { if (proofTimer) { clearInterval(proofTimer); proofTimer = null; } }
-const PROOF_TABS = [['', 'All'], ['diff', 'Differences'], ['missing', 'No proof'], ['extras', 'Extras']];
+const PROOF_TABS = [['', 'All'], ['diff', 'Differences'], ['missing', 'No proof'], ['extras', 'Extras'], ['bills', 'Bills']];
 const PROOF_STATUS = {
   matched: ['ok', '✓ Matched'], waiting: ['warn', 'Printed, no proof yet'], missing: ['bad', 'Settled, no proof'],
   difference: ['info', 'Difference'], not_needed: ['', 'No proof needed'], unknown: ['', '—'],
@@ -2825,7 +2831,7 @@ async function paymentsScreen(tab = '') {
     const proofText = (e) => `${{ upi: 'UPI', card: 'Card slip', bill: 'Bill photo' }[e.kind]}${e.amountPaise ? ` ${rs(e.amountPaise)}` : ''} · ${time(e.sentAt)}${e.caption ? ` · “${e.caption}”` : ''}`;
     const row = (r) => {
       const [tone, label] = PROOF_STATUS[r.status] ?? PROOF_STATUS.unknown;
-      return html`<tr><td>${time(r.at)}</td><td class="mono">${r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
+      return html`<tr><td>${time(r.at)}</td><td class="mono">${r.billNo && r.kind !== 'receipt' ? html`<a href="#/done/${r.key}">${r.billNo}</a>` : r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
         <td>${r.modes.length ? r.modes.map((m) => `${PROOF_MODE[m.mode] ?? m.mode} ${rs(m.amountPaise)}`).join(' + ') : html`<span class="quiet">not paid</span>`}</td>
         <td class="small">${r.proof.length ? r.proof.map((e) => html`<div>${proofText(e)}</div>`) : html`<span class="quiet">—</span>`}</td>
         <td>${tone ? html`<span class="status ${tone}">${label}</span>` : html`<span class="quiet small">${label}</span>`}
@@ -2858,6 +2864,40 @@ async function paymentsScreen(tab = '') {
     try { await load(); rerender(); } catch { /* the next tick tries again */ }
   }, 12_000);
 }
+
+// ---------- Payments › Bills (25 Nov 2026): every bill of a shift, filtered and searched; a tap opens the bill.
+const BILL_FILTERS = [['', 'All'], ['topay', 'To pay'], ['room', 'To room'], ['credit', 'Credit'], ['nc', 'NC'], ['void', 'Void']];
+async function billsScreen(dayArg) {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg ?? '') ? dayArg : me.business.shiftDay;
+  const r = await api('GET', `${B()}/bill-list?day=${day}`);
+  const kindOf = (b) => (b.status === 'void' ? 'void' : b.status === 'printed' ? 'topay' : b.modes.includes('comp') ? 'nc' : b.modes.includes('room') ? 'room' : b.modes.includes('credit') ? 'credit' : 'paid');
+  const paidBy = (b) => b.status === 'void' ? html`<span class="quiet">—</span>` : b.status === 'printed' ? html`<span class="quiet">not paid</span>`
+    : b.modes.map((m) => (m === 'room' && b.room ? `To room ${b.room.split(' · ')[0].replace(/^Room /, '')}` : m === 'credit' && b.credit ? `Credit · ${b.credit}` : PAID_BY[m] ?? m)).join(' + ');
+  const tone = { void: ['bad', 'Void'], topay: ['warn', 'To pay'], nc: ['mute', 'NC'], room: ['info', 'On room'], credit: ['info', 'On credit'], paid: ['ok', 'Paid'] };
+  rerender = () => {
+    const f = ui.bF ?? '';
+    const q = String(ui.bQ ?? '').trim().toLowerCase();
+    const shown = r.bills.filter((b) => (!f || kindOf(b) === f) && (!q || `${b.billNo} ${b.place} ${b.guestName ?? ''}`.toLowerCase().includes(q)));
+    const live = r.bills.filter((b) => b.status !== 'void');
+    const n = (k) => r.bills.filter((b) => kindOf(b) === k).length;
+    paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(day)}`, 'Every bill of the shift. Tap one to open it: the bill as printed, a copy, take payment if unpaid, or give money back.')}
+      ${tabsNav('Payments', PROOF_TABS.map(([k, t]) => [k ? `#/payments/${k}` : '#/payments', t, k]), 'bills')}
+      <div class="row" style="align-items:end;flex-wrap:wrap;margin-bottom:12px"><a class="btn" href="#/payments/bills/${addDays(day, -1)}" aria-label="Previous shift">‹</a>
+        <label class="f">Shift<input class="in" type="date" data-model="bDay" value="${ui.bDay ?? day}" style="width:auto"></label>
+        <a class="btn" href="#/payments/bills/${addDays(day, 1)}" aria-label="Next shift">›</a><button class="btn" type="button" data-act="bDayGo">Show</button>
+        <input class="in grow" type="search" data-model="bQ" data-live value="${ui.bQ ?? ''}" placeholder="Search bill no., table or guest" aria-label="Search bills" style="flex:1 1 220px"></div>
+      <div class="kpis">${kpi('Bills', String(live.length), `${rs(live.reduce((t, b) => t + b.totalPaise, 0))} with GST`)}${kpi('To pay', String(n('topay')), n('topay') ? 'printed, not paid' : 'none', n('topay') ? 'warn' : '')}
+        ${kpi('On room or credit', String(n('room') + n('credit')), 'paid later')}${kpi('Void', String(n('void')), '', n('void') ? 'warn' : '')}</div>
+      <div class="chips" style="margin-bottom:10px">${BILL_FILTERS.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="bF" data-id="${k}">${t}${k ? ` ${n(k)}` : ` ${r.bills.length}`}</button>`)}</div>
+      <section class="panel">${shown.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Time</th><th>Bill</th><th>Table / room</th><th>Guest</th><th class="num">Amount</th><th>Paid by</th><th>Status</th></tr></thead><tbody>
+        ${shown.map((b) => html`<tr class="rowlink" data-act="goTo" data-href="#/done/${b.id}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><a href="#/done/${b.id}">${b.billNo}</a></td>
+          <td data-label="Table">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}${b.phone ? html`<div class="small quiet">${b.phone}</div>` : ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td>
+          <td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status ${tone[kindOf(b)][0]}">${tone[kindOf(b)][1]}</span></td></tr>`)}</tbody></table></div>`
+        : html`<p class="empty">${r.bills.length ? 'No bill matches.' : 'No bills in this shift.'}</p>`}</section>`));
+  };
+  rerender();
+}
+actions.bDayGo = () => go(`#/payments/bills/${ui.bDay ?? me.business.shiftDay}`);
 
 async function creditScreen() {
   await load('credit', 'payAccounts');
@@ -4483,7 +4523,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
       <div class="chips">${chip('all', 'All', events.length)}${chip('kot_cancel', 'Cancels', events.filter((e) => e.kind === 'kot_cancel').length)}${chip('discount', 'Discounts', events.filter((e) => e.kind === 'discount').length)}${chip('void', 'Voids', events.filter((e) => e.kind === 'void').length)}${chip('other', 'Other', events.filter((e) => !evKind[e.kind]).length)}</div></div>
     <p class="quiet small">Every void, reprint, cancelled KOT line, discount and complimentary bill, with who and why. Nothing here can be changed.</p>
     <div class="scroll"><table class="t"><thead><tr><th>Time</th><th>What</th><th>Bill or item</th><th class="num">Amount</th><th>By</th><th>Reason</th></tr></thead><tbody>
-      ${shown.length ? shown.map((e) => html`<tr><td>${time(e.at)}</td><td><span class="status ${tone[e.kind] ?? 'mute'}">${kind[e.kind]}</span></td><td><strong>${e.ref}</strong></td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
+      ${shown.length ? shown.map((e) => html`<tr><td>${time(e.at)}</td><td><span class="status ${tone[e.kind] ?? 'mute'}">${kind[e.kind]}</span></td><td><strong>${String(e.ref ?? '').split(/,\s*/).map((x, i) => html`${i ? ', ' : ''}${/^[A-Z0-9]+\d{6,}$/.test(x.trim()) ? html`<a href="#/billno/${x.trim()}">${x.trim()}</a>` : x}`)}</strong></td><td class="num">${e.amountPaise === null ? '' : rs(e.amountPaise)}</td><td>${e.byName ?? ''}</td><td>${e.reason ?? ''}${e.detail ? html`<div class="small quiet">${e.detail}</div>` : ''}</td></tr>`)
         : html`<tr><td colspan="6" class="quiet">Nothing in this shift.</td></tr>`}</tbody></table></div></section>`));
   rerender();
 }
