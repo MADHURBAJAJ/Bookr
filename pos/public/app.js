@@ -3247,7 +3247,8 @@ async function roomsReportTab(head, from, to) {
       ${kpi('RevPAR', r.occupancy.revparPaise == null ? '—' : rs(r.occupancy.revparPaise), 'per room or bed available')}
       ${kpi('Nights sold', String(r.occupancy.rooms.sold + r.occupancy.beds.sold), `of ${r.occupancy.rooms.available + r.occupancy.beds.available} available${r.occupancy.upTo < r.to ? ` · up to ${dayName(r.occupancy.upTo)}` : ''}`)}</div>` : ''}
     <div class="kpis">${kpi('Room invoices', String(t.invoices))}${kpi('Room nights', String(t.nights))}${kpi('Room sales (before GST)', rs(t.taxablePaise))}${kpi('GST on rooms', rs(t.gstPaise))}${kpi('No-show charges kept', rs(t.noShowPaise))}</div>
-    <p class="small quiet">Occupancy counts the guests who stayed each night, rooms and dorm beds together. ADR is room sales before GST per night invoiced (a room is invoiced at check-out). RevPAR is ADR × occupancy.</p>
+    <p class="small quiet">Occupancy counts the guests who stayed each night, rooms and dorm beds together. ADR is room revenue before GST per night sold, as earned each night (see Room revenue by day). RevPAR is ADR × occupancy. Room invoices are made at check-out.</p>
+    ${r.byDay?.days?.length ? roomRevenueTable(r.byDay, t.taxablePaise) : ''}
     <section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Room invoices</h2>${r.invoices.length ? html`<button class="btn" type="button" data-act="roomsCsv">Download (CSV)</button>` : ''}</div>
       <div class="scroll"><table class="t"><thead><tr><th>Invoice</th><th>Day</th><th>Guest / company</th><th>Room</th><th class="num">Nights</th><th>Rate</th><th class="num">Value</th><th class="num">GST</th><th class="num">Total</th></tr></thead><tbody>
         ${r.invoices.length ? r.invoices.map((x) => html`<tr><td>${x.invoiceNo}</td><td>${dayName(x.day)}</td><td>${x.guestName}${x.billToName ? html`<div class="small quiet">${x.billToName}${x.billToGstin ? ` · ${x.billToGstin}` : ''}</div>` : ''}</td><td>${x.room}</td>
@@ -3261,6 +3262,22 @@ async function roomsReportTab(head, from, to) {
   ui.roomsRep = r;
   rerender();
 }
+/** Room revenue by day (25 Nov 2026): what each night earned, rooms and beds, with and without GST; not advances or payments. */
+function roomRevenueTable(rv, invoicedTaxable) {
+  const T = rv.totals;
+  const tot = (k) => rs(T[k]);
+  return html`<section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Room revenue by day</h2><button class="btn" type="button" data-act="revCsv">Download (CSV)</button></div>
+    <p class="small quiet">What each night earned: each stay's room rent split equally over its nights, guests in house counted up to ${dayName(rv.upTo)}. Advances and payments are not revenue and are not here. Extra charges and discounts count on the day they were added.</p>
+    <div class="scroll"><table class="t"><thead><tr><th>Date</th><th class="num">Rooms</th><th class="num">Beds</th><th class="num">Rooms revenue</th><th class="num">Beds revenue</th><th class="num">Before GST</th><th class="num">GST</th><th class="num">With GST</th><th class="num">ADR</th><th class="num">Occupancy</th></tr></thead><tbody>
+      ${rv.days.map((d) => html`<tr><td>${dayName(d.day)}${d.notInvoicedPaise ? html`<div class="small quiet">${rs(d.notInvoicedPaise)} not invoiced yet</div>` : ''}${d.unknownNights ? html`<div class="small" style="color:var(--warn)">${plural(d.unknownNights, 'night')} rent not known</div>` : ''}${d.noShowPaise ? html`<div class="small quiet">+ ${rs(d.noShowPaise)} no-show kept</div>` : ''}</td>
+        <td class="num">${d.roomsSold}</td><td class="num">${d.bedsSold}</td><td class="num">${rs(d.roomsPaise)}</td><td class="num">${rs(d.bedsPaise)}</td>
+        <td class="num">${rs(d.taxablePaise)}</td><td class="num">${rs(d.gstPaise)}</td><td class="num"><strong>${rs(d.grossPaise)}</strong></td><td class="num">${d.adrPaise == null ? '—' : rs(d.adrPaise)}</td><td class="num">${d.occupancyPct == null ? '—' : `${d.occupancyPct}%`}</td></tr>`)}
+      <tr style="font-weight:700"><td>Total</td><td class="num">${T.roomsSold}</td><td class="num">${T.bedsSold}</td><td class="num">${tot('roomsPaise')}</td><td class="num">${tot('bedsPaise')}</td><td class="num">${tot('taxablePaise')}</td><td class="num">${tot('gstPaise')}</td><td class="num">${tot('grossPaise')}</td><td></td><td></td></tr>
+    </tbody></table></div>
+    <div class="small quiet" style="margin-top:6px">${T.notInvoicedPaise ? `${rs(T.notInvoicedPaise)} of it is from guests not checked out yet (invoiced at check-out). ` : ''}${T.unknownNights ? `${plural(T.unknownNights, 'night')} from before the POS have no known rent. ` : ''}${T.noShowPaise ? `No-show charges kept: ${rs(T.noShowPaise)}. ` : ''}Room invoices in these dates (made at check-out, before GST): ${rs(invoicedTaxable)}.</div></section>`;
+}
+actions.revCsv = () => downloadCsv(`room-revenue-${ui.roomsRep.from}-to-${ui.roomsRep.to}.csv`, [['Date', 'Rooms sold', 'Beds sold', 'Rooms revenue', 'Beds revenue', 'Before GST', 'GST', 'With GST', 'ADR', 'Occupancy %', 'Not invoiced yet', 'Nights rent not known', 'No-show kept'],
+  ...ui.roomsRep.byDay.days.map((d) => [d.day, d.roomsSold, d.bedsSold, rupees(d.roomsPaise), rupees(d.bedsPaise), rupees(d.taxablePaise), rupees(d.gstPaise), rupees(d.grossPaise), d.adrPaise == null ? '' : rupees(d.adrPaise), d.occupancyPct ?? '', rupees(d.notInvoicedPaise), d.unknownNights, rupees(d.noShowPaise)])]);
 actions.roomsCsv = () => downloadCsv(`room-invoices-${ui.roomsRep.from}-to-${ui.roomsRep.to}.csv`, [['Invoice', 'Shift day', 'Guest', 'Company', 'GSTIN', 'Room', 'Check-in', 'Check-out', 'Nights', 'GST rate', 'Value', 'CGST', 'SGST', 'Total'],
   ...ui.roomsRep.invoices.map((x) => [x.invoiceNo, x.day, x.guestName, x.billToName ?? '', x.billToGstin ?? '', x.room, x.checkIn, x.checkOut, x.nights, `${x.gstRateBp / 100}%`, rupees(x.taxablePaise), rupees(x.cgstPaise), rupees(x.sgstPaise), rupees(x.totalPaise)])]);
 async function gstTab(head, month) {
