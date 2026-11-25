@@ -6,6 +6,7 @@ import { all, one, stmt, type DB } from './db';
 import { cardMatchStatements } from './cards';
 import { ADVANCE_DAYS, ADVANCE_TAG } from './extra';
 import { addDays, shiftWindow } from './time';
+import { shiftPlans } from './plans';
 
 export interface CardAdvance { paymentId: string; amountPaise: number; paidAt: number; txId: string; txDay: string; what: string; scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null }
 
@@ -18,13 +19,9 @@ export function cardAdvances(db: DB, businessId: string, day: string) {
     ORDER BY s.paid_at`, businessId, shiftWindow(addDays(day, -ADVANCE_DAYS)).from, shiftWindow(day).to, `%${ADVANCE_TAG}%`);
 }
 
-/** Choices kept in the audit log until the save: the last word for each payment stands. */
+/** Card advances chosen for bills of this shift (card_advance plans): the payment and the bill, and the plan. */
 export async function cardAdvancePlans(db: DB, businessId: string, day: string) {
-  const rows = await all<{ action: string; rowId: string; after: string }>(db, `SELECT action, row_id AS rowId, after FROM audit_log
-    WHERE business_id = ? AND action IN ('card.advance_planned', 'card.advance_unplanned') AND json_extract(after, '$.shiftDay') = ? ORDER BY id`, businessId, day);
-  const last = new Map<string, { action: string; comparisonId: string }>();
-  for (const r of rows) last.set(r.rowId, { action: r.action, comparisonId: (JSON.parse(r.after) as { comparisonId: string }).comparisonId });
-  return [...last].filter(([, x]) => x.action === 'card.advance_planned').map(([paymentId, x]) => ({ paymentId, comparisonId: x.comparisonId }));
+  return (await shiftPlans(db, businessId, day, ['card_advance'])).map((p) => ({ planId: p.id, paymentId: p.cardPaymentIds[0], comparisonId: p.comparisonIds[0] }));
 }
 
 /** The booking goes, the sale takes the advance's day, and the payment is matched to the sale. Works on a sale made earlier in the same batch. */

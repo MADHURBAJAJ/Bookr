@@ -25,7 +25,7 @@ describe('several pairs matched on save at once', () => {
     expect(r.open.credits.map((c: any) => c.id)).toEqual(expect.arrayContaining([a, b, odd]));
     const url = `/businesses/${h.bid}/shifts/2026-10-31/choices`;
     const acc = h.clients.accountant;
-    const count = async () => (await sql`SELECT count(*) AS n FROM shift_choices WHERE business_id = ${h.bid}`)[0].n;
+    const count = async () => (await sql`SELECT count(*) AS n FROM shift_plans WHERE business_id = ${h.bid}`)[0].n;
 
     expect((await h.clients.entry_staff.post(url, { pairs: [{ bankRowId: a, comparisonIds: [bill('2610311')] }] })).status).toBe(403);
     // The same credit or bill twice, or one pair that does not add up: nothing is saved.

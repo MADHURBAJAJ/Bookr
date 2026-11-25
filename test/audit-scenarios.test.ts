@@ -389,7 +389,7 @@ describe('a same-sale choice made before saving', () => {
     await h.software([['2610311', '31 12:00', 'UPI', '650'], ['2610312', '31 18:00', 'UPI', '650']]);
     await h.register([{ no: '2610311', amount: '650', pays: [['upi', '650', 'UPI Bank 2']] }, { no: '2610312', amount: '650', pays: [['upi', '650', 'UPI Bank 2']] }]);
     const [booked] = await h.credits([['30 19:00', 650], ['1 08:30', 3]], 'HUF B');
-    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${booked}/book`, { headId: h.fnb, note: 'Sale' })).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${booked}/book`, { headId: h.fnb, note: 'Sale', override: { reason: 'Booked before its bill (test)' } })).json.ok).toBe(true);
     const v = await h.view();
     const a = await h.clients.owner.post(`/businesses/${h.bid}/comparisons/${bill(v, '2610311').id}/same-sale`, { rowId: booked });
     const b = await h.clients.owner.post(`/businesses/${h.bid}/comparisons/${bill(v, '2610312').id}/same-sale`, { rowId: booked });

@@ -1,6 +1,6 @@
 // The card picture of a shift not saved yet (approved 10 Nov 2026): its card bills as saving would count them, against
 // the card machine's payments in the shift. Nothing is written: what Bookr would match on save is shown, and a person
-// may choose a match now (kept in shift_choices, made on Save). The rest is told, to fix before or after saving.
+// may choose a match now (kept as a plan of the shift, made on Save). The rest is told, to fix before or after saving.
 
 import { all, one, type DB } from './db';
 import { addDays, shiftWindow } from './time';
@@ -40,8 +40,8 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const covered = (last?.paid ?? 0) >= w.to || (last?.settled ?? '') >= addDays(day, 2);
   const inShift = (p: CardPayment) => p.paid_at >= w.from && p.paid_at < w.to;
   // Payments chosen on another shift's Reconcile are held there.
-  const heldElsewhere = new Set((await all<{ card_payment_id: string }>(db, `SELECT card_payment_id FROM shift_choices WHERE business_id = ? AND kind = 'card_match'
-    AND shift_day <> ?`, businessId, day)).map((x) => x.card_payment_id));
+  const heldElsewhere = new Set((await all<{ card_payment_id: string }>(db, `SELECT i.card_payment_id FROM shift_plans p JOIN shift_plan_items i ON i.plan_id = p.id WHERE p.business_id = ? AND i.card_payment_id IS NOT NULL
+    AND p.shift_day <> ?`, businessId, day)).map((x) => x.card_payment_id));
 
   // This shift's card sales as saving would make them: one per bill (its card parts added up).
   const ids = [...new Set(rows.map((r) => r.c.id))];
@@ -71,7 +71,7 @@ export async function trialCards(db: DB, businessId: string, day: string) {
   const [upiCredits, upiChosen, savedUpi] = await Promise.all([
     all<{ amount_paise: number; posted_at: number }>(db, `SELECT amount_paise, posted_at FROM bank_rows WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched'
       AND posted_at >= ? AND posted_at < ?`, businessId, w.from - EDGE_MS, w.to + EDGE_MS),
-    all<{ comparison_ids: string }>(db, "SELECT comparison_ids FROM shift_choices WHERE business_id = ? AND shift_day = ? AND kind = 'bank_match'", businessId, day),
+    all<{ comparison_ids: string }>(db, "SELECT comparison_ids FROM shift_plans WHERE business_id = ? AND shift_day = ? AND kind IN ('bank_match', 'bill_parts', 'same_sale')", businessId, day),
     upiWaitingSaved(db, businessId, addDays(day, -1), addDays(day, 1)),
   ]);
   const upiChosenIds = new Set(upiChosen.flatMap((k) => JSON.parse(k.comparison_ids) as string[]));

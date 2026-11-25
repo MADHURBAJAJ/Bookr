@@ -126,7 +126,7 @@ describe('money out', () => {
     // Booked from the line in one step: an approved expense on the bank account, of the line's amount and shift, tied to it.
     const milk = await line('Milk');
     const r = (await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/book-many`, { items: [{ rowId: milk.id, headId: h.util, party: 'Dairy Fresh', item: 'Milk for tea' }] })).json;
-    expect(r).toEqual({ booked: 1, skipped: [] });
+    expect(r).toEqual({ booked: 1, skipped: [], look: [] });
     const [tx] = await sql`SELECT t.* FROM transactions t JOIN bank_rows r ON r.transaction_id = t.id WHERE r.id = ${milk.id}`;
     expect(tx).toMatchObject({ type: 'expense', status: 'approved', amount_paise: 5000, account_id: h.acc, head_id: h.util, matched_bank_row: milk.id, narration: 'Milk for tea' });
     expect(await line('Milk')).toMatchObject({ status: 'booked', head: 'Utilities', party: 'Dairy Fresh', narration: 'Milk for tea' });

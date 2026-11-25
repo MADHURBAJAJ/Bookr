@@ -78,7 +78,8 @@ changesRoutes.get('/businesses/:businessId/shifts/:day/changes', requireRole('ba
     all<{ id: string; billNo: string; status: string }>(db, 'SELECT id, bill_no AS billNo, status FROM register_rows WHERE business_id = ? AND shift_day = ?', bid, day),
     one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day),
     all<{ id: string; bankRowId: string | null; cardId: string | null }>(db,
-      'SELECT id, bank_row_id AS bankRowId, card_payment_id AS cardId FROM shift_choices WHERE business_id = ? AND shift_day = ?', bid, day),
+      `SELECT p.id, i.bank_row_id AS bankRowId, i.card_payment_id AS cardId FROM shift_plans p JOIN shift_plan_items i ON i.plan_id = p.id
+        WHERE p.business_id = ? AND p.shift_day = ? AND p.kind IN ('bank_match', 'card_match')`, bid, day),
   ]);
   const cmp = new Map(cmps.map((x) => [x.id, x]));
   const reg = new Map(regs.map((x) => [x.id, x]));

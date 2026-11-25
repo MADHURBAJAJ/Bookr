@@ -19,7 +19,7 @@ describe('C10 UPI matched on save', () => {
     await h.register([{ no: '2610401', amount: '450', pays: [['upi', '450']] }, { no: '2610402', amount: '620', pays: [['upi', '620']] },
       { no: '2610403', amount: '650', pays: [['upi', '650']] }, { no: '2610404', amount: '100', pays: [['cash', '100']] }]);
     const [booked] = await h.credits([['30 19:00', 650]]);
-    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${booked}/book`, { headId: h.fnb, note: 'Sale' })).status).toBe(200);
+    expect((await h.clients.owner.post(`/businesses/${h.bid}/bank-rows/${booked}/book`, { headId: h.fnb, note: 'Sale', override: { reason: 'Booked before its bill (test)' } })).json.ok).toBe(true);
     const [clear, far] = await h.credits([['31 14:02', 450], ['1 06:30', 620], ['1 08:30', 3]]);
     const acc = h.clients.accountant;
     // A credit chosen by hand for 2610402, and the booked 30 Oct credit as the same sale as 2610403.
@@ -99,7 +99,7 @@ describe('C12 advances joined to a room bill', () => {
     const adv = await h.swipe('30 13:00', 5000);
     expect((await acc.post(`${base}/cards/${adv}/book`, { billType: 'room', item: 'Advance: Mr Sharma, room 12' })).status).toBe(200);
     const [upiAdv] = await h.credits([['30 18:00', 2000]]);
-    expect((await h.clients.owner.post(`${base}/bank-rows/${upiAdv}/book`, { headId: await roomHead(h), note: 'Advance: Ms Das, room 5' })).status).toBe(200);
+    expect((await h.clients.owner.post(`${base}/bank-rows/${upiAdv}/book`, { headId: await roomHead(h), note: 'Advance: Ms Das, room 5', override: { reason: 'Booked before its bill (test)' } })).json.ok).toBe(true);
     await h.software([['2610421', '31 11:00', 'CASH', '12000'], ['2610422', '31 12:00', 'UPI', '2000']]);
     await h.register([{ no: '2610421', amount: '12000', pays: [['card', '5000'], ['cash', '7000']] }, { no: '2610422', amount: '2000', pays: [['upi', '2000']] }]);
     await sql`UPDATE register_rows SET bill_type = 'room' WHERE business_id = ${h.bid}`;

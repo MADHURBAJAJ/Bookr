@@ -5,6 +5,7 @@ import { matchStatements, settleOnCredit } from './bank';
 import type { Card } from './explain';
 import { addDays, shiftWindow } from './time';
 import { ADVANCE_DAYS, ADVANCE_TAG } from './extra';
+import { shiftPlans } from './plans';
 
 const WATCH = 7;
 /** Small amounts repeat all day: with more than one bill of the amount, they are not worth a card. */
@@ -88,26 +89,15 @@ export async function sameSaleCards(db: DB, businessId: string, day: string, ski
   return pairBooked(rows.filter((r) => !skip.has(r.txId)), booked, day).map((p) => sameSaleCard(`/businesses/${businessId}`, p, counted.get(p.bill.txId!) ?? true));
 }
 
-// ---- Before confirming: the wish is kept in the audit log until the confirm makes the sale it applies to.
+// ---- Before confirming: the wish is a same_sale plan of the shift until the save makes the sale it applies to.
 
+/** Same-sale plans of this shift whose credit is still booked: the credit and the bill. */
 export async function plansFor(db: DB, businessId: string, day: string) {
-  const rows = await all<{ rowId: string; after: string }>(db, `SELECT a.row_id AS rowId, a.after FROM audit_log a
-    WHERE a.business_id = ? AND a.action = 'bank.same_sale_planned' AND json_extract(a.after, '$.shiftDay') = ?
-      AND NOT EXISTS (SELECT 1 FROM audit_log u WHERE u.business_id = a.business_id AND u.action = 'bank.same_sale_unplanned' AND u.row_id = a.row_id AND u.id > a.id)
-      AND EXISTS (SELECT 1 FROM bank_rows r WHERE r.id = a.row_id AND r.status = 'booked') ORDER BY a.id`, businessId, day);
-  // One credit joins one bill, and a bill one credit: the first choice stands (audit, 9 Nov 2026).
-  const seenRow = new Set<string>();
-  const seenCmp = new Set<string>();
-  return rows.map((r) => ({ rowId: r.rowId, comparisonId: (JSON.parse(r.after) as { comparisonId: string }).comparisonId }))
-    .filter((p) => { if (seenRow.has(p.rowId) || seenCmp.has(p.comparisonId)) return false; seenRow.add(p.rowId); seenCmp.add(p.comparisonId); return true; });
-}
-
-/** Is this credit, or this bill, already chosen to be one sale with another (any shift, not undone)? */
-export async function planTaken(db: DB, businessId: string, rowId: string, comparisonId: string) {
-  return !!(await one(db, `SELECT 1 AS x FROM audit_log a
-    WHERE a.business_id = ? AND a.action = 'bank.same_sale_planned' AND (a.row_id = ? OR json_extract(a.after, '$.comparisonId') = ?)
-      AND NOT EXISTS (SELECT 1 FROM audit_log u WHERE u.business_id = a.business_id AND u.action = 'bank.same_sale_unplanned' AND u.row_id = a.row_id AND u.id > a.id)
-      AND EXISTS (SELECT 1 FROM bank_rows r WHERE r.id = a.row_id AND r.status = 'booked')`, businessId, rowId, comparisonId));
+  const plans = await shiftPlans(db, businessId, day, ['same_sale']);
+  if (!plans.length) return [];
+  const ids = plans.map((p) => p.bankRowIds[0]);
+  const booked = new Set((await all<{ id: string }>(db, `SELECT id FROM bank_rows WHERE business_id = ? AND status = 'booked' AND id IN (${ids.map(() => '?').join(',')})`, businessId, ...ids)).map((r) => r.id));
+  return plans.filter((p) => booked.has(p.bankRowIds[0])).map((p) => ({ planId: p.id, rowId: p.bankRowIds[0], comparisonId: p.comparisonIds[0] }));
 }
 
 // ---- Joining and taking it apart
@@ -160,21 +150,42 @@ export async function undoSameSaleStatements(db: DB, businessId: string, rowId: 
  * 24 Nov 2026). txId: a saved sale the credit can be matched to now; without it the shift is not saved yet and the
  * credit is matched when it is.
  */
-export async function waitingBillsLike(db: DB, businessId: string, amountPaise: number, day: string) {
-  if (amountPaise < SMALL_PAISE) return [];
+export async function waitingBillsLike(db: DB, businessId: string, amountPaise: number, day: string, rowId: string | null = null) {
+  // Any amount (the booking gate, 25 Nov 2026: small credits are checked too). Not a bill closed by a person, nor one
+  // already chosen to be paid by another credit on Reconcile.
   const from = addDays(day, -WATCH);
   const to = addDays(day, WATCH);
-  return all<{ billNo: string; day: string; txId: string | null; billPaise: number; upiPaise: number }>(db, `
-    SELECT t.bill_no AS billNo, t.shift_day AS day, t.id AS txId, t.amount_paise AS upiPaise,
-      (SELECT sum(x.amount_paise) FROM transactions x WHERE x.business_id = t.business_id AND x.type = 'income' AND x.bill_no = t.bill_no AND x.shift_day = t.shift_day) AS billPaise
-    FROM transactions t
-    WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
-      AND t.amount_paise = ? AND t.shift_day BETWEEN ? AND ?
-    UNION
-    SELECT c.bill_no, c.shift_day, NULL, ?, coalesce(c.rg_amount_paise, c.sw_amount_paise, ?)
-    FROM bill_comparisons c LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
-    WHERE c.business_id = ? AND coalesce(s.status, '') <> 'confirmed' AND c.closed_at IS NULL AND coalesce(c.decision, '') NOT IN ('leave_out', 'carry_forward')
-      AND c.shift_day BETWEEN ? AND ? AND ((c.rg_mode = 'upi' AND c.rg_amount_paise = ?) OR (c.sw_mode = 'upi' AND c.sw_amount_paise = ?)
-        OR (c.register_row_id IS NOT NULL AND (SELECT sum(p.amount_paise) FROM register_payments p WHERE p.register_row_id = c.register_row_id AND p.mode = 'upi') = ?))
-    LIMIT 5`, businessId, amountPaise, from, to, amountPaise, amountPaise, businessId, from, to, amountPaise, amountPaise, amountPaise);
+  type Waiting = { billNo: string; day: string; txId: string | null; billPaise: number; upiPaise: number };
+  const [saved, open] = await Promise.all([
+    all<Waiting>(db, `
+      SELECT t.bill_no AS billNo, t.shift_day AS day, t.id AS txId, t.amount_paise AS upiPaise,
+        (SELECT sum(x.amount_paise) FROM transactions x WHERE x.business_id = t.business_id AND x.type = 'income' AND x.bill_no = t.bill_no AND x.shift_day = t.shift_day) AS billPaise
+      FROM transactions t
+      WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
+        AND t.amount_paise = ? AND t.shift_day BETWEEN ? AND ? AND t.id NOT IN (SELECT transaction_id FROM closed_bills WHERE business_id = t.business_id)
+        AND NOT EXISTS (SELECT 1 FROM shift_plans p, json_each(p.comparison_ids) j WHERE p.business_id = t.business_id AND j.value = t.id)
+      ORDER BY t.shift_day, t.bill_no LIMIT 5`, businessId, amountPaise, from, to),
+    all<Waiting>(db, `
+      SELECT c.bill_no AS billNo, c.shift_day AS day, NULL AS txId, ? AS upiPaise, coalesce(c.rg_amount_paise, c.sw_amount_paise, ?) AS billPaise
+      FROM bill_comparisons c LEFT JOIN shifts s ON s.business_id = c.business_id AND s.shift_day = c.shift_day
+      WHERE c.business_id = ? AND coalesce(s.status, '') <> 'confirmed' AND c.closed_at IS NULL AND coalesce(c.decision, '') NOT IN ('leave_out', 'carry_forward')
+        AND c.shift_day BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM shift_plans p, json_each(p.comparison_ids) j WHERE p.business_id = c.business_id AND j.value = c.id)
+        AND ((c.rg_mode = 'upi' AND c.rg_amount_paise = ?) OR (c.sw_mode = 'upi' AND c.sw_amount_paise = ?)
+          OR (c.register_row_id IS NOT NULL AND (SELECT sum(p.amount_paise) FROM register_payments p WHERE p.register_row_id = c.register_row_id AND p.mode = 'upi') = ?))
+      ORDER BY c.shift_day, c.bill_no LIMIT 20`, amountPaise, amountPaise, businessId, from, to, amountPaise, amountPaise, amountPaise),
+  ]);
+  // A shift not saved yet pairs its bills with the credits in its hours when it is saved: a bill there needs this credit
+  // only when the other free credits of this amount in those hours are fewer than its bills of this amount (20 Nov 2026,
+  // more "could be" credits than bills: the rest are extra and bookable).
+  const byDay = new Map<string, Waiting[]>();
+  for (const b of open) byDay.set(b.day, [...(byDay.get(b.day) ?? []), b]);
+  const need: Waiting[] = [];
+  for (const [d, bills] of byDay) {
+    const w = shiftWindow(d);
+    const free = await one<{ n: number }>(db, `SELECT count(*) AS n FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.direction = 'CR' AND r.status = 'unmatched'
+      AND r.amount_paise = ? AND r.posted_at >= ? AND r.posted_at < ? AND r.id <> ? AND NOT EXISTS (SELECT 1 FROM shift_plan_items i WHERE i.bank_row_id = r.id)`,
+      businessId, amountPaise, w.from - 3600e3, w.to + 3 * 3600e3, rowId ?? '');
+    if ((free?.n ?? 0) < bills.length) need.push(...bills);
+  }
+  return [...saved, ...need].slice(0, 5);
 }

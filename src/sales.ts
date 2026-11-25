@@ -9,6 +9,7 @@ import { settleOnCredit } from './bank';
 import { spillGroupDiscount } from './discounts';
 import { bookedTx, plansFor, sameSaleStatements } from './sameSale';
 import { cardAdvancePlans, joinCardAdvanceStatements } from './cardAdvance';
+import { dropShiftPlansStatements, shiftPlans, type Plan } from './plans';
 import { all, newId, now, one, stmt, type DB, SUMMARY_IN_USE } from './db';
 import { twoDaysFor, type TwoDays } from './twoDays';
 import { addDays, istDay, missingInWindow, shiftWindow, type Gap } from './time';
@@ -545,7 +546,7 @@ const REISSUE_MIN = 30;
 
 /** Comparisons as the bank evidence sees them; bills paid together are left to UPI matching (one credit, many bills). */
 function evidenceBills(comps: (Comparison & { paid_at: number | null })[], grouped: Set<string>, paysByRow: Map<string, RgPay[]>,
-  chosen: Map<string, { id: number; creditIds: string[] }> = new Map()): EvidenceBill[] {
+  chosen: Map<string, { id: string; creditIds: string[] }> = new Map()): EvidenceBill[] {
   return comps.map((c) => ({ chosen: chosen.get(c.id),
     id: c.id, billNo: c.bill_no, paidAt: c.paid_at, difference: c.difference, decision: c.decision, grouped: !!c.register_row_id && grouped.has(c.register_row_id),
     // Sides that agree after a discount or tip (24 Nov 2026): saving books what the register says was received, so only
@@ -574,36 +575,22 @@ export async function creditsForShift(db: DB, businessId: string, day: string) {
     shiftCredits(db, businessId, prev),
   ]);
   const grouped = new Set(groups.flatMap((g) => [g.headId, ...rg.filter((r) => r.paid_with_row_id === g.headId).map((r) => r.id)]));
-  const { used } = pairEvidence(evidenceBills(comps, grouped, paysByRow, await billPartsChosen(db, businessId, comps.map((c) => c.id))), earlier, shiftWindow(prev));
+  const { used } = pairEvidence(evidenceBills(comps, grouped, paysByRow, await billPartsChosen(db, businessId, comps.map((c) => c.id), prev)), earlier, shiftWindow(prev));
   return credits.filter((c) => !used.has(c.id));
 }
 
-/**
- * A bill paid in several goes, its credits ticked by a person (25 Nov 2026): audit 'bank.bill_parts' on the bill's
- * comparison with the credits; Undo adds 'bank.bill_parts_undone' with row_id = that audit's id. The latest not undone counts.
- */
-export async function billPartsChosen(db: DB, businessId: string, comparisonIds: string[]) {
-  if (!comparisonIds.length) return new Map<string, { id: number; creditIds: string[] }>();
-  const rows: { id: number; row_id: string; after: string }[] = [];
-  for (let i = 0; i < comparisonIds.length; i += 80) {
-    const ids = comparisonIds.slice(i, i + 80);
-    rows.push(...await all<{ id: number; row_id: string; after: string }>(db, `SELECT a.id, a.row_id, a.after FROM audit_log a WHERE a.business_id = ? AND a.action = 'bank.bill_parts'
-      AND a.row_id IN (${ids.map(() => '?').join(',')})
-      AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'bank.bill_parts_undone' AND x.row_id = CAST(a.id AS TEXT))`, businessId, ...ids));
-  }
-  rows.sort((a, b) => a.id - b.id);
-  return new Map(rows.map((r) => [r.row_id, { id: r.id, creditIds: (JSON.parse(r.after) as { creditIds: string[] }).creditIds }]));
+/** A bill paid in several goes, its credits ticked by a person (25 Nov 2026): its bill_parts plan, by comparison. */
+export async function billPartsChosen(db: DB, businessId: string, comparisonIds: string[], day: string) {
+  const want = new Set(comparisonIds);
+  return new Map((await shiftPlans(db, businessId, day, ['bill_parts'])).filter((p) => want.has(p.comparisonIds[0]))
+    .map((p) => [p.comparisonIds[0], { id: p.id, creditIds: p.bankRowIds }]));
 }
 
-/**
- * Match all on a group paid in parts (approved 23 Nov 2026): audit 'bank.group_parts' on the group's head row with the
- * credits; Undo adds 'bank.group_parts_undone' with row_id = that audit's id. The latest not undone counts.
- */
-export async function groupPartsAccepted(db: DB, businessId: string, headIds: string[]) {
-  const rows = await all<{ id: number; row_id: string; after: string }>(db, `SELECT a.id, a.row_id, a.after FROM audit_log a WHERE a.business_id = ? AND a.action = 'bank.group_parts'
-    AND a.row_id IN (${headIds.map(() => '?').join(',')})
-    AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'bank.group_parts_undone' AND x.row_id = CAST(a.id AS TEXT)) ORDER BY a.id`, businessId, ...headIds);
-  return new Map(rows.map((r) => [r.row_id, { id: r.id, creditIds: (JSON.parse(r.after) as { creditIds: string[] }).creditIds }]));
+/** Match all on a group paid in parts (approved 23 Nov 2026): its group_parts plan, by the group's head row. */
+export async function groupPartsAccepted(db: DB, businessId: string, headIds: string[], day: string) {
+  const want = new Set(headIds);
+  return new Map((await shiftPlans(db, businessId, day, ['group_parts'])).filter((p) => p.headRowId && want.has(p.headRowId))
+    .map((p) => [p.headRowId!, { id: p.id, creditIds: p.bankRowIds }]));
 }
 
 /** Shares credits over sales in order, each sale taking what it still needs (a group paid in parts). */
@@ -776,7 +763,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
   const upiTotal = (g: PaidGroup) => upiOf(g).reduce((t, p) => t + p.amount_paise, 0);
   let groupCredits = new Map<string, EvidenceCredit>();
   let groupParts = new Map<string, EvidenceCredit[]>();
-  const partsOk = groups.length ? await groupPartsAccepted(db, businessId, groups.map((g) => g.headId)) : new Map<string, { id: number; creditIds: string[] }>();
+  const partsOk = groups.length ? await groupPartsAccepted(db, businessId, groups.map((g) => g.headId), day) : new Map<string, { id: string; creditIds: string[] }>();
   const near = new Map<string, { creditId: string; amountPaise: number; postedAt: number; label: string | null; minutes: number }>();
   let bank: { covered: boolean; lastBankAt: number | null; evidence: Map<string, Evidence>; noBill: { id: string; amount: number; postedAt: number }[]; left: string[]; noUpi: Map<string, NoUpi>; open: OpenCredit[] } | null = null;
   if (shift?.status !== 'confirmed') {
@@ -785,7 +772,7 @@ export async function shiftView(db: DB, businessId: string, day: string) {
     // own credit, and into no UPI column's account. The closer of a credit and a machine payment pays a bill.
     const machineCredits: EvidenceCredit[] = onMachine.map((p) => ({ id: p.id, amount: p.amount_paise, postedAt: p.paid_at, label: null, machine: { settledOn: p.settled_on, label: machineLabel(p) } }));
     const witnesses = [...credits, ...machineCredits];
-    const ebills = evidenceBills(comparisons, grouped, paysByRow, await billPartsChosen(db, businessId, comparisons.map((c) => c.id)));
+    const ebills = evidenceBills(comparisons, grouped, paysByRow, await billPartsChosen(db, businessId, comparisons.map((c) => c.id), day));
     const { evidence, used } = pairEvidence(ebills, witnesses, cov.window);
     groupCredits = pairGroups(groups.map((g) => ({ id: g.headId, upiPaise: upiTotal(g), labels: upiOf(g).map((p) => p.column_label).filter(Boolean).join(',') || null })), witnesses, used, cov.window);
     // Paid in parts (approved 23 Nov 2026): a group with no one credit, paid in two to four.
@@ -1147,7 +1134,6 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     else skipped.push(`${rows.find((r) => r.c.id === plan.comparisonId)?.c.bill_no ?? '?'} (card advance)`);
   }
   if (choices.length || cardChosen.length) {
-    statements.push(stmt(db, 'DELETE FROM shift_choices WHERE business_id = ? AND shift_day = ?', businessId, day));
     if (skipped.length) statements.push(stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
       VALUES (?, ?, 'shift.choices_skipped', 'shifts', ?, NULL, ?, ?)`, businessId, userId, shift!.id, JSON.stringify({ shiftDay: day, bills: skipped }), t));
   }
@@ -1242,47 +1228,64 @@ export async function confirmShift(db: DB, businessId: string, day: string, user
     matched += 1;
   }
   if (dropped.length) return { blockers: dropped };
+  // Every plan of the shift goes with the save: applied above, or said as skipped (one list, 25 Nov 2026).
+  statements.push(...dropShiftPlansStatements(db, businessId, day));
   if (matched) statements.push(...settleOnCredit(db, businessId));
   await db.batch(statements);
   return { rows: rows.length, totalPaise: rows.reduce((s, r) => s + r.amount, 0), matched, skipped };
 }
 
-/** Matches chosen on Reconcile before saving, with their credit (still open or not) and their bills' numbers. */
-export async function shiftChoices(db: DB, businessId: string, day: string) {
-  const list = await all<{ id: string; bank_row_id: string; comparison_ids: string; created_at: number; by: string | null; amount_paise: number; posted_at: number;
-    status: string; account: string | null }>(db, `
-    SELECT k.id, k.bank_row_id, k.comparison_ids, k.created_at, u.name AS by, r.amount_paise, r.posted_at, r.status, a.name AS account
-    FROM shift_choices k JOIN bank_rows r ON r.id = k.bank_row_id LEFT JOIN accounts a ON a.id = r.account_id LEFT JOIN users u ON u.id = k.created_by
-    WHERE k.business_id = ? AND k.shift_day = ? AND k.kind = 'bank_match' ORDER BY k.created_at`, businessId, day);
-  const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
-  const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
-  // A card bill of an earlier shift settled here is chosen by its sale's id.
-  const others = [...new Set(list.flatMap((k) => JSON.parse(k.comparison_ids) as string[]))].filter((id) => !billOf.has(id));
+/** The bill numbers of comparisons of this shift, or of sales of earlier shifts paid here (chosen by the sale's id). */
+async function billNames(db: DB, businessId: string, day: string, ids: string[]) {
+  const billOf = new Map<string, string>();
+  if (!ids.length) return billOf;
+  for (const c of await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day)) billOf.set(c.id, c.bill_no);
+  const others = [...new Set(ids)].filter((id) => !billOf.has(id));
   if (others.length) for (const x of await all<{ id: string; bill_no: string }>(db, `SELECT id, bill_no FROM transactions WHERE business_id = ? AND id IN (${others.map(() => '?').join(',')})`, businessId, ...others)) billOf.set(x.id, x.bill_no);
-  return list.map((k) => {
-    const comparisonIds = JSON.parse(k.comparison_ids) as string[];
-    return { id: k.id, bankRowId: k.bank_row_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, postedAt: k.posted_at,
-      accountName: k.account, open: k.status === 'unmatched', by: k.by, at: k.created_at };
+  return billOf;
+}
+
+/** Matches chosen on Reconcile before saving (bank_match plans), with their credit (still open or not) and their bills' numbers. */
+export async function shiftChoices(db: DB, businessId: string, day: string) {
+  const plans = await shiftPlans(db, businessId, day, ['bank_match']);
+  if (!plans.length) return [];
+  const ids = plans.map((p) => p.bankRowIds[0]);
+  const [rows, users, billOf] = await Promise.all([
+    all<{ id: string; amount_paise: number; posted_at: number; status: string; account: string | null }>(db, `SELECT r.id, r.amount_paise, r.posted_at, r.status, a.name AS account
+      FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id WHERE r.business_id = ? AND r.id IN (${ids.map(() => '?').join(',')})`, businessId, ...ids),
+    userNames(db, plans),
+    billNames(db, businessId, day, plans.flatMap((p) => p.comparisonIds)),
+  ]);
+  const rowOf = new Map(rows.map((r) => [r.id, r]));
+  return plans.filter((p) => rowOf.has(p.bankRowIds[0])).map((p) => {
+    const r = rowOf.get(p.bankRowIds[0])!;
+    return { id: p.id, bankRowId: r.id, comparisonIds: p.comparisonIds, billNos: p.comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: r.amount_paise, postedAt: r.posted_at,
+      accountName: r.account, open: r.status === 'unmatched', by: p.createdBy ? users.get(p.createdBy) ?? null : null, at: p.createdAt };
   });
 }
 
-/** Card matches chosen on Reconcile before saving, with their machine payment (still not matched or not) and their bills. */
+async function userNames(db: DB, plans: Plan[]) {
+  const ids = [...new Set(plans.map((p) => p.createdBy).filter((x): x is string => !!x))];
+  return new Map(ids.length ? (await all<{ id: string; name: string | null }>(db, `SELECT id, name FROM users WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids)).map((u) => [u.id, u.name]) : []);
+}
+
+/** Card matches chosen on Reconcile before saving (card_match plans), with their machine payment (still not matched or not) and their bills. */
 export async function cardShiftChoices(db: DB, businessId: string, day: string) {
-  const list = await all<{ id: string; card_payment_id: string; comparison_ids: string; created_at: number; by: string | null; amount_paise: number; paid_at: number;
-    scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null; matched: number }>(db, `
-    SELECT k.id, k.card_payment_id, k.comparison_ids, k.created_at, u.name AS by, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4, s.pay_mode,
-      EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
-    FROM shift_choices k JOIN card_settlements s ON s.id = k.card_payment_id LEFT JOIN users u ON u.id = k.created_by
-    WHERE k.business_id = ? AND k.shift_day = ? AND k.kind = 'card_match' ORDER BY k.created_at`, businessId, day);
-  const cmps = list.length ? await all<{ id: string; bill_no: string }>(db, 'SELECT id, bill_no FROM bill_comparisons WHERE business_id = ? AND shift_day = ?', businessId, day) : [];
-  const billOf = new Map(cmps.map((c) => [c.id, c.bill_no]));
-  // A card bill of an earlier shift settled here is chosen by its sale's id.
-  const others = [...new Set(list.flatMap((k) => JSON.parse(k.comparison_ids) as string[]))].filter((id) => !billOf.has(id));
-  if (others.length) for (const x of await all<{ id: string; bill_no: string }>(db, `SELECT id, bill_no FROM transactions WHERE business_id = ? AND id IN (${others.map(() => '?').join(',')})`, businessId, ...others)) billOf.set(x.id, x.bill_no);
-  return list.map((k) => {
-    const comparisonIds = JSON.parse(k.comparison_ids) as string[];
-    return { id: k.id, paymentId: k.card_payment_id, comparisonIds, billNos: comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, paidAt: k.paid_at,
-      label: machineLabel(k), open: !k.matched, by: k.by, at: k.created_at, upi: isMachineUpi(k) };
+  const plans = await shiftPlans(db, businessId, day, ['card_match']);
+  if (!plans.length) return [];
+  const ids = plans.map((p) => p.cardPaymentIds[0]);
+  const [pays, users, billOf] = await Promise.all([
+    all<{ id: string; amount_paise: number; paid_at: number; scheme: string | null; card_type: string | null; card_last4: string | null; pay_mode: string | null; matched: number }>(db, `
+      SELECT s.id, s.amount_paise, s.paid_at, s.scheme, s.card_type, s.card_last4, s.pay_mode, EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AS matched
+      FROM card_settlements s WHERE s.business_id = ? AND s.id IN (${ids.map(() => '?').join(',')})`, businessId, ...ids),
+    userNames(db, plans),
+    billNames(db, businessId, day, plans.flatMap((p) => p.comparisonIds)),
+  ]);
+  const payOf = new Map(pays.map((x) => [x.id, x]));
+  return plans.filter((p) => payOf.has(p.cardPaymentIds[0])).map((p) => {
+    const k = payOf.get(p.cardPaymentIds[0])!;
+    return { id: p.id, paymentId: k.id, comparisonIds: p.comparisonIds, billNos: p.comparisonIds.map((id) => billOf.get(id) ?? '?'), amountPaise: k.amount_paise, paidAt: k.paid_at,
+      label: machineLabel(k), open: !k.matched, by: p.createdBy ? users.get(p.createdBy) ?? null : null, at: p.createdAt, upi: isMachineUpi(k) };
   });
 }
 
@@ -1688,7 +1691,7 @@ export async function cashBills(db: DB, businessId: string, day: string) {
     const w = shiftWindow(day);
     const [credits, machine] = await Promise.all([
       all<{ id: string; amount_paise: number; posted_at: number; held: string | null }>(db, `SELECT r.id, r.amount_paise, r.posted_at,
-          (SELECT k.comparison_ids FROM shift_choices k WHERE k.bank_row_id = r.id LIMIT 1) AS held FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched'
+          (SELECT p.comparison_ids FROM shift_plan_items k JOIN shift_plans p ON p.id = k.plan_id WHERE k.bank_row_id = r.id LIMIT 1) AS held FROM bank_rows r WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched'
         AND r.posted_at >= ? AND r.posted_at < ?`, businessId, w.from - 3 * 3600e3, w.to + 3 * 3600e3),
       all<{ amount_paise: number; paid_at: number; scheme: string | null }>(db, `SELECT s.amount_paise, s.paid_at, s.scheme FROM card_settlements s WHERE s.business_id = ? AND s.txn_type = 'PURCHASE'
         AND s.paid_at >= ? AND s.paid_at < ? AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id)`, businessId, w.from - 3600e3, w.to + 3600e3),

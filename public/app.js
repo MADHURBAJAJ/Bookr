@@ -246,6 +246,8 @@ const NAV = [
   { key: 'shifts', label: 'Shift', group: 'Daily work', screens: ['bringin', 'review', 'compare', 'compare-old', 'reconcile'], badge: 'shifts', when: (b) => !b.cashBooks },
   // Bank (approved 10 Nov 2026): statements, money in and out, all payments, card settlements, done, as tabs of one page.
   { key: 'bank', label: 'Bank', needs: 'bank.link', screens: ['bank', 'cards', 'money-out'], badge: 'bank' },
+  // Days (approved 25 Nov 2026): is each day's money finished. Needs the shift and the bank, so it is on its own.
+  { key: 'days', label: 'Days', needs: 'bank.link', group: 'Daily work', badge: 'days', when: (b) => !b.cashBooks },
   // WhatsApp inbox (approved 24 Nov 2026): guest payment photos and bills from the WhatsApp groups.
   { key: 'whatsapp', label: 'WhatsApp', needs: 'wa.review', group: 'Daily work', when: (b) => !b.cashBooks },
   // Restaurant POS (approved 14 Nov 2026): its bills, receipts and shift closes, and Connect POS.
@@ -284,7 +286,7 @@ async function fillNavCounts(biz) {
 /** What each menu count shows, from the Today figures. */
 function todayCounts(h, biz) {
   const bank = (h.bookExpenses?.count ?? 0) + (h.upi?.credits.count ?? 0) + (h.cards?.days ?? 0);
-  return { shifts: h.shifts?.count ?? 0, bank, today: todayItems(h, biz).length };
+  return { shifts: h.shifts?.count ?? 0, bank, today: todayItems(h, biz).length, days: h.days ? h.days.total - h.days.closed : 0 };
 }
 
 // The shift being worked on (7 Nov 2026): Review, Compare sales and Reconcile open on the day last worked on anywhere,
@@ -330,7 +332,8 @@ function shiftBar(biz, day, screen) {
   return html`<nav class="shiftbar" aria-label="Shift" data-day="${day}" data-screen="${screen}">
     <div class="sb-day"><a class="btn plain" data-sbstep="-1" href="#" aria-label="Previous shift">‹</a>
       <span class="sb-cal"><button class="btn plain sb-pick" type="button" data-sbpick aria-haspopup="dialog" aria-expanded="false">${dayLabel(day)} shift <span aria-hidden="true">▾</span></button></span>
-      <a class="btn plain" data-sbstep="1" href="#" aria-label="Next shift">›</a></div>
+      <a class="btn plain" data-sbstep="1" href="#" aria-label="Next shift">›</a>
+      ${biz.actions.includes('bank.link') && !biz.cashBooks ? html`<a class="chip mute sb-dayst" data-sbday href="#/b/${biz.id}/days/${day}" hidden></a>` : ''}</div>
     <div class="sb-tabs" role="tablist">${tabs.map(([k, label], i) => html`<a role="tab" class="${k === screen ? 'on' : ''}" aria-selected="${k === screen}" href="${screenHref(biz, k, day)}">
       <span class="sb-i">${i + 1}</span>${label}<span class="sb-n" data-sbn="${k}"></span></a>`)}</div>
   </nav>`;
@@ -353,6 +356,7 @@ async function wireShiftBar(biz) {
     a.addEventListener('click', (e) => { e.preventDefault(); to(d); });
   });
   wireShiftCalendar(biz, bar.querySelector('.sb-cal'), day, cal, to);
+  fillDayChip(biz, bar, day);
   if (!p) return;
   const set = (k, text, cls) => { const el = bar.querySelector(`[data-sbn="${k}"]`); if (el) { el.textContent = text; el.className = `sb-n ${cls}`; } };
   set('bringin', !p.software && !p.rows ? 'to bring in' : !p.software ? 'no sales report' : !p.rows ? 'no register' : '✓', p.software && p.rows ? 'ok' : 'wait');
@@ -360,6 +364,29 @@ async function wireShiftBar(biz) {
   const left = p.bank ? p.bank.billsLeft + p.bank.creditsLeft + (p.bank.cardsLeft ?? 0) : 0;
   set('reconcile', p.status !== 'confirmed' ? (p.toDecide ? `${p.toDecide} to decide · not saved` : 'not saved') : left ? `${left} left` : '✓',
     p.status !== 'confirmed' ? (p.toDecide ? 'wait' : '') : left ? 'wait' : 'ok');
+}
+
+/** The day's state on the shift bar (Days, 25 Nov 2026): not saved, things left, waiting for files, or closed. Opens Days. */
+let DAYS_CACHE = { bizId: null, at: 0, data: null };
+async function daysList(biz, fresh = false) {
+  if (fresh || DAYS_CACHE.bizId !== biz.id || Date.now() - DAYS_CACHE.at > 60e3) {
+    DAYS_CACHE = { bizId: biz.id, at: Date.now(), data: await api('GET', `/businesses/${biz.id}/days`) };
+  }
+  return DAYS_CACHE.data;
+}
+const dayLeft = (d) => d.creditsOpen + d.billsWaiting;
+const DAY_STATES = { closed: ['td-g', 'ok', 'Closed'], open: ['td-a', 'wait', 'Things left'], waiting: ['td-n', 'mute', 'Waiting for a file'], unsaved: ['td-u', 'mute', 'Shift not saved'] };
+const dayChipText = (d) => (d.status === 'closed' ? 'closed ✓' : d.status === 'unsaved' ? 'not saved' : d.status === 'waiting' ? 'waiting for a file' : `${dayLeft(d)} left`);
+async function fillDayChip(biz, bar, day) {
+  const el = bar.querySelector('[data-sbday]');
+  if (!el) return;
+  const data = await daysList(biz).catch(() => null);
+  const d = data?.days.find((x) => x.day === day);
+  if (!d || !el.isConnected) return;
+  el.textContent = `Day ${dayChipText(d)}`;
+  el.className = `chip ${DAY_STATES[d.status][1]} sb-dayst`;
+  el.title = 'Open this day on Days';
+  el.hidden = false;
 }
 
 /**
@@ -689,6 +716,9 @@ async function dashboardView(biz) {
       ${legend}
     </section>` : ''}
     ${tiles.length ? html`<section class="card" style="gap:10px"><h2>Money</h2><div class="td-tiles">${tiles}</div></section>` : ''}
+    ${h.days ? html`<section class="card td-row"><div><h2 style="margin:0">${h.days.closed} of ${nOf(h.days.total, 'day')} closed</h2>
+      <div class="note">${h.days.closed === h.days.total ? 'Every day\'s money is finished' : `${nOf(h.days.credits, 'credit')} and ${nOf(h.days.bills, 'bill')} left · oldest ${short(h.days.oldestOpen)}`}</div></div>
+      <a class="btn plain" href="#/b/${biz.id}/days">Close days ›</a></section>` : ''}
     ${h.creditRed?.length ? html`<section class="card td-row" style="border-left:3px solid #DC2626"><div><h2 style="margin:0"><span class="chip bad">Credit 30+ days</span> ${h.creditRed.map((k) => `${k.guestName} ₹ ${rs(k.amountPaise)}`).join(' · ')}</h2>
       <div class="note">${h.creditRed.map((k) => `${k.billNo}: ${k.days} days`).join(' · ')}</div></div>
       <a class="btn plain" href="#/b/${biz.id}/reports">Open ›</a></section>` : ''}
@@ -5604,7 +5634,8 @@ function wireRepeats(biz, rep, rows, reload, msg, canRules) {
     const items = on.map((c) => ({ rowId: c.value, headId, party: c.dataset.party || shared, item: itemOf(c) }));
     b.disabled = true;
     try {
-      const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items });
+      const r = await bookMany(biz, items);
+      if (r.cancelled || r.done) { b.disabled = false; if (r.done) await reload(); return; }
       if (b.dataset.rule) await api('POST', `/businesses/${biz.id}/rules`, { name: shared || x.label.replace(/"/g, ''), direction: 'DR', headId,
         ...(x.vpa ? { vpa: x.vpa } : { contains: x.contains }) });
       await reload();
@@ -6055,7 +6086,7 @@ async function bankView(biz, query = '') {
     const item = { rowId: id, headId: app.querySelector(`[data-head="${id}"]`)?.value || null, party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null,
       item: app.querySelector(`[data-item="${id}"]`)?.value.trim() || null };
     if (!item.headId && !item.party) { showError(msg, new Error('Choose a head (or a known party) first.')); return; }
-    run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: [item] }), (r) => (r.booked ? 'Booked. Undo is on Done.' : `Not booked: ${r.skipped.join(' ')}`));
+    run(() => bookMany(biz, [item]), (r) => bookedSay(r, () => 'Booked. Undo is on Done.'));
   }));
   app.querySelectorAll('[data-head]').forEach((h) => h.addEventListener('change', () => {
     const btn = app.querySelector(`[data-bookone="${h.dataset.head}"]`);
@@ -6186,8 +6217,8 @@ async function bankView(biz, query = '') {
     const id = b.dataset.unbilled;
     const what = (prompt(`Sale not billed (${b.dataset.type === 'fnb' ? 'F&B' : 'Room'}). What was it? (e.g. 2 beers, water)`, app.querySelector(`[data-item="${id}"]`)?.value ?? '') ?? null);
     if (what === null) return;
-    run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items: [{ rowId: id, billType: b.dataset.type, item: what.trim() || null,
-      party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null }] }), (r) => r.booked ? 'Booked as a sale not billed.' : `Not booked: ${r.skipped.join(' ')}`);
+    run(() => bookMany(biz, [{ rowId: id, billType: b.dataset.type, item: what.trim() || null,
+      party: app.querySelector(`[data-party="${id}"]`)?.value.trim() || null }]), (r) => bookedSay(r, () => 'Booked as a sale not billed.'));
   }));
   // Sections: Select all, ticked count on the button, one button for the ticked lines of that section.
   app.querySelectorAll('[data-sec]').forEach((sec) => {
@@ -6231,7 +6262,7 @@ async function bankView(biz, query = '') {
         const seen = new Set();
         rememberAfter = firsts.filter((x) => !seen.has(x.r.vpa) && seen.add(x.r.vpa)).slice(0, 5)
           .map((x) => ({ vpa: x.r.vpa, party: x.party, headId: x.headId, headName: heads.find((h) => h.id === x.headId)?.name ?? '' }));
-        run(() => apiFull('POST', `/businesses/${biz.id}/bank-rows/book-many`, { items }), (r) => `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`);
+        run(() => bookMany(biz, items), (r) => (r.done || r.cancelled ? bookedSay(r) : `${r.booked} line${r.booked === 1 ? '' : 's'} booked.${r.skipped.length ? ` Not booked: ${r.skipped.join(' ')}` : ''}`));
       }
     });
   });
@@ -8098,7 +8129,7 @@ async function reconcileView(biz, dayArg) {
   const nbBase = `/businesses/${biz.id}/bank-rows`;
   const nbWhat = (id) => app.querySelector(`[data-nbwhat="${id}"]`)?.value.trim() || null;
   const nbReopen = (ids) => () => eachAtOnce(ids, (id) => apiFull('POST', `${nbBase}/${id}/reopen`, {}));
-  const nbMany = async (items) => { const res = await apiFull('POST', `${nbBase}/book-many`, { items }); if (!res.booked) throw new Error(res.skipped.join(' ') || 'Not booked.'); return res; };
+  const nbMany = async (items) => { const res = await bookMany(biz, items); if (!res.booked && !res.done) throw new Error(res.skipped.join(' ') || 'Not booked.'); return res; };
   // Ticked in Money with no bill (a saved shift), or credits with no bill ticked on Not matched yet with no bill ticked.
   const loTicked = (side) => [...app.querySelectorAll(`#trialopen [data-tside="${side}"]`)].filter((x) => x.checked);
   const nbTicks = () => [...[...app.querySelectorAll('[data-nbtick]')].filter((x) => x.checked).map((x) => x.dataset.nbtick),
@@ -9032,45 +9063,133 @@ function wireCardSection(biz, k, act) {
 }
 
 /**
- * Books a credit, asking first if a bill of its amount is waiting (the whole bill, or the UPI part of a cash + UPI
- * bill: approved 24 Nov 2026): both would count one sale twice. A saved sale can be matched from the card instead.
- * True when booked or matched; false if the person stops.
+ * Books a credit through the booking gate (E1, 25 Nov 2026): the server checks every booking. When it finds something
+ * (a bill waiting for this amount, the other half of a transfer, cash deposited, a settlement holding desk bills, card
+ * money, a credit chosen on Reconcile) the gate box asks first. True when booked or settled another way; false if stopped.
  */
 async function bookCredit(biz, rowId, payload) {
   const path = `/businesses/${biz.id}/bank-rows/${rowId}/book`;
-  const first = await apiFull('POST', path, { ...payload, checkBills: true });
+  const first = await apiFull('POST', path, payload);
   if (first.ok) return true;
-  const pick = await askWaitingBill(first.waitingBills);
-  if (!pick) return false;
-  if (pick === 'book') { await apiFull('POST', path, payload); return true; }
-  await apiFull('POST', `/businesses/${biz.id}/bank-rows/${rowId}/match`, { transactionIds: [pick] });
-  return true;
+  if (!first.gate) return false;
+  const r = await resolveGate(biz, rowId, first.gate);
+  if (r?.override) { const again = await apiFull('POST', path, { ...payload, override: r.override }); return !!again.ok; }
+  return !!r?.done;
 }
 
-/** The waiting bills as suggestion cards: Match (saved sale), Book anyway or Cancel. Resolves a txId, 'book' or null. */
-function askWaitingBill(bills) {
+/**
+ * Books lines through the gate. One line: a stopped line opens the gate box. Several: Bookr checks them first and shows
+ * one summary ("3 can be booked · 2 need a look"); the clear ones are booked, the rest stay as they are.
+ * Returns the server's { booked, skipped }, with done (what was done instead) or cancelled.
+ */
+async function bookMany(biz, items) {
+  const path = `/businesses/${biz.id}/bank-rows/book-many`;
+  if (items.length === 1) {
+    const res = await apiFull('POST', path, { items });
+    if (!res.look?.length) return res;
+    const r = await resolveGate(biz, items[0].rowId, res.look[0]);
+    if (r?.override) return apiFull('POST', path, { items: [{ ...items[0], override: r.override }] });
+    return r?.done ? { booked: 0, skipped: [], done: r.done } : { booked: 0, skipped: [], cancelled: true };
+  }
+  const check = await apiFull('POST', path, { items, check: true });
+  if (!check.look?.length) return apiFull('POST', path, { items });
+  const go = await askGateSummary(check);
+  if (!go || !check.clear.length) return { booked: 0, skipped: [], cancelled: true };
+  const res = await apiFull('POST', path, { items: items.filter((x) => check.clear.includes(x.rowId)) });
+  return { ...res, skipped: [...res.skipped, ...check.look.map((l) => `${l.tranId}: ${gateWords(l.checks)}.`)] };
+}
+
+/** A message for a booking result: what was done instead, or booked / not booked. */
+const bookedSay = (r, ok) => (r.done ? r.done : r.cancelled ? 'Not booked.' : r.booked ? ok(r) : `Not booked: ${r.skipped.join(' ')}`);
+
+const gateWords = (checks) => ({ card: 'card machine money', held: `chosen on ${dayLabel(checks[0]?.day)} Reconcile`, waiting: 'a bill of this amount is waiting',
+  settlement: 'a desk bill may be inside', transfer: `transfer from ${checks[0]?.otherAccountName ?? 'another account'}`, cash: 'cash deposited' })[checks[0]?.check] ?? 'needs a look';
+
+/** "Book N selected" when some lines need a look: one summary. Resolves true to book the clear ones. */
+function askGateSummary(check) {
   return new Promise((resolve) => {
     const dlg = document.createElement('dialog');
     dlg.className = 'rowdlg';
-    const line = (b) => b.billPaise !== b.upiPaise
-      ? `Bill ₹ ${rs(b.billPaise)} = other ₹ ${rs(b.billPaise - b.upiPaise)} ✓ + UPI ₹ ${rs(b.upiPaise)} ✗ · ${dayLabel(b.day)} shift`
-      : `Bill ₹ ${rs(b.billPaise)} UPI ✗ · ${dayLabel(b.day)} shift`;
-    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:10px;max-width:460px">
-      ${bills.map((b) => html`<div style="border-bottom:1px solid var(--line-soft);padding-bottom:10px">
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="mono">${b.billNo}</span>
-          <span class="chip wait">${b.billPaise !== b.upiPaise ? 'UPI part waiting' : 'UPI waiting'}</span></div>
-        <div class="tiny" style="margin-top:4px">${line(b)}</div>
-        ${b.txId ? '' : html`<div class="tiny note">Shift not saved: the credit is matched when it is.</div>`}
-        ${b.txId ? html`<div class="form-row" style="margin-top:8px"><button class="btn" value="m:${b.txId}" type="submit">Match to ${b.billNo}</button></div>` : ''}
-      </div>`)}
-      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button><button class="btn plain" value="book" type="submit">Book anyway</button></div>
+    const n = check.clear.length;
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:8px;max-width:480px">
+      <strong>${n + check.look.length} ticked · ${n} can be booked · ${check.look.length} need${check.look.length === 1 ? 's' : ''} a look</strong>
+      ${check.look.map((l) => html`<div style="display:flex;gap:8px;align-items:baseline;border-top:1px solid var(--line-soft);padding-top:6px">
+        <span class="chip wait">look</span><span>${gateWords(l.checks)}</span><span class="mono" style="margin-left:auto">₹ ${rs(l.amountPaise)}</span></div>`)}
+      <div class="tiny note">The ones that need a look stay as they are: book or settle them one by one.</div>
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button>
+        ${n ? html`<button class="btn" value="go" type="submit">Book ${n}, leave ${check.look.length}</button>` : ''}</div>
     </form>`.__html;
     document.body.append(dlg);
-    dlg.addEventListener('close', () => {
-      const v = dlg.returnValue;
-      resolve(v === 'book' ? 'book' : v.startsWith('m:') ? v.slice(2) : null);
-      dlg.remove();
+    dlg.addEventListener('close', () => { resolve(dlg.returnValue === 'go'); dlg.remove(); });
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
+    dlg.showModal();
+  });
+}
+
+/**
+ * The gate box for one line: what Bookr found, with the likely fix as the main button. Does that fix itself (match the
+ * bill, book as a transfer, cash deposited, open Reconcile or Card settlements). Resolves { done: message }, { override:
+ * { reason } } for Book anyway (Owner or Accountant, with a reason), or null.
+ */
+function resolveGate(biz, rowId, gate) {
+  const base = `/businesses/${biz.id}/bank-rows`;
+  return new Promise((resolve) => {
+    const dlg = document.createElement('dialog');
+    dlg.className = 'rowdlg';
+    const btns = [];
+    const act = (label, fn, main = true) => { btns.push({ label, fn, main }); return btns.length - 1; };
+    const part = (k) => {
+      if (k.check === 'card') { const i = act('Settle on Card settlements', async () => { location.hash = `#/b/${biz.id}/cards`; return null; }); return html`<div class="tiny">${k.text}</div>${btnOf(i)}`; }
+      if (k.check === 'held') { const i = act(`Open ${dayLabel(k.day)} Reconcile`, async () => { location.hash = `#/b/${biz.id}/reconcile/${k.day}`; return null; }); return html`<div class="tiny">${k.text}</div>${btnOf(i)}`; }
+      if (k.check === 'waiting') return html`<div class="tiny">${k.text}</div>${k.bills.map((b) => html`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:6px">
+        <span class="mono">${b.billNo}</span><span class="chip wait">${b.billPaise !== b.upiPaise ? 'UPI part waiting' : 'UPI waiting'}</span>
+        <span class="tiny">${dayLabel(b.day)} shift${b.txId ? '' : ' · not saved'}</span><span class="mono" style="margin-left:auto">₹ ${rs(b.upiPaise)}</span>
+        ${b.txId ? btnOf(act(`Match to ${b.billNo}`, async () => { await apiFull('POST', `${base}/${rowId}/match`, { transactionIds: [b.txId] }); return `Matched to bill ${b.billNo}.`; }))
+          : btnOf(act(`Open ${dayLabel(b.day)} Reconcile`, async () => { location.hash = `#/b/${biz.id}/reconcile/${b.day}`; return null; }))}</div>`)}`;
+      if (k.check === 'settlement') return html`<div class="tiny">${k.text}</div>${k.bills.map((b) => html`<div style="display:flex;gap:8px;padding-top:4px"><span class="mono">${b.billNo ?? '?'}</span>
+        <span class="tiny">${dayLabel(b.day)}</span><span class="mono" style="margin-left:auto">₹ ${rs(b.amountPaise)}</span></div>`)}
+        ${btnOf(act('Desk bills in this', async () => {
+          const desk = document.querySelector(`[data-deskbills="${rowId}"]`);
+          if (desk) desk.click(); else location.hash = `#/b/${biz.id}/bank?tab=in&from=${gate.day}&to=${gate.day}`;
+          return null;
+        }))}`;
+      if (k.check === 'transfer') return html`<div class="tiny">${k.text}</div>${btnOf(act(k.booked ? `Put back ${k.booked.headName ?? 'the booking'} and book as transfer` : 'Book as transfer', async () => {
+          if (k.booked) await apiFull('POST', `${base}/${k.booked.rowId}/reopen`, {});
+          await apiFull('POST', `${base}/${rowId}/own-transfer`, { otherAccountId: k.otherAccountId, pairRowId: k.pairRowId, legId: k.legId });
+          return 'Booked as a transfer between your accounts: not income. Undo is on Done.';
+        }))}`;
+      if (k.check === 'cash') return html`<div class="tiny">${k.text}</div>${btnOf(act('Cash deposited', async () => {
+          const day = prompt('Cash deposited into the bank: which shift\'s cash did it come from? (YYYY-MM-DD, or leave blank for the shift it came in)', '');
+          if (day === null) return null;
+          await apiFull('POST', `${base}/${rowId}/cash-move`, { shiftDay: day.trim() || null });
+          return 'Booked as cash deposited: not income. It comes off that shift\'s cash in hand.';
+        }))}`;
+      return '';
+    };
+    const btnOf = (i) => html`<div class="form-row" style="justify-content:flex-end;margin-top:6px"><button class="btn" type="button" data-gatebtn="${i}">${btns[i].label}</button></div>`;
+    const body = gate.checks.map((k) => html`<div style="border-top:1px solid var(--line-soft);padding-top:8px">${part(k)}</div>`);
+    const anyway = gate.canOverride ? html`<button class="btn plain" type="button" data-gateanyway="1">Book anyway…</button>` : '';
+    dlg.innerHTML = html`<form class="inset" method="dialog" style="display:grid;gap:8px;max-width:500px">
+      <strong>Before booking${gate.amountPaise ? ` ₹ ${rs(gate.amountPaise)}` : ''}${gate.day ? ` · ${dayLabel(gate.day)}` : ''}</strong>
+      ${body}
+      <div class="form-msg"></div>
+      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button>${anyway}</div>
+      ${gate.canOverride ? html`<div class="tiny note" style="text-align:right">Book anyway asks for a reason; it is kept with the line.</div>` : ''}
+    </form>`.__html;
+    document.body.append(dlg);
+    let result = null;
+    dlg.querySelectorAll('[data-gatebtn]').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try { const done = await btns[Number(b.dataset.gatebtn)].fn(); result = done ? { done } : null; dlg.close('done'); }
+      catch (err) { b.disabled = false; showError(dlg.querySelector('.form-msg'), err); }
+    }));
+    dlg.querySelector('[data-gateanyway]')?.addEventListener('click', () => {
+      const why = prompt('Book anyway: why is this not the bill, transfer or deposit Bookr found? (kept with the line)', '');
+      if (!why || why.trim().length < 3) return;
+      result = { override: { reason: why.trim() } };
+      dlg.close('anyway');
     });
+    dlg.addEventListener('close', () => { resolve(result); dlg.remove(); });
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close('cancel'); });
     dlg.showModal();
   });
@@ -9236,7 +9355,7 @@ async function loadUnmatchedRow(biz, x, box, entries, canClose, u, reload) {
     'Matched to the owed bill.', () => apiFull('DELETE', `${base}/bank-rows/${x.id}/match`, {}))));
   body.querySelector('[data-umadvance]')?.addEventListener('click', () => {
     const who = reason('Advance received: from which guest (name, room or booking)?');
-    if (who) run(async () => { const res = await apiFull('POST', `${base}/bank-rows/book-many`, { items: [{ rowId: x.id, billType: 'room', item: `Advance: ${who}` }] }); if (!res.booked) throw new Error(res.skipped.join(' ')); },
+    if (who) run(async () => { const res = await bookMany(biz, [{ rowId: x.id, billType: 'room', item: `Advance: ${who}` }]); if (!res.booked && !res.done) throw new Error(res.skipped.join(' ') || 'Not booked.'); },
       'Booked as an advance. Its room bill joins it when it comes.', () => apiFull('POST', `${base}/bank-rows/${x.id}/reopen`, {}));
   });
   body.querySelectorAll('[data-umhold]').forEach((b) => b.addEventListener('click', () => {
@@ -12067,6 +12186,7 @@ async function routeInner() {
       if (screen === 'parties') return partiesView(biz, query);
       if (screen === 'directors') return biz.actions.includes('reports.view') ? directorsView(biz) : go(home(biz));
       if (screen === 'loans') return biz.actions.includes('reports.view') ? loansView(biz) : go(home(biz));
+      if (screen === 'days') return biz.actions.includes('bank.link') && !biz.cashBooks ? daysView(biz, isDay(parts[3]) ? parts[3] : null) : go(home(biz));
       if (screen === 'whatsapp') return biz.actions.includes('wa.review') ? whatsappView(biz, query) : go(home(biz));
       if (screen === 'wagroups') return biz.actions.includes('wa.review') ? waGroupsView(biz) : go(home(biz));
       if (screen === 'pos') return posView(biz, query);
@@ -12079,6 +12199,77 @@ async function routeInner() {
   } catch (e) {
     if (me) render(html`<div class="center"><section class="card"><div class="error">${e.message}</div><a href="#/choose">Back</a></section></div>`);
   }
+}
+
+/**
+ * Days (approved 25 Nov 2026). A day is closed when its shift is saved, every bank credit of it is matched, booked,
+ * settled or left out, and no bill of it waits for its money. The page only shows what is left and where it is dealt
+ * with; it books nothing. Days turn green by themselves (no lock).
+ */
+async function daysView(biz, day) {
+  const [p, d] = await Promise.all([daysList(biz, true), day ? api('GET', `/businesses/${biz.id}/days/${day}`) : null]);
+  const short = (x) => (x ? new Date(`${x}T12:00:00+05:30`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' }) : '–');
+  const nOf = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const range = (days) => `from=${addDaysIso(days[0], -1)}&to=${addDaysIso(days.at(-1), 1)}`;
+  const moneyIn = (days) => `#/b/${biz.id}/bank?tab=in&${range(days)}`;
+  const daysText = (xs) => (xs.length > 3 ? `${short(xs[0])} – ${short(xs.at(-1))} · ${xs.length} days` : xs.map(short).join(', '));
+  // Where each cause is dealt with. Nothing is booked from here.
+  const act = (cause, days) => (cause === 'unsaved' || cause === 'chosen' ? [`Open ${short(days[0])}`, screenHref(biz, 'reconcile', days[0])]
+    : cause === 'card' ? ['Card settlements', `#/b/${biz.id}/cards`] : ['Open in Money in', moneyIn(days)]);
+  const strip = p.days.map((x, i) => {
+    const [cls, , word] = DAY_STATES[x.status];
+    const n = dayLeft(x);
+    return html`<a class="td-day ${cls} ${x.day === day ? 'dy-on' : ''}" href="#/b/${biz.id}/days/${x.day}" title="${dayLabel(x.day)} · ${word}${n ? ` · ${n} left` : ''}">
+      ${short(x.day).split(' ')[0]}<small>${x.status === 'closed' ? '✓' : n ? n : i === 0 || x.day.slice(5, 7) !== p.days[i - 1].day.slice(5, 7) ? short(x.day).split(' ')[1] : ''}</small></a>`;
+  });
+  const legend = Object.entries(DAY_STATES).map(([k, [cls, , word]]) => {
+    const n = p.days.filter((x) => x.status === k).length;
+    return n ? html`<span style="display:inline-flex;gap:6px;align-items:center"><span class="td-dot ${cls}"></span>${word} · ${n}</span>` : '';
+  });
+  const dayCard = d ? (() => {
+    const row = d.row;
+    const [, chipCls, word] = DAY_STATES[row?.status ?? 'open'];
+    const done = d.lines.filter((l) => l.state === 'done');
+    const open = d.lines.filter((l) => l.state === 'open');
+    const sum = d.lines.reduce((t, l) => t + l.paise, 0);
+    const main = row?.status === 'unsaved' ? ['Open Reconcile', screenHref(biz, 'reconcile', d.day)]
+      : d.credits.length ? act(d.credits[0].cause, [d.day]) : d.bills.length ? ['Bills to look at', `#/b/${biz.id}/pending`] : null;
+    const line = (l) => html`<div class="dy-line"><span class="chip ${l.state === 'done' ? 'ok' : 'wait'}">${l.state === 'done' ? 'done' : 'open'}</span>
+      <span style="flex:1">${l.label} · ${l.n}</span><span class="amount">₹ ${money(l.paise)}</span></div>`;
+    return html`<section class="card" style="gap:6px">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><h2 style="margin:0">${dayLabel(d.day)} · money in</h2>
+        <span class="chip ${chipCls}">${row?.status === 'open' ? `${dayLeft(row)} left` : word}</span><span class="amount" style="margin-left:auto;font-weight:600">₹ ${money(d.inPaise)}</span></div>
+      ${done.map(line)}${open.map(line)}
+      <div class="dy-line" style="font-weight:600"><span style="flex:1">${sum === d.inPaise ? '= adds up ✓' : '≠ does not add up'}</span><span class="amount">₹ ${money(sum)}</span></div>
+      ${d.credits.length ? html`<details class="cmp-fold"><summary class="note">${nOf(d.credits.length, 'open credit')}</summary>
+        ${d.credits.map((c) => html`<div class="dy-line"><span class="tiny note" style="width:46px">${new Date(c.at + 19800000).toISOString().slice(11, 16)}</span>
+          <span style="flex:1;min-width:0;overflow-wrap:anywhere">${c.description} <span class="tiny note">· ${c.accountName}</span></span><span class="amount">₹ ${money(c.amountPaise)}</span></div>`)}</details>` : ''}
+      <div class="dy-line"><span style="flex:1">${d.bills.length ? html`Bills waiting: ${d.bills.map((b) => html`<span style="${b.overdue ? 'color:#B91C1C' : ''}">${b.billNo} ₹ ${rs(b.amountPaise)}${b.mode ? ` ${b.mode}` : ''} ✗</span>`).reduce((a, b) => html`${a} · ${b}`)}`
+        : d.grey.length ? `Bills waiting for a file: ${d.grey.map((g) => `${g.billNo} (${g.reason})`).join(', ')}` : 'Bills waiting: none'}</span></div>
+      ${main ? html`<div style="display:flex;gap:8px;align-items:center"><a class="btn" href="${main[1]}">${main[0]} ›</a>
+        <a class="note" style="margin-left:auto" href="#/b/${biz.id}/days">Close ✕</a></div>` : ''}
+    </section>`;
+  })() : '';
+  const groupTile = (g) => {
+    const [label, href] = act(g.cause, g.days);
+    return html`<section class="card dy-tile"><div class="dy-head"><strong>${g.label}</strong><span class="amount">${g.n} · ₹ ${rs(g.paise)}</span></div>
+      <div class="note">${daysText(g.days)}${g.cause === 'unsaved' ? ' · save the oldest first' : ''}</div>
+      ${g.cause !== 'unsaved' && g.cause !== 'upi' ? html`<div class="tiny note" style="overflow-wrap:anywhere">${g.sample.map((s) => `${short(s.day)} ₹ ${rs(s.amountPaise)} ${s.description.slice(0, 48)}`).join(' · ')}${g.n > g.sample.length ? ' · …' : ''}</div>` : ''}
+      <div style="display:flex"><a class="btn plain" style="margin-left:auto" href="${href}">${label} ›</a></div></section>`;
+  };
+  const MODE = { upi: 'UPI bills waiting', card: 'Card bills waiting', cash: 'Cash bills not in the count', other: 'Bills with no mode' };
+  const billTile = (g) => html`<section class="card dy-tile"><div class="dy-head"><strong>${MODE[g.mode]}</strong><span class="amount">${g.n} · ₹ ${rs(g.paise)}</span></div>
+      <div class="note">${g.overdue ? html`<span style="color:#B91C1C">${g.overdue} over ${p.watchDays} days</span> · ` : ''}${g.bills.map((b) => `${b.billNo} ₹ ${rs(b.amountPaise)}`).join(' · ')}${g.n > g.bills.length ? ' · …' : ''}</div>
+      <div style="display:flex"><a class="btn plain" style="margin-left:auto" href="#/b/${biz.id}/pending">Match or close ›</a></div></section>`;
+  render(shell(biz, 'days', 'Days', 'A day is closed when its shift is saved, every bank credit of it is dealt with and no bill of it waits for its money.', html`
+    <section class="card td-row"><div><h2 style="margin:0">${p.closed} of ${nOf(p.days.length, 'day')} closed</h2>
+      <div class="note">${p.closed === p.days.length ? 'Every day\'s money is finished' : `${nOf(p.left.credits, 'credit')} and ${nOf(p.left.bills, 'bill')} left · oldest ${short(p.oldestOpen)}`}</div></div></section>
+    <section class="card" style="gap:8px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2>Days</h2><span class="note">Press a day to see it add up</span></div>
+      <div class="td-strip">${strip}</div><div class="note" style="display:flex;gap:14px;flex-wrap:wrap">${legend}</div></section>
+    ${dayCard}
+    ${p.groups.length || p.billGroups.length ? html`<h2 style="margin:8px 0 0">What is left · biggest first</h2>${p.groups.map(groupTile)}${p.billGroups.map(billTile)}` : ''}`));
+  wireShell();
+  if (day) document.querySelector('.dy-on')?.scrollIntoView({ block: 'nearest' });
 }
 
 // Bookr on the phone (approved 20 Nov 2026): installable as an app. The service worker keeps only an offline page.

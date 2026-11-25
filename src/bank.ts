@@ -6,6 +6,7 @@ import { all, newId, now, one, stmt, type DB } from './db';
 import type { BankLine } from './bankstatement';
 import { addDays, shiftWindow } from './time';
 import { runCardAuto } from './cards';
+import { heldCredit } from './plans';
 
 export interface BankRow {
   id: string; account_id: string; tran_id: string; value_date: string; posted_at: number; day: string; description: string;
@@ -79,10 +80,10 @@ export async function leaveOutReturned(db: DB, businessId: string) {
   const [reversedAll, refundsAll, failedAll, testsAll, reopened] = await Promise.all([
     all<{ rev: string; cr: string; ref: string | null }>(db, `SELECT r.id AS rev, c.id AS cr, r.upi_ref AS ref FROM bank_rows r JOIN bank_rows c ON c.id = r.pair_row_id
       WHERE r.business_id = ? AND r.kind = 'reversal' AND r.direction = 'DR' AND r.status = 'unmatched' AND c.kind = 'upi_in' AND c.status = 'unmatched'
-        AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = c.id)`, businessId),
+        AND NOT ${heldCredit('c.id')}`, businessId),
     all<{ out: string; cr: string; vpa: string; amount: number }>(db, `SELECT d.id AS out, (SELECT c.id FROM bank_rows c WHERE c.business_id = d.business_id
         AND c.kind = 'upi_in' AND c.status = 'unmatched' AND c.vpa = d.vpa AND c.amount_paise = d.amount_paise AND c.posted_at < d.posted_at
-        AND c.posted_at >= d.posted_at - ? AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = c.id)
+        AND c.posted_at >= d.posted_at - ? AND NOT ${heldCredit('c.id')}
         AND NOT EXISTS (SELECT 1 FROM bank_rows o WHERE o.pair_row_id = c.id) ORDER BY c.posted_at DESC LIMIT 1) AS cr, d.vpa, d.amount_paise AS amount
       FROM bank_rows d WHERE d.business_id = ? AND d.kind = 'upi_out' AND d.direction = 'DR' AND d.status = 'unmatched' AND d.vpa IS NOT NULL AND d.pair_row_id IS NULL`,
       REFUND_DAYS * 86400e3, businessId),

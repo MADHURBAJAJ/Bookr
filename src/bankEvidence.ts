@@ -6,6 +6,7 @@
 import { labelFits } from './bank';
 import { all, one, type DB } from './db';
 import { shiftWindow } from './time';
+import { heldElsewhere } from './plans';
 
 /** Paired within this many minutes of the software's time. */
 const NEAR_MIN = 60;
@@ -23,7 +24,7 @@ export interface EvidenceBill {
   /** UPI payments written for a bill paid in several goes (or partly another way): each needs its own credit. */
   parts?: number[];
   /** Credits a person ticked for this bill paid in several goes (25 Nov 2026): they pay it whatever the time gap. */
-  chosen?: { id: number; creditIds: string[] };
+  chosen?: { id: string; creditIds: string[] };
 }
 export interface EvidenceCredit { id: string; amount: number; postedAt: number; label?: string | null; remark?: string | null;
   /** A UPI payment on the card machine (approved 9 Nov 2026): it reaches the bank in the machine's settlement of that day. */
@@ -44,8 +45,8 @@ export interface Evidence {
   split?: boolean;
   /** The credit's UPI note names this bill. */
   byNote?: boolean;
-  /** The parts a person ticked (audit id of 'bank.bill_parts'), so Undo can take them back. */
-  chosenId?: number;
+  /** The parts a person ticked (their bill_parts plan), so Undo can take them back. */
+  chosenId?: string;
 }
 
 /** A bill the register splits (cash + UPI) where the software has one mode, for a different amount than the UPI part. */
@@ -260,8 +261,8 @@ export const shiftCredits = (db: DB, businessId: string, day: string) => {
   return all<EvidenceCredit>(db, `SELECT r.id, r.amount_paise AS amount, r.posted_at AS postedAt, s.receives_upi_label AS label, r.remark FROM bank_rows r
     LEFT JOIN bank_sources s ON s.account_id = r.account_id
     WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
-      AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`,
-    businessId, w.from - 3600e3, w.to + 3 * 3600e3);
+      AND NOT ${heldElsewhere('r.id')} ORDER BY r.posted_at`,
+    businessId, w.from - 3600e3, w.to + 3 * 3600e3, day);
 };
 
 /**

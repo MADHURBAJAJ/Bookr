@@ -12,8 +12,11 @@ import { creditList } from '../credit';
 import { cashCheck } from '../cash';
 import { cardReportsStatus } from '../cardDrive';
 import { daysWithoutReport } from '../reportDays';
+import { daysPicture } from '../days';
 
 export const homeRoutes = new Hono<AppEnv>();
+const isDay = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d);
+
 
 /**
  * The dashboard (approved 9 Nov 2026): the jobs waiting, most urgent first, as counts read from what is stored.
@@ -109,6 +112,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     photos: null as null | { count: number; paise: number; pages: { uploadId: string; day: string; count: number; paise: number }[] },
     // Credit bills still owed 30 days or more after their bill (approved 23 Nov 2026), in red.
     creditRed: [] as { guestName: string; amountPaise: number; days: number; billNo: string }[],
+    // Days (approved 25 Nov 2026): how many days' money is finished, for the Today tile and the menu count.
+    days: null as null | { total: number; closed: number; oldestOpen: string | null; credits: number; bills: number },
   };
 
   // The shift that ended at 8 am this morning, while its files are still missing (Today, approved 14 Nov 2026).
@@ -161,6 +166,8 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
     result.cards = { days: unsettled.length, netPaise: unsettled.reduce((t, d) => t + d.netPaise, 0), oldestDay: unsettled[0]?.settledOn ?? null };
     result.fresh.bank = accounts.map((a) => ({ id: a.id, name: a.name, lastSyncedAt: a.lastSyncedAt, lastAt: a.lastAt, note: a.note, linked: !!a.linked }));
     result.fresh.cards = { folder: !!cardStatus.folder, lastAt: cardStatus.lastAt };
+    const dp = await daysPicture(db, businessId, today, waiting0);
+    result.days = { total: dp.days.length, closed: dp.closed, oldestOpen: dp.oldestOpen, credits: dp.left.credits, bills: dp.left.bills };
   }
   })();
   const decideP = (async () => {
@@ -195,3 +202,17 @@ export async function homeFor(env: Env, businessId: string, role: Role, today = 
 
 homeRoutes.get('/businesses/:businessId/home', requireRole('reports.view'), async (c) =>
   c.json(await homeFor(c.env, c.get('businessId'), c.get('role'))));
+
+/** Days (approved 25 Nov 2026): every day from the books start, closed or not, and what is left by cause. Read only. */
+homeRoutes.get('/businesses/:businessId/days', requireRole('bank.link'), async (c) => {
+  const { detail, ...rest } = await daysPicture(c.env.DB, c.get('businessId'), istDay(Date.now()));
+  void detail;
+  return c.json(rest);
+});
+/** One day: its money in, line by line, adding up; its open credits and the bills still waiting. */
+homeRoutes.get('/businesses/:businessId/days/:day', requireRole('bank.link'), async (c) => {
+  const day = c.req.param('day');
+  if (!isDay(day)) return c.json({ error: 'A day is YYYY-MM-DD.' }, 400);
+  const p = await daysPicture(c.env.DB, c.get('businessId'), istDay(Date.now()));
+  return c.json({ ...p.detail(day), start: p.start, lastDay: p.lastDay });
+});

@@ -11,6 +11,7 @@
 import { all, one, type DB } from './db';
 import { addDays, shiftWindow } from './time';
 import { plannedRows } from './sales';
+import { heldCredit } from './plans';
 
 const NEAR_MIN = 60;
 
@@ -36,11 +37,11 @@ export async function paidByUpi(db: DB, businessId: string, day: string): Promis
       SELECT r.id, r.amount_paise, r.posted_at, a.name AS account_name, s.receives_upi_label AS label FROM bank_rows r
       JOIN accounts a ON a.id = r.account_id LEFT JOIN bank_sources s ON s.account_id = r.account_id
       WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
-        AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id)`, businessId, w.from - 3600e3, w.to + 3 * 3600e3),
+        AND NOT ${heldCredit('r.id')}`, businessId, w.from - 3600e3, w.to + 3 * 3600e3),
     one<{ paid: number | null; settled: string | null }>(db, 'SELECT max(paid_at) AS paid, max(settled_on) AS settled FROM card_settlements WHERE business_id = ?', businessId),
     all<{ amount_paise: number; paid_at: number }>(db, `SELECT amount_paise, paid_at FROM card_settlements WHERE business_id = ? AND txn_type = 'PURCHASE'
       AND paid_at >= ? AND paid_at < ?`, businessId, w.from - 3600e3, w.to + 3600e3),
-    all<{ comparison_ids: string }>(db, 'SELECT comparison_ids FROM shift_choices WHERE business_id = ? AND shift_day = ?', businessId, day),
+    all<{ comparison_ids: string }>(db, 'SELECT comparison_ids FROM shift_plans WHERE business_id = ? AND shift_day = ?', businessId, day),
   ]);
   const regOf = new Map(regs.map((r) => [r.id, r]));
   const timeOf = new Map(times.map((t) => [t.id, t.paid_at]));

@@ -862,3 +862,10 @@ details.inst-slim[open] { display: grid; gap: 8px; }
 .wa-bigph { width: 200px; max-height: 360px; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); display: flex; align-items: center; justify-content: center; }
 .wa-edit { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; background: var(--ground); }
 .wa-edit input, .wa-edit select { min-height: 36px; font-size: 14px; }
+/* Days (25 Nov 2026): a day's money adding up, and what is left by cause, one tile per line. */
+.dy-line { display: flex; gap: 8px; align-items: baseline; font-size: 14px; padding: 5px 0; border-top: 1px solid var(--line); }
+.dy-tile { gap: 4px !important; }
+.dy-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.dy-head .amount { margin-left: auto; font-weight: 600; }
+.td-day.dy-on { outline: 2px solid var(--teal); outline-offset: 1px; }
+.shiftbar .sb-dayst { text-decoration: none; margin-left: 6px; white-space: nowrap; }

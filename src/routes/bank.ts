@@ -1,5 +1,5 @@
 import { removeTwice, undoTwice } from '../countedTwice';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { bookTransferStatements, ownAccounts, transferHints, undoTransferStatements } from '../transfers';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
@@ -18,7 +18,9 @@ import { cashOver, isMachineUpi, machineLabel, shiftCards, unsettledDays } from 
 import { trialCards } from '../cardTrial';
 import { explainShift } from '../explain';
 import { reconcileShift, trialReconcile, unmatchedEntries } from '../reconcile';
-import { bookedTx, joinedBill, planTaken, plansFor, sameSaleStatements, undoSameSaleStatements, waitingBillsLike } from '../sameSale';
+import { bookedTx, joinedBill, plansFor, sameSaleStatements, undoSameSaleStatements } from '../sameSale';
+import { bookingGate, gateWord, SETTLEMENT_BACK_DAYS, SETTLEMENT_REMARK, type GateCheck } from '../bookingGate';
+import { addPlanStatements, dropPlanStatements, heldCredit, heldPayment, isClash, isPlanId, planById, planClash, shiftPlans } from '../plans';
 import { billDistance, cardShiftChoices, plannedCardPaise, plannedUpiPaise, shiftChoices, shiftView, WATCH_DAYS } from '../sales';
 import { addDays, istDay, shiftDayOf, shiftWindow } from '../time';
 import { accountLabels, columnHints } from '../columnHints';
@@ -48,6 +50,8 @@ const audit = (bid: string, user: string, action: string, id: string, before: un
   [bid, user, action, id, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), t] as const;
 const AUDIT = `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, 'bank_rows', ?, ?, ?, ?)`;
 const TX_AUDIT = AUDIT.replace("'bank_rows'", "'transactions'");
+/** An audit line on any table. */
+const LOG = `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
 
 async function bankAccount(db: D1Database, bid: string, id: string) {
   if (!isUuid(id)) fail(404, 'Not found.');
@@ -398,19 +402,19 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/choices', requireRole('bank
     if (existing.some((k) => k.comparisonIds.some((x) => cids.includes(x)))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save.`);
     if (existing.some((k) => k.bankRowId === rowId)) fail(409, 'This credit is already matched on save.');
     if (cids.some((x) => machineChosen.has(x))) fail(409, `${named ? `Bill ${named}` : 'A bill'} is already matched on save to the card machine.`);
-    for (const id of cids) if (await planTaken(db, bid, '', id)) fail(409, 'A bill is already chosen to be one sale with a booked credit.');
+    const clash = await planClash(db, bid, { bankRowIds: [rowId], comparisonIds: cids }, [], named ? `Bill ${named}` : 'A bill');
+    if (clash) fail(409, clash);
     const upi = await plannedUpiPaise(db, bid, day, cids) + laterUpi.reduce((t, x) => t + x.amountPaise, 0);
     if (upi !== row.amount_paise) fail(409, upi ? `The credit is not what ${named ? `bill ${named} takes` : 'these bills take'} by UPI.` : `${named ? `Bill ${named} has` : 'These bills have'} no UPI payment: decide or correct ${named ? 'it' : 'them'} first.`);
-    const id = newId();
-    ids.push(id);
-    stmts.push(stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, bank_row_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'bank_match', ?, ?, ?, ?)`,
-      id, bid, day, rowId, JSON.stringify(cids), c.get('user').id, now()),
+    const plan = addPlanStatements(db, bid, day, 'bank_match', { comparisonIds: cids, bankRowIds: [rowId] }, c.get('user').id);
+    ids.push(plan.id);
+    stmts.push(...plan.statements,
     stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', rowId, null, JSON.stringify({ shiftDay: day, comparisonIds: cids }), now()));
   }
   try {
     await db.batch(stmts);
   } catch (e) {
-    if (/UNIQUE/i.test(String(e))) fail(409, 'This credit is already matched on save.');
+    if (isClash(e)) fail(409, 'This credit is already matched on save.');
     throw e;
   }
   return c.json({ ok: true, id: ids[0], ids });
@@ -430,28 +434,37 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/group-parts', requireRole('
   const g = view.paidGroups.find((x) => x.id === headId);
   const parts = g?.bank && 'parts' in g.bank ? g.bank.parts : undefined;
   if (!g || !parts || parts.length !== creditIds.length || !parts.every((p) => creditIds.includes(p.creditId))) fail(409, 'These credits no longer add up to these bills: reload.');
-  if (g!.bank && 'accepted' in g!.bank && g!.bank.accepted) return c.json({ ok: true, unchanged: true });
-  const r = await one<{ id: number }>(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
-    VALUES (?, ?, 'bank.group_parts', 'register_rows', ?, NULL, ?, ?) RETURNING id`, bid, c.get('user').id, headId,
-    JSON.stringify({ shiftDay: day, billNos: g!.billNos, creditIds, amounts: parts!.map((p) => p.amountPaise) }), now());
-  return c.json({ ok: true, auditId: r!.id });
+  if (g!.bank && 'accepted' in g!.bank && g!.bank.accepted) return c.json({ ok: true, unchanged: true, planId: g!.bank.acceptId, auditId: g!.bank.acceptId });
+  const old = (await shiftPlans(db, bid, day, ['group_parts'])).filter((p) => p.headRowId === headId).map((p) => p.id);
+  const clash = await planClash(db, bid, { bankRowIds: creditIds }, old, `Bills ${g!.billNos.join(' + ')}`);
+  if (clash) fail(409, clash);
+  const plan = addPlanStatements(db, bid, day, 'group_parts', { headRowId: headId, bankRowIds: creditIds }, c.get('user').id);
+  try {
+    await db.batch([...dropPlanStatements(db, old), ...plan.statements, stmt(db, LOG, bid, c.get('user').id, 'bank.group_parts', 'register_rows', headId, null,
+      JSON.stringify({ shiftDay: day, billNos: g!.billNos, creditIds, amounts: parts!.map((p) => p.amountPaise), planId: plan.id }), now())]);
+  } catch (e) {
+    if (isClash(e)) fail(409, 'One of these credits is already chosen on save.');
+    throw e;
+  }
+  return c.json({ ok: true, planId: plan.id, auditId: plan.id });
 });
 
-bankRoutes.post('/businesses/:businessId/group-parts/:auditId/undo', requireRole('bank.link'), async (c) => {
+/** Undo a plan of a shift not saved yet: Match all on a group paid in parts, or credits ticked for a bill paid in parts. */
+async function undoPartsPlan(c: Context<AppEnv>, kind: 'group_parts' | 'bill_parts') {
   const db = c.env.DB;
   const bid = c.get('businessId');
-  const id = Number(c.req.param('auditId'));
-  if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
-  const a = await one<{ id: number; after: string }>(db, "SELECT id, after FROM audit_log WHERE id = ? AND business_id = ? AND action = 'bank.group_parts'", id, bid);
-  if (!a) fail(404, 'Not found.');
-  const day = (JSON.parse(a!.after) as { shiftDay: string }).shiftDay;
-  const s = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
+  const id = c.req.param('planId');
+  if (!isPlanId(id)) fail(404, 'Not found.');
+  const plan = await planById(db, bid, id!);
+  if (!plan || plan.kind !== kind) return c.json({ ok: true, unchanged: true });
+  const s = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, plan.day);
   if (s?.status === 'confirmed') fail(409, 'This shift is saved: unmatch the credits on Reconcile.');
-  if (await one(db, "SELECT 1 AS x FROM audit_log WHERE business_id = ? AND action = 'bank.group_parts_undone' AND row_id = ?", bid, String(id))) return c.json({ ok: true, unchanged: true });
-  await db.prepare(`INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
-    VALUES (?, ?, 'bank.group_parts_undone', 'audit_log', ?, NULL, NULL, ?)`).bind(bid, c.get('user').id, String(id), now()).run();
+  await db.batch([...dropPlanStatements(db, [plan.id]), stmt(db, LOG, bid, c.get('user').id, `bank.${kind}_undone`, 'shift_plans', plan.id, null,
+    JSON.stringify({ shiftDay: plan.day, comparisonIds: plan.comparisonIds, headRowId: plan.headRowId, creditIds: plan.bankRowIds }), now())]);
   return c.json({ ok: true });
-});
+}
+
+bankRoutes.post('/businesses/:businessId/group-parts/:planId/undo', requireRole('bank.link'), (c) => undoPartsPlan(c, 'group_parts'));
 
 // A bill paid in several goes, its credits ticked by a person (25 Nov 2026): kept in the audit log and used when the
 // shift is saved, whatever the time between the credits and the bill. Each credit must equal one UPI payment written
@@ -482,40 +495,24 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/bill-parts', requireRole('b
   if (credits.some((r) => r.kind !== 'upi_in' || r.direction !== 'CR' || r.status !== 'unmatched')) fail(409, 'Choose open UPI credits.');
   const key = (xs: number[]) => [...xs].sort((a, b) => a - b).join(',');
   if (key(upi) !== key(credits.map((r) => r.amount_paise))) fail(409, `${named}'s register row does not have one UPI payment for each credit: write them on its row first.`);
-  if (await one(db, "SELECT 1 AS x FROM shift_choices WHERE business_id = ? AND kind = 'bank_match' AND (comparison_ids LIKE ? OR bank_row_id IN (" + creditIds.map(() => '?').join(',') + '))', bid, `%"${cmpId}"%`, ...creditIds))
-    fail(409, `${named} or one of these credits is already matched on save.`);
-  const live = `a.business_id = ? AND a.action = 'bank.bill_parts' AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.business_id = a.business_id AND x.action = 'bank.bill_parts_undone' AND x.row_id = CAST(a.id AS TEXT))`;
-  for (const id of creditIds) {
-    if (await one(db, `SELECT 1 AS x FROM audit_log a WHERE ${live} AND a.row_id <> ? AND a.after LIKE ?`, bid, cmpId, `%"${id}"%`)) fail(409, 'A credit is already chosen for another bill.');
-  }
-  const mine = await all<{ id: number; after: string }>(db, `SELECT a.id, a.after FROM audit_log a WHERE ${live} AND a.row_id = ? ORDER BY a.id`, bid, cmpId);
-  const last = mine[mine.length - 1];
+  const old = (await shiftPlans(db, bid, day, ['bill_parts'])).filter((p) => p.comparisonIds[0] === cmpId);
   const ids = (xs: string[]) => [...xs].sort().join(',');
-  if (last && ids((JSON.parse(last.after) as { creditIds: string[] }).creditIds) === ids(creditIds)) return c.json({ ok: true, auditId: last.id, unchanged: true });
+  if (old.length === 1 && ids(old[0].bankRowIds) === ids(creditIds)) return c.json({ ok: true, planId: old[0].id, auditId: old[0].id, unchanged: true });
+  const clash = await planClash(db, bid, { bankRowIds: creditIds, comparisonIds: [cmpId] }, old.map((p) => p.id), named);
+  if (clash) fail(409, clash);
   const user = c.get('user').id;
-  if (mine.length) await db.batch(mine.map((m) => stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
-    VALUES (?, ?, 'bank.bill_parts_undone', 'audit_log', ?, NULL, NULL, ?)`, bid, user, String(m.id), now())));
-  const r = await one<{ id: number }>(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
-    VALUES (?, ?, 'bank.bill_parts', 'bill_comparisons', ?, NULL, ?, ?) RETURNING id`, bid, user, cmpId,
-    JSON.stringify({ shiftDay: day, billNo: cmp!.bill_no, creditIds, amounts: credits.map((x) => x.amount_paise) }), now());
-  return c.json({ ok: true, auditId: r!.id });
+  const plan = addPlanStatements(db, bid, day, 'bill_parts', { comparisonIds: [cmpId], bankRowIds: creditIds }, user);
+  try {
+    await db.batch([...dropPlanStatements(db, old.map((p) => p.id)), ...plan.statements, stmt(db, LOG, bid, user, 'bank.bill_parts', 'bill_comparisons', cmpId, null,
+      JSON.stringify({ shiftDay: day, billNo: cmp!.bill_no, creditIds, amounts: credits.map((x) => x.amount_paise), planId: plan.id }), now())]);
+  } catch (e) {
+    if (isClash(e)) fail(409, 'One of these credits is already chosen on save.');
+    throw e;
+  }
+  return c.json({ ok: true, planId: plan.id, auditId: plan.id });
 });
 
-bankRoutes.post('/businesses/:businessId/bill-parts/:auditId/undo', requireRole('bank.link'), async (c) => {
-  const db = c.env.DB;
-  const bid = c.get('businessId');
-  const id = Number(c.req.param('auditId'));
-  if (!Number.isInteger(id) || id <= 0) fail(404, 'Not found.');
-  const a = await one<{ id: number; after: string }>(db, "SELECT id, after FROM audit_log WHERE id = ? AND business_id = ? AND action = 'bank.bill_parts'", id, bid);
-  if (!a) fail(404, 'Not found.');
-  const day = (JSON.parse(a!.after) as { shiftDay: string }).shiftDay;
-  const s = await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, day);
-  if (s?.status === 'confirmed') fail(409, 'This shift is saved: unmatch the credits on Reconcile.');
-  if (await one(db, "SELECT 1 AS x FROM audit_log WHERE business_id = ? AND action = 'bank.bill_parts_undone' AND row_id = ?", bid, String(id))) return c.json({ ok: true, unchanged: true });
-  await db.prepare(`INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at)
-    VALUES (?, ?, 'bank.bill_parts_undone', 'audit_log', ?, NULL, NULL, ?)`).bind(bid, c.get('user').id, String(id), now()).run();
-  return c.json({ ok: true });
-});
+bankRoutes.post('/businesses/:businessId/bill-parts/:planId/undo', requireRole('bank.link'), (c) => undoPartsPlan(c, 'bill_parts'));
 
 // A card machine payment matched to its bill(s) before saving (approved 10 Nov 2026), made on Save like a UPI match.
 bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole('bank.link'), async (c) => {
@@ -565,16 +562,17 @@ bankRoutes.post('/businesses/:businessId/shifts/:day/card-choices', requireRole(
     // UPI on the machine (approved 11 Nov 2026) pays a card bill like a swipe, or a UPI bill, matched to the machine on save.
     const upi = isMachineUpi(p) && card !== p.amount_paise ? await plannedUpiPaise(db, bid, day, cids) : 0;
     if (card !== p.amount_paise && upi !== p.amount_paise) fail(409, card || upi ? `The payment is not what ${named ? `bill ${named} takes` : 'these bills take'} by ${isMachineUpi(p) ? 'card or UPI' : 'card'}.` : `${named ? `Bill ${named} has` : 'These bills have'} no ${isMachineUpi(p) ? 'card or UPI' : 'card'} payment: decide or correct ${named ? 'it' : 'them'} first.`);
-    const id = newId();
-    ids.push(id);
-    stmts.push(stmt(db, `INSERT INTO shift_choices (id, business_id, shift_day, kind, card_payment_id, comparison_ids, created_by, created_at) VALUES (?, ?, ?, 'card_match', ?, ?, ?, ?)`,
-      id, bid, day, pid, JSON.stringify(cids), c.get('user').id, now()),
+    const clash = await planClash(db, bid, { cardPaymentIds: [pid], comparisonIds: cids }, [], named ? `Bill ${named}` : 'A bill');
+    if (clash) fail(409, clash);
+    const plan = addPlanStatements(db, bid, day, 'card_match', { comparisonIds: cids, cardPaymentIds: [pid] }, c.get('user').id);
+    ids.push(plan.id);
+    stmts.push(...plan.statements,
     stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice', pid, null, JSON.stringify({ shiftDay: day, comparisonIds: cids, card: true }), now()));
   }
   try {
     await db.batch(stmts);
   } catch (e) {
-    if (/UNIQUE/i.test(String(e))) fail(409, 'This card payment is already matched on save.');
+    if (isClash(e)) fail(409, 'This card payment is already matched on save.');
     throw e;
   }
   return c.json({ ok: true, id: ids[0], ids });
@@ -584,14 +582,13 @@ bankRoutes.delete('/businesses/:businessId/shifts/:day/choices/:id', requireRole
   const db = c.env.DB;
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  if (!isUuid(id)) fail(404, 'Not found.');
-  const k = await one<{ bank_row_id: string | null; card_payment_id: string | null; comparison_ids: string; shift_day: string }>(db,
-    'SELECT bank_row_id, card_payment_id, comparison_ids, shift_day FROM shift_choices WHERE id = ? AND business_id = ?', id, bid);
-  if (!k || k.shift_day !== c.req.param('day')) fail(404, 'Not found, or already saved.');
+  if (!isPlanId(id)) fail(404, 'Not found.');
+  const k = await planById(db, bid, id!);
+  if (!k || k.day !== c.req.param('day') || (k.kind !== 'bank_match' && k.kind !== 'card_match')) fail(404, 'Not found, or already saved.');
   await db.batch([
-    stmt(db, 'DELETE FROM shift_choices WHERE id = ?', id),
-    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice_undone', k.bank_row_id ?? k.card_payment_id,
-      JSON.stringify({ shiftDay: k.shift_day, comparisonIds: JSON.parse(k.comparison_ids), ...(k.card_payment_id ? { card: true } : {}) }), null, now()),
+    ...dropPlanStatements(db, [k!.id]),
+    stmt(db, AUDIT, bid, c.get('user').id, 'shift.choice_undone', k!.bankRowIds[0] ?? k!.cardPaymentIds[0],
+      JSON.stringify({ shiftDay: k!.day, comparisonIds: k!.comparisonIds, ...(k!.kind === 'card_match' ? { card: true } : {}) }), null, now()),
   ]);
   return c.json({ ok: true });
 });
@@ -630,11 +627,11 @@ bankRoutes.get('/businesses/:businessId/shifts/:day/nearby', requireRole('bank.l
       all<{ id: string; amountPaise: number; postedAt: number; accountName: string | null; remark: string | null; label: string | null }>(db, `SELECT r.id, r.amount_paise AS amountPaise, r.posted_at AS postedAt,
         a.name AS accountName, r.remark, s.receives_upi_label AS label FROM bank_rows r LEFT JOIN accounts a ON a.id = r.account_id LEFT JOIN bank_sources s ON s.account_id = r.account_id
         WHERE r.business_id = ? AND r.kind = 'upi_in' AND r.status = 'unmatched' AND r.posted_at >= ? AND r.posted_at < ?
-          AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.bank_row_id = r.id) ORDER BY r.posted_at`, bid, w.from, w.to),
+          AND NOT ${heldCredit('r.id')} ORDER BY r.posted_at`, bid, w.from, w.to),
       all<{ id: string; paid_at: number; amount_paise: number; txn_type: string; terminal_id: string; pay_mode: string | null; scheme: string | null; card_type: string | null; card_last4: string | null }>(db,
         `SELECT s.id, s.paid_at, s.amount_paise, s.txn_type, s.terminal_id, s.pay_mode, s.scheme, s.card_type, s.card_last4 FROM card_settlements s
         WHERE s.business_id = ? AND s.txn_type = 'PURCHASE' AND s.paid_at >= ? AND s.paid_at < ?
-          AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AND NOT EXISTS (SELECT 1 FROM shift_choices k WHERE k.card_payment_id = s.id) ORDER BY s.paid_at`, bid, w.from, w.to),
+          AND NOT EXISTS (SELECT 1 FROM card_matches m WHERE m.settlement_id = s.id) AND NOT ${heldPayment('s.id')} ORDER BY s.paid_at`, bid, w.from, w.to),
     ]);
     credits.push(...cr.map((x) => ({ ...x, shiftDay: adj })));
     payments.push(...pays.filter((p) => !isMachineUpi(p)).map((p) => ({ id: p.id, paidAt: p.paid_at, amountPaise: p.amount_paise, txnType: p.txn_type, terminalId: p.terminal_id, upi: false,
@@ -819,17 +816,26 @@ bankRoutes.post('/businesses/:businessId/comparisons/:id/same-sale', requireRole
   if (!cmp) fail(404, 'Not found.');
   if ((await one<{ status: string }>(db, 'SELECT status FROM shifts WHERE business_id = ? AND shift_day = ?', bid, cmp.shift_day))?.status === 'confirmed') fail(409, 'This shift is already confirmed.');
   if (!(await bookedTx(db, bid, rowId))) fail(409, 'This credit is no longer booked as a sale.');
-  if (await planTaken(db, bid, rowId, cmp.id)) fail(409, 'This credit, or this bill, is already chosen to be one sale with another.');
-  if (await one(db, "SELECT 1 AS x FROM shift_choices WHERE business_id = ? AND kind = 'bank_match' AND comparison_ids LIKE ?", bid, `%"${cmp.id}"%`)) fail(409, 'This bill is already matched on save.');
-  await db.batch([stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.same_sale_planned', rowId, null, { comparisonId: cmp.id, shiftDay: cmp.shift_day }, now()))]);
-  return c.json({ ok: true });
+  const clash = await planClash(db, bid, { bankRowIds: [rowId], comparisonIds: [cmp!.id] }, [], 'This bill');
+  if (clash) fail(409, clash);
+  const plan = addPlanStatements(db, bid, cmp!.shift_day, 'same_sale', { comparisonIds: [cmp!.id], bankRowIds: [rowId] }, c.get('user').id);
+  try {
+    await db.batch([...plan.statements, stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.same_sale_planned', rowId, null, { comparisonId: cmp!.id, shiftDay: cmp!.shift_day, planId: plan.id }, now()))]);
+  } catch (e) {
+    if (isClash(e)) fail(409, 'This credit is already chosen on save.');
+    throw e;
+  }
+  return c.json({ ok: true, planId: plan.id });
 });
 
 bankRoutes.delete('/businesses/:businessId/comparisons/:id/same-sale', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const rowId = (await body(c)).rowId;
   if (typeof rowId !== 'string' || !isUuid(rowId)) fail(400, 'Choose the credit.');
-  await db.batch([stmt(db, AUDIT, ...audit(c.get('businessId'), c.get('user').id, 'bank.same_sale_unplanned', rowId, null, { comparisonId: c.req.param('id') }, now()))]);
+  const bid = c.get('businessId');
+  const plans = (await all<{ id: string }>(db, `SELECT p.id FROM shift_plans p JOIN shift_plan_items i ON i.plan_id = p.id
+    WHERE p.business_id = ? AND p.kind = 'same_sale' AND i.bank_row_id = ?`, bid, rowId)).map((x) => x.id);
+  await db.batch([...dropPlanStatements(db, plans), stmt(db, AUDIT, ...audit(bid, c.get('user').id, 'bank.same_sale_unplanned', rowId, null, { comparisonId: c.req.param('id') }, now()))]);
   return c.json({ ok: true });
 });
 
@@ -1139,7 +1145,11 @@ bankRoutes.post('/businesses/:businessId/bank-rows/book-many', requireRole('bank
   const db = c.env.DB;
   const bid = c.get('businessId');
   const data = await body(c);
-  const items = (Array.isArray(data.items) ? data.items : []).slice(0, 300) as { rowId?: unknown; headId?: unknown; party?: unknown; item?: unknown; billType?: unknown }[];
+  const items = (Array.isArray(data.items) ? data.items : []).slice(0, 300) as { rowId?: unknown; headId?: unknown; party?: unknown; item?: unknown; billType?: unknown; override?: unknown }[];
+  // check: only say which lines the booking gate would stop, booking nothing ("Book N selected" asks first).
+  const checkOnly = data.check === true;
+  const look: { rowId: string; tranId: string; amountPaise: number; day: string; checks: GateCheck[]; canOverride: boolean }[] = [];
+  const clear: string[] = [];
   if (!items.length) fail(400, 'Choose the lines to book.');
   const t = now();
   const user = c.get('user').id;
@@ -1160,17 +1170,27 @@ bankRoutes.post('/businesses/:businessId/bank-rows/book-many', requireRole('bank
     if (!row || row.status !== 'unmatched') { skipped.push(`${row?.tran_id ?? 'A line'}: already done or not found.`); continue; }
     if (unbilled && row.direction !== 'CR') { skipped.push(`${row.tran_id}: only money received can be a sale.`); continue; }
     if (unbilled && !chosen) { skipped.push(`${row.tran_id}: choose the income head for ${unbilled === 'fnb' ? 'F&B' : 'Room'} bills on Heads and rules first.`); continue; }
+    if (chosen) { try { await headFits(db, bid, row, chosen); } catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); continue; } }
+    const g = await passGate(c, row, it.override);
+    if (!g.ok) {
+      look.push({ rowId: row.id, tranId: row.tran_id, amountPaise: row.amount_paise, day: row.day, checks: g.checks, canOverride: g.canOverride });
+      skipped.push(`${row.tran_id}: ${gateWord(g.checks)}.`);
+      continue;
+    }
+    if (checkOnly) { clear.push(row.id); continue; }
     try {
       const p = await partyStatements(db, bid, row, partyName, item, chosen, ctx);
       if (!p.headId) { skipped.push(`${row.tran_id}: choose a head.`); continue; }
-      const book = await bookStatements(db, bid, row, p.headId, p.partyId, unbilled ? 'Unbilled sale' : null, user, t, unbilled ? `unbilled ${unbilled} sale` : 'chosen in a list', item);
+      const book = await bookStatements(db, bid, row, p.headId, p.partyId, [unbilled ? 'Unbilled sale' : null, g.note].filter(Boolean).join(' · ') || null, user, t,
+        unbilled ? `unbilled ${unbilled} sale` : 'chosen in a list', item, g.gate);
       statements.push(...p.statements, ...book);
       if (p.partyId) ctx.history.unshift({ party_id: p.partyId, head_id: p.headId, narration: item ?? row.remark });
       booked += 1;
     } catch (e) { skipped.push(`${row.tran_id}: ${(e as Error).message}`); }
   }
+  if (checkOnly) return c.json({ clear, look, skipped: skipped.filter((x) => !look.some((l) => x.startsWith(`${l.tranId}:`))) });
   for (let i = 0; i < statements.length; i += 90) await db.batch(statements.slice(i, i + 90));
-  return c.json({ booked, skipped });
+  return c.json({ booked, skipped, look });
 });
 
 /**
@@ -1215,8 +1235,6 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/match-with-difference'
  * 3 days before the settlement's date (it pays out money collected before that day: 26 Nov 2026), can be matched to it, and the rest is booked under an income head (Room
  * income). Unmatch on the line undoes both.
  */
-const SETTLEMENT_REMARK = 'UPI collection settlement';
-const SETTLEMENT_BACK_DAYS = 3;
 bankRoutes.get('/businesses/:businessId/bank-rows/:rowId/desk-bills', requireRole('bank.link'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
@@ -1489,7 +1507,15 @@ async function partyStatements(db: D1Database, bid: string, row: BankRow, partyN
   return { partyId: v.partyId, headId: v.headId, statements };
 }
 
-async function bookStatements(db: D1Database, bid: string, row: BankRow, headId: string, partyId: string | null, note: string | null, user: string, t: number, how: string, item: string | null = null) {
+/** The head is of the line's kind: income for money received, an expense for money paid. */
+async function headFits(db: D1Database, bid: string, row: BankRow, headId: string) {
+  const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', headId, bid);
+  if (!head) fail(400, 'Choose a head.');
+  if (head!.type !== (row.direction === 'CR' ? 'income' : 'expense')) fail(400, row.direction === 'CR' ? 'Money received goes under an income head.' : 'Money paid goes under an expense head.');
+}
+
+async function bookStatements(db: D1Database, bid: string, row: BankRow, headId: string, partyId: string | null, note: string | null, user: string, t: number, how: string, item: string | null = null,
+  gate: { checks: string[]; reason: string } | null = null) {
   const head = await one<{ type: string }>(db, 'SELECT type FROM heads WHERE id = ? AND business_id = ?', headId, bid);
   if (!head) fail(400, 'Choose a head.');
   const type = row.direction === 'CR' ? 'income' : 'expense';
@@ -1501,8 +1527,21 @@ async function bookStatements(db: D1Database, bid: string, row: BankRow, headId:
       txId, bid, row.account_id, row.day, row.amount_paise, type, headId, [item || row.description, note].filter(Boolean).join(' — '),
       row.kind === 'upi_in' || row.kind === 'upi_out' || row.kind === 'upi_fee' ? 'upi' : null, partyId, row.id, t),
     stmt(db, "UPDATE bank_rows SET status = 'booked', transaction_id = ?, note = ?, done_by = ?, done_at = ? WHERE id = ? AND status = 'unmatched'", txId, note, user, t, row.id),
-    stmt(db, AUDIT, ...audit(bid, user, 'bank.book', row.id, { status: 'unmatched' }, { status: 'booked', headId, partyId, item, note, how, transactionId: txId }, t)),
+    stmt(db, AUDIT, ...audit(bid, user, 'bank.book', row.id, { status: 'unmatched' }, { status: 'booked', headId, partyId, item, note, how, transactionId: txId, ...(gate ? { gate } : {}) }, t)),
   ];
+}
+
+/**
+ * The booking gate for one line (src/bookingGate.ts): pass when nothing is found, or when an Owner or Accountant books it
+ * anyway with a reason and nothing found is a hard stop. The reason is kept on the line's note and in the audit log.
+ */
+async function passGate(c: Context<AppEnv>, row: BankRow, override: unknown): Promise<{ ok: true; note: string | null; gate: { checks: string[]; reason: string } | null } | { ok: false; checks: GateCheck[]; canOverride: boolean }> {
+  const checks = await bookingGate(c.env.DB, c.get('businessId'), row);
+  if (!checks.length) return { ok: true, note: null, gate: null };
+  const allowed = !checks.some((k) => k.block) && can(c.get('role'), 'bank.book_anyway');
+  const reason = override && typeof override === 'object' && typeof (override as { reason?: unknown }).reason === 'string' ? (override as { reason: string }).reason.trim().slice(0, 200) : '';
+  if (allowed && reason.length >= 3) return { ok: true, note: `Booked anyway (${gateWord(checks)}): ${reason}`, gate: { checks: checks.map((k) => k.check), reason } };
+  return { ok: false, checks, canOverride: allowed };
 }
 
 bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('bank.link'), async (c) => {
@@ -1516,11 +1555,10 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('ba
   const partyName = text(data, 'party', 'Party', { optional: true, max: 120 });
   const note = text(data, 'note', 'Note', { optional: true, max: 300 });
   const item = text(data, 'item', 'Item', { optional: true, max: 120 });
-  // Asked first by the screens: a bill of this amount waiting means booking this too may count one sale twice.
-  if (data.checkBills === true && row.kind === 'upi_in') {
-    const bills = await waitingBillsLike(db, bid, row.amount_paise, row.day);
-    if (bills.length) return c.json({ ok: false, waitingBills: bills });
-  }
+  await headFits(db, bid, row!, headId);
+  // The booking gate (25 Nov 2026): checked every time, whatever the screen.
+  const g = await passGate(c, row!, data.override);
+  if (!g.ok) return c.json({ ok: false, gate: { checks: g.checks, canOverride: g.canOverride, amountPaise: row!.amount_paise, day: row!.day } });
   const t = now();
   const statements: D1PreparedStatement[] = [];
   let partyId: string | null = null;
@@ -1529,7 +1567,7 @@ bankRoutes.post('/businesses/:businessId/bank-rows/:rowId/book', requireRole('ba
     partyId = p?.id ?? newId();
     if (!p) statements.push(stmt(db, 'INSERT INTO parties (id, business_id, name, aliases, default_head_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', partyId, bid, partyName, '[]', headId, t));
   }
-  statements.push(...(await bookStatements(db, bid, row, headId, partyId, note, c.get('user').id, t, 'by hand', item)));
+  statements.push(...(await bookStatements(db, bid, row!, headId, partyId, [note, g.note].filter(Boolean).join(' · ') || null, c.get('user').id, t, 'by hand', item, g.gate)));
   await db.batch(statements);
   return c.json({ ok: true });
 });
@@ -1550,6 +1588,8 @@ bankRoutes.post('/businesses/:businessId/bank-rows/book-by-rules', requireRole('
   for (const r of rows) {
     const rule = r.kind === 'upi_in' ? null : ruleFor(rules, r);
     if (!rule) continue;
+    // A rule books nothing the booking gate stops: those wait for a person.
+    if ((await bookingGate(db, bid, r)).length) continue;
     statements.push(...(await bookStatements(db, bid, r, rule.head_id, rule.party_id, `Rule: ${rule.name}`, user, t, `rule ${rule.id}`)));
     booked += 1;
   }
