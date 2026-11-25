@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
-import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt } from '../db';
+import { all, isShiftConfirmed, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, fail, isUuid, text } from '../http';
 import { sha256 } from '../crypto';
 import { parseSalesCsv } from '../salescsv';
@@ -316,6 +316,16 @@ salesRoutes.get('/businesses/:businessId/shifts', requireRole('sales.view'), asy
   return c.json({ shifts });
 });
 
+/** What is left on a saved shift once its card side is counted: UPI bills, UPI credits and card items, each once. */
+async function savedLeft(db: DB, bid: string, day: string, bills: number, credits: number) {
+  const w = shiftWindow(day);
+  const k = await shiftCards(db, bid, day, null);
+  // What the card side explains counts once, there.
+  const twiceCredits = k.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).length;
+  const twiceBills = k.explains.bills.filter((x) => x.shiftDay === day).length;
+  return { billsLeft: bills - twiceBills, creditsLeft: credits - twiceCredits, cardsLeft: k.left };
+}
+
 /**
  * The shift calendar (approved 15 Nov 2026): a month of shifts, each saved, in progress or not started, and how many
  * things are still open on it (bills to decide; for people who can see the bank, UPI bills and credits not matched).
@@ -335,7 +345,7 @@ salesRoutes.get('/businesses/:businessId/shifts/calendar', requireRole('sales.vi
   const workStart = opening?.bank ?? booksStart;
   const bankToo = can(c.get('role'), 'bank.link');
   const w = { from: shiftWindow(first).from, to: shiftWindow(last).to };
-  const [saved, started, decide, bills, credits] = await Promise.all([
+  const [saved, started, decide, bills, credits, toCheck] = await Promise.all([
     all<{ d: string }>(db, `SELECT shift_day AS d FROM shifts WHERE business_id = ? AND status = 'confirmed' AND shift_day >= ? AND shift_day <= ?`,
       bid, workStart < first ? workStart : first, today),
     all<{ d: string }>(db, `SELECT shift_day AS d FROM shifts WHERE business_id = ? AND shift_day BETWEEN ? AND ?
@@ -347,11 +357,26 @@ salesRoutes.get('/businesses/:businessId/shifts/calendar', requireRole('sales.vi
       AND type = 'income' AND payment_mode = 'upi' AND match_status = 'awaiting_bank_match' AND matched_bank_row IS NULL GROUP BY shift_day`, bid, first, last) : [],
     bankToo ? all<{ d: string; n: number }>(db, `SELECT date((posted_at - 9000000) / 1000, 'unixepoch') AS d, count(*) AS n FROM bank_rows
       WHERE business_id = ? AND kind = 'upi_in' AND status = 'unmatched' AND posted_at >= ? AND posted_at < ? GROUP BY d`, bid, w.from, w.to) : [],
+    all<{ d: string; n: number }>(db, `SELECT shift_day AS d, count(*) AS n FROM register_rows WHERE business_id = ? AND shift_day BETWEEN ? AND ?
+      AND status <> 'checked' GROUP BY shift_day`, bid, first, last),
   ]);
   const done = new Set(saved.map((r) => r.d));
   const begun = new Set(started.map((r) => r.d));
+  // The number on a day (owner, 25 Nov 2026). Not saved: only what stops saving (rows to check, bills to decide); its
+  // UPI credits are matched on save, so they are not counted. Saved: what is still unmatched, as on the shift bar
+  // (UPI bills, UPI credits and card items).
+  const get = (xs: { d: string; n: number }[], d: string) => xs.find((x) => x.d === d)?.n ?? 0;
   const open = new Map<string, number>();
-  for (const r of [...decide, ...bills, ...credits]) open.set(r.d, (open.get(r.d) ?? 0) + r.n);
+  await Promise.all([...new Set([...decide, ...toCheck, ...bills, ...credits].map((r) => r.d))].filter((d) => d >= first && d <= last).map(async (d) => {
+    if (!done.has(d)) { open.set(d, get(toCheck, d) + get(decide, d)); return; }
+    if (!bankToo) { open.set(d, 0); return; }
+    const l = await savedLeft(db, bid, d, get(bills, d), get(credits, d));
+    open.set(d, l.billsLeft + l.creditsLeft + l.cardsLeft);
+  }));
+  if (bankToo) await Promise.all([...done].filter((d) => d >= first && d <= last && !open.has(d)).map(async (d) => {
+    const l = await savedLeft(db, bid, d, 0, 0);
+    if (l.cardsLeft) open.set(d, l.cardsLeft);
+  }));
   const days = [];
   for (let d = first; d <= last; d = addDays(d, 1)) {
     const off = d < booksStart || d > today;
@@ -386,11 +411,9 @@ salesRoutes.get('/businesses/:businessId/shifts/:day/progress', requireRole('sal
       AND posted_at >= ? AND posted_at < ?`, bid, w.from, w.to) : null,
   ]);
   // Card items count too once the shift is confirmed: swipes with no bill, and card bills with no swipe once the report is in.
-  const k = bills != null && status?.status === 'confirmed' ? await shiftCards(db, bid, day, null) : null;
-  // What the card side explains counts once, there.
-  const twice = k ? { credits: k.explains.credits.filter((x) => x.postedAt >= w.from && x.postedAt < w.to).length, bills: k.explains.bills.filter((x) => x.shiftDay === day).length } : { credits: 0, bills: 0 };
-  return c.json({ software, rows, toCheck, toDecide, status: status?.status ?? null,
-    bank: bills == null ? null : { billsLeft: bills - twice.bills, creditsLeft: (credits ?? 0) - twice.credits, cardsLeft: k?.left ?? 0 } });
+  const bank = bills == null ? null : status?.status === 'confirmed' ? await savedLeft(db, bid, day, bills, credits ?? 0)
+    : { billsLeft: bills, creditsLeft: credits ?? 0, cardsLeft: 0 };
+  return c.json({ software, rows, toCheck, toDecide, status: status?.status ?? null, bank });
 });
 
 salesRoutes.get('/businesses/:businessId/shifts/:day', requireRole('sales.view'), async (c) => {

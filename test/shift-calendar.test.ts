@@ -28,10 +28,17 @@ describe('shift calendar', () => {
     expect(r).toMatchObject({ month: '2026-10', workStart: '2026-10-30', oldestToDo: '2026-10-30' });
     expect(r.days).toHaveLength(31);
     expect(at('2026-10-31')).toMatchObject({ state: 'saved', off: false });
-    expect(at('2026-10-30')).toMatchObject({ state: 'started', off: false, open: 1 });
-    // The UPI credit is bank data: not counted for people who cannot see the bank.
+    // Not saved: only what stops saving counts (owner, 25 Nov 2026). Its UPI credit is matched on save, so not counted.
+    expect(at('2026-10-30')).toMatchObject({ state: 'started', off: false, open: 0 });
     const seen = (await h.clients.viewer.get(`${base}?month=2026-10`)).json;
     expect(seen.days.find((x: any) => x.day === '2026-10-30')).toMatchObject({ state: 'started', open: 0 });
+    // A bill to decide does count before saving.
+    await sql`UPDATE bill_comparisons SET difference = 'amount', decision = NULL WHERE business_id = ${h.bid} AND shift_day = '2026-10-30'`;
+    expect((await h.clients.accountant.get(`${base}?month=2026-10`)).json.days.find((x: any) => x.day === '2026-10-30')).toMatchObject({ open: 1 });
+    // Saved: a UPI credit with no bill counts (the bank's people only).
+    await h.lines([['31 16:00', 77, 'CR', 'UPI/110000000003/Guest/yyguest@ybl//ICIbbbb']]);
+    expect((await h.clients.accountant.get(`${base}?month=2026-10`)).json.days.find((x: any) => x.day === '2026-10-31')).toMatchObject({ state: 'saved', open: 1 });
+    expect((await h.clients.viewer.get(`${base}?month=2026-10`)).json.days.find((x: any) => x.day === '2026-10-31')).toMatchObject({ open: 0 });
     // Before the bank's books start but after the cash book's: can be opened, no mark.
     expect(at('2026-10-29')).toMatchObject({ state: null });
     expect(at('2026-10-29').off).toBe(r.booksStart > '2026-10-29');
