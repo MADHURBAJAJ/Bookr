@@ -1315,8 +1315,8 @@ async function settleScreen(billId) {
             ${notes.length ? html`<div class="f" style="grid-column:1/-1">Note handed over<div class="chips">${notes.map((n) => html`<button type="button" class="chip" aria-pressed="${given === n}" data-act="tender" data-p="${n}">${rs(n)}</button>`)}</div></div>` : ''}
             ${given && thisAmt && given > thisAmt ? html`<p class="change" role="status" style="grid-column:1/-1">Give change: ${rs(given - thisAmt)}</p>` : ''}` : ''}
           ${m === 'upi' ? html`<div class="f" style="grid-column:1/-1">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
-          ${m === 'card' ? html`<label class="f">Approval code (from the slip)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="6" autocomplete="off"></label>
-            <label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" value="${ui.cardLast4 ?? ''}" maxlength="4" autocomplete="off"></label>` : ''}
+          ${m === 'card' ? html`<label class="f">Approval code (optional)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="12" autocomplete="off"></label>
+            <label class="f">Card last 4 (optional)<input class="in" inputmode="numeric" data-model="cardLast4" value="${ui.cardLast4 ?? ''}" maxlength="4" autocomplete="off"></label>` : ''}
           ${m === 'room' ? html`<div style="grid-column:1/-1">${stayPicker('pick', ui.debtorAccountId, (s) => s.accountId)}</div>` : ''}
           ${m === 'credit' ? creditPicker() : ''}
           ${m === 'comp' ? html`<label class="f">Guest name (required)<input class="in" data-model="compGuest" value="${ui.compGuest ?? ''}"></label>
@@ -1400,9 +1400,10 @@ actions.addPay = () => {
   if (m === 'upi') { if (!ui.payAccountId) throw new Error("Choose which account's QR was paid."); p.payAccountId = ui.payAccountId; p.detail = cache.payAccounts.find((a) => a.id === ui.payAccountId).name; }
   if (m === 'card') {
     const code = (ui.cardApproval ?? '').trim().toUpperCase(); const last4 = (ui.cardLast4 ?? '').trim();
-    if (!/^[A-Z0-9]{6}$/.test(code)) throw new Error('Type the 6-character approval code from the card slip.');
-    if (!/^\d{4}$/.test(last4)) throw new Error("Type the card's last 4 digits from the slip.");
-    Object.assign(p, { cardApproval: code, cardLast4: last4, detail: `Approval ${code} · ****${last4}` });
+    // Both optional (26 Nov 2026): checked only when typed.
+    if (code && !/^[A-Z0-9]{1,12}$/.test(code)) throw new Error('The approval code is letters and digits only.');
+    if (last4 && !/^\d{4}$/.test(last4)) throw new Error("The card's last digits are 4 digits.");
+    Object.assign(p, { cardApproval: code, cardLast4: last4, detail: [code && `Approval ${code}`, last4 && `****${last4}`].filter(Boolean).join(' · ') });
   }
   if (m === 'room') { if (!ui.debtorAccountId) throw new Error('Choose the room.'); p.debtorAccountId = ui.debtorAccountId; p.detail = cache.stays.find((s) => s.accountId === ui.debtorAccountId).room; p.detail = 'Room ' + p.detail; }
   if (m === 'credit') {
@@ -1644,7 +1645,7 @@ function moneyForms() {
 const payFields = (amountKey = 'recvAmount') => html`<div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
   <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="${amountKey}" ${amountKey === 'nrAdv' ? 'data-live' : ''} value="${ui[amountKey] ?? ''}"></label>
     ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
-    ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>`;
+    ${ui.recvMode === 'card' ? html`<label class="f">Approval code (optional)<input class="in" data-model="cardApproval" maxlength="12"></label><label class="f">Card last 4 (optional)<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>`;
 const payOf = (amountKey = 'recvAmount') => ({ mode: ui.recvMode ?? 'cash', amount: ui[amountKey] ?? '', payAccountId: ui.payAccountId, cardApproval: ui.cardApproval, cardLast4: ui.cardLast4 });
 
 const ROOM_VIEWS = [['today', 'Today'], ['chart', 'Room chart'], ['list', 'Reservations'], ['new', '+ New reservation'], ['checkin', 'Check-in'], ['house', 'Housekeeping'],
@@ -2615,7 +2616,7 @@ function advanceForm() {
     <div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
     <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="recvAmount" value="${ui.recvAmount ?? ''}"></label>
       ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((x) => x.active).map((x) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === x.id}" data-act="pick" data-k="payAccountId" data-id="${x.id}">${x.name}</button>`)}</div></div>` : ''}
-      ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
+      ${ui.recvMode === 'card' ? html`<label class="f">Approval code (optional)<input class="in" data-model="cardApproval" maxlength="12"></label><label class="f">Card last 4 (optional)<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
     <div class="row"><button class="btn pri" type="submit" data-act="advGo" data-submit>Take advance and print receipt</button><button class="btn" type="button" data-act="advNo">Cancel</button></div></form>`;
 }
 actions.advNew = () => { ui.adv = {}; ui.recvMode = 'cash'; ui.recvAmount = undefined; ui.advName = ui.advPhone = ui.advIn = undefined; ui.error = null; rerender(); scrollTo(0, 0); };

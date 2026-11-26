@@ -131,7 +131,9 @@ describe('settle', () => {
     const { bill } = await billed(s, [['Masala Dosa', 2], ['Butter Naan', 1]]); // 420 + 21 = 441
     const pay = (payments: unknown[]) => s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments });
     expect((await pay([{ mode: 'cash', amount: '400' }])).json.error).toMatch(/₹41 is still to pay/);
-    expect((await pay([{ mode: 'cash', amount: '241' }, { mode: 'card', amount: '200', cardApproval: '12', cardLast4: '4242' }])).json.error).toMatch(/approval code/);
+    expect((await pay([{ mode: 'cash', amount: '241' }, { mode: 'card', amount: '200', cardApproval: '12-34', cardLast4: '4242' }])).json.error).toMatch(/approval code/);
+    // Approval code and last 4 are optional (26 Nov 2026); typed last digits must still be 4 digits.
+    expect((await pay([{ mode: 'cash', amount: '241' }, { mode: 'card', amount: '200', cardLast4: '42' }])).json.error).toMatch(/4 digits/);
     const r = await pay([{ mode: 'cash', amount: '241', tendered: '300' }, { mode: 'card', amount: '200', cardApproval: 'a1b2c3', cardLast4: '4242' }]);
     expect(r.status).toBe(201);
     expect(r.json.changePaise).toBe(5900);
@@ -711,5 +713,15 @@ describe('menu v2: add-ons, price at billing, GST by category and item', () => {
     const hufBill = (await ok(counter.post(`${B}/orders/${o2}/bill`, { entityId: s.huf }))).bill;
     expect(hufBill.taxes).toEqual([{ kind: 'gst', bp: 0, valuePaise: 20000, cgstPaise: 0, sgstPaise: 0 }, { kind: 'liquor', bp: 0, valuePaise: 30000, cgstPaise: 0, sgstPaise: 0 }]);
     await expect(q('UPDATE bill_taxes SET value_paise = 1 WHERE bill_id = ?', bill.id)).rejects.toThrow(/bill_frozen/);
+  });
+});
+
+describe('card without slip details', () => {
+  it('takes a card payment with no approval code or last 4 digits (26 Nov 2026)', async () => {
+    const { setupBusiness: setup, billed: bill } = await import('./helpers');
+    const s = await setup();
+    const { bill: b } = await bill(s, [['Masala Chai', 1]]);
+    const r = await s.counter.post(`${s.B}/settlements`, { billIds: [b.id], payments: [{ mode: 'card', amount: String(b.totalPaise / 100) }] });
+    expect(r.status).toBe(201);
   });
 });
