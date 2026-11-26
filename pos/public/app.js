@@ -5894,9 +5894,18 @@ actions.addItem = async () => {
     openPrice: open, minPrice: open ? ui.iMin ?? '' : '', addonGroups: (ui.iGroups ?? []).map((id) => ({ id, prices: itemPricesOut(id) })) };
   const fromChoice = !open && choicePrice();
   if (fromChoice) body.price = fromChoice;
-  if (ui.editItem) { const m = cache.menu.find((x) => x.id === ui.editItem); await api('PUT', `${B()}/menu/${m.id}`, { ...body, sac: m.sac, active: !!m.active }); }
+  let lowered = '';
+  if (ui.editItem) {
+    const m = cache.menu.find((x) => x.id === ui.editItem);
+    const r = await api('PUT', `${B()}/menu/${m.id}`, { ...body, sac: m.sac, active: !!m.active });
+    // A lower price (26 Nov 2026): offer it on open orders still at the old price.
+    if (r.openHigher && confirm(`${m.name} is cheaper now. Lower it on ${plural(r.openHigher, 'open order')} that still ${r.openHigher === 1 ? 'has' : 'have'} the old price? (Bills already printed stay as they are.)`)) {
+      const x = await api('POST', `${B()}/menu/${m.id}/reprice-open`, {});
+      lowered = x.places.length ? ` Lowered on ${x.places.join(', ')}.` : '';
+    }
+  }
   else await api('POST', B() + '/menu', body);
-  flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.` }; route();
+  flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.${lowered}` }; route();
 };
 /** Items the Menu tab shows: matching the search (name or category, any word order) and the chosen category. */
 function menuFilter() {

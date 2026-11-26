@@ -546,7 +546,27 @@ settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
     syncItemStations(c.env.DB, bid),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.update', 'menu_items', id, before, f),
   ]);
-  return c.json({ ok: true });
+  // A lower price (26 Nov 2026): how many open orders, not billed yet, still have it at the old price (offered to lower).
+  const lower = !f.open_price && (f.price_paise as number) < (before.price_paise as number);
+  const openHigher = lower ? (await one<{ n: number }>(c.env.DB, `SELECT count(DISTINCT l.order_id) AS n FROM order_lines l JOIN orders o ON o.id = l.order_id
+    WHERE o.business_id = ? AND o.status IN ('open', 'tab') AND l.item_id = ? AND l.qty > 0 AND l.options IS NULL AND l.price_paise > ?`, bid, id, f.price_paise))!.n : 0;
+  return c.json({ ok: true, openHigher });
+});
+
+// Lowers an item's price on open orders not billed yet to today's menu price (26 Nov 2026): a lower price is in the guest's
+// favour. A dish with add-ons, a typed price, or on a printed bill is left as it is.
+settingsRoutes.post(`${B}/menu/:id/reprice-open`, requireAction('menu.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const m = await one<{ id: string; name: string; price_paise: number; open_price: number }>(c.env.DB, 'SELECT id, name, price_paise, open_price FROM menu_items WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  if (!m) fail(404, 'Item not found.');
+  if (m.open_price) fail(409, 'This item has its price typed at the counter.');
+  const rows = await all<{ id: string; place: string; price_paise: number; qty: number }>(c.env.DB, `SELECT l.id, o.place, l.price_paise, l.qty FROM order_lines l JOIN orders o ON o.id = l.order_id
+    WHERE o.business_id = ? AND o.status IN ('open', 'tab') AND l.item_id = ? AND l.qty > 0 AND l.options IS NULL AND l.price_paise > ?`, bid, m.id, m.price_paise);
+  if (rows.length) await c.env.DB.batch([
+    ...rows.map((r) => stmt(c.env.DB, 'UPDATE order_lines SET price_paise = ? WHERE id = ?', m.price_paise, r.id)),
+    audit(c.env.DB, bid, c.get('staff').id, 'menu.reprice_open', 'menu_items', m.id, { lines: rows.map((r) => ({ place: r.place, pricePaise: r.price_paise, qty: r.qty })) }, { pricePaise: m.price_paise }),
+  ]);
+  return c.json({ ok: true, lines: rows.length, places: [...new Set(rows.map((r) => r.place))] });
 });
 
 /**
