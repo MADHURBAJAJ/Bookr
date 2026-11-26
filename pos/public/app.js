@@ -432,7 +432,7 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault(); go('#/rooms/new');
   } else if ((ev.key === 'c' || ev.key === 'C') && onDesk() && can('stays.edit')) {
     ev.preventDefault(); go('#/rooms/checkin');
-  } else if ((ev.key === 'a' || ev.key === 'A') && /^#\/(counter)?$|^$|^#$/.test(location.hash) && can('debtors.receive')) {
+  } else if ((ev.key === 'a' || ev.key === 'A') && /^#\/(counter|tables)?$|^$|^#$/.test(location.hash) && can('debtors.receive')) {
     // A party's advance (A), from the Counter (26 Nov 2026).
     ev.preventDefault(); actions.partyAdv();
   } else if (['t', 'r', 'k'].includes(ev.key.toLowerCase()) && onDesk() && can('orders.edit')) {
@@ -676,6 +676,9 @@ async function tablesScreen() {
   const [{ orders, tables, tablesFixed, sections }, ev] = await Promise.all([api('GET', B() + '/orders'), api('GET', B() + '/event-mode/now').catch(() => ({ event: null })), load('stays')]);
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.event = ev.event;
   if (pendingPick) { ui.picking = pendingPick; pendingPick = null; }
+  // Restaurant advances (26 Nov 2026): taken and held here as on the Counter.
+  ui.radv = can('pos.view') ? (await api('GET', B() + '/restaurant-advances').catch(() => ({ advances: [] }))).advances : [];
+  if (can('debtors.receive')) await load('payAccounts').catch(() => null);
   rerender = () => {
     const showGrid = can('orders.edit') && ui.tables.length > 0;
     // Orders that need the cashier first: bills waiting for money, then dishes not yet sent, then the rest.
@@ -697,11 +700,13 @@ async function tablesScreen() {
         ${can('orders.edit') ? html`<div class="startbar" role="group" aria-label="Start an order">
           <button class="btn ${ui.picking === 'table' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="table">New table order</button>
           <button class="btn ${ui.picking === 'room' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="room">Room service</button>
-          <button class="btn ${ui.picking === 'takeaway' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button></div>` : ''}
+          <button class="btn ${ui.picking === 'takeaway' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button>
+          ${can('debtors.receive') ? html`<button class="btn ${ui.advForm ? 'pri' : ''}" type="button" data-act="partyAdv">Party advance</button>` : ''}</div>` : ''}
       </div>
       ${errorBox()}
       ${ui.event ? eventStrip(ui.event) : ''}
       ${ui.picking ? newOrderForm() : ''}
+      ${ui.advForm ? advanceTakeForm() : ''}
       <div class="row between" style="margin-bottom:14px;align-items:center">
         <div class="counts" style="margin:0">
           <span class="badge billed">${n('billed')} to pay</span><span class="badge new">${n('new')} not sent</span>
@@ -712,6 +717,7 @@ async function tablesScreen() {
       </div>
       ${ui.found ? searchResults(ui.found) : ''}
       ${showGrid ? tableGrid() : ''}
+      ${(ui.radv ?? []).length ? advancesHeldList() : ''}
       <div class="sect"><h2>${showGrid ? 'Room service, takeaway and tabs' : 'Open orders'}</h2>
         ${rest.length ? html`<span class="small quiet">Bills to pay first, then oldest</span>` : ''}</div>
       ${rest.length ? html`<div class="olist">${rest.map(card)}</div>` : html`<p class="empty">${showGrid ? 'No room service, takeaway or tab open.' : 'No open orders. Start one above.'}</p>`}`));
