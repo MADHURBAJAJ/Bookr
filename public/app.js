@@ -6198,7 +6198,9 @@ async function bankView(biz, query = '') {
       <div class="note" data-dbsum></div>
       <label class="tiny">Direct bookings head <select data-dbhead style="width:auto">${d.heads.map((x) => html`<option value="${x.id}" ${x.id === d.headId ? 'selected' : ''}>${x.name}</option>`)}</select></label>
       <div class="form-msg" data-dbmsg></div>
-      <div class="form-row" style="justify-content:flex-end"><button class="btn plain" value="cancel" type="submit">Cancel</button><button class="btn" type="button" data-dbgo disabled>Match and book</button></div>
+      <div class="form-row" style="justify-content:flex-end;flex-wrap:wrap"><button class="btn plain" value="cancel" type="submit">Cancel</button>
+        ${d.bills.length && biz.actions.includes('bank.book_anyway') ? html`<button class="btn plain" type="button" data-dbnone>None of these · book ₹ ${money(line.amountPaise)}</button>` : ''}
+        <button class="btn" type="button" data-dbgo disabled>Match and book</button></div>
     </form>`.__html;
     document.body.append(dlg);
     const ticked = () => [...dlg.querySelectorAll('[data-db]')].filter((x) => x.checked);
@@ -6220,6 +6222,20 @@ async function bankView(biz, query = '') {
         await bankView(biz, query);
         document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Desk bills matched; the rest booked as direct bookings. Unmatch is on Done.</div>`.__html;
       } catch (err) { go.disabled = false; showError(dlg.querySelector('[data-dbmsg]'), err); }
+    });
+    // None of these (approved 26 Nov 2026): no desk bill is in it; the whole settlement is booked under the head chosen,
+    // the check written on the booking. Owner or Accountant; Undo (Open again) is on Done as usual.
+    dlg.querySelector('[data-dbnone]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const r = await apiFull('POST', `/businesses/${biz.id}/bank-rows/${line.id}/book`, { headId: dlg.querySelector('[data-dbhead]').value, item: 'UPI collection settlement',
+          override: { reason: `Checked: no desk bill in this settlement (${d.bills.map((x) => x.billNo ?? '?').join(', ')} not in it)` } });
+        if (r.gate) throw new Error(`Not booked: ${gateWords(r.gate.checks)}.`);
+        dlg.close('done');
+        await bankView(biz, query);
+        document.getElementById('bmsg').innerHTML = html`<div class="ok-msg">Settlement booked as direct bookings; no desk bill in it. Open again is on Done.</div>`.__html;
+      } catch (err) { btn.disabled = false; showError(dlg.querySelector('[data-dbmsg]'), err); }
     });
     dlg.addEventListener('close', () => dlg.remove());
     dlg.showModal();

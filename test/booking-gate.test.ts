@@ -88,6 +88,13 @@ describe('the booking gate', () => {
     const g = await gate(settle);
     expect(g.checks[0]).toMatchObject({ check: 'settlement', from: '2026-10-30', to: '2026-11-01' });
     expect(g.checks[0].bills.map((b: { billNo: string }) => b.billNo)).toEqual(['2610503']);
+    // None of these (26 Nov 2026): the Accountant says no desk bill is in it; the whole settlement is booked, the check written on it.
+    const none = await h.clients.accountant.post(`/businesses/${h.bid}/bank-rows/${settle}/book`, { headId: h.fnb, item: 'UPI collection settlement',
+      override: { reason: 'Checked: no desk bill in this settlement (2610503 not in it)' } });
+    expect(none.status, JSON.stringify(none.json)).toBe(200);
+    expect(none.json.gate).toBeUndefined();
+    expect(await statusOf(settle)).toBe('booked');
+    expect((await sql`SELECT t.narration, t.amount_paise FROM bank_rows r JOIN transactions t ON t.id = r.transaction_id WHERE r.id = ${settle}`)[0]).toMatchObject({ amount_paise: 410000 });
 
     // A rule for "BY CASH" books nothing the gate stops.
     expect((await o.post(`/businesses/${h.bid}/rules`, { name: 'Cash', direction: 'CR', contains: 'BY CASH', headId: h.fnb })).status).toBe(201);
