@@ -97,8 +97,8 @@ authRoutes.post('/auth/logout', async (c) => {
 
 authRoutes.get('/me', requireStaff, async (c) => {
   const s = c.get('staff');
-  const b = await one<{ name: string; shift_start_hour: number; fy_start_month: number; tab_age_days: number; disc_limit_bp: number; float_paise: number }>(c.env.DB,
-    'SELECT name, shift_start_hour, fy_start_month, tab_age_days, disc_limit_bp, float_paise FROM businesses WHERE id = ?', s.businessId);
+  const b = await one<{ name: string; shift_start_hour: number; fy_start_month: number; tab_age_days: number; disc_limit_bp: number; float_paise: number; service_charge_bp: number }>(c.env.DB,
+    'SELECT name, shift_start_hour, fy_start_month, tab_age_days, disc_limit_bp, float_paise, service_charge_bp FROM businesses WHERE id = ?', s.businessId);
   const actions = (Object.keys(PERMISSIONS) as Action[]).filter((a) => (PERMISSIONS[a] as readonly string[]).includes(s.role));
   // The restaurants this person may switch to: only their own login's places (given by a Bookr POS admin), active ones.
   const loginId = c.get('loginId');

@@ -451,8 +451,9 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     one<Entity>(c.env.DB, 'SELECT id, name, gst_rate_bp, gst_registered, series_prefix, offered, active, warn1_paise, warn2_paise, stop_paise FROM billing_entities WHERE id = ? AND business_id = ?', entityId, bid),
     one<{ s: number }>(c.env.DB, "SELECT coalesce(sum(total_paise), 0) AS s FROM bills WHERE entity_id = ? AND fy = ? AND status <> 'void'", entityId, fy),
     // Each line's tax, from the menu as it is now: the item's own, else its category's, else the billing name's.
-    all<{ id: string; mode: string | null; bp: number | null; cmode: string | null; cbp: number | null }>(c.env.DB, `SELECT l.id, m.tax_mode AS mode, m.gst_bp AS bp,
-        k.tax_mode AS cmode, k.gst_bp AS cbp FROM order_lines l JOIN menu_items m ON m.id = l.item_id
+    all<{ id: string; mode: string | null; bp: number | null; cmode: string | null; cbp: number | null; sc: number | null; incl: number | null; scBp: number }>(c.env.DB, `SELECT l.id, m.tax_mode AS mode, m.gst_bp AS bp,
+        k.tax_mode AS cmode, k.gst_bp AS cbp, coalesce(m.service_charge, k.service_charge, 0) AS sc, coalesce(m.price_incl, k.price_incl, 0) AS incl,
+        (SELECT service_charge_bp FROM businesses WHERE id = m.business_id) AS scBp FROM order_lines l JOIN menu_items m ON m.id = l.item_id
         LEFT JOIN menu_categories k ON k.business_id = m.business_id AND lower(k.name) = lower(m.category) WHERE l.order_id = ?`, c.req.param('id')),
   ]);
   // A billing name not registered for GST charges no GST: its GST lines go at 0%; liquor and exempt stay as they are.
@@ -464,6 +465,11 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     const bp = mode === 'rate' ? (r!.mode === 'rate' ? r!.bp! : r!.cbp!) : e!.gst_rate_bp;
     return { kind: 'gst', bp: e!.gst_registered ? bp : 0 };
   };
+  // Service charge (26 Nov 2026): the business's rate on lines that carry it, unless the guest asked for it off; a
+  // price that includes GST has its GST worked out of it.
+  const flags = (lineId: string) => { const r = taxRows.find((x) => x.id === lineId); return { sc: !!r?.sc, incl: !!r?.incl }; };
+  if (data.serviceCharge !== undefined && typeof data.serviceCharge !== 'boolean') fail(400, 'Service charge must be on or off.');
+  const scBp = data.serviceCharge === false ? 0 : taxRows[0]?.scBp ?? 0;
   const ls = allLines.filter((l) => l.qty > 0);
   if (!ls.length) fail(409, 'The order has no items.');
   if (ls.some((l) => l.qty > l.sent_qty)) fail(409, 'Send the new items to the kitchen first.');
@@ -490,7 +496,9 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
     }
   }
   let totals;
-  try { totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, tax: lineTax(l.id), discPaise: lineDisc.get(l.id) ?? 0 })), discount, e.gst_rate_bp); } catch { fail(400, 'The discount is more than the bill.'); }
+  try {
+    totals = billTotals(ls.map((l) => ({ qty: l.qty, pricePaise: l.price_paise, tax: lineTax(l.id), discPaise: lineDisc.get(l.id) ?? 0, ...flags(l.id) })), discount, e.gst_rate_bp, scBp);
+  } catch { fail(400, 'The discount is more than the bill.'); }
   if (totals.totalPaise <= 0) fail(400, 'Everything on this bill is free: close it as complimentary instead (no discount, then Complimentary at payment).');
   const discountReason = totals.discountPaise > 0 ? await reasonLabel(c.env.DB, bid, 'discount', d.reasonId ?? data.discountReasonId, 'A reason for the discount') : null;
   // A cashier gives up to the business's limit alone; above it, or any item made free, a manager approves.
@@ -515,19 +523,22 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
       // Its number: the billing name's letter, the date printed (YYMMDD, India time) and the next number of that day
       // (C261119001); the yearly running number (seq) is taken too. All in this one batch, so no number is skipped.
       stmt(c.env.DB, `INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise,
-          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq, guest_phone)
-        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n, ?
+          discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq, guest_phone,
+          service_charge_bp, service_charge_paise)
+        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n, ?, ?, ?
         FROM bill_series s, (SELECT coalesce(max(day_seq), 0) + 1 AS n FROM bills WHERE entity_id = ? AND print_day = ?) d WHERE s.entity_id = ? AND s.fy = ?`,
         id, bid, o.id, e.id, fy, e.series_prefix, yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
         totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, printDay, o.guest_phone,
-        e.id, printDay, e.id, fy),
+        scBp, totals.serviceChargePaise ?? 0, e.id, printDay, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
       ...ls.map((l) => {
         const tx = lineTax(l.id);
-        return stmt(c.env.DB, `INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed, options, tax_kind, gst_bp, price_by, discount_paise)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        const fl = flags(l.id);
+        return stmt(c.env.DB, `INSERT INTO bill_lines (id, business_id, bill_id, item_id, name, sac, qty, rate_paise, amount_paise, taxed, options, tax_kind, gst_bp, price_by, discount_paise,
+            service_charge, price_incl)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           newId(), bid, id, l.item_id, l.name, l.sac, l.qty, l.price_paise, l.qty * l.price_paise, tx.kind === 'gst' ? 1 : 0, l.options,
-          tx.kind, tx.kind === 'gst' ? tx.bp : null, l.price_by, lineDisc.get(l.id) ?? 0);
+          tx.kind, tx.kind === 'gst' ? tx.bp : null, l.price_by, lineDisc.get(l.id) ?? 0, fl.sc && scBp > 0 ? 1 : 0, fl.incl ? 1 : 0);
       }),
       ...totals.taxes.map((x) => stmt(c.env.DB, 'INSERT INTO bill_taxes (bill_id, business_id, kind, gst_bp, value_paise, cgst_paise, sgst_paise) VALUES (?, ?, ?, ?, ?, ?, ?)',
         id, bid, x.kind, x.bp, x.valuePaise, x.cgstPaise, x.sgstPaise)),
@@ -552,13 +563,15 @@ export async function billOut(db: D1Database, bid: string, id: string) {
       b.gross_paise AS grossPaise, b.discount_paise AS discountPaise, b.discount_reason AS discountReason, b.taxable_paise AS taxablePaise,
       b.nongst_paise AS nonGstPaise, b.gst_rate_bp AS gstRateBp, b.cgst_paise AS cgstPaise, b.sgst_paise AS sgstPaise, b.round_off_paise AS roundOffPaise, b.total_paise AS totalPaise,
       b.guest_name AS guestName, b.status, b.print_count AS printCount, b.void_reason AS voidReason, b.entity_id,
+      b.service_charge_bp AS serviceChargeBp, b.service_charge_paise AS serviceChargePaise,
       e.name AS entityName, e.gst_registered AS gstRegistered, e.gstin, o.place, st.name AS printedBy
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
   const [items, creditNotes, pays, differences, taxRows] = await Promise.all([
     all<Record<string, unknown> & { options: string | null }>(db, `SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, discount_paise AS discountPaise, taxed, options,
-      coalesce(tax_kind, CASE WHEN taxed = 1 THEN 'gst' ELSE 'liquor' END) AS taxKind, gst_bp AS gstBp, price_by IS NOT NULL AS typedPrice FROM bill_lines WHERE bill_id = ? ORDER BY rowid`, id),
+      coalesce(tax_kind, CASE WHEN taxed = 1 THEN 'gst' ELSE 'liquor' END) AS taxKind, gst_bp AS gstBp, price_by IS NOT NULL AS typedPrice,
+      service_charge AS serviceCharge, price_incl AS priceIncl FROM bill_lines WHERE bill_id = ? ORDER BY rowid`, id),
     all(db, `SELECT id, cn_no AS cnNo, reason, lines, total_paise AS totalPaise, refund_mode AS refundMode, at FROM credit_notes WHERE bill_id = ? ORDER BY seq`, id),
     all(db, `SELECT p.id, p.mode, p.shift_day AS shiftDay, a.amount_paise AS amountPaise, p.card_last4 AS cardLast4, p.card_approval AS cardApproval, pa.name AS payAccount,
       d.name AS debtorAccount, p.comp_guest AS compGuest, p.comp_reason AS compReason, p.tendered_paise AS tenderedPaise

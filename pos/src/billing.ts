@@ -35,7 +35,8 @@ export const creditNoteNo = (prefix: string, printDay: string, n: number) => bil
 export type LineTax = { kind: 'gst'; bp: number } | { kind: 'liquor' } | { kind: 'exempt' };
 /** A bill line. Without `tax`, `taxed: false` = liquor and anything else = GST at the bill's rate. */
 /** `discPaise`: a discount on this line alone (an item made free, or a share off it), taken before the bill's discount. */
-export interface Line { qty: number; pricePaise: number; taxed?: boolean; tax?: LineTax; discPaise?: number }
+/** `incl`: its price already includes GST (worked out of it, not added). `sc`: it carries the bill's service charge. */
+export interface Line { qty: number; pricePaise: number; taxed?: boolean; tax?: LineTax; discPaise?: number; incl?: boolean; sc?: boolean }
 /** One row of a bill's tax: all its lines of one kind and rate, after their share of the discount. */
 export interface TaxRow { kind: 'gst' | 'liquor' | 'exempt'; bp: number; valuePaise: number; cgstPaise: number; sgstPaise: number }
 export type Discount = { kind: 'none' } | { kind: 'pct'; bp: number } | { kind: 'amount'; paise: number };
@@ -50,6 +51,8 @@ export interface Totals {
   sgstPaise: number;
   roundOffPaise: number;
   totalPaise: number;
+  /** Service charge, already inside the rows' values (GST is charged on it with its lines). */
+  serviceChargePaise?: number;
 }
 
 // Half away from zero on whole paise; only ever applied to non-negative values here.
@@ -59,22 +62,48 @@ export const taxOf = (l: Line, gstRateBp: number): LineTax => l.tax ?? (l.taxed 
 const KIND_ORDER = { gst: 0, liquor: 1, exempt: 2 } as const;
 const taxKey = (t: LineTax) => `${t.kind}:${t.kind === 'gst' ? t.bp : 0}`;
 
-/** Lines grouped by tax (GST rates lowest first, then liquor, then exempt), each with its gross value. */
-function buckets(lines: { gross: number; tax: LineTax }[]) {
-  const m = new Map<string, { tax: LineTax; gross: number }>();
+type Piece = { gross: number; tax: LineTax; incl?: boolean; sc?: boolean };
+/** Lines grouped by tax (GST rates lowest first, then liquor, then exempt) and by how they are charged (price with GST
+ *  in it, service charge), each with its gross value. */
+function buckets(lines: Piece[]) {
+  const m = new Map<string, Piece>();
   for (const l of lines) {
-    const k = taxKey(l.tax);
-    const b = m.get(k) ?? { tax: l.tax, gross: 0 };
+    const k = `${taxKey(l.tax)}:${l.incl ? 1 : 0}:${l.sc ? 1 : 0}`;
+    const b = m.get(k) ?? { tax: l.tax, incl: !!l.incl, sc: !!l.sc, gross: 0 };
     b.gross += l.gross;
     m.set(k, b);
   }
   return [...m.values()].filter((b) => b.gross > 0).sort((a, b) => KIND_ORDER[a.tax.kind] - KIND_ORDER[b.tax.kind]
-    || (a.tax.kind === 'gst' && b.tax.kind === 'gst' ? a.tax.bp - b.tax.bp : 0));
+    || (a.tax.kind === 'gst' && b.tax.kind === 'gst' ? a.tax.bp - b.tax.bp : 0) || Number(a.incl) - Number(b.incl) || Number(a.sc) - Number(b.sc));
 }
-const row = (tax: LineTax, value: number): TaxRow => {
-  const half = tax.kind === 'gst' ? roundDiv(value * tax.bp, 20000) : 0;
-  return { kind: tax.kind, bp: tax.kind === 'gst' ? tax.bp : 0, valuePaise: value, cgstPaise: half, sgstPaise: half };
-};
+/**
+ * One bucket after its share of the discount: the value before GST (a price with GST in it has its GST worked out of
+ * it, so the guest pays the menu price), its service charge on that value, and half its GST (CGST = SGST), charged on
+ * the service charge too. Liquor and exempt carry no GST; their service charge goes into their value.
+ */
+function charge(b: Piece, after: number, scBp: number) {
+  const bp = b.tax.kind === 'gst' ? b.tax.bp : 0;
+  const inside = !!b.incl && bp > 0;
+  let half = inside ? roundDiv(after * bp, 2 * (10000 + bp)) : 0;
+  const value = after - 2 * half;
+  const sc = b.sc && scBp > 0 ? roundDiv(value * scBp, 10000) : 0;
+  half = inside ? half + roundDiv(sc * bp, 20000) : roundDiv((value + sc) * bp, 20000);
+  return { value: value + sc, sc, half };
+}
+/** Buckets with their discount shares into tax rows, one per kind and rate, and the service charge in them. */
+function rowsOf(bs: Piece[], shares: number[], scBp: number) {
+  const m = new Map<string, TaxRow>();
+  let sc = 0;
+  bs.forEach((b, i) => {
+    const x = charge(b, b.gross - shares[i], scBp);
+    sc += x.sc;
+    const k = taxKey(b.tax);
+    const r = m.get(k) ?? { kind: b.tax.kind, bp: b.tax.kind === 'gst' ? b.tax.bp : 0, valuePaise: 0, cgstPaise: 0, sgstPaise: 0 };
+    r.valuePaise += x.value; r.cgstPaise += x.half; r.sgstPaise += x.half;
+    m.set(k, r);
+  });
+  return { rows: [...m.values()], sc };
+}
 function sumRows(rows: TaxRow[]) {
   const s = (f: (r: TaxRow) => number) => rows.reduce((t, r) => t + f(r), 0);
   return { taxablePaise: s((r) => (r.kind === 'gst' ? r.valuePaise : 0)), nonGstPaise: s((r) => (r.kind === 'gst' ? 0 : r.valuePaise)),
@@ -87,7 +116,7 @@ function sumRows(rows: TaxRow[]) {
  * charged per row at its own rate; liquor and exempt rows carry none and stay out of the taxable value. The total is
  * rounded to the rupee with the round-off shown. A billing name not registered for GST passes rate 0.
  */
-export function billTotals(lines: Line[], discount: Discount, gstRateBp: number): Totals & { taxes: TaxRow[] } {
+export function billTotals(lines: Line[], discount: Discount, gstRateBp: number, serviceChargeBp = 0): Totals & { taxes: TaxRow[] } {
   const gross = lines.reduce((s, l) => s + l.qty * l.pricePaise, 0);
   // Line discounts first, each off its own line (so its own tax row); the bill's discount then shares the rest by value.
   const lineDisc = lines.reduce((s, l) => s + (l.discPaise ?? 0), 0);
@@ -97,17 +126,18 @@ export function billTotals(lines: Line[], discount: Discount, gstRateBp: number)
   if (discount.kind === 'pct') disc = roundDiv(base * discount.bp, 10000);
   if (discount.kind === 'amount') disc = discount.paise;
   if (disc < 0 || disc > base) throw new Error('bad_discount');
-  const bs = buckets(lines.map((l) => ({ gross: l.qty * l.pricePaise - (l.discPaise ?? 0), tax: taxOf(l, gstRateBp) })));
+  const bs = buckets(lines.map((l) => ({ gross: l.qty * l.pricePaise - (l.discPaise ?? 0), tax: taxOf(l, gstRateBp), incl: l.incl, sc: l.sc })));
   let left = disc;
-  const taxes = bs.map((b, i) => {
+  const shares = bs.map((b, i) => {
     const share = i === bs.length - 1 ? left : roundDiv(b.gross * disc, base);
     left -= share;
-    return row(b.tax, b.gross - share);
+    return share;
   });
+  const { rows: taxes, sc } = rowsOf(bs, shares, serviceChargeBp);
   const sums = sumRows(taxes);
   const raw = sums.taxablePaise + sums.nonGstPaise + sums.cgstPaise + sums.sgstPaise;
   const total = roundDiv(raw, 100) * 100;
-  return { grossPaise: gross, discountPaise: lineDisc + disc, ...sums, roundOffPaise: total - raw, totalPaise: total, taxes };
+  return { grossPaise: gross, discountPaise: lineDisc + disc, ...sums, roundOffPaise: total - raw, totalPaise: total, serviceChargePaise: sc, taxes };
 }
 
 /**
@@ -174,7 +204,7 @@ export function rs(p: number): string {
   return `${neg ? '-' : ''}₹${r}${ps ? '.' + String(ps).padStart(2, '0') : ''}`;
 }
 
-export interface BillAmounts extends Totals { gstRateBp: number; taxes?: TaxRow[] }
+export interface BillAmounts extends Totals { gstRateBp: number; taxes?: TaxRow[]; serviceChargeBp?: number }
 
 /** A bill's tax rows: as written, or for a bill from before rows were kept, its GST at its rate and its liquor. */
 export function billTaxRows(bill: { gstRateBp: number; taxablePaise: number; nonGstPaise: number; cgstPaise: number; sgstPaise: number }, rows: TaxRow[]): TaxRow[] {
@@ -200,24 +230,28 @@ export function creditTotals(bill: BillAmounts, already: Totals, linesGross: num
  * A credit note by tax row: each credited line's value takes the bill's discount share, and GST at the line's own rate.
  * When it credits everything still left on the bill, each row takes exactly what is left of it.
  */
-export function creditNote(bill: BillAmounts, already: Totals, alreadyRows: TaxRow[], lines: { gross: number; tax: LineTax }[], lastOne: boolean): Totals & { taxes: TaxRow[] } {
+export function creditNote(bill: BillAmounts, already: Totals, alreadyRows: TaxRow[], lines: Piece[], lastOne: boolean): Totals & { taxes: TaxRow[] } {
   const billRows = billTaxRows(bill, bill.taxes ?? []);
   if (lastOne) {
-    const left = (k: keyof Totals) => bill[k] - already[k];
+    const left = (k: Exclude<keyof Totals, 'serviceChargePaise'>) => bill[k] - already[k];
     const taxes = billRows.map((r) => {
       const a = alreadyRows.filter((x) => x.kind === r.kind && x.bp === r.bp);
       const minus = (f: (x: TaxRow) => number) => a.reduce((t, x) => t + f(x), 0);
       return { ...r, valuePaise: r.valuePaise - minus((x) => x.valuePaise), cgstPaise: r.cgstPaise - minus((x) => x.cgstPaise), sgstPaise: r.sgstPaise - minus((x) => x.sgstPaise) };
     }).filter((r) => r.valuePaise || r.cgstPaise || r.sgstPaise);
     return { grossPaise: left('grossPaise'), discountPaise: left('discountPaise'), taxablePaise: left('taxablePaise'), nonGstPaise: left('nonGstPaise'),
-      cgstPaise: left('cgstPaise'), sgstPaise: left('sgstPaise'), roundOffPaise: left('roundOffPaise'), totalPaise: left('totalPaise'), taxes };
+      cgstPaise: left('cgstPaise'), sgstPaise: left('sgstPaise'), roundOffPaise: left('roundOffPaise'), totalPaise: left('totalPaise'),
+      serviceChargePaise: (bill.serviceChargePaise ?? 0) - (already.serviceChargePaise ?? 0), taxes };
   }
   const share = (v: number) => (bill.grossPaise ? roundDiv(v * bill.discountPaise, bill.grossPaise) : 0);
-  const taxes = buckets(lines).map((b) => row(b.tax, b.gross - share(b.gross)));
+  const bs = buckets(lines);
+  const shares = bs.map((b) => share(b.gross));
+  const { rows: taxes, sc } = rowsOf(bs, shares, bill.serviceChargeBp ?? 0);
   const sums = sumRows(taxes);
   const gross = lines.reduce((t, l) => t + l.gross, 0);
   const values = sums.taxablePaise + sums.nonGstPaise;
-  return { grossPaise: gross, discountPaise: gross - values, ...sums, roundOffPaise: 0, totalPaise: values + sums.cgstPaise + sums.sgstPaise, taxes };
+  return { grossPaise: gross, discountPaise: shares.reduce((t, x) => t + x, 0), ...sums, roundOffPaise: 0, totalPaise: values + sums.cgstPaise + sums.sgstPaise,
+    serviceChargePaise: sc, taxes };
 }
 
 export { IST_OFFSET_MS };

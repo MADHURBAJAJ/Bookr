@@ -158,10 +158,11 @@ function copyStatements(db: D1Database, from: string, to: string, t: number) {
   return [
     stmt(db, `INSERT INTO stations (id, business_id, name, how, copies, is_bar, sort, active, created_at) SELECT ${remap('id')}, ?, name, how, copies, is_bar, sort, active, ? FROM stations WHERE business_id = ?`, to, t, from),
     stmt(db, `INSERT INTO reasons (id, business_id, kind, label, active, created_at) SELECT ${remap('id')}, ?, kind, label, active, ? FROM reasons WHERE business_id = ? AND active = 1`, to, t, from),
-    stmt(db, `INSERT INTO menu_categories (id, business_id, name, tax_mode, gst_bp, sort, created_at, kot, station_id)
-      SELECT ${remap('id')}, ?, name, tax_mode, gst_bp, sort, ?, kot, CASE WHEN station_id IS NULL THEN NULL ELSE ${remap('station_id')} END FROM menu_categories WHERE business_id = ?`, to, t, from),
-    stmt(db, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, active, created_at, tax_mode, gst_bp, open_price, min_price_paise, kot, station_id)
-      SELECT ${remap('id')}, ?, name, category, price_paise, sac, station, active, ?, tax_mode, gst_bp, open_price, min_price_paise, kot,
+    stmt(db, `INSERT INTO menu_categories (id, business_id, name, tax_mode, gst_bp, sort, created_at, kot, station_id, service_charge, price_incl)
+      SELECT ${remap('id')}, ?, name, tax_mode, gst_bp, sort, ?, kot, CASE WHEN station_id IS NULL THEN NULL ELSE ${remap('station_id')} END, service_charge, price_incl
+      FROM menu_categories WHERE business_id = ?`, to, t, from),
+    stmt(db, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, active, created_at, tax_mode, gst_bp, open_price, min_price_paise, kot, service_charge, price_incl, station_id)
+      SELECT ${remap('id')}, ?, name, category, price_paise, sac, station, active, ?, tax_mode, gst_bp, open_price, min_price_paise, kot, service_charge, price_incl,
         CASE WHEN station_id IS NULL THEN NULL ELSE ${remap('station_id')} END FROM menu_items WHERE business_id = ? AND active = 1`, to, t, from),
     stmt(db, `INSERT INTO addon_groups (id, business_id, name, kind, created_at) SELECT ${remap('id')}, ?, name, kind, ? FROM addon_groups WHERE business_id = ?`, to, t, from),
     stmt(db, `INSERT INTO addon_options (id, business_id, group_id, name, add_paise, sort, active) SELECT ${remap('id')}, ?, ${remap('group_id')}, name, add_paise, sort, active FROM addon_options WHERE business_id = ?`, to, from),
