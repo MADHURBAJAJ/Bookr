@@ -127,5 +127,16 @@ describe('booking mails', () => {
     await ok(counter.post(`${B}/stays`, { room: 'Deluxe 1', guestName: 'Pair Guest', bookingId: arr[0].id }));
     expect((await q("SELECT ext_ref, status FROM bookings WHERE business_id = ? ORDER BY ext_ref", s.businessId))).toEqual([
       { ext_ref: 'DJ-9', status: 'checked_in' }, { ext_ref: 'MMT-9', status: 'checked_in' }]);
+    // The twin's mail comes after the check-in (an old mail brought in, 26 Nov 2026): it joins the stay, so the guest is
+    // not listed as "not checked in" on Day close.
+    await ok(owner.call('PUT', `${B}/tables`, { sections: [{ name: 'Deluxe', kind: 'rooms', tables: ['Deluxe 1', 'Deluxe 2'] }] }));
+    await receiveMail(message('bookings@mail.example.test', raw('reports@djubo.example.test', 'B', 'p3', `Booking DJ-10 | Late Twin | 9800077777 | Deluxe | ${day} | ${out}`)).msg, e as never);
+    const arr2 = (await ok(counter.get(`${B}/bookings/arrivals?day=${day}`))).arrivals;
+    await ok(counter.post(`${B}/stays`, { room: 'Deluxe 2', guestName: 'Late Twin', bookingId: arr2.find((x: any) => x.extRef === 'DJ-10').id }));
+    await receiveMail(message('bookings@mail.example.test', raw('new@mmt.example.test', 'B', 'p4', `Booking MMT-10 | Late Twin | 9800077777 | Deluxe | ${day} | ${out}`)).msg, e as never);
+    const rows = await q("SELECT ext_ref, status, stay_id FROM bookings WHERE business_id = ? AND ext_ref IN ('DJ-10', 'MMT-10') ORDER BY ext_ref", s.businessId);
+    expect(rows.map((r: any) => r.status)).toEqual(['checked_in', 'checked_in']);
+    expect(rows[1].stay_id).toBe(rows[0].stay_id);
+    expect((await ok(owner.get(`${B}/shifts/${day}`))).notCheckedIn.map((x: any) => x.guestName)).not.toContain('Late Twin');
   });
 });

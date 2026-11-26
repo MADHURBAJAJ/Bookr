@@ -311,7 +311,7 @@ async function linkMatch(db: DB, bid: string, id: string) {
   const byNo = await all<{ id: string }>(db, `SELECT id FROM bookings WHERE business_id = ? AND source <> ? AND unplaced = 0 AND match_id IS NULL
     AND ((? IS NOT NULL AND (ota_ref = ? OR ext_ref = ?)) OR (? IS NOT NULL AND pnr = ?))`, bid, me.source, me.ota_ref, me.ota_ref, me.ota_ref, me.pnr, me.pnr);
   if (byNo.length === 1) {
-    await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', byNo[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, byNo[0].id)]);
+    await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', byNo[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, byNo[0].id), ...followTwin(db, id, byNo[0].id)]);
     return;
   }
   if (!me.check_in) return;
@@ -320,7 +320,16 @@ async function linkMatch(db: DB, bid: string, id: string) {
   const same = (a: string | null, b: string | null) => !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
   const hits = others.filter((o) => (me.phone && o.phone === me.phone) || same(o.guest_name, me.guest_name));
   if (hits.length !== 1) return;   // none, or not sure which: a person links it
-  await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', hits[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, hits[0].id)]);
+  await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', hits[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, hits[0].id), ...followTwin(db, id, hits[0].id)]);
+}
+
+/** A twin that arrives after the stay began (26 Nov 2026: an old mail brought in, or a late OTA mail) is checked in with
+ *  its pair, as a check-in does for both; the room bill counts a pair once. Either way round. */
+function followTwin(db: DB, a: string, b: string) {
+  const one_ = (x: string, y: string) => stmt(db, `UPDATE bookings SET status = 'checked_in', stay_id = (SELECT stay_id FROM bookings WHERE id = ?2), updated_at = ?3
+    WHERE id = ?1 AND stay_id IS NULL AND status IN ('new', 'approved')
+      AND EXISTS (SELECT 1 FROM bookings t WHERE t.id = ?2 AND t.status = 'checked_in' AND t.stay_id IS NOT NULL)`, x, y, now());
+  return [one_(a, b), one_(b, a)];
 }
 
 /** Applies today's Djubo daily report (24 Nov 2026). An older report is kept but not applied, so reading mails again never
