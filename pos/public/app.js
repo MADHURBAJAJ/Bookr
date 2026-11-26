@@ -1801,6 +1801,7 @@ function todayView() {
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
     ...(fd.alerts.djuboToMode ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.djuboToMode, 'payment')} taken in Djubo · ${rs(fd.djubo.open.reduce((t, x) => t + x.amountPaise, 0))}`, sub: 'Counted on the day marked. Pick Cash, UPI or Card for each', act: 'djPanel' }] : []),
     ...(fd.alerts.djuboLowered ? [{ tone: 'bad', icon: '₹', title: `Djubo lowered ${plural(fd.alerts.djuboLowered, 'payment')} after its receipt`, sub: 'Refund it, or correct it in Djubo', act: 'djPanel' }] : []),
+    ...(fd.alerts.rentTwice ?? []).map((x) => ({ tone: 'bad', icon: '₹', title: `Rent may be counted twice: ${x.room} · ${x.guestName}`, sub: `extra night added by hand, and Djubo sent ${x.refs} for it. Take the hand-added night off`, act: 'roomBill', id: x.stayId })),
     ...(fd.alerts.deskToTake ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.deskToTake, 'payment')} entered in Djubo by reception`, sub: 'Take it here so a receipt prints', act: 'deskPanel' }] : []),
     ...(fd.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: 'C', title: `Form C not filed: ${x.room} · ${x.guestName}`, sub: `checked in ${x.hours} h ago · due within 24 h`, act: 'roomBill', id: x.stayId })),
     ...(a?.overstays ?? []).map((x) => ({ tone: 'bad', icon: '⏱', title: `Past check-out: ${x.room} · ${x.guestName}`, sub: `was due out ${dayName(x.plan)}`, act: 'roomBill', id: x.id })),
@@ -2511,7 +2512,11 @@ function djRow(x) {
     ${x.settlementId || done ? html`<div class="line" style="gap:8px"><span class="status ok">${MODE_NAME[done?.payments[0].mode ?? x.mode] ?? x.mode} · ${done?.receiptNo ?? x.receiptNo}</span>
         ${done ? html`<button class="btn sm ghost" type="button" data-act="djPrint" data-m="${k}">Print receipt</button>` : ''}</div>`
       : html`<div class="chips" role="group" aria-label="How ${x.guestName ?? 'the guest'} paid">${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="chip" aria-pressed="${ui.djUpi === k && m === 'upi'}" data-act="djMode" data-b="${x.bookingId}" data-m="${k}" data-mode="${m}">${MODE_NAME[m]}</button>`)}
+          <button type="button" class="chip" data-act="djLinkOpen" data-b="${x.bookingId}" data-m="${k}">Already taken in the POS</button>
           <span class="status warn">Pick how it was paid</span></div>
+        ${ui.djLink?.mailId === k ? html`<div style="margin-top:4px">${ui.djLink.list.length ? html`<div class="small quiet">The same money, already taken here: pick its receipt (no new receipt is made)</div>
+            <div class="chips">${ui.djLink.list.map((r) => html`<button type="button" class="chip" data-act="djLinkGo" data-b="${x.bookingId}" data-m="${k}" data-id="${r.settlementId}">${r.receiptNo} · ${MODE_NAME[r.mode] ?? r.mode} · ${rs(r.amountPaise)} · ${dateTime(r.at)}</button>`)}</div>`
+          : html`<div class="small" style="color:var(--warn)">No receipt for this guest in the last 14 days that isn't linked already. Pick Cash, UPI or Card instead.</div>`}</div>` : ''}
         ${ui.djUpi === k ? html`<div class="chips" style="margin-top:4px"><span class="small quiet">QR paid into</span>${accs.map((a) => html`<button type="button" class="chip" data-act="djUpiAcc" data-b="${x.bookingId}" data-m="${k}" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}`}</div>`;
 }
 async function djSave(bookingId, mailId, mode, payAccountId) {
@@ -2533,6 +2538,21 @@ actions.djMode = async (d) => {
   return djSave(d.b, d.m, d.mode);
 };
 actions.djUpiAcc = (d) => djSave(d.b, d.m, 'upi', d.id);
+actions.djLinkOpen = async (d) => {
+  if (ui.djLink?.mailId === d.m) { ui.djLink = null; rerender(); return; }
+  const r = await api('GET', `${B()}/bookings/${d.b}/djubo-receipts?mailId=${encodeURIComponent(d.m)}`);
+  ui.djLink = { mailId: d.m, list: r.receipts }; rerender();
+};
+actions.djLinkGo = async (d) => {
+  const r = await api('POST', `${B()}/bookings/${d.b}/djubo-link`, { mailId: d.m, settlementId: d.id });
+  ui.djLink = null;
+  flash = { kind: 'ok', text: `Linked to ${r.receiptNo}: counted once, no new receipt.` };
+  if (location.hash.startsWith('#/rooms')) {
+    const [fd, bill] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), ui.roomBill ? api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`) : null]);
+    ui.fd = fd; if (bill) ui.roomBill = bill;
+    rerender();
+  } else route();
+};
 actions.djPrint = (d) => { if (djDone[d.m]) printJobs([{ kind: 'bill', html: asHtml(receiptSlip(djDone[d.m])) }]); };
 actions.djPanel = () => {
   ui.roomBill = null; ui.chartSel = null;

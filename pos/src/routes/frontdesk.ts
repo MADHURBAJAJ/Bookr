@@ -311,6 +311,19 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
   const live = reservations.filter((r) => !(r.status === 'hold' && (r.holdUntil ?? 0) < t));
   const rooms = chart.sections.reduce((n, s) => n + s.rooms.length, 0);
   const busy = new Set(chart.bars.map((x) => x.room)).size;
+  // Rent maybe counted twice (26 Nov 2026): an extra night added by hand on a stay (or its group) that Djubo also sent as an
+  // extension booking. Shown until the hand-added rent is taken off.
+  const rentTwice = await all<{ stayId: string; room: string; guestName: string; handPaise: number; refs: string }>(db, `
+    SELECT s.id AS stayId, s.room, s.guest_name AS guestName,
+      (SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays m ON m.id = a.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL) AS handPaise,
+      (SELECT group_concat(k.ext_ref, ', ') FROM bookings k JOIN stays m ON m.id = k.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id)
+        AND k.status = 'checked_in' AND k.source = 'djubo' AND k.check_in > s.check_in) AS refs
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL
+      AND EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays m ON m.id = a.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND e.amount_paise > 0 AND e.note LIKE '%extra night%')
+      AND EXISTS (SELECT 1 FROM bookings k JOIN stays m ON m.id = k.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id)
+        AND k.status = 'checked_in' AND k.source = 'djubo' AND k.check_in > s.check_in)`, b.id);
   // Money reception marked in Djubo (26 Nov 2026): already taken, so not to collect; it waits only for how it was paid.
   const dj = await djuboPays(db, b.id, b.shift_start_hour);
   const djOpen = dj.pays.filter((x) => !x.settlementId);
@@ -332,7 +345,7 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
     djubo: { open: djOpen, today: dj.pays.filter((x) => x.day === today), lowered: dj.lowered },
     stats: { arriving: arrivals.length + live.length, inHouse: stays.length, leaving: stays.filter((s) => s.plan && s.plan <= today).length, freeTonight: Math.max(0, rooms - busy), toCollectPaise: toCollect },
     alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0,
-      djuboToMode: djOpen.length, djuboLowered: dj.lowered.length },
+      djuboToMode: djOpen.length, djuboLowered: dj.lowered.length, rentTwice: rentTwice.filter((x) => x.handPaise > 0) },
   });
 });
 

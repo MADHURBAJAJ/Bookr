@@ -124,10 +124,18 @@ export async function deskPending(db: DB, bid: string) {
       coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0)
       -- Receipts on the room bill cover it only past what they paid of food and other charges (26 Nov 2026): a food payment
       -- must not hide rent reception took in Djubo.
-      + max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id = k.stay_id AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0)
+      -- A bed in a group has its payments on the group's first room (26 Nov 2026), so that bill counts too. A POS receipt
+      -- someone linked to this booking's Djubo payment ("already taken in the POS") always counts in full.
+      + max(coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
+          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0),
+        max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0)
         - max(0, coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id = k.stay_id AND e.kind IN ('charge', 'credit_note', 'transfer')), 0))) AS coveredPaise
+          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('charge', 'credit_note', 'transfer')), 0)))
+        + coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
+          AND NOT EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id
+            AND a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)))
+          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0)) AS coveredPaise
     FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in') ORDER BY k.desk_paid_at`, bid);
   return rows.map((r) => ({ ...r, pendingPaise: r.deskPaidPaise - r.coveredPaise })).filter((r) => r.pendingPaise > 0);
 }

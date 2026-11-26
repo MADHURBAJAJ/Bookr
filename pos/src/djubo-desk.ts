@@ -33,7 +33,8 @@ export async function djuboPays(db: DB, bid: string, startHour: number, bookingI
     ext_ref: string; guest_name: string | null; check_in: string | null; check_out: string | null; room_labels: string | null; stay_id: string | null; status: string;
     receipt_no: string | null; mode: string | null; receipt_paise: number | null }>(db, `
     SELECT l.booking_id, l.mail_id, l.paid_paise, l.entered_by, l.received_at, l.settlement_id, k.ext_ref, k.guest_name, k.check_in, k.check_out, k.room_labels,
-      coalesce(k.stay_id, (SELECT m.stay_id FROM bookings m WHERE m.id = k.match_id)) AS stay_id, k.status,
+      -- The room bill it belongs on: a bed in a group has its payments on the group's first room (26 Nov 2026).
+      (SELECT coalesce(g.group_stay_id, g.id) FROM stays g WHERE g.id = coalesce(k.stay_id, (SELECT m.stay_id FROM bookings m WHERE m.id = k.match_id))) AS stay_id, k.status,
       s.receipt_no, (SELECT min(p.mode) FROM payments p WHERE p.settlement_id = s.id) AS mode, (SELECT sum(p.amount_paise) FROM payments p WHERE p.settlement_id = s.id) AS receipt_paise
     FROM booking_paid_log l JOIN bookings k ON k.id = l.booking_id LEFT JOIN settlements s ON s.id = l.settlement_id
     WHERE l.business_id = ? AND k.source = 'djubo' ${bookingId ? 'AND l.booking_id = ?' : ''}

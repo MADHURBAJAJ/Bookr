@@ -616,3 +616,39 @@ settleRoutes.post(`${B}/bookings/:id/djubo-paid`, requireAction('debtors.receive
   return c.json({ receipt: { receiptNo, kind: acc ? 'receipt' : 'advance', at: t, name: e.guestName ?? 'Guest', room: room?.room ?? null, booking: e.extRef, checkIn: e.checkIn, checkOut: e.checkOut,
     totalPaise: pay.amountPaise, balancePaise, payments: [{ mode: pay.mode, amountPaise: pay.amountPaise, payAccountName: pay.payAccountName, cardLast4: pay.cardLast4 }] }, shiftDay }, 201);
 });
+
+// "Already taken in the POS" (26 Nov 2026): a Djubo payment the desk also took here (a receipt on the guest's or the group's
+// room bill, or an advance) is linked to that receipt instead of making a new one, so it is counted once.
+async function djuboReceipts(db: DB, bid: string, bookingId: string, stayId: string | null) {
+  return all<{ settlementId: string; receiptNo: string; at: number; amountPaise: number; mode: string }>(db, `
+    SELECT s.id AS settlementId, s.receipt_no AS receiptNo, s.at, sum(p.amount_paise) AS amountPaise, min(p.mode) AS mode
+    FROM settlements s JOIN payments p ON p.settlement_id = s.id
+    WHERE s.business_id = ?1 AND s.kind = 'receipt' AND s.at > ?2 AND NOT EXISTS (SELECT 1 FROM booking_paid_log l WHERE l.settlement_id = s.id)
+      AND (EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id AND a.stay_id IN
+            (SELECT id FROM stays WHERE id = ?3 OR group_stay_id = ?3))
+        OR EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = s.id AND d.booking_id IN (?4, (SELECT match_id FROM bookings WHERE id = ?4))))
+    GROUP BY s.id ORDER BY s.at DESC LIMIT 20`, bid, now() - 14 * 86_400_000, stayId, bookingId);
+}
+settleRoutes.get(`${B}/bookings/:id/djubo-receipts`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  const e = (await djuboPays(c.env.DB, bid, bizOf(c).shift_start_hour, isUuid(id) ? id : '00000000-0000-0000-0000-000000000000')).pays.find((x) => x.mailId === c.req.query('mailId') && !x.settlementId);
+  if (!e) fail(404, 'This Djubo payment has a receipt already, or is no longer waiting.');
+  return c.json({ receipts: await djuboReceipts(c.env.DB, bid, e.bookingId, e.stayId) });
+});
+settleRoutes.post(`${B}/bookings/:id/djubo-link`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const data = await body(c);
+  const e = (await djuboPays(db, bid, bizOf(c).shift_start_hour, isUuid(id) ? id : '00000000-0000-0000-0000-000000000000')).pays.find((x) => x.mailId === data.mailId && !x.settlementId);
+  if (!e) fail(404, 'This Djubo payment has a receipt already, or is no longer waiting.');
+  const r = (await djuboReceipts(db, bid, e.bookingId, e.stayId)).find((x) => x.settlementId === data.settlementId);
+  if (!r) fail(404, "That receipt is not on this guest's bill, or is linked already.");
+  if (r.amountPaise < e.amountPaise) fail(400, `${r.receiptNo} is ${rs(r.amountPaise)}, less than the ${rs(e.amountPaise)} marked in Djubo. Pick how the rest was paid instead.`);
+  await db.batch([
+    stmt(db, 'UPDATE booking_paid_log SET settlement_id = ? WHERE booking_id = ? AND mail_id = ? AND settlement_id IS NULL', r.settlementId, e.bookingId, e.mailId),
+    audit(db, bid, c.get('staff').id, 'booking.djubo_linked', 'bookings', e.bookingId, null, { mailId: e.mailId, receiptNo: r.receiptNo, amountPaise: e.amountPaise, markedBy: e.by }),
+  ]);
+  return c.json({ ok: true, receiptNo: r.receiptNo });
+});

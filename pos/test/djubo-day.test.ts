@@ -110,5 +110,23 @@ describe('money marked in Djubo by reception', () => {
     await send(s.businessId, 'g2', `Booking DJ-G1 | Food Guest | 9800055552 | Deluxe | ${day} | ${plus(1)} | 2500 | 2500 | Sample Desk | XII`);
     const sh = await ok(s.owner.get(`${B}/shifts/${day}`));
     expect(sh.summary.djubo.map((x: any) => [x.extRef, x.amountPaise])).toEqual([['DJ-G1', 250_000]]);
+
+    // "Already taken in the POS": the desk had also taken the ₹2,500 here. Linked to that receipt, it is counted once.
+    const x = sh.summary.djubo[0];
+    // (Here it went against more food on the bill, so the automatic check can't tell it was the rent; staff link it by hand.)
+    await q("INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, at) VALUES ('fd-2', ?, ?, 'charge', 250000, ?)", s.businessId, acc, Date.now());
+    const rc = await ok(counter.post(`${B}/debtors/${acc}/receipts`, { kind: 'receipt', payments: [{ mode: 'cash', amount: '2500' }] }));
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(1);
+    const list = (await ok(counter.get(`${B}/bookings/${x.bookingId}/djubo-receipts?mailId=${x.mailId}`))).receipts;
+    const mine = list.find((r: any) => r.receiptNo === rc.receipt.receiptNo);
+    expect(mine).toMatchObject({ amountPaise: 250_000, mode: 'cash' });
+    const before = (await ok(s.owner.get(`${B}/shifts/${day}`))).summary.receipts.find((r: any) => r.mode === 'cash').paise;
+    await ok(counter.post(`${B}/bookings/${x.bookingId}/djubo-link`, { mailId: x.mailId, settlementId: mine.settlementId }));
+    const after = (await ok(s.owner.get(`${B}/shifts/${day}`))).summary;
+    expect(after.djubo.map((y: any) => [y.receiptNo, y.mode])).toEqual([[rc.receipt.receiptNo, 'cash']]);
+    expect(after.receipts.find((r: any) => r.mode === 'cash').paise).toBe(before);   // no new money
+    expect(after.deskMissing).toEqual([]);
+    // The same receipt can't be linked twice.
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
   });
 });
