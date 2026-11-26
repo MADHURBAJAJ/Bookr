@@ -129,4 +129,19 @@ describe('money marked in Djubo by reception', () => {
     // The same receipt can't be linked twice.
     expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
   });
+
+  it('money marked before the rule began, for a stay from then on, counts as paid before arrival', async () => {
+    const s = await hostel();
+    const { B, counter, ok, plus } = s;
+    djuboDeskRule.from = plus(1);   // the rule begins tomorrow: today's marks are "before the POS"
+    try {
+      await send(s.businessId, 'b1', `Booking DJ-B1 | Early Guest | 9800066661 | Deluxe | ${plus(3)} | ${plus(4)} | 5000 | 2500 | Sample Desk | X`);
+      const bk = await ok(counter.get(`${B}/bookings`));
+      expect(bk.deskToTake).toEqual([]);
+      const k = (await q("SELECT desk_paid_paise AS d FROM bookings WHERE ext_ref = 'DJ-B1' AND business_id = ?", s.businessId))[0];
+      expect(k.d).toBe(0);
+    } finally {
+      djuboDeskRule.from = '2000-01-01';
+    }
+  });
 });

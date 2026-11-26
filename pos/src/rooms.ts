@@ -90,8 +90,15 @@ export async function bookingTeam(db: DB, bid: string): Promise<string[]> {
  * or changed by anyone but the booking team and the OTAs ("System") is money taken at the desk; a decrease takes it back.
  * The same however often mails are read. (24 Nov 2026: by who needs no receipt, so a new or unlisted person needs one.)
  */
+/** The first shift day money marked in Djubo is counted in the POS on the day marked (26 Nov 2026). Tests set it. */
+export const djuboDeskRule = { from: '2026-11-26' };
+
 export async function recomputeDesk(db: DB, bid: string, bookingId: string, team?: string[]) {
   const noReceipt = team ?? await bookingTeam(db, bid);
+  // Before the POS (26 Nov 2026, owner's choice): what reception marked in Djubo before djuboDeskRule.from, for a stay from
+  // that day on, was received then (in the paper register or the bank): it counts as paid before arrival, not desk money.
+  const k = await one<{ check_in: string | null; h: number }>(db, 'SELECT k.check_in, b.shift_start_hour AS h FROM bookings k JOIN businesses b ON b.id = k.business_id WHERE k.id = ?', bookingId);
+  const before = k?.check_in && k.check_in >= djuboDeskRule.from ? Date.parse(`${djuboDeskRule.from}T00:00:00Z`) + k.h * 3_600_000 - 19_800_000 : 0;
   const atDesk = (name: string | null) => { const n = (name ?? '').trim().toLowerCase(); return !!n && n !== 'system' && !noReceipt.includes(n); };
   const log = await all<{ paid_paise: number; entered_by: string | null; received_at: number }>(db,
     'SELECT paid_paise, entered_by, received_at FROM booking_paid_log WHERE booking_id = ? ORDER BY received_at, mail_id', bookingId);
@@ -100,7 +107,7 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, team
   let at: number | null = null;
   for (const r of log) {
     const d = r.paid_paise - prev;
-    if (atDesk(r.entered_by)) {
+    if (atDesk(r.entered_by) && r.received_at >= before) {
       if (d > 0) { desk += d; at = r.received_at; } else if (d < 0) desk = Math.max(0, desk + d);
     } else if (d < 0) desk = Math.min(desk, r.paid_paise);
     prev = r.paid_paise;

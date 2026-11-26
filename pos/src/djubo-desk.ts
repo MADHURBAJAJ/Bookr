@@ -6,10 +6,9 @@
 // taken here first) covers it, so nothing is counted twice. Earlier money keeps the old "take it here" list.
 import { all, type DB } from '../../src/db';
 import { shiftDayAt } from './billing';
-import { bookingTeam, deskPending } from './rooms';
+import { bookingTeam, deskPending, djuboDeskRule } from './rooms';
 
-/** The first shift day counted this way. Tests set it. */
-export const djuboDeskRule = { from: '2026-11-26' };
+export { djuboDeskRule };
 
 export interface DjuboPay {
   bookingId: string; mailId: string; extRef: string; guestName: string | null; checkIn: string | null; checkOut: string | null; roomLabels: string | null;
