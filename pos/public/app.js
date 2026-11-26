@@ -2904,11 +2904,31 @@ async function billsScreen(dayArg) {
   const r = await api('GET', `${B()}/bill-list?day=${day}`);
   // Room invoices (made at check-out) sit in the same list, marked Room; a tap opens the guest's room bill.
   r.bills = [...r.bills, ...(r.roomInvoices ?? []).map((i) => ({ id: i.id, roomInvoice: true, stayId: i.stayId, billNo: i.invoiceNo, status: 'settled', totalPaise: i.totalPaise, printedAt: i.at,
-    place: i.room, guestName: i.billToName ? `${i.guestName} · ${i.billToName}` : i.guestName, modes: [], creditNotes: i.creditNotes }))].sort((x, y) => y.printedAt - x.printedAt);
-  const kindOf = (b) => (b.roomInvoice ? 'roominv' : b.status === 'void' ? 'void' : b.status === 'printed' ? 'topay' : b.modes.includes('comp') ? 'nc' : b.modes.includes('room') ? 'room' : b.modes.includes('credit') ? 'credit' : 'paid');
-  const paidBy = (b) => b.roomInvoice ? html`Room invoice${b.creditNotes ? html` <span class="small quiet">· ${plural(b.creditNotes, 'credit note')}</span>` : ''}` : b.status === 'void' ? html`<span class="quiet">—</span>` : b.status === 'printed' ? html`<span class="quiet">not paid</span>`
-    : b.modes.map((m) => (m === 'room' && b.room ? `To room ${b.room.split(' · ')[0].replace(/^Room /, '')}` : m === 'credit' && b.credit ? `Credit · ${b.credit}` : PAID_BY[m] ?? m)).join(' + ');
-  const tone = { void: ['bad', 'Void'], topay: ['warn', 'To pay'], nc: ['mute', 'NC'], room: ['info', 'On room'], credit: ['info', 'On credit'], paid: ['ok', 'Paid'], roominv: ['info', 'Room'] };
+    place: i.room, guestName: i.billToName ? `${i.guestName} · ${i.billToName}` : i.guestName, modes: [], creditNotes: i.creditNotes, inv: i }))].sort((x, y) => y.printedAt - x.printedAt);
+  // How each line was paid (26 Nov 2026): a room invoice by the money taken on its room bill, prepaid or moved to an
+  // account; a bill on a room as on the room bill until that guest checks out, then paid with the room invoice.
+  const roomNo = (b) => (b.roomPlace ?? b.room?.split(' · ')[0] ?? '').replace(/^Room /, '');
+  const roomPaidWith = (b) => b.modes.includes('room') && b.roomOut;
+  const kindOf = (b) => (b.roomInvoice ? 'roominv' : b.status === 'void' ? 'void' : b.status === 'printed' ? 'topay' : b.modes.includes('comp') ? 'nc'
+    : b.modes.includes('room') && !roomPaidWith(b) ? 'room' : b.modes.includes('credit') ? 'credit' : 'paid');
+  const invState = (i) => (i.movedPaise > 0 ? ['warn', 'On credit'] : i.paid.length ? ['ok', 'Paid'] : i.prepaidPaise > 0 ? ['ok', 'Prepaid'] : ['ok', 'Paid']);
+  const sub = (t) => html`<div class="small quiet">${t}</div>`;
+  const paidBy = (b) => {
+    if (b.roomInvoice) {
+      const i = b.inv;
+      const parts = [...i.paid.map((p) => `${PAID_BY[p.mode] ?? p.mode} ${rs(p.amountPaise)}`), ...(i.prepaidPaise ? [`Prepaid${i.prepaidTo ? ` · ${i.prepaidTo}` : ''} ${rs(i.prepaidPaise)}`] : []),
+        ...(i.movedPaise ? [`On credit · ${i.movedTo.join(', ') || 'account'} ${rs(i.movedPaise)}`] : [])];
+      const notes = ['room invoice', i.foodBills ? `includes ${plural(i.foodBills, 'food bill')}` : '', b.creditNotes ? plural(b.creditNotes, 'credit note') : ''].filter(Boolean).join(' · ');
+      return html`${parts.join(' · ') || 'Nothing to collect'}${sub(notes)}`;
+    }
+    if (b.status === 'void') return html`<span class="quiet">—</span>`;
+    if (b.status === 'printed') return html`<span class="quiet">not paid</span>`;
+    return html`${b.modes.map((m) => (m === 'room' ? (b.roomOut ? `With room ${roomNo(b)}` : `To room ${roomNo(b)}`) : m === 'credit' && b.credit ? `On credit · ${b.credit}` : PAID_BY[m] ?? m)).join(' + ')}${
+      b.modes.includes('room') ? sub(b.roomOut ? (b.roomInvoiceNo ? `room invoice ${b.roomInvoiceNo}` : 'paid at check-out') : 'on the room bill, not paid yet') : ''}${
+      b.modes.includes('credit') && b.creditOwesPaise != null ? sub(b.creditOwesPaise > 0 ? `account owes ${rs(b.creditOwesPaise)}` : 'account paid up') : ''}`;
+  };
+  const tone = { void: ['bad', 'Void'], topay: ['warn', 'To pay'], nc: ['mute', 'NC'], room: ['info', 'On room bill'], credit: ['warn', 'On credit'], paid: ['ok', 'Paid'], roominv: ['info', 'Room'] };
+  const stateOf = (b) => (b.roomInvoice ? invState(b.inv) : kindOf(b) === 'paid' && roomPaidWith(b) ? ['ok', 'Paid with room'] : tone[kindOf(b)]);
   rerender = () => {
     const f = ui.bF ?? '';
     const q = String(ui.bQ ?? '').trim().toLowerCase();
@@ -2926,10 +2946,10 @@ async function billsScreen(dayArg) {
       <div class="chips" style="margin-bottom:10px">${BILL_FILTERS.map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="bF" data-id="${k}">${t}${k ? ` ${n(k)}` : ` ${r.bills.length}`}</button>`)}</div>
       <section class="panel">${shown.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Time</th><th>Bill</th><th>Table / room</th><th>Guest</th><th class="num">Amount</th><th>Paid by</th><th>Status</th></tr></thead><tbody>
         ${shown.map((b) => b.roomInvoice ? html`<tr class="rowlink" data-act="counterBill" data-id="${b.stayId}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><span style="color:var(--pri);text-decoration:underline">${b.billNo}</span></td>
-          <td data-label="Room">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td><td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status info">Room</span></td></tr>`
+          <td data-label="Room">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td><td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status ${stateOf(b)[0]}">${stateOf(b)[1]}</span></td></tr>`
           : html`<tr class="rowlink" data-act="goTo" data-href="#/done/${b.id}" style="cursor:pointer"><td data-label="Time">${time(b.printedAt)}</td><td data-label="Bill" class="mono"><a href="#/done/${b.id}">${b.billNo}</a></td>
           <td data-label="Table">${b.place}</td><td data-label="Guest">${b.guestName ?? ''}${b.phone ? html`<div class="small quiet">${b.phone}</div>` : ''}</td><td class="num" data-label="Amount">${rs(b.totalPaise)}</td>
-          <td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status ${tone[kindOf(b)][0]}">${tone[kindOf(b)][1]}</span></td></tr>`)}</tbody></table></div>`
+          <td data-label="Paid by">${paidBy(b)}</td><td data-label="Status"><span class="status ${stateOf(b)[0]}">${stateOf(b)[1]}</span></td></tr>`)}</tbody></table></div>`
         : html`<p class="empty">${r.bills.length ? 'No bill matches.' : 'No bills in this shift.'}</p>`}</section>`));
   };
   rerender();

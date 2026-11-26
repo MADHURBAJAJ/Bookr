@@ -631,19 +631,52 @@ orderRoutes.get(`${B}/bill-list`, requireAction('bills.print'), async (c) => {
   const day = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('day') ?? '') ? c.req.query('day')! : clock(bizOf(c)).shiftDay;
   if (!isManager(c) && Date.parse(day) < Date.now() - 90 * 86_400_000) fail(403, 'Older bills: a manager or owner looks them up.');
   const rows = await all<{ id: string; bill_no: string; status: string; total: number; printed_at: number; place: string; guest_name: string | null; guest_phone: string | null;
-    modes: string | null; room: string | null; credit: string | null }>(c.env.DB, `
+    modes: string | null; room: string | null; credit: string | null; room_place: string | null; room_out: number | null; room_inv: string | null; credit_owes: number | null }>(c.env.DB, `
     SELECT b.id, b.bill_no, b.status, b.total_paise AS total, b.printed_at, o.place, coalesce(b.guest_name, o.guest_name) AS guest_name,
       coalesce(b.guest_phone, o.guest_phone) AS guest_phone,
       (SELECT group_concat(DISTINCT p.mode) FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = b.id) AS modes,
       (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room,
-      (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1) AS credit
+      (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1) AS credit,
+      -- Posted to a room (26 Nov 2026): the room, whether that guest has checked out, and the room invoice it was settled with.
+      (SELECT st.room FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id JOIN stays st ON st.id = d.stay_id
+        WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room_place,
+      (SELECT st.checked_out_at IS NOT NULL FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id JOIN stays st ON st.id = d.stay_id
+        WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room_out,
+      (SELECT i.invoice_no FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id JOIN stays st ON st.id = d.stay_id
+        JOIN room_invoices i ON i.stay_id = coalesce(st.group_stay_id, st.id) WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room_inv,
+      -- On credit: what that account still owes now.
+      (SELECT sum(e.amount_paise) FROM debtor_entries e WHERE e.account_id = (SELECT p.debtor_account_id FROM allocations a JOIN payments p ON p.id = a.payment_id
+        WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1)) AS credit_owes
     FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.business_id = ? AND b.shift_day = ? ORDER BY b.printed_at DESC LIMIT 500`, bid, day);
   // The shift's room invoices too (made at check-out): a tap opens the guest's room bill.
-  const roomInvoices = await all(c.env.DB, `SELECT i.id, i.invoice_no AS invoiceNo, i.at, i.room, i.guest_name AS guestName, i.total_paise AS totalPaise, i.stay_id AS stayId,
+  const invs = await all<{ id: string; invoiceNo: string; at: number; room: string; guestName: string; totalPaise: number; stayId: string; billToName: string | null; creditNotes: number }>(c.env.DB,
+    `SELECT i.id, i.invoice_no AS invoiceNo, i.at, i.room, i.guest_name AS guestName, i.total_paise AS totalPaise, i.stay_id AS stayId,
       i.bill_to_name AS billToName, (SELECT count(*) FROM room_credit_notes n WHERE n.invoice_id = i.id) AS creditNotes
     FROM room_invoices i WHERE i.business_id = ? AND i.shift_day = ? ORDER BY i.at DESC`, bid, day);
+  // How each room was paid (26 Nov 2026), from the room bill's ledger of the stay and its group: money taken by mode
+  // (receipts and advances, less refunds), paid before arrival (and to whom), moved to a credit account, food bills on it.
+  const roomInvoices = [];
+  for (const i of invs) {
+    const es = await all<{ kind: string; mode: string | null; amt: number; note: string | null; ch: string | null; bills: number }>(c.env.DB,
+      `SELECT e.kind, p.mode, sum(-e.amount_paise) AS amt, max(e.note) AS note, max(coalesce(k.channel, k.source)) AS ch, count(e.bill_id) AS bills
+       FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays st ON st.id = a.stay_id
+       LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN bookings k ON k.id = e.booking_id
+       WHERE a.business_id = ? AND (st.id = ?2 OR st.group_stay_id = ?2) AND e.kind IN ('receipt', 'advance', 'refund', 'prepaid', 'transfer', 'charge')
+       GROUP BY e.kind, p.mode, e.note`, bid, i.stayId);
+    const modes: Record<string, number> = {};
+    for (const e of es) if ((e.kind === 'receipt' || e.kind === 'advance' || e.kind === 'refund') && e.mode) modes[e.mode] = (modes[e.mode] ?? 0) + e.amt;
+    const prepaid = es.filter((e) => e.kind === 'prepaid').reduce((t, e) => t + e.amt, 0);
+    const moved = es.filter((e) => e.kind === 'transfer' && e.amt > 0);
+    roomInvoices.push({ ...i,
+      paid: Object.entries(modes).filter(([, v]) => v > 0).map(([mode, amountPaise]) => ({ mode, amountPaise })),
+      prepaidPaise: prepaid > 0 ? prepaid : 0, prepaidTo: es.find((e) => e.kind === 'prepaid' && e.ch)?.ch ?? null,
+      movedTo: moved.map((e) => (e.note ?? '').replace(/^Moved to\s*/, '').replace(/\s*·.*$/, '')).filter(Boolean),
+      movedPaise: moved.reduce((t, e) => t + e.amt, 0),
+      foodBills: es.filter((e) => e.kind === 'charge').reduce((t, e) => t + e.bills, 0) });
+  }
   return c.json({ day, roomInvoices, bills: rows.map((b) => ({ id: b.id, billNo: b.bill_no, status: b.status, totalPaise: b.total, printedAt: b.printed_at, place: b.place, guestName: b.guest_name,
-    phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [], room: b.room, credit: b.credit })) });
+    phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [], room: b.room, credit: b.credit,
+    roomPlace: b.room_place, roomOut: !!b.room_out, roomInvoiceNo: b.room_inv, creditOwesPaise: b.credit_owes })) });
 });
 
 // Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.
