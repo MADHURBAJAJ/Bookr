@@ -3940,7 +3940,10 @@ function purchasesTab() {
         <p class="small quiet">${r.by ? `Received by ${r.by}` : ''}${r.photo ? html` · <a href="/api${B()}/stock/bills/${r.billId}/photo" target="_blank" rel="noopener">See the bill photo</a>` : ''}</p></details>`)}`
       : html`<p class="quiet">Nothing received in these dates.</p>`}</section>`;
 }
-actions.puGo = () => route();
+// The dates chosen on Purchases and Consumption stay when Show reloads the screen (26 Nov 2026: they went back to the
+// default because a reload clears the screen's state).
+const stockPicks = {};
+actions.puGo = () => { Object.assign(stockPicks, { puFrom: ui.puFrom, puTo: ui.puTo }); route(); };
 function useTab(storeSel) {
   const u = ui.use;
   const unitQty = (q, i) => (i.packSize > 1 && i.unit !== 'pcs' && Math.abs(q) >= i.packSize ? `${q} ${i.unit} (${(q / i.packSize).toFixed(1)})` : `${q} ${i.unit}`);
@@ -3960,7 +3963,7 @@ function useTab(storeSel) {
       <p class="small quiet">Sold is by each dish's recipe when it was sent to the kitchen or bar (orders before 25 Nov, 8 am: when the bill was paid). Not billed is what was sent but is on no bill: tables still open, walkouts, or food that left without a bill (all stores only). A cancelled KOT puts its stock back, so food made and then cancelled shows as missing at the count. Missing is what counts found short of the book. Values are at the last price paid.</p>`
       : html`<p class="quiet">Nothing was used in these dates${ui.uStore ? ' from this store' : ''}.</p>`}</section>`;
 }
-actions.useGo = () => route();
+actions.useGo = () => { Object.assign(stockPicks, { uFrom: ui.uFrom, uTo: ui.uTo, uStore: ui.uStore }); route(); };
 
 async function stockScreen(tab = 'hand') {
   const st = await api('GET', `${B()}/stock`);
@@ -3986,8 +3989,8 @@ async function stockScreen(tab = 'hand') {
   }
   if (tab === 'report' && ui.rStore) ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`);
   if (tab === 'buy') { ui.byDays ??= '14'; ui.byCover ??= '7'; ui.buy = await api('GET', `${B()}/stock/shortages?days=${int(ui.byDays) || 14}&cover=${int(ui.byCover) || 7}`); ui.buyQty = {}; }
-  if (tab === 'purchases') { ui.puFrom ??= addDays(me.business.shiftDay, -29); ui.puTo ??= me.business.shiftDay; ui.pur = await api('GET', `${B()}/stock/purchases?from=${ui.puFrom}&to=${ui.puTo}`); }
-  if (tab === 'use') { ui.uFrom ??= addDays(me.business.shiftDay, -6); ui.uTo ??= me.business.shiftDay; ui.uStore ??= ''; ui.use = await api('GET', `${B()}/stock/consumption?from=${ui.uFrom}&to=${ui.uTo}${ui.uStore ? `&storeId=${ui.uStore}` : ''}`); }
+  if (tab === 'purchases') { ui.puFrom ??= stockPicks.puFrom ?? addDays(me.business.shiftDay, -29); ui.puTo ??= stockPicks.puTo; ui.puTo ??= me.business.shiftDay; ui.pur = await api('GET', `${B()}/stock/purchases?from=${ui.puFrom}&to=${ui.puTo}`); }
+  if (tab === 'use') { ui.uFrom ??= stockPicks.uFrom ?? addDays(me.business.shiftDay, -6); ui.uTo ??= stockPicks.uTo ?? me.business.shiftDay; ui.uStore ??= stockPicks.uStore ?? ''; ui.use = await api('GET', `${B()}/stock/consumption?from=${ui.uFrom}&to=${ui.uTo}${ui.uStore ? `&storeId=${ui.uStore}` : ''}`); }
   if (tab === 'receive') ui.drafts = (await api('GET', `${B()}/stock/bills`)).bills;
   rerender = () => {
     let body = '';
