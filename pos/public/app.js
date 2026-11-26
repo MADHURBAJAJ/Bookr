@@ -1911,6 +1911,8 @@ function todayView() {
   const items = [
     ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
+    ...(fd.missingBeds ?? []).map((x) => ({ tone: 'warn', icon: '⇆', title: `Beds missing: ${x.guestName} · ${x.room}`,
+      sub: `Booked ${x.booked}, ${x.have} in the POS${x.sharing ? ` (+${x.sharing} sharing)` : ''}. Assign ${x.missing} more, or mark as sharing`, act: 'bedsPanel', id: x.stayId })),
     ...((fd.held ?? []).length ? [{ tone: fd.held.some((x) => x.reason?.startsWith('Cancelled')) ? 'bad' : 'warn', icon: '!', title: `${plural(fd.held.length, 'booking change')} to check before applying`,
       sub: fd.held.slice(0, 3).map((x) => `${x.room ?? x.extRef} · ${x.guestName ?? ''}: ${x.reason}`).join(' · '), act: 'heldPanel' }] : []),
     ...(fd.alerts.djuboToMode ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.djuboToMode, 'payment')} taken in Djubo · ${rs(fd.djubo.open.reduce((t, x) => t + x.amountPaise, 0))}`, sub: 'Counted on the day marked. Pick Cash, UPI or Card for each', act: 'djPanel' }] : []),
@@ -2561,6 +2563,10 @@ function roomPicker() {
     <label class="tickline small"><input type="checkbox" data-act="ciMultiTog" ${ui.ciMulti ? 'checked' : ''}> Several rooms or beds for this guest${ui.ciMulti ? ': tap each one; the first holds the bill' : ''}</label>
     ${(ui.ciTaken ?? []).length ? html`<div class="msg warn">Djubo has ${ui.ciTaken.join(', ')} for this booking, but ${ui.ciTaken.length === 1 ? 'it is' : 'they are'} taken now. Choose ${ui.ciTaken.length === 1 ? 'another' : 'others'} below, or check the guest there out first.</div>` : ''}
     ${(ui.ciRooms ?? []).length ? html`<div class="msg ok">Checking in to <strong>${[ui.room, ...ui.ciRooms].join(', ')}</strong> · one bill, on ${ui.room}</div>` : ''}
+    ${ui.bookingId && ui.room && (ui.ciBooked ?? 1) > 1 + (ui.ciMulti ? (ui.ciRooms ?? []).length : 0) ? html`<div class="msg warn" style="display:block"><strong>Booked for ${ui.ciBooked} rooms or beds, ${1 + (ui.ciMulti ? (ui.ciRooms ?? []).length : 0)} picked.</strong>
+      Pick the others where the guests are, or:
+      <label class="tickline small" style="margin-top:4px"><input type="checkbox" data-model="ciShare" data-live ${ui.ciShare ? 'checked' : ''}> The others share (no extra beds)</label>
+      <div class="small">Not ticked: the check-in goes ahead and Today shows "Beds missing" until they are assigned.</div></div>` : ''}
     <div class="rpick">${groups.length ? groups.map((g) => html`<div class="rpg"><div class="rph"><strong>${g.x.name}</strong><span class="small quiet">${g.free} of ${g.total} free</span></div>
       <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken && !(ui.ciLeft && ui.ciOutToo) ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
         title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}" ${u.taken && ui.ciLeft && ui.ciOutToo ? 'data-past="1"' : ''}>${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
@@ -2616,6 +2622,46 @@ function heldPanel() {
         <button class="btn ${x.reason?.startsWith('Cancelled') ? '' : 'pri'}" type="button" data-act="heldApply" data-b="${x.bookingId}" data-m="${x.mailId}">${x.reason?.startsWith('Cancelled') ? 'Apply: the guest left' : 'Apply the change'}</button></div></div>`)
       : html`<p class="empty">Nothing to check.</p>`}`;
 }
+// A booking's rooms or beds missing in the POS (26 Nov 2026): add them where the guests are, or mark that they share.
+function bedsPanel() {
+  const x = (ui.fd?.missingBeds ?? []).find((y) => y.stayId === ui.bedsFor);
+  if (!x) return html`<div class="dhead"><h2>Assign beds</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="">Close</button></div><p class="empty">Nothing missing now.</p>`;
+  const busy = new Set((cache.stays ?? []).map((s) => roomKeyOf(s.room)));
+  const secs = (ui.roomSecs ?? []).map((sec) => ({ name: sec.name, beds: (sec.tables ?? []).filter((t) => !/· whole$/.test(t) && !busy.has(roomKeyOf(t))) })).filter((sec) => sec.beds.length);
+  const mine = secs.findIndex((sec) => (ui.roomSecs.find((r) => r.name === sec.name)?.tables ?? []).some((t) => roomKeyOf(t) === roomKeyOf(x.room)));
+  if (mine > 0) secs.unshift(...secs.splice(mine, 1));
+  const picked = ui.bedsPick ?? [];
+  const djubo = (x.djuboBeds ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+  const djuboTaken = djubo.filter((t) => busy.has(roomKeyOf(t)) && roomKeyOf(t) !== roomKeyOf(x.room));
+  return html`<div class="dhead"><h2>Assign beds · ${x.guestName}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${errorBox()}
+    <p class="small">${x.extRef ? `Djubo ${x.extRef} · ` : ''}<strong>booked ${x.booked}</strong> · in the POS: <strong>${x.have}</strong>${x.sharing ? ` (+${x.sharing} sharing)` : ''} · first room <strong>${x.room}</strong></p>
+    ${djubo.length ? html`<div class="msg warn" style="display:block">Djubo has <strong>${djubo.join(', ')}</strong> for this booking${djuboTaken.length ? html`, but ${djuboTaken.join(', ')} ${djuboTaken.length === 1 ? 'has' : 'have'} another guest` : ''}. Djubo's beds are only a suggestion: pick where the guests really are.</div>` : ''}
+    <h3 style="margin-top:10px">Free beds tonight, same kind first · pick ${x.missing}</h3>
+    ${secs.length ? secs.map((sec) => html`<div class="small quiet" style="margin-top:6px">${sec.name}</div><div class="chips">${sec.beds.map((t) => html`<button type="button" class="chip" aria-pressed="${picked.includes(t)}" data-act="bedsToggle" data-id="${t}">${t}</button>`)}</div>`)
+      : html`<p class="empty">No free beds tonight.</p>`}
+    <div class="row" style="margin-top:12px"><button class="btn pri" type="button" data-act="bedsGo" ${picked.length ? '' : 'disabled'}>${picked.length ? `Add ${picked.join(', ')} to ${x.guestName}'s group` : 'Pick the beds'}</button>
+      <button class="btn" type="button" data-act="bedsShare">${x.missing === 1 ? 'Sharing (no extra bed)' : `The other ${x.missing} share (no extra beds)`}</button></div>
+    <p class="small quiet">Added beds join the group: food and payments go on ${x.room}'s bill; rent stays as the booking has it.</p>`;
+}
+actions.bedsPanel = (d) => { ui.roomBill = null; ui.chartSel = null; ui.bedsFor = d.id; ui.bedsPick = []; ui.error = null; ui.drawer = bedsPanel; rerender(); };
+actions.bedsToggle = (d) => { const p = ui.bedsPick ?? []; ui.bedsPick = p.includes(d.id) ? p.filter((t) => t !== d.id) : [...p, d.id]; rerender(); };
+const bedsDone = async (text) => {
+  [ui.fd] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), load('stays')]);
+  cache.stays = (await api('GET', B() + '/stays')).stays ?? cache.stays;
+  flash = { kind: 'ok', text }; ui.bedsPick = [];
+  if (!(ui.fd?.missingBeds ?? []).some((y) => y.stayId === ui.bedsFor)) ui.drawer = null;
+  rerender();
+};
+actions.bedsGo = async () => {
+  const x = ui.fd.missingBeds.find((y) => y.stayId === ui.bedsFor);
+  await api('POST', `${B()}/stays/${ui.bedsFor}/add-beds`, { rooms: ui.bedsPick });
+  await bedsDone(`${ui.bedsPick.join(', ')} added to ${x.guestName}'s group.`);
+};
+actions.bedsShare = async () => {
+  const x = ui.fd.missingBeds.find((y) => y.stayId === ui.bedsFor);
+  await api('POST', `${B()}/stays/${ui.bedsFor}/sharing`, { beds: x.missing });
+  await bedsDone(`Marked as sharing: no extra beds for ${x.guestName}.`);
+};
 actions.heldPanel = () => { ui.roomBill = null; ui.chartSel = null; ui.drawer = heldPanel; rerender(); };
 const heldDo = async (d, what) => {
   await api('POST', `${B()}/bookings/${d.b}/versions/${encodeURIComponent(d.m)}/${what}`, {});
@@ -3000,6 +3046,7 @@ actions.pickArrival = async (d, _el, quiet) => {
   ui.ciHits = hits;
   ctPrepare(a, hits);
   ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
+  ui.ciBooked = Math.max(a.rooms ?? 1, 1); ui.ciShare = false;
   ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
   ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
   if (!quiet) rerender();
@@ -3104,7 +3151,8 @@ actions.openStay = async (d = {}) => {
     .filter((x) => String(x.number).trim());
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
   const r = await api('POST', B() + '/stays', { room: ui.room, rooms: ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
-    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
+    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults,
+    sharingBeds: ui.ciShare ? Math.max(0, (ui.ciBooked ?? 1) - 1 - (ui.ciMulti ? (ui.ciRooms ?? []).length : 0)) || undefined : undefined, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
     goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign, past: !!(ui.ciLate && ui.ciLeft && ui.ciOutToo) || undefined, ...(ui.ciLate > 2 && !isMgr() ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
   if (!d.noprint) printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${r.id}/grc`)).grc)) }]);
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
