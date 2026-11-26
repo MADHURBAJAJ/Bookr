@@ -4740,17 +4740,17 @@ async function settingsScreen(tab = 'menu') {
         <button class="btn" type="button" data-act="mNew">+ Add item</button></div>
       ${menuShown.length ? '' : html`<p class="quiet">No item matches${ui.mQ ? ` “${ui.mQ}”` : ''}${ui.mCat ? ` in ${ui.mCat}` : ''}.</p>`}
       ${menuBulkBar()}
-      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mSelAll" aria-label="Tick every item shown" ${menuShown.length && menuShown.every((m) => (ui.mSel ?? []).includes(m.id)) ? 'checked' : ''}></th><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
+      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mSelAll" aria-label="Tick every item shown" ${menuShown.length && menuShown.every((m) => (ui.mSel ?? []).includes(m.id)) ? 'checked' : ''}></th><th>Item</th><th class="num">Price</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
         ${menuShown.map((m) => html`<tr class="${(ui.mSel ?? []).includes(m.id) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mSel" data-id="${m.id}" aria-label="Tick ${m.name}" ${(ui.mSel ?? []).includes(m.id) ? 'checked' : ''}></td><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
           ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
-          <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
-          <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}</td>
+          <td data-label="Price" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
+          <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}${taxMarks(m)}</td>
           <td class="act"><div class="irow">${iconBtn('itemEdit', m.id, 'edit', `Edit ${m.name}`)}${m.active ? iconBtn('itemToggle', m.id, 'off', `Take ${m.name} off the menu`) : iconBtn('itemToggle', m.id, 'on', `Put ${m.name} back on the menu`)}${iconBtn('itemDelete', m.id, 'trash', `Delete ${m.name}`, 'danger')}</div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
         <label class="f">Price at billing<select class="in" data-model="iOpen"><option value="no">No: fixed price</option><option value="yes" ${ui.iOpen === 'yes' ? 'selected' : ''}>Yes: typed when ordered (bottles, catch of the day)</option></select></label>
         ${ui.iOpen === 'yes' ? html`<label class="f">Lowest price allowed (₹, optional)<input class="in" inputmode="decimal" data-model="iMin" value="${ui.iMin ?? ''}"></label>`
-          : choicePrice() !== null ? html`<label class="f">Price (₹, before GST)<input class="in" data-model="iPrice" value="${choicePrice()}" readonly aria-describedby="ip-n"><span class="small quiet" id="ip-n" style="font-weight:400">The first choice's price, set below.</span></label>`
-          : html`<label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
+          : choicePrice() !== null ? html`<label class="f">Price (₹)<input class="in" data-model="iPrice" value="${choicePrice()}" readonly aria-describedby="ip-n"><span class="small quiet" id="ip-n" style="font-weight:400">The first choice's price, set below.</span></label>`
+          : html`<label class="f">Price (₹)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
         ${itemKotFields()}
         <label class="f">Tax<select class="in" data-model="iTax">${taxChoices(true).map(([v, t]) => html`<option value="${v}" ${(ui.iTax ?? 'category') === v ? 'selected' : ''}>${t}</option>`)}</select></label>
         ${followSelect('iSc', 'Service charge', 'serviceCharge')}${followSelect('iIncl', 'Price includes GST', 'priceIncl')}
@@ -5493,7 +5493,8 @@ async function menuBulk(ids, action, value) {
   const n = plural(ids.length, 'item');
   flash = { kind: 'ok', text: action === 'delete'
     ? [r.deleted ? `${plural(r.deleted, 'item')} deleted.` : '', r.takenOff ? `${plural(r.takenOff, 'item')} ${r.takenOff === 1 ? 'was' : 'were'} ordered before, so taken off the menu instead.` : ''].filter(Boolean).join(' ')
-    : { off: `${n} taken off the menu.`, on: `${n} put back on the menu.`, category: `${n} moved to ${value}.`, station: `${n}: station changed.`, tax: `${n}: tax changed.` }[action] };
+    : { off: `${n} taken off the menu.`, on: `${n} put back on the menu.`, category: `${n} moved to ${value}.`, station: `${n}: station changed.`, tax: `${n}: tax changed.`,
+      serviceCharge: `${n}: service charge ${value === 'category' ? 'as category' : value}.`, priceIncl: `${n}: price includes GST ${value === 'category' ? 'as category' : value}.` }[action] };
   route();
 }
 function menuBulkBar() {
@@ -5506,6 +5507,8 @@ function menuBulkBar() {
     <select class="in" data-act-change="mBulkPick" data-do="category" aria-label="Move ticked items to a category"><option value="">Category…</option>${cats.map((c) => html`<option>${c}</option>`)}<option value="__new">New category…</option></select>
     <select class="in" data-act-change="mBulkPick" data-do="station" aria-label="Station for ticked items"><option value="">Station…</option><option value="category">As its category says</option>${activeStations().map((x) => html`<option value="${x.id}">${x.name}</option>`)}<option value="none">No KOT</option></select>
     <select class="in" data-act-change="mBulkPick" data-do="tax" aria-label="Tax for ticked items"><option value="">Tax…</option>${taxChoices(true).map(([v, t]) => html`<option value="${v}">${t}</option>`)}</select>
+    ${['serviceCharge', 'priceIncl'].map((k) => html`<select class="in" data-act-change="mBulkPick" data-do="${k}" aria-label="${k === 'serviceCharge' ? 'Service charge' : 'Price includes GST'} for ticked items">
+      <option value="">${k === 'serviceCharge' ? 'Service charge…' : 'Price includes GST…'}</option><option value="category">As its category</option><option value="yes">Yes</option><option value="no">No</option></select>`)}
     <button class="btn danger" type="button" data-act="mBulk" data-do="delete">Delete</button>
     <button class="btn ghost" type="button" data-act="mSelClear">Clear ticks</button></div>`;
 }
@@ -5514,6 +5517,16 @@ actions.catTax = async (d, el) => {
   const c = cache.menuCats.find((x) => x.id === d.id); Object.assign(c, el.value.startsWith('rate:') ? { taxMode: 'rate', gstBp: Number(el.value.slice(5)) * 100 } : { taxMode: el.value, gstBp: null });
   flash = { kind: 'ok', text: `${c.name}: ${taxName(c)}.` }; route();
 };
+/** What an item carries besides its GST (26 Nov 2026): service charge, a price with GST in it, and "own" when it does not follow its category. */
+function taxMarks(m) {
+  const c = catOf(m);
+  const sc = m.serviceCharge ?? c?.serviceCharge ?? 0;
+  const mode = m.taxMode ?? c?.taxMode ?? 'billing';
+  const incl = (m.priceIncl ?? c?.priceIncl ?? 0) && mode !== 'none' && mode !== 'liquor';
+  const own = m.serviceCharge != null || m.priceIncl != null;
+  if (!sc && !incl && !own) return '';
+  return html`<div class="row" style="gap:4px;margin-top:4px">${sc ? html`<span class="badge open">+ service charge</span>` : ''}${incl ? html`<span class="badge new">price incl. GST</span>` : ''}${own ? html`<span class="badge">own setting</span>` : ''}</div>`;
+}
 /** An item's own choice or its category's (26 Nov 2026), for the item form; "As its category" says what that is. */
 function followSelect(model, label, field) {
   const c = catOf({ category: ui.iCat ?? '' });

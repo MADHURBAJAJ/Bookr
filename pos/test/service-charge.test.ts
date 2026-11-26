@@ -59,6 +59,16 @@ describe('service charge and prices with GST in them: settings and the bill', ()
     await ok(owner.call('PUT', `${B}/menu/${chai.id}`, { name: chai.name, category: 'Food', price: '40' }));
     expect((await ok(owner.get(`${B}/menu`))).items.find((m: { id: string }) => m.id === chai.id)).toMatchObject({ serviceCharge: 0, priceIncl: 1 });
 
+    // Many items at once, from the Menu screen's ticked rows; a wrong value is refused.
+    const naan = menu.items.find((m: { name: string }) => m.name === 'Butter Naan');
+    expect((await owner.post(`${B}/menu/bulk`, { ids: [naan.id], action: 'serviceCharge', value: 'maybe' })).status).toBe(400);
+    await ok(owner.post(`${B}/menu/bulk`, { ids: [naan.id], action: 'serviceCharge', value: 'no' }));
+    await ok(owner.post(`${B}/menu/bulk`, { ids: [naan.id], action: 'priceIncl', value: 'yes' }));
+    expect((await ok(owner.get(`${B}/menu`))).items.find((m: { id: string }) => m.id === naan.id)).toMatchObject({ serviceCharge: 0, priceIncl: 1 });
+    await ok(owner.post(`${B}/menu/bulk`, { ids: [naan.id], action: 'serviceCharge', value: 'category' }));
+    await ok(owner.post(`${B}/menu/bulk`, { ids: [naan.id], action: 'priceIncl', value: 'category' }));
+    expect((await ok(owner.get(`${B}/menu`))).items.find((m: { id: string }) => m.id === naan.id)).toMatchObject({ serviceCharge: null, priceIncl: null });
+
     const { bill } = await (await import('./helpers')).billed(s, [['Masala Dosa', 1], ['Masala Chai', 1]]);
     expect(bill).toMatchObject({ serviceChargeBp: 1000, serviceChargePaise: 1800, taxablePaise: 23610, cgstPaise: 590, totalPaise: 24800 });
     expect(bill.items.map((l: { name: string; serviceCharge: number; priceIncl: number }) => [l.name, l.serviceCharge, l.priceIncl])).toEqual([['Masala Dosa', 1, 0], ['Masala Chai', 0, 1]]);

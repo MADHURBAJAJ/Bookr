@@ -562,8 +562,9 @@ settingsRoutes.post(`${B}/menu/bulk`, requireAction('menu.edit'), async (c) => {
   if (!Array.isArray(ids) || !ids.length || ids.length > 2000 || !ids.every((x) => typeof x === 'string' && isUuid(x))) fail(400, 'Choose at least one item.');
   const uniq = [...new Set(ids as string[])];
   const json = JSON.stringify(uniq);
-  const before = await all<{ id: string; name: string; category: string; active: number; station_id: string | null; kot: number | null; tax_mode: string | null; gst_bp: number | null; used: number }>(db,
-    `SELECT id, name, category, active, station_id, kot, tax_mode, gst_bp,
+  const before = await all<{ id: string; name: string; category: string; active: number; station_id: string | null; kot: number | null; tax_mode: string | null; gst_bp: number | null;
+    service_charge: number | null; price_incl: number | null; used: number }>(db,
+    `SELECT id, name, category, active, station_id, kot, tax_mode, gst_bp, service_charge, price_incl,
        EXISTS (SELECT 1 FROM order_lines l WHERE l.item_id = m.id) OR EXISTS (SELECT 1 FROM bill_lines l WHERE l.item_id = m.id) AS used
      FROM menu_items m WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))`, bid, json);
   if (before.length !== uniq.length) fail(404, 'An item was not found. Reload the page and try again.');
@@ -599,6 +600,10 @@ settingsRoutes.post(`${B}/menu/bulk`, requireAction('menu.edit'), async (c) => {
   } else if (action === 'tax') {
     const f = taxFields((data.value ?? {}) as Record<string, unknown>, true);
     s.push(stmt(db, `UPDATE menu_items SET tax_mode = ?, gst_bp = ? WHERE ${IN}`, f.tax_mode, f.gst_bp, bid, json));
+  } else if (action === 'serviceCharge' || action === 'priceIncl') {
+    // Service charge or price-includes-GST for the ticked items (26 Nov 2026): 'category', 'yes' or 'no'.
+    const v = followYesNo(data.value, action === 'serviceCharge' ? 'Service charge' : 'Price includes GST');
+    s.push(stmt(db, `UPDATE menu_items SET ${action === 'serviceCharge' ? 'service_charge' : 'price_incl'} = ? WHERE ${IN}`, v, bid, json));
   } else fail(400, 'Unknown change.');
   await db.batch([
     ...s,
