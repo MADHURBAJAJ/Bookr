@@ -9,7 +9,8 @@ import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, dormBed, dormWhole, tableLayout, type Business } from '../util';
 import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
-import { bookingUnits, deskPending, roomTax } from '../rooms';
+import { bookingUnits, roomTax } from '../rooms';
+import { djuboPays, oldDeskPending } from '../djubo-desk';
 import { shiftDayAt } from '../billing';
 import { formCPending } from './roomdesk';
 import type { AppEnv } from '../types';
@@ -304,27 +305,34 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
       FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id WHERE s.business_id = ? AND s.checked_out_at IS NULL ORDER BY s.room`, b.id),
     chartData(db, b, today, 1),
     notInDjubo(db, b.id, today, t),
-    deskPending(db, b.id),
+    oldDeskPending(db, b.id, b.shift_start_hour),
     one<{ n: number }>(db, "SELECT count(*) AS n FROM bookings WHERE business_id = ? AND status = 'new' AND unplaced = 1", b.id),
   ]);
   const live = reservations.filter((r) => !(r.status === 'hold' && (r.holdUntil ?? 0) < t));
   const rooms = chart.sections.reduce((n, s) => n + s.rooms.length, 0);
   const busy = new Set(chart.bars.map((x) => x.room)).size;
+  // Money reception marked in Djubo (26 Nov 2026): already taken, so not to collect; it waits only for how it was paid.
+  const dj = await djuboPays(db, b.id, b.shift_start_hour);
+  const djOpen = dj.pays.filter((x) => !x.settlementId);
+  const sumBy = (key: 'bookingId' | 'stayId', id: string) => djOpen.filter((x) => x[key] === id).reduce((n, x) => n + x.amountPaise, 0);
   // From Djubo's daily report with no total yet (24 Nov 2026): what the report says is still to collect.
-  const due = (a: (typeof arrivals)[number]) => (a.fromReport && a.amountPaise === null ? Math.max(0, (a.reportDuePaise ?? 0) - a.heldPaise)
-    : Math.max(0, (a.amountPaise ?? 0) - Math.max(0, (a.paidPaise ?? 0) - a.deskPaidPaise) - a.heldPaise));
+  const due = (a: (typeof arrivals)[number]) => Math.max(0, (a.fromReport && a.amountPaise === null ? Math.max(0, (a.reportDuePaise ?? 0) - a.heldPaise)
+    : Math.max(0, (a.amountPaise ?? 0) - Math.max(0, (a.paidPaise ?? 0) - a.deskPaidPaise) - a.heldPaise)) - sumBy('bookingId', a.id));
+  const stayDjubo = (id: string) => sumBy('stayId', id);
   const toCollect = arrivals.reduce((n, a) => n + due(a), 0) + live.reduce((n, r) => n + Math.max(0, r.totalPaise - r.heldPaise), 0)
-    + stays.reduce((n, s) => n + Math.max(0, s.balancePaise), 0);
+    + stays.reduce((n, s) => n + Math.max(0, s.balancePaise - stayDjubo(s.id)), 0);
   return c.json({
     today,
-    arrivals: [...arrivals.map((a) => ({ ...a, kind: 'booking', duePaise: due(a) })),
+    arrivals: [...arrivals.map((a) => ({ ...a, kind: 'booking', duePaise: due(a), djuboPaise: sumBy('bookingId', a.id) })),
       ...live.map((r) => ({ id: r.id, kind: 'reservation', guestName: r.guestName, checkIn: r.checkIn, checkOut: r.checkOut, status: r.status, source: r.source,
         rooms: (JSON.parse(r.lines) as { type: string; rooms: number; roomNames?: string[] }[]).map((l) => `${l.type}${l.roomNames?.length ? ` ${l.roomNames.join(', ')}` : ` × ${l.rooms}`}`).join(' · '),
         duePaise: Math.max(0, r.totalPaise - r.heldPaise), totalPaise: r.totalPaise }))],
-    inHouse: stays,
-    leaving: stays.filter((s) => s.plan && s.plan <= today),
+    inHouse: stays.map((s) => ({ ...s, djuboPaise: stayDjubo(s.id) })),
+    leaving: stays.filter((s) => s.plan && s.plan <= today).map((s) => ({ ...s, djuboPaise: stayDjubo(s.id) })),
+    djubo: { open: djOpen, today: dj.pays.filter((x) => x.day === today), lowered: dj.lowered },
     stats: { arriving: arrivals.length + live.length, inHouse: stays.length, leaving: stays.filter((s) => s.plan && s.plan <= today).length, freeTonight: Math.max(0, rooms - busy), toCollectPaise: toCollect },
-    alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0 },
+    alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0,
+      djuboToMode: djOpen.length, djuboLowered: dj.lowered.length },
   });
 });
 

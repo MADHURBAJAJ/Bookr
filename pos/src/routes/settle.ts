@@ -7,7 +7,8 @@ import { all, newId, now, one, stmt, type DB } from '../../../src/db';
 import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { approval, isManager, requireAction, requireStaff } from '../auth';
-import { allocateLoose, rs } from '../billing';
+import { allocateLoose, fyOf, rs } from '../billing';
+import { djuboPays } from '../djubo-desk';
 import { audit, clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
 import { billOut } from './orders';
 import { phoneKey } from './settings';
@@ -562,4 +563,56 @@ settleRoutes.post(`${B}/payments/:id/change`, requireAction('bills.settle'), asy
     throw e;
   }
   return c.json({ ok: true });
+});
+
+// ---------- money reception marked in Djubo (26 Nov 2026)
+// Someone picks how a Djubo payment was paid: it becomes a numbered POS receipt dated the day it was marked in Djubo (the
+// next open shift if that day is closed), on the guest's room bill, or held as an advance until check-in. The cash was
+// taken when it was marked, so the drawer holder is not asked.
+settleRoutes.post(`${B}/bookings/:id/djubo-paid`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const data = await body(c);
+  const b = bizOf(c);
+  const e = (await djuboPays(db, bid, b.shift_start_hour, isUuid(id) ? id : '00000000-0000-0000-0000-000000000000')).pays
+    .find((x) => x.mailId === data.mailId && !x.settlementId);
+  if (!e) fail(404, 'This Djubo payment has a receipt already, or is no longer waiting.');
+  const pay = await readPayment(db, bid, { ...(data as object), amount: (e.amountPaise / 100).toFixed(2) }, 1, ['cash', 'upi', 'card']);
+  const { shiftDay: today } = clock(b);
+  const closed = await one(db, 'SELECT 1 FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, e.day);
+  const shiftDay = closed || e.day > today ? today : e.day;
+  const fy = fyOf(shiftDay, b.fy_start_month);
+  const staff = c.get('staff');
+  const t = closed ? now() : e.at;
+  const settlementId = newId();
+  const acc = e.stayId ? await one<{ id: string; name: string }>(db, 'SELECT id, name FROM debtor_accounts WHERE stay_id = ? AND business_id = ?', e.stayId, bid) : null;
+  const room = e.stayId ? await one<{ room: string }>(db, 'SELECT room FROM stays WHERE id = ?', e.stayId) : null;
+  try {
+    await db.batch([
+      ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
+      insertPayment(db, bid, settlementId, { ...pay, debtorAccountId: null }, shiftDay, staff.id, t),
+      acc ? stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, booking_id, note, by_staff, at) VALUES (?, ?, ?, 'receipt', ?, ?, ?, ?, ?, ?)",
+        newId(), bid, acc.id, -pay.amountPaise, pay.id, e.bookingId, `Paid at reception, in Djubo (${e.by ?? ''})`.slice(0, 120), staff.id, t)
+        : stmt(db, `INSERT INTO desk_advances (id, business_id, booking_id, guest_name, phone, check_in, amount_paise, settlement_id, by_staff, at)
+          SELECT ?, ?, id, coalesce(guest_name, 'Guest'), phone, check_in, ?, ?, ?, ? FROM bookings WHERE id = ?`, newId(), bid, pay.amountPaise, settlementId, staff.id, t, e.bookingId),
+      stmt(db, 'UPDATE booking_paid_log SET settlement_id = ? WHERE booking_id = ? AND mail_id = ?', settlementId, e.bookingId, e.mailId),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
+        settlementId, kind: acc ? 'receipt' : 'advance', account: acc ? { id: acc.id, kind: 'room', name: acc.name } : { id: null, kind: 'booking', name: e.guestName ?? 'Guest', booking: e.extRef },
+        shiftDay, at: t, by: staff.name, djubo: { by: e.by, at: e.at },
+        payments: [{ paymentId: pay.id, mode: pay.mode, amountPaise: pay.amountPaise, payAccountId: pay.payAccountId, payAccountName: pay.payAccountName,
+          bookrAccountId: pay.bookrAccountId, cardApproval: pay.cardApproval, cardLast4: pay.cardLast4 }],
+      }), t),
+      audit(db, bid, staff.id, 'booking.djubo_paid', 'bookings', e.bookingId, null, { mailId: e.mailId, mode: pay.mode, amountPaise: pay.amountPaise, shiftDay, markedBy: e.by }),
+    ]);
+  } catch (err) {
+    if (isTrigger(err, 'shift_closed')) fail(409, 'That shift just closed. Try again: it goes to the open shift.');
+    throw err;
+  }
+  sendSoon(c, bid);
+  if (e.stayId) await syncStay(db, bid, e.stayId);
+  const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
+  const balancePaise = acc ? await balance(db, acc.id) : null;
+  return c.json({ receipt: { receiptNo, kind: acc ? 'receipt' : 'advance', at: t, name: e.guestName ?? 'Guest', room: room?.room ?? null, booking: e.extRef, checkIn: e.checkIn, checkOut: e.checkOut,
+    totalPaise: pay.amountPaise, balancePaise, payments: [{ mode: pay.mode, amountPaise: pay.amountPaise, payAccountName: pay.payAccountName, cardLast4: pay.cardLast4 }] }, shiftDay }, 201);
 });

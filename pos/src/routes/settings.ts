@@ -1,5 +1,6 @@
 // Settings a business chooses (nothing hotel-specific is fixed in code): business rules, staff and PINs, billing names
 // with their GST and limits, UPI accounts, the menu, reason lists, in-house stays and credit accounts.
+import { djuboPays } from '../djubo-desk';
 import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt } from '../../../src/db';
 import { hashPassword } from '../../../src/crypto';
@@ -1112,6 +1113,8 @@ export async function stayBill(c: Context<AppEnv>, id: string) {
   return { stay: { id: s.id, room: s.room, guestName: s.guest_name, phone: s.phone, checkIn: s.check_in, checkedOutAt: s.checked_out_at, accountId: s.account_id,
       checkOutPlan: extra?.plan ?? null, foreign: !!extra?.foreign_info, formCAt: extra?.form_c_at ?? null, company: extra?.company ?? null, gstin: extra?.gstin ?? null, group },
     booking, lines, invoice, balancePaise: lines.reduce((t, l) => t + l.amountPaise, 0),
+    // Money reception marked in Djubo for this stay, waiting for how it was paid (26 Nov 2026).
+    djubo: (await djuboPays(db, c.get('businessId'), bizOf(c).shift_start_hour)).pays.filter((x) => x.stayId === s.id && !x.settlementId),
     rentPaise: sum(['room_rent']), prepaidPaise: -sum(['prepaid']), foodPaise: sum(['charge']), paidPaise: -sum(['receipt', 'advance', 'deposit', 'credit_note']) - sum(['refund']) };
 }
 

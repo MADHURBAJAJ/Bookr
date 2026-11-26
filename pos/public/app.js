@@ -1799,6 +1799,8 @@ function todayView() {
   const items = [
     ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
+    ...(fd.alerts.djuboToMode ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.djuboToMode, 'payment')} taken in Djubo · ${rs(fd.djubo.open.reduce((t, x) => t + x.amountPaise, 0))}`, sub: 'Counted on the day marked. Pick Cash, UPI or Card for each', act: 'djPanel' }] : []),
+    ...(fd.alerts.djuboLowered ? [{ tone: 'bad', icon: '₹', title: `Djubo lowered ${plural(fd.alerts.djuboLowered, 'payment')} after its receipt`, sub: 'Refund it, or correct it in Djubo', act: 'djPanel' }] : []),
     ...(fd.alerts.deskToTake ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.deskToTake, 'payment')} entered in Djubo by reception`, sub: 'Take it here so a receipt prints', act: 'deskPanel' }] : []),
     ...(fd.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: 'C', title: `Form C not filed: ${x.room} · ${x.guestName}`, sub: `checked in ${x.hours} h ago · due within 24 h`, act: 'roomBill', id: x.stayId })),
     ...(a?.overstays ?? []).map((x) => ({ tone: 'bad', icon: '⏱', title: `Past check-out: ${x.room} · ${x.guestName}`, sub: `was due out ${dayName(x.plan)}`, act: 'roomBill', id: x.id })),
@@ -1819,9 +1821,10 @@ function todayView() {
       <section class="dcol"><div class="dch"><h2>Arriving</h2><span class="faint">${fd.arrivals.length}</span></div>
         ${fd.arrivals.length ? fd.arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
           html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}${(() => { const c = (ui.arrivals ?? []).find((y) => y.id === x.id)?.continues; return c ? ` · already in ${c.map((y) => y.room).join(', ')}: extension` : ''; })()}</small>`,
-          due(x.duePaise))) : html`<p class="empty">No more arrivals today.</p>`}</section>
+          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${due(x.duePaise)}`)) : html`<p class="empty">No more arrivals today.</p>`}</section>
       <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${fd.inHouse.length}</span></div>
-        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}</small>`, owes(x.balancePaise)))
+        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}${x.djuboPaise ? ' · pick how the Djubo payment was paid' : ''}</small>`,
+          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${owes(x.balancePaise - (x.djuboPaise ?? 0))}`))
           : html`<p class="empty">No guests in house.</p>`}</section>
       <section class="dcol"><div class="dch"><h2>Leaving today</h2><span class="faint">${fd.leaving.length}</span></div>
         ${fd.leaving.length ? fd.leaving.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>check-out 11 am</small>`,
@@ -2497,7 +2500,54 @@ function folioLabel(l) {
   })[l.kind] ?? l.kind;
 }
 /** The room's bill (24 Nov 2026): rent, charges, food, payments, what is still to collect, and check-out with the invoice. */
+// ---------- money reception marked in Djubo (26 Nov 2026): counted on the day it was marked; pick how it was paid.
+const djDone = {};   // mailId -> its receipt, picked in this session (for Print)
+function djRow(x) {
+  const k = x.mailId;
+  const done = djDone[k];
+  const accs = (cache.payAccounts ?? []).filter((a) => a.active);
+  return html`<div class="djrow"><div class="line" style="gap:8px;align-items:baseline"><span class="grow"><strong>${x.guestName ?? 'No name'}</strong> · Djubo ${x.extRef}${x.checkIn ? ` · stay ${dayName(x.checkIn)} → ${dayName(x.checkOut)}` : ''}
+      <span class="small quiet" style="display:block">Marked by ${x.by ?? '?'}, ${dateTime(x.at)}</span></span><strong class="num">${rs(x.amountPaise)}</strong></div>
+    ${x.settlementId || done ? html`<div class="line" style="gap:8px"><span class="status ok">${MODE_NAME[done?.payments[0].mode ?? x.mode] ?? x.mode} · ${done?.receiptNo ?? x.receiptNo}</span>
+        ${done ? html`<button class="btn sm ghost" type="button" data-act="djPrint" data-m="${k}">Print receipt</button>` : ''}</div>`
+      : html`<div class="chips" role="group" aria-label="How ${x.guestName ?? 'the guest'} paid">${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="chip" aria-pressed="${ui.djUpi === k && m === 'upi'}" data-act="djMode" data-b="${x.bookingId}" data-m="${k}" data-mode="${m}">${MODE_NAME[m]}</button>`)}
+          <span class="status warn">Pick how it was paid</span></div>
+        ${ui.djUpi === k ? html`<div class="chips" style="margin-top:4px"><span class="small quiet">QR paid into</span>${accs.map((a) => html`<button type="button" class="chip" data-act="djUpiAcc" data-b="${x.bookingId}" data-m="${k}" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}`}</div>`;
+}
+async function djSave(bookingId, mailId, mode, payAccountId) {
+  const r = await api('POST', `${B()}/bookings/${bookingId}/djubo-paid`, { mailId, mode, payAccountId });
+  djDone[mailId] = r.receipt; ui.djUpi = null;
+  flash = { kind: 'ok', text: `${r.receipt.receiptNo}: ${rs(r.receipt.totalPaise)} from ${r.receipt.name}, ${MODE_NAME[mode]}, counted on ${dayName(r.shiftDay)}.` };
+  if (location.hash.startsWith('#/rooms')) {
+    const [fd, bill] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), ui.roomBill ? api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`) : null]);
+    ui.fd = fd; if (bill) ui.roomBill = bill;
+    rerender();
+  } else route();
+}
+actions.djMode = async (d) => {
+  if (d.mode === 'upi') {
+    const accs = (cache.payAccounts ?? []).filter((a) => a.active);
+    if (accs.length !== 1) { ui.djUpi = d.m; rerender(); return; }
+    return djSave(d.b, d.m, 'upi', accs[0].id);
+  }
+  return djSave(d.b, d.m, d.mode);
+};
+actions.djUpiAcc = (d) => djSave(d.b, d.m, 'upi', d.id);
+actions.djPrint = (d) => { if (djDone[d.m]) printJobs([{ kind: 'bill', html: asHtml(receiptSlip(djDone[d.m])) }]); };
+actions.djPanel = () => {
+  ui.roomBill = null; ui.chartSel = null;
+  ui.drawer = () => { const f = ui.fd?.djubo ?? { open: [], lowered: [] }; return html`<div class="dhead"><h2>Taken in Djubo by reception</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+    <p class="small quiet">Money reception marked in Djubo, counted on the day it was marked. Pick how each was paid: that makes its receipt. A day can't close until each of its payments has one.</p>
+    ${f.lowered.length ? html`<div class="msg warn" style="display:block">${f.lowered.map((x) => html`<div><strong>Djubo lowered ${x.guestName ?? x.extRef} by ${rs(x.paise)}</strong> after its receipt: refund it, or correct it in Djubo.</div>`)}</div>` : ''}
+    ${f.open.length ? f.open.map(djRow) : html`<p class="empty">Nothing waiting.</p>`}`; };
+  rerender();
+};
+
 function roomBillPanel(r) {
+  // Money reception marked in Djubo for this stay, waiting for its mode (26 Nov 2026): already taken, so not to collect.
+  const djWait = r.djubo ?? [];
+  const djSum = djWait.reduce((t, x) => t + x.amountPaise, 0);
+  if (djSum) r = { ...r, balancePaise: r.balancePaise - djSum };
   const st = r.stay;
   const grp = (st.group ?? []).filter((g) => !g.checkedOutAt);
   const name = `Room ${[st.room, ...grp.map((g) => g.room)].join(', ')} · ${st.guestName}`;
@@ -2561,6 +2611,7 @@ function roomBillPanel(r) {
     ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
       ${r.lines.map((l) => html`<tr><td>${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
+      ${djWait.map((x) => html`<tr><td>Paid at reception, in Djubo<div class="small quiet">${dateTime(x.at)} · ${x.by ?? ''} · pick how it was paid, below</div></td><td class="num">${rs(-x.amountPaise)}</td></tr>`)}
       <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
     </tbody></table>
     ${inv ? html`<div class="msg ok" style="margin-top:8px;display:block">Invoice <strong>${inv.invoiceNo}</strong> · ${rs(inv.totalPaise)}${inv.billToName ? ` · to ${inv.billToName}${inv.billToGstin ? ` (${inv.billToGstin})` : ''}` : ''}
@@ -2578,7 +2629,8 @@ function roomBillPanel(r) {
       <button class="btn" type="button" data-act="rbForm" data-f="extend">Extend stay</button>
       <button class="btn ghost" type="button" data-act="rbGrc" data-id="${st.id}">Registration card</button>
       ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
-      ${r.balancePaise === 0 ? (() => {
+      ${djWait.length ? html`<div class="msg warn" style="display:block;width:100%"><strong>Paid at reception, in Djubo: pick how</strong>${djWait.map(djRow)}<div class="small">Check-out waits for this.</div></div>` : ''}
+      ${r.balancePaise === 0 && !djWait.length ? (() => {
         // One click (25 Nov 2026): the form opens only for a company invoice, or when a manager must approve (no room rent).
         const rentUnknown = !!(r.booking?.fromReport && r.booking.amountPaise == null);
         return r.rentPaise <= 0 && !rentUnknown && !isMgr()
@@ -3197,7 +3249,7 @@ async function shiftScreen() {
   // The day moves on at its hour or when it is closed by hand (24 Nov 2026): read the current one afresh.
   try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
   const day = me.business.shiftDay;
-  const d = await api('GET', `${B()}/shifts/${day}`);
+  const [d] = await Promise.all([api('GET', `${B()}/shifts/${day}`), load('payAccounts').catch(() => null)]);
   ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue; ui.notIn = d.notCheckedIn ?? []; ui.countOn = d.drawerCount !== false;
   const notes = NOTE_VALUES;
   rerender = () => {
@@ -3205,7 +3257,8 @@ async function shiftScreen() {
     const counted = notes.reduce((t, n) => t + (Number(ui.counts[n]) || 0) * Number(n) * 100, 0) + (toPaise(ui.loose || '0') ?? 0);
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
     const carried = [...s.openOrders.map((o) => o.place), ...s.unpaidBills.map((x) => `${x.place ?? ''} ${x.bill_no}`.trim())];
-    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0);
+    const djOpen = (s.djubo ?? []).filter((x) => !x.settlementId);
+    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0) + djOpen.length;
     const cd = ui.countDiff;
     // Counting turned off (26 Nov 2026): the page is the takings and what is pending, and Close the day closes it.
     const moneyIn = [...s.byMode, ...s.receipts].filter((m) => ['cash', 'upi', 'card'].includes(m.mode)).reduce((t, m) => t + m.paise, 0);
@@ -3233,6 +3286,8 @@ async function shiftScreen() {
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
       ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
+        ${djOpen.length ? html`<div class="msg warn" style="display:block"><strong>Taken in Djubo today, how it was paid not picked: ${plural(djOpen.length, 'payment')} · ${rs(djOpen.reduce((t, x) => t + x.amountPaise, 0))}</strong>
+          <div class="small">Pick Cash, UPI or Card for each, in "Taken in Djubo today" below.</div></div>` : ''}
         ${ui.overdue.length ? html`<div class="msg bad" style="display:block"><strong>Open since an earlier day:</strong> ${ui.overdue.map((o) => `${o.place}${o.bill_no ? ` (${o.bill_no})` : ''} · since ${dayName(o.since)}`).join(', ')}
           <div class="small">Take payment, post to a room, put on credit, or void with a manager. <a href="#/">Go to Tables</a></div></div>` : ''}
         ${s.notInDjubo?.length ? html`<div class="msg bad" style="display:block"><strong>Reservations made here, not in Djubo yet: ${s.notInDjubo.length}</strong>
@@ -3242,6 +3297,9 @@ async function shiftScreen() {
           ${s.deskMissing.map((x) => html`<div class="small">Djubo ${x.extRef} · ${x.guestName ?? ''} · ${x.enteredBy ?? ''}, ${time(x.at)} · ${rs(x.pendingPaise)}</div>`)}
           <div class="small">Take it in Rooms so a receipt prints, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
       </section>` : ''}
+      ${(s.djubo ?? []).length ? html`<section class="panel" style="margin-bottom:12px"><div class="row between"><h2>Taken in Djubo today · ${rs(s.djubo.reduce((t, x) => t + x.amountPaise, 0))}</h2>${djOpen.length ? html`<span class="status warn">${djOpen.length} to pick</span>` : html`<span class="status ok">All picked</span>`}</div>
+        <p class="small quiet" style="margin:0">Marked in Djubo today by reception (not the booking team or the OTAs), for any stay date. Counted in today's takings once you pick how each was paid; the day can't close before.</p>
+        ${s.djubo.map(djRow)}</section>` : ''}
       ${carried.length ? html`<p class="small quiet" style="margin-bottom:12px">Carrying into ${dayName(addDays(s.shiftDay, 1))}: ${carried.join(', ')}. Their sale stays on the day the bill was printed; the money counts when paid.</p>` : ''}
       <div class="two rev">
       <section class="panel"><div class="row between"><h2>Takings</h2><div class="chips">${[['close', 'Close'], ['detail', 'Breakdown']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.tkTab ?? 'close') === k}" data-act="pick" data-k="tkTab" data-id="${k}">${t}</button>`)}</div></div>
@@ -3263,7 +3321,7 @@ async function shiftScreen() {
         <p class="small quiet">Closes ${dayName(s.shiftDay)} now and starts ${dayName(addDays(s.shiftDay, 1))}.${s.openOrders.length ? ` The ${plural(s.openOrders.length, 'open table')} carry on.` : ''} No drawer count (turned off in Settings, Staff).</p>
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length ? 'disabled' : ''}>Close the day</button></form>`}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}</form>`}
       ${ui.closed || !ui.countOn ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
         ${ui.floatSet ? html`<div class="row between"><span>Float (fixed in Settings)</span><strong>${rs(ui.floatSet)}</strong></div>`
           : html`<label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" value="${ui.float ?? ''}"></label>`}
@@ -3275,7 +3333,7 @@ async function shiftScreen() {
         ${cd ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}" autofocus></label>` : ''}
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}" placeholder="e.g. Entered in Djubo, mail not come yet"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length ? 'disabled' : ''}>Close the day</button>
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}
         <p class="small quiet">${Date.now() < ui.endsAt ? `The day ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts ${dayName(addDays(s.shiftDay, 1))} at once: money taken after this goes there.` : ''}</p></form>`}
       ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen ${dayName(ui.last.shiftDay)} (owner)</summary>
         <p class="small quiet">Closed ${ui.last.auto ? 'by itself' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); close it again after. Bookr keeps the first close it was sent.</p>

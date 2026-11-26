@@ -122,8 +122,12 @@ export async function deskPending(db: DB, bid: string) {
     deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; coveredPaise: number }>(db, `SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
       k.check_in AS checkIn, k.check_out AS checkOut, k.status, k.stay_id AS stayId, k.desk_paid_paise AS deskPaidPaise, k.desk_paid_at AS deskPaidAt, k.entered_by AS enteredBy,
       coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0)
-      + coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id = k.stay_id AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0) AS coveredPaise
+      -- Receipts on the room bill cover it only past what they paid of food and other charges (26 Nov 2026): a food payment
+      -- must not hide rent reception took in Djubo.
+      + max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+          WHERE a.stay_id = k.stay_id AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0)
+        - max(0, coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+          WHERE a.stay_id = k.stay_id AND e.kind IN ('charge', 'credit_note', 'transfer')), 0))) AS coveredPaise
     FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in') ORDER BY k.desk_paid_at`, bid);
   return rows.map((r) => ({ ...r, pendingPaise: r.deskPaidPaise - r.coveredPaise })).filter((r) => r.pendingPaise > 0);
 }

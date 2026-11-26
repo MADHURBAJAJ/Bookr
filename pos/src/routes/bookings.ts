@@ -7,7 +7,8 @@ import { body, date, fail, isUuid, text } from '../../../src/http';
 import { isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock } from '../util';
 import { readAgain } from '../mail';
-import { continuesOf, deskPending, linkStay, recomputeDesk } from '../rooms';
+import { continuesOf, linkStay, recomputeDesk } from '../rooms';
+import { oldDeskPending } from '../djubo-desk';
 import { phoneKey } from './settings';
 import type { AppEnv } from '../types';
 
@@ -40,7 +41,7 @@ bookingRoutes.get(`${B}/bookings`, requireAction('stays.edit'), async (c) => {
   // checked in, the room bill shows it as to collect), advances taken here waiting for their Djubo booking, and the rooms
   // checked in by hand with no booking (to link a booking to); a group's other beds have theirs on its first room.
   const [pending, advancesWaiting, unbooked] = await Promise.all([
-    deskPending(c.env.DB, bid),
+    oldDeskPending(c.env.DB, bid, bizOf(c).shift_start_hour),
     all(c.env.DB, `SELECT d.id, d.guest_name AS guestName, d.phone, d.check_in AS checkIn, d.amount_paise AS amountPaise, d.at, s.receipt_no AS receiptNo,
         CASE WHEN r.status = 'cancelled' THEN 'cancelled' ELSE k.status END AS bookingStatus, coalesce(k.ext_ref, CASE WHEN r.id IS NOT NULL THEN 'made here' END) AS bookingRef
       FROM desk_advances d JOIN settlements s ON s.id = d.settlement_id LEFT JOIN bookings k ON k.id = d.booking_id LEFT JOIN reservations r ON r.id = d.reservation_id

@@ -5,6 +5,10 @@ import { dispose, env, q, setupBusiness } from './helpers';
 import { receiveMail } from '../src/mail';
 import { readDjubo, setReader } from '../src/booking-readers';
 import { shiftDayAt } from '../src/billing';
+import { djuboDeskRule } from '../src/djubo-desk';
+
+// These test the list for money marked before the Djubo-day rule (26 Nov 2026); the rule is moved past today here.
+djuboDeskRule.from = '2999-01-01';
 
 afterAll(dispose);
 
