@@ -21,14 +21,14 @@ const B = '/businesses/:businessId';
 orderRoutes.use(`${B}/*`, requireStaff);
 
 interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; guest_phone: string | null; guest_id: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string;
-  handed_at: number | null; handed_from_name: string | null; held_by_name: string | null }
-const ORDER_COLS = `id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day, handed_at,
+  handed_at: number | null; handed_from_name: string | null; held_by_name: string | null; kot_note: string | null }
+const ORDER_COLS = `id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day, handed_at, kot_note,
   (SELECT name FROM staff WHERE id = orders.handed_from) AS handed_from_name, (SELECT name FROM staff WHERE id = orders.held_by) AS held_by_name`;
-interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number }
+interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number; remark: string | null }
 /** What was chosen on a line: [{group, name, addPaise}], in the dish's order of groups. */
 type Chosen = { group: string; name: string; addPaise: number }[];
 const chosenOf = (l: { options: string | null }): Chosen => (l.options ? JSON.parse(l.options) : []);
-const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by, station_id, kot';
+const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by, station_id, kot, remark';
 
 async function order(c: { env: { DB: D1Database } }, bid: string, id: string, editable = false): Promise<OrderRow> {
   if (!isUuid(id)) fail(404, 'Order not found.');
@@ -73,11 +73,11 @@ const lines = (db: D1Database, orderId: string) =>
 function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
   return {
     id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, guestPhone: maskPhone(o.guest_phone), covers: o.covers, status: o.status,
-    openedAt: o.opened_at, openedShiftDay: o.opened_shift_day,
+    openedAt: o.opened_at, openedShiftDay: o.opened_shift_day, kotNote: o.kot_note,
     // Handed over between cashiers (24 Nov 2026): from whom, to whom, when.
     handedFrom: o.handed_from_name, heldBy: o.held_by_name, handedAt: o.handed_at,
     lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty,
-      options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0 })),
+      options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0, remark: l.remark })),
     itemsPaise: ls.reduce((s, l) => s + l.qty * l.price_paise, 0), bill,
   };
 }
@@ -88,7 +88,7 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const fixed = tableList(bizOf(c));
   const [os, ls, bills, used] = await Promise.all([
     all<OrderRow>(c.env.DB, `SELECT ${ORDER_COLS} FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at`, bid),
-    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by, l.station_id, l.kot FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
+    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by, l.station_id, l.kot, l.remark FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
     all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
       "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
     // The counter's table grid: the restaurant's own list from Settings, or else the tables used in the last 60 days.
@@ -312,21 +312,57 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
     const id = newId();
     ids.push(id);
     // The printed number starts at 101 each shift day (21 Nov 2026); kot_no keeps running underneath.
-    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no)
-      SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?,
-        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ? AND shift_day = ?), 100) + 1 FROM kots WHERE business_id = ?`,
+    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no, note)
+      SELECT ?1, ?2, ?3, coalesce(max(kot_no), 0) + 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ?12 AND shift_day = ?13), 100) + 1, (SELECT kot_note FROM orders WHERE id = ?3) FROM kots WHERE business_id = ?14`,
       id, bid, orderId, s.name, JSON.stringify(gl.map((l) => ({ name: l.name, qty: l.qty - l.sent_qty, options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise,
-        ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid);
+        ...(l.remark ? { remark: l.remark } : {}), ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid);
   });
   return { ids, statements };
 }
 /** KOTs as the counter gets them: those it must print itself have printAt 'counter'. */
 async function kotsOut(db: D1Database, ids: string[], place: string) {
   if (!ids.length) return [];
-  const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null }>(db,
-    `SELECT coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.lines, k.print_at, s.copies FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
-  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1 }));
+  const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null; note: string | null }>(db,
+    `SELECT coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.lines, k.print_at, s.copies, k.note FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
+  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1, note: k.note }));
 }
+
+// A remark on a line for the kitchen (26 Nov 2026): "no onion", "extra sugar". Only what is not yet sent takes it: it
+// becomes a line of its own (joining one with the same remark), so 2 teas with extra sugar and 1 without stay apart.
+orderRoutes.put(`${B}/orders/:id/lines/:lineId/remark`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const o = await order(c, bid, c.req.param('id'), true);
+  const data = await body(c);
+  const remark = text(data, 'remark', 'Remark', { optional: true, max: 120 }) ?? null;
+  const l = await one<LineRow>(db, `SELECT ${LINE_COLS} FROM order_lines WHERE id = ? AND order_id = ?`, c.req.param('lineId'), o.id);
+  if (!l) fail(404, 'That item is not on the order.');
+  if (l.qty <= l.sent_qty) fail(409, 'This has gone to the kitchen already. Add a new line, or a note for the order.');
+  const base = l.variant.replace(/#r:.*$/s, '');
+  const variant = remark ? `${base}#r:${remark.toLowerCase()}` : base;
+  if (variant === l.variant && remark === l.remark) return c.json({ order: orderOut(o, await lines(db, o.id)) });
+  const unsent = l.qty - l.sent_qty;
+  const t = now();
+  // The unsent part moves to the line with this remark (made if missing); what was sent stays where it was.
+  await db.batch([
+    stmt(db, 'UPDATE order_lines SET qty = qty - ? WHERE id = ?', unsent, l.id),
+    stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot, remark)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = order_lines.qty + excluded.qty, remark = excluded.remark`,
+      newId(), bid, o.id, l.item_id, l.name, l.price_paise, l.sac, l.station, unsent, t, variant, l.options, l.price_by, l.station_id, l.kot, remark),
+    stmt(db, 'DELETE FROM order_lines WHERE id = ? AND qty = 0 AND sent_qty = 0', l.id),
+  ]);
+  return c.json({ order: orderOut(o, await lines(db, o.id)) });
+});
+
+// A note for the whole order (26 Nov 2026): "extra tissues", "serve together". It prints on every KOT sent from now on.
+orderRoutes.put(`${B}/orders/:id/note`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const o = await order(c, bid, c.req.param('id'), true);
+  const note = text(await body(c), 'note', 'Note', { optional: true, max: 200 }) ?? null;
+  await stmt(c.env.DB, 'UPDATE orders SET kot_note = ? WHERE id = ?', note, o.id).run();
+  return c.json({ order: orderOut({ ...o, kot_note: note }, await lines(c.env.DB, o.id)) });
+});
 
 // Split by item: chosen quantities move to a new order at the same place ("T4 · 2"), billed on its own with its own number
 // and GST. What was already sent to the kitchen stays sent, so no new KOT prints for it.
@@ -361,9 +397,9 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
       const sentMoved = Math.max(0, qty - (line.qty - line.sent_qty)); // not-yet-sent move first
       return [
         stmt(c.env.DB, 'UPDATE order_lines SET qty = qty - ?, sent_qty = sent_qty - ? WHERE id = ?', qty, sentMoved, line.id),
-        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by, line.station_id, line.kot),
+        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot, remark)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by, line.station_id, line.kot, line.remark),
       ];
     }),
   ]);

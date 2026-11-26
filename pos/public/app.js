@@ -859,11 +859,17 @@ async function orderScreen(id) {
     const line = (l) => html`<div>
       <div class="line"><div class="grow"><div class="nm">${l.name}</div>
           ${l.options?.length ? html`<div class="mods">${l.options.map((x) => '+ ' + x.name).join('  ')}</div>` : ''}
-          <div class="sub">${rs(l.pricePaise)} each${l.typedPrice ? ' · price typed' : ''}${l.noKot ? ' · no KOT' : ''}${l.sentQty && l.qty > l.sentQty ? ` · ${l.sentQty} sent, ${l.qty - l.sentQty} new` : ''}</div></div>
+          ${l.remark ? html`<div class="mods" style="color:var(--warn);font-weight:600">✎ ${l.remark}</div>` : ''}
+          <div class="sub">${rs(l.pricePaise)} each${l.typedPrice ? ' · price typed' : ''}${l.noKot ? ' · no KOT' : ''}${l.sentQty && l.qty > l.sentQty ? ` · ${l.sentQty} sent, ${l.qty - l.sentQty} new` : ''}</div>
+          ${l.qty > l.sentQty && !l.noKot && ui.remFor !== l.id ? html`<button type="button" class="btn ghost addln" style="padding:2px 8px;font-size:12.5px" data-act="remOpen" data-id="${l.id}">${l.remark ? '✎ Change remark' : '+ Remark'}</button>` : ''}</div>
         <button class="sq" type="button" data-act="less" data-id="${lineKey(l)}" aria-label="One less ${l.name}">−</button>
         <span class="qty" aria-label="${l.qty} of ${l.name}">${l.qty}</span>
         <button class="sq" type="button" data-act="more" data-id="${lineKey(l)}" aria-label="One more ${l.name}">+</button>
         <span class="lt">${rs(l.qty * l.pricePaise)}</span></div>
+      ${ui.remFor === l.id ? html`<form class="msg" style="display:block;background:var(--soft)"><div class="chips" style="margin-bottom:6px">${KOT_PICKS.map((p) => html`<button type="button" class="chip" data-act="remPick" data-v="${p}">${p}</button>`)}</div>
+        <input class="in" data-model="remText" value="${ui.remText ?? ''}" maxlength="120" placeholder="Remark for the kitchen, e.g. no onion" aria-label="Remark for ${l.name}" autofocus>
+        <div class="row" style="margin-top:6px"><button class="btn pri" type="submit" data-act="remSave" data-submit>Done</button><button class="btn ghost" type="button" data-act="remNo">Cancel</button>
+          ${l.remark ? html`<button class="btn ghost" type="button" data-act="remClear">Remove remark</button>` : ''}</div></form>` : ''}
       ${ui.asking === lineKey(l) ? (ui.approve?.key === lineKey(l)
         ? html`<form class="msg warn approve" role="alert"><p style="margin-bottom:8px"><strong>A manager or owner approves</strong> cancelling one ${l.name} (${reasonsOf('kot_cancel').find((r) => r.id === ui.approve.reasonId)?.label ?? ''}).</p>
           ${ui.approvers?.length ? html`<div class="row"><select class="in" data-model="apId" aria-label="Approved by">${ui.approvers.map((a) => html`<option value="${a.id}" ${ui.apId === a.id ? 'selected' : ''}>${a.name}</option>`)}</select>
@@ -900,6 +906,12 @@ async function orderScreen(id) {
           ${o.lines.length ? '' : html`<p class="empty" style="margin-top:12px">Tap dishes on the menu to add them.</p>`}
           ${fresh.length ? html`<div class="tk-group new"><p class="label"><span>New · not sent yet</span><span>${newCount}</span></p>${fresh.map(line)}</div>` : ''}
           ${sent.length ? html`<div class="tk-group"><p class="label"><span>Sent to kitchen or bar</span><span>${sent.reduce((t, l) => t + l.qty, 0)}</span></p>${sent.map(line)}</div>` : ''}
+          ${o.lines.length ? (ui.noteOpen ? html`<form class="msg" style="display:block;background:var(--soft);margin-top:8px"><p class="label" style="margin-bottom:6px">Note for the whole order · prints on every KOT</p>
+              <div class="chips" style="margin-bottom:6px">${KOT_NOTE_PICKS.map((p) => html`<button type="button" class="chip" data-act="notePick" data-v="${p}">${p}</button>`)}</div>
+              <input class="in" data-model="noteText" value="${ui.noteText ?? ''}" maxlength="200" placeholder="e.g. Extra tissues, serve together" aria-label="Note for the whole order" autofocus>
+              <div class="row" style="margin-top:6px"><button class="btn pri" type="submit" data-act="noteSave" data-submit>Save note</button><button class="btn ghost" type="button" data-act="noteNo">Cancel</button></div></form>`
+            : html`<div class="row" style="margin-top:8px;align-items:center">${o.kotNote ? html`<span class="small" style="color:var(--warn);font-weight:600">📝 Note: ${o.kotNote}</span>` : ''}
+              <button type="button" class="btn ghost addln" style="padding:2px 8px;font-size:12.5px" data-act="noteOpen">${o.kotNote ? 'Change note' : '+ Note for the kitchen'}</button></div>`) : ''}
           ${ui.splitting ? html`<div class="msg warn"><p style="margin-bottom:8px"><strong>Split bill:</strong> choose what moves to a new bill at this table. Each bill gets its own number and GST.</p>
             ${o.lines.map((l) => html`<div class="line"><span class="grow">${l.name}${l.options?.length ? ` (${l.options.map((x) => x.name).join(', ')})` : ''} <span class="quiet small">(${l.qty} on this bill)</span></span>
               <button class="sq" type="button" data-act="splitLess" data-id="${l.id}" aria-label="Move one less ${l.name}">−</button>
@@ -946,6 +958,26 @@ function optionAdd(kind, options, option, prices) {
 }
 /** A ticket line's handle: its id once saved; before that, its dish (a plain line). */
 const lineKey = (l) => l.id ?? `item:${l.itemId}`;
+// Remarks for the kitchen (26 Nov 2026): one tap for the usual ones; anything else is typed.
+const KOT_PICKS = ['No onion', 'No garlic', 'Less spicy', 'Extra spicy', 'Jain', 'Extra sugar', 'Less sugar', 'No sugar', 'No ice', 'Pack to go'];
+const KOT_NOTE_PICKS = ['Extra tissues', 'Serve together', 'Starters first', 'Kids at table'];
+const addPick = (cur, v) => { const t = String(cur ?? '').trim(); return t ? (t.toLowerCase().includes(v.toLowerCase()) ? t : `${t}, ${v}`) : v; };
+actions.remOpen = (d) => { const l = ui.order.lines.find((x) => x.id === d.id); ui.remFor = d.id; ui.remText = l?.remark ?? ''; rerender(); };
+actions.remPick = (d) => { ui.remText = addPick(ui.remText, d.v); rerender(); };
+actions.remNo = () => { ui.remFor = null; rerender(); };
+const remSet = async (remark) => {
+  const r = await api('PUT', `${B()}/orders/${ui.order.id}/lines/${ui.remFor}/remark`, { remark });
+  ui.order = r.order; ui.remFor = null; rerender();
+};
+actions.remSave = () => remSet(String(ui.remText ?? '').trim());
+actions.remClear = () => remSet('');
+actions.noteOpen = () => { ui.noteOpen = true; ui.noteText = ui.order.kotNote ?? ''; rerender(); };
+actions.notePick = (d) => { ui.noteText = addPick(ui.noteText, d.v); rerender(); };
+actions.noteNo = () => { ui.noteOpen = false; rerender(); };
+actions.noteSave = async () => {
+  const r = await api('PUT', `${B()}/orders/${ui.order.id}/note`, { note: String(ui.noteText ?? '').trim() });
+  ui.order = r.order; ui.noteOpen = false; rerender();
+};
 
 // The add-on box: choose one from each "choose one" group, any from "add any", a typed price for a price-at-billing dish.
 function pickerSheet() {
@@ -1600,7 +1632,8 @@ const kotSlip = (k) => {
   const cancel = k.lines.some((l) => l.cancelled);
   return html`<div class="receipt" style="page-break-after:always"><div class="hd">${cancel ? 'CANCEL · ' : ''}KOT ${k.kotNo} · ${String(k.station).toUpperCase()}</div>
     <div class="rl"><span>${k.place}</span><span>${time(k.at ?? Date.now())}</span></div>${k.by ? html`<div class="rl"><span>${k.by}</span></div>` : ''}<hr>
-    ${k.lines.map((l) => html`<div style="font-size:15px;${l.cancelled ? 'font-weight:700' : ''}">${l.cancelled ? `CANCEL ${Math.abs(l.qty)}` : l.qty} × ${l.name}</div>${(l.options ?? []).map((x) => html`<div style="padding-left:18px">+ ${x}</div>`)}`)}</div>`;
+    ${k.lines.map((l) => html`<div style="font-size:15px;${l.cancelled ? 'font-weight:700' : ''}">${l.cancelled ? `CANCEL ${Math.abs(l.qty)}` : l.qty} × ${l.name}</div>${(l.options ?? []).map((x) => html`<div style="padding-left:18px">+ ${x}</div>`)}${l.remark ? html`<div style="padding-left:18px;font-weight:700;font-size:15px">» ${String(l.remark).toUpperCase()}</div>` : ''}`)}
+    ${k.note ? html`<hr><div style="border:2px solid #000;padding:3px 6px;font-weight:700;font-size:14px">NOTE: ${String(k.note).toUpperCase()}</div>` : ''}</div>`;
 };
 function printKots(kots) {
   if (!kots.length) return;
@@ -5534,7 +5567,8 @@ function paintStation() {
         <span>${screen ? `${open.length} open` : 'Printing KOTs here'}</span></div></div>
     ${screen ? (open.length ? html`<div class="kds-tickets">${open.map((k) => { const cancel = k.lines.some((l) => l.cancelled); return html`<div class="kds-tk ${late(k)} ${cancel ? 'cancel' : ''}">
         <div class="kds-h"><span>${cancel ? 'CANCEL · ' : ''}${k.place}</span><span>${mins(k)} min · ${k.by ?? ''}</span></div>
-        <ul>${k.lines.map((l) => html`<li class="${l.cancelled ? 'cx' : ''}">${l.cancelled ? `Cancel ${Math.abs(l.qty)}` : l.qty} × ${l.name}${(l.options ?? []).map((o) => html`<small>+ ${o}</small>`)}</li>`)}</ul>
+        <ul>${k.lines.map((l) => html`<li class="${l.cancelled ? 'cx' : ''}">${l.cancelled ? `Cancel ${Math.abs(l.qty)}` : l.qty} × ${l.name}${(l.options ?? []).map((o) => html`<small>+ ${o}</small>`)}${l.remark ? html`<small style="font-weight:700;color:var(--warn)">» ${l.remark}</small>` : ''}</li>`)}</ul>
+        ${k.note ? html`<div class="small" style="font-weight:700;border:2px solid var(--warn);border-radius:6px;padding:3px 6px;margin-top:4px">Note: ${k.note}</div>` : ''}
         <div class="kds-act">${cancel ? html`<button type="button" class="go" data-act="kdsReady" data-id="${k.id}">Seen</button>` : html`<button type="button" data-act="kdsStart" data-id="${k.id}" ${k.status === 'started' ? 'disabled' : ''}>${k.status === 'started' ? 'Started' : 'Start'}</button>
           <button type="button" class="go" data-act="kdsReady" data-id="${k.id}">Ready</button>`}</div>
         <div class="kds-foot">KOT ${k.kotNo}${st.station.how === 'both' ? html` · <button type="button" class="kds-link" data-act="kdsPrint" data-id="${k.id}">Print again</button>` : ''}</div></div>`; })}</div>`
