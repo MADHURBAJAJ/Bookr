@@ -32,9 +32,17 @@ describe('KOT remarks', () => {
     const fresh = r.order.lines.find((l: any) => l.qty > l.sentQty);
     r = await ok(counter.call('PUT', `${B}/orders/${o}/lines/${fresh.id}/remark`, { remark: 'No sugar' }));
     expect(r.order.lines.map((l: any) => [l.qty, l.sentQty, l.remark])).toEqual([[4, 4, 'extra sugar'], [1, 0, 'No sugar']]);
+    // Quick picks come from what was typed, most used first, per dish and overall; commas split a remark; notes too.
+    await ok(counter.post(`${B}/orders/${o}/items`, { itemId: s.items['Masala Dosa'], delta: 1 }));
+    const dosa = (await ok(counter.get(`${B}/orders/${o}`))).order.lines.find((l: any) => l.name === 'Masala Dosa').id;
+    await ok(counter.call('PUT', `${B}/orders/${o}/lines/${dosa}/remark`, { remark: 'No onion, less spicy' }));
+    const picks = await ok(counter.get(`${B}/kot-picks`));
+    expect(picks.byItem[chai].map((x: any) => x[0])).toEqual(expect.arrayContaining(['extra sugar', 'No sugar']));
+    expect(picks.byItem[s.items['Masala Dosa']]).toEqual(expect.arrayContaining([['No onion', 1], ['less spicy', 1]]));
+    expect(picks.notes).toEqual([['Extra tissues', 1]]);
     // The bill does not carry remarks: two lines of the same dish at the same price.
     await ok(counter.post(`${B}/orders/${o}/kot`));
     const bill = (await ok(counter.post(`${B}/orders/${o}/bill`, { entityId: s.company }))).bill;
-    expect(bill.items.map((i: any) => [i.name, i.qty])).toEqual([['Masala Chai', 4], ['Masala Chai', 1]]);
+    expect(bill.items.map((i: any) => [i.name, i.qty])).toEqual([['Masala Chai', 4], ['Masala Chai', 1], ['Masala Dosa', 1]]);
   });
 });

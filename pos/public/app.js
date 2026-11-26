@@ -866,8 +866,9 @@ async function orderScreen(id) {
         <span class="qty" aria-label="${l.qty} of ${l.name}">${l.qty}</span>
         <button class="sq" type="button" data-act="more" data-id="${lineKey(l)}" aria-label="One more ${l.name}">+</button>
         <span class="lt">${rs(l.qty * l.pricePaise)}</span></div>
-      ${ui.remFor === l.id ? html`<form class="msg" style="display:block;background:var(--soft)"><div class="chips" style="margin-bottom:6px">${KOT_PICKS.map((p) => html`<button type="button" class="chip" data-act="remPick" data-v="${p}">${p}</button>`)}</div>
-        <input class="in" data-model="remText" value="${ui.remText ?? ''}" maxlength="120" placeholder="Remark for the kitchen, e.g. no onion" aria-label="Remark for ${l.name}" autofocus>
+      ${ui.remFor === l.id ? html`<form class="msg" style="display:block;background:var(--soft)">
+        <input class="in" data-model="remText" data-live value="${ui.remText ?? ''}" maxlength="120" placeholder="Type a remark, or tap one below" aria-label="Remark for ${l.name}" autofocus autocomplete="off">
+        ${pickLists(ui.remText, [[`Used on ${l.name}`, cache.kotPicks?.byItem?.[l.itemId] ?? []], ['Used most often', cache.kotPicks?.all ?? []]], KOT_PICKS, 'remPick')}
         <div class="row" style="margin-top:6px"><button class="btn pri" type="submit" data-act="remSave" data-submit>Done</button><button class="btn ghost" type="button" data-act="remNo">Cancel</button>
           ${l.remark ? html`<button class="btn ghost" type="button" data-act="remClear">Remove remark</button>` : ''}</div></form>` : ''}
       ${ui.asking === lineKey(l) ? (ui.approve?.key === lineKey(l)
@@ -907,8 +908,8 @@ async function orderScreen(id) {
           ${fresh.length ? html`<div class="tk-group new"><p class="label"><span>New · not sent yet</span><span>${newCount}</span></p>${fresh.map(line)}</div>` : ''}
           ${sent.length ? html`<div class="tk-group"><p class="label"><span>Sent to kitchen or bar</span><span>${sent.reduce((t, l) => t + l.qty, 0)}</span></p>${sent.map(line)}</div>` : ''}
           ${o.lines.length ? (ui.noteOpen ? html`<form class="msg" style="display:block;background:var(--soft);margin-top:8px"><p class="label" style="margin-bottom:6px">Note for the whole order · prints on every KOT</p>
-              <div class="chips" style="margin-bottom:6px">${KOT_NOTE_PICKS.map((p) => html`<button type="button" class="chip" data-act="notePick" data-v="${p}">${p}</button>`)}</div>
-              <input class="in" data-model="noteText" value="${ui.noteText ?? ''}" maxlength="200" placeholder="e.g. Extra tissues, serve together" aria-label="Note for the whole order" autofocus>
+              <input class="in" data-model="noteText" data-live value="${ui.noteText ?? ''}" maxlength="200" placeholder="Type a note, or tap one below" aria-label="Note for the whole order" autofocus autocomplete="off">
+              ${pickLists(ui.noteText, [['Used most often', cache.kotPicks?.notes ?? []]], KOT_NOTE_PICKS, 'notePick')}
               <div class="row" style="margin-top:6px"><button class="btn pri" type="submit" data-act="noteSave" data-submit>Save note</button><button class="btn ghost" type="button" data-act="noteNo">Cancel</button></div></form>`
             : html`<div class="row" style="margin-top:8px;align-items:center">${o.kotNote ? html`<span class="small" style="color:var(--warn);font-weight:600">📝 Note: ${o.kotNote}</span>` : ''}
               <button type="button" class="btn ghost addln" style="padding:2px 8px;font-size:12.5px" data-act="noteOpen">${o.kotNote ? 'Change note' : '+ Note for the kitchen'}</button></div>`) : ''}
@@ -961,22 +962,48 @@ const lineKey = (l) => l.id ?? `item:${l.itemId}`;
 // Remarks for the kitchen (26 Nov 2026): one tap for the usual ones; anything else is typed.
 const KOT_PICKS = ['No onion', 'No garlic', 'Less spicy', 'Extra spicy', 'Jain', 'Extra sugar', 'Less sugar', 'No sugar', 'No ice', 'Pack to go'];
 const KOT_NOTE_PICKS = ['Extra tissues', 'Serve together', 'Starters first', 'Kids at table'];
-const addPick = (cur, v) => { const t = String(cur ?? '').trim(); return t ? (t.toLowerCase().includes(v.toLowerCase()) ? t : `${t}, ${v}`) : v; };
-actions.remOpen = (d) => { const l = ui.order.lines.find((x) => x.id === d.id); ui.remFor = d.id; ui.remText = l?.remark ?? ''; rerender(); };
+/** Text with a pick added: replaces what is being typed after the last comma (if it is part of the pick), else adds it. */
+const addPick = (cur, v) => {
+  const parts = String(cur ?? '').split(',').map((x) => x.trim());
+  const last = parts[parts.length - 1] ?? '';
+  const done = parts.slice(0, -1).filter(Boolean);
+  if (last && !v.toLowerCase().includes(last.toLowerCase())) done.push(last);
+  if (!done.some((x) => x.toLowerCase() === v.toLowerCase())) done.push(v);
+  return done.join(', ');
+};
+/** Quick picks (26 Nov 2026): what staff typed before, most used first (per dish, then overall), filtered by what is being
+ *  typed; the usual ones fill in while there is little history. A new typed one is offered as "+ add". */
+function pickLists(text, groups, defaults, act) {
+  const parts = String(text ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const typing = String(text ?? '').trim().endsWith(',') ? '' : parts[parts.length - 1] ?? '';
+  const taken = new Set(String(text ?? '').trim().endsWith(',') ? parts : parts.slice(0, -1));
+  const seen = new Set();
+  const ok = (v) => { const k = v.toLowerCase(); if (seen.has(k) || taken.has(k) || (typing && (k === typing || !k.includes(typing)))) return false; seen.add(k); return true; };
+  const shown = groups.map(([title, list]) => [title, list.filter(([v]) => ok(v)).slice(0, 12)]);
+  const extra = defaults.filter((v) => ok(v)).slice(0, Math.max(0, 10 - shown.reduce((t, [, l]) => t + l.length, 0)));
+  const known = [...groups.flatMap(([, l]) => l.map(([v]) => v)), ...defaults].some((v) => v.toLowerCase() === typing);
+  const chip = (v, n) => html`<button type="button" class="chip" data-act="${act}" data-v="${v}">${v}${n ? html` <span class="small quiet">${n}</span>` : ''}</button>`;
+  return html`<div style="display:flex;flex-direction:column;gap:6px;margin:8px 0">
+    ${shown.filter(([, l]) => l.length).map(([title, l]) => html`<div><p class="label" style="margin-bottom:4px">${title}</p><div class="chips">${l.map(([v, n]) => chip(v, n))}</div></div>`)}
+    ${extra.length ? html`<div class="chips">${extra.map((v) => chip(v, 0))}</div>` : ''}
+    ${typing && !known ? html`<div class="chips"><button type="button" class="chip" style="border-style:dashed" data-act="${act}" data-v="${String(text).split(',').pop().trim()}">+ add "${String(text).split(',').pop().trim()}"</button></div>` : ''}</div>`;
+}
+const loadPicks = async () => { if (!cache.kotPicks) cache.kotPicks = await api('GET', `${B()}/kot-picks`).catch(() => null); };
+actions.remOpen = async (d) => { const l = ui.order.lines.find((x) => x.id === d.id); ui.remFor = d.id; ui.remText = l?.remark ?? ''; await loadPicks(); rerender(); };
 actions.remPick = (d) => { ui.remText = addPick(ui.remText, d.v); rerender(); };
 actions.remNo = () => { ui.remFor = null; rerender(); };
 const remSet = async (remark) => {
   const r = await api('PUT', `${B()}/orders/${ui.order.id}/lines/${ui.remFor}/remark`, { remark });
-  ui.order = r.order; ui.remFor = null; rerender();
+  ui.order = r.order; ui.remFor = null; delete cache.kotPicks; rerender();
 };
 actions.remSave = () => remSet(String(ui.remText ?? '').trim());
 actions.remClear = () => remSet('');
-actions.noteOpen = () => { ui.noteOpen = true; ui.noteText = ui.order.kotNote ?? ''; rerender(); };
+actions.noteOpen = async () => { ui.noteOpen = true; ui.noteText = ui.order.kotNote ?? ''; await loadPicks(); rerender(); };
 actions.notePick = (d) => { ui.noteText = addPick(ui.noteText, d.v); rerender(); };
 actions.noteNo = () => { ui.noteOpen = false; rerender(); };
 actions.noteSave = async () => {
   const r = await api('PUT', `${B()}/orders/${ui.order.id}/note`, { note: String(ui.noteText ?? '').trim() });
-  ui.order = r.order; ui.noteOpen = false; rerender();
+  ui.order = r.order; ui.noteOpen = false; delete cache.kotPicks; rerender();
 };
 
 // The add-on box: choose one from each "choose one" group, any from "add any", a typed price for a price-at-billing dish.

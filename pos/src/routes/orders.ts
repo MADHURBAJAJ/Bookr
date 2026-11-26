@@ -328,6 +328,27 @@ async function kotsOut(db: D1Database, ids: string[], place: string) {
   return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1, note: k.note }));
 }
 
+// Quick picks for remarks and order notes (26 Nov 2026): worked out from what staff typed on orders of the last 60 days,
+// most used first; per dish for remarks. A remark with commas counts as its parts. Nothing to set up.
+orderRoutes.get(`${B}/kot-picks`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const since = now() - 60 * 86_400_000;
+  const [rems, notes] = await Promise.all([
+    all<{ item_id: string; remark: string }>(c.env.DB, `SELECT l.item_id, l.remark FROM order_lines l JOIN orders o ON o.id = l.order_id
+      WHERE o.business_id = ? AND l.remark IS NOT NULL AND l.created_at > ? LIMIT 5000`, bid, since),
+    all<{ note: string }>(c.env.DB, 'SELECT kot_note AS note FROM orders WHERE business_id = ? AND kot_note IS NOT NULL AND opened_at > ? LIMIT 2000', bid, since),
+  ]);
+  const parts = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
+  const tally = (texts: string[]) => {
+    const m = new Map<string, { text: string; n: number }>();
+    for (const t of texts) for (const p of parts(t)) { const k = p.toLowerCase(); const e = m.get(k) ?? { text: p, n: 0 }; e.n++; m.set(k, e); }
+    return [...m.values()].sort((a, b) => b.n - a.n || a.text.localeCompare(b.text)).map((e) => [e.text, e.n] as [string, number]);
+  };
+  const byItem: Record<string, [string, number][]> = {};
+  for (const id of new Set(rems.map((r) => r.item_id))) byItem[id] = tally(rems.filter((r) => r.item_id === id).map((r) => r.remark)).slice(0, 8);
+  return c.json({ byItem, all: tally(rems.map((r) => r.remark)).slice(0, 30), notes: tally(notes.map((n) => n.note)).slice(0, 12) });
+});
+
 // A remark on a line for the kitchen (26 Nov 2026): "no onion", "extra sugar". Only what is not yet sent takes it: it
 // becomes a line of its own (joining one with the same remark), so 2 teas with extra sugar and 1 without stay apart.
 orderRoutes.put(`${B}/orders/:id/lines/:lineId/remark`, requireAction('orders.edit'), async (c) => {
