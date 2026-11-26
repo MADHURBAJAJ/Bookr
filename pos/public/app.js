@@ -1221,7 +1221,7 @@ async function billScreen(orderId) {
           <div class="pl"><span class="quiet">Items</span><span>${rs(gross)}</span></div>
           ${lineDisc ? html`<div class="pl"><span class="quiet">Item discounts</span><span>${rs(-lineDisc)}</span></div>` : ''}
           ${billDisc ? html`<div class="pl"><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-billDisc)}</span></div>` : ''}
-          ${sc ? html`<div class="pl"><span class="quiet">Service charge ${scBp / 100}% (optional)</span><span>${rs(sc)}</span></div>` : ''}
+          ${sc ? html`<div class="pl"><span class="quiet">Service charge ${scBp / 100}%</span><span>${rs(sc)}</span></div>` : ''}
           ${taxLines(taxes, 'pl', !!e?.gst_registered)}
           ${total !== raw ? html`<div class="pl"><span class="quiet">Round off</span><span>${rs(total - raw)}</span></div>` : ''}
           <hr><div class="pl tot"><span>Total</span><span>${rs(total)}</span></div>
@@ -1557,7 +1557,7 @@ function receipt(b, onScreen = false) {
       ${l.discountPaise ? html`<div class="rl"><span style="padding-left:14px">${l.discountPaise >= l.amountPaise ? 'Free' : 'Discount'}</span><span>${rs(-l.discountPaise)}</span></div>` : ''}`)}<hr>
     <div class="rl"><span>Items</span><span>${rs(b.grossPaise)}</span></div>
     ${b.discountPaise ? html`<div class="rl"><span>Discount</span><span>${rs(-b.discountPaise)}</span></div>` : ''}
-    ${b.serviceChargePaise ? html`<div class="rl"><span>Service charge ${b.serviceChargeBp / 100}% (optional)</span><span>${rs(b.serviceChargePaise)}</span></div>` : ''}
+    ${b.serviceChargePaise ? html`<div class="rl"><span>Service charge ${b.serviceChargeBp / 100}%</span><span>${rs(b.serviceChargePaise)}</span></div>` : ''}
     ${b.gstRegistered && b.items.some((l) => l.priceIncl && l.taxKind === 'gst') ? html`<div class="small">Prices marked ^ include GST.</div>` : ''}
     ${taxLines(b.taxes ?? [], 'rl', !!b.gstRegistered)}
     ${b.gstRegistered && b.items[0]?.sac ? html`<div class="small">SAC ${[...new Set(b.items.map((l) => l.sac))].join(', ')}</div>` : ''}
