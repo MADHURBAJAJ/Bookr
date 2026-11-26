@@ -376,7 +376,7 @@ roomDeskRoutes.post(`${B}/stays/:id/swap`, requireAction('stays.edit'), async (c
   if (a.checked_out_at || b.checked_out_at) fail(409, 'Both guests must still be in house.');
   if (a.id === b.id) fail(400, 'Choose another guest\'s room.');
   if (a.room.endsWith(PAST_STAY) || b.room.endsWith(PAST_STAY)) fail(409, 'A past stay keeps its room: finish its check-out first.');
-  const reason = text(data, 'reason', 'Why the rooms are swapped', { max: 80 })!;
+  const reason = text(data, 'reason', 'Why the rooms are swapped', { optional: true, max: 80 }) ?? null;   // optional (26 Nov 2026)
   const name = (room: string, guest: string) => `${/^\d/.test(room) ? 'Room ' : ''}${room} · ${guest}`;
   const staff = c.get('staff').id;
   // One open stay per room: the first guest waits under a name no room has while the second moves in.
@@ -406,7 +406,7 @@ roomDeskRoutes.post(`${B}/stays/:id/move`, requireAction('stays.edit'), async (c
   const to = all_.find((r) => r === data.room);
   if (!to) fail(400, 'Choose a room or bed from the list.');
   if (to === s.room) fail(400, 'That is the same room.');
-  const reason = text(data, 'reason', 'Why the guest moves', { max: 80 })!;
+  const reason = text(data, 'reason', 'Why the guest moves', { optional: true, max: 80 }) ?? null;   // optional (26 Nov 2026)
   if (data.dirtyOk !== true && await roomIsDirty(db, bid, to)) return c.json({ error: `${to} is marked dirty. Move anyway?`, code: 'room_dirty' }, 409);
   const t = now();
   try {

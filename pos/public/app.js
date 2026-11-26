@@ -2461,13 +2461,13 @@ function roomBillPanel(r) {
     if (f === 'move' && ui.mvSwap) return html`<form class="panel" style="margin-top:10px"><h3>Swap rooms with another guest</h3>
       <div class="chips"><button type="button" class="chip" aria-pressed="false" data-act="pick" data-k="mvSwap" data-id="">To a free room</button><button type="button" class="chip" aria-pressed="true">Swap with another guest</button></div>
       <div class="grid2"><label class="f">Swap with<select class="in" data-model="swWith"><option value="">Choose</option>${(cache.stays ?? []).filter((y) => y.id !== st.id && !/\(past stay\)$/.test(y.room)).map((y) => html`<option value="${y.id}" ${ui.swWith === y.id ? 'selected' : ''}>${y.room} · ${y.guestName}</option>`)}</select></label>
-        <label class="f">Why<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. guests asked to exchange"></label></div>
+        <label class="f">Why (optional)<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. guests asked to exchange"></label></div>
       <p class="small quiet">${st.guestName} goes to the other room and that guest comes to ${st.room}, each with their bill and open food orders. Neither room is marked dirty. Change both in Djubo too.</p>
       <div class="row"><button class="btn pri" type="submit" data-act="rbSwap" data-submit>Swap rooms</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
     if (f === 'move') return html`<form class="panel" style="margin-top:10px"><h3>Move the guest to another room</h3>
       <div class="chips"><button type="button" class="chip" aria-pressed="true">To a free room</button><button type="button" class="chip" aria-pressed="false" data-act="pick" data-k="mvSwap" data-id="1">Swap with another guest</button></div>
       <div class="grid2"><label class="f">New room or bed<select class="in" data-model="mvRoom"><option value="">Choose</option>${ui.roomSecs.flatMap((x) => x.tables ?? []).filter((t) => t !== st.room && !/· whole$/.test(t) && !(cache.stays ?? []).some((y) => y.room === t)).map((t) => html`<option ${ui.mvRoom === t ? 'selected' : ''}>${t}</option>`)}</select></label>
-        <label class="f">Why<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. AC not working, upgrade"></label></div>
+        <label class="f">Why (optional)<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. AC not working, upgrade"></label></div>
       <p class="small quiet">The bill, open food orders and history go with the guest. ${st.room} is marked dirty. Change the room in Djubo too.</p>
       <div class="row"><button class="btn pri" type="submit" data-act="rbMove" data-submit>Move guest</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
     if (f === 'extend') return html`<form class="panel" style="margin-top:10px"><h3>Extend the stay</h3>
