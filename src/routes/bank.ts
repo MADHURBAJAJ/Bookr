@@ -338,7 +338,7 @@ bankRoutes.post('/businesses/:businessId/sales/repay', requireRole('bank.link'),
       WHERE business_id = ? AND id IN (${ids.map(() => '?').join(',')})`, bid, ...ids);
     const total = tx.reduce((t, x) => t + x.amount_paise, 0);
     const row = tx.length && tx.every((x) => x.payment_mode === 'cash' && x.shift_day === tx[0].shift_day)
-      ? await one<Record<string, unknown> & { id: string; amount_paise: number }>(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND type = 'expense' AND shift_day = ?
+      ? await one<Record<string, unknown> & { id: string; amount_paise: number }>(db, `SELECT * FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND payment_mode = 'cash' AND type = 'expense' AND shift_day = ?
           ORDER BY amount_paise DESC LIMIT 1`, bid, tx[0].shift_day) : null;
     if (!row) fail(409, 'No cash shortage is booked on that day any more.');
     shortage = { row: row!, fromPaise: row!.amount_paise, toPaise: Math.max(0, row!.amount_paise - total) };
@@ -853,6 +853,77 @@ bankRoutes.post('/businesses/:businessId/sales/:txId/reopen', requireRole('sales
     stmt(db, 'DELETE FROM closed_bills WHERE transaction_id = ?', id),
     stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.reopened', id, { note: closed.note }, { matchStatus: 'awaiting_bank_match' }, t)),
   ]);
+  return c.json({ ok: true });
+});
+
+/**
+ * UPI shortage (approved 26 Nov 2026): a saved UPI sale whose money never came. An Owner or Accountant books it as an
+ * expense under "UPI shortage" (on no account: a UPI sale sits on none until matched), with a reason; the sale stops
+ * waiting. Kept like a cash shortage (source cash_shortage) but with payment mode UPI, so no cash check counts it. Undo takes the expense off and the bill waits again. Only a bill counted as a sale can be booked this way.
+ */
+export const UPI_SHORTAGE_HEAD = { name: 'UPI shortage', tally: 'UPI Shortage' };
+const UPI_SHORT_NOTE = 'UPI shortage booked';
+bankRoutes.post('/businesses/:businessId/upi-shortage', requireRole('cash.writeoff'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const note = text(data, 'note', 'Reason', { max: 300 })!;
+  const txId = typeof data.txId === 'string' && isUuid(data.txId) ? data.txId : null;
+  const cmpId = typeof data.comparisonId === 'string' && isUuid(data.comparisonId) ? data.comparisonId : null;
+  if (!txId && !cmpId) fail(400, 'Choose the bill.');
+  const sale = await one<{ id: string; shift_day: string; amount_paise: number; bill_no: string | null; comparison_id: string | null; status: string }>(db, `
+    SELECT t.id, t.shift_day, t.amount_paise, t.bill_no, t.comparison_id, s.status FROM transactions t JOIN shifts s ON s.business_id = t.business_id AND s.shift_day = t.shift_day
+    WHERE t.business_id = ? AND t.type = 'income' AND t.payment_mode = 'upi' AND t.match_status = 'awaiting_bank_match' AND t.matched_bank_row IS NULL
+      AND (t.id = ? OR t.comparison_id = ?) AND t.id NOT IN (SELECT transaction_id FROM closed_bills WHERE business_id = ?) LIMIT 1`, bid, txId, cmpId, bid);
+  if (!sale) fail(409, 'Only a UPI bill counted as a sale and still waiting for its money can be booked as a shortage.');
+  if (sale!.status !== 'confirmed') fail(409, 'Save the shift first.');
+  const t = now();
+  const user = c.get('user').id;
+  const statements: D1PreparedStatement[] = [];
+  let head = await one<{ id: string }>(db, "SELECT id FROM heads WHERE business_id = ? AND type = 'expense' AND lower(name) = lower(?)", bid, UPI_SHORTAGE_HEAD.name);
+  if (!head) {
+    head = { id: newId() };
+    statements.push(stmt(db, "INSERT INTO heads (id, business_id, name, type, tally_ledger, is_custom, created_at) VALUES (?, ?, ?, 'expense', ?, 0, ?)",
+      head.id, bid, UPI_SHORTAGE_HEAD.name, UPI_SHORTAGE_HEAD.tally, t));
+  }
+  const id = newId();
+  const bill = sale!.bill_no ?? 'no number';
+  statements.push(
+    stmt(db, `INSERT INTO transactions (id, business_id, account_id, day, amount_paise, type, head_id, narration, source, status, payment_mode, shift_day, bill_no, created_at, ocr_original)
+      VALUES (?, ?, NULL, ?, ?, 'expense', ?, ?, 'cash_shortage', 'approved', 'upi', ?, ?, ?, ?)`, id, bid, sale!.shift_day, sale!.amount_paise, head.id,
+      `UPI shortage, ${sale!.shift_day} shift: bill ${bill} not received · ${note}`, sale!.shift_day, sale!.bill_no, t,
+      JSON.stringify({ saleId: sale!.id, comparisonId: sale!.comparison_id, billNo: sale!.bill_no })),
+    stmt(db, "UPDATE transactions SET match_status = NULL WHERE id = ? AND match_status = 'awaiting_bank_match'", sale!.id),
+    stmt(db, 'INSERT INTO closed_bills (transaction_id, business_id, note, closed_by, closed_at) VALUES (?, ?, ?, ?, ?)', sale!.id, bid, `${UPI_SHORT_NOTE}: ${note}`.slice(0, 300), user, t),
+    stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.upi_shortage', id, null, { saleId: sale!.id, billNo: sale!.bill_no, amountPaise: sale!.amount_paise, note }, t)),
+  );
+  if (sale!.comparison_id) statements.push(stmt(db, 'UPDATE bill_comparisons SET closed_at = ?, closed_by = ?, close_note = ? WHERE id = ? AND business_id = ? AND closed_at IS NULL',
+    t, user, `${UPI_SHORT_NOTE}: ${note}`.slice(0, 300), sale!.comparison_id, bid));
+  await db.batch(statements);
+  return c.json({ ok: true, id, amountPaise: sale!.amount_paise, billNo: sale!.bill_no });
+});
+
+bankRoutes.post('/businesses/:businessId/upi-shortage/:id/undo', requireRole('cash.writeoff'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  if (!isUuid(id)) fail(404, 'Not found.');
+  const x = await one<{ id: string; ocr_original: string | null }>(db, "SELECT id, ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND payment_mode = 'upi' AND type = 'expense'", id, bid);
+  if (!x) fail(404, 'This UPI shortage is not booked.');
+  let o: { saleId?: string; comparisonId?: string | null } = {};
+  try { o = JSON.parse(x!.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
+  const t = now();
+  const user = c.get('user').id;
+  const statements = [
+    stmt(db, 'DELETE FROM transactions WHERE id = ? AND business_id = ?', id, bid),
+    stmt(db, TX_AUDIT, ...audit(bid, user, 'sale.upi_shortage_undone', id, { saleId: o.saleId ?? null }, null, t)),
+  ];
+  if (o.saleId) statements.push(
+    stmt(db, "UPDATE transactions SET match_status = 'awaiting_bank_match' WHERE id = ? AND business_id = ? AND matched_bank_row IS NULL", o.saleId, bid),
+    stmt(db, 'DELETE FROM closed_bills WHERE transaction_id = ? AND business_id = ?', o.saleId, bid));
+  if (o.comparisonId) statements.push(stmt(db, `UPDATE bill_comparisons SET closed_at = NULL, closed_by = NULL, close_note = NULL
+    WHERE id = ? AND business_id = ? AND close_note LIKE '${UPI_SHORT_NOTE}%'`, o.comparisonId, bid));
+  await db.batch(statements);
   return c.json({ ok: true });
 });
 

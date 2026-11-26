@@ -63,7 +63,7 @@ async function cashCheckRead(db: DB, businessId: string, day: string) {
         min(CASE WHEN status <> 'approved' THEN upload_id END) AS waitingUpload
       FROM transactions WHERE business_id = ? AND day = ? AND source = 'cash_photo' AND type = 'expense'`, businessId, day),
     all<{ id: string; type: string; amount_paise: number; narration: string | null; ocr_original: string | null; created_at: number }>(db, `SELECT id, type, amount_paise, narration, ocr_original, created_at FROM transactions
-      WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage' ORDER BY created_at`, businessId, day),
+      WHERE business_id = ? AND shift_day = ? AND source = 'cash_shortage' AND payment_mode = 'cash' ORDER BY created_at`, businessId, day),
     one<{ after: string }>(db, `SELECT after FROM audit_log WHERE business_id = ? AND action = 'cash.difference_accepted'
       AND row_table = 'shifts' AND json_extract(after, '$.day') = ? ORDER BY id DESC LIMIT 1`, businessId, day),
     // Cash moved to or from the bank on this shift (Stage 6).
@@ -243,7 +243,7 @@ export async function shortageToReverse(db: DB, businessId: string, day: string,
   const over = k.confirmed ? k.differencePaise : null;
   if (over == null || over <= 0 || k.settled) return null;
   const x = await one<{ id: string; shift_day: string; amount_paise: number; ocr_original: string | null }>(db, `SELECT id, shift_day, amount_paise, ocr_original FROM transactions
-    WHERE business_id = ? AND source = 'cash_shortage' AND type = 'expense' AND amount_paise = ? AND shift_day < ? AND shift_day >= ? ORDER BY shift_day DESC LIMIT 1`,
+    WHERE business_id = ? AND source = 'cash_shortage' AND payment_mode = 'cash' AND type = 'expense' AND amount_paise = ? AND shift_day < ? AND shift_day >= ? ORDER BY shift_day DESC LIMIT 1`,
     businessId, over, day, addDays(day, -7));
   if (!x) return null;
   let o: { billNo?: string } = {}; try { o = JSON.parse(x.ocr_original ?? '{}') ?? {}; } catch { /* none */ }

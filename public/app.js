@@ -4363,7 +4363,10 @@ function waitCardHtml(biz, day, sp, waitPic, opts) {
     const twiceBox = tw ? html`<div class="cmp-warn" style="margin:4px 0 0"><strong>Probably counted twice.</strong> The register line has ₹ ${money(w.amountPaise)} ${MODE_LABELS[tw.otherMode] ?? tw.otherMode} and ₹ ${money(w.amountPaise)} ${MODE_LABELS[w.mode] ?? w.mode} (₹ ${money(w.amountPaise * 2)}) for a ₹ ${money(tw.billPaise)} bill. The ${MODE_LABELS[tw.otherMode] ?? tw.otherMode} ₹ ${money(w.amountPaise)} came; the software says ${MODE_LABELS[tw.otherMode] ?? tw.otherMode} only.
       <div class="form-row" style="gap:6px;margin-top:6px"><button class="btn plain dchip" type="button" data-twice="${w.key.slice(2)}" data-bill="${w.billNo}" data-day="${w.day}" data-amt="${w.amountPaise}"
         data-mode="${MODE_LABELS[w.mode] ?? w.mode}" data-other="${MODE_LABELS[tw.otherMode] ?? tw.otherMode}" data-bp="${tw.billPaise}" data-nd="${tw.newDiscountPaise}" data-nt="${tw.newTipPaise}">Remove the ${MODE_LABELS[w.mode] ?? w.mode} ₹ ${money(w.amountPaise)} (counted twice)</button></div></div>` : '';
-    return html`${twiceBox}<div class="wc-acts">
+    // UPI shortage (approved 26 Nov 2026): the money never came; Owner or Accountant books it as an expense, with Undo.
+    const upiShort = w.mode === 'upi' && opts.canWriteoff && !w.reversalId && !tw && (w.key.startsWith('t:') || w.comparisonId)
+      ? html`<button class="btn dchip" type="button" data-upishort="${w.key.startsWith('t:') ? w.key.slice(2) : ''}" data-cmp="${w.comparisonId ?? ''}" data-bill="${w.billNo}" data-amt="${w.amountPaise}">Book as shortage</button>` : '';
+    return html`${twiceBox}<div class="wc-acts">${upiShort}
       ${w.reversalId ? html`<button class="btn plain dchip" type="button" data-reversed="${w.reversalId}" data-bill="${w.billNo}">Bill unpaid again</button>` : ''}
       ${w.side === 'both' && w.mode === 'upi' && w.key.startsWith('t:') ? html`<button class="btn plain dchip" type="button" data-owedtx="${w.key.slice(2)}" data-bill="${w.billNo}">Owed by guest/company</button>` : ''}
       ${w.comparisonId && w.side !== 'both' ? html`<button class="btn plain dchip" type="button" data-closebill="${w.comparisonId}" data-bill="${w.billNo}">Close with a reason</button>
@@ -4416,6 +4419,15 @@ function wireWaiting(biz, root, act) {
     await act(async () => { res = await apiFull('POST', `/businesses/${biz.id}/sales/${d.twice}/counted-twice`, { note }); });
     if (res) doneToast(`${d.mode} ₹ ${money(amt)} removed from bill ${d.bill}. ${dayLabel(d.day)} income is ₹ ${money(amt)} less.`,
       () => apiFull('POST', `/businesses/${biz.id}/counted-twice/${res.auditId}/undo`, {}), () => (drawerReload ?? route)());
+  }));
+  root.querySelectorAll('[data-upishort]').forEach((b) => b.addEventListener('click', async () => {
+    const d = b.dataset;
+    const note = (prompt(`Book bill ${d.bill} (₹ ${money(Number(d.amt))}, UPI) as a UPI shortage: its money never came. Reason?`) ?? '').trim();
+    if (!note) return;
+    let res = null;
+    await act(async () => { res = await apiFull('POST', `/businesses/${biz.id}/upi-shortage`, { txId: d.upishort || null, comparisonId: d.cmp || null, note }); });
+    if (res) doneToast(`Bill ${d.bill}: ₹ ${money(res.amountPaise)} booked as UPI shortage.`,
+      () => apiFull('POST', `/businesses/${biz.id}/upi-shortage/${res.id}/undo`, {}), () => route());
   }));
   root.querySelectorAll('[data-keepwait]').forEach((b) => b.addEventListener('click', () => {
     const note = (prompt(`Keep bill ${b.dataset.bill} waiting: what are you waiting for?`) ?? '').trim();

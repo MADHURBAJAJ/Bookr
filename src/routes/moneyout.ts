@@ -73,7 +73,7 @@ moneyOutRoutes.get('/businesses/:businessId/money-out', requireRole('bank.link')
         t.amount_paise AS amountPaise, CASE t.status WHEN 'approved' THEN 'approved' ELSE 'draft' END AS status, NULL AS note, t.upload_id AS uploadId
       FROM transactions t JOIN accounts a ON a.id = t.account_id
       LEFT JOIN heads h ON h.id = t.head_id LEFT JOIN parties p ON p.id = t.party_id
-      WHERE t.business_id = ? AND t.type = 'expense' AND t.source IN ('cash_photo', 'cash_shortage') AND t.day BETWEEN ? AND ?`,
+      WHERE t.business_id = ? AND t.type = 'expense' AND t.source IN ('cash_photo', 'cash_shortage') AND NOT (t.source = 'cash_shortage' AND t.payment_mode = 'upi') AND t.day BETWEEN ? AND ?`,
       bid, from, to),
     all<{ id: string; name: string; kind: string }>(db, 'SELECT id, name, kind FROM accounts WHERE business_id = ? ORDER BY kind = \'bank\', name', bid),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM heads WHERE business_id = ? AND type = 'expense' ORDER BY name", bid),

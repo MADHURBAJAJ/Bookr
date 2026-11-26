@@ -983,7 +983,7 @@ salesRoutes.post('/businesses/:businessId/cash-excess/:txId/undo', requireRole('
   const db = c.env.DB;
   const bid = c.get('businessId');
   const x = await one<{ id: string; shift_day: string; amount_paise: number; narration: string | null }>(db,
-    "SELECT id, shift_day, amount_paise, narration FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND type = 'income'", c.req.param('txId'), bid);
+    "SELECT id, shift_day, amount_paise, narration FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND payment_mode = 'cash' AND type = 'income'", c.req.param('txId'), bid);
   if (!x) fail(404, 'This cash excess is not in the books.');
   await db.batch([
     stmt(db, 'DELETE FROM transactions WHERE id = ? AND business_id = ?', x!.id, bid),
@@ -1000,7 +1000,7 @@ salesRoutes.post('/businesses/:businessId/cash-shortages/:txId/reverse', require
   const db = c.env.DB;
   const bid = c.get('businessId');
   const x = await one<{ id: string; shift_day: string; amount_paise: number; narration: string | null; ocr_original: string | null }>(db,
-    "SELECT id, shift_day, amount_paise, narration, ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND type = 'expense'", c.req.param('txId'), bid);
+    "SELECT id, shift_day, amount_paise, narration, ocr_original FROM transactions WHERE id = ? AND business_id = ? AND source = 'cash_shortage' AND payment_mode = 'cash' AND type = 'expense'", c.req.param('txId'), bid);
   if (!x) fail(404, 'This shortage is not in the books.');
   const note = text(await body(c), 'note', 'Note', { max: 300, optional: true });
   let o: { comparisonId?: string } = {}; try { o = JSON.parse(x!.ocr_original ?? '{}') ?? {}; } catch { /* none */ }
@@ -1161,7 +1161,7 @@ salesRoutes.get('/businesses/:businessId/reports/missed', requireRole('reports.v
   const cashRevised = sheets.map((x) => { const r = JSON.parse(x.o).revision as { reason: string; note: string | null; fields: string[] }; return { day: x.day, uploadId: x.uploadId, ...r }; });
   // Cash shortages booked in the period, and the bill each was booked for (18 Nov 2026).
   const sh = await all<{ day: string; amountPaise: number; narration: string | null; o: string | null }>(c.env.DB, `SELECT shift_day AS day, amount_paise AS amountPaise, narration, ocr_original AS o
-    FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND type = 'expense' AND shift_day BETWEEN ? AND ? ORDER BY shift_day, created_at`, c.get('businessId'), from, to);
+    FROM transactions WHERE business_id = ? AND source = 'cash_shortage' AND payment_mode = 'cash' AND type = 'expense' AND shift_day BETWEEN ? AND ? ORDER BY shift_day, created_at`, c.get('businessId'), from, to);
   const shortages = sh.map((x) => { let o: { billNo?: string } = {}; try { o = JSON.parse(x.o ?? '{}') ?? {}; } catch { /* none */ }
     return { day: x.day, amountPaise: x.amountPaise, billNo: o.billNo ?? null, note: (x.narration ?? '').replace(/^Cash shortage, [\d-]+ shift: (bill \S+ not received · )?/, '') }; });
   return c.json({ from, to, lastDay: last?.day ?? null, cashRevised, shortages, ...(await missedEntries(c.env.DB, c.get('businessId'), from, to)) });
