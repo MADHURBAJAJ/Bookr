@@ -66,8 +66,15 @@ describe('stock at the KOT', () => {
       expect(det.bills.map((x: any) => [x.billNo, x.place, x.units])).toEqual([[expect.any(String), 'T9', 2]]);
       expect(det.unbilled.map((x: any) => [x.orderId, x.place, x.status, x.units, !!x.kots])).toEqual([[o3, 'T12', 'open', 4, true]]);
       expect(det.losses.map((x: any) => [x.kind, x.qty, x.reason, x.store])).toEqual([['breakage', 1, 'Bottle broke while cooling', 'Sample Bar']]);
-      const kit = await ok(s.owner.get(`${B}/stock/consumption/item?itemId=si-beer&from=${day}&to=${day}&storeId=st-bar`));
-      expect(kit.unbilled).toEqual([]);        // by store: bills are not by store, so not-billed is for all stores only
+      // One store alone (26 Nov 2026): beer is a bar dish, so the Bar shows it all and the Kitchen none of it.
+      const bar = await ok(s.owner.get(`${B}/stock/consumption/item?itemId=si-beer&from=${day}&to=${day}&storeId=st-bar`));
+      expect([bar.bills.length, bar.unbilled.map((x: any) => [x.place, x.units]), bar.losses.length]).toEqual([1, [['T12', 4]], 1]);
+      const kit = await ok(s.owner.get(`${B}/stock/consumption/item?itemId=si-beer&from=${day}&to=${day}&storeId=st-kit`));
+      expect([kit.bills, kit.unbilled, kit.losses]).toEqual([[], [], []]);
+      const barUse = await ok(s.owner.get(`${B}/stock/consumption?from=${day}&to=${day}&storeId=st-bar`));
+      expect(barUse.items.find((i: any) => i.name === 'Sample Beer')).toMatchObject({ sold: 6, notBilled: 4 });
+      const kitUse = await ok(s.owner.get(`${B}/stock/consumption?from=${day}&to=${day}&storeId=st-kit`));
+      expect(kitUse.items.find((i: any) => i.name === 'Sample Batter')).toMatchObject({ sold: 150, notBilled: 0 });
       expect((await s.owner.get(`${B}/stock/consumption/item?itemId=nope&from=${day}&to=${day}`)).status).toBe(404);
 
       // The Daily check lists what cancelled KOTs put back, to check at the stock count.
