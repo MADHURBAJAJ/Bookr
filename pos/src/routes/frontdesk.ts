@@ -11,6 +11,7 @@ import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
 import { bookingUnits, roomTax } from '../rooms';
 import { djuboPays, oldDeskPending } from '../djubo-desk';
+import { heldChanges } from './bookings';
 import { shiftDayAt } from '../billing';
 import { formCPending } from './roomdesk';
 import type { AppEnv } from '../types';
@@ -343,6 +344,8 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
     inHouse: stays.map((s) => ({ ...s, djuboPaise: stayDjubo(s.id) })),
     leaving: stays.filter((s) => s.plan && s.plan <= today).map((s) => ({ ...s, djuboPaise: stayDjubo(s.id) })),
     djubo: { open: djOpen, today: dj.pays.filter((x) => x.day === today), lowered: dj.lowered },
+    // Booking changes from Djubo or MakeMyTrip waiting for a person (26 Nov 2026).
+    held: await heldChanges(db, b.id),
     stats: { arriving: arrivals.length + live.length, inHouse: stays.length, leaving: stays.filter((s) => s.plan && s.plan <= today).length, freeTonight: Math.max(0, rooms - busy), toCollectPaise: toCollect },
     alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0,
       djuboToMode: djOpen.length, djuboLowered: dj.lowered.length, rentTwice: rentTwice.filter((x) => x.handPaise > 0) },

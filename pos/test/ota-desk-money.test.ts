@@ -8,8 +8,8 @@ import { setReader } from '../src/booking-readers';
 import { shiftDayAt } from '../src/billing';
 import { djuboDeskRule } from '../src/djubo-desk';
 
-// These test the list for money marked before the Djubo-day rule (26 Nov 2026); the rule is moved past today here.
-djuboDeskRule.from = '2999-01-01';
+// The Djubo-day rule (26 Nov 2026) counts from today here.
+djuboDeskRule.from = '2000-01-01';
 
 afterAll(dispose);
 
@@ -48,9 +48,9 @@ describe('an OTA booking entered in Djubo by hand', () => {
     await send(s.businessId, 'reports@djubo.example.test', 'd2', `Booking DJ-OTA1 | Ota Guest | 9800030001 | ${day} | ${out} | 5000 | 5000 | Sample Desk | NH900001`);
     // Djubo first this time, MakeMyTrip's mail after it.
     await send(s.businessId, 'reports@djubo.example.test', 'd3', `Booking DJ-OTA2 | Second Guest | 9800030002 | ${day} | ${out} | 4000 | 4000 | Sample Desk | NH900002`);
-    expect((await ok(counter.get(`${B}/bookings`))).deskToTake.map((x: any) => x.extRef)).toEqual(['DJ-OTA2']);   // not yet known as MakeMyTrip's
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).djubo.open.map((x: any) => x.extRef)).toEqual(['DJ-OTA2']);   // not yet known as MakeMyTrip's
     await send(s.businessId, 'alerts@mmt.example.test', 'm2', `Booking NH900002 | Second Guest | 9800030002 | ${day} | ${out} | 4000 | 4000 | | NH900002`);
-    expect((await ok(counter.get(`${B}/bookings`))).deskToTake).toEqual([]);
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).djubo.open).toEqual([]);
 
     // Checked in: the room bill shows it paid before arrival, nothing to collect.
     const arr = (await ok(counter.get(`${B}/bookings/arrivals?day=${day}`))).arrivals;

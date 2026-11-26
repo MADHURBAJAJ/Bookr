@@ -7,8 +7,9 @@ import { readDjubo, setReader } from '../src/booking-readers';
 import { shiftDayAt } from '../src/billing';
 import { djuboDeskRule } from '../src/djubo-desk';
 
-// These test the list for money marked before the Djubo-day rule (26 Nov 2026); the rule is moved past today here.
-djuboDeskRule.from = '2999-01-01';
+// Since 26 Nov 2026 reception's Djubo money is listed on the day it was marked (the Djubo-day rule, from today here).
+djuboDeskRule.from = '2000-01-01';
+const open = async (s: any) => (await s.ok(s.counter.get(`${s.B}/frontdesk/today`))).djubo.open;
 
 afterAll(dispose);
 
@@ -65,10 +66,10 @@ describe('money taken at reception', () => {
     expect(pb.lines.find((l: any) => l.kind === 'prepaid').note).toBe('Advance paid before arrival (booking team)');
     // Not taken yet: shift close needs it taken, or a reason.
     let sh = await ok(s.owner.get(`${B}/shifts/${day}`));
-    expect(sh.summary.deskMissing).toMatchObject([{ extRef: 'DJ-W1', pendingPaise: 300_000 }]);
+    expect(sh.summary.djubo).toMatchObject([{ extRef: 'DJ-W1', amountPaise: 300_000 }]);
     await ok(counter.post(`${B}/debtors/${wb.stay.accountId}/receipts`, { kind: 'receipt', payments: [{ mode: 'cash', amount: '3000' }] }));
     sh = await ok(s.owner.get(`${B}/shifts/${day}`));
-    expect(sh.summary.deskMissing).toEqual([]);
+    expect([sh.summary.deskMissing, sh.summary.djubo]).toEqual([[], []]);
     // Read again: nothing changes.
     await ok(counter.post(`${B}/mails/read-all-again`, {}));
     wb = await ok(counter.get(`${B}/stays/${walk}/bill`));
@@ -81,11 +82,10 @@ describe('money taken at reception', () => {
     await send(s.businessId, 'a1', `Booking DJ-A1 | Later Guest | 9800033333 | Deluxe | ${plus(5)} | ${plus(7)} | 6000 | 0 | Sample Team | X`);
     await send(s.businessId, 'a2', `Booking DJ-A1 | Later Guest | 9800033333 | Deluxe | ${plus(5)} | ${plus(7)} | 6000 | 2000 | Sample Desk | X`);
     let bk = await ok(counter.get(`${B}/bookings`));
-    expect(bk.deskToTake).toMatchObject([{ extRef: 'DJ-A1', pendingPaise: 200_000, enteredBy: 'Sample Desk' }]);
-    const r = await ok(counter.post(`${B}/desk-advances`, { bookingId: bk.deskToTake[0].id, payments: [{ mode: 'cash', amount: '2000' }] }));
+    expect(await open(s)).toMatchObject([{ extRef: 'DJ-A1', amountPaise: 200_000, by: 'Sample Desk' }]);
+    const r = await ok(counter.post(`${B}/desk-advances`, { bookingId: (await open(s))[0].bookingId, payments: [{ mode: 'cash', amount: '2000' }] }));
     expect(r.receipt).toMatchObject({ kind: 'advance', booking: 'DJ-A1', totalPaise: 200_000, receiptNo: expect.stringMatching(/^RCPT\//) });
-    bk = await ok(counter.get(`${B}/bookings`));
-    expect(bk.deskToTake).toEqual([]);
+    expect(await open(s)).toEqual([]);
     // Check-in on the day (moved to today for the test): the advance is on the room bill with its receipt.
     await q("UPDATE bookings SET check_in = ?, check_out = ? WHERE ext_ref = 'DJ-A1' AND business_id = ?", day, plus(2), s.businessId);
     const id = (await q("SELECT id FROM bookings WHERE ext_ref = 'DJ-A1' AND business_id = ?", s.businessId))[0].id;
@@ -155,11 +155,11 @@ describe('money taken at reception', () => {
     await send(s.businessId, 'n1', `Booking DJ-N1 | Ota Guest | 9800010101 | Deluxe | ${day} | ${plus(1)} | 3000 | 3000 | System | X`);
     await send(s.businessId, 'n2', `Booking DJ-N2 | Team Guest | 9800010102 | Deluxe | ${day} | ${plus(1)} | 3000 | 1000 | Sample Team | XI`);
     await send(s.businessId, 'n3', `Booking DJ-N3 | New Desk Guest | 9800010103 | Deluxe | ${day} | ${plus(1)} | 3000 | 1500 | New Person | XII`);
-    const take = (await ok(counter.get(`${B}/bookings`))).deskToTake.map((x: any) => [x.extRef, x.pendingPaise]);
+    const take = (await open(s)).map((x: any) => [x.extRef, x.amountPaise]);
     expect(take).toEqual([['DJ-N3', 150_000]]);
     // Adding the new person to the booking team: their money no longer needs a receipt.
     await ok(s.owner.call('PUT', `${B}/bookings/booking-team`, { users: ['Sample Team', 'New Person'] }));
-    expect((await ok(counter.get(`${B}/bookings`))).deskToTake).toEqual([]);
+    expect(await open(s)).toEqual([]);
     expect((await counter.call('PUT', `${B}/bookings/booking-team`, { users: [] })).status).toBe(403);
   });
 });

@@ -1099,7 +1099,7 @@ export async function stayBill(c: Context<AppEnv>, id: string) {
   const s = await openStay(c, id);
   const [lines, booking, invoice, group] = await Promise.all([
     folioLines(db, s.account_id),
-    one(db, `SELECT ext_ref AS extRef, source, guest_name AS guestName, channel, room_type AS roomType, room_labels AS roomLabels, rooms, guests, check_in AS checkIn, check_out AS checkOut,
+    one(db, `SELECT id, ext_ref AS extRef, source, guest_name AS guestName, channel, room_type AS roomType, room_labels AS roomLabels, rooms, guests, check_in AS checkIn, check_out AS checkOut,
         amount_paise AS amountPaise, paid_paise AS paidPaise, booked_at AS bookedAt, changed_at AS changedAt, meal_plan AS mealPlan, requests, ota_ref AS otaRef, pnr,
         from_report AS fromReport, report_due_paise AS reportDuePaise
       FROM bookings WHERE stay_id = ? ORDER BY source = 'djubo' DESC, updated_at DESC LIMIT 1`, s.id),

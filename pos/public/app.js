@@ -1799,6 +1799,8 @@ function todayView() {
   const items = [
     ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
+    ...((fd.held ?? []).length ? [{ tone: fd.held.some((x) => x.reason?.startsWith('Cancelled')) ? 'bad' : 'warn', icon: '!', title: `${plural(fd.held.length, 'booking change')} to check before applying`,
+      sub: fd.held.slice(0, 3).map((x) => `${x.room ?? x.extRef} · ${x.guestName ?? ''}: ${x.reason}`).join(' · '), act: 'heldPanel' }] : []),
     ...(fd.alerts.djuboToMode ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.djuboToMode, 'payment')} taken in Djubo · ${rs(fd.djubo.open.reduce((t, x) => t + x.amountPaise, 0))}`, sub: 'Counted on the day marked. Pick Cash, UPI or Card for each', act: 'djPanel' }] : []),
     ...(fd.alerts.djuboLowered ? [{ tone: 'bad', icon: '₹', title: `Djubo lowered ${plural(fd.alerts.djuboLowered, 'payment')} after its receipt`, sub: 'Refund it, or correct it in Djubo', act: 'djPanel' }] : []),
     ...(fd.alerts.rentTwice ?? []).map((x) => ({ tone: 'bad', icon: '₹', title: `Rent may be counted twice: ${x.room} · ${x.guestName}`, sub: `extra night added by hand, and Djubo sent ${x.refs} for it. Take the hand-added night off`, act: 'roomBill', id: x.stayId })),
@@ -2467,6 +2469,52 @@ const stampText = (v) => {
   return `${dayName(d)}, ${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`;
 };
 /** The booking card (24 Nov 2026): who, how long, where it was booked, when, the room, and what is still to collect. */
+// ---------- each booking's mail history and changes held for a person (26 Nov 2026)
+const HIST_STATUS = { applied: ['cur', 'Used'], older: ['', 'Older: not used'], held: ['held', 'Waiting for a check'], kept: ['', 'Kept as it was'] };
+function histList(list) {
+  if (!list.length) return html`<p class="small quiet">No emails kept for this booking yet.</p>`;
+  const first = list.findIndex((x) => x.status === 'applied');
+  return html`<div class="hist">${list.map((x, i) => { const [cls, label] = HIST_STATUS[x.status] ?? ['', x.status];
+    return html`<div class="hev ${i === first ? 'cur' : ''} ${x.status}"><span class="hdot" aria-hidden="true"></span><div>
+      <div class="line" style="gap:8px;flex-wrap:wrap"><strong>${x.cancelled ? 'Cancelled' : x.subject?.match(/revised|modif/i) ? 'Revised' : 'Booking'} · ${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef}</strong>
+        <span class="status ${i === first ? 'ok' : cls === 'held' ? 'warn' : 'mute'}">${i === first ? 'The bill follows this one' : label}</span></div>
+      <div class="small quiet">${x.source === 'djubo' ? 'Djubo changed' : 'Email came'} ${dateTime(x.orderAt)}${x.enteredBy ? ` by ${x.enteredBy}` : ''}${x.decidedBy ? ` · ${x.status === 'kept' ? 'kept' : 'applied'} by ${x.decidedBy}` : ''}</div>
+      <div class="small">Total ${x.amountPaise === null ? '—' : rs(x.amountPaise)} · Paid ${x.paidPaise === null ? '—' : rs(x.paidPaise)}${x.checkIn ? ` · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}` : ''}${x.roomLabels?.length ? ` · ${x.roomLabels.join(', ')}` : ''}</div>
+      ${x.heldReason ? html`<div class="small" style="color:var(--warn)">${x.heldReason}</div>` : ''}</div></div>`; })}</div>`;
+}
+actions.bkHist = async (d) => {
+  if (ui.bkHist?.id === d.id) { ui.bkHist = null; rerender(); return; }
+  ui.bkHist = { id: d.id, list: (await api('GET', `${B()}/bookings/${d.id}/history`)).history }; rerender();
+};
+const heldVal = (x, k) => (k === 'status' ? (x.cancelled ? 'Cancelled' : x.status === 'checked_in' ? 'Checked in' : x.status ?? 'Confirmed') : x[k] === null || x[k] === undefined ? '—' : rs(x[k]));
+function heldPanel() {
+  const list = ui.fd?.held ?? [];
+  return html`<div class="dhead"><h2>Booking changes to check</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+    <p class="small quiet">These changes from Djubo or MakeMyTrip were not applied by themselves: check them in Djubo, then apply or keep. Until then the bill stays as it is.</p>
+    ${list.length ? list.map((x) => html`<div class="msg ${x.reason?.startsWith('Cancelled') ? 'bad' : 'warn'}" style="display:block;margin-top:10px">
+      <strong>${x.reason}: ${x.room ? `${x.room} · ` : ''}${x.guestName ?? 'No name'}</strong>
+      <div class="small">${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef} · changed ${dateTime(x.at)}${x.mail.enteredBy ? ` by ${x.mail.enteredBy}` : ''}</div>
+      <div class="scroll"><table class="t" style="margin-top:6px"><thead><tr><th></th><th class="num">Now</th><th class="num">The new email says</th></tr></thead><tbody>
+        ${x.mail.cancelled || x.now.status === 'checked_in' ? html`<tr><td>Status</td><td class="num">${x.now.status === 'checked_in' ? 'Checked in' : 'Confirmed'}</td><td class="num"><strong>${x.mail.cancelled ? 'Cancelled' : 'Confirmed'}</strong></td></tr>` : ''}
+        <tr><td>Total</td><td class="num">${heldVal(x.now, 'amountPaise')}</td><td class="num">${x.mail.cancelled ? '—' : heldVal(x.mail, 'amountPaise')}</td></tr>
+        <tr><td>Paid</td><td class="num">${heldVal(x.now, 'paidPaise')}</td><td class="num">${heldVal(x.mail, 'paidPaise')}</td></tr>
+        <tr><td>Dates</td><td class="num">${x.now.checkIn ? `${dayName(x.now.checkIn)} → ${dayName(x.now.checkOut)}` : '—'}</td><td class="num">${x.mail.checkIn ? `${dayName(x.mail.checkIn)} → ${dayName(x.mail.checkOut)}` : '—'}</td></tr></tbody></table></div>
+      ${x.reason?.startsWith('Cancelled') ? html`<div class="small">Often a room change or a rebooking in Djubo: if the guest is staying, keep it, and the new booking's rent comes when it is linked. Apply only if the guest has really left.</div>` : ''}
+      <div class="row" style="margin-top:8px"><button class="btn" type="button" data-act="heldKeep" data-b="${x.bookingId}" data-m="${x.mailId}">Keep as it is</button>
+        <button class="btn ${x.reason?.startsWith('Cancelled') ? '' : 'pri'}" type="button" data-act="heldApply" data-b="${x.bookingId}" data-m="${x.mailId}">${x.reason?.startsWith('Cancelled') ? 'Apply: the guest left' : 'Apply the change'}</button></div></div>`)
+      : html`<p class="empty">Nothing to check.</p>`}`;
+}
+actions.heldPanel = () => { ui.roomBill = null; ui.chartSel = null; ui.drawer = heldPanel; rerender(); };
+const heldDo = async (d, what) => {
+  await api('POST', `${B()}/bookings/${d.b}/versions/${encodeURIComponent(d.m)}/${what}`, {});
+  ui.fd = await api('GET', B() + '/frontdesk/today').catch(() => ui.fd);
+  flash = { kind: 'ok', text: what === 'apply' ? 'Change applied.' : 'Kept as it was.' };
+  if (!(ui.fd?.held ?? []).length) ui.drawer = null;
+  rerender();
+};
+actions.heldApply = (d) => heldDo(d, 'apply');
+actions.heldKeep = (d) => heldDo(d, 'keep');
+
 function bookingCard(a, onBill = false) {
   const nights = a.checkIn && a.checkOut ? Math.max(1, Math.round((Date.parse(a.checkOut) - Date.parse(a.checkIn)) / 86400000)) : null;
   // On the room bill, the bill itself says what is left to collect; the card shows only what the booking says.
@@ -2628,7 +2676,8 @@ function roomBillPanel(r) {
       <div class="small">This stay began before the POS: its booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}), and that must be paid first. Djubo or the OTA has its invoice. To print a POS invoice instead, type the total rent from Djubo (optional).</div>
       <div class="row" style="margin-top:6px"><input class="in" inputmode="decimal" data-model="rptRent" value="${ui.rptRent ?? ''}" placeholder="Total rent in Djubo (₹)" style="max-width:220px">
         <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
-    ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
+    ${r.booking ? html`${bookingCard(r.booking, true)}<div class="row" style="margin:4px 0 8px"><button class="btn sm ghost" type="button" data-act="bkHist" data-id="${r.booking.id}">${ui.bkHist?.id === r.booking.id ? 'Hide email history' : 'Email history'}</button></div>
+      ${ui.bkHist?.id === r.booking.id ? histList(ui.bkHist.list) : ''}` : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
       ${r.lines.map((l) => html`<tr><td>${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
       ${djWait.map((x) => html`<tr><td>Paid at reception, in Djubo<div class="small quiet">${dateTime(x.at)} · ${x.by ?? ''} · pick how it was paid, below</div></td><td class="num">${rs(-x.amountPaise)}</td></tr>`)}

@@ -58,7 +58,16 @@ describe('money marked in Djubo by reception', () => {
     await send(s.businessId, 'f3', `Booking DJ-F1 | Future Guest | 9800044442 | Deluxe | ${plus(5)} | ${plus(6)} | 5000 | 2000 | Sample Desk | X`);
 
     let sh = await ok(s.owner.get(`${B}/shifts/${day}`));
+    // Djubo lowering what was paid (₹2,700 to ₹2,000) waits for a person (26 Nov 2026); applied, the slip comes off.
+    expect(sh.summary.djubo.map((x: any) => [x.extRef, x.amountPaise])).toEqual([['DJ-H1', 300_000], ['DJ-F1', 150_000], ['DJ-F1', 120_000]]);
+    const held = (await ok(counter.get(`${B}/bookings/held`))).held;
+    expect(held.map((x: any) => [x.extRef, x.reason, x.now.paidPaise, x.mail.paidPaise])).toEqual([['DJ-F1', 'What was paid went down', 270_000, 200_000]]);
+    await ok(counter.post(`${B}/bookings/${held[0].bookingId}/versions/${held[0].mailId}/apply`, {}));
+    expect((await ok(counter.get(`${B}/bookings/held`))).held).toEqual([]);
+    sh = await ok(s.owner.get(`${B}/shifts/${day}`));
     expect(sh.summary.djubo.map((x: any) => [x.extRef, x.amountPaise, x.by, x.settlementId])).toEqual([['DJ-H1', 300_000, 'Sample Desk', null], ['DJ-F1', 150_000, 'Sample Desk', null], ['DJ-F1', 50_000, 'Sample Desk', null]]);
+    const hist = (await ok(counter.get(`${B}/bookings/${held[0].bookingId}/history`))).history;
+    expect(hist.map((x: any) => [x.paidPaise, x.status])).toEqual([[200_000, 'applied'], [270_000, 'applied'], [150_000, 'applied']]);
     expect(sh.summary.deskMissing).toEqual([]);
     const fd = await ok(counter.get(`${B}/frontdesk/today`));
     expect([fd.alerts.djuboToMode, fd.alerts.deskToTake]).toEqual([3, 0]);

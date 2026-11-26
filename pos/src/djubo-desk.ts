@@ -38,7 +38,7 @@ export async function djuboPays(db: DB, bid: string, startHour: number, bookingI
     FROM booking_paid_log l JOIN bookings k ON k.id = l.booking_id LEFT JOIN settlements s ON s.id = l.settlement_id
     WHERE l.business_id = ? AND k.source = 'djubo' ${bookingId ? 'AND l.booking_id = ?' : ''}
       AND l.booking_id IN (SELECT booking_id FROM booking_paid_log WHERE business_id = ? AND received_at >= ?)
-    ORDER BY l.booking_id, l.received_at, l.mail_id`, ...(bookingId ? [bid, bookingId, bid, cut] : [bid, bid, cut]));
+    ORDER BY l.booking_id, coalesce((SELECT v.order_at FROM booking_versions v WHERE v.booking_id = l.booking_id AND v.mail_id = l.mail_id), l.received_at), l.received_at, l.mail_id`, ...(bookingId ? [bid, bookingId, bid, cut] : [bid, bid, cut]));
   const pending = new Map((await deskPending(db, bid)).map((p) => [p.id, p.pendingPaise]));
   const byBooking = new Map<string, typeof rows>();
   for (const r of rows) byBooking.set(r.booking_id, [...(byBooking.get(r.booking_id) ?? []), r]);
