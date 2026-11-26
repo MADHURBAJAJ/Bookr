@@ -3086,6 +3086,47 @@ actions.recvGo = async () => {
 
 // ---------- shift close
 
+// ---------- Day close › Takings (26 Nov 2026): "Close" (today's money by type, then the steps to close) and "Breakdown"
+// (a table of money in by type and where from; a tap on an amount lists the bills and receipts behind it).
+const TK_MODES = [['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']];
+const tkOf = (rows, mode) => rows.find((x) => x.mode === mode)?.paise ?? 0;
+function takingsClose(s) {
+  const tot = TK_MODES.map(([m, t]) => ({ m, t, bills: tkOf(s.byMode, m), rooms: tkOf(s.receipts, m) }));
+  const all = tot.reduce((x, r) => x + r.bills + r.rooms, 0);
+  const notMoney = [['room', 'on rooms'], ['credit', 'on credit']].map(([m, t]) => [t, tkOf(s.byMode, m)]).filter(([, v]) => v);
+  const look = [...s.events.filter((e) => e.n).map((e) => `${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings', credit_note: 'Credit notes', stock_waste: 'Stock breakage', stock_count: 'Stock count variances', pay_change: 'Payment type changed' }[e.kind] ?? e.kind} ${e.n}`),
+    ...(s.tips.length ? [`Tips ${rs(s.tips.reduce((t, x) => t + x.paise, 0))}`] : []), ...(s.discountsAtPayment.n ? [`Discounts at payment ${s.discountsAtPayment.n}`] : []),
+    ...(s.drawerOuts.length ? [`Paid out ${rs(s.drawerOuts.reduce((t, o) => t + o.amountPaise, 0))}`] : [])];
+  const billed = s.billed.reduce((t, b) => t + b.paise, 0);
+  const step = (n, title, sub, value) => html`<div class="tkstep"><span class="tkn">${n}</span><div><strong>${title}</strong><div class="small quiet">${sub}</div></div><div class="tkv">${value}</div></div>`;
+  return html`<div class="tkcards">${tot.map((r) => html`<div class="tkcard"><span class="l">${r.t}</span><span class="v">${rs(r.bills + r.rooms)}</span><span class="s">bills ${rs(r.bills)} · rooms ${rs(r.rooms)}</span></div>`)}</div>
+    <div class="tkbig"><span>Money in today</span><span>${rs(all)}</span></div>
+    <p class="label" style="margin:6px 0 0">To close the day</p>
+    <div>${step(1, 'Count the cash drawer', 'Use the "Count the cash drawer" form. What the drawer should hold shows after you count.', '')}
+      ${step(2, s.byAccount.length === 1 ? `Match UPI in the ${s.byAccount[0].name} app` : 'Match UPI in each bank app', s.byAccount.length > 1 ? s.byAccount.map((a) => `${a.name} ${rs(a.paise)}`).join(' · ') : 'all UPI today, bills and rooms', rs(tot[1].bills + tot[1].rooms))}
+      ${step(3, 'Card machine settlement', tot[2].bills + tot[2].rooms ? 'all card payments today, bills and rooms' : 'no card payments today', rs(tot[2].bills + tot[2].rooms))}
+      ${step(4, 'Bills printed today', html`${s.billed.map((b) => `${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}`).join(' · ') || 'no bills'}${notMoney.length ? ` · ${notMoney.map(([t, v]) => `${rs(v)} ${t}, not money yet`).join(' · ')}` : ''}${s.unpaidBills.length ? html` · <span style="color:var(--warn)">${plural(s.unpaidBills.length, 'bill')} not paid yet</span>` : s.billed.length ? html` · all paid <span style="color:var(--go)">✓</span>` : ''}`, rs(billed))}
+      ${step(5, 'Anything to look at', look.length ? look.join(' · ') : 'voids, discounts, credit notes, cancelled KOTs, paid out', look.length ? html`<button type="button" class="chip" data-act="pick" data-k="tkTab" data-id="detail">See breakdown</button>` : html`<span class="status mute">none</span>`)}</div>`;
+}
+function takingsTable(s) {
+  const pays = s.payments ?? [];
+  const cell = (m, k, v) => (v ? html`<button type="button" class="tkcell" aria-pressed="${ui.tkList === `${m}:${k}`}" data-act="pick" data-k="tkList" data-id="${ui.tkList === `${m}:${k}` ? '' : `${m}:${k}`}">${rs(v)}</button>` : html`<span class="quiet">${rs(0)}</span>`);
+  const rows = TK_MODES.map(([m, t]) => ({ m, t: m === 'upi' && s.byAccount.length === 1 ? `UPI · ${s.byAccount[0].name}` : t, bills: tkOf(s.byMode, m), rooms: tkOf(s.receipts, m) }));
+  const [lm, lk] = (ui.tkList ?? '').split(':');
+  const listed = lm ? pays.filter((p) => p.mode === lm && (lk === 'all' || (lk === 'bills' ? p.kind === 'bills' : p.kind !== 'bills'))) : [];
+  const ref = (p) => (p.kind === 'bills' ? html`<a href="#/done/${p.billId}">${p.bills}</a>`
+    : p.stayId ? html`<button type="button" class="linkbtn" data-act="counterBill" data-id="${p.stayId}">${p.receiptNo ?? 'Receipt'}</button>` : html`<span>${p.receiptNo ?? 'Receipt'}</span>`);
+  const what = (p) => (p.kind === 'bills' ? p.place ?? '' : p.account ?? (p.advGuest ? `Advance · ${p.advGuest}` : ''));
+  const notMoney = [['room', 'To room (not paid yet)'], ['credit', 'On credit'], ['comp', 'Complimentary'], ['advance', 'Paid from advances taken earlier']].map(([m, t]) => [t, tkOf(s.byMode, m)]).filter(([, v]) => v);
+  return html`<div class="scroll"><table class="t"><thead><tr><th>Money in</th><th class="num">Restaurant bills</th><th class="num">Rooms and credit</th><th class="num">Total today</th></tr></thead><tbody>
+    ${rows.map((r) => html`<tr><td>${r.t}</td><td class="num">${cell(r.m, 'bills', r.bills)}</td><td class="num">${cell(r.m, 'rooms', r.rooms)}</td><td class="num"><strong>${cell(r.m, 'all', r.bills + r.rooms)}</strong></td></tr>`)}
+    <tr class="tktot"><td>Total</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.rooms, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills + r.rooms, 0))}</td></tr></tbody></table></div>
+    ${lm ? html`<div class="tklist"><div class="row between"><strong>${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[lm]} · ${{ bills: 'restaurant bills', rooms: 'rooms and credit', all: 'all today' }[lk]} · ${listed.length}</strong>
+        <button type="button" class="btn" data-act="pick" data-k="tkList" data-id="">Close</button></div>
+      <div class="scroll"><table class="t"><tbody>${listed.map((p) => html`<tr><td>${time(p.at)}</td><td>${ref(p)}</td><td>${what(p)}</td><td class="num">${rs(p.amountPaise)}</td></tr>`)}</tbody></table></div>
+      <p class="small quiet">Tap a bill number to open the bill, or a receipt number to open the room bill.</p></div>` : html`<p class="small quiet">Tap an amount to list the bills and receipts behind it.</p>`}
+    ${notMoney.length ? html`<div class="sums"><div><strong>Not money yet, or counted on another day</strong></div>${notMoney.map(([t, v]) => html`<div><span>${t}</span><span>${rs(v)}</span></div>`)}</div>` : ''}`;
+}
 async function shiftScreen() {
   // The day moves on at its hour or when it is closed by hand (24 Nov 2026): read the current one afresh.
   try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
@@ -3123,11 +3164,9 @@ async function shiftScreen() {
       </section>` : ''}
       ${carried.length ? html`<p class="small quiet" style="margin-bottom:12px">Carrying into ${dayName(addDays(s.shiftDay, 1))}: ${carried.join(', ')}. Their sale stays on the day the bill was printed; the money counts when paid.</p>` : ''}
       <div class="two rev">
-      <section class="panel"><h2>Takings</h2>
+      <section class="panel"><div class="row between"><h2>Takings</h2><div class="chips">${[['close', 'Close'], ['detail', 'Breakdown']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.tkTab ?? 'close') === k}" data-act="pick" data-k="tkTab" data-id="${k}">${t}</button>`)}</div></div>
         ${ui.closed ? html`<div class="msg ok">Closed at ${dateTime(ui.closed.closedAt)} · counted ${rs(ui.closed.countedPaise)} · difference ${rs(ui.closed.differencePaise)}</div>` : ''}
-        <div class="sums">${s.byMode.map((m) => html`<div><span>${modeName[m.mode]} (${m.n})</span><span>${rs(m.paise)}</span></div>`)}
-          ${s.byAccount.map((a) => html`<div><span class="quiet">UPI: ${a.name}</span><span>${rs(a.paise)}</span></div>`)}
-          ${s.receipts.map((m) => html`<div><span class="quiet">Received on folios and credit: ${modeName[m.mode]}</span><span>${rs(m.paise)}</span></div>`)}</div>
+        ${(ui.tkTab ?? 'close') === 'close' ? takingsClose(s) : html`${takingsTable(s)}
         <div class="sums">${s.billed.map((b) => html`<div><span>${b.entity}: ${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}</span><span>${rs(b.paise)}</span></div>`)}</div>
         <div class="sums">${s.events.map((e) => html`<div><span>${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings', credit_note: 'Credit notes', stock_waste: 'Stock breakage', stock_count: 'Stock count variances' }[e.kind]}</span><span>${e.n} · ${rs(e.paise)}</span></div>`)}</div>
         ${s.tabs.length ? html`<div class="sums"><div><strong>Tabs carried to the next day (not in these totals)</strong></div>${s.tabs.map((t) => html`<div><span>${t.place} · ${t.guest} · since ${t.since}${t.old ? ' · overdue' : ''}</span><span>${rs(t.paise)}</span></div>`)}</div>` : ''}
@@ -3135,6 +3174,7 @@ async function shiftScreen() {
           ${s.discountsAtPayment.n ? html`<div><span>Discounts at payment (${s.discountsAtPayment.n})</span><span>${rs(s.discountsAtPayment.paise)}</span></div>` : ''}</div>` : ''}
         ${s.creditNotes.length ? html`<div class="sums"><div><strong>Credit notes (money given back)</strong></div>${s.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
         ${s.drawerOuts.length ? html`<div class="sums"><div><strong>Paid out of the drawer</strong></div>${s.drawerOuts.map((o) => html`<div><span>${o.kind === 'refund' ? 'Advance refunded' : 'Paid out'}${o.mode === 'upi' ? ' (UPI)' : ''}${o.note && o.note !== 'Advance refunded' ? ' · ' + o.note : ''} · ${o.byName ?? ''}</span><span>${rs(-o.amountPaise)}</span></div>`)}</div>` : ''}
+        `}
         ${ui.closed ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
           <label class="f">What for<input class="in" data-model="outNote" value="${ui.outNote ?? ''}" placeholder="e.g. Vegetables"></label>
           <button class="btn" type="submit" data-act="paidOut" data-submit>Record paid out</button></form>`}

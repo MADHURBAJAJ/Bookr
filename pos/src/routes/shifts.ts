@@ -47,6 +47,18 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
     FROM settle_differences d LEFT JOIN payments p ON p.id = d.payment_id WHERE d.business_id = ? AND d.shift_day = ? GROUP BY d.kind, p.mode`, bid, day);
   const creditNotes = await all<{ cn_no: string; bill_no: string; total_paise: number; refund_mode: string; reason: string }>(db, `SELECT n.cn_no, b.bill_no, n.total_paise, n.refund_mode, n.reason
     FROM credit_notes n JOIN bills b ON b.id = n.bill_id WHERE n.business_id = ? AND n.shift_day = ? ORDER BY n.seq`, bid, day);
+  // Each money payment of the day (26 Nov 2026), for Day close's Breakdown: what it paid (bill numbers, or the receipt and
+  // the room or account it went on, or a desk advance's guest) so a tap on a total lists them.
+  const payments = await all<{ id: string; mode: string; amountPaise: number; kind: string; at: number; receiptNo: string | null; bills: string | null; billId: string | null;
+    place: string | null; account: string | null; stayId: string | null; advGuest: string | null }>(db, `SELECT p.id, p.mode, p.amount_paise AS amountPaise, s.kind, s.at, s.receipt_no AS receiptNo,
+      (SELECT group_concat(b.bill_no, ', ') FROM allocations a JOIN bills b ON b.id = a.bill_id WHERE a.payment_id = p.id) AS bills,
+      (SELECT a.bill_id FROM allocations a WHERE a.payment_id = p.id LIMIT 1) AS billId,
+      (SELECT o.place FROM allocations a JOIN bills b ON b.id = a.bill_id JOIN orders o ON o.id = b.order_id WHERE a.payment_id = p.id LIMIT 1) AS place,
+      (SELECT d.name FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id WHERE e.payment_id = p.id LIMIT 1) AS account,
+      (SELECT d.stay_id FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id WHERE e.payment_id = p.id LIMIT 1) AS stayId,
+      (SELECT g.guest_name FROM desk_advances g WHERE g.settlement_id = s.id LIMIT 1) AS advGuest
+    FROM payments p JOIN settlements s ON s.id = p.settlement_id
+    WHERE p.business_id = ? AND p.shift_day = ? AND p.mode IN ('cash', 'upi', 'card') ORDER BY s.at DESC, p.rowid DESC LIMIT 1000`, bid, day);
   const cashIn = [...byMode, ...receipts].filter((r) => r.mode === 'cash').reduce((s, r) => s + r.paise, 0);
   const cashOut = outs.filter((o) => o.mode === 'cash').reduce((s, o) => s + o.amount_paise, 0)
     + creditNotes.filter((n) => n.refund_mode === 'cash').reduce((s, n) => s + n.total_paise, 0);
@@ -54,7 +66,7 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const deskMissing = (await deskPending(db, bid)).filter((r) => r.deskPaidAt !== null && shiftDayAt(r.deskPaidAt, startHour) === day)
     .map((r) => ({ bookingId: r.id, extRef: r.extRef, guestName: r.guestName, enteredBy: r.enteredBy, at: r.deskPaidAt, pendingPaise: r.pendingPaise }));
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
-  return { shiftDay: day, byMode, receipts, byAccount, billed, events, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
+  return { shiftDay: day, byMode, receipts, byAccount, billed, events, payments, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut, deskMissing,
     // Reservations made at the desk that Djubo has not confirmed (25 Nov 2026).
     notInDjubo: await notInDjubo(db, bid, day),

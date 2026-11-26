@@ -1055,3 +1055,21 @@ body .ctrcol .kpis { margin-bottom: 0; grid-template-columns: repeat(auto-fit, m
 .dc-drawer { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .dc-drawer:last-child { border-bottom: 0; }
 @media (max-width: 640px) { .dc-barrow { grid-template-columns: 100px minmax(0, 1fr) 84px; } .dc-total { align-items: flex-start; } }
+
+/* Day close › Takings (26 Nov 2026): money cards, closing steps, and the Breakdown table with tappable amounts. */
+.tkcards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 600px) { .tkcards { grid-template-columns: 1fr; } }
+.tkcard { background: var(--soft); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; }
+.tkcard .l { font-size: 12.5px; font-weight: 600; color: var(--quiet); }
+.tkcard .v { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.tkcard .s { font-size: 12px; color: var(--quiet); }
+.tkbig { display: flex; justify-content: space-between; align-items: baseline; font-weight: 800; font-size: 18px; padding: 10px 14px; background: var(--pri-tint); border-radius: 10px; font-variant-numeric: tabular-nums; margin: 10px 0; }
+.tkstep { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.tkstep:last-child { border-bottom: 0; }
+.tkn { width: 30px; height: 30px; border-radius: 50%; background: var(--pri); color: #fff; display: grid; place-items: center; font-weight: 700; }
+.tkv { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; }
+.tkcell { font: inherit; color: var(--pri); background: none; border: 0; padding: 2px 6px; border-radius: 6px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; font-variant-numeric: tabular-nums; }
+.tkcell:hover, .tkcell[aria-pressed="true"] { background: var(--pri-tint); }
+.tkcell:focus-visible { outline: 2px solid var(--pri); outline-offset: 2px; }
+tr.tktot td { font-weight: 800; background: var(--soft); }
+.tklist { border: 2px solid var(--pri); border-radius: 12px; padding: 12px 14px; margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
