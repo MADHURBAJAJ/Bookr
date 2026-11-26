@@ -8,5 +8,7 @@ contextBridge.exposeInMainWorld('bookrDesktop', {
   print: (job) => ipcRenderer.invoke('print', job),
   openPrinters: () => ipcRenderer.invoke('printers:open'),
   minimize: () => ipcRenderer.invoke('window:minimize'),
+  /** Gives the keyboard back to the page (Windows lost it after print windows and OK/Cancel boxes, 26 Nov 2026). */
+  refocus: () => ipcRenderer.invoke('window:refocus'),
   toggleFullScreen: () => ipcRenderer.invoke('window:fullscreen'),
 });

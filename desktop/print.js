@@ -25,8 +25,10 @@ function slipDocument(body, paperMm) {
 
 /** Prints `body` (the POS's slip HTML) on `printer`; resolves when Windows has it, rejects with the reason if not. */
 async function printSlip(body, printer, { paperMm = 80, copies = 1 } = {}) {
+  // Never focusable (26 Nov 2026): on Windows a hidden print window took the keyboard from the POS window, and typing
+  // stopped working until the app was switched away from and back.
   const w = new BrowserWindow({
-    show: false, width: Math.round((paperMm / 25.4) * 96), height: 200,
+    show: false, focusable: false, skipTaskbar: true, width: Math.round((paperMm / 25.4) * 96), height: 200,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: true },
   });
   try {
