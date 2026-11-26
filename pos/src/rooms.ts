@@ -258,3 +258,64 @@ export async function continuesOf(db: DB, bid: string, bookings: { id: string; p
   }
   return out;
 }
+
+// ---------- extensions are made in Djubo (26 Nov 2026)
+
+/** When Djubo changes a checked-in booking's dates, the stay and its group's beds leave when the bookings end. A date a
+ *  manager extended by hand past the bookings stays. */
+export async function followBookingDates(db: DB, bid: string, bookingId: string, oldCheckOut: string | null) {
+  const k = await one<{ stay_id: string | null }>(db, 'SELECT stay_id FROM bookings WHERE id = ? AND business_id = ?', bookingId, bid);
+  if (!k?.stay_id) return;
+  const head = (await one<{ h: string }>(db, 'SELECT coalesce(group_stay_id, id) AS h FROM stays WHERE id = ?', k.stay_id))!.h;
+  const end = (await one<{ e: string | null }>(db, `SELECT max(b.check_out) AS e FROM bookings b JOIN stays s ON s.id = b.stay_id
+    WHERE (s.id = ?1 OR s.group_stay_id = ?1) AND b.status = 'checked_in'`, head))?.e;
+  if (!end) return;
+  await stmt(db, `UPDATE stays SET check_out_plan = ?1 WHERE (id = ?2 OR group_stay_id = ?2) AND checked_out_at IS NULL
+    AND (check_out_plan IS NULL OR check_out_plan = ?3 OR check_out_plan < ?1)`, end, head, oldCheckOut ?? end).run();
+}
+
+/** Nights the guest stays that no rent covers: their bookings' last day plus nights a manager added by hand ("N extra
+ *  night(s)", less any taken off), against the day they leave. Only for stays from bookings. */
+export async function nightsNotCharged(db: DB, bid: string) {
+  const rows = await all<{ id: string; room: string; guest_name: string; plan: string | null; booked_to: string | null; hand: string | null }>(db, `
+    SELECT s.id, s.room, s.guest_name, s.check_out_plan AS plan,
+      (SELECT max(b.check_out) FROM bookings b JOIN stays m ON m.id = b.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id) AND b.status = 'checked_in') AS booked_to,
+      (SELECT json_group_array(json_object('a', e.amount_paise, 'n', e.note)) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id JOIN stays m ON m.id = d.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND lower(e.note) LIKE '%extra night%') AS hand
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)'`, bid);
+  const out: { stayId: string; room: string; guestName: string; plan: string; coveredTo: string; nights: number }[] = [];
+  for (const r of rows) {
+    if (!r.booked_to) continue;
+    let hand = 0;
+    for (const e of JSON.parse(r.hand ?? '[]') as { a: number; n: string }[]) {
+      const n = Number(/(\d+)\s+extra night/i.exec(e.n ?? '')?.[1] ?? 1);
+      hand += e.a > 0 ? n : e.a < 0 ? -n : 0;
+    }
+    const covered = new Date(Date.parse(r.booked_to) + Math.max(0, hand) * 86_400_000).toISOString().slice(0, 10);
+    const plan = r.plan ?? r.booked_to;
+    if (plan > covered) out.push({ stayId: r.id, room: r.room, guestName: r.guest_name, plan, coveredTo: covered, nights: Math.round((Date.parse(plan) - Date.parse(covered)) / 86_400_000) });
+  }
+  return out;
+}
+
+/** Guests in house tonight whose night has no rent (an overstay, or an extension not in Djubo): blocks the day's close. */
+export async function tonightNotCharged(db: DB, bid: string, day: string) {
+  const rows = await all<{ id: string; room: string; guest_name: string; booked_to: string | null; hand: string | null }>(db, `
+    SELECT s.id, s.room, s.guest_name,
+      (SELECT max(b.check_out) FROM bookings b JOIN stays m ON m.id = b.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id) AND b.status = 'checked_in') AS booked_to,
+      (SELECT json_group_array(json_object('a', e.amount_paise, 'n', e.note)) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id JOIN stays m ON m.id = d.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND lower(e.note) LIKE '%extra night%') AS hand
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)'`, bid);
+  const out: { stayId: string; room: string; guestName: string; coveredTo: string }[] = [];
+  for (const r of rows) {
+    if (!r.booked_to) continue;
+    let hand = 0;
+    for (const e of JSON.parse(r.hand ?? '[]') as { a: number; n: string }[]) {
+      const n = Number(/(\d+)\s+extra night/i.exec(e.n ?? '')?.[1] ?? 1);
+      hand += e.a > 0 ? n : e.a < 0 ? -n : 0;
+    }
+    const covered = new Date(Date.parse(r.booked_to) + Math.max(0, hand) * 86_400_000).toISOString().slice(0, 10);
+    if (covered <= day) out.push({ stayId: r.id, room: r.room, guestName: r.guest_name, coveredTo: covered });
+  }
+  return out;
+}

@@ -9,7 +9,7 @@ import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, dormBed, dormWhole, tableLayout, type Business } from '../util';
 import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
-import { bookingUnits, roomTax } from '../rooms';
+import { bookingUnits, nightsNotCharged, roomTax } from '../rooms';
 import { djuboPays, oldDeskPending } from '../djubo-desk';
 import { heldChanges } from './bookings';
 import { missingBeds } from './settings';
@@ -349,6 +349,8 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
     held: await heldChanges(db, b.id),
     // A booking's rooms or beds not all in the POS (26 Nov 2026).
     missingBeds: await missingBeds(db, b.id),
+    // Nights a guest stays that no rent covers (26 Nov 2026: extensions are made in Djubo).
+    nightsNotCharged: await nightsNotCharged(db, b.id),
     stats: { arriving: arrivals.length + live.length, inHouse: stays.length, leaving: stays.filter((s) => s.plan && s.plan <= today).length, freeTonight: Math.max(0, rooms - busy), toCollectPaise: toCollect },
     alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0,
       djuboToMode: djOpen.length, djuboLowered: dj.lowered.length, rentTwice: rentTwice.filter((x) => x.handPaise > 0) },

@@ -11,7 +11,7 @@ import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
-import { linkStay } from '../rooms';
+import { continuesOf, linkStay } from '../rooms';
 
 export const roomDeskRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -139,6 +139,10 @@ roomDeskRoutes.post(`${B}/bookings/:id/no-show`, requireAction('stays.edit'), as
   const k = await one<{ id: string; status: string; match_id: string | null; ext_ref: string }>(c.env.DB, 'SELECT id, status, match_id, ext_ref FROM bookings WHERE id = ? AND business_id = ?', isUuid(id) ? id : null, bid);
   if (!k) fail(404, 'Booking not found.');
   if (k.status === 'checked_in' || k.status === 'cancelled') fail(409, k.status === 'checked_in' ? 'This guest is checked in.' : 'This booking was cancelled.');
+  // A booking that continues a guest already in house is their extension, not a no-show (26 Nov 2026).
+  const kk = await one<{ phone: string | null; guest_name: string | null; check_in: string | null }>(c.env.DB, 'SELECT phone, guest_name, check_in FROM bookings WHERE id = ?', k.id);
+  const cont = (await continuesOf(c.env.DB, bid, [{ id: k.id, phone: kk?.phone ?? null, guestName: kk?.guest_name ?? null, checkIn: kk?.check_in ?? null }])).get(k.id);
+  if (cont?.length) fail(409, `${cont.map((x) => x.room).join(', ')}: this guest is in house. This booking is their extension: press Continue on it instead.`);
   const data = await body(c);
   const keep = data.advance === 'keep';
   const t = now();
@@ -182,14 +186,19 @@ roomDeskRoutes.post(`${B}/stays/:id/extend`, requireAction('stays.edit'), async 
   if (to <= from) fail(400, `The new check-out must be after ${from}.`);
   const nights = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
   const rate = data.rate === undefined || data.rate === '' ? null : paise(data, 'rate', 'Rate per night');
+  // Extensions are made in Djubo (26 Nov 2026, owner's choice): the date and rent follow Djubo's mail. This is the fallback
+  // when Djubo is down or its mail does not come: a manager, with the reason and the rent per night.
+  const why = text(data, 'reason', 'Why it is extended here and not in Djubo', { max: 120 })!;
+  const approver = await approval(c, data, 'Extending a stay without Djubo');
+  if (!rate) fail(400, 'Type the rent per night: without Djubo, the POS has no rent for these nights.');
   const t = now();
   await c.env.DB.batch([
     stmt(c.env.DB, 'UPDATE stays SET check_out_plan = ? WHERE id = ?', to, s.id),
     // The group's other rooms and beds stay as long (24 Nov 2026).
     stmt(c.env.DB, 'UPDATE stays SET check_out_plan = ? WHERE group_stay_id = ? AND checked_out_at IS NULL', to, s.id),
     ...(rate ? [stmt(c.env.DB, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, by_staff, at) VALUES (?, ?, ?, 'room_rent', ?, ?, ?, ?)",
-      newId(), bid, s.account_id, rate * nights, `Room rent · ${nights} extra night${nights === 1 ? '' : 's'} × ${rupeesText(rate)}`, c.get('staff').id, t)] : []),
-    audit(c.env.DB, bid, c.get('staff').id, 'stay.extend', 'stays', s.id, { checkOut: from }, { checkOut: to, ratePaise: rate }),
+      newId(), bid, s.account_id, rate * nights, `Room rent · ${nights} extra night${nights === 1 ? '' : 's'} × ${rupeesText(rate)} · by hand (manager, ${approver.name}): ${why}`.slice(0, 160), c.get('staff').id, t)] : []),
+    audit(c.env.DB, bid, c.get('staff').id, 'stay.extend', 'stays', s.id, { checkOut: from }, { checkOut: to, ratePaise: rate, reason: why, approvedBy: approver.name }),
   ]);
   return c.json(await stayBill(c, s.id), 201);
 });
@@ -343,6 +352,8 @@ roomDeskRoutes.post(`${B}/bookings/:id/continue`, requireAction('stays.edit'), a
         audit(db, bid, staff, 'stay.move', 'stays', s.id, { room: s.room }, { room: moveTo, reason: `Djubo's room for booking ${b.ext_ref}` }));
     }
     batch.push(stmt(db, 'UPDATE stays SET check_out_plan = max(coalesce(check_out_plan, ?), ?) WHERE id = ?', b.check_out, b.check_out, s.id),
+      // Its group's other rooms and beds run as long (26 Nov 2026).
+      stmt(db, 'UPDATE stays SET check_out_plan = max(coalesce(check_out_plan, ?), ?) WHERE group_stay_id = ? AND checked_out_at IS NULL', b.check_out, b.check_out, s.id),
       audit(db, bid, staff, 'stay.continue', 'stays', s.id, null, { booking: b.ext_ref, till: b.check_out }));
   }
   try {

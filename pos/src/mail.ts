@@ -7,7 +7,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../sr
 import type { Env } from './types';
 import { readDjuboReport, readerFor, type DjuboReport, type ReadBooking, type ReportRoom } from './booking-readers';
 import { phoneKeySoft } from './booking-readers';
-import { linkWalkIn, recomputeDesk, syncStay, syncStayRent } from './rooms';
+import { followBookingDates, linkWalkIn, recomputeDesk, syncStay, syncStayRent } from './rooms';
 import { linkReservation } from './routes/frontdesk';
 import { CLOSED_TO, clock, tableLayout, type Business } from './util';
 
@@ -305,8 +305,9 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
       status, problem, mailId, status, t, ...extra, prev.id).run();
     await afterSave(db, b.id, prev.id, x);
     await deskMoney(db, b.id, prev.id, source, mailId, x, !!imp);
-    // Already checked in (an extra night, a room change, a cancellation): the room's bill follows the booking.
-    if (prev.status === 'checked_in') await syncStayRent(db, b.id, prev.id);
+    // Already checked in (an extra night, a room change, a cancellation): the room's bill follows the booking, and the
+    // stay (with its group's beds) leaves when the bookings end (26 Nov 2026: extensions are made in Djubo).
+    if (prev.status === 'checked_in') { await followBookingDates(db, b.id, prev.id, prev.check_out); await syncStayRent(db, b.id, prev.id); }
     else await linkWalkIn(db, b.id, prev.id);
     return prev.id;
   }

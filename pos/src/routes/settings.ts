@@ -6,7 +6,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../..
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
-import { bookingUnits, folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
+import { bookingUnits, continuesOf, folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
 import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { isOnline, syncItemStations } from '../stations';
@@ -972,6 +972,13 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
       checkInDay = bk.check_in;
     }
   }
+  // A booking that continues a guest already in house is their extension (26 Nov 2026): it joins their stay (Continue),
+  // never a second stay and a second bill.
+  if (typeof data.bookingId === 'string' && isUuid(data.bookingId) && !past) {
+    const bk = await one<{ id: string; phone: string | null; guest_name: string | null; check_in: string | null }>(c.env.DB, 'SELECT id, phone, guest_name, check_in FROM bookings WHERE id = ? AND business_id = ?', data.bookingId, bid);
+    const cont = bk ? (await continuesOf(c.env.DB, bid, [{ id: bk.id, phone: bk.phone, guestName: bk.guest_name, checkIn: bk.check_in }])).get(bk.id) : undefined;
+    if (cont?.length) fail(409, `${cont.map((x) => `${x.room} · ${x.guestName}`).join(', ')} is already in house: this booking is their extension. Press Continue on it instead of Check in.`);
+  }
   // The guest is kept for next time, by phone: a returning guest's name and city are brought up to date.
   const known = phone ? await one<{ id: string }>(c.env.DB, 'SELECT id FROM guests WHERE business_id = ? AND phone = ?', bid, phone) : null;
   const guestId = phone ? known?.id ?? newId() : null;
@@ -1177,6 +1184,10 @@ settingsRoutes.post(`${B}/stays/:id/charges`, requireAction('stays.edit'), async
   if (amount <= 0) fail(400, 'Amount must be above zero.');
   const note = text(data, 'note', 'What the charge is for', { max: 80 })!;
   const lower = data.lower === true;
+  // Room rent comes from Djubo (26 Nov 2026, owner's choice): staff add extras only; a manager may add rent by hand.
+  if (!lower && /\b(rent|night|nights|extension|extend|tariff)\b/i.test(note) && !isManager(c)
+    && await one(c.env.DB, 'SELECT 1 FROM bookings WHERE stay_id IN (SELECT id FROM stays WHERE id = ?1 OR group_stay_id = ?1) AND business_id = ?2', s.id, bid))
+    fail(403, 'Room rent comes from Djubo: extend or change the booking in Djubo. Extras (extra bed, late check-out, laundry) can be added here; a manager can add rent by hand.');
   let noteOut = note;
   if (lower) {
     const rent = (await one<{ r: number }>(c.env.DB, "SELECT coalesce(sum(amount_paise), 0) AS r FROM debtor_entries WHERE account_id = ? AND kind = 'room_rent'", s.account_id))!.r;

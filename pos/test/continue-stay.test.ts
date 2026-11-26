@@ -27,7 +27,7 @@ describe('continuing a stay', () => {
     const x23 = (await ok(counter.post(`${B}/stays`, { room: 'XXIII', guestName: 'Mr.Sample Guest', phone: '9800055555', bookingId: second }))).id;
 
     // Someone extended XXIII by hand first (₹2,500 typed): it is still offered, and that rent gives way to the booking's.
-    await ok(counter.post(`${B}/stays/${x23}/extend`, { to: add(today, 1), rate: '2500' }));
+    await ok(counter.post(`${B}/stays/${x23}/extend`, { to: add(today, 1), rate: '2500', reason: 'Djubo down (test)', ...s.mgr }));   // a manager, without Djubo (26 Nov 2026)
     // The extension is offered against both rooms.
     const arr = (await ok(counter.get(`${B}/bookings/arrivals`))).arrivals.find((a: any) => a.extRef === 'DJ-3');
     expect(arr.continues.map((x: any) => x.room)).toEqual(['XX', 'XXIII']);
