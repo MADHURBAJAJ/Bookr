@@ -105,7 +105,11 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, team
     } else if (d < 0) desk = Math.min(desk, r.paid_paise);
     prev = r.paid_paise;
   }
-  desk = Math.max(0, Math.min(desk, prev));
+  // What its MakeMyTrip twin says was paid online is never desk money (26 Nov 2026): reception may enter an OTA booking in
+  // Djubo by hand and mark it paid, which is the OTA's payment, not cash at the desk.
+  const twin = await one<{ p: number | null }>(db, `SELECT max(paid_paise) AS p FROM bookings WHERE source = 'mmt' AND status <> 'cancelled'
+    AND (id = (SELECT match_id FROM bookings WHERE id = ?1) OR match_id = ?1)`, bookingId);
+  desk = Math.max(0, Math.min(desk, prev - (twin?.p ?? 0)));
   await stmt(db, 'UPDATE bookings SET desk_paid_paise = ?, desk_paid_at = ? WHERE id = ?', desk, desk ? at : null, bookingId).run();
 }
 

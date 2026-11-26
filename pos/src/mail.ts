@@ -289,6 +289,9 @@ async function afterSave(db: DB, bid: string, id: string, x: ReadBooking) {
   }
   await linkMatch(db, bid, id);
   await adoptTwin(db, bid, id);
+  // Once paired, the Djubo side's desk money is checked against what MakeMyTrip says was paid online.
+  const pair = await all<{ id: string }>(db, `SELECT id FROM bookings WHERE source = 'djubo' AND (id = ?1 OR match_id = ?1 OR id = (SELECT match_id FROM bookings WHERE id = ?1))`, id);
+  for (const p of pair) await recomputeDesk(db, bid, p.id);
 }
 
 /** A MakeMyTrip booking whose mail has no room name (MakeMyTrip sometimes leaves it blank) takes the room type from its
