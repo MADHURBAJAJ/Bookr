@@ -35,6 +35,14 @@ export function namedAccount(accounts: OwnAccount[], row: Pick<BankRow, 'account
   return null;
 }
 
+const isUpi = (r: Pick<BankRow, 'kind'>) => r.kind === 'upi_in' || r.kind === 'upi_out';
+/**
+ * A UPI line pairs only with the other side of the same UPI payment: the same reference on both (26 Nov 2026). ₹1,200 paid
+ * from one account to a shop and ₹1,200 a guest paid into another are two payments to and from other people, not a transfer.
+ */
+export const sameUpi = (a: Pick<BankRow, 'kind' | 'upi_ref'>, b: Pick<BankRow, 'kind' | 'upi_ref'>) =>
+  (!isUpi(a) && !isUpi(b)) || (!!a.upi_ref && a.upi_ref === b.upi_ref);
+
 /** The transfer each open line could be (by line id). Cash lines are left to the cash deposit / withdrawal step. */
 export async function transferHints(db: DB, businessId: string, rows: BankRow[]): Promise<Map<string, TransferHint>> {
   const open = rows.filter((r) => r.status === 'unmatched' && r.kind !== 'card_settlement');
@@ -65,7 +73,7 @@ export async function transferHints(db: DB, businessId: string, rows: BankRow[])
     const leg = legs.find((l) => l.account_id === r.account_id && l.amount_paise === r.amount_paise && l.leg === (r.direction === 'CR' ? 'in' : 'out') && near(l.at) && !taken.has(l.id));
     if (leg) { taken.add(leg.id); out.set(r.id, { otherAccountId: leg.partnerAccount, otherAccountName: nameOf.get(leg.partnerAccount) ?? '', pairRowId: null, legId: leg.id, why: 'leg', word: null }); continue; }
     const pair = others.filter((o) => o.id !== r.id && o.account_id !== r.account_id && bankIds.has(o.account_id) && o.direction !== r.direction
-      && o.amount_paise === r.amount_paise && near(o.posted_at) && !taken.has(o.id))
+      && o.amount_paise === r.amount_paise && near(o.posted_at) && !taken.has(o.id) && sameUpi(r, o))
       .sort((a, b) => Math.abs(a.posted_at - r.posted_at) - Math.abs(b.posted_at - r.posted_at))[0];
     const named = namedAccount(accounts, r);
     // A pair whose other account the description names (or any pair when it names none) is the transfer.

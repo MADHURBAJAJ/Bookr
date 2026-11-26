@@ -52,6 +52,24 @@ describe('transfers between own accounts', () => {
     expect((await sql`SELECT status FROM bank_rows WHERE id IN (${out}, ${inn})`).map((r: any) => r.status)).toEqual(['unmatched', 'unmatched']);
   });
 
+  it('does not pair two UPI payments to and from other people; the two sides of one UPI payment (same reference) still pair', async () => {
+    const h = await setup();
+    const o = h.clients.owner;
+    // ₹1,200 paid from ICICI to a shop, ₹1,200 a guest paid into HUF: same amount, same day, not a transfer.
+    await o.post(`/businesses/${h.bid}/bank/${h.a}/paste`, { text: [HEAD, T([4, 'S40000004', '10/11/2026', '10/11/2026 2:04:00 PM', '-', 'UPI/111285028572/PaniPuri/xx2314@ibl//ICIcccc', 'DR', 1200, '91500'])].join('\n') });
+    await o.post(`/businesses/${h.bid}/bank/${h.b}/paste`, { text: [HEAD, T([2, 'S50000002', '10/11/2026', '10/11/2026 11:49:00 AM', '-', 'UPI/632996004637/UPI/xx2890@okicici/ICICI Bank/ICIdddd', 'CR', 1200, '51200']),
+      T([3, 'S50000003', '10/11/2026', '10/11/2026 5:00:00 PM', '-', 'UPI/333000000001/Rent share/xxhuf@okicici/ICICI Bank/ICIeeee', 'CR', 2500, '53700'])].join('\n') });
+    await o.post(`/businesses/${h.bid}/bank/${h.a}/paste`, { text: [HEAD, T([5, 'S40000006', '10/11/2026', '10/11/2026 5:00:00 PM', '-', 'UPI/333000000001/Rent share/xxhuf@okicici//ICIffff', 'DR', 2500, '89000'])].join('\n') });
+    const rs = await h.rows();
+    const [shop, guest, out, inn] = [await h.row('S40000004'), await h.row('S50000002'), await h.row('S40000006'), await h.row('S50000003')];
+    expect(rs.find((r) => r.id === shop).transfer).toBeNull();
+    expect(rs.find((r) => r.id === guest).transfer).toBeNull();
+    expect(rs.find((r) => r.id === inn).transfer).toMatchObject({ pairRowId: out, why: 'pair' });
+    // The booking gate no longer stops the guest's ₹1,200.
+    const income = (await o.get(`/businesses/${h.bid}/heads`)).json.heads.find((x: { type: string }) => x.type === 'income').id;
+    expect((await o.post(`/businesses/${h.bid}/bank-rows/${guest}/book`, { headId: income })).json.gate).toBeUndefined();
+  });
+
   it('knows a line by words written on the other account, and remembers a word when booked by hand; the other side joins later', async () => {
     const h = await setup();
     const hostel = await h.row('S40000002');
