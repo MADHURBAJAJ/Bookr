@@ -45,7 +45,7 @@
     const heavy = byPerson.filter((p) => p.cancels >= 3);
     const look = [
       ...(!d.shiftClose ? ['Shift not closed yet'] : []),
-      ...(d.shiftClose && !d.shiftClose.countedAt ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
+      ...(d.shiftClose && !d.shiftClose.countedAt && !d.shiftClose.noCount ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
       ...(d.drawers ?? []).filter((x) => x.differencePaise).map((x) => `Cash ${x.differencePaise < 0 ? 'short' : 'over'} ${rs(Math.abs(x.differencePaise))} in ${x.holder}'s drawer`),
       ...unpaidOld.map((o) => `${o.place} not paid for ${hrs(o.hours)}`),
       ...heavy.map((p) => `${p.name} cancelled ${plural(p.cancels, 'KOT line')}`),
@@ -57,7 +57,8 @@
     const maxMode = Math.max(1, ...modes.map((m) => m.paise));
     const tile = (k, v, n, tone = '', wide = false) => `<div class="tile ${tone} ${wide ? 'wide' : ''}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="n">${esc(n)}</div></div>`;
     const exT = (n, k, money) => `<div class="ex ${n ? 'on' : ''}"><div class="k">${esc(k)}</div><div class="v">${n}</div><div class="n">${n ? (money !== undefined ? rs(money) : '') : 'none'}</div></div>`;
-    const cashTile = d.shiftClose && !d.shiftClose.countedAt ? tile('Cash close', 'Not counted', 'Count it on Day close', 'bad')
+    const cashTile = d.shiftClose?.noCount ? tile('Cash close', 'Closed', 'No drawer count (turned off)', '')
+      : d.shiftClose && !d.shiftClose.countedAt ? tile('Cash close', 'Not counted', 'Count it on Day close', 'bad')
       : d.shiftClose ? tile('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
       : tile('Cash close', 'Not closed', 'The shift is not closed yet', 'warn');
     const h = shiftStartHour ?? 8;

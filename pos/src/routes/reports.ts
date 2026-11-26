@@ -148,8 +148,8 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
     all<{ entity_id: string; name: string; prefix: string; seqs: string; days: string | null }>(db, `SELECT e.id AS entity_id, e.name, e.series_prefix AS prefix,
         group_concat(n.seq) AS seqs, group_concat(n.print_day || ':' || n.day_seq) AS days
       FROM credit_notes n JOIN billing_entities e ON e.id = n.entity_id WHERE n.business_id = ? AND n.fy = ? GROUP BY e.id`, bid, fy),
-    one<{ difference_paise: number; difference_reason: string | null; closed_at: number; counted_at: number | null; auto: number }>(db,
-      'SELECT difference_paise, difference_reason, closed_at, counted_at, auto FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, day),
+    one<{ difference_paise: number; difference_reason: string | null; closed_at: number; counted_at: number | null; auto: number; totals: string | null }>(db,
+      'SELECT difference_paise, difference_reason, closed_at, counted_at, auto, totals FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, day),
     // The bar: how many counts were taken this shift, and what they found missing or extra, at cost.
     one<{ counts: number; missing: number; extra: number; waste: number }>(db, `SELECT
         (SELECT count(*) FROM pos_events e WHERE e.business_id = ?1 AND e.shift_day = ?2 AND e.kind = 'stock_count' AND e.reason = 'Count'
@@ -202,7 +202,9 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
     bar: { counts: bar!.counts, missingPaise: Math.round(bar!.missing), extraPaise: Math.round(bar!.extra), breakagePaise: Math.round(bar!.waste) },
     drawers: await drawersOfDay(db, bid, Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000,
       Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), b.shift_start_hour) - 19_800_000 + 86_400_000),
-    shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at, countedAt: close.counted_at, auto: !!close.auto } : null,
+    shiftClose: close ? { differencePaise: close.difference_paise, reason: close.difference_reason, closedAt: close.closed_at, countedAt: close.counted_at, auto: !!close.auto,
+      // Closed with counting turned off (26 Nov 2026): not a missed count, so not flagged.
+      noCount: (() => { try { return !!JSON.parse(String(close.totals ?? '{}')).noCount; } catch { return false; } })() } : null,
     // Sent to the kitchen or bar, not paid (25 Nov 2026): bills voided this shift whose order was not billed and paid
     // again, and the stock a cancelled KOT put back on the book, to check at the stock count.
     voidedNotRebilled: await all(db, `SELECT b.bill_no AS billNo, b.total_paise AS totalPaise, o.place

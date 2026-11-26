@@ -220,6 +220,18 @@ drawerRoutes.post(`${B}/drawer/count`, requireAction('shift.close'), async (c) =
     message: `Drawer counted. ${diff === 0 ? 'It agrees.' : `It is ${diff < 0 ? 'short' : 'over'} by ${rs(Math.abs(diff))}.`}` });
 });
 
+// Whether Day close counts the drawer (26 Nov 2026; owners and managers): off closes the day without a count.
+drawerRoutes.put(`${B}/drawer/count-setting`, requireAction('drawer.float'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  if (typeof data.on !== 'boolean') fail(400, 'Say whether the drawer is counted at day close: on or off.');
+  const before = await one<{ drawer_count: number }>(db, 'SELECT drawer_count FROM businesses WHERE id = ?', bid);
+  await db.batch([stmt(db, 'UPDATE businesses SET drawer_count = ? WHERE id = ?', data.on ? 1 : 0, bid),
+    audit(db, bid, c.get('staff').id, 'business.drawer_count', 'businesses', bid, before, { drawer_count: data.on ? 1 : 0 })]);
+  return c.json({ ok: true, on: data.on });
+});
+
 // The float left in the drawer at each day close (managers and owners).
 drawerRoutes.put(`${B}/drawer/float`, requireAction('drawer.float'), async (c) => {
   const db = c.env.DB;

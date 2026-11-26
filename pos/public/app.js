@@ -318,6 +318,12 @@ actions.discLimitSave = async () => {
   await api('PUT', `${B()}/settings`, { name: b.name, fyStartMonth: b.fy_start_month, shiftStartHour: b.shift_start_hour, tabAgeDays: b.tab_age_days, discLimitPct: Number(ui.discLimit ?? b.disc_limit_bp / 100) });
   me = await api('GET', '/me'); flash = { kind: 'ok', text: `Saved: a cashier may give up to ${me.business.disc_limit_bp / 100}% alone.` }; route();
 };
+actions.drawerCountSet = async (d) => {
+  const on = d.on === '1';
+  await api('PUT', `${B()}/drawer/count-setting`, { on });
+  me.business.drawer_count = on ? 1 : 0;
+  flash = { kind: 'ok', text: on ? 'The drawer is counted at Day close.' : 'Day close no longer counts the drawer.' }; route();
+};
 actions.floatSave = async () => {
   await api('PUT', `${B()}/drawer/float`, { amount: String(ui.floatAmt ?? (me.business.float_paise ?? 0) / 100) });
   me = await api('GET', '/me'); flash = { kind: 'ok', text: `Saved: ${rs(me.business.float_paise)} stays in the drawer at each day close.` }; route();
@@ -3102,11 +3108,11 @@ function takingsClose(s) {
   return html`<div class="tkcards">${tot.map((r) => html`<div class="tkcard"><span class="l">${r.t}</span><span class="v">${rs(r.bills + r.rooms)}</span><span class="s">bills ${rs(r.bills)} · rooms ${rs(r.rooms)}</span></div>`)}</div>
     <div class="tkbig"><span>Money in today</span><span>${rs(all)}</span></div>
     <p class="label" style="margin:6px 0 0">To close the day</p>
-    <div>${step(1, 'Count the cash drawer', 'Use the "Count the cash drawer" form. What the drawer should hold shows after you count.', '')}
-      ${step(2, s.byAccount.length === 1 ? `Match UPI in the ${s.byAccount[0].name} app` : 'Match UPI in each bank app', s.byAccount.length > 1 ? s.byAccount.map((a) => `${a.name} ${rs(a.paise)}`).join(' · ') : 'all UPI today, bills and rooms', rs(tot[1].bills + tot[1].rooms))}
-      ${step(3, 'Card machine settlement', tot[2].bills + tot[2].rooms ? 'all card payments today, bills and rooms' : 'no card payments today', rs(tot[2].bills + tot[2].rooms))}
-      ${step(4, 'Bills printed today', html`${s.billed.map((b) => `${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}`).join(' · ') || 'no bills'}${notMoney.length ? ` · ${notMoney.map(([t, v]) => `${rs(v)} ${t}, not money yet`).join(' · ')}` : ''}${s.unpaidBills.length ? html` · <span style="color:var(--warn)">${plural(s.unpaidBills.length, 'bill')} not paid yet</span>` : s.billed.length ? html` · all paid <span style="color:var(--go)">✓</span>` : ''}`, rs(billed))}
-      ${step(5, 'Anything to look at', look.length ? look.join(' · ') : 'voids, discounts, credit notes, cancelled KOTs, paid out', look.length ? html`<button type="button" class="chip" data-act="pick" data-k="tkTab" data-id="detail">See breakdown</button>` : html`<span class="status mute">none</span>`)}</div>`;
+    <div>${ui.countOn ? step(1, 'Count the cash drawer', 'Use the "Count the cash drawer" form. What the drawer should hold shows after you count.', '') : ''}
+      ${step(ui.countOn ? 2 : 1, s.byAccount.length === 1 ? `Match UPI in the ${s.byAccount[0].name} app` : 'Match UPI in each bank app', s.byAccount.length > 1 ? s.byAccount.map((a) => `${a.name} ${rs(a.paise)}`).join(' · ') : 'all UPI today, bills and rooms', rs(tot[1].bills + tot[1].rooms))}
+      ${step(ui.countOn ? 3 : 2, 'Card machine settlement', tot[2].bills + tot[2].rooms ? 'all card payments today, bills and rooms' : 'no card payments today', rs(tot[2].bills + tot[2].rooms))}
+      ${step(ui.countOn ? 4 : 3, 'Bills printed today', html`${s.billed.map((b) => `${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}`).join(' · ') || 'no bills'}${notMoney.length ? ` · ${notMoney.map(([t, v]) => `${rs(v)} ${t}, not money yet`).join(' · ')}` : ''}${s.unpaidBills.length ? html` · <span style="color:var(--warn)">${plural(s.unpaidBills.length, 'bill')} not paid yet</span>` : s.billed.length ? html` · all paid <span style="color:var(--go)">✓</span>` : ''}`, rs(billed))}
+      ${step(ui.countOn ? 5 : 4, 'Anything to look at', look.length ? look.join(' · ') : 'voids, discounts, credit notes, cancelled KOTs, paid out', look.length ? html`<button type="button" class="chip" data-act="pick" data-k="tkTab" data-id="detail">See breakdown</button>` : html`<span class="status mute">none</span>`)}</div>`;
 }
 function takingsTable(s) {
   const pays = s.payments ?? [];
@@ -3132,7 +3138,7 @@ async function shiftScreen() {
   try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
   const day = me.business.shiftDay;
   const d = await api('GET', `${B()}/shifts/${day}`);
-  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue; ui.notIn = d.notCheckedIn ?? [];
+  ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue; ui.notIn = d.notCheckedIn ?? []; ui.countOn = d.drawerCount !== false;
   const notes = NOTE_VALUES;
   rerender = () => {
     const s = ui.s;
@@ -3141,15 +3147,29 @@ async function shiftScreen() {
     const carried = [...s.openOrders.map((o) => o.place), ...s.unpaidBills.map((x) => `${x.place ?? ''} ${x.bill_no}`.trim())];
     const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0);
     const cd = ui.countDiff;
-    paint(shell('#/shift', html`${pageHead(`Day close · ${dayName(s.shiftDay)}`, `The day runs ${me.business.shift_start_hour} am to ${me.business.shift_start_hour} am. Count the drawer, check the day, then close it. Closing does not change who holds the drawer.`)}
-      <div class="kpis">${kpi('Cash drawer', ui.dz ? ui.dz.holder : 'Nobody yet', ui.dz ? `since ${dateTime(ui.dz.since)}` : 'starts with the next cash')}
+    // Counting turned off (26 Nov 2026): the page is the takings and what is pending, and Close the day closes it.
+    const moneyIn = [...s.byMode, ...s.receipts].filter((m) => ['cash', 'upi', 'card'].includes(m.mode)).reduce((t, m) => t + m.paise, 0);
+    const cashIn = [...s.byMode, ...s.receipts].filter((m) => m.mode === 'cash').reduce((t, m) => t + m.paise, 0);
+    const upiIn = [...s.byMode, ...s.receipts].filter((m) => m.mode === 'upi').reduce((t, m) => t + m.paise, 0);
+    const billedPaise = s.billed.reduce((t, b) => t + b.paise, 0);
+    const openPaise = s.openOrders.reduce((t, o) => t + o.paise, 0);
+    paint(shell('#/shift', html`${pageHead(`Day close · ${dayName(s.shiftDay)}`, ui.countOn ? `The day runs ${me.business.shift_start_hour} am to ${me.business.shift_start_hour} am. Count the drawer, check the day, then close it. Closing does not change who holds the drawer.`
+        : `The day runs ${me.business.shift_start_hour} am to ${me.business.shift_start_hour} am. Check what is pending and today's takings, then close the day. It closes by itself at ${me.business.shift_start_hour} am if nobody does.`)}
+      ${ui.countOn ? '' : html`<div class="kpis">${kpi('Money in today', rs(moneyIn), `cash ${rs(cashIn)} · UPI ${rs(upiIn)}`)}
+        ${kpi('Bills printed', String(s.billed.reduce((t, b) => t + b.n - b.voids, 0)), `${rs(billedPaise)}${s.unpaidBills.length ? ` · ${plural(s.unpaidBills.length, 'bill')} not paid` : s.billed.length ? ' · all paid' : ''}`)}
+        ${kpi('Tables carried on', String(s.openOrders.length), s.openOrders.length ? `${rs(openPaise)} open` : 'none open')}
+        ${ui.overdue.length ? kpi('Open since an earlier day', String(ui.overdue.length), 'clear before closing', 'bad') : ''}</div>`}
+      ${ui.countOn ? html`<div class="kpis">${kpi('Cash drawer', ui.dz ? ui.dz.holder : 'Nobody yet', ui.dz ? `since ${dateTime(ui.dz.since)}` : 'starts with the next cash')}
         ${kpi('Float kept', ui.floatSet ? rs(ui.floatSet) : 'Not set', ui.floatSet ? 'the rest goes to the safe' : 'set it in Settings, Staff')}
         ${kpi('Tables carried on', String(carried.length), carried.length ? 'into the next day, with their holder' : 'none open')}
-        ${ui.overdue.length ? kpi('Open since an earlier day', String(ui.overdue.length), 'clear before closing', 'bad') : ''}</div>
+        ${ui.overdue.length ? kpi('Open since an earlier day', String(ui.overdue.length), 'clear before closing', 'bad') : ''}</div>` : ''}
+      ${!ui.countOn && s.openOrders.length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><strong>${plural(s.openOrders.length, 'table')} still open · ${rs(openPaise)}</strong>
+        <div class="small">${[...s.openOrders].sort((a, b) => b.paise - a.paise).map((o) => `${o.place} ${rs(o.paise)}`).join(' · ')}. They carry into ${dayName(addDays(s.shiftDay, 1))}; their sale counts on the day the bill prints.</div>
+        <div class="row" style="margin-top:6px"><a class="btn" href="#/">Go to Tables</a></div></div>` : ''}
       ${ui.notIn.length && can('stays.edit') ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><strong>Arrivals not checked in: ${ui.notIn.length}</strong> · check each in (late, if the guest has left), or mark a no-show.
         <div class="small">${ui.notIn.slice(0, 12).map((x) => `${x.guestName ?? 'No name'}${x.roomLabels ? ` (${x.roomLabels})` : ''} · ${dayName(x.checkIn)}`).join(' · ')}${ui.notIn.length > 12 ? ` · and ${ui.notIn.length - 12} more` : ''}</div>
         <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms/checkin">Go to Check-in</a><a class="btn ghost" href="#/rooms/audit">Night audit (no-shows)</a></div></div>` : ''}
-      ${ui.last && !ui.last.countedAt ? html`<section class="panel blockers"><div class="bh"><h2>${dayName(ui.last.shiftDay)} closed by itself</h2><span class="status warn">Drawer not counted</span></div>
+      ${ui.countOn && ui.last && !ui.last.countedAt ? html`<section class="panel blockers"><div class="bh"><h2>${dayName(ui.last.shiftDay)} closed by itself</h2><span class="status warn">Drawer not counted</span></div>
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
       ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
@@ -3175,11 +3195,16 @@ async function shiftScreen() {
         ${s.creditNotes.length ? html`<div class="sums"><div><strong>Credit notes (money given back)</strong></div>${s.creditNotes.map((n) => html`<div><span>${n.cnNo} on ${n.billNo} · ${n.reason} · ${n.refundMode}</span><span>${rs(-n.totalPaise)}</span></div>`)}</div>` : ''}
         ${s.drawerOuts.length ? html`<div class="sums"><div><strong>Paid out of the drawer</strong></div>${s.drawerOuts.map((o) => html`<div><span>${o.kind === 'refund' ? 'Advance refunded' : 'Paid out'}${o.mode === 'upi' ? ' (UPI)' : ''}${o.note && o.note !== 'Advance refunded' ? ' · ' + o.note : ''} · ${o.byName ?? ''}</span><span>${rs(-o.amountPaise)}</span></div>`)}</div>` : ''}
         `}
-        ${ui.closed ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
+        ${ui.closed || !ui.countOn ? '' : html`<form class="grid2" style="align-items:end"><label class="f">Cash paid out (₹)<input class="in" inputmode="decimal" data-model="outAmount" value="${ui.outAmount ?? ''}"></label>
           <label class="f">What for<input class="in" data-model="outNote" value="${ui.outNote ?? ''}" placeholder="e.g. Vegetables"></label>
           <button class="btn" type="submit" data-act="paidOut" data-submit>Record paid out</button></form>`}
       </section>
-      ${ui.closed ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
+      ${ui.closed || ui.countOn ? '' : html`<form class="panel"><h2>Close the day</h2>${errorBox()}
+        <p class="small quiet">Closes ${dayName(s.shiftDay)} now and starts ${dayName(addDays(s.shiftDay, 1))}.${s.openOrders.length ? ` The ${plural(s.openOrders.length, 'open table')} carry on.` : ''} No drawer count (turned off in Settings, Staff).</p>
+        ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}"></label>` : ''}
+        ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length ? 'disabled' : ''}>Close the day</button></form>`}
+      ${ui.closed || !ui.countOn ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
         ${ui.floatSet ? html`<div class="row between"><span>Float (fixed in Settings)</span><strong>${rs(ui.floatSet)}</strong></div>`
           : html`<label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" value="${ui.float ?? ''}"></label>`}
         <div class="notes">${notes.map((n) => html`<label class="f">₹${n} notes<input class="in" inputmode="numeric" data-model="c${n}" data-note="${n}" value="${ui.counts[n] ?? ''}"></label>`)}
@@ -3215,7 +3240,7 @@ actions.closeShift = async () => {
   counted.loose = ui.loose || '0';
   try {
     const r = await api('POST', `${B()}/shifts/${ui.s.shiftDay}/close`, { openingFloat: ui.floatSet ? undefined : ui.float || '0', counted, reason: ui.reason, deskReason: ui.deskReason, djuboReason: ui.djuboReason });
-    flash = { kind: r.differencePaise ? 'warn' : 'ok', text: `Day closed. ${r.message}` }; me = await api('GET', '/me'); route();
+    flash = { kind: r.differencePaise ? 'warn' : 'ok', text: r.noCount ? r.message : `Day closed. ${r.message}` }; me = await api('GET', '/me'); route();
   } catch (e) {
     // Blind count (24 Nov 2026): the expected amount comes back only after counting, with a request for the reason.
     if (e instanceof ApiError && e.code === 'count_differs') { ui.countDiff = { expected: Number(e.data.expectedPaise), diff: Number(e.data.differencePaise) }; ui.error = null; rerender(); return; }
@@ -4514,7 +4539,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   ui.npOpen ??= !!(unpaidOld.length || heavy.length);
   // ----- What to look at first.
   const look = [
-    ...(d.shiftClose && !d.shiftClose.countedAt ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
+    ...(d.shiftClose && !d.shiftClose.countedAt && !d.shiftClose.noCount ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
     ...(d.drawers ?? []).filter((x) => x.differencePaise).map((x) => `Cash ${x.differencePaise < 0 ? 'short' : 'over'} ${rs(Math.abs(x.differencePaise))} in ${x.holder}'s drawer`),
     ...unpaidOld.map((o) => `${o.place} not paid for ${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d` : `${o.hours} h`}`),
     ...heavy.map((p) => `${p.name} cancelled ${plural(p.cancels + p.orders.size, 'KOT line')}`),
@@ -4543,7 +4568,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
     ${look.length ? html`<div class="dc-look"><span class="badge-n">${plural(look.length, 'thing')} to look at</span><span>${look.join(' · ')}</span></div>`
       : html`<div class="dc-look ok"><span class="badge-n">All clear</span><span>Cash matched, nothing unpaid for long, no unusual cancels.</span></div>`}
     <div class="kpis dc-kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), change === null ? `${rs(d.sales.totalPaise)} with GST` : `${change >= 0 ? '▲' : '▼'} ${Math.abs(change)}% on last ${new Date(day + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long' })}`)}
-      ${d.shiftClose && !d.shiftClose.countedAt ? kpi('Cash close', 'Not counted', 'Count it on Day close', 'bad')
+      ${d.shiftClose?.noCount ? kpi('Cash close', 'Closed', 'No drawer count (turned off)')
+        : d.shiftClose && !d.shiftClose.countedAt ? kpi('Cash close', 'Not counted', 'Count it on Day close', 'bad')
         : d.shiftClose ? kpi('Cash close', d.shiftClose.differencePaise === 0 ? 'Matched' : `${d.shiftClose.differencePaise > 0 ? 'Over' : 'Short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`, d.shiftClose.reason ?? 'Shift closed', d.shiftClose.differencePaise === 0 ? 'good' : 'bad')
         : kpi('Cash close', 'Not closed', 'The shift is not closed yet', 'warn')}
       ${kpi('Bill numbers', broken.length ? 'Gaps found' : 'Unbroken', broken.length ? 'See below' : `${plural(d.series.length, 'series', 'series')} · FY ${d.fy}`, broken.length ? 'bad' : 'good')}
@@ -4864,6 +4890,10 @@ async function settingsScreen(tab = 'menu') {
       <form class="row" style="align-items:end"><label class="f">Discount a cashier may give alone (%)<input class="in" inputmode="numeric" data-model="discLimit" value="${ui.discLimit ?? (me.business.disc_limit_bp ?? 1000) / 100}" style="width:120px"></label>
         <button class="btn" type="submit" data-act="discLimitSave" data-submit>Save</button></form>
       <p class="small quiet">Above this, a manager's or owner's PIN is needed. A PIN is always needed to make an item free, give a complimentary bill, open a credit account, give money back, or change how a bill was paid.</p></section>
+      <section class="panel" style="margin-bottom:16px"><h2>Count the drawer at Day close</h2>
+      <div class="row"><button type="button" class="chip" aria-pressed="${(me.business.drawer_count ?? 1) === 1}" data-act="drawerCountSet" data-on="1">On: count the cash at closing</button>
+        <button type="button" class="chip" aria-pressed="${(me.business.drawer_count ?? 1) === 0}" data-act="drawerCountSet" data-on="0">Off: takings and pending only</button></div>
+      <p class="small quiet">Off: Day close shows the takings and what is pending, and closes the day without counting the drawer (no paid-out form). Turn it on again any time.</p></section>
       <section class="panel" style="margin-bottom:16px"><h2>Cash drawer float</h2>
       <form class="row" style="align-items:end"><label class="f">Float kept in the drawer (₹)<input class="in" inputmode="decimal" data-model="floatAmt" value="${ui.floatAmt ?? (me.business.float_paise ?? 0) / 100}" style="width:140px"></label>
         <button class="btn" type="submit" data-act="floatSave" data-submit>Save</button></form>

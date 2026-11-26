@@ -92,6 +92,7 @@ shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
   return c.json({ summary: await shiftSummary(db, bid, day, b.tab_age_days, b.shift_start_hour), closed, current: clock(b).shiftDay,
     lastClosed: last ? { shiftDay: last.shift_day, countedAt: last.counted_at, auto: !!last.auto, closedAt: last.closed_at, by: last.by } : null,
     endsAt: shiftEnd(clock(b).shiftDay, b.shift_start_hour), overdue: await overdueOrders(db, bid, day), floatPaise: float,
+    drawerCount: (await one<{ n: number }>(db, 'SELECT drawer_count AS n FROM businesses WHERE id = ?', bid))!.n === 1,
     // Arrivals of this shift and the 7 days before that were never checked in here (25 Nov 2026): a reminder, not a block.
     notCheckedIn: await all(db, `SELECT guest_name AS guestName, check_in AS checkIn, room_labels AS roomLabels FROM bookings bk
       WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in <= ? AND check_in >= ?
@@ -126,6 +127,25 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const s = await shiftSummary(db, bid, day, b.tab_age_days, b.shift_start_hour);
 
   const data = await body(c);
+  // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).
+  const deskReason = s.deskMissing.length ? text(data, 'deskReason', `Reception entered ${rs(s.deskMissing.reduce((t, x) => t + x.pendingPaise, 0))} in Djubo with no POS receipt (${s.deskMissing.map((x) => x.extRef).join(', ')}). Take it in Rooms, or a reason`, { max: 200 })! : null;
+  const djuboReason = s.notInDjubo.length ? text(data, 'djuboReason', `${s.notInDjubo.length} reservation${s.notInDjubo.length === 1 ? '' : 's'} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (${s.notInDjubo.map((x) => x.guestName).join(', ')}). Enter ${s.notInDjubo.length === 1 ? 'it' : 'them'} in Djubo, or a reason`, { max: 200 })! : null;
+  // No drawer count (26 Nov 2026, a setting): the day closes as the automatic close does, the drawer "not counted" and
+  // left as it is; nothing goes to Bookr for it (the bills and payments already did).
+  if ((await one<{ n: number }>(db, 'SELECT drawer_count AS n FROM businesses WHERE id = ?', bid))!.n === 0) {
+    const totals = { deskMissing: s.deskMissing, deskReason, notInDjubo: s.notInDjubo, djuboReason, byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed,
+      events: s.events, tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment,
+      carried: { openOrders: s.openOrders, unpaidBills: s.unpaidBills }, noCount: true };
+    try {
+      await db.batch([stmt(db, `INSERT INTO shift_closes (id, business_id, shift_day, opening_float_paise, counted, counted_paise, expected_paise, difference_paise,
+        difference_reason, totals, closed_by, closed_at, counted_at, auto) VALUES (?, ?, ?, 0, '{}', 0, ?, 0, NULL, ?, ?, ?, NULL, 0)`,
+        newId(), bid, day, s.cashInPaise - s.cashOutPaise, JSON.stringify(totals), me.id, t)]);
+    } catch (e) {
+      if (isUniqueViolation(e)) fail(409, 'This shift is already closed.');
+      throw e;
+    }
+    return c.json({ ok: true, noCount: true, message: `${day} closed. Cash taken today ${rs(s.cashInPaise)}.` }, 201);
+  }
   const floatPaise = (await one<{ f: number }>(db, 'SELECT float_paise AS f FROM businesses WHERE id = ?', bid))!.f;
   const typed = typeof data.openingFloat === 'string' && data.openingFloat ? parsePaise(data.openingFloat) : null;
   if (typed !== null && typed < 0) fail(400, 'Opening float must be an amount in rupees.');
@@ -139,9 +159,6 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const cash = await cashBetween(db, bid, dr.opened_at, t);
   const expected = opening + cash.inPaise - cash.outPaise;
   const { diff, reason } = countResult(data, countedPaise, expected);
-  // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).
-  const deskReason = s.deskMissing.length ? text(data, 'deskReason', `Reception entered ${rs(s.deskMissing.reduce((t, x) => t + x.pendingPaise, 0))} in Djubo with no POS receipt (${s.deskMissing.map((x) => x.extRef).join(', ')}). Take it in Rooms, or a reason`, { max: 200 })! : null;
-  const djuboReason = s.notInDjubo.length ? text(data, 'djuboReason', `${s.notInDjubo.length} reservation${s.notInDjubo.length === 1 ? '' : 's'} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (${s.notInDjubo.map((x) => x.guestName).join(', ')}). Enter ${s.notInDjubo.length === 1 ? 'it' : 'them'} in Djubo, or a reason`, { max: 200 })! : null;
   const start = shiftEnd(day, b.shift_start_hour) - 86_400_000;
   const drawers = (await drawersOfDay(db, bid, start, t)).map((x) => (x.id === dr!.id ? { ...x, to: t, closeKind: 'day_close', countedPaise, expectedPaise: expected, differencePaise: diff, reason } : x));
   const safePaise = Math.max(0, countedPaise - (floatPaise || opening));
@@ -193,7 +210,7 @@ shiftRoutes.post(`${B}/shifts/:day/reopen`, requireAction('staff.manage'), async
  *  closed if nobody closed it by hand and anything happened in it. Its drawer is "not counted yet"; open orders, printed
  *  bills and tabs carry on into the next shift and are listed in the close. Only the shift just ended is closed. */
 export async function autoCloseAll(db: DB, t = now()) {
-  const bs = await all<{ id: string; shift_start_hour: number; tab_age_days: number }>(db, "SELECT id, shift_start_hour, tab_age_days FROM businesses WHERE status = 'active'");
+  const bs = await all<{ id: string; shift_start_hour: number; tab_age_days: number; drawer_count: number }>(db, "SELECT id, shift_start_hour, tab_age_days, drawer_count FROM businesses WHERE status = 'active'");
   let closed = 0;
   for (const b of bs) {
     const prev = new Date(Date.parse(shiftDayAt(t, b.shift_start_hour)) - 86_400_000).toISOString().slice(0, 10);
@@ -205,7 +222,7 @@ export async function autoCloseAll(db: DB, t = now()) {
     const s = await shiftSummary(db, b.id, prev, b.tab_age_days, b.shift_start_hour);
     const totals = { deskMissing: s.deskMissing, notInDjubo: s.notInDjubo, byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events,
       tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment,
-      carried: { openOrders: s.openOrders, unpaidBills: s.unpaidBills } };
+      carried: { openOrders: s.openOrders, unpaidBills: s.unpaidBills }, ...(b.drawer_count === 0 ? { noCount: true } : {}) };
     try {
       await db.batch([stmt(db, `INSERT INTO shift_closes (id, business_id, shift_day, opening_float_paise, counted, counted_paise, expected_paise, difference_paise,
         difference_reason, totals, closed_by, closed_at, counted_at, auto) VALUES (?, ?, ?, 0, '{}', 0, ?, 0, NULL, ?, NULL, ?, NULL, 1)`,
