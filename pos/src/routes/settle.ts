@@ -9,6 +9,7 @@ import { body, fail, isUuid, text } from '../../../src/http';
 import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { allocateLoose, fyOf, rs } from '../billing';
 import { djuboPays } from '../djubo-desk';
+import { restaurantAdvances } from '../restaurant-advances';
 import { audit, clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
 import { billOut } from './orders';
 import { phoneKey } from './settings';
@@ -651,4 +652,102 @@ settleRoutes.post(`${B}/bookings/:id/djubo-link`, requireAction('debtors.receive
     audit(db, bid, c.get('staff').id, 'booking.djubo_linked', 'bookings', e.bookingId, null, { mailId: e.mailId, receiptNo: r.receiptNo, amountPaise: e.amountPaise, markedBy: e.by }),
   ]);
   return c.json({ ok: true, receiptNo: r.receiptNo });
+});
+
+// ---------- advances on restaurant orders (26 Nov 2026)
+// Taken on a running order, or for a party booked ahead. The money goes on an advance account of its own with a numbered
+// receipt (counted in takings the day it is taken); at payment the bill uses it ("Use advance"), so it is not counted twice.
+
+settleRoutes.get(`${B}/restaurant-advances`, requireAction('pos.view'), async (c) => {
+  const id = c.req.query('orderId');
+  return c.json({ advances: await restaurantAdvances(c.env.DB, c.get('businessId'), id && isUuid(id) ? id : undefined) });
+});
+
+// Takes one: on an order (orderId), or for a party booked ahead (partyDay, optional time and people). Prints a receipt.
+settleRoutes.post(`${B}/restaurant-advances`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  let order: { id: string; place: string; guest_name: string | null; guest_phone: string | null } | null = null;
+  if (data.orderId !== undefined && data.orderId !== null && data.orderId !== '') {
+    order = await one(db, "SELECT id, place, guest_name, guest_phone FROM orders WHERE id = ? AND business_id = ? AND status IN ('open', 'tab')",
+      isUuid(String(data.orderId)) ? data.orderId : null, bid);
+    if (!order) fail(404, 'Order not found, or already billed.');
+  }
+  const partyDay = order ? null : (typeof data.partyDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.partyDay) ? data.partyDay : fail(400, 'Choose the day of the party.'));
+  const partyTime = order ? null : (typeof data.partyTime === 'string' && /^\d{2}:\d{2}$/.test(data.partyTime) ? data.partyTime : null);
+  const people = order ? null : (Number.isInteger(data.people) && (data.people as number) > 0 && (data.people as number) < 1000 ? data.people as number : null);
+  const name = (typeof data.guestName === 'string' && data.guestName.trim() ? data.guestName.trim() : order?.guest_name ?? '').slice(0, 80);
+  if (!name) fail(400, "Type the guest's name.");
+  const phone = data.phone ? phoneKey(data.phone) : order?.guest_phone ?? null;
+  if (data.phone && !phone) fail(400, 'Phone must be 6 to 15 digits.');
+  if (!order && !phone) fail(400, "Add the guest's phone, so the advance finds their table on the day.");
+  if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 5) fail(400, 'Add how it was paid.');
+  const pays: Pay[] = [];
+  for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card']));
+  const total = pays.reduce((s0, p) => s0 + p.amountPaise, 0);
+  const b = bizOf(c);
+  const { t, shiftDay, fy } = clock(b);
+  const staff = c.get('staff');
+  await cashGuard(c, pays.some((p) => p.mode === 'cash'));
+  const accId = newId();
+  const id = newId();
+  const settlementId = newId();
+  const accName = `Advance · ${name}${order ? ` · ${order.place}` : partyDay ? ` · ${partyDay}` : ''}`.slice(0, 120);
+  try {
+    await db.batch([
+      stmt(db, "INSERT INTO debtor_accounts (id, business_id, kind, name, phone, created_by, created_at) VALUES (?, ?, 'credit', ?, ?, ?, ?)", accId, bid, accName, phone, staff.id, t),
+      stmt(db, `INSERT INTO restaurant_advances (id, business_id, account_id, order_id, guest_name, phone, party_day, party_time, people, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, accId, order?.id ?? null, name, phone, partyDay, partyTime, people, staff.id, t),
+      ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
+      ...pays.map((p) => insertPayment(db, bid, settlementId, { ...p, debtorAccountId: null }, shiftDay, staff.id, t)),
+      ...pays.map((p) => stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, by_staff, at) VALUES (?, ?, ?, 'advance', ?, ?, ?, ?)",
+        newId(), bid, accId, -p.amountPaise, p.id, staff.id, t)),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
+        settlementId, kind: 'advance', account: { id: accId, kind: 'credit', name: accName }, shiftDay, at: t, by: staff.name,
+        payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, payAccountName: p.payAccountName,
+          bookrAccountId: p.bookrAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4 })),
+      }), t),
+      audit(db, bid, staff.id, 'restaurant.advance', 'restaurant_advances', id, null, { orderId: order?.id ?? null, partyDay, amountPaise: total }),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Open the screen again: money now goes to the next shift.');
+    throw e;
+  }
+  sendSoon(c, bid);
+  const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
+  return c.json({ id, accountId: accId, receipt: { receiptNo, kind: 'advance', at: t, name, room: null, place: order?.place ?? null, party: partyDay ? { day: partyDay, time: partyTime, people } : null,
+    totalPaise: total, balancePaise: null, payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } }, 201);
+});
+
+// Puts a party's advance on the order opened for it (the table on the day).
+settleRoutes.post(`${B}/restaurant-advances/:id/link`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const r = await one<{ id: string }>(c.env.DB, "SELECT id FROM restaurant_advances WHERE id = ? AND business_id = ? AND status = 'open'", c.req.param('id'), bid);
+  if (!r) fail(404, 'Advance not found.');
+  const o = await one<{ id: string; place: string }>(c.env.DB, "SELECT id, place FROM orders WHERE id = ? AND business_id = ? AND status IN ('open', 'tab')",
+    typeof data.orderId === 'string' && isUuid(data.orderId) ? data.orderId : null, bid);
+  if (!o) fail(404, 'Choose an open order.');
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE restaurant_advances SET order_id = ? WHERE id = ?', o.id, r.id),
+    audit(c.env.DB, bid, c.get('staff').id, 'restaurant.advance_link', 'restaurant_advances', r.id, null, { orderId: o.id, place: o.place }),
+  ]);
+  return c.json({ ok: true });
+});
+
+// A no-show's advance not given back: a manager keeps it, with a reason (it leaves the lists; the account keeps the record).
+settleRoutes.post(`${B}/restaurant-advances/:id/keep`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const note = text(data, 'note', 'Why it is kept', { max: 160 })!;
+  const approver = await approval(c, data, 'Keeping an advance');
+  const r = await one<{ id: string }>(c.env.DB, "SELECT id FROM restaurant_advances WHERE id = ? AND business_id = ? AND status = 'open'", c.req.param('id'), bid);
+  if (!r) fail(404, 'Advance not found.');
+  const kept = isManager(c) ? note : `${note} · Approved by ${approver.name}`.slice(0, 200);
+  await c.env.DB.batch([
+    stmt(c.env.DB, "UPDATE restaurant_advances SET status = 'kept', kept_note = ? WHERE id = ?", kept, r.id),
+    audit(c.env.DB, bid, c.get('staff').id, 'restaurant.advance_kept', 'restaurant_advances', r.id, null, { note: kept }),
+  ]);
+  return c.json({ ok: true });
 });

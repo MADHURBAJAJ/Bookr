@@ -432,6 +432,9 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault(); go('#/rooms/new');
   } else if ((ev.key === 'c' || ev.key === 'C') && onDesk() && can('stays.edit')) {
     ev.preventDefault(); go('#/rooms/checkin');
+  } else if ((ev.key === 'a' || ev.key === 'A') && /^#\/(counter)?$|^$|^#$/.test(location.hash) && can('debtors.receive')) {
+    // A party's advance (A), from the Counter (26 Nov 2026).
+    ev.preventDefault(); actions.partyAdv();
   } else if (['t', 'r', 'k'].includes(ev.key.toLowerCase()) && onDesk() && can('orders.edit')) {
     // New table (T), room service (R), takeaway (K) from Counter, Tables or Rooms (24 Nov 2026).
     ev.preventDefault();
@@ -489,6 +492,78 @@ const KIND_TEXT = { table: 'Table', room: 'Room service', takeaway: 'Takeaway' }
 // (running tables, carried over first; room service, takeaway and tabs), front desk on the right (today's numbers, every
 // room and bed tonight, arriving, leaving, money owed), with one search and the alerts on top. Shortcut keys: / search,
 // T new table, R room service, K takeaway, C check in, N new reservation (also on Tables and Rooms).
+// ---------- advances on restaurant orders (26 Nov 2026): on a running order, or for a party booked ahead.
+function advanceTakeForm() {
+  const f = ui.advForm;
+  const accs = (cache.payAccounts ?? []).filter((a) => a.active);
+  return html`<form class="panel" style="border-color:var(--pri-line);margin:8px 0"><h3 style="margin:0">${f.orderId ? `Advance on ${f.place}` : 'Advance for a party booked ahead'}</h3>${errorBox()}
+    <div class="grid2"><label class="f">Guest name<input class="in" data-model="advGName" value="${ui.advGName ?? f.name ?? ''}" autofocus></label>
+      <label class="f">Phone${f.orderId ? ' (optional)' : ''}<input class="in" inputmode="tel" data-model="advGPhone" value="${ui.advGPhone ?? ''}"></label></div>
+    ${f.orderId ? '' : html`<div class="grid3"><label class="f">Day<input class="in" type="date" data-model="advDay" value="${ui.advDay ?? me.business.shiftDay}"></label>
+      <label class="f">Time<input class="in" type="time" data-model="advTime" value="${ui.advTime ?? ''}"></label>
+      <label class="f">People<input class="in" inputmode="numeric" data-model="advPeople" value="${ui.advPeople ?? ''}"></label></div>`}
+    <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="advAmt" value="${ui.advAmt ?? ''}"></label>
+      <div class="f">Paid by<div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.advMode ?? 'cash') === k}" data-act="pick" data-k="advMode" data-id="${k}">${t}</button>`)}</div></div></div>
+    ${ui.advMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${accs.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.advAcc === a.id}" data-act="pick" data-k="advAcc" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
+    <div class="row"><button class="btn pri" type="submit" data-act="advTakeGo" data-submit>Take advance and print receipt</button><button class="btn" type="button" data-act="advFormNo">Cancel</button></div></form>`;
+}
+actions.partyAdv = () => { ui.advForm = {}; ui.advMode = 'cash'; Object.assign(ui, { advGName: undefined, advGPhone: undefined, advDay: undefined, advTime: undefined, advPeople: undefined, advAmt: undefined, advAcc: undefined }); ui.error = null; rerender(); };
+actions.advOrder = () => { ui.advForm = { orderId: ui.order.id, place: ui.order.place, name: ui.order.guestName ?? '' }; ui.advMode = 'cash'; Object.assign(ui, { advGName: undefined, advGPhone: undefined, advAmt: undefined, advAcc: undefined }); ui.error = null; rerender(); };
+actions.advFormNo = () => { ui.advForm = null; rerender(); };
+actions.advTakeGo = async () => {
+  const f = ui.advForm;
+  const mode = ui.advMode ?? 'cash';
+  if (mode === 'upi' && !ui.advAcc) throw new Error("Choose which account's QR was paid.");
+  const people = Number(ui.advPeople);
+  const r = await api('POST', `${B()}/restaurant-advances`, { orderId: f.orderId, guestName: ui.advGName ?? f.name ?? '', phone: ui.advGPhone || undefined,
+    partyDay: f.orderId ? undefined : ui.advDay ?? me.business.shiftDay, partyTime: f.orderId ? undefined : ui.advTime || undefined, people: Number.isInteger(people) && people > 0 ? people : undefined,
+    payments: [{ mode, amount: ui.advAmt ?? '', payAccountId: mode === 'upi' ? ui.advAcc : undefined }] });
+  printJobs([{ kind: 'bill', html: asHtml(receiptSlip(r.receipt)) }]);
+  ui.advForm = null;
+  flash = { kind: 'ok', text: `${r.receipt.receiptNo}: advance ${rs(r.receipt.totalPaise)} from ${r.receipt.name} taken.` };
+  if (f.orderId) { ui.oadv = (await api('GET', `${B()}/restaurant-advances?orderId=${f.orderId}`)).advances; rerender(); } else route();
+};
+function advancesHeldList() {
+  const today = me.business.shiftDay;
+  // Restaurant tables only (not rooms or dorm beds), not running now.
+  const restTables = (ui.sections ?? []).filter((x) => !['rooms', 'dorms', 'nc'].includes(x.kind)).flatMap((x) => x.tables ?? []);
+  const free = (restTables.length ? restTables : ui.tables ?? []).filter((t) => !(ui.orders ?? []).some((o) => o.kind === 'table' && o.place.toLowerCase() === t.toLowerCase()));
+  return html`<div class="sect"><h3 style="margin:0">Advances held</h3><span class="small quiet">${ui.radv.length} · ${rs(ui.radv.reduce((t, x) => t + x.leftPaise, 0))}</span></div>
+    <div class="ctrlist">${ui.radv.map((x) => { const done = x.orderStatus === 'closed' || x.orderStatus === 'cancelled'; const noShow = !x.orderId && x.partyDay && x.partyDay < today;
+      return html`<div class="drow" style="flex-wrap:wrap"><span class="grow"><strong>${x.guestName}</strong>
+        <small>${x.orderId ? `${x.place}${done ? ' · bill paid, advance left over' : ''}` : `Party ${dayName(x.partyDay)}${x.partyTime ? `, ${x.partyTime}` : ''}${x.people ? ` · ${x.people} people` : ''}${noShow ? ' · date passed' : ''}`} · ${x.receipts ?? ''}${x.phoneEnd ? ` · phone …${x.phoneEnd}` : ''}</small></span>
+        <span class="dright"><span class="num">${rs(x.leftPaise)}</span>
+          ${!x.orderId && !noShow && can('orders.edit') ? html`<button class="btn sm" type="button" data-act="advOpenAsk" data-id="${x.id}">${ui.advOpen === x.id ? 'Cancel' : 'Open their table'}</button>` : ''}
+          ${(done || noShow) && isMgr() ? html`<button class="btn sm" type="button" data-act="advBack" data-id="${x.id}" data-a="${x.accountId}" data-m="cash" data-amt="${rupees(x.leftPaise)}">Give back cash</button>
+            <button class="btn sm" type="button" data-act="advBack" data-id="${x.id}" data-a="${x.accountId}" data-m="upi" data-amt="${rupees(x.leftPaise)}">Give back UPI</button>
+            <button class="btn sm ghost" type="button" data-act="advKeep" data-id="${x.id}">Keep</button>` : (done || noShow) ? html`<span class="status warn">A manager gives it back or keeps it</span>` : ''}</span>
+        ${ui.advOpen === x.id ? html`<div class="chips" style="width:100%;margin-top:6px"><span class="small quiet">Their table:</span>${free.map((t) => html`<button type="button" class="chip" data-act="advOpenGo" data-id="${x.id}" data-place="${t}">${t}</button>`)}</div>` : ''}</div>`; })}</div>`;
+}
+actions.advOpenAsk = (d) => { ui.advOpen = ui.advOpen === d.id ? null : d.id; rerender(); };
+actions.advOpenGo = async (d) => {
+  const x = ui.radv.find((y) => y.id === d.id);
+  const r = await api('POST', B() + '/orders', { kind: 'table', place: d.place });
+  await api('POST', `${B()}/restaurant-advances/${d.id}/link`, { orderId: r.id });
+  flash = { kind: 'ok', text: `${x.guestName}'s ${rs(x.leftPaise)} advance is on ${d.place}.` };
+  go(`#/order/${r.id}`);
+};
+actions.advBack = async (d) => {
+  await api('POST', `${B()}/debtors/${d.a}/refund`, { mode: d.m, amount: d.amt, note: 'Restaurant advance given back' });
+  flash = { kind: 'ok', text: `₹${d.amt} given back (${d.m === 'cash' ? 'cash from the drawer' : 'UPI'}).` }; route();
+};
+actions.advKeep = async (d) => {
+  const note = prompt('Why is this advance kept (not given back)?');
+  if (!note || !note.trim()) return;
+  await api('POST', `${B()}/restaurant-advances/${d.id}/keep`, { note: note.trim() });
+  flash = { kind: 'ok', text: 'Advance kept.' }; route();
+};
+actions.advLinkHere = async (d) => {
+  await api('POST', `${B()}/restaurant-advances/${d.id}/link`, { orderId: ui.order.id });
+  ui.oadv = (await api('GET', `${B()}/restaurant-advances?orderId=${ui.order.id}`)).advances;
+  ui.waitAdv = (ui.waitAdv ?? []).filter((x) => x.id !== d.id);
+  flash = { kind: 'ok', text: 'Advance put on this order.' }; rerender();
+};
+
 async function counterScreen() {
   const today = me.business.shiftDay;
   const [{ orders, tables, tablesFixed, sections }, fd, chart] = await Promise.all([
@@ -499,6 +574,8 @@ async function counterScreen() {
   ]);
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.fd = fd; ui.cchart = chart;
   ui.arrivals = (fd?.arrivals ?? []).filter((a) => a.kind === 'booking');
+  ui.radv = can('pos.view') ? (await api('GET', B() + '/restaurant-advances').catch(() => ({ advances: [] }))).advances : [];
+  if (can('debtors.receive')) await load('payAccounts').catch(() => null);
   rerender = () => {
     const orderN = (st) => ui.orders.filter((o) => orderState(o) === st).length;
     const toPay = ui.orders.filter((o) => orderState(o) === 'billed').reduce((t, o) => t + (o.bill?.totalPaise ?? 0), 0);
@@ -508,6 +585,8 @@ async function counterScreen() {
     const f = ui.fd;
     const alerts = [
       ...(f?.alerts.notInDjubo ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', text: `Not in Djubo yet: ${x.guestName} · ${x.rooms}`, href: '#/rooms/list' })),
+      ...(ui.radv ?? []).filter((x) => !x.orderId && x.partyDay === today).map((x) => ({ tone: 'info', text: `Party today: ${x.guestName}${x.partyTime ? `, ${x.partyTime}` : ''} · ${rs(x.leftPaise)} advance`, href: '#/' })),
+      ...(ui.radv ?? []).filter((x) => (!x.orderId && x.partyDay && x.partyDay < today) || x.orderStatus === 'closed' || x.orderStatus === 'cancelled').map((x) => ({ tone: 'warn', text: `Advance to give back: ${x.guestName} · ${rs(x.leftPaise)}`, href: '#/' })),
       ...overdue.map((o) => ({ tone: 'bad', text: `${o.place} open since ${dayName(o.openedShiftDay)}: clear before the day closes`, href: orderHref(o) })),
       ...(f?.alerts.deskToTake ? [{ tone: 'warn', text: `Reception money to take: ${plural(f.alerts.deskToTake, 'booking')}`, href: '#/rooms' }] : []),
       ...(f?.alerts.unplaced ? [{ tone: 'bad', text: `Djubo could not place ${plural(f.alerts.unplaced, 'booking')}`, href: '#/rooms/list' }] : []),
@@ -527,11 +606,14 @@ async function counterScreen() {
           <div class="row"><h2 class="grow" style="margin:0">Restaurant</h2>
             ${can('orders.edit') ? html`<button class="btn pri sm" type="button" data-act="newOrder" data-kind="table">New table · T</button>
               <button class="btn sm" type="button" data-act="newOrder" data-kind="room">Room service · R</button>
-              <button class="btn sm" type="button" data-act="newOrder" data-kind="takeaway">Takeaway · K</button>` : ''}</div>
+              <button class="btn sm" type="button" data-act="newOrder" data-kind="takeaway">Takeaway · K</button>` : ''}
+            ${can('debtors.receive') ? html`<button class="btn sm" type="button" data-act="partyAdv">Party advance · A</button>` : ''}</div>
           ${ui.picking ? newOrderForm() : ''}
+          ${ui.advForm ? advanceTakeForm() : ''}
           <div class="kpis">${kpi('Running', String(ui.orders.length))}${kpi('To pay', rs(toPay), plural(orderN('billed'), 'bill'))}${kpi('With kitchen', String(orderN('open')))}
             ${kpi('Not sent', String(orderN('new')), '', orderN('new') ? 'warn' : '')}${kpi('Carried over', String(carried.length), overdue.length ? `${overdue.length} overdue` : '', overdue.length ? 'bad' : '')}</div>
           ${can('orders.edit') && ui.tables.length ? tableGrid() : ''}
+          ${(ui.radv ?? []).length ? advancesHeldList() : ''}
           <div class="sect"><h3 style="margin:0">Room service, takeaway and tabs</h3><span class="small quiet">${rest.length}</span></div>
           ${rest.length ? html`<div class="ctrlist">${rest.map((o) => { const st = orderState(o); return html`<a class="drow" href="${orderHref(o)}"><span class="grow"><strong>${o.place}</strong>
             <small>${KIND_TEXT[o.kind] ?? o.kind}${o.guestName ? ` · ${o.guestName}` : ''} · ${since(o.openedAt)}</small></span>
@@ -842,6 +924,11 @@ async function orderScreen(id) {
   const [o, ev] = await Promise.all([api('GET', `${B()}/orders/${id}`), api('GET', `${B()}/event-mode/now`).catch(() => ({ event: null }))]);
   ui.order = o.order; ui.event = ev.event; ui.guest = o.order.guest;
   ui.cat = 'All'; ui.q = '';
+  // Advances on this order, and parties' advances waiting for a table (26 Nov 2026).
+  const adv = can('pos.view') ? (await api('GET', `${B()}/restaurant-advances`).catch(() => ({ advances: [] }))).advances : [];
+  ui.oadv = adv.filter((x) => x.orderId === id);
+  ui.waitAdv = adv.filter((x) => !x.orderId && x.partyDay && x.partyDay <= me.business.shiftDay);
+  if (can('debtors.receive')) await load('payAccounts').catch(() => null);
   rerender = () => {
     const o = ui.order;
     if (o.status === 'billed' || o.status === 'closed') { paint(shell('#/', html`<p class="empty">This order is already billed. <a href="#/">Back to tables</a></p>`)); return; }
@@ -925,12 +1012,16 @@ async function orderScreen(id) {
             <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
         </div>
         <div class="tk-foot">
+          ${(ui.oadv ?? []).map((x) => html`<div class="msg ok" style="display:block;margin-bottom:6px"><strong>Advance ${rs(x.leftPaise)}</strong> · ${x.guestName} · ${x.receipts ?? ''}<div class="small">It comes off the bill at payment.</div></div>`)}
+          ${(ui.waitAdv ?? []).length && can('orders.edit') ? html`<div class="msg warn" style="display:block;margin-bottom:6px"><strong>Party advance waiting</strong>
+            ${ui.waitAdv.map((x) => html`<div class="line" style="gap:8px;margin-top:4px"><span class="grow small">${x.guestName} · ${dayName(x.partyDay)}${x.partyTime ? `, ${x.partyTime}` : ''} · ${rs(x.leftPaise)}${x.phoneEnd ? ` · …${x.phoneEnd}` : ''}</span><button class="btn sm" type="button" data-act="advLinkHere" data-id="${x.id}">Put on this table</button></div>`)}</div>` : ''}
+          ${ui.advForm ? advanceTakeForm() : ''}
           <div class="tk-total"><span>${plural(count, 'item')}</span><strong>${rs(total)}</strong></div>
           <div class="tk-main ${can('bills.print') ? '' : 'one'}">
             <button class="btn ${unsent ? 'pri' : ''}" type="button" data-act="kot" ${unsent ? '' : 'disabled'}>Send KOT${unsent ? ` · ${newCount} new` : ''}</button>
             ${can('bills.print') ? html`<button class="btn ${o.lines.length && !unsent ? 'go' : ''}" type="button" data-act="toBill" ${!o.lines.length || unsent ? 'disabled' : ''}>Bill</button>` : ''}</div>
           ${unsent && can('bills.print') ? html`<p class="hint">Send the new dishes to the kitchen before billing.</p>` : ''}
-          <div class="tk-more">${count > 1 && !ui.splitting ? html`<button class="btn" type="button" data-act="splitAsk">Split bill</button>` : ''}
+          <div class="tk-more">${can('debtors.receive') && !ui.advForm ? html`<button class="btn" type="button" data-act="advOrder">Take advance</button>` : ''}${count > 1 && !ui.splitting ? html`<button class="btn" type="button" data-act="splitAsk">Split bill</button>` : ''}
             ${o.status === 'open' ? html`<button class="btn" type="button" data-act="keepTab">Keep as a tab</button>` : ''}
             ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>`
               : ui.wholeCancel ? '' : html`<button class="btn danger" type="button" data-act="wholeAsk">Cancel whole order</button>`}</div>
@@ -1329,6 +1420,18 @@ async function settleScreen(billId) {
   ui.bill = bill; ui.others = orders.filter((o) => o.status === 'billed' && o.bill && o.bill.id !== billId);
   ui.together = []; ui.pays = []; ui.mode = ui.folio ? 'room' : 'cash';
   if (ui.folio) ui.debtorAccountId = ui.folio.accountId;
+  // An advance taken on this order is used by itself (26 Nov 2026): the guest pays only the rest.
+  if (ord && !ui.ncPlace) {
+    const adv = (await api('GET', `${B()}/restaurant-advances?orderId=${ord.id}`).catch(() => ({ advances: [] }))).advances;
+    let left = bill.totalPaise;
+    for (const x of adv) {
+      const use = Math.min(x.leftPaise, left);
+      if (use <= 0) continue;
+      ui.pays.push({ mode: 'advance', amount: rupees(use), amountPaise: use, debtorAccountId: x.accountId, label: 'Advance', detail: `${x.guestName} · ${x.receipts ?? ''}` });
+      left -= use;
+    }
+    if (ui.pays.length) ui.mode = 'cash';
+  }
   rerender = () => {
     const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
     const paid = ui.pays.reduce((s, p) => s + p.amountPaise, 0);
@@ -1499,11 +1602,14 @@ actions.addPay = () => {
 actions.quick = async (d) => {
   const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
   const acct = cache.payAccounts.find((a) => a.id === d.id);
-  ui.pays = [d.m === 'cash' ? { mode: 'cash', amount: rupees(due), amountPaise: due, label: 'Cash', detail: 'Exact' }
-    : { mode: 'upi', amount: rupees(due), amountPaise: due, payAccountId: acct.id, label: 'UPI', detail: acct.name }];
+  // Advances already on the bill stay; the rest is paid now (26 Nov 2026).
+  const kept = ui.pays.filter((p) => p.mode === 'advance');
+  const rest = due - kept.reduce((t, p) => t + p.amountPaise, 0);
+  ui.pays = [...kept, d.m === 'cash' ? { mode: 'cash', amount: rupees(rest), amountPaise: rest, label: 'Cash', detail: 'Exact' }
+    : { mode: 'upi', amount: rupees(rest), amountPaise: rest, payAccountId: acct.id, label: 'UPI', detail: acct.name }];
   ui.diff = null;
   // A refusal clears the payment again; a "billing name differs" question keeps it, so "Settle anyway" works.
-  try { await actions.settle({}); } catch (e) { ui.pays = []; throw e; }
+  try { await actions.settle({}); } catch (e) { ui.pays = ui.pays.filter((p) => p.mode === 'advance'); throw e; }
 };
 actions.settle = async (d) => {
   ui.error = null;
@@ -2767,7 +2873,7 @@ actions.formC = async (d) => { await api('POST', `${B()}/stays/${d.id}/form-c`);
 /** A payment receipt slip (24 Nov 2026): its number, the room and guest, how it was paid, and what is left to pay. */
 const receiptSlip = (r) => html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">${r.kind === 'deposit' ? 'DEPOSIT RECEIPT (REFUNDABLE)' : r.kind === 'advance' ? 'ADVANCE RECEIPT' : 'PAYMENT RECEIPT'}</div>
   <div class="rl"><span>${r.receiptNo}</span><span>${dateTime(r.at)}</span></div>
-  <div>${r.room ? `Room ${r.room} · ` : ''}${r.name}</div>${r.booking ? html`<div>Booking ${r.booking}</div>` : ''}${r.checkIn ? html`<div>Stay from ${dayName(r.checkIn)}${r.checkOut ? ` to ${dayName(r.checkOut)}` : ''}</div>` : ''}<hr>
+  <div>${r.room ? `Room ${r.room} · ` : r.place ? `${r.place} · ` : ''}${r.name}</div>${r.party ? html`<div>Party ${dayName(r.party.day)}${r.party.time ? `, ${r.party.time}` : ''}${r.party.people ? ` · ${r.party.people} people` : ''}</div>` : ''}${r.booking ? html`<div>Booking ${r.booking}</div>` : ''}${r.checkIn ? html`<div>Stay from ${dayName(r.checkIn)}${r.checkOut ? ` to ${dayName(r.checkOut)}` : ''}</div>` : ''}<hr>
   ${r.payments.map((p) => html`<div class="rl"><span>${MODE_NAME[p.mode] ?? p.mode}${p.payAccountName ? ` (${p.payAccountName})` : ''}${p.cardLast4 ? ` ****${p.cardLast4}` : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}
   <div class="rl" style="font-weight:700"><span>RECEIVED</span><span>${rs(r.totalPaise)}</span></div><hr>
   ${r.balancePaise === null || r.balancePaise === undefined ? '' : html`<div class="rl"><span>${r.balancePaise > 0 ? 'Still to pay' : r.balancePaise < 0 ? 'Held for you' : 'Nothing more to pay'}</span><span>${r.balancePaise ? rs(Math.abs(r.balancePaise)) : ''}</span></div>`}
@@ -3374,6 +3480,9 @@ async function shiftScreen() {
       ${(s.djubo ?? []).length ? html`<section class="panel" style="margin-bottom:12px"><div class="row between"><h2>Taken in Djubo today · ${rs(s.djubo.reduce((t, x) => t + x.amountPaise, 0))}</h2>${djOpen.length ? html`<span class="status warn">${djOpen.length} to pick</span>` : html`<span class="status ok">All picked</span>`}</div>
         <p class="small quiet" style="margin:0">Marked in Djubo today by reception (not the booking team or the OTAs), for any stay date. Counted in today's takings once you pick how each was paid; the day can't close before.</p>
         ${s.djubo.map(djRow)}</section>` : ''}
+      ${(s.advancesHeld ?? []).length ? html`<section class="panel" style="margin-bottom:12px"><div class="row between"><h2>Restaurant advances held · ${rs(s.advancesHeld.reduce((t, x) => t + x.leftPaise, 0))}</h2><span class="small quiet">not used on a bill yet</span></div>
+        ${s.advancesHeld.map((x) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:6px 0"><span class="grow small"><strong>${x.guestName}</strong> · ${x.orderId ? x.place : `party ${dayName(x.partyDay)}${x.partyTime ? `, ${x.partyTime}` : ''}`} · ${x.receipts ?? ''}</span><span class="num">${rs(x.leftPaise)}</span></div>`)}
+        <p class="small quiet" style="margin:4px 0 0">Counted in takings on the day each was taken; using it on a bill later is not counted again.</p></section>` : ''}
       ${carried.length ? html`<p class="small quiet" style="margin-bottom:12px">Carrying into ${dayName(addDays(s.shiftDay, 1))}: ${carried.join(', ')}. Their sale stays on the day the bill was printed; the money counts when paid.</p>` : ''}
       <div class="two rev">
       <section class="panel"><div class="row between"><h2>Takings</h2><div class="chips">${[['close', 'Close'], ['detail', 'Breakdown']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.tkTab ?? 'close') === k}" data-act="pick" data-k="tkTab" data-id="${k}">${t}</button>`)}</div></div>

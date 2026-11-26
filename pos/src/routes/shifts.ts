@@ -8,6 +8,7 @@ import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { rs, shiftDayAt } from '../billing';
 import { djuboPays, oldDeskPending } from '../djubo-desk';
+import { restaurantAdvances } from '../restaurant-advances';
 import { notInDjubo } from './frontdesk';
 import { audit, clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
@@ -69,6 +70,8 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   return { shiftDay: day, byMode, receipts, byAccount, billed, events, payments, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut, deskMissing,
     // Money reception marked in Djubo on this day (26 Nov 2026): counted here; each needs a mode before the day closes.
+    // Restaurant advances not used on a bill yet (26 Nov 2026).
+    advancesHeld: await restaurantAdvances(db, bid),
     djubo: (await djuboPays(db, bid, startHour)).pays.filter((x) => x.day === day || (x.settlementId && payments.some((p) => p.receiptNo === x.receiptNo))),
     // Reservations made at the desk that Djubo has not confirmed (25 Nov 2026).
     notInDjubo: await notInDjubo(db, bid, day),
