@@ -410,7 +410,7 @@ const onDesk = () => /^#\/(counter|rooms)?(\/.*)?$|^#?$/.test(location.hash) && 
 let pendingPick = null;   // a new order asked for by a shortcut on Rooms: opened on Tables
 // Keyboard shortcuts (25 Nov 2026): / searches the screen, N starts a new reservation (on Rooms), Esc closes the side
 // panel or the open form. Not while typing in a field (except Esc).
-const ESC_KEYS = ['roomBill', 'recv', 'refund', 'adv', 'rbForm', 'chartSel', 'resSel', 'drawer', 'approval', 'guestAsk'];
+const ESC_KEYS = ['roomBill', 'recv', 'refund', 'adv', 'rbForm', 'chartSel', 'resSel', 'drawer', 'approval', 'guestAsk', 'useSel'];
 document.addEventListener('keydown', (ev) => {
   if (ev.ctrlKey || ev.metaKey || ev.altKey || ui.pinPad) return;
   const typing = ev.target.matches?.('input, textarea, select');
@@ -3954,15 +3954,43 @@ function useTab(storeSel) {
     ${u.items.length ? html`<div class="sums" style="max-width:520px;margin:12px 0"><div><span>Used in ${plural(u.days, 'day')}, at the last price paid</span><span><strong>${rs(u.totals.usedValuePaise)}</strong></span></div>
         <div><span>of which breakage</span><span>${rs(u.totals.wasteValuePaise)}</span></div><div><span>of which missing at counts</span><span style="${u.totals.missingValuePaise ? 'color:var(--bad)' : ''}">${rs(u.totals.missingValuePaise)}</span></div>
         ${ui.uStore ? '' : html`<div><span>Sent to kitchen or bar, not on a bill</span><span style="${u.totals.notBilledValuePaise ? 'color:var(--warn)' : ''}">${rs(u.totals.notBilledValuePaise ?? 0)}</span></div>`}</div>
-      <div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Missing</th><th class="num">Used</th><th class="num">A day</th><th class="num">Value</th><th>Used most by</th></tr></thead><tbody>
-        ${u.items.map((i) => html`<tr><td data-label="Item"><strong>${i.name}</strong>${i.extra ? html`<div class="small quiet">+${i.extra} ${i.unit} found extra at counts</div>` : ''}</td>
+      <div class="usewrap ${ui.useSel ? 'two' : ''}"><div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th class="num">Sold</th><th class="num">Breakage</th><th class="num">Missing</th><th class="num">Used</th><th class="num">A day</th><th class="num">Value</th><th>Used most by</th></tr></thead><tbody>
+        ${u.items.map((i) => html`<tr class="userow ${ui.useSel === i.id ? 'on' : ''}" data-act="useRow" data-id="${i.id}" tabindex="0" title="Tap to see the bills, KOTs and breakage behind it"><td data-label="Item"><strong>${i.name}</strong>${i.extra ? html`<div class="small quiet">+${i.extra} ${i.unit} found extra at counts</div>` : ''}</td>
           <td data-label="Sold" class="num">${unitQty(i.sold, i)}${i.notBilled ? html`<div class="small" style="color:var(--warn)">${unitQty(i.notBilled, i)} not billed</div>` : ''}</td><td data-label="Breakage" class="num">${i.waste ? unitQty(i.waste, i) : '—'}</td>
           <td data-label="Missing" class="num" style="${i.missing ? 'color:var(--bad)' : ''}">${i.missing ? unitQty(i.missing, i) : '—'}</td><td data-label="Used" class="num"><strong>${unitQty(i.used, i)}</strong></td>
           <td data-label="A day" class="num">${i.perDay} ${i.unit}</td><td data-label="Value" class="num">${rs(i.usedValuePaise)}</td>
           <td data-label="Used most by" class="small">${i.topDishes.length ? i.topDishes.map((d) => `${d.dish} (${d.qty})`).join(', ') : html`<span class="quiet">—</span>`}</td></tr>`)}</tbody></table></div>
-      <p class="small quiet">Sold is by each dish's recipe when it was sent to the kitchen or bar (orders before 25 Nov, 8 am: when the bill was paid). Not billed is what was sent but is on no bill: tables still open, walkouts, or food that left without a bill (all stores only). A cancelled KOT puts its stock back, so food made and then cancelled shows as missing at the count. Missing is what counts found short of the book. Values are at the last price paid.</p>`
+      ${useSide(unitQty)}</div>
+      <p class="small quiet">Tap a row to see what is behind it. Sold is by each dish's recipe when it was sent to the kitchen or bar (orders before 25 Nov, 8 am: when the bill was paid). Not billed is what was sent but is on no bill: tables still open, walkouts, or food that left without a bill (all stores only). A cancelled KOT puts its stock back, so food made and then cancelled shows as missing at the count. Missing is what counts found short of the book. Values are at the last price paid.</p>`
       : html`<p class="quiet">Nothing was used in these dates${ui.uStore ? ' from this store' : ''}.</p>`}</section>`;
 }
+// What is behind one Consumption row (26 Nov 2026), loaded when the row is tapped.
+function useSide(unitQty) {
+  const d = ui.useDet;
+  if (!ui.useSel) return '';
+  if (!d) return html`<section class="panel usedet"><p class="quiet">Loading…</p></section>`;
+  const i = ui.use.items.find((x) => x.id === ui.useSel) ?? { unit: d.item.unit, packSize: 1 };
+  const q = (n) => unitQty(n, i);
+  const sec = (title, list, row, none) => html`<h3 class="usedh">${title}</h3>${list.length ? html`<div class="uselist">${list.map(row)}</div>` : html`<p class="small quiet">${none}</p>`}`;
+  const state = (o) => (o.status === 'tab' ? 'on a tab' : o.status === 'open' ? 'table still open' : 'bill voided');
+  return html`<section class="panel usedet" id="usedet"><div class="row" style="justify-content:space-between;align-items:center"><h2>${d.item.name}</h2>
+      <button class="btn ghost sm" type="button" data-act="useClose">Close</button></div>
+    <p class="small quiet" style="margin:0">${dayName(d.from)} to ${dayName(d.to)}${ui.uStore ? '' : ' · all stores'}</p>
+    ${sec('Sold on bills', d.bills, (b) => html`<div class="useln"><a class="mono" href="#/done/${b.id}">${b.billNo}</a><span>${b.place} · ${dateTime(b.at)}<span class="small quiet"> · ${b.dishes}</span></span><span class="num">${q(b.units)}</span></div>`, 'None in these dates.')}
+    ${ui.uStore ? '' : sec('Sent to the kitchen or bar, not on a bill', d.unbilled, (o) => html`<div class="useln"><a href="#/order/${o.orderId}">${o.kots ? `KOT ${o.kots}` : o.place}</a><span>${o.place} · ${dateTime(o.at)}${o.by ? ` · ${o.by}` : ''} <span class="badge ${o.status === 'open' || o.status === 'tab' ? 'open' : 'void'}">${state(o)}</span><span class="small quiet"> · ${o.dishes}</span></span><span class="num">${q(o.units)}</span></div>`, 'Everything sent was billed.')}
+    ${sec('Breakage and missing', d.losses, (m) => html`<div class="useln"><span>${dateTime(m.at)}</span><span>${m.kind === 'breakage' ? 'Breakage' : 'Missing at count'}${m.reason ? ` · ${m.reason}` : ''} · ${m.store}${m.by ? ` · ${m.by}` : ''}</span><span class="num">${q(m.qty)}</span></div>`, 'None.')}
+  </section>`;
+}
+actions.useRow = async (d) => {
+  if (ui.useSel === d.id) { ui.useSel = null; ui.useDet = null; rerender(); return; }
+  ui.useSel = d.id; ui.useDet = null; rerender();
+  const r = await api('GET', `${B()}/stock/consumption/item?itemId=${d.id}&from=${ui.uFrom}&to=${ui.uTo}${ui.uStore ? `&storeId=${ui.uStore}` : ''}`);
+  if (ui.useSel !== d.id) return;
+  ui.useDet = r; rerender();
+  document.getElementById('usedet')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+};
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.matches?.('tr.userow')) { ev.preventDefault(); actions.useRow({ id: ev.target.dataset.id }); } });
+actions.useClose = () => { ui.useSel = null; ui.useDet = null; rerender(); };
 actions.useGo = () => { Object.assign(stockPicks, { uFrom: ui.uFrom, uTo: ui.uTo, uStore: ui.uStore }); route(); };
 
 async function stockScreen(tab = 'hand') {

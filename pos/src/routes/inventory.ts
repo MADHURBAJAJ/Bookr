@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { all, one, stmt } from '../../../src/db';
 import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
+import { stockRule } from '../stock';
 import { audit } from '../util';
 import type { AppEnv } from '../types';
 
@@ -94,6 +95,41 @@ inventoryRoutes.get(`${B}/stock/consumption`, requireAction('stock.edit'), async
   return c.json({ from, to, days: nDays, storeId, items, totals: {
     usedValuePaise: items.reduce((t, x) => t + x.usedValuePaise, 0), wasteValuePaise: items.reduce((t, x) => t + x.wasteValuePaise, 0),
     missingValuePaise: items.reduce((t, x) => t + x.missingValuePaise, 0), notBilledValuePaise: items.reduce((t, x) => t + x.notBilledValuePaise, 0) } });
+});
+
+// One item's consumption, behind its row (26 Nov 2026): the bills it was sold on, the orders that took it at the KOT
+// and are on no bill yet, and the breakage and count shortfalls, with who and when. Loaded only when the row is tapped.
+inventoryRoutes.get(`${B}/stock/consumption/item`, requireAction('stock.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const from = date({ d: c.req.query('from') ?? '' }, 'd', 'From');
+  const to = date({ d: c.req.query('to') ?? '' }, 'd', 'To');
+  if (from > to) fail(400, 'From must be on or before To.');
+  const storeId = c.req.query('storeId') || null;
+  const item = await one<{ id: string; name: string; unit: string }>(db, 'SELECT id, name, unit FROM stock_items WHERE id = ? AND business_id = ?', c.req.query('itemId') ?? '', bid);
+  if (!item) fail(404, 'Stock item not found.');
+  const bills = await all<{ id: string; bill_no: string; place: string; printed_at: number; units: number; dishes: string }>(db, `
+    SELECT b.id, b.bill_no, o.place, b.printed_at, sum(l.qty * r.qty) AS units, group_concat(l.qty || ' × ' || l.name, ', ') AS dishes
+      FROM bill_lines l JOIN bills b ON b.id = l.bill_id JOIN orders o ON o.id = b.order_id JOIN recipes r ON r.menu_item_id = l.item_id AND r.stock_item_id = ?
+      WHERE b.business_id = ? AND b.shift_day BETWEEN ? AND ? AND b.status <> 'void' GROUP BY b.id ORDER BY b.printed_at DESC LIMIT 300`, item.id, bid, from, to);
+  // Sent (or handed over, for no-KOT items) on orders with no bill standing: still open, on a tab, or their bill voided.
+  const unbilled = storeId ? [] : await all<{ id: string; place: string; status: string; opened_at: number; units: number; dishes: string; kots: string | null; by_name: string | null }>(db, `
+    SELECT o.id, o.place, o.status, o.opened_at, sum(CASE WHEN l.kot = 0 THEN l.qty ELSE l.sent_qty END * r.qty) AS units,
+      group_concat(CASE WHEN l.kot = 0 THEN l.qty ELSE l.sent_qty END || ' × ' || l.name, ', ') AS dishes,
+      (SELECT group_concat(k.kot_no, ', ') FROM kots k WHERE k.order_id = o.id) AS kots,
+      (SELECT st.name FROM kots k JOIN staff st ON st.id = k.by_staff WHERE k.order_id = o.id ORDER BY k.printed_at LIMIT 1) AS by_name
+      FROM orders o JOIN order_lines l ON l.order_id = o.id JOIN recipes r ON r.menu_item_id = l.item_id AND r.stock_item_id = ?
+      WHERE o.business_id = ? AND o.opened_shift_day BETWEEN ? AND ? AND o.status <> 'cancelled' AND o.opened_at >= ?
+        AND NOT EXISTS (SELECT 1 FROM bills b WHERE b.order_id = o.id AND b.status <> 'void')
+      GROUP BY o.id HAVING units > 0 ORDER BY o.opened_at DESC LIMIT 300`, item.id, bid, from, to, stockRule.kotFrom);
+  const losses = await all<{ kind: string; qty: number; reason: string | null; ref: string | null; at: number; shift_day: string; store: string; by_name: string | null }>(db, `
+    SELECT m.kind, m.qty, m.reason, m.ref, m.at, m.shift_day, s.name AS store, st.name AS by_name FROM stock_moves m JOIN stock_stores s ON s.id = m.store_id
+      LEFT JOIN staff st ON st.id = m.by_staff WHERE m.business_id = ? AND m.item_id = ? AND m.shift_day BETWEEN ? AND ? ${storeId ? 'AND m.store_id = ?' : ''}
+      AND (m.kind = 'waste' OR (m.kind = 'count' AND m.qty < 0)) ORDER BY m.at DESC LIMIT 300`, ...(storeId ? [bid, item.id, from, to, storeId] : [bid, item.id, from, to]));
+  return c.json({ item: { id: item.id, name: item.name, unit: item.unit }, from, to,
+    bills: bills.map((b) => ({ id: b.id, billNo: b.bill_no, place: b.place, at: b.printed_at, units: b.units, dishes: b.dishes })),
+    unbilled: unbilled.map((o) => ({ orderId: o.id, place: o.place, status: o.status, at: o.opened_at, units: o.units, dishes: o.dishes, kots: o.kots, by: o.by_name })),
+    losses: losses.map((m) => ({ kind: m.kind === 'waste' ? 'breakage' : 'missing', qty: -m.qty, reason: m.reason ?? m.ref ?? '', at: m.at, store: m.store, by: m.by_name })) });
 });
 
 // What was bought for shifts from..to: each receipt (a bill, or one receiving), its lines and amount, the price paid
