@@ -34,7 +34,9 @@
   "vars": { "BOOKR_URL": "https://bookr.thebajajgroup.co", "CLAUDE_OCR_MODEL": "claude-opus-5-5", "BILL_READS_PER_DAY": "30",
     // Booking mails: which address belongs to which business, and which senders' mails are read (others bounce).
     "MAIL_ROUTES": "{\"bookings@mail.thebajajgroup.co\": \"d165d1c4-909d-42ff-bedc-d9c2eccd3cab\"}",
-    "BOOKING_MAIL_FROM": "{\"mmt\": \"no-reply@go-mmt.com, no-reply@goibibo.com\", \"djubo\": \"notifications@djubo.com\"}" },
+    "BOOKING_MAIL_FROM": "{\"mmt\": \"no-reply@go-mmt.com, no-reply@goibibo.com\", \"djubo\": \"notifications@djubo.com\"}",
+    // Old booking mails forwarded once from the hotel's mailbox (25 Nov 2026); read only while the MAIL_IMPORT_KEY secret is set.
+    "MAIL_IMPORT_FROM": "xoxohostel@gmail.com" },
   // Sends Bookr whatever is still waiting, every 5 minutes.
   "triggers": { "crons": ["*/5 * * * *"] },
   // POS_SETUP_TOKEN is a Worker secret (wrangler secret put POS_SETUP_TOKEN -c pos/wrangler.jsonc), never here.

@@ -42,41 +42,106 @@ export async function receiveMail(message: ForwardableEmailMessage, env: Env) {
   if (!businessId) { message.setReject('This address is not set up in Bookr POS.'); return; }
   const raw = new Uint8Array(await new Response(message.raw).arrayBuffer());
   const mail = await PostalMime.parse(raw);
-  const source = sourceOf(env, addressOf(mail.from));
+  const from = addressOf(mail.from);
+  const imp = await importOf(env, from, mail);
+  if (typeof imp === 'string') { message.setReject(`Bookr POS only reads booking mails from Djubo and MakeMyTrip: ${imp.slice(8).replace(/[()]/g, '').trim()}.`); return; }
+  if (imp) { await storeMail(env, businessId, raw, imp.source, imp.mail, imp); return; }
+  const source = sourceOf(env, from);
   if (!source) { message.setReject('Bookr POS only reads booking mails from Djubo and MakeMyTrip.'); return; }
   await storeMail(env, businessId, raw, source, mail);
 }
 
+// ---------- Old booking mails, brought in once (25 Nov 2026) ----------
+// The mails from before the POS read booking mails are forwarded once from the hotel's own mailbox (MAIL_IMPORT_FROM).
+// Each forward carries a line "Bookr import <key> <Gmail id> <when the mail came, ISO, or - to take it from the forward's
+// own header> <its sender>" with the key in the
+// MAIL_IMPORT_KEY secret, which is set only while this runs. The forwarded mail is read with its sender's reader and
+// counts as having come when the original did, so it never overrides a newer mail the POS already has.
+
+export interface Imported { source: 'mmt' | 'djubo'; mail: Email; messageId: string; receivedAt: number }
+const IMPORT_LINE = /Bookr\s+import\s+([A-Za-z0-9_-]{20,})\s+([0-9a-f]{8,20})\s+(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?Z|-)\s+([^\s<>"]+@[^\s<>"]+)/;
+/** Gmail's forward header: "---------- Forwarded message ---------" then "Date: Wed, Nov 4, 2026 at 5:54 AM" (the
+ *  mailbox's time zone, UTC for this one). */
+const FWD_DATE = /Forwarded message[\s\S]{0,400}?Date:\s*(?:[A-Za-z]{3},\s*)?([A-Za-z]{3})[a-z]*\s+(\d{1,2}),\s*(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*([AP])M/i;
+const MONTHS_EN = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+export function forwardedAt(flat: string): number | null {
+  const m = FWD_DATE.exec(flat);
+  const mon = m ? MONTHS_EN.indexOf(m[1].toLowerCase()) : -1;
+  if (!m || mon < 0) return null;
+  const h = (Number(m[4]) % 12) + (/p/i.test(m[6]) ? 12 : 0);
+  return Date.UTC(Number(m[3]), mon, Number(m[2]), h, Number(m[5]));
+}
+const FWD = /^\s*(?:(?:fwd?|fw)\s*:\s*)+/i;
+
+/** A forwarded old booking mail: what it is and its inner mail; 'refused (why)' when it is from the hotel's mailbox but not
+ *  a valid import (no key, a wrong one, imports not open); null when it is not from the hotel's mailbox at all. */
+export async function importOf(env: Env, from: string, mail: Email): Promise<Imported | `refused${string}` | null> {
+  const box = (env.MAIL_IMPORT_FROM ?? '').trim().toLowerCase();
+  if (!box || from !== box) return null;
+  const key = env.MAIL_IMPORT_KEY ?? '';
+  if (key.length < 20) return 'refused (imports are closed)';
+  const flat = `${mail.text ?? ''}\n${(mail.html ?? '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').replace(/&#64;/g, '@')}`;
+  const m = IMPORT_LINE.exec(flat);
+  if (!m) return 'refused (no import line)';
+  if (!same(m[1], key)) return 'refused (wrong key)';
+  const src = sourceOf(env, m[4].toLowerCase());
+  if (src !== 'mmt' && src !== 'djubo') return 'refused (not a booking sender)';
+  const at = m[3] === '-' ? forwardedAt(flat) : Date.parse(m[3]);
+  if (at === null || Number.isNaN(at)) return 'refused (no date for the original mail)';
+  return { source: src, mail: await innerOf(mail), messageId: `import:${m[2]}`, receivedAt: at };
+}
+
+/** The original inside a forward: an attached mail when there is one, else the forward itself without its "Fwd:". */
+async function innerOf(mail: Email): Promise<Email> {
+  const att = mail.attachments?.find((a) => /message\/rfc822/i.test(a.mimeType));
+  if (att) {
+    const inner = await PostalMime.parse(typeof att.content === 'string' ? att.content : new Uint8Array(att.content as ArrayBuffer));
+    if (inner.html || inner.text) return inner;
+  }
+  return { ...mail, subject: (mail.subject ?? '').replace(FWD, '') };
+}
+
+/** Same length and same characters, compared without stopping early. */
+function same(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
 /** Keeps the mail (once per Message-ID) and reads it. Returns the stored mail's id, or null when it was already there. */
-export async function storeMail(env: Env, businessId: string, raw: Uint8Array, source: MailSource, mail?: Email) {
+export async function storeMail(env: Env, businessId: string, raw: Uint8Array, source: MailSource, mail?: Email, imp?: Pick<Imported, 'messageId' | 'receivedAt'>) {
   const db = env.DB;
   if (!env.BILLS) throw new Error('No mail store (R2) is set up.');
   mail ??= await PostalMime.parse(raw);
-  const messageId = (mail.messageId ?? '').trim() || `sha256:${await sha256(raw)}`;
+  const messageId = imp?.messageId ?? ((mail.messageId ?? '').trim() || `sha256:${await sha256(raw)}`);
   if (await one(db, 'SELECT 1 FROM inbound_mails WHERE business_id = ? AND message_id = ?', businessId, messageId)) return null;
   const id = newId();
   const key = `mail/${businessId}/${id}.eml`;
   await env.BILLS.put(key, raw, { httpMetadata: { contentType: 'message/rfc822' } });
   const t = now();
-  const receivedAt = mail.date && !Number.isNaN(Date.parse(mail.date)) ? Date.parse(mail.date) : t;
+  const receivedAt = imp?.receivedAt ?? (mail.date && !Number.isNaN(Date.parse(mail.date)) ? Date.parse(mail.date) : t);
   await stmt(db, `INSERT INTO inbound_mails (id, business_id, message_id, from_addr, subject, source, received_at, r2_key, status, note, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', 'Not read yet.', ?) ON CONFLICT (business_id, message_id) DO NOTHING`,
     id, businessId, messageId, addressOf(mail.from), (mail.subject ?? '').slice(0, 300), source, receivedAt, key, t).run();
-  await readMail(db, businessId, id, source, mail);
+  await readMail(db, businessId, id, source, mail, imp ? receivedAt : null);
   return id;
 }
 
 /** Reads a kept mail again from R2 (after a reader is improved). */
 export async function readAgain(env: Env, businessId: string, mailId: string) {
-  const m = await one<{ r2_key: string; source: MailSource }>(env.DB, 'SELECT r2_key, source FROM inbound_mails WHERE id = ? AND business_id = ?', mailId, businessId);
+  const m = await one<{ r2_key: string; source: MailSource; message_id: string; received_at: number }>(env.DB,
+    'SELECT r2_key, source, message_id, received_at FROM inbound_mails WHERE id = ? AND business_id = ?', mailId, businessId);
   if (!m || !env.BILLS) return null;
   const obj = await env.BILLS.get(m.r2_key);
   if (!obj) return null;
-  await readMail(env.DB, businessId, mailId, m.source, await PostalMime.parse(new Uint8Array(await obj.arrayBuffer())));
+  const mail = await PostalMime.parse(new Uint8Array(await obj.arrayBuffer()));
+  const imported = m.message_id.startsWith('import:');
+  await readMail(env.DB, businessId, mailId, m.source, imported ? await innerOf(mail) : mail, imported ? m.received_at : null);
   return true;
 }
 
-async function readMail(db: DB, businessId: string, mailId: string, source: MailSource, mail: Email) {
+async function readMail(db: DB, businessId: string, mailId: string, source: MailSource, mail: Email, importAt: number | null = null) {
   let status: 'read' | 'failed' | 'ignored';
   let note: string;
   if (source === 'gmail') {
@@ -100,8 +165,10 @@ async function readMail(db: DB, businessId: string, mailId: string, source: Mail
       if (!found.length) { status = 'ignored'; note = 'No booking in this mail.'; } else {
         const b = (await one<Business>(db, `SELECT id, name, fy_start_month, shift_start_hour, tab_age_days, tables, disc_limit_bp, ${CLOSED_TO} FROM businesses WHERE id = ?`, businessId))!;
         const auto = (await one<{ a: number | null }>(db, 'SELECT bookings_auto_from AS a FROM businesses WHERE id = ?', businessId))!.a;
-        for (const x of found) await saveBooking(db, b, auto, source, mailId, x);
-        status = 'read'; note = `${found.length} booking${found.length === 1 ? '' : 's'} read.`;
+        const notes: string[] = [];
+        for (const x of found) await saveBooking(db, b, auto, source, mailId, x, importAt === null ? undefined : { at: importAt, notes });
+        status = 'read';
+        note = importAt === null ? `${found.length} booking${found.length === 1 ? '' : 's'} read.` : `Old mail brought in: ${notes.join('; ')}.`.slice(0, 300);
       }
     } catch (e) {
       status = 'failed'; note = (e as Error).message.slice(0, 300);
@@ -117,9 +184,36 @@ const roomTypes = (b: Business) => (tableLayout(b) ?? []).filter((s) => s.kind =
  * One booking as read: added, or brought up to date by its number. Why it needs a person is noted; a clean one goes in by
  * itself once automatic is on. The same stay from the other source (same phone or name, same check-in) is linked.
  */
-export async function saveBooking(db: DB, b: Business, autoFrom: number | null, source: 'mmt' | 'djubo', mailId: string | null, x: ReadBooking) {
+export async function saveBooking(db: DB, b: Business, autoFrom: number | null, source: 'mmt' | 'djubo', mailId: string | null, x: ReadBooking,
+  imp?: { at: number; notes: string[] }) {
   const t = now();
   const phone = phoneKeySoft(x.phone);
+  if (imp) {
+    // An old mail brought in (25 Nov 2026): only stays not over yet; never over a newer mail the POS already has (it only
+    // fills what that booking lacks); a total typed at the desk stays, and Djubo's daily report has the last word on what
+    // is still to collect.
+    if (x.checkOut && x.checkOut < clock(b).shiftDay) { imp.notes.push(`${x.extRef} stay over, left out`); return null; }
+    const old = await one<{ id: string; from_report: number; amount_paise: number | null; report_due_paise: number | null }>(db,
+      'SELECT id, from_report, amount_paise, report_due_paise FROM bookings WHERE business_id = ? AND source = ? AND ext_ref = ?', b.id, source, x.extRef);
+    if (old) {
+      const last = await one<{ t: number | null }>(db, `SELECT max(t) AS t FROM (SELECT received_at AS t FROM booking_paid_log WHERE booking_id = ?1
+        UNION ALL SELECT m.received_at FROM bookings k JOIN inbound_mails m ON m.id = k.mail_id WHERE k.id = ?1 AND k.from_report = 0)`, old.id);
+      if (last?.t != null && last.t > imp.at) {
+        await stmt(db, 'UPDATE bookings SET booked_at = coalesce(booked_at, ?), phone = coalesce(phone, ?) WHERE id = ?', x.bookedAt ?? null, phone, old.id).run();
+        imp.notes.push(`${x.extRef} has a newer mail, only blanks filled`);
+        return old.id;
+      }
+      if (old.from_report) {
+        if (old.amount_paise !== null) {
+          if (x.amountPaise !== undefined && x.amountPaise !== old.amount_paise) imp.notes.push(`${x.extRef} total typed at the desk kept (mail says ${(x.amountPaise / 100).toFixed(2)})`);
+          x = { ...x, amountPaise: undefined, paidPaise: undefined };
+        } else if (x.amountPaise !== undefined && old.report_due_paise !== null && old.report_due_paise <= x.amountPaise) {
+          x = { ...x, paidPaise: x.amountPaise - old.report_due_paise };
+        }
+      }
+      imp.notes.push(`${x.extRef} brought up to date`);
+    } else imp.notes.push(`${x.extRef} added${x.cancelled ? ' (cancelled)' : ''}`);
+  }
   const known = roomTypes(b);
   const problem = [
     x.hold && 'website hold: not confirmed or paid yet',
@@ -146,7 +240,7 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
       x.guestName ?? null, phone, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null, x.amountPaise ?? null, x.paidPaise ?? null,
       status, problem, mailId, status, t, ...extra, prev.id).run();
     await afterSave(db, b.id, prev.id, x);
-    await deskMoney(db, b.id, prev.id, source, mailId, x);
+    await deskMoney(db, b.id, prev.id, source, mailId, x, !!imp);
     // Already checked in (an extra night, a room change, a cancellation): the room's bill follows the booking.
     if (prev.status === 'checked_in') await syncStayRent(db, b.id, prev.id);
     else await linkWalkIn(db, b.id, prev.id);
@@ -159,7 +253,7 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
     id, b.id, source, x.extRef, x.guestName ?? null, phone, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null,
     x.amountPaise ?? null, x.paidPaise ?? null, x.cancelled ? 'cancelled' : goesIn ? 'approved' : 'new', goesIn && !x.cancelled ? 'auto' : null, problem, mailId, t, t, ...extra).run();
   await afterSave(db, b.id, id, x);
-  await deskMoney(db, b.id, id, source, mailId, x);
+  await deskMoney(db, b.id, id, source, mailId, x, !!imp);
   await linkWalkIn(db, b.id, id);
   return id;
 }
@@ -168,12 +262,14 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
  * Money taken at reception (24 Nov 2026): each Djubo mail's advance is logged with who entered it, and the desk's part is
  * worked out again; an advance taken here before Djubo had the booking (same phone and check-in day) is attached to it.
  */
-async function deskMoney(db: DB, bid: string, id: string, source: string, mailId: string | null, x: ReadBooking) {
+async function deskMoney(db: DB, bid: string, id: string, source: string, mailId: string | null, x: ReadBooking, before = false) {
   if (source === 'djubo' && mailId) {
     const m = await one<{ received_at: number }>(db, 'SELECT received_at FROM inbound_mails WHERE id = ?', mailId);
     await stmt(db, `INSERT INTO booking_paid_log (booking_id, mail_id, business_id, paid_paise, entered_by, received_at) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT (booking_id, mail_id) DO UPDATE SET paid_paise = excluded.paid_paise, entered_by = excluded.entered_by`,
-      id, mailId, bid, x.cancelled ? 0 : x.paidPaise ?? 0, x.enteredBy ?? null, m?.received_at ?? now()).run();
+      // An old mail's advance was taken before the POS: it never asks for a POS receipt (no one at the desk entered it here).
+      id, mailId, bid, x.cancelled ? 0 : before ? (await one<{ p: number | null }>(db, 'SELECT paid_paise AS p FROM bookings WHERE id = ?', id))?.p ?? 0 : x.paidPaise ?? 0,
+      before ? null : x.enteredBy ?? null, m?.received_at ?? now()).run();
     await recomputeDesk(db, bid, id);
   }
   const phone = phoneKeySoft(x.phone);

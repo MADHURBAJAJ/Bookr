@@ -61,8 +61,9 @@ async function readPayment(db: DB, bid: string, raw: unknown, n: number, allowed
   if (mode === 'card') {
     const code = typeof p.cardApproval === 'string' ? p.cardApproval.trim().toUpperCase() : '';
     const last4 = typeof p.cardLast4 === 'string' ? p.cardLast4.trim() : '';
-    if (!/^[A-Z0-9]{6}$/.test(code)) fail(400, `Payment ${n}: type the 6-character approval code from the card slip.`);
-    if (!/^\d{4}$/.test(last4)) fail(400, `Payment ${n}: type the card's last 4 digits from the slip.`);
+    // Both optional (26 Nov 2026, the owner's choice): kept blank when not typed; checked only when typed.
+    if (code && !/^[A-Z0-9]{1,12}$/.test(code)) fail(400, `Payment ${n}: the approval code is letters and digits only.`);
+    if (last4 && !/^\d{4}$/.test(last4)) fail(400, `Payment ${n}: the card's last digits are 4 digits.`);
     out.cardApproval = code;
     out.cardLast4 = last4;
   }

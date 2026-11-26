@@ -1121,7 +1121,13 @@ function dishTax(itemId, e) {
   const bp = from.taxMode === 'rate' ? from.gstBp : e?.gst_rate_bp ?? 0;
   return { kind: 'gst', bp: e?.gst_registered ? bp : 0 };
 }
-function previewTotals(lines, discBp, e, lineBp = {}) {
+/** A dish's service charge and price-includes-GST (26 Nov 2026): the dish's own choice, else its category's. */
+function dishFlags(itemId) {
+  const m = cache.menu.find((x) => x.id === itemId);
+  const c = (cache.menuCats ?? []).find((x) => x.name.toLowerCase() === (m?.category ?? '').toLowerCase());
+  return { sc: !!(m?.serviceCharge ?? c?.serviceCharge ?? 0), incl: !!(m?.priceIncl ?? c?.priceIncl ?? 0) };
+}
+function previewTotals(lines, discBp, e, lineBp = {}, scBp = 0) {
   const gross = lines.reduce((t, l) => t + l.qty * l.pricePaise, 0);
   // Item discounts first, off their own lines; the bill's discount then shares what is left (as the server does).
   const offOf = (l) => (lineBp[l.id] ? Math.floor((l.qty * l.pricePaise * lineBp[l.id] + 5000) / 10000) : 0);
@@ -1130,20 +1136,34 @@ function previewTotals(lines, discBp, e, lineBp = {}) {
   const billDisc = roundDiv(base * discBp, 10000);
   const m = new Map();
   for (const l of lines) {
-    const tax = dishTax(l.itemId, e); const k = `${tax.kind}:${tax.bp ?? 0}`;
-    const b = m.get(k) ?? { tax, gross: 0 }; b.gross += l.qty * l.pricePaise - offOf(l); m.set(k, b);
+    const tax = dishTax(l.itemId, e); const f = dishFlags(l.itemId);
+    const k = `${tax.kind}:${tax.bp ?? 0}:${f.incl ? 1 : 0}:${f.sc ? 1 : 0}`;
+    const b = m.get(k) ?? { tax, ...f, gross: 0 }; b.gross += l.qty * l.pricePaise - offOf(l); m.set(k, b);
   }
   const ord = { gst: 0, liquor: 1, exempt: 2 };
-  const bs = [...m.values()].filter((b) => b.gross > 0).sort((a, b) => ord[a.tax.kind] - ord[b.tax.kind] || (a.tax.bp ?? 0) - (b.tax.bp ?? 0));
+  const bs = [...m.values()].filter((b) => b.gross > 0).sort((a, b) => ord[a.tax.kind] - ord[b.tax.kind] || (a.tax.bp ?? 0) - (b.tax.bp ?? 0)
+    || Number(a.incl) - Number(b.incl) || Number(a.sc) - Number(b.sc));
   let left = billDisc;
-  const taxes = bs.map((b, i) => {
+  const rows = new Map();
+  let sc = 0;
+  bs.forEach((b, i) => {
     const share = i === bs.length - 1 ? left : roundDiv(b.gross * billDisc, base); left -= share;
-    const v = b.gross - share; const half = b.tax.kind === 'gst' ? roundDiv(v * b.tax.bp, 20000) : 0;
-    return { kind: b.tax.kind, bp: b.tax.bp ?? 0, valuePaise: v, cgstPaise: half, sgstPaise: half };
+    // As the server (pos/src/billing.ts charge()): GST worked out of a price that includes it, service charge on the
+    // value before GST, and GST on the service charge too.
+    const after = b.gross - share; const bp = b.tax.kind === 'gst' ? b.tax.bp : 0; const inside = b.incl && bp > 0;
+    let half = inside ? roundDiv(after * bp, 2 * (10000 + bp)) : 0;
+    const value = after - 2 * half;
+    const s = b.sc && scBp > 0 ? roundDiv(value * scBp, 10000) : 0;
+    half = inside ? half + roundDiv(s * bp, 20000) : roundDiv((value + s) * bp, 20000);
+    sc += s;
+    const k = `${b.tax.kind}:${bp}`;
+    const r = rows.get(k) ?? { kind: b.tax.kind, bp, valuePaise: 0, cgstPaise: 0, sgstPaise: 0 };
+    r.valuePaise += value + s; r.cgstPaise += half; r.sgstPaise += half; rows.set(k, r);
   });
+  const taxes = [...rows.values()];
   const raw = taxes.reduce((t, r) => t + r.valuePaise + r.cgstPaise + r.sgstPaise, 0);
   const total = roundDiv(raw, 100) * 100;
-  return { gross, disc: lineDisc + billDisc, lineDisc, billDisc, offOf, taxes, raw, total };
+  return { gross, disc: lineDisc + billDisc, lineDisc, billDisc, offOf, taxes, raw, total, sc };
 }
 const taxTag = (t) => (t.kind === 'liquor' ? 'liquor, no GST' : t.kind === 'exempt' ? 'no GST' : t.bp ? `GST ${t.bp / 100}%` : 'no GST');
 /** A bill's tax rows as lines: value and CGST/SGST for each rate, then liquor and no-GST values. */
@@ -1158,13 +1178,16 @@ async function billScreen(orderId) {
   ui.order = order;
   const ents = counterEntities();
   ui.entityId = (ents.find((e) => e.is_default) ?? ents[0])?.id;
-  ui.disc = 0; ui.discReason = null; ui.lineBp = {};
+  ui.disc = 0; ui.discReason = null; ui.lineBp = {}; ui.noSc = false;
   rerender = () => {
     const o = ui.order;
     const e = ents.find((x) => x.id === ui.entityId);
     const billed = o.lines.filter((l) => l.qty > 0);
     // The same sums as the server: each line taxed by dish, category or billing name; the discount shared by value.
-    const { gross, disc, lineDisc, billDisc, offOf, taxes, raw, total } = previewTotals(billed, ui.disc * 100, e, ui.lineBp);
+    // Service charge (26 Nov 2026): the business's rate on items that carry it, unless the guest asked for it off.
+    const scBp = ui.noSc ? 0 : me.business.service_charge_bp ?? 0;
+    const scAny = (me.business.service_charge_bp ?? 0) > 0 && billed.some((l) => dishFlags(l.itemId).sc);
+    const { gross, disc, lineDisc, billDisc, offOf, taxes, raw, total, sc } = previewTotals(billed, ui.disc * 100, e, ui.lineBp, scBp);
     const near = e && e.warn1_paise !== null && e.year_paise + total >= e.warn1_paise;
     const anyDisc = disc > 0;
     const ready = e && !(anyDisc && !ui.discReason) && total > 0;
@@ -1185,6 +1208,9 @@ async function billScreen(orderId) {
             <span class="chips">${[[0, 'None'], [2500, '25% off'], [5000, '50% off'], [10000, 'Free']].map(([bp, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.lineBp[l.id] ?? 0) === bp}" data-act="lineDisc" data-id="${l.id}" data-bp="${bp}">${t}</button>`)}</span></div>`)}</div>` : ''}
           ${anyDisc ? html`<p class="label" style="margin-top:14px">Reason for the discount (required)</p><div class="chips">${reasonsOf('discount').map((r) => html`<button type="button" class="chip" aria-pressed="${ui.discReason === r.id}" data-act="discWhy" data-id="${r.id}">${r.label}</button>`)}</div>` : ''}
           ${needsMgr ? html`<p class="hint">A discount above ${limit / 100}% or a free item needs a manager's PIN when you print.</p>` : ''}</div>
+        ${scAny ? html`<div><p class="label">Service charge</p>
+          <div class="row"><button type="button" class="chip" aria-pressed="${!!ui.noSc}" data-act="noSc">${ui.noSc ? 'Removed: put it back' : 'Remove service charge'}</button>
+          <span class="small quiet">${ui.noSc ? 'Taken off because the guest asked.' : `${(me.business.service_charge_bp ?? 0) / 100}% is optional: take it off if the guest asks.`}</span></div></div>` : ''}
         <label class="f">Guest name on the bill (optional)<input class="in" data-model="guestName" value="${ui.guestName ?? o.guestName ?? ''}"></label>
       </section>
       <section class="panel">
@@ -1195,6 +1221,7 @@ async function billScreen(orderId) {
           <div class="pl"><span class="quiet">Items</span><span>${rs(gross)}</span></div>
           ${lineDisc ? html`<div class="pl"><span class="quiet">Item discounts</span><span>${rs(-lineDisc)}</span></div>` : ''}
           ${billDisc ? html`<div class="pl"><span class="quiet">Discount ${ui.disc}%</span><span>${rs(-billDisc)}</span></div>` : ''}
+          ${sc ? html`<div class="pl"><span class="quiet">Service charge ${scBp / 100}% (optional)</span><span>${rs(sc)}</span></div>` : ''}
           ${taxLines(taxes, 'pl', !!e?.gst_registered)}
           ${total !== raw ? html`<div class="pl"><span class="quiet">Round off</span><span>${rs(total - raw)}</span></div>` : ''}
           <hr><div class="pl tot"><span>Total</span><span>${rs(total)}</span></div>
@@ -1209,6 +1236,7 @@ async function billScreen(orderId) {
 actions.ent = (d) => { ui.entityId = d.id; rerender(); };
 actions.disc = (d) => { ui.disc = Number(d.p); rerender(); };
 actions.itemDiscOpen = () => { ui.itemDisc = !ui.itemDisc; rerender(); };
+actions.noSc = () => { ui.noSc = !ui.noSc; rerender(); };
 actions.lineDisc = (d) => { const bp = Number(d.bp); if (bp) ui.lineBp[d.id] = bp; else delete ui.lineBp[d.id]; rerender(); };
 actions.discWhy = (d) => { ui.discReason = d.id; rerender(); };
 actions.printBill = async () => {
@@ -1216,6 +1244,7 @@ actions.printBill = async () => {
     entityId: ui.entityId, guestName: ui.guestName,
     discount: ui.disc ? { kind: 'pct', bp: ui.disc * 100, reasonId: ui.discReason } : { kind: 'none' },
     lineDiscounts: Object.entries(ui.lineBp).map(([lineId, bp]) => ({ lineId, bp })), discountReasonId: ui.discReason ?? undefined,
+    ...(ui.noSc ? { serviceCharge: false } : {}),
   });
   printReceipt(r.bill);
   if (r.warning) flash = { kind: 'warn', text: r.warning };
@@ -1286,8 +1315,8 @@ async function settleScreen(billId) {
             ${notes.length ? html`<div class="f" style="grid-column:1/-1">Note handed over<div class="chips">${notes.map((n) => html`<button type="button" class="chip" aria-pressed="${given === n}" data-act="tender" data-p="${n}">${rs(n)}</button>`)}</div></div>` : ''}
             ${given && thisAmt && given > thisAmt ? html`<p class="change" role="status" style="grid-column:1/-1">Give change: ${rs(given - thisAmt)}</p>` : ''}` : ''}
           ${m === 'upi' ? html`<div class="f" style="grid-column:1/-1">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
-          ${m === 'card' ? html`<label class="f">Approval code (from the slip)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="6" autocomplete="off"></label>
-            <label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" value="${ui.cardLast4 ?? ''}" maxlength="4" autocomplete="off"></label>` : ''}
+          ${m === 'card' ? html`<label class="f">Approval code (optional)<input class="in" data-model="cardApproval" value="${ui.cardApproval ?? ''}" maxlength="12" autocomplete="off"></label>
+            <label class="f">Card last 4 (optional)<input class="in" inputmode="numeric" data-model="cardLast4" value="${ui.cardLast4 ?? ''}" maxlength="4" autocomplete="off"></label>` : ''}
           ${m === 'room' ? html`<div style="grid-column:1/-1">${stayPicker('pick', ui.debtorAccountId, (s) => s.accountId)}</div>` : ''}
           ${m === 'credit' ? creditPicker() : ''}
           ${m === 'comp' ? html`<label class="f">Guest name (required)<input class="in" data-model="compGuest" value="${ui.compGuest ?? ''}"></label>
@@ -1371,9 +1400,10 @@ actions.addPay = () => {
   if (m === 'upi') { if (!ui.payAccountId) throw new Error("Choose which account's QR was paid."); p.payAccountId = ui.payAccountId; p.detail = cache.payAccounts.find((a) => a.id === ui.payAccountId).name; }
   if (m === 'card') {
     const code = (ui.cardApproval ?? '').trim().toUpperCase(); const last4 = (ui.cardLast4 ?? '').trim();
-    if (!/^[A-Z0-9]{6}$/.test(code)) throw new Error('Type the 6-character approval code from the card slip.');
-    if (!/^\d{4}$/.test(last4)) throw new Error("Type the card's last 4 digits from the slip.");
-    Object.assign(p, { cardApproval: code, cardLast4: last4, detail: `Approval ${code} · ****${last4}` });
+    // Both optional (26 Nov 2026): checked only when typed.
+    if (code && !/^[A-Z0-9]{1,12}$/.test(code)) throw new Error('The approval code is letters and digits only.');
+    if (last4 && !/^\d{4}$/.test(last4)) throw new Error("The card's last digits are 4 digits.");
+    Object.assign(p, { cardApproval: code, cardLast4: last4, detail: [code && `Approval ${code}`, last4 && `****${last4}`].filter(Boolean).join(' · ') });
   }
   if (m === 'room') { if (!ui.debtorAccountId) throw new Error('Choose the room.'); p.debtorAccountId = ui.debtorAccountId; p.detail = cache.stays.find((s) => s.accountId === ui.debtorAccountId).room; p.detail = 'Room ' + p.detail; }
   if (m === 'credit') {
@@ -1522,11 +1552,13 @@ function receipt(b, onScreen = false) {
     <div class="rl"><span>${b.place}</span>${onScreen && b.printedBy ? html`<span class="quiet">by ${b.printedBy}</span>` : ''}</div>
     ${b.guestName ? html`<div>Guest: ${b.guestName}</div>` : ''}
     ${b.printCount > 1 ? html`<div class="c">COPY ${b.printCount - 1}</div>` : ''}
-    <hr>${b.items.map((l) => html`<div class="rl"><span>${l.qty} × ${l.name}${l.taxKind === 'exempt' ? ' †' : l.taxKind === 'liquor' || l.taxed === 0 ? ' *' : ''}${b.gstRegistered && l.taxKind === 'gst' && (b.taxes ?? []).filter((r) => r.kind === 'gst').length > 1 ? ` (${l.gstBp / 100}%)` : ''}</span><span>${rs(l.amountPaise)}</span></div>
+    <hr>${b.items.map((l) => html`<div class="rl"><span>${l.qty} × ${l.name}${l.taxKind === 'exempt' ? ' †' : l.taxKind === 'liquor' || l.taxed === 0 ? ' *' : ''}${b.gstRegistered && l.priceIncl && l.taxKind === 'gst' ? ' ^' : ''}${b.gstRegistered && l.taxKind === 'gst' && (b.taxes ?? []).filter((r) => r.kind === 'gst').length > 1 ? ` (${l.gstBp / 100}%)` : ''}</span><span>${rs(l.amountPaise)}</span></div>
       ${(l.options ?? []).map((x) => html`<div style="padding-left:14px">+ ${x.name ?? x}</div>`)}
       ${l.discountPaise ? html`<div class="rl"><span style="padding-left:14px">${l.discountPaise >= l.amountPaise ? 'Free' : 'Discount'}</span><span>${rs(-l.discountPaise)}</span></div>` : ''}`)}<hr>
     <div class="rl"><span>Items</span><span>${rs(b.grossPaise)}</span></div>
     ${b.discountPaise ? html`<div class="rl"><span>Discount</span><span>${rs(-b.discountPaise)}</span></div>` : ''}
+    ${b.serviceChargePaise ? html`<div class="rl"><span>Service charge ${b.serviceChargeBp / 100}% (optional)</span><span>${rs(b.serviceChargePaise)}</span></div>` : ''}
+    ${b.gstRegistered && b.items.some((l) => l.priceIncl && l.taxKind === 'gst') ? html`<div class="small">Prices marked ^ include GST.</div>` : ''}
     ${taxLines(b.taxes ?? [], 'rl', !!b.gstRegistered)}
     ${b.gstRegistered && b.items[0]?.sac ? html`<div class="small">SAC ${[...new Set(b.items.map((l) => l.sac))].join(', ')}</div>` : ''}
     ${b.roundOffPaise ? html`<div class="rl"><span>Round off</span><span>${rs(b.roundOffPaise)}</span></div>` : ''}
@@ -1613,7 +1645,7 @@ function moneyForms() {
 const payFields = (amountKey = 'recvAmount') => html`<div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
   <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="${amountKey}" ${amountKey === 'nrAdv' ? 'data-live' : ''} value="${ui[amountKey] ?? ''}"></label>
     ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === a.id}" data-act="pick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
-    ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>`;
+    ${ui.recvMode === 'card' ? html`<label class="f">Approval code (optional)<input class="in" data-model="cardApproval" maxlength="12"></label><label class="f">Card last 4 (optional)<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>`;
 const payOf = (amountKey = 'recvAmount') => ({ mode: ui.recvMode ?? 'cash', amount: ui[amountKey] ?? '', payAccountId: ui.payAccountId, cardApproval: ui.cardApproval, cardLast4: ui.cardLast4 });
 
 const ROOM_VIEWS = [['today', 'Today'], ['chart', 'Room chart'], ['list', 'Reservations'], ['new', '+ New reservation'], ['checkin', 'Check-in'], ['house', 'Housekeeping'],
@@ -1959,8 +1991,8 @@ function listView() {
         <td data-label="Room">${kind === 'res' ? x.lines.map((l) => `${l.type}${l.roomNames.length ? ` ${l.roomNames.join(', ')}` : ` × ${l.rooms}`}`).join(' · ') : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`}</td>
         <td data-label="Source">${kind === 'res' ? x.source : x.channel ?? '—'}</td>
         <td data-label="Status"><span class="badge ${st[0]}">${st[1]}</span></td>
-        <td class="num" data-label="Total">${rs(kind === 'res' ? x.totalPaise : x.amountPaise ?? 0)}</td>
-        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
+        <td class="num" data-label="Total">${kind === 'res' ? rs(x.totalPaise) : x.amountPaise != null ? rs(x.amountPaise) : x.fromReport ? html`—<div class="small quiet">Djubo's report</div>` : '—'}</td>
+        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise || (x.fromReport && x.amountPaise == null) ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
     </tbody></table></div></section>`;
 }
 actions.resSearch = async () => { ui.res = await api('GET', `${B()}/reservations${ui.resQ ? `?q=${encodeURIComponent(ui.resQ)}` : ''}`); ui.resF = 'all'; rerender(); };
@@ -2584,7 +2616,7 @@ function advanceForm() {
     <div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.recvMode ?? 'cash') === k}" data-act="pick" data-k="recvMode" data-id="${k}">${t}</button>`)}</div>
     <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="recvAmount" value="${ui.recvAmount ?? ''}"></label>
       ${ui.recvMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${cache.payAccounts.filter((x) => x.active).map((x) => html`<button type="button" class="chip" aria-pressed="${ui.payAccountId === x.id}" data-act="pick" data-k="payAccountId" data-id="${x.id}">${x.name}</button>`)}</div></div>` : ''}
-      ${ui.recvMode === 'card' ? html`<label class="f">Approval code<input class="in" data-model="cardApproval" maxlength="6"></label><label class="f">Card last 4<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
+      ${ui.recvMode === 'card' ? html`<label class="f">Approval code (optional)<input class="in" data-model="cardApproval" maxlength="12"></label><label class="f">Card last 4 (optional)<input class="in" inputmode="numeric" data-model="cardLast4" maxlength="4"></label>` : ''}</div>
     <div class="row"><button class="btn pri" type="submit" data-act="advGo" data-submit>Take advance and print receipt</button><button class="btn" type="button" data-act="advNo">Cancel</button></div></form>`;
 }
 actions.advNew = () => { ui.adv = {}; ui.recvMode = 'cash'; ui.recvAmount = undefined; ui.advName = ui.advPhone = ui.advIn = undefined; ui.error = null; rerender(); scrollTo(0, 0); };
@@ -4709,19 +4741,20 @@ async function settingsScreen(tab = 'menu') {
         <button class="btn" type="button" data-act="mNew">+ Add item</button></div>
       ${menuShown.length ? '' : html`<p class="quiet">No item matches${ui.mQ ? ` “${ui.mQ}”` : ''}${ui.mCat ? ` in ${ui.mCat}` : ''}.</p>`}
       ${menuBulkBar()}
-      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mSelAll" aria-label="Tick every item shown" ${menuShown.length && menuShown.every((m) => (ui.mSel ?? []).includes(m.id)) ? 'checked' : ''}></th><th>Item</th><th class="num">Price (before GST)</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
+      <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mSelAll" aria-label="Tick every item shown" ${menuShown.length && menuShown.every((m) => (ui.mSel ?? []).includes(m.id)) ? 'checked' : ''}></th><th>Item</th><th class="num">Price</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
         ${menuShown.map((m) => html`<tr class="${(ui.mSel ?? []).includes(m.id) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mSel" data-id="${m.id}" aria-label="Tick ${m.name}" ${(ui.mSel ?? []).includes(m.id) ? 'checked' : ''}></td><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
           ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
-          <td data-label="Price (before GST)" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
-          <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}</td>
+          <td data-label="Price" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
+          <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}${taxMarks(m)}</td>
           <td class="act"><div class="irow">${iconBtn('itemEdit', m.id, 'edit', `Edit ${m.name}`)}${m.active ? iconBtn('itemToggle', m.id, 'off', `Take ${m.name} off the menu`) : iconBtn('itemToggle', m.id, 'on', `Put ${m.name} back on the menu`)}${iconBtn('itemDelete', m.id, 'trash', `Delete ${m.name}`, 'danger')}</div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
         <label class="f">Price at billing<select class="in" data-model="iOpen"><option value="no">No: fixed price</option><option value="yes" ${ui.iOpen === 'yes' ? 'selected' : ''}>Yes: typed when ordered (bottles, catch of the day)</option></select></label>
         ${ui.iOpen === 'yes' ? html`<label class="f">Lowest price allowed (₹, optional)<input class="in" inputmode="decimal" data-model="iMin" value="${ui.iMin ?? ''}"></label>`
-          : choicePrice() !== null ? html`<label class="f">Price (₹, before GST)<input class="in" data-model="iPrice" value="${choicePrice()}" readonly aria-describedby="ip-n"><span class="small quiet" id="ip-n" style="font-weight:400">The first choice's price, set below.</span></label>`
-          : html`<label class="f">Price (₹, before GST)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
+          : choicePrice() !== null ? html`<label class="f">Price (₹)<input class="in" data-model="iPrice" value="${choicePrice()}" readonly aria-describedby="ip-n"><span class="small quiet" id="ip-n" style="font-weight:400">The first choice's price, set below.</span></label>`
+          : html`<label class="f">Price (₹)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
         ${itemKotFields()}
         <label class="f">Tax<select class="in" data-model="iTax">${taxChoices(true).map(([v, t]) => html`<option value="${v}" ${(ui.iTax ?? 'category') === v ? 'selected' : ''}>${t}</option>`)}</select></label>
+        ${followSelect('iSc', 'Service charge', 'serviceCharge')}${followSelect('iIncl', 'Price includes GST', 'priceIncl')}
         <div style="grid-column:1/-1">${itemAddons()}</div>
         <div class="f">&nbsp;<div class="row"><button class="btn pri" type="submit" data-act="addItem" data-submit>${ui.editItem ? 'Save item' : 'Add item'}</button>${ui.editItem ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></div></form></section>`;
     if (tab === 'categories') body = html`<section class="panel"><h2>Categories and GST</h2>
@@ -4756,7 +4789,8 @@ async function settingsScreen(tab = 'menu') {
           <label class="f">Yearly limit (₹, optional)<input class="in" inputmode="decimal" data-model="eLimit" value="${ui.eLimit ?? ''}"></label>
           <label class="f">Warn at (₹)<input class="in" inputmode="decimal" data-model="eWarn1" value="${ui.eWarn1 ?? ''}"></label><label class="f">Warn again at (₹)<input class="in" inputmode="decimal" data-model="eWarn2" value="${ui.eWarn2 ?? ''}"></label>
           <label class="f">Stop offering at (₹)<input class="in" inputmode="decimal" data-model="eStop" value="${ui.eStop ?? ''}"></label></div>
-        <div class="row"><button class="btn pri" type="submit" data-act="addEntity" data-submit>Save billing name</button>${ui.editEntity ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
+        <div class="row"><button class="btn pri" type="submit" data-act="addEntity" data-submit>Save billing name</button>${ui.editEntity ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>
+      ${catTaxSection()}`;
     if (tab === 'accounts') body = html`<section class="panel"><h2>UPI accounts</h2><p class="quiet small">Each QR's bank account belongs to one billing name. A bill paid into another name's account is asked about at the counter.</p>${errorBox()}
       <div class="scroll"><table class="t"><thead><tr><th>Account</th><th>Belongs to</th><th>Bookr account id</th></tr></thead><tbody>
         ${cache.payAccounts.map((a) => html`<tr><td>${a.name}${a.active ? '' : ' (not used)'}</td><td>${a.entityName}</td><td class="small">${a.bookrAccountId ?? ''}</td>
@@ -5460,7 +5494,8 @@ async function menuBulk(ids, action, value) {
   const n = plural(ids.length, 'item');
   flash = { kind: 'ok', text: action === 'delete'
     ? [r.deleted ? `${plural(r.deleted, 'item')} deleted.` : '', r.takenOff ? `${plural(r.takenOff, 'item')} ${r.takenOff === 1 ? 'was' : 'were'} ordered before, so taken off the menu instead.` : ''].filter(Boolean).join(' ')
-    : { off: `${n} taken off the menu.`, on: `${n} put back on the menu.`, category: `${n} moved to ${value}.`, station: `${n}: station changed.`, tax: `${n}: tax changed.` }[action] };
+    : { off: `${n} taken off the menu.`, on: `${n} put back on the menu.`, category: `${n} moved to ${value}.`, station: `${n}: station changed.`, tax: `${n}: tax changed.`,
+      serviceCharge: `${n}: service charge ${value === 'category' ? 'as category' : value}.`, priceIncl: `${n}: price includes GST ${value === 'category' ? 'as category' : value}.` }[action] };
   route();
 }
 function menuBulkBar() {
@@ -5473,6 +5508,8 @@ function menuBulkBar() {
     <select class="in" data-act-change="mBulkPick" data-do="category" aria-label="Move ticked items to a category"><option value="">Category…</option>${cats.map((c) => html`<option>${c}</option>`)}<option value="__new">New category…</option></select>
     <select class="in" data-act-change="mBulkPick" data-do="station" aria-label="Station for ticked items"><option value="">Station…</option><option value="category">As its category says</option>${activeStations().map((x) => html`<option value="${x.id}">${x.name}</option>`)}<option value="none">No KOT</option></select>
     <select class="in" data-act-change="mBulkPick" data-do="tax" aria-label="Tax for ticked items"><option value="">Tax…</option>${taxChoices(true).map(([v, t]) => html`<option value="${v}">${t}</option>`)}</select>
+    ${['serviceCharge', 'priceIncl'].map((k) => html`<select class="in" data-act-change="mBulkPick" data-do="${k}" aria-label="${k === 'serviceCharge' ? 'Service charge' : 'Price includes GST'} for ticked items">
+      <option value="">${k === 'serviceCharge' ? 'Service charge…' : 'Price includes GST…'}</option><option value="category">As its category</option><option value="yes">Yes</option><option value="no">No</option></select>`)}
     <button class="btn danger" type="button" data-act="mBulk" data-do="delete">Delete</button>
     <button class="btn ghost" type="button" data-act="mSelClear">Clear ticks</button></div>`;
 }
@@ -5481,9 +5518,65 @@ actions.catTax = async (d, el) => {
   const c = cache.menuCats.find((x) => x.id === d.id); Object.assign(c, el.value.startsWith('rate:') ? { taxMode: 'rate', gstBp: Number(el.value.slice(5)) * 100 } : { taxMode: el.value, gstBp: null });
   flash = { kind: 'ok', text: `${c.name}: ${taxName(c)}.` }; route();
 };
+/** What an item carries besides its GST (26 Nov 2026): service charge, a price with GST in it, and "own" when it does not follow its category. */
+function taxMarks(m) {
+  const c = catOf(m);
+  const sc = m.serviceCharge ?? c?.serviceCharge ?? 0;
+  const mode = m.taxMode ?? c?.taxMode ?? 'billing';
+  const incl = (m.priceIncl ?? c?.priceIncl ?? 0) && mode !== 'none' && mode !== 'liquor';
+  const own = m.serviceCharge != null || m.priceIncl != null;
+  if (!sc && !incl && !own) return '';
+  return html`<div class="row" style="gap:4px;margin-top:4px">${sc ? html`<span class="badge open">+ service charge</span>` : ''}${incl ? html`<span class="badge new">price incl. GST</span>` : ''}${own ? html`<span class="badge">own setting</span>` : ''}</div>`;
+}
+/** An item's own choice or its category's (26 Nov 2026), for the item form; "As its category" says what that is. */
+function followSelect(model, label, field) {
+  const c = catOf({ category: ui.iCat ?? '' });
+  const v = ui[model] ?? 'category';
+  return html`<label class="f">${label}<select class="in" data-model="${model}">
+    <option value="category" ${v === 'category' ? 'selected' : ''}>As its category${c ? ` (${c[field] ? 'yes' : 'no'})` : ''}</option>
+    <option value="yes" ${v === 'yes' ? 'selected' : ''}>Yes, for this item</option><option value="no" ${v === 'no' ? 'selected' : ''}>No, for this item</option></select></label>`;
+}
+/**
+ * GST and service charge by category (26 Nov 2026), under Billing names: the service charge rate, then each category's
+ * GST, service charge and price-includes-GST as ticks, and how many of its items are set on their own (in Menu).
+ */
+function catTaxSection() {
+  if (!can('menu.edit')) return '';
+  const cats = cache.menuCats ?? [];
+  const rate = ui.scRate ?? String((me.business.service_charge_bp ?? 0) / 100);
+  const own = (c) => cache.menu.filter((m) => m.category.toLowerCase() === c.name.toLowerCase() && (m.taxMode != null || m.serviceCharge != null || m.priceIncl != null)).length;
+  const gstOn = (c) => c.taxMode !== 'none' && c.taxMode !== 'liquor';
+  return html`<section class="panel"><h2>GST and service charge by category</h2>
+    <p class="quiet small">Tick what each category carries. An item follows its category unless it is set on its own in Menu. GST is charged only on bills under a GST-registered billing name. Service charge is optional for the guest: the bill screen has a button to take it off.</p>
+    <form class="row"><label class="f" style="max-width:220px">Service charge (%)<input class="in" inputmode="decimal" data-model="scRate" value="${rate}"></label>
+      <div class="f">&nbsp;<button class="btn" type="submit" data-act="scSave" data-submit>Save rate</button></div>
+      <p class="small quiet" style="align-self:center">On the value before GST; GST is charged on it too. 0 = no service charge.</p></form>
+    ${cats.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Category</th><th>GST</th><th>Service charge</th><th>Price includes GST</th><th>Items set on their own</th></tr></thead><tbody>
+      ${cats.map((c) => html`<tr><td><strong>${c.name}</strong>${c.taxMode === 'liquor' ? html`<div class="small quiet">Liquor · outside GST</div>` : c.taxMode === 'rate' ? html`<div class="small quiet">GST ${c.gstBp / 100}%</div>` : ''}</td>
+        <td><input type="checkbox" aria-label="GST on ${c.name}" data-act-change="catFlag" data-id="${c.id}" data-f="gst" ${gstOn(c) ? 'checked' : ''} ${c.taxMode === 'liquor' ? 'disabled' : ''}></td>
+        <td><input type="checkbox" aria-label="Service charge on ${c.name}" data-act-change="catFlag" data-id="${c.id}" data-f="sc" ${c.serviceCharge ? 'checked' : ''}></td>
+        <td><input type="checkbox" aria-label="Price includes GST for ${c.name}" data-act-change="catFlag" data-id="${c.id}" data-f="incl" ${c.priceIncl ? 'checked' : ''} ${gstOn(c) ? '' : 'disabled'}></td>
+        <td>${own(c) ? html`<span class="badge new">${plural(own(c), 'item')}</span>` : html`<span class="small quiet">None</span>`}</td></tr>`)}</tbody></table></div>`
+    : html`<p class="empty">No categories yet: add items in Menu first.</p>`}</section>`;
+}
+actions.scSave = async () => {
+  const pct = Number(String(ui.scRate ?? '').trim() || '0');
+  const r = await api('PUT', `${B()}/service-charge`, { pct });
+  me.business.service_charge_bp = r.serviceChargeBp; ui.scRate = undefined;
+  flash = { kind: 'ok', text: r.serviceChargeBp ? `Service charge ${r.serviceChargeBp / 100}% saved.` : 'Service charge off.' }; route();
+};
+actions.catFlag = async (d, el) => {
+  const c = cache.menuCats.find((x) => x.id === d.id);
+  // GST on keeps a category's own rate, else the billing name's; off = no GST (and so no price-includes-GST).
+  const body = d.f === 'gst' ? (el.checked ? (c.taxMode === 'rate' ? { taxMode: 'rate', gstRate: c.gstBp / 100 } : { taxMode: 'billing' }) : { taxMode: 'none', priceIncl: false })
+    : d.f === 'sc' ? { serviceCharge: el.checked } : { priceIncl: el.checked };
+  await api('PUT', `${B()}/menu-categories/${c.id}`, body);
+  flash = { kind: 'ok', text: `${c.name}: ${{ gst: 'GST', sc: 'service charge', incl: 'price includes GST' }[d.f]} ${el.checked ? 'on' : 'off'}.` }; route();
+};
 actions.addItem = async () => {
   const open = ui.iOpen === 'yes';
   const body = { name: ui.iName, category: ui.iCat, price: open ? '' : ui.iPrice ?? '', stationId: ui.iStationId ?? '', kot: ui.iKot ?? 'category', ...taxBody(ui.iTax ?? 'category'),
+    serviceCharge: ui.iSc ?? 'category', priceIncl: ui.iIncl ?? 'category',
     openPrice: open, minPrice: open ? ui.iMin ?? '' : '', addonGroups: (ui.iGroups ?? []).map((id) => ({ id, prices: itemPricesOut(id) })) };
   const fromChoice = !open && choicePrice();
   if (fromChoice) body.price = fromChoice;
@@ -5497,8 +5590,9 @@ function menuFilter() {
   return cache.menu.filter((m) => (!ui.mCat || m.category === ui.mCat) && words.every((w) => m.name.toLowerCase().includes(w) || m.category.toLowerCase().includes(w)));
 }
 const toItemForm = () => setTimeout(() => root.querySelector('form.grid3')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0);
-actions.mNew = () => { Object.assign(ui, { editItem: null, iName: '', iCat: ui.mCat ?? '', iPrice: '', iStationId: '', iKot: 'category', iTax: 'category', iOpen: 'no', iMin: '', iGroups: [], iPrices: {} }); rerender(); toItemForm(); root.querySelector('[data-model="iName"]')?.focus({ preventScroll: true }); };
+actions.mNew = () => { Object.assign(ui, { editItem: null, iName: '', iCat: ui.mCat ?? '', iPrice: '', iStationId: '', iKot: 'category', iTax: 'category', iSc: 'category', iIncl: 'category', iOpen: 'no', iMin: '', iGroups: [], iPrices: {} }); rerender(); toItemForm(); root.querySelector('[data-model="iName"]')?.focus({ preventScroll: true }); };
 actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStationId: m.stationId ?? '', iKot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', iTax: taxValue(m),
+  iSc: m.serviceCharge == null ? 'category' : m.serviceCharge ? 'yes' : 'no', iIncl: m.priceIncl == null ? 'category' : m.priceIncl ? 'yes' : 'no',
   iOpen: m.openPrice ? 'yes' : 'no', iMin: m.minPricePaise != null ? rupees(m.minPricePaise) : '', iGroups: [...(m.addonGroups ?? [])],
   iPrices: Object.fromEntries(Object.entries(m.addonPrices ?? {}).map(([g, ps]) => [g, Object.fromEntries(Object.entries(ps).map(([k, v]) => [k, rupeesShort(v)]))])) }); rerender(); };
 actions.editCancel = () => route();

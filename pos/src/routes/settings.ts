@@ -24,6 +24,21 @@ const flag = (v: unknown) => v === true;
 
 // ---------- business rules
 
+// The service charge rate (26 Nov 2026), set with the billing names: 0 = none. Which items carry it is set by category.
+settingsRoutes.put(`${B}/service-charge`, requireAction('entities.edit'), async (c) => {
+  const id = c.get('businessId');
+  const data = await body(c);
+  const pct = data.pct;
+  if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 20 || Math.round(pct * 100) !== pct * 100) fail(400, 'Service charge must be 0 to 20%, at most two decimals.');
+  const before = await one<{ service_charge_bp: number }>(c.env.DB, 'SELECT service_charge_bp FROM businesses WHERE id = ?', id);
+  const bp = Math.round(pct * 100);
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE businesses SET service_charge_bp = ? WHERE id = ?', bp, id),
+    audit(c.env.DB, id, c.get('staff').id, 'business.service_charge', 'businesses', id, before, { service_charge_bp: bp }),
+  ]);
+  return c.json({ ok: true, serviceChargeBp: bp });
+});
+
 settingsRoutes.put(`${B}/settings`, requireAction('staff.manage'), async (c) => {
   const id = c.get('businessId');
   const data = await body(c);
@@ -359,9 +374,10 @@ settingsRoutes.get(`${B}/menu`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
   const [items, links, categories, groups, options, stations] = await Promise.all([
     all(c.env.DB, `SELECT id, name, category, price_paise AS pricePaise, sac, station, active, tax_mode AS taxMode, gst_bp AS gstBp,
-      open_price AS openPrice, min_price_paise AS minPricePaise, kot, station_id AS stationId FROM menu_items WHERE business_id = ? ORDER BY category, name`, bid),
+      service_charge AS serviceCharge, price_incl AS priceIncl, open_price AS openPrice, min_price_paise AS minPricePaise, kot, station_id AS stationId FROM menu_items WHERE business_id = ? ORDER BY category, name`, bid),
     all<{ item_id: string; group_id: string; prices: string | null }>(c.env.DB, 'SELECT item_id, group_id, prices FROM menu_item_addons WHERE business_id = ? ORDER BY sort', bid),
-    all(c.env.DB, 'SELECT id, name, tax_mode AS taxMode, gst_bp AS gstBp, kot, station_id AS stationId FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
+    all(c.env.DB, `SELECT id, name, tax_mode AS taxMode, gst_bp AS gstBp, kot, station_id AS stationId, service_charge AS serviceCharge, price_incl AS priceIncl
+      FROM menu_categories WHERE business_id = ? ORDER BY sort, name`, bid),
     all<{ id: string; name: string; kind: string }>(c.env.DB, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ? ORDER BY name', bid),
     all<{ id: string; group_id: string; name: string; add_paise: number }>(c.env.DB,
       'SELECT id, group_id, name, add_paise FROM addon_options WHERE business_id = ? AND active = 1 ORDER BY sort, name', bid),
@@ -419,7 +435,16 @@ function itemFields(data: Record<string, unknown>) {
   if (new Set(groups.map((g) => g.id)).size !== groups.length) fail(400, 'Each add-on once.');
   return { name: text(data, 'name', 'Item name', { max: 80 })!, category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? 'Other', price_paise: price, sac, station,
     ...taxFields(data, true), open_price: open ? 1 : 0, min_price_paise: open ? optionalPaise(data, 'minPrice', 'Lowest price') : null,
-    addon_groups: groups, active: data.active === false ? 0 : 1, station_id: stationId, kot: kotRaw === 'category' ? null : kotRaw === 'yes' ? 1 : 0 };
+    addon_groups: groups, active: data.active === false ? 0 : 1, station_id: stationId, kot: kotRaw === 'category' ? null : kotRaw === 'yes' ? 1 : 0,
+    service_charge: followYesNo(data.serviceCharge, 'Service charge'), price_incl: followYesNo(data.priceIncl, 'Price includes GST') };
+}
+
+/** An item's own choice (26 Nov 2026): 'category' (or left out) = as its category, 'yes' = 1, 'no' = 0. */
+function followYesNo(v: unknown, what: string): number | null {
+  if (v === undefined || v === null || v === 'category') return null;
+  if (v === 'yes' || v === true) return 1;
+  if (v === 'no' || v === false) return 0;
+  fail(400, `${what} must be from the category, yes or no.`);
 }
 
 /**
@@ -489,9 +514,10 @@ settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
   const id = newId();
   const extras = await itemExtras(c, bid, id, f);
   await c.env.DB.batch([
-    stmt(c.env.DB, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, now(), f.kot, f.station_id ?? null),
+    stmt(c.env.DB, `INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id,
+        service_charge, price_incl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, bid, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, now(), f.kot, f.station_id ?? null,
+      f.service_charge, f.price_incl),
     ...extras,
     syncItemStations(c.env.DB, bid),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.create', 'menu_items', id, null, f),
@@ -502,13 +528,19 @@ settingsRoutes.post(`${B}/menu`, requireAction('menu.edit'), async (c) => {
 settingsRoutes.put(`${B}/menu/:id`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one(c.env.DB, 'SELECT name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active FROM menu_items WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one<Record<string, unknown> & { service_charge: number | null; price_incl: number | null }>(c.env.DB,
+    'SELECT name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, service_charge, price_incl FROM menu_items WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Item not found.');
-  const f = itemFields(await body(c));
+  const data = await body(c);
+  const f = itemFields(data);
+  // A screen that does not send the new choices keeps what the item had.
+  if (data.serviceCharge === undefined) f.service_charge = before.service_charge;
+  if (data.priceIncl === undefined) f.price_incl = before.price_incl;
   const extras = await itemExtras(c, bid, id, f);
   await c.env.DB.batch([
     stmt(c.env.DB, `UPDATE menu_items SET name = ?, category = ?, price_paise = ?, sac = ?, station = ?, tax_mode = ?, gst_bp = ?, open_price = ?, min_price_paise = ?, active = ?,
-      kot = ?, station_id = ? WHERE id = ?`, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise, f.active, f.kot, f.station_id ?? null, id),
+      kot = ?, station_id = ?, service_charge = ?, price_incl = ? WHERE id = ?`, f.name, f.category, f.price_paise, f.sac, f.station, f.tax_mode, f.gst_bp, f.open_price, f.min_price_paise,
+      f.active, f.kot, f.station_id ?? null, f.service_charge, f.price_incl, id),
     ...extras,
     syncItemStations(c.env.DB, bid),
     audit(c.env.DB, bid, c.get('staff').id, 'menu.update', 'menu_items', id, before, f),
@@ -530,8 +562,9 @@ settingsRoutes.post(`${B}/menu/bulk`, requireAction('menu.edit'), async (c) => {
   if (!Array.isArray(ids) || !ids.length || ids.length > 2000 || !ids.every((x) => typeof x === 'string' && isUuid(x))) fail(400, 'Choose at least one item.');
   const uniq = [...new Set(ids as string[])];
   const json = JSON.stringify(uniq);
-  const before = await all<{ id: string; name: string; category: string; active: number; station_id: string | null; kot: number | null; tax_mode: string | null; gst_bp: number | null; used: number }>(db,
-    `SELECT id, name, category, active, station_id, kot, tax_mode, gst_bp,
+  const before = await all<{ id: string; name: string; category: string; active: number; station_id: string | null; kot: number | null; tax_mode: string | null; gst_bp: number | null;
+    service_charge: number | null; price_incl: number | null; used: number }>(db,
+    `SELECT id, name, category, active, station_id, kot, tax_mode, gst_bp, service_charge, price_incl,
        EXISTS (SELECT 1 FROM order_lines l WHERE l.item_id = m.id) OR EXISTS (SELECT 1 FROM bill_lines l WHERE l.item_id = m.id) AS used
      FROM menu_items m WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))`, bid, json);
   if (before.length !== uniq.length) fail(404, 'An item was not found. Reload the page and try again.');
@@ -567,6 +600,10 @@ settingsRoutes.post(`${B}/menu/bulk`, requireAction('menu.edit'), async (c) => {
   } else if (action === 'tax') {
     const f = taxFields((data.value ?? {}) as Record<string, unknown>, true);
     s.push(stmt(db, `UPDATE menu_items SET tax_mode = ?, gst_bp = ? WHERE ${IN}`, f.tax_mode, f.gst_bp, bid, json));
+  } else if (action === 'serviceCharge' || action === 'priceIncl') {
+    // Service charge or price-includes-GST for the ticked items (26 Nov 2026): 'category', 'yes' or 'no'.
+    const v = followYesNo(data.value, action === 'serviceCharge' ? 'Service charge' : 'Price includes GST');
+    s.push(stmt(db, `UPDATE menu_items SET ${action === 'serviceCharge' ? 'service_charge' : 'price_incl'} = ? WHERE ${IN}`, v, bid, json));
   } else fail(400, 'Unknown change.');
   await db.batch([
     ...s,
@@ -581,13 +618,19 @@ settingsRoutes.post(`${B}/menu/bulk`, requireAction('menu.edit'), async (c) => {
 settingsRoutes.put(`${B}/menu-categories/:id`, requireAction('menu.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one<{ name: string; tax_mode: string; gst_bp: number | null; kot: number; station_id: string | null }>(c.env.DB,
-    'SELECT name, tax_mode, gst_bp, kot, station_id FROM menu_categories WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one<{ name: string; tax_mode: string; gst_bp: number | null; kot: number; station_id: string | null; service_charge: number; price_incl: number }>(c.env.DB,
+    'SELECT name, tax_mode, gst_bp, kot, station_id, service_charge, price_incl FROM menu_categories WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Category not found.');
   const data = await body(c);
   // Any of: its tax (taxMode, gstRate), whether its items make a KOT (kot: true / false), and its station.
   const f = data.taxMode !== undefined || data.tax !== undefined ? taxFields(data, false) : { tax_mode: before.tax_mode, gst_bp: before.gst_bp };
   if (data.kot !== undefined && typeof data.kot !== 'boolean') fail(400, 'KOT must be yes or no.');
+  // Service charge and price includes GST (26 Nov 2026): yes or no for the category's items.
+  for (const [k, what] of [['serviceCharge', 'Service charge'], ['priceIncl', 'Price includes GST']] as const) {
+    if (data[k] !== undefined && typeof data[k] !== 'boolean') fail(400, `${what} must be yes or no.`);
+  }
+  const sc = data.serviceCharge === undefined ? before.service_charge : data.serviceCharge ? 1 : 0;
+  const incl = data.priceIncl === undefined ? before.price_incl : data.priceIncl ? 1 : 0;
   const kot = data.kot === undefined ? before.kot : data.kot ? 1 : 0;
   let stationId = before.station_id;
   if (data.stationId !== undefined) {
@@ -595,9 +638,9 @@ settingsRoutes.put(`${B}/menu-categories/:id`, requireAction('menu.edit'), async
     stationId = data.stationId as string;
   }
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE menu_categories SET tax_mode = ?, gst_bp = ?, kot = ?, station_id = ? WHERE id = ?', f.tax_mode, f.gst_bp, kot, stationId, id),
+    stmt(c.env.DB, 'UPDATE menu_categories SET tax_mode = ?, gst_bp = ?, kot = ?, station_id = ?, service_charge = ?, price_incl = ? WHERE id = ?', f.tax_mode, f.gst_bp, kot, stationId, sc, incl, id),
     syncItemStations(c.env.DB, bid),
-    audit(c.env.DB, bid, c.get('staff').id, 'category.update', 'menu_categories', id, before, { ...f, kot, station_id: stationId }),
+    audit(c.env.DB, bid, c.get('staff').id, 'category.update', 'menu_categories', id, before, { ...f, kot, station_id: stationId, service_charge: sc, price_incl: incl }),
   ]);
   return c.json({ ok: true });
 });

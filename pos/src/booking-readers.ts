@@ -90,6 +90,16 @@ export function stampOf(s: string | undefined): string | undefined {
   return t ? `${d} ${t[1].padStart(2, '0')}:${t[2]}` : d;
 }
 
+/** "25 Nov '26 03:01 PM" → '2026-11-25 15:01' (India time); a date alone keeps its date. */
+export function clock12(s: string | undefined): string | undefined {
+  const d = dateOf(s);
+  if (!d) return undefined;
+  const t = /\b(\d{1,2}):(\d{2})\s*([ap])\.?m\b/i.exec(s!);
+  if (!t) return stampOf(s);
+  const h = (Number(t[1]) % 12) + (/p/i.test(t[3]) ? 12 : 0);
+  return `${d} ${String(h).padStart(2, '0')}:${t[2]}`;
+}
+
 /** "₹ 1,609.51" or "2,190.48" → paise. */
 export function paiseOf(s: string | undefined): number | undefined {
   const m = /-?\d[\d,]*(?:\.\d+)?/.exec(s ?? '');
@@ -157,7 +167,11 @@ export function readMmt(mail: Email): ReadBooking[] {
   const pay = after(/^Payment Status$/i) ?? '';
   const paidPaise = amountPaise !== undefined && /paid online|prepaid/i.test(pay) && !/part/i.test(pay) ? amountPaise : undefined;
   const pnr = after(/^PNR$/i)?.match(/\d{6,}/)?.[0];
+  // "Booked on" then, a row or two later, "25 Nov '26 03:01 PM" (25 Nov 2026).
+  const bi = flat.findIndex((l) => /^Booked on$/i.test(l));
+  const bookedAt = bi >= 0 ? clock12(flat.slice(bi + 1, bi + 4).find((l) => dateOf(l))) : undefined;
   return [{
+    bookedAt,
     extRef: ref,
     otaRef: ref,
     pnr,
