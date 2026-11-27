@@ -14,6 +14,7 @@ import { clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, pla
 import { dishMoves, cancelMoves, stockAtKot } from '../stock';
 import { sendSoon } from '../sync';
 import { istDay } from '../../../src/time';
+import { offlineStep } from '../offline';
 import type { AppEnv } from '../types';
 
 export const orderRoutes = new Hono<AppEnv>();
@@ -305,18 +306,21 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
   const groups = new Map<string, LineRow[]>();
   for (const l of send) { const s = stationOf(l); if (s) groups.set(s.id, [...(groups.get(s.id) ?? []), l]); }
   const ids: string[] = [];
+  // Sent up after the internet was off (27 Nov 2026): the counter already printed it, and the kitchen has made it.
+  const off = offlineStep();
   const statements = [...groups].map(([sid, gl]) => {
     const s = stations.find((x) => x.id === sid)!;
     const online = isOnline(s.seen, t);
-    const printAt = !online ? 'counter' : s.how === 'screen' ? 'none' : 'station';
+    const label = off ? off.kotLabels?.[s.id] ?? off.kotLabels?.[s.name] ?? (Object.values(off.kotLabels ?? {}).join(' ') || null) : null;
+    const printAt = off ? 'counter' : !online ? 'counter' : s.how === 'screen' ? 'none' : 'station';
     const id = newId();
     ids.push(id);
     // The printed number starts at 101 each shift day (21 Nov 2026); kot_no keeps running underneath.
-    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no, note)
+    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no, note, offline_label)
       SELECT ?1, ?2, ?3, coalesce(max(kot_no), 0) + 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ?12 AND shift_day = ?13), 100) + 1, (SELECT kot_note FROM orders WHERE id = ?3) FROM kots WHERE business_id = ?14`,
+        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ?12 AND shift_day = ?13), 100) + 1, (SELECT kot_note FROM orders WHERE id = ?3), ?15 FROM kots WHERE business_id = ?14`,
       id, bid, orderId, s.name, JSON.stringify(gl.map((l) => ({ name: l.name, qty: l.qty - l.sent_qty, options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise,
-        ...(l.remark ? { remark: l.remark } : {}), ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid);
+        ...(l.remark ? { remark: l.remark } : {}), ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, off || s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid, label);
   });
   return { ids, statements };
 }
@@ -572,6 +576,9 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   const id = newId();
   const printDay = istDay(t);
   const yymmdd = printDay.slice(2).replace(/-/g, '');
+  // A bill printed offline keeps the number on its paper (C261126A001: the device's letter, then its own count); it has
+  // no place in the day's server count. The replay checked the number is this device's and this day's.
+  const offNo = offlineStep()?.billNo ?? null;
   const guest = text(data, 'guestName', 'Guest name', { optional: true, max: 80 }) ?? o.guest_name;
   const staffId = c.get('staff').id;
   try {
@@ -582,12 +589,13 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
       stmt(c.env.DB, `INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise,
           discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq, guest_phone,
           service_charge_bp, service_charge_paise)
-        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, s.next_no, ${offNo ? "? || ? || ''" : "? || ? || printf('%03d', d.n)"}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${offNo ? 'NULL' : 'd.n'}, ?, ?, ?
         FROM bill_series s, (SELECT coalesce(max(day_seq), 0) + 1 AS n FROM bills WHERE entity_id = ? AND print_day = ?) d WHERE s.entity_id = ? AND s.fy = ?`,
-        id, bid, o.id, e.id, fy, e.series_prefix, yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
+        id, bid, o.id, e.id, fy, offNo ?? e.series_prefix, offNo ? '' : yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
         totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, printDay, o.guest_phone,
         scBp, totals.serviceChargePaise ?? 0, e.id, printDay, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
+      ...(offNo ? [stmt(c.env.DB, 'UPDATE bills SET offline_device = ? WHERE id = ?', offlineStep()!.deviceId, id)] : []),
       ...ls.map((l) => {
         const tx = lineTax(l.id);
         const fl = flags(l.id);

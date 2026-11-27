@@ -20,6 +20,7 @@ import { bookingRoutes } from './routes/bookings';
 import { frontDeskRoutes } from './routes/frontdesk';
 import { roomDeskRoutes } from './routes/roomdesk';
 import { proofRoutes } from './routes/proof';
+import { offlineRoutes } from './routes/offline';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -69,6 +70,7 @@ app.route('/', bookingRoutes);
 app.route('/', frontDeskRoutes);
 app.route('/', roomDeskRoutes);
 app.route('/', proofRoutes);
+app.route('/', offlineRoutes);
 app.route('/', adminRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));

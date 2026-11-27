@@ -16,6 +16,7 @@ import { syncStay } from '../rooms';
 import { saleMoves } from '../stock';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
+import { offlineStep } from '../offline';
 
 export const settleRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -346,6 +347,10 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
 
 /** A numbered receipt (RCPT/26-27/0001): its settlement row, numbered in the same batch. */
 function receiptSettlement(db: DB, bid: string, settlementId: string, shiftDay: string, fy: string, staffId: string, t: number) {
+  // A receipt printed offline (27 Nov 2026) keeps the number on its paper (RCPT/26-27/A001); the yearly count is not used.
+  const off = offlineStep();
+  if (off?.receiptNo) return [stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no, offline_device) VALUES (?, ?, 'receipt', ?, ?, ?, ?, ?)`,
+    settlementId, bid, shiftDay, staffId, t, off.receiptNo, off.deviceId)];
   return [
     stmt(db, 'INSERT OR IGNORE INTO receipt_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
     stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no)
