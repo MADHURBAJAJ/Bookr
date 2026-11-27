@@ -1225,6 +1225,17 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   const members = row.group_stay_id ? [] : await all<{ id: string; room: string; balance: number }>(db,
     `SELECT s.id, s.room, coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id WHERE d.stay_id = s.id), 0) AS balance
      FROM stays s WHERE s.group_stay_id = ? AND s.checked_out_at IS NULL ORDER BY s.room`, id);
+  // Food still open on the guest (27 Nov 2026): an order open, on a tab, or printed and not paid, on this room or bed (the
+  // first room: on every one of the group's). It would stay tied to a guest who left, block that bed's tile for the next
+  // guest, and could no longer go on a room bill. Close it first: on the room bill, or paid.
+  const leaving = [id, ...members.map((m) => m.id)];
+  const food = await all<{ id: string; place: string; status: string; amountPaise: number }>(db, `SELECT o.id, o.place, o.status,
+      coalesce((SELECT b.total_paise FROM bills b WHERE b.order_id = o.id AND b.status = 'printed'), (SELECT coalesce(sum(l.price_paise * l.qty), 0) FROM order_lines l WHERE l.order_id = o.id)) AS amountPaise
+    FROM orders o WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') AND o.stay_id IN (${leaving.map(() => '?').join(', ')}) ORDER BY o.place`, bid, ...leaving);
+  if (food.length) {
+    const what = (f: { place: string; status: string; amountPaise: number }) => `${f.place}: ${rupeesText(f.amountPaise)} ${f.status === 'billed' ? 'printed, not paid' : f.status === 'tab' ? 'on a tab' : 'open'}`;
+    return c.json({ error: `Food is still open: ${food.map(what).join(' · ')}. Put it on the room bill or take payment first.`, code: 'open_food', orders: food }, 409);
+  }
   const owing = [...(row.group_stay_id ? [{ room: row.room, balance: row.balance }] : []), ...members].filter((m) => m.balance !== 0);
   if (owing.length) fail(409, `${owing.map((m) => m.room).join(', ')} still ${owing.length === 1 ? 'has' : 'have'} money on ${owing.length === 1 ? 'its' : 'their'} own bill: move it to the first room's bill first (Move to another room).`);
   // A past stay's room (25 Nov 2026) takes its own name at check-out, and is not marked dirty: nobody left it today.

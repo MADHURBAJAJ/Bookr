@@ -167,7 +167,7 @@ const errorBox = () => html`${ui.drawerAsk ? html`<div class="msg warn" role="al
   <div class="row"><a class="btn pri" href="#/handover">${ui.drawerAsk.holder} is here: hand it to me</a><a class="btn" href="#/handover/takeover">${ui.drawerAsk.holder} has left: I take it over</a>
     <button class="btn ghost" type="button" data-act="drawerAskNo">Cancel</button></div></div>` : ''}${ui.guestAsk ? html`<div class="msg warn" role="alert"><p style="margin-bottom:8px"><strong>${ui.guestAsk.message}</strong></p>
   <div class="row"><button class="btn pri" type="button" data-act="guestChoice" data-c="saved">Yes, ${ui.guestAsk.savedName}</button>
-    <button class="btn" type="button" data-act="guestChoice" data-c="update">Use the name I typed</button><button class="btn ghost" type="button" data-act="guestChoiceNo">Cancel</button></div></div>` : ''}${ui.approval ? approvalBox() : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
+    <button class="btn" type="button" data-act="guestChoice" data-c="update">Use the name I typed</button><button class="btn ghost" type="button" data-act="guestChoiceNo">Cancel</button></div></div>` : ''}${ui.approval ? approvalBox() : ''}${ui.error && ui.openFood?.length ? html`<div class="row" style="margin:6px 0">${ui.openFood.map((o) => html`<button class="btn sm" type="button" data-act="openFoodGo" data-id="${o.id}">Open ${o.place} · ${rs(o.amountPaise)}</button>`)}</div>` : ''}${ui.error ? html`<div class="msg bad" role="alert">${ui.error}</div>` : ''}`;
 /** The manager's PIN for a step a cashier may not take alone (asked for by the server). */
 const approvalBox = () => {
   const a = ui.approval;
@@ -266,6 +266,8 @@ async function actionError(e, act, dataset) {
     // Cash while the drawer is with someone else (24 Nov 2026): hand it over, or take it over.
     if (e instanceof ApiError && e.code === 'drawer_held') { ui.drawerAsk = { holder: e.data?.holder ?? 'someone else' }; ui.error = null; rerender(); return; }
     // A room still marked dirty (25 Nov 2026): asked, then the same tap again.
+    // Food still open at check-out (27 Nov 2026): the error lists it, with a button to each order.
+    ui.openFood = e instanceof ApiError && e.code === 'open_food' ? e.data?.orders ?? [] : null;
     if (e instanceof ApiError && e.code === 'room_dirty') {
       if (confirm(e.message)) { await Promise.resolve(actions[act]({ ...dataset, dirtyOk: '1' })).catch((x) => actionError(x, act, dataset)); }
       return;
@@ -1888,7 +1890,8 @@ const drawerOpen = () => !!(ui.roomBill || ui.chartSel || ui.drawer);
 /** The guests in house, as before (for a captain who cannot check in). */
 const inHouseTable = () => html`<section class="panel"><h2>In house</h2>${ui.recv || ui.refund || ui.roomBill || ui.adv ? '' : errorBox()}
   <div class="scroll"><table class="t cards"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
-    ${cache.stays.map((s) => html`<tr><td data-label="Room"><strong>${s.room}</strong></td><td data-label="Guest">${s.guestName}</td><td data-label="Since">${dayName(s.checkIn)}</td><td class="num" data-label="Owes">${rs(s.balancePaise)}</td>
+    ${cache.stays.filter((s) => !s.groupStayId || !cache.stays.some((y) => y.id === s.groupStayId)).map((s) => { const grp = [s, ...cache.stays.filter((y) => y.groupStayId === s.id)];
+      return { ...s, room: compactRooms(grp.map((y) => y.room)), balancePaise: grp.reduce((n, y) => n + y.balancePaise, 0) }; }).map((s) => html`<tr><td data-label="Room"><strong>${s.room}</strong></td><td data-label="Guest">${s.guestName}</td><td data-label="Since">${dayName(s.checkIn)}</td><td class="num" data-label="Owes">${rs(s.balancePaise)}</td>
       <td class="act"><div class="row">${can('stays.edit') ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${s.id}">Room bill</button>` : ''}
       ${can('debtors.receive') ? html`<button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-room="1">Take payment</button>` : ''}</div></td></tr>`)}
   </tbody></table></div></section>`;
@@ -1930,6 +1933,32 @@ function todayView() {
     ...(a?.dirty?.length ? [{ tone: 'mute', icon: '◆', title: `${plural(a.dirty.length, 'room')} not ready`, sub: a.dirty.slice(0, 6).map((x) => `${x.room} ${x.status}`).join(' · '), act: 'goTo', href: '#/rooms/house' }] : []),
   ];
   const row = (attrs, left, right) => html`<button type="button" class="drow" ${attrs}><span class="grow">${left}</span><span class="dright">${right}</span></button>`;
+  // One tile per party, closed each time the screen opens (27 Nov 2026).
+  const inTiles = partyTiles(fd.inHouse);
+  const outTiles = partyTiles(fd.leaving);
+  const tile = (t, kind) => {
+    const all = t.bills.flatMap((b) => [b.head, ...b.members]);
+    const first = t.bills[0].head;
+    const dj = all.reduce((n, x) => n + (x.djuboPaise ?? 0), 0);
+    const bal = all.reduce((n, x) => n + x.balancePaise, 0);
+    const right = kind === 'out' ? (bal === 0 ? html`<span class="status ok">Ready to check out</span>` : owes(bal))
+      : html`${dj ? html`<span class="status info">Paid in Djubo ${rs(dj)}</span> ` : ''}${owes(bal - dj)}`;
+    const sub = kind === 'out' ? 'check-out 11 am' : `${first.plan ? `till ${dayName(first.plan)}` : 'no check-out date'}${dj ? ' · pick how the Djubo payment was paid' : ''}`;
+    if (all.length === 1) return row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${first.room} · ${first.guestName}</strong><small>${sub}</small>`, right);
+    const two = t.bills.length > 1;
+    const roomsOf = (b) => compactRooms([b.head, ...b.members].map((x) => x.room));
+    const k = `${kind}:${t.key}`;
+    const open = !!ui.tileOpen?.[k];
+    const n = two ? t.bills.length : all.length;
+    return html`<div style="display:flex;flex-direction:column">
+      ${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${t.bills.map(roomsOf).join(', ')} · ${first.guestName}</strong><small>${sub}${two ? ' · 2 bookings, one party' : ''}</small>`, right)}
+      <div style="padding:0 10px 6px"><button type="button" class="chip" aria-expanded="${open}" data-act="tileTog" data-k="${k}">${open ? '▾' : '▸'} ${n} ${two ? (n === 1 ? 'bill' : 'bills') : (n === 1 ? 'bed' : 'beds')}</button></div>
+      ${open ? html`<div style="padding:0 0 6px 18px">${two
+        ? t.bills.map((b) => { const bb = [b.head, ...b.members]; const v = bb.reduce((q, x) => q + x.balancePaise - (kind === 'out' ? 0 : x.djuboPaise ?? 0), 0);
+            return row(html`data-act="roomBill" data-id="${b.head.id}"`, html`<span>${roomsOf(b)} · its own bill</span>`, owes(v)); })
+        : all.map((x, i) => row(html`data-act="roomBill" data-id="${first.id}"`, html`<span>${x.room}${i === 0 ? ' · the bill' : ''}</span>`, ''))}</div>` : ''}
+    </div>`;
+  };
   const due = (p, prepaidText = 'Prepaid') => (p ? html`<span class="status warn">Collect ${rs(p)}</span>` : html`<span class="status ok">${prepaidText}</span>`);
   const owes = (b) => (b > 0 ? html`<span class="status warn">Owes ${rs(b)}</span>` : b < 0 ? html`<span class="status info">Holds ${rs(-b)}</span>` : html`<span class="status ok">Settled</span>`);
   return html`<div class="kpis">${kpi('Arriving today', String(s.arriving))}${kpi('In house', String(s.inHouse))}${kpi('Leaving today', String(s.leaving))}${kpi('Free tonight', String(s.freeTonight), 'rooms and beds')}${kpi('To collect today', rs(s.toCollectPaise), '', s.toCollectPaise ? 'warn' : '')}</div>
@@ -1943,14 +1972,38 @@ function todayView() {
         ${fd.arrivals.length ? fd.arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
           html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}${(() => { const c = (ui.arrivals ?? []).find((y) => y.id === x.id)?.continues; return c ? ` · already in ${c.map((y) => y.room).join(', ')}: extension` : ''; })()}</small>`,
           html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${due(x.duePaise)}`)) : html`<p class="empty">No more arrivals today.</p>`}</section>
-      <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${fd.inHouse.length}</span></div>
-        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}${x.djuboPaise ? ' · pick how the Djubo payment was paid' : ''}</small>`,
-          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${owes(x.balancePaise - (x.djuboPaise ?? 0))}`))
-          : html`<p class="empty">No guests in house.</p>`}</section>
-      <section class="dcol"><div class="dch"><h2>Leaving today</h2><span class="faint">${fd.leaving.length}</span></div>
-        ${fd.leaving.length ? fd.leaving.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>check-out 11 am</small>`,
-          x.balancePaise === 0 ? html`<span class="status ok">Ready to check out</span>` : owes(x.balancePaise))) : html`<p class="empty">Nobody is due to leave today.</p>`}</section>
+      <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${inTiles.length}${inTiles.length !== fd.inHouse.length ? ` · ${fd.inHouse.length} rooms and beds` : ''}</span></div>
+        ${inTiles.length ? inTiles.map((t) => tile(t, 'in')) : html`<p class="empty">No guests in house.</p>`}</section>
+      <section class="dcol"><div class="dch"><h2>Leaving today</h2><span class="faint">${outTiles.length}</span></div>
+        ${outTiles.length ? outTiles.map((t) => tile(t, 'out')) : html`<p class="empty">Nobody is due to leave today.</p>`}</section>
     </div>`;
+}
+actions.openFoodGo = (d) => { ui.openFood = null; ui.error = null; ui.roomBill = null; go(`#/order/${d.id}`); };
+actions.tileTog = (d) => { ui.tileOpen = { ...ui.tileOpen, [d.k]: !ui.tileOpen?.[d.k] }; rerender(); };
+/** Rooms in short: "XIV A–F" when the beds of one room run in order, else listed. */
+function compactRooms(list) {
+  const by = new Map();
+  for (const r of list) { const m = /^(.*\S)\s+([A-Z])$/.exec(r); const k = m ? m[1] : r; if (!by.has(k)) by.set(k, []); by.get(k).push(m ? m[2] : null); }
+  return [...by].map(([k, ls]) => {
+    if (ls.includes(null) || ls.length < 2) return ls.map((l) => (l ? `${k} ${l}` : k)).join(', ');
+    const c = [...ls].sort().map((l) => l.charCodeAt(0));
+    return c.every((x, i) => !i || x === c[i - 1] + 1) ? `${k} ${String.fromCharCode(c[0])}–${String.fromCharCode(c[c.length - 1])}` : ls.sort().map((l) => `${k} ${l}`).join(', ');
+  }).join(', ');
+}
+/**
+ * In house as one tile per party (27 Nov 2026): a group's beds under its first room (one bill), and bookings Djubo split
+ * for the same guest and the same check-in day (Vikash Kumar's X and VI A) on one tile, each keeping its own bill.
+ */
+function partyTiles(list) {
+  const heads = list.filter((x) => !x.groupStayId || !list.some((y) => y.id === x.groupStayId));
+  const tiles = [];
+  for (const h of heads) {
+    const bill = { head: h, members: list.filter((x) => x.groupStayId === h.id) };
+    const key = `${String(h.guestName ?? '').trim().toLowerCase()}|${h.checkIn}`;
+    const t = tiles.find((x) => x.key === key);
+    if (t) t.bills.push(bill); else tiles.push({ key, bills: [bill] });
+  }
+  return tiles;
 }
 actions.goTo = (d) => go(d.href);
 actions.deskPanel = () => { ui.roomBill = null; ui.chartSel = null; ui.drawer = () => html`<div class="dhead"><h2>Money at reception</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${deskMoneyPanel(ui.bk)}`; rerender(); };

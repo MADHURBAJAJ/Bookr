@@ -301,7 +301,7 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
        (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.reservation_id = r.id AND d.status = 'held') AS heldPaise
        FROM reservations r WHERE r.business_id = ? AND r.status IN ('confirmed', 'hold') AND r.booking_id IS NULL AND r.stay_id IS NULL AND r.check_in <= ? AND r.check_out > ?`, b.id, today, today),
     all<{ id: string; room: string; guestName: string; checkIn: string; plan: string | null; accountId: string; balancePaise: number }>(db, `SELECT s.id, s.room, s.guest_name AS guestName,
-      s.check_in AS checkIn, d.id AS accountId,
+      s.check_in AS checkIn, d.id AS accountId, s.group_stay_id AS groupStayId,
       coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id), (SELECT r.check_out FROM reservations r WHERE r.id = s.reservation_id)) AS plan,
       coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balancePaise
       FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id WHERE s.business_id = ? AND s.checked_out_at IS NULL ORDER BY s.room`, b.id),

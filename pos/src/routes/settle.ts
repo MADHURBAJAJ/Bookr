@@ -304,7 +304,10 @@ settleRoutes.get(`${B}/bills/:id/credit-match`, requireAction('bills.settle'), a
 settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
-  const acc = await one<{ id: string; kind: string; name: string }>(db, 'SELECT id, kind, name FROM debtor_accounts WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  // A bed checked in with a group (27 Nov 2026): money taken on it goes on the group's bill, on the first room.
+  const acc = await one<{ id: string; kind: string; name: string }>(db, `SELECT coalesce(g.id, d.id) AS id, d.kind, coalesce(g.name, d.name) AS name FROM debtor_accounts d
+    LEFT JOIN stays s ON s.id = d.stay_id LEFT JOIN debtor_accounts g ON g.stay_id = s.group_stay_id
+    WHERE d.id = ? AND d.business_id = ?`, c.req.param('id'), bid);
   if (!acc) fail(404, 'Account not found.');
   const data = await body(c);
   const kind = data.kind;
