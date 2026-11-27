@@ -3491,56 +3491,135 @@ const PROOF_STATUS = {
 };
 const PROOF_MODE = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Room', credit: 'Credit', comp: 'Comp', advance: 'Advance' };
 
+// Which shift or shifts Payments shows (28 Nov 2026): one shift (◀ date ▶) or From–To, up to 7 shifts, newest first.
+// Kept while moving between its tabs; "Today's shift" goes back. A shift runs from the start hour to the same hour next
+// day, so a bill after midnight sits under the shift before; every row shows its own date and time.
+let payDays = null;
+const PAY_MAX = 7;
+function payState() {
+  const t = me.business.shiftDay;
+  if (!payDays) payDays = { mode: 'one', day: t, from: addDays(t, -(PAY_MAX - 1)), to: t };
+  return payDays;
+}
+const payList = () => {
+  const p = payState();
+  if (p.mode === 'one') return [p.day];
+  const out = [];
+  for (let d = p.to; d >= p.from && out.length < PAY_MAX; d = addDays(d, -1)) out.push(d);
+  return out;
+};
+const shiftName = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).replace(',', '');
+const dm = (ms) => new Date(ms).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+/** "28 Nov, 12:41 am": the date always shown, as a bill after midnight belongs to the shift before. */
+const payWhen = (ms) => html`<span class="pay-when"><b>${dm(ms)}</b>, ${time(ms)}</span>`;
+
 async function paymentsScreen(tab = '') {
-  const load = async () => { ui.pf = await api('GET', `${B()}/proof`); };
+  const p = payState();
+  const today = me.business.shiftDay;
+  if (p.day > today) p.day = today;
+  if (p.to > today) p.to = today;
+  const days = payList();
+  const live = p.mode === 'one' && p.day === today;
+  const load = async () => { ui.pfDays = await Promise.all(days.map((d) => api('GET', `${B()}/proof?day=${d}${p.mode === 'range' ? '&open=0' : ''}`))); };
   await load();
   rerender = () => {
-    const d = ui.pf;
-    const byKey = new Map((d.rows ?? []).map((r) => [r.key, r]));
-    const rows = d.bills.map((b) => byKey.get(b.key) ?? { ...b, status: 'unknown', proof: [], differences: [], missing: [] }).reverse();
-    const extras = [...(d.extras ?? [])].reverse();
-    const n = { diff: rows.filter((r) => r.status === 'difference').length, missing: rows.filter((r) => r.status === 'missing').length, extras: extras.length };
-    const shown = tab === 'diff' ? rows.filter((r) => r.status === 'difference') : tab === 'missing' ? rows.filter((r) => r.status === 'missing') : rows;
-    const stale = d.listener?.lastSeenAt && Date.now() - d.listener.lastSeenAt > 10 * 60_000;
+    const all = ui.pfDays;
+    const first = all[0] ?? {};
+    const rowsOf = (d) => {
+      const byKey = new Map((d.rows ?? []).map((r) => [r.key, r]));
+      return d.bills.map((b) => byKey.get(b.key) ?? { ...b, status: 'unknown', proof: [], differences: [], missing: [] }).reverse();
+    };
+    const shifts = all.map((d) => {
+      const rows = rowsOf(d);
+      const extras = [...(d.extras ?? [])].reverse();
+      const c = { matched: rows.filter((r) => r.status === 'matched').length, missing: rows.filter((r) => r.status === 'missing').length,
+        diff: rows.filter((r) => r.status === 'difference').length, waiting: rows.filter((r) => r.status === 'waiting').length, extras: extras.length };
+      return { d, rows, extras, c };
+    });
+    const sum = (k) => shifts.reduce((n, x) => n + x.c[k], 0);
+    const n = { matched: sum('matched'), missing: sum('missing'), diff: sum('diff'), waiting: sum('waiting'), extras: sum('extras') };
+    const stale = live && first.listener?.lastSeenAt && Date.now() - first.listener.lastSeenAt > 10 * 60_000;
     // Connected to Bookr, but Bookr has never heard from the WhatsApp listener (24 Nov 2026): say so, or bills just show no proof.
-    const neverSeen = d.connected !== false && !d.error && !d.listener?.lastSeenAt;
-    const proofText = (e) => `${{ upi: 'UPI', card: 'Card slip', bill: 'Bill photo' }[e.kind]}${e.amountPaise ? ` ${rs(e.amountPaise)}` : ''} · ${time(e.sentAt)}${e.caption ? ` · “${e.caption}”` : ''}`;
+    const neverSeen = first.connected !== false && !first.error && !first.listener?.lastSeenAt;
+    const proofText = (e) => html`${{ upi: 'UPI', card: 'Card slip', bill: 'Bill photo' }[e.kind]}${e.amountPaise ? ` ${rs(e.amountPaise)}` : ''} · ${payWhen(e.sentAt)}${e.caption ? ` · “${e.caption}”` : ''}`;
     const row = (r) => {
       const [tone, label] = PROOF_STATUS[r.status] ?? PROOF_STATUS.unknown;
-      return html`<tr><td>${time(r.at)}</td><td class="mono">${r.billNo && r.kind !== 'receipt' ? html`<a href="#/done/${r.key}">${r.billNo}</a>` : r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
+      return html`<tr><td>${payWhen(r.at)}</td><td class="mono">${r.billNo && r.kind !== 'receipt' ? html`<a href="#/done/${r.key}">${r.billNo}</a>` : r.billNo ?? 'Receipt'}</td><td>${r.label ?? ''}</td><td class="num">${rs(r.totalPaise)}</td>
         <td>${r.modes.length ? r.modes.map((m) => `${PROOF_MODE[m.mode] ?? m.mode} ${rs(m.amountPaise)}`).join(' + ') : html`<span class="quiet">not paid</span>`}</td>
         <td class="small">${r.proof.length ? r.proof.map((e) => html`<div>${proofText(e)}</div>`) : html`<span class="quiet">—</span>`}</td>
         <td>${tone ? html`<span class="status ${tone}">${label}</span>` : html`<span class="quiet small">${label}</span>`}
           ${[...r.differences, ...r.missing].map((x) => html`<div class="small">${x}</div>`)}</td></tr>`;
     };
-    paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(d.day)}`, 'Every bill and receipt of the shift against the proof posted in the Guest payment group: a UPI screenshot, the card slip, or “cash” on the bill photo. Post proof until the day closes.')}
-      ${(d.cancelledReceipts ?? []).length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><b>Cancelled receipts (no proof needed)</b>${d.cancelledReceipts.map((x) => html`<div><span style="text-decoration:line-through">${x.receiptNo ?? 'Receipt'} · ${rs(x.totalPaise)}</span> <span class="status bad">CANCELLED</span> · ${x.who ?? ''} · ${x.reason} · by ${x.byName ?? ''}</div>`)}</div>` : ''}
-      ${d.connected === false ? html`<div class="msg warn">This POS is not connected to Bookr, so no proof is shown. The bills are listed below.</div>` : ''}
-      ${d.error ? html`<div class="msg warn">Bookr could not be reached (${d.error}). Trying again every few seconds; the bills are listed below.</div>` : ''}
+    const tableOf = (x) => {
+      if (tab === 'extras') return x.extras.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Posted</th><th>What</th><th>Caption</th><th>By</th></tr></thead><tbody>
+          ${x.extras.map((e) => html`<tr><td>${payWhen(e.sentAt)}</td><td>${e.what}</td><td class="small">${e.caption ?? ''}</td><td class="small">${e.sender ?? ''}</td></tr>`)}</tbody></table></div>`
+        : html`<p class="empty">No extra proof: everything posted fits a POS bill.</p>`;
+      const shown = tab === 'diff' ? x.rows.filter((r) => r.status === 'difference') : tab === 'missing' ? x.rows.filter((r) => r.status === 'missing') : x.rows;
+      return shown.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Date and time</th><th>Bill</th><th>Table</th><th class="num">Amount</th><th>Paid by</th><th>Proof posted</th><th>Status</th></tr></thead>
+          <tbody>${shown.map(row)}</tbody></table></div>`
+        : html`<p class="empty">${tab ? 'Nothing here.' : 'No bills in this shift.'}</p>`;
+    };
+    const cancelled = all.flatMap((d) => (d.cancelledReceipts ?? []));
+    const start = me.business.shift_start_hour ?? 8;
+    const title = p.mode === 'one' ? `Payments · ${shiftName(p.day)}${p.day === today ? " (today's shift)" : ''}` : `Payments · ${shiftName(days.at(-1))} to ${shiftName(days[0])}`;
+    const bar = html`<div class="pay-bar">
+      <span class="pay-mode" role="group" aria-label="One shift or several"><button type="button" class="chip" data-act="payMode" data-v="one" aria-pressed="${p.mode === 'one'}">One day</button><button type="button" class="chip" data-act="payMode" data-v="range" aria-pressed="${p.mode === 'range'}">From–To</button></span>
+      ${p.mode === 'one' ? html`<button class="btn" type="button" data-act="payStep" data-n="-1" aria-label="Previous shift">◀</button>
+          <input class="in" type="date" id="payDay" value="${p.day}" max="${today}" data-act-change="payPick" data-k="day" aria-label="Shift">
+          <button class="btn" type="button" data-act="payStep" data-n="1" aria-label="Next shift" ${p.day >= today ? 'disabled' : ''}>▶</button>`
+        : html`<label class="small pay-lab">From <input class="in" type="date" id="payFrom" value="${p.from}" max="${today}" data-act-change="payPick" data-k="from"></label>
+          <label class="small pay-lab">To <input class="in" type="date" id="payTo" value="${p.to}" max="${today}" data-act-change="payPick" data-k="to"></label>
+          <span class="small quiet">Up to ${PAY_MAX} days</span>`}
+      <span class="grow"></span>
+      <button class="btn ${live ? '' : 'pri'}" type="button" data-act="payToday">Today's shift</button></div>`;
+    const body = p.mode === 'one' ? html`<section class="panel">${tableOf(shifts[0])}</section>`
+      : shifts.map((x) => html`<section class="panel"><div class="row between" style="margin-bottom:6px"><h2>${shiftName(x.d.day)} shift</h2>
+          <span class="small quiet">${plural(x.rows.length, 'bill')} · ${x.c.matched} matched${x.c.missing ? html` · <b style="color:var(--bad)">${x.c.missing} no proof</b>` : ''}${x.c.diff ? ` · ${plural(x.c.diff, 'difference')}` : ''}</span></div>
+          ${tableOf(x)}</section>`);
+    paint(shell('#/payments', html`${pageHead(title, `Every bill and receipt against the proof posted in the Guest payment group: a UPI screenshot, the card slip, or “cash” on the bill photo. A shift runs ${start} am to ${start} am, so a bill after midnight belongs to the shift before.`)}
+      ${bar}
+      ${p.mode === 'one' && !live ? html`<p class="small quiet" style="margin:-4px 0 12px">A past shift: shown as checked now, not refreshed. Bills still unpaid show on today's shift.</p>` : ''}
+      ${p.mode === 'range' ? html`<p class="small quiet" style="margin:-4px 0 12px">Shown as checked now, not refreshed. Each bill is under the shift it was printed or paid in.</p>` : ''}
+      ${cancelled.length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><b>Cancelled receipts (no proof needed)</b>${cancelled.map((x) => html`<div><span style="text-decoration:line-through">${x.receiptNo ?? 'Receipt'} · ${rs(x.totalPaise)}</span> <span class="status bad">CANCELLED</span> · ${x.who ?? ''} · ${x.reason} · by ${x.byName ?? ''}</div>`)}</div>` : ''}
+      ${first.connected === false ? html`<div class="msg warn">This POS is not connected to Bookr, so no proof is shown. The bills are listed below.</div>` : ''}
+      ${all.find((d) => d.error) ? html`<div class="msg warn">Bookr could not be reached (${all.find((d) => d.error).error}).${live ? ' Trying again every few seconds;' : ''} The bills are listed below.</div>` : ''}
       ${neverSeen ? html`<div class="msg warn">WhatsApp is not connected to Bookr yet, so no payment proof can show. The listener on the reception PC needs setting up, and the Guest payment group adding in Bookr (Settings › WhatsApp groups, with POS proof on).</div>` : ''}
-      ${stale ? html`<div class="msg warn">WhatsApp has not been read since ${time(d.listener.lastSeenAt)}: new proof will not show until the reception PC is back.</div>` : ''}
-      <div class="kpis">${kpi('Matched', String(rows.filter((r) => r.status === 'matched').length), `of ${rows.filter((r) => ['matched', 'missing', 'difference'].includes(r.status)).length} paid needing proof`, 'good')}
+      ${stale ? html`<div class="msg warn">WhatsApp has not been read since ${payWhen(first.listener.lastSeenAt)}: new proof will not show until the reception PC is back.</div>` : ''}
+      <div class="kpis">${kpi('Matched', String(n.matched), `of ${n.matched + n.missing + n.diff} paid needing proof`, 'good')}
         ${kpi('Settled, no proof', String(n.missing), '', n.missing ? 'bad' : '')}
-        ${kpi('Printed, not paid', String(rows.filter((r) => r.status === 'waiting').length), '', 'warn')}
+        ${kpi('Printed, not paid', String(n.waiting), '', 'warn')}
         ${kpi('Differences', String(n.diff), '', n.diff ? 'bad' : '')}
         ${kpi('Extras', String(n.extras), 'proof with no POS bill')}</div>
-      ${d.reading ? html`<p class="small quiet">${d.reading} photo${d.reading === 1 ? ' is' : 's are'} being read.</p>` : ''}
-      ${tabsNav('Payments', PROOF_TABS.map(([k, t]) => [k ? `#/payments/${k}` : '#/payments', k && n[k] ? html`${t} <span class="status ${k === 'extras' ? 'info' : 'bad'}">${n[k]}</span>` : t, k]), tab)}
-      <section class="panel">${tab === 'extras'
-        ? (extras.length ? html`<table class="t"><thead><tr><th>Posted</th><th>What</th><th>Caption</th><th>By</th></tr></thead><tbody>
-            ${extras.map((e) => html`<tr><td>${time(e.sentAt)}</td><td>${e.what}</td><td class="small">${e.caption ?? ''}</td><td class="small">${e.sender ?? ''}</td></tr>`)}</tbody></table>`
-          : html`<p class="empty">No extra proof: everything posted fits a POS bill.</p>`)
-        : (shown.length ? html`<table class="t"><thead><tr><th>Time</th><th>Bill</th><th>Table</th><th class="num">Amount</th><th>Paid by</th><th>Proof posted</th><th>Status</th></tr></thead>
-            <tbody>${shown.map(row)}</tbody></table>`
-          : html`<p class="empty">${tab ? 'Nothing here.' : 'No bills in this shift yet.'}</p>`)}</section>`));
+      ${live && first.reading ? html`<p class="small quiet">${first.reading} photo${first.reading === 1 ? ' is' : 's are'} being read.</p>` : ''}
+      ${tabsNav('Payments', PROOF_TABS.map(([k, t]) => [k === 'bills' && p.mode === 'one' ? `#/payments/bills/${p.day}` : k ? `#/payments/${k}` : '#/payments',
+        k && n[k] ? html`${t} <span class="status ${k === 'extras' ? 'info' : 'bad'}">${n[k]}</span>` : t, k]), tab)}
+      ${body}`));
   };
   rerender();
-  // Asks again every 12 seconds while this screen is open and the window is in front.
-  proofTimer = setInterval(async () => {
-    if (document.hidden) return;
-    try { await load(); rerender(); } catch { /* the next tick tries again */ }
-  }, 12_000);
+  // Today's shift only: asks again every 12 seconds while this screen is open and the window is in front.
+  if (live) {
+    proofTimer = setInterval(async () => {
+      if (document.hidden) return;
+      try { await load(); rerender(); } catch { /* the next tick tries again */ }
+    }, 12_000);
+  }
 }
+actions.payMode = (d) => { payState().mode = d.v === 'range' ? 'range' : 'one'; route(); };
+actions.payStep = (d) => { const p = payState(); const next = addDays(p.day, Number(d.n)); if (next <= me.business.shiftDay) { p.day = next; route(); } };
+actions.payToday = () => { const p = payState(); p.mode = 'one'; p.day = me.business.shiftDay; route(); };
+actions.payPick = (d, el) => {
+  const v = el.value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return;
+  const p = payState();
+  const today = me.business.shiftDay;
+  p[d.k] = v > today ? today : v;
+  if (p.mode === 'range') {
+    if (p.from > p.to) [p.from, p.to] = [p.to, p.from];
+    // Up to 7 shifts: a longer range keeps its last 7 days.
+    if (addDays(p.from, PAY_MAX - 1) < p.to) { p.from = addDays(p.to, -(PAY_MAX - 1)); flash = { kind: 'warn', text: `Up to ${PAY_MAX} days at a time: showing ${dayName(p.from)} to ${dayName(p.to)}.` }; }
+  }
+  route();
+};
 
 // ---------- Payments › Bills (25 Nov 2026): every bill of a shift, filtered and searched; a tap opens the bill.
 const BILL_FILTERS = [['', 'All'], ['topay', 'To pay'], ['room', 'To room'], ['credit', 'Credit'], ['nc', 'NC'], ['void', 'Void'], ['roominv', 'Room invoices']];

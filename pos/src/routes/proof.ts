@@ -5,7 +5,7 @@
 import { cancelledReceipts } from './receipt-cancels';
 import { Hono } from 'hono';
 import { all, type DB } from '../../../src/db';
-import { date } from '../../../src/http';
+import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { bookrLink } from '../sync';
 import { bizOf, clock } from '../util';
@@ -20,20 +20,22 @@ export interface ProofBill { key: string; billNo: string | null; kind: 'bill' | 
   at: number; label: string | null; tenders: Tender[] }
 
 /** The shift's bills (printed or settled in it, and any still unpaid) and receipts, as Bookr's list wants them. */
-export async function shiftBills(db: DB, bid: string, day: string): Promise<ProofBill[]> {
+/** `open`: also bills still unpaid from earlier shifts (today's shift only, so a past day or a range lists each bill once). */
+export async function shiftBills(db: DB, bid: string, day: string, open = true): Promise<ProofBill[]> {
+  const o = open ? 1 : 0;
   const bills = await all<{ id: string; bill_no: string; status: 'printed' | 'settled'; total_paise: number; discount_paise: number; printed_at: number; place: string; guest_name: string | null }>(db,
     `SELECT b.id, b.bill_no, b.status, b.total_paise, b.discount_paise, b.printed_at, o.place, b.guest_name
      FROM bills b JOIN orders o ON o.id = b.order_id
-     WHERE b.business_id = ? AND b.status <> 'void' AND (b.shift_day = ? OR b.status = 'printed'
+     WHERE b.business_id = ? AND b.status <> 'void' AND (b.shift_day = ? OR (? = 1 AND b.status = 'printed')
        OR b.id IN (SELECT a.bill_id FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE p.business_id = ? AND p.shift_day = ?))
-     ORDER BY b.printed_at`, bid, day, bid, day);
+     ORDER BY b.printed_at`, bid, day, o, bid, day);
   const tenders = await all<Tender & { billId: string }>(db,
     `SELECT a.bill_id AS billId, p.id AS paymentId, p.mode, a.amount_paise AS amountPaise, p.amount_paise AS totalPaise, p.card_approval AS cardApproval,
        p.card_last4 AS cardLast4, p.at AS paidAt
      FROM allocations a JOIN payments p ON p.id = a.payment_id
-     WHERE a.business_id = ? AND a.bill_id IN (SELECT b.id FROM bills b WHERE b.business_id = ? AND (b.shift_day = ? OR b.status = 'printed')
+     WHERE a.business_id = ? AND a.bill_id IN (SELECT b.id FROM bills b WHERE b.business_id = ? AND (b.shift_day = ? OR (? = 1 AND b.status = 'printed'))
        UNION SELECT a2.bill_id FROM allocations a2 JOIN payments p2 ON p2.id = a2.payment_id WHERE p2.business_id = ? AND p2.shift_day = ?)
-     ORDER BY p.at`, bid, bid, day, bid, day);
+     ORDER BY p.at`, bid, bid, day, o, bid, day);
   const receipts = await all<Tender & { settlementId: string; debtor: string | null }>(db,
     `SELECT s.id AS settlementId, p.id AS paymentId, p.mode, p.amount_paise AS amountPaise, p.amount_paise AS totalPaise, p.card_approval AS cardApproval,
        p.card_last4 AS cardLast4, p.at AS paidAt, d.name AS debtor
@@ -56,8 +58,8 @@ export async function shiftBills(db: DB, bid: string, day: string): Promise<Proo
 }
 
 /** Asks Bookr. Answers { connected: false } when this POS has no Bookr key, and { error } when Bookr cannot be reached. */
-export async function proofList(env: Env, bid: string, day: string, startHour: number, fetcher: typeof fetch = (...a) => fetch(...a)) {
-  const bills = await shiftBills(env.DB, bid, day);
+export async function proofList(env: Env, bid: string, day: string, startHour: number, fetcher: typeof fetch = (...a) => fetch(...a), open = true) {
+  const bills = await shiftBills(env.DB, bid, day, open);
   const link = bookrLink(env, bid);
   const local = { day, bills: bills.map((b) => ({ key: b.key, billNo: b.billNo, kind: b.kind, state: b.state, totalPaise: b.totalPaise, at: b.at, label: b.label,
     modes: b.tenders.map((t) => ({ mode: t.mode, amountPaise: t.amountPaise })) })) };
@@ -79,7 +81,12 @@ export async function proofList(env: Env, bid: string, day: string, startHour: n
 proofRoutes.get(`${B}/proof`, requireAction('pos.view'), async (c) => {
   const b = bizOf(c);
   const q = c.req.query('day');
-  const day = q ? date({ day: q }, 'day', 'Shift day') : clock(b).shiftDay;
+  const today = clock(b).shiftDay;
+  const day = q ? date({ day: q }, 'day', 'Shift day') : today;
+  if (day > today) fail(400, 'That shift has not started yet.');
+  // A past shift (28 Nov 2026, Payments with dates): only its own bills; bills still unpaid show on today's shift.
   // Receipts cancelled this day (27 Nov 2026): listed as cancelled; no proof is asked for them.
-  return c.json({ ...(await proofList(c.env, c.get('businessId'), day, b.shift_start_hour)), cancelledReceipts: await cancelledReceipts(c.env.DB, c.get('businessId'), day) });
+  // In From–To (?open=0) each bill shows once, under its own shift.
+  const open = day === today && c.req.query('open') !== '0';
+  return c.json({ ...(await proofList(c.env, c.get('businessId'), day, b.shift_start_hour, undefined, open)), today, cancelledReceipts: await cancelledReceipts(c.env.DB, c.get('businessId'), day) });
 });
