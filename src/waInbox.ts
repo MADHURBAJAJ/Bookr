@@ -94,7 +94,7 @@ export async function inbox(db: DB, bid: string, tab: Tab) {
   };
 }
 
-const audit = (db: DB, bid: string, user: string, action: string, table: string, id: string, before: unknown, after: unknown, t: number) =>
+const audit = (db: DB, bid: string, user: string | null, action: string, table: string, id: string, before: unknown, after: unknown, t: number) =>
   stmt(db, `INSERT INTO audit_log (business_id, user_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     bid, user, action, table, id, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), t);
 
@@ -250,7 +250,9 @@ async function checkHead(db: DB, bid: string, headId: string | null | undefined)
 }
 
 /** Starts reading a group (from the groups the listener sees, or by its id). */
-export async function addGroup(db: DB, bid: string, user: string, g: { waGroupId: string; name?: string | null; department?: string | null; defaultHeadId?: string | null }) {
+/** `user` is null when the change came from the POS; `by` then names the POS person ("POS · Ravi (manager)") in the history. */
+export async function addGroup(db: DB, bid: string, user: string | null, g: { waGroupId: string; name?: string | null; department?: string | null; defaultHeadId?: string | null;
+  posProof?: boolean }, by?: string) {
   await checkHead(db, bid, g.defaultHeadId);
   const have = await one<{ id: string; business_id: string }>(db, 'SELECT id, business_id FROM wa_groups WHERE wa_group_id = ?', g.waGroupId);
   if (have && have.business_id !== bid) throw new InboxError(409, 'This group is read for another business.');
@@ -261,18 +263,20 @@ export async function addGroup(db: DB, bid: string, user: string, g: { waGroupId
   const id = have?.id ?? newId();
   await db.batch([
     have
-      ? stmt(db, 'UPDATE wa_groups SET active = 1, name = ?, department = coalesce(?, department), default_head_id = coalesce(?, default_head_id) WHERE id = ?',
-        name, g.department?.trim() || null, g.defaultHeadId || null, id)
+      ? stmt(db, `UPDATE wa_groups SET active = 1, name = ?, department = coalesce(?, department), default_head_id = coalesce(?, default_head_id),
+          pos_proof = coalesce(?, pos_proof) WHERE id = ?`,
+        name, g.department?.trim() || null, g.defaultHeadId || null, g.posProof === undefined ? null : g.posProof ? 1 : 0, id)
       // A group named for payments is the guests' payment group: its proof shows on the POS Payments screen from the start
       // (24 Nov 2026), the same rule migration 0042 used for existing groups. It can be switched off on the group.
       : stmt(db, 'INSERT INTO wa_groups (id, business_id, wa_group_id, name, department, default_head_id, active, created_at, pos_proof) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
-        id, bid, g.waGroupId, name, g.department?.trim() || null, g.defaultHeadId || null, t, /payment/i.test(name) ? 1 : 0),
-    audit(db, bid, user, 'wa.group.add', 'wa_groups', id, null, { waGroupId: g.waGroupId, name }, t),
+        id, bid, g.waGroupId, name, g.department?.trim() || null, g.defaultHeadId || null, t, (g.posProof ?? /payment/i.test(name)) ? 1 : 0),
+    audit(db, bid, user, 'wa.group.add', 'wa_groups', id, null, { waGroupId: g.waGroupId, name, ...(by ? { by } : {}) }, t),
   ]);
   return id;
 }
 
-export async function editGroup(db: DB, bid: string, user: string, id: string, e: { name?: string; department?: string | null; defaultHeadId?: string | null; active?: boolean; posProof?: boolean }) {
+export async function editGroup(db: DB, bid: string, user: string | null, id: string, e: { name?: string; department?: string | null; defaultHeadId?: string | null; active?: boolean; posProof?: boolean },
+  by?: string) {
   const g = await one<{ name: string; department: string | null; default_head_id: string | null; active: number; pos_proof: number }>(db,
     'SELECT name, department, default_head_id, active, pos_proof FROM wa_groups WHERE id = ? AND business_id = ?', id, bid);
   if (!g) throw new InboxError(404, 'Group not found.');
@@ -285,7 +289,7 @@ export async function editGroup(db: DB, bid: string, user: string, id: string, e
   const t = now();
   await db.batch([
     stmt(db, 'UPDATE wa_groups SET name = ?, department = ?, default_head_id = ?, active = ?, pos_proof = ? WHERE id = ?', next.name, next.department, next.default_head_id, next.active, next.pos_proof, id),
-    audit(db, bid, user, 'wa.group.edit', 'wa_groups', id, g, next, t),
+    audit(db, bid, user, 'wa.group.edit', 'wa_groups', id, g, by ? { ...next, by } : next, t),
   ]);
 }
 

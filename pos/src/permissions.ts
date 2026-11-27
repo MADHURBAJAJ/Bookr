@@ -25,7 +25,9 @@ export const PERMISSIONS = {
   'stock.edit': MANAGE,          // stock items, recipes, receiving, transfers, breakage, counts and the stock report
   'menu.upload': OWNER,          // replace the whole menu from a sheet (CSV), after checking what it changes
   'entities.edit': OWNER,        // billing names, GST, limits, which are offered; UPI accounts
-  'staff.manage': OWNER,         // staff, PINs, counter devices, business settings
+  'staff.manage': OWNER,
+  'whatsapp.edit': MANAGE,       // Settings › WhatsApp: see whether reading works, switch a group's reading or its bill proof on or off (27 Nov 2026)
+  'whatsapp.add': OWNER,         // start reading a new group the reception phone is in         // staff, PINs, counter devices, business settings
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

@@ -96,6 +96,18 @@ and settings wait for the internet.
   it has opened the POS online.
 - The Worker needs the `nodejs_als` compatibility flag (in `wrangler.jsonc`) and migration `0050_offline_mode.sql`.
 
+## Settings › WhatsApp (27 Nov 2026)
+
+Bookr reads WhatsApp (the listener on the reception PC, see `listener/README.md`); this tab shows whether that works and
+chooses the groups, without signing in to Bookr. Owners and managers see it and switch a group's reading or its
+"Proof for bills"; only the Owner starts reading a new group, picked from the groups the reception phone is in.
+
+- The POS checks the role on every request (`whatsapp.edit`, `whatsapp.add` in `src/permissions.ts`) and asks Bookr
+  with its existing key (`BOOKR_KEYS`): `POST /api/pos/wa`, `/api/pos/wa/edit`, `/api/pos/wa/add` (`src/routes/pos.ts` in
+  Bookr). Bookr checks the key and the role again, and writes the POS person's name in its history
+  ("POS · Ravi (manager)").
+- No new secret and no migration. Without a Bookr key the tab says the POS is not connected.
+
 ## Run and test
 
 ```bash
