@@ -1151,3 +1151,13 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .wa-sw[disabled] { opacity: .5; cursor: not-allowed; }
 .wa-add { background: var(--soft); border-radius: var(--radius); padding: 12px; margin: 0 0 12px; display: flex; flex-direction: column; gap: 8px; }
 .wa-never { margin: 8px 0; padding-left: 20px; columns: 2 220px; line-height: 1.7; }
+
+/* Today › In house and Leaving (27 Nov 2026): each guest or party is one tile; a group's tile has a coloured edge and its
+   beds or bills button inside it. */
+.dcol .dtile { border: 1px solid var(--line); border-radius: 10px; margin: 8px 10px; overflow: hidden; background: var(--panel); }
+.dcol .dtile .drow { border-bottom: 0; }
+.dcol .dtile.grp { border-left: 4px solid var(--pri); }
+.dcol .dtile .dtbar { display: flex; justify-content: flex-end; padding: 0 12px 8px; margin-top: -4px; }
+.dcol .dtile .dtbeds { border-top: 1px dashed var(--line); background: var(--soft); padding: 2px 0 2px 12px; }
+.dcol .dtile .dtbeds .drow { padding: 6px 12px; font-size: 13px; }
+.dcol .dtile .dtbeds .drow + .drow { border-top: 1px solid var(--line); }

@@ -1966,16 +1966,17 @@ function todayView() {
     const right = kind === 'out' ? (bal === 0 ? html`<span class="status ok">Ready to check out</span>` : owes(bal))
       : html`${dj ? html`<span class="status info">Paid in Djubo ${rs(dj)}</span> ` : ''}${owes(bal - dj)}`;
     const sub = kind === 'out' ? 'check-out 11 am' : `${first.plan ? `till ${dayName(first.plan)}` : 'no check-out date'}${dj ? ' · Djubo payment: pick how paid' : ''}`;
-    if (all.length === 1) return row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${first.room} · ${first.guestName}</strong><small>${sub}</small>`, right);
+    // One tile per guest or party (27 Nov 2026): a group's beds or bills open inside its own tile.
+    if (all.length === 1) return html`<div class="dtile">${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${first.room} · ${first.guestName}</strong><small>${sub}</small>`, right)}</div>`;
     const two = t.bills.length > 1;
     const roomsOf = (b) => compactRooms([b.head, ...b.members].map((x) => x.room));
     const k = `${kind}:${t.key}`;
     const open = !!ui.tileOpen?.[k];
     const n = two ? t.bills.length : all.length;
-    return html`<div style="display:flex;flex-direction:column">
+    return html`<div class="dtile grp">
       ${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${t.bills.map(roomsOf).join(', ')} · ${first.guestName}</strong><small>${sub}${two ? ' · 2 bookings, one party' : ''}</small>`, right)}
-      <div style="padding:0 10px 6px"><button type="button" class="chip" aria-expanded="${open}" data-act="tileTog" data-k="${k}">${open ? '▾' : '▸'} ${n} ${two ? (n === 1 ? 'bill' : 'bills') : (n === 1 ? 'bed' : 'beds')}</button></div>
-      ${open ? html`<div style="padding:0 0 6px 18px">${two
+      <div class="dtbar"><button type="button" class="chip" aria-expanded="${open}" data-act="tileTog" data-k="${k}">${open ? '▾' : '▸'} ${n} ${two ? (n === 1 ? 'bill' : 'bills') : (n === 1 ? 'bed' : 'beds')}</button></div>
+      ${open ? html`<div class="dtbeds">${two
         ? t.bills.map((b) => { const bb = [b.head, ...b.members]; const v = bb.reduce((q, x) => q + x.balancePaise - (kind === 'out' ? 0 : x.djuboPaise ?? 0), 0);
             return row(html`data-act="roomBill" data-id="${b.head.id}"`, html`<span>${roomsOf(b)} · its own bill</span>`, owes(v)); })
         : all.map((x, i) => row(html`data-act="roomBill" data-id="${first.id}"`, html`<span>${x.room}${i === 0 ? ' · the bill' : ''}</span>`, ''))}</div>` : ''}
