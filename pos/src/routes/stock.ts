@@ -39,15 +39,15 @@ stockRoutes.get(`${B}/stock`, requireAction('stock.edit'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
   const stores = await all<{ id: string; name: string; kind: string }>(db, 'SELECT id, name, kind FROM stock_stores WHERE business_id = ? ORDER BY created_at', bid);
-  const items = await all<{ id: string; name: string; unit: string; pack_name: string; pack_size: number; cost_per_pack_paise: number; reorder_level: number; active: number }>(db,
-    'SELECT id, name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active FROM stock_items WHERE business_id = ? ORDER BY name', bid);
+  const items = await all<{ id: string; name: string; unit: string; pack_name: string; pack_size: number; cost_per_pack_paise: number; reorder_level: number; active: number; category: string | null }>(db,
+    'SELECT id, name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active, category FROM stock_items WHERE business_id = ? ORDER BY name', bid);
   const sums = await all<{ item_id: string; store_id: string; q: number }>(db, 'SELECT item_id, store_id, sum(qty) AS q FROM stock_moves WHERE business_id = ? GROUP BY item_id, store_id', bid);
   const recipes = await all(db, `SELECT r.menu_item_id AS menuItemId, m.name AS menuItem, r.stock_item_id AS stockItemId, r.qty FROM recipes r JOIN menu_items m ON m.id = r.menu_item_id
     WHERE r.business_id = ? ORDER BY m.name`, bid);
   return c.json({ stores, recipes, items: items.map((i) => {
     const byStore = Object.fromEntries(stores.map((s) => [s.id, sums.find((x) => x.item_id === i.id && x.store_id === s.id)?.q ?? 0]));
     const total = Object.values(byStore).reduce((a, b) => a + b, 0);
-    return { id: i.id, name: i.name, unit: i.unit, packName: i.pack_name, packSize: i.pack_size, costPerPackPaise: i.cost_per_pack_paise, reorderLevel: i.reorder_level,
+    return { id: i.id, name: i.name, unit: i.unit, category: i.category, packName: i.pack_name, packSize: i.pack_size, costPerPackPaise: i.cost_per_pack_paise, reorderLevel: i.reorder_level,
       active: i.active, byStore, total, valuePaise: Math.round((Math.max(0, total) * i.cost_per_pack_paise) / i.pack_size), low: total <= i.reorder_level };
   }) });
 });
@@ -73,6 +73,8 @@ function itemFields(data: Record<string, unknown>) {
     name: text(data, 'name', 'Item name', { max: 80 })!, unit: data.unit as string, pack_name: text(data, 'packName', 'Pack name', { optional: true, max: 20 }) ?? 'pack',
     pack_size: whole(data.packSize, 'Units in a pack'), cost_per_pack_paise: optionalPaise(data, 'costPerPack', 'Cost per pack') ?? 0,
     reorder_level: whole(data.reorderLevel ?? 0, 'Reorder level', 0), active: data.active === false ? 0 : 1,
+    // Its category for count sheets (27 Nov 2026), e.g. Whisky, Beer, Cigarettes.
+    category: text(data, 'category', 'Category', { optional: true, max: 40 }) ?? null,
   };
 }
 
@@ -82,8 +84,8 @@ stockRoutes.post(`${B}/stock/items`, requireAction('stock.edit'), async (c) => {
   const id = newId();
   try {
     await c.env.DB.batch([
-      stmt(c.env.DB, 'INSERT INTO stock_items (id, business_id, name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        id, bid, f.name, f.unit, f.pack_name, f.pack_size, f.cost_per_pack_paise, f.reorder_level, f.active, Date.now()),
+      stmt(c.env.DB, 'INSERT INTO stock_items (id, business_id, name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active, created_at, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        id, bid, f.name, f.unit, f.pack_name, f.pack_size, f.cost_per_pack_paise, f.reorder_level, f.active, Date.now(), f.category),
       audit(c.env.DB, bid, c.get('staff').id, 'stock_item.create', 'stock_items', id, null, f),
     ]);
   } catch (e) {
@@ -96,13 +98,13 @@ stockRoutes.post(`${B}/stock/items`, requireAction('stock.edit'), async (c) => {
 stockRoutes.put(`${B}/stock/items/:id`, requireAction('stock.edit'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one(c.env.DB, 'SELECT name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active FROM stock_items WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one(c.env.DB, 'SELECT name, unit, pack_name, pack_size, cost_per_pack_paise, reorder_level, active, category FROM stock_items WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Stock item not found.');
   const f = itemFields(await body(c));
   if (f.unit !== before.unit && (await one(c.env.DB, 'SELECT 1 FROM stock_moves WHERE item_id = ? LIMIT 1', id))) fail(409, 'This item has stock movements; its unit cannot change.');
   await c.env.DB.batch([
-    stmt(c.env.DB, 'UPDATE stock_items SET name = ?, unit = ?, pack_name = ?, pack_size = ?, cost_per_pack_paise = ?, reorder_level = ?, active = ? WHERE id = ?',
-      f.name, f.unit, f.pack_name, f.pack_size, f.cost_per_pack_paise, f.reorder_level, f.active, id),
+    stmt(c.env.DB, 'UPDATE stock_items SET name = ?, unit = ?, pack_name = ?, pack_size = ?, cost_per_pack_paise = ?, reorder_level = ?, active = ?, category = ? WHERE id = ?',
+      f.name, f.unit, f.pack_name, f.pack_size, f.cost_per_pack_paise, f.reorder_level, f.active, f.category, id),
     audit(c.env.DB, bid, c.get('staff').id, 'stock_item.update', 'stock_items', id, before, f),
   ]);
   return c.json({ ok: true });

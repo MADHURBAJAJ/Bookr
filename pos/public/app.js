@@ -148,7 +148,7 @@ const fullButton = () => (window.bookrDesktop?.minimize ? html`<button type="but
   : document.fullscreenEnabled ? html`<button type="button" class="themebtn" data-act="fullScreen" title="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}" aria-label="${document.fullscreenElement ? 'Leave full screen' : 'Full screen'}">${FULL_ICON}</button>` : '');
 function shell(active, body) {
   const links = [['#/counter', 'Counter', 'stays.edit'], ['#/', 'Tables', 'pos.view'], ['#/rooms', 'Rooms', 'pos.view'], ['#/credit', 'Credit', 'pos.view'], ['#/payments', 'Payments', 'pos.view'], ['#/shift', 'Day close', 'shift.close'],
-    ['#/stock', 'Stock', 'stock.edit'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
+    ['#/stock', 'Stock', can('stock.edit') ? 'stock.edit' : 'stock.count'], ['#/reports', 'Reports', 'reports.view'], ['#/exceptions', 'Daily check', 'reports.view'], ['#/settings', 'Settings', 'menu.edit']].filter((l) => can(l[2]));
   const navLinks = links.map(([h, t]) => html`<a href="${h}" ${active === h ? html`aria-current="page"` : ''}>${t}</a>`);
   const current = links.find(([h]) => h === active)?.[1] ?? 'Menu';
   return html`<header class="top"><div class="top-in">
@@ -4435,10 +4435,13 @@ actions.useClose = () => { ui.useSel = null; ui.useDet = null; rerender(); };
 actions.useGo = () => { Object.assign(stockPicks, { uFrom: ui.uFrom, uTo: ui.uTo, uStore: ui.uStore }); route(); };
 
 async function stockScreen(tab = 'hand') {
-  const st = await api('GET', `${B()}/stock`);
+  // Bar staff count (27 Nov 2026): without the rest of Stock, they see only Count.
+  const full = can('stock.edit');
+  if (!full) tab = 'count';
+  const st = full ? await api('GET', `${B()}/stock`) : { stores: [], items: [], recipes: [] };
   await load('menu');
   ui.st = st;
-  const tabs = [['hand', 'On hand'], ['buy', 'To buy'], ['receive', 'Receive'], ['purchases', 'Purchases'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'],
+  const tabs = !full ? [['count', 'Count']] : [['hand', 'On hand'], ['buy', 'To buy'], ['receive', 'Receive'], ['purchases', 'Purchases'], ['transfer', 'Transfer'], ['waste', 'Breakage'], ['count', 'Count'],
     ['use', 'Consumption'], ['handover', 'Bar handover'], ['report', 'Report'], ['items', 'Stock items'], ['recipes', 'Recipes']];
   // The old Make recipes address opens Recipes with Make recipes showing.
   if (tab === 'auto') { tab = 'recipes'; ui.mkOpen = true; }
@@ -4450,6 +4453,7 @@ async function stockScreen(tab = 'hand') {
   const qtyText = (q, i) => i.unit === 'ml' || i.unit === 'g' ? `${q} ${i.unit}${i.packSize > 1 && Math.abs(q) >= i.packSize ? ` (${(q / i.packSize).toFixed(1)} ${i.packName})` : ''}` : `${q} ${i.unit}`;
   if (tab === 'report') { ui.rFrom ??= me.business.shiftDay; ui.rTo ??= me.business.shiftDay; ui.rStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
   if (tab === 'handover') { ui.hFrom ??= me.business.shiftDay; ui.hTo ??= me.business.shiftDay; ui.hStore ??= st.stores.find((x) => x.kind === 'bar')?.id ?? st.stores[0]?.id; }
+  if (tab === 'count') await countLoad();
   if (tab === 'handover' && ui.hStore) ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`);
   if (tab === 'recipes') {
     ui.mkSections = (await api('GET', `${B()}/stock/recipes/sections`)).sections;
@@ -4524,16 +4528,7 @@ async function stockScreen(tab = 'hand') {
         <label class="f" style="grid-column:1/-1">Reason (required)<input class="in" data-model="waReason" value="${ui.waReason ?? ''}" placeholder="e.g. Bottle broken"></label></div>
       <div><button class="btn pri" type="submit" data-act="stWaste" data-submit>Record</button></div><p class="small quiet">Shown on the exceptions report with who recorded it.</p></form>`;
     else if (tab === 'count') {
-      const sid = ui.ctStore;
-      body = html`<form class="panel"><h2>Count a store</h2>${errorBox()}<div class="grid3">${storeSel('ctStore', 'Store')}</div>
-        ${sid ? html`<p class="small quiet">Type what is physically there: full bottles (or packs), plus what is left in an open one. Leave an item blank to skip it.</p>
-          <div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">Book</th><th>Counted</th></tr></thead><tbody>
-          ${items.map((i) => html`<tr><td>${i.name}</td><td class="num">${qtyText(i.byStore[sid] ?? 0, i)}</td><td>${i.packSize > 1 && i.unit !== 'pcs'
-            ? html`<div class="row" style="gap:6px;flex-wrap:nowrap;align-items:center"><input class="in" inputmode="numeric" style="max-width:80px" data-model="ctp_${i.id}" value="${ui['ctp_' + i.id] ?? ''}" aria-label="Full ${i.packName}s of ${i.name}"><span class="small">full ${i.packName}s +</span>
-              <input class="in" inputmode="numeric" style="max-width:90px" data-model="ct_${i.id}" value="${ui['ct_' + i.id] ?? ''}" aria-label="Loose ${i.unit} of ${i.name}"><span class="small">${i.unit} open</span></div>`
-            : html`<input class="in" inputmode="numeric" style="max-width:160px" data-model="ct_${i.id}" value="${ui['ct_' + i.id] ?? ''}" aria-label="Counted ${i.name}">`}</td></tr>`)}</tbody></table></div>
-          <div><button class="btn pri" type="submit" data-act="stCount" data-submit>Save count</button></div>` : ''}
-        ${ui.countResult ? html`<div class="sums">${ui.countResult.map((l) => html`<div><span>${l.name}: book ${l.book}, counted ${l.counted} ${l.unit}</span><span style="color:${l.variance ? 'var(--bad)' : 'var(--go-dark)'}">${l.variance ? `${l.variance > 0 ? '+' : ''}${l.variance} ${l.unit} · ${rs(l.valuePaise)}` : 'agrees'}</span></div>`)}</div>` : ''}</form>`;
+      body = countView(st);
     } else if (tab === 'handover') {
       const h = ui.handovers;
       body = html`<section class="panel"><form class="row" style="align-items:end">${storeSel('hStore', 'Store')}<label class="f">From<input class="in" type="date" data-model="hFrom" value="${ui.hFrom}"></label>
@@ -4591,6 +4586,7 @@ function stockItemsTab() {
         <label class="f">Units in one (e.g. 750)<input class="in" inputmode="numeric" data-model="siSize" value="${ui.siSize ?? ''}"></label>
         <label class="f">Price per pack (₹)<input class="in" inputmode="decimal" data-model="siCost" value="${ui.siCost ?? ''}"></label>
         <label class="f">Reorder when total is at or below (units)<input class="in" inputmode="numeric" data-model="siReorder" value="${ui.siReorder ?? ''}"></label>
+        <label class="f">Category (for count sheets)<input class="in" data-model="siCat" list="siCats" value="${ui.siCat ?? ''}" placeholder="e.g. Whisky, Beer, Cigarettes"><datalist id="siCats">${[...new Set(ui.st.items.map((x) => x.category).filter(Boolean))].sort().map((x) => html`<option value="${x}"></option>`)}</datalist></label>
         <div class="row" style="grid-column:1/-1"><button class="btn pri" type="submit" data-act="stItem" data-submit>${ui.siEditId ? 'Save stock item' : 'Add stock item'}</button><button class="btn ghost" type="button" data-act="siCancel">Cancel</button></div></form>` : ''}
       ${list.length ? html`<div class="scroll"><table class="t cards"><thead><tr><th>Item</th><th>Counted in</th><th>Bought as</th><th class="num">Price per pack</th><th class="num">Reorder at</th><th>Used in</th><th></th></tr></thead><tbody>
         ${list.map((i) => html`<tr class="${i.active ? '' : 'mksaved'}"><td data-label="Item"><strong>${i.name}</strong>${i.active ? '' : html` <span class="small quiet">(not used)</span>`}</td><td data-label="Counted in">${unitName[i.unit]}</td>
@@ -4605,12 +4601,12 @@ function stockItemsTab() {
         <label class="f">Kind<select class="in" data-model="sStoreKind"><option value="bar">Bar</option><option value="main" ${ui.sStoreKind === 'main' ? 'selected' : ''}>Main store</option><option value="kitchen" ${ui.sStoreKind === 'kitchen' ? 'selected' : ''}>Kitchen</option></select></label>
         <button class="btn" type="submit" data-act="stStore" data-submit>Add store</button></form></section>`;
 }
-const siFields = () => ['siName', 'siUnit', 'siPack', 'siSize', 'siCost', 'siReorder'];
+const siFields = () => ['siName', 'siUnit', 'siPack', 'siSize', 'siCost', 'siReorder', 'siCat'];
 actions.siNew = () => { ui.siOpen = true; ui.siEditId = null; for (const k of siFields()) ui[k] = ''; ui.siUnit = 'ml'; ui.error = null; rerender(); };
 actions.siCancel = () => { ui.siOpen = false; ui.siEditId = null; ui.error = null; rerender(); };
 actions.siEdit = (d) => {
   const i = ui.st.items.find((x) => x.id === d.id);
-  Object.assign(ui, { siEditId: i.id, siOpen: true, siName: i.name, siUnit: i.unit, siPack: i.packName, siSize: String(i.packSize), siCost: i.costPerPackPaise ? rupeesShort(i.costPerPackPaise) : '', siReorder: i.reorderLevel ? String(i.reorderLevel) : '' });
+  Object.assign(ui, { siEditId: i.id, siOpen: true, siName: i.name, siUnit: i.unit, siPack: i.packName, siSize: String(i.packSize), siCost: i.costPerPackPaise ? rupeesShort(i.costPerPackPaise) : '', siReorder: i.reorderLevel ? String(i.reorderLevel) : '', siCat: i.category ?? '' });
   ui.error = null; rerender(); window.scrollTo({ top: 0, behavior: 'smooth' });
 };
 actions.siDel = async (d) => {
@@ -4999,9 +4995,179 @@ actions.stCount = async () => {
   const r = await api('POST', `${B()}/stock/counts`, { storeId: ui.ctStore, lines });
   const keep = ui.ctStore; await stockScreen('count'); ui.ctStore = keep; ui.countResult = r.lines; rerender();
 };
+// ---------- Count (27 Nov 2026): count lists by category, a sheet to print with what is in hand, typing after the shift or
+// live, and a manager's approval before stock changes.
+async function countLoad() {
+  const [cl, cs] = await Promise.all([api('GET', `${B()}/stock/count-lists`), api('GET', `${B()}/stock/count-sessions`)]);
+  ui.cl = cl; ui.cs = cs.counts;
+  if (!ui.ctList || !cl.lists.some((l) => l.id === ui.ctList)) ui.ctList = cl.lists[0]?.id ?? null;
+  if (ui.ckId) ui.ck = await api('GET', `${B()}/stock/count-sessions/${ui.ckId}`).catch(() => null);
+}
+/** Units as packs + loose: 1,830 ml of a 750 ml bottle is "2 btl + 330 ml". */
+function packText(q, i) {
+  if (q == null) return '';
+  const neg = q < 0; let n = Math.abs(q);
+  const short = (x) => ({ bottle: 'btl', packet: 'pkt' }[x] ?? x);
+  if (!(i.packSize > 1)) return `${neg ? '−' : ''}${n} ${i.unit}`;
+  const f = Math.floor(n / i.packSize); const l = n - f * i.packSize;
+  const t = [f ? `${f} ${short(i.packName)}` : '', l ? `${l} ${i.unit}` : ''].filter(Boolean).join(' + ') || '0';
+  return `${neg ? '−' : ''}${t}`;
+}
+const ckKey = (p, k, id) => `ck${p}${k}_${id}`;
+function countView(st) {
+  const cl = ui.cl; const ck = ui.ck;
+  if (!cl) return html`<section class="panel"><p class="quiet">Loading…</p></section>`;
+  if (ui.clEdit) return countListEdit(st);
+  if (ck) return countSheetView(ck);
+  const list = cl.lists.find((l) => l.id === ui.ctList);
+  const status = { draft: 'Not sent yet', waiting: 'Waiting for a manager', sent_back: 'Sent back to recount', approved: 'Approved', dropped: 'Dropped' };
+  return html`<section class="panel"><div class="row" style="justify-content:space-between;align-items:center"><h2>Count</h2>
+      ${isMgr() ? html`<div class="row"><button class="btn sm" type="button" data-act="clNew">New count list</button>${list ? html`<button class="btn sm" type="button" data-act="clOpen" data-id="${list.id}">Change ${list.name}</button>` : ''}</div>` : ''}</div>
+    ${errorBox()}
+    ${cl.lists.length ? html`<div class="chips">${cl.lists.map((l) => html`<button type="button" class="chip" aria-pressed="${l.id === ui.ctList}" data-act="pick" data-k="ctList" data-id="${l.id}">${l.name} · ${l.count}</button>`)}</div>
+      ${list ? html`<div class="row"><button class="btn" type="button" data-act="ckSheet">Print sheet</button>
+        <button class="btn pri" type="button" data-act="ckStart" data-m="after_shift">Type a count from paper</button><button class="btn" type="button" data-act="ckStart" data-m="live">Live count</button></div>
+        <p class="small quiet">After the shift: print the sheet, count at the bar counter and in the store, then type it in with the time it was counted. Live: count now on this screen, row by row. Stock changes only when a manager approves.</p>` : ''}`
+      : html`<p class="quiet">${isMgr() ? 'Make a count list first: pick the categories and items to count (New count list).' : 'A manager makes the count list first.'}</p>`}
+    ${(ui.cs ?? []).length ? html`<h3 style="margin-top:12px">Counts</h3><div class="scroll"><table class="t"><thead><tr><th>Started</th><th>List</th><th>How</th><th>By</th><th class="num">Rows</th><th>Status</th></tr></thead><tbody>
+      ${ui.cs.map((k) => html`<tr class="userow" tabindex="0" data-act="ckOpen" data-id="${k.id}" style="cursor:pointer"><td>${dateTime(k.createdAt)}</td><td>${k.list ?? k.store}</td><td>${k.mode === 'live' ? 'Live' : `From paper${k.countedAt ? ` · counted ${dateTime(k.countedAt)}` : ''}`}</td>
+        <td>${k.byName ?? ''}</td><td class="num">${k.rows}</td><td><span class="status ${k.status === 'waiting' || k.status === 'sent_back' ? 'warn' : k.status === 'approved' ? 'ok' : 'mute'}">${status[k.status]}</span></td></tr>`)}</tbody></table></div>` : ''}
+  </section>`;
+}
+function countSheetView(ck) {
+  const k = ck.count;
+  const typing = k.status === 'draft' || k.status === 'sent_back';
+  const review = k.status === 'waiting' && isMgr();
+  const rows = ck.groups.flatMap((g) => g.items);
+  const done = rows.filter((r) => r.counted !== null);
+  const diffCell = (r) => (r.diff == null ? '' : r.diff === 0 ? html`<span style="color:var(--go-dark);font-weight:700">matches</span>`
+    : html`<span style="color:${r.diff < 0 ? 'var(--bad)' : 'var(--warn)'};font-weight:700">${r.diff < 0 ? 'short ' : 'more '}${packText(Math.abs(r.diff), r)}</span>`);
+  const inp = (r, p) => {
+    const two = r.packSize > 1;
+    const pv = ui[ckKey(p, 'p', r.id)] ?? (r[`place${p}`] != null && r[`place${p}`] !== 0 ? String(two ? Math.floor(r[`place${p}`] / r.packSize) : r[`place${p}`]) : (r[`place${p}`] === 0 && p === 1 ? '0' : ''));
+    const lv = ui[ckKey(p, 'l', r.id)] ?? (two && r[`place${p}`] ? String(r[`place${p}`] % r.packSize || '') : '');
+    const short = ({ bottle: 'btl', packet: 'pkt' })[r.packName] ?? r.packName;
+    return html`<div class="row" style="gap:4px;flex-wrap:nowrap;align-items:center"><input class="in" inputmode="numeric" style="width:58px" data-model="${ckKey(p, 'p', r.id)}" value="${pv}" aria-label="${r.name} ${two ? short : r.unit}, ${p === 1 ? 'bar counter' : 'other place'}"><span class="small">${two ? short : r.unit}</span>
+      ${two ? html`<input class="in" inputmode="numeric" style="width:64px" data-model="${ckKey(p, 'l', r.id)}" value="${lv}" aria-label="${r.name} ${r.unit}, ${p === 1 ? 'bar counter' : 'other place'}"><span class="small">${r.unit}</span>` : ''}</div>`;
+  };
+  const head = html`<div class="row" style="justify-content:space-between;align-items:center"><h2>${k.list ?? k.store} · ${k.mode === 'live' ? 'live count' : 'count from paper'}</h2>
+    <button class="btn ghost sm" type="button" data-act="ckClose">Back to counts</button></div>
+    <p class="small quiet" style="margin:0">Started by ${k.by ?? ''} · ${dateTime(k.createdAt)}${k.sentAt ? ` · sent ${dateTime(k.sentAt)}` : ''}${k.decidedBy ? ` · ${k.status === 'approved' ? 'approved' : 'closed'} by ${k.decidedBy} ${dateTime(k.decidedAt)}` : ''}</p>
+    ${k.status === 'sent_back' ? html`<div class="msg warn" style="display:block">Sent back to count again${k.note ? `: ${k.note}` : ''}. Rows marked "count again" are shown first in each group.</div>` : ''}
+    ${k.status === 'waiting' && !isMgr() ? html`<div class="msg ok" style="display:block">With the manager. Stock changes when they approve.</div>` : ''}`;
+  const when = k.mode === 'after_shift'
+    ? html`<label class="f" style="max-width:260px">Counted at<input class="in" type="datetime-local" data-model="ckAt" value="${ui.ckAt ?? (k.countedAt ? localDT(k.countedAt) : '')}" ${typing ? '' : 'disabled'}></label>
+      <p class="small quiet" style="margin:0">In hand is the stock as it was at this time, so sales after the count do not show as missing.</p>`
+    : html`<p class="small quiet" style="margin:0">Live: in hand is the stock when each row is typed (now, for rows not typed yet).</p>`;
+  const table = html`<div class="scroll"><table class="t"><thead><tr><th>Item</th><th class="num">In hand${k.mode === 'after_shift' && k.countedAt ? ` at ${time(k.countedAt)}` : ''}</th>${typing ? html`<th>Bar counter</th><th>Other place</th>` : html`<th class="num">Counted</th>`}<th class="num">Difference</th>${review ? html`<th></th>` : ''}</tr></thead><tbody>
+    ${ck.groups.map((g) => html`<tr><td colspan="${typing ? 5 : review ? 5 : 4}" style="background:var(--soft);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.5px">${g.category}</td></tr>
+      ${[...g.items].sort((a, b) => (typing ? Number(b.recount) - Number(a.recount) : 0)).map((r) => html`<tr><td>${r.name}${r.recount ? html` <span class="status warn">count again</span>` : ''}<div class="small quiet">${r.packSize > 1 ? `${r.packName} of ${r.packSize} ${r.unit}` : r.unit}</div></td>
+        <td class="num">${packText(r.inHand, r)}</td>
+        ${typing ? html`<td>${inp(r, 1)}</td><td>${inp(r, 2)}</td>` : html`<td class="num">${r.counted == null ? html`<span class="quiet">not counted</span>` : packText(r.counted, r)}</td>`}
+        <td class="num">${diffCell(r)}${r.diff && !typing ? html`<div class="small quiet">${rs(Math.abs(r.valuePaise))}</div>` : ''}</td>
+        ${review ? html`<td>${r.diff ? html`<label class="tickline"><input type="checkbox" data-model="ckb_${r.id}" ${ui['ckb_' + r.id] ? 'checked' : ''}> count again</label>` : ''}</td>` : ''}</tr>`)}`)}
+  </tbody></table></div>`;
+  const short = done.filter((r) => r.diff < 0); const more = done.filter((r) => r.diff > 0);
+  const sums = html`<div class="kpis">${kpi('Counted', `${done.length} of ${rows.length}`)}${kpi('Short', String(short.length), short.length ? rs(-short.reduce((t, r) => t + r.valuePaise, 0)) : '', short.length ? 'warn' : '')}${kpi('More than in hand', String(more.length), more.length ? rs(more.reduce((t, r) => t + r.valuePaise, 0)) : '')}</div>`;
+  const btns = typing ? html`<div class="row"><button class="btn" type="button" data-act="ckSave">Save, finish later</button><button class="btn pri" type="button" data-act="ckSend">Send to manager</button><button class="btn ghost" type="button" data-act="ckDrop">Drop this count</button></div>`
+    : review ? html`<div class="row"><button class="btn pri" type="button" data-act="ckApprove">Approve: set stock to the count</button><button class="btn" type="button" data-act="ckBack">Send back to count again</button><button class="btn ghost" type="button" data-act="ckDrop">Drop this count</button></div>
+      <label class="f" style="max-width:480px">Note for the counter (optional)<input class="in" data-model="ckNote" value="${ui.ckNote ?? ''}" placeholder="e.g. check the store room again"></label>` : '';
+  return html`<section class="panel">${head}${errorBox()}${typing ? when : ''}${sums}${table}${btns}</section>`;
+}
+const localDT = (ms) => { const d = new Date(ms + 330 * 60_000); return d.toISOString().slice(0, 16); };
+const fromLocalDT = (v) => (v ? Date.parse(`${v}:00+05:30`) : NaN);
+function countListEdit(st) {
+  const e = ui.clEdit; const cl = ui.cl;
+  const cats = cl.categories;
+  const itemsOf = (c) => cl.items.filter((i) => i.category === c);
+  const onCat = (c) => e.categories.includes(c);
+  const itemOn = (i) => (onCat(i.category) ? !e.offItems.includes(i.id) : e.onItems.includes(i.id));
+  const n = cl.items.filter(itemOn).length;
+  return html`<section class="panel"><div class="row" style="justify-content:space-between;align-items:center"><h2>${e.id ? `Change ${e.name}` : 'New count list'}</h2><button class="btn ghost sm" type="button" data-act="clClose">Cancel</button></div>
+    ${errorBox()}<div class="grid3"><label class="f">Name<input class="in" data-model="clName" value="${ui.clName ?? e.name}" placeholder="e.g. Bar count"></label>
+      <label class="f">Store<select class="in" data-model="clStore">${st.stores.map((x) => html`<option value="${x.id}" ${(ui.clStore ?? e.storeId) === x.id ? 'selected' : ''}>${x.name}</option>`)}</select></label></div>
+    <p class="small quiet">${n} items on this list. Tap a category to put all of it on or off; tap an item to take it off or put it back. New items in a category that is on join the list by themselves. Set an item's category in Stock items.</p>
+    ${cats.map((c) => html`<div style="border-top:1px solid var(--line);padding-top:8px;margin-top:6px"><div class="row" style="justify-content:space-between;align-items:center"><strong>${c}</strong>
+        <button type="button" class="chip" aria-pressed="${onCat(c)}" data-act="clCat" data-c="${c}">${onCat(c) ? 'On the list' : 'Put all on'}</button></div>
+      <div class="chips" style="margin-top:6px">${itemsOf(c).map((i) => html`<button type="button" class="chip" aria-pressed="${itemOn(i)}" data-act="clItem" data-id="${i.id}">${itemOn(i) ? '✓ ' : '+ '}${i.name}</button>`)}</div></div>`)}
+    <div class="row" style="margin-top:10px"><button class="btn pri" type="button" data-act="clSave">Save the list</button></div></section>`;
+}
+actions.clNew = () => { ui.clEdit = { id: null, name: 'Bar count', storeId: ui.st.stores.find((x) => x.kind === 'bar')?.id ?? ui.st.stores[0]?.id, categories: [], offItems: [], onItems: [] }; ui.clName = ui.clStore = undefined; ui.error = null; rerender(); };
+actions.clOpen = (d) => { const l = ui.cl.lists.find((x) => x.id === d.id); ui.clEdit = { ...l, categories: [...l.categories], offItems: [...l.offItems], onItems: [...l.onItems] }; ui.clName = ui.clStore = undefined; ui.error = null; rerender(); };
+actions.clClose = () => { ui.clEdit = null; ui.error = null; rerender(); };
+actions.clCat = (d) => {
+  const e = ui.clEdit; const ids = ui.cl.items.filter((i) => i.category === d.c).map((i) => i.id);
+  if (e.categories.includes(d.c)) e.categories = e.categories.filter((x) => x !== d.c);
+  else { e.categories.push(d.c); e.offItems = e.offItems.filter((x) => !ids.includes(x)); }
+  e.onItems = e.onItems.filter((x) => !ids.includes(x)); rerender();
+};
+actions.clItem = (d) => {
+  const e = ui.clEdit; const i = ui.cl.items.find((x) => x.id === d.id);
+  const flip = (arr) => (arr.includes(i.id) ? arr.filter((x) => x !== i.id) : [...arr, i.id]);
+  if (e.categories.includes(i.category)) e.offItems = flip(e.offItems); else e.onItems = flip(e.onItems);
+  rerender();
+};
+actions.clSave = async () => {
+  const e = ui.clEdit;
+  const b = { name: ui.clName ?? e.name, storeId: ui.clStore ?? e.storeId, categories: e.categories, offItems: e.offItems, onItems: e.onItems };
+  const r = e.id ? await api('PUT', `${B()}/stock/count-lists/${e.id}`, b) : await api('POST', `${B()}/stock/count-lists`, b);
+  ui.clEdit = null; ui.ctList = e.id ?? r.id; flash = { kind: 'ok', text: `${b.name} saved.` }; await countLoad(); rerender();
+};
+actions.ckStart = async (d) => {
+  const r = await api('POST', `${B()}/stock/count-sessions`, { listId: ui.ctList, mode: d.m });
+  ui.ckId = r.id; ui.ckAt = d.m === 'after_shift' ? localDT(Date.now()) : undefined; await countLoad(); rerender();
+};
+actions.ckOpen = async (d) => { ui.ckId = d.id; ui.ckAt = undefined; for (const k of Object.keys(ui)) if (/^ck[12][pl]_|^ckb_/.test(k)) delete ui[k]; await countLoad(); rerender(); };
+actions.ckClose = async () => { ui.ckId = null; ui.ck = null; await countLoad(); rerender(); };
+/** What was typed, as units per place; a row cleared of both places is taken off the count. */
+function ckLines() {
+  const has = (k) => ui[k] !== undefined;
+  const num = (k, label) => { const v = String(ui[k] ?? '').trim(); if (!v) return 0; const n = Number(v); if (!Number.isInteger(n) || n < 0) throw new Error(`${label}: a whole number.`); return n; };
+  const out = [];
+  for (const r of ui.ck.groups.flatMap((g) => g.items)) {
+    const touched = [1, 2].some((p) => has(ckKey(p, 'p', r.id)) || has(ckKey(p, 'l', r.id)));
+    if (!touched) continue;
+    const place = (p) => {
+      const pk = has(ckKey(p, 'p', r.id)) ? ui[ckKey(p, 'p', r.id)] : null; const lk = has(ckKey(p, 'l', r.id)) ? ui[ckKey(p, 'l', r.id)] : null;
+      if (pk === null && lk === null) return r[`place${p}`] ?? 0;
+      return num(ckKey(p, 'p', r.id), r.name) * (r.packSize > 1 ? r.packSize : 1) + (r.packSize > 1 ? num(ckKey(p, 'l', r.id), r.name) : 0);
+    };
+    const blank = [1, 2].every((p) => ['p', 'l'].every((x) => !String(ui[ckKey(p, x, r.id)] ?? (r[`place${p}`] ? 'x' : '')).trim()));
+    out.push(blank ? { itemId: r.id, clear: true } : { itemId: r.id, place1: place(1), place2: place(2) });
+  }
+  return out;
+}
+async function ckPut() {
+  const at = ui.ck.count.mode === 'after_shift' && ui.ckAt ? fromLocalDT(ui.ckAt) : undefined;
+  if (ui.ck.count.mode === 'after_shift' && ui.ckAt && !Number.isFinite(at)) throw new Error('Type the time it was counted.');
+  ui.ck = await api('PUT', `${B()}/stock/count-sessions/${ui.ckId}`, { lines: ckLines(), countedAt: at });
+  for (const k of Object.keys(ui)) if (/^ck[12][pl]_/.test(k)) delete ui[k];
+}
+actions.ckSave = async () => { await ckPut(); flash = { kind: 'ok', text: 'Saved. Open it from Counts to finish.' }; rerender(); };
+actions.ckSend = async () => { await ckPut(); await api('POST', `${B()}/stock/count-sessions/${ui.ckId}/send`, {}); flash = { kind: 'ok', text: 'Sent to the manager. Stock changes when they approve.' }; await actions.ckClose(); };
+actions.ckDrop = async () => { if (!confirm('Drop this count? Nothing in it changes stock.')) return; await api('POST', `${B()}/stock/count-sessions/${ui.ckId}/drop`, {}); flash = { kind: 'ok', text: 'Count dropped.' }; await actions.ckClose(); };
+actions.ckApprove = async () => { const r = await api('POST', `${B()}/stock/count-sessions/${ui.ckId}/approve`, {}); flash = { kind: 'ok', text: `Approved: ${r.rows} counted, ${r.differ} changed. Shortages are on Bar handover.` }; await actions.ckClose(); };
+actions.ckBack = async () => {
+  const itemIds = ui.ck.groups.flatMap((g) => g.items).filter((r) => ui['ckb_' + r.id]).map((r) => r.id);
+  if (!itemIds.length) throw new Error('Tick "count again" on the rows to count again.');
+  await api('POST', `${B()}/stock/count-sessions/${ui.ckId}/back`, { itemIds, note: ui.ckNote ?? '' }); flash = { kind: 'ok', text: `Sent back: ${plural(itemIds.length, 'row')} to count again.` }; await actions.ckClose();
+};
+/** The sheet to count on: A4, by category, what is in hand now, blanks for the bar counter and the store, and a difference column. */
+actions.ckSheet = async () => {
+  const sh = await api('GET', `${B()}/stock/count-lists/${ui.ctList}/sheet`);
+  const short = (i) => (({ bottle: 'btl', packet: 'pkt' })[i.packName] ?? i.packName);
+  const blank = (i) => (i.packSize > 1 ? `<span class="bl"></span>${short(i)} <span class="bl"></span>${i.unit}` : `<span class="bl"></span>${i.unit}`);
+  const esc = (t) => String(t).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  printArea.innerHTML = `<div class="countsheet"><h1>${esc(sh.list.name)} · ${esc(sh.store.name)}</h1><p>Printed ${esc(dateTime(sh.at))} · in hand at that time · counted by ________________ · counted at ________</p>
+    <table><colgroup><col style="width:27%"><col style="width:17%"><col style="width:20%"><col style="width:20%"><col style="width:16%"></colgroup>
+    <thead><tr><th>Item</th><th>In hand</th><th>Bar counter</th><th>Store / other place</th><th>Difference</th></tr></thead><tbody>
+    ${sh.groups.map((g) => `<tr class="cat"><td colspan="5">${esc(g.category)}</td></tr>${g.items.map((i) => `<tr><td>${esc(i.name)}<small>${i.packSize > 1 ? `${esc(i.packName)} of ${i.packSize} ${i.unit}` : i.unit}</small></td><td class="r">${esc(packText(i.inHand, i))}</td><td>${blank(i)}</td><td>${blank(i)}</td><td></td></tr>`).join('')}`).join('')}
+    </tbody></table></div>`;
+  window.print();
+};
 actions.stReport = async () => { ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`); rerender(); };
 actions.stItem = async () => {
-  const body = { name: ui.siName, unit: ui.siUnit || 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0') };
+  const body = { name: ui.siName, unit: ui.siUnit || 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0'), category: ui.siCat || null };
   if (ui.siEditId) await api('PUT', `${B()}/stock/items/${ui.siEditId}`, { ...body, active: true });
   else await api('POST', `${B()}/stock/items`, body);
   flash = { kind: 'ok', text: `${ui.siName} ${ui.siEditId ? 'saved' : 'added'}.` };
