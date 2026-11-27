@@ -9,7 +9,7 @@ import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, date, fail, isUuid, paise, signInSql, text } from '../http';
-import { bookDay, bookDays, bookFor, booksOf, depositCandidates, feeChecks, handovers, inHandThrough, receiptRange, seesAllBooks, type HandoverRow } from '../cashbook';
+import { bookDay, bookDays, bookFor, booksOf, bookReport, depositCandidates, feeChecks, handovers, inHandThrough, receiptRange, seesAllBooks, type HandoverRow } from '../cashbook';
 import { can } from '../permissions';
 import { refillAll } from '../fees';
 
@@ -670,6 +670,28 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/days', requireR
   const from = new Date(Date.parse(`${through}T00:00:00Z`) - 44 * 86400000).toISOString().slice(0, 10);
   const days = await bookDays(db, book, from, through);
   return c.json({ book, today: through, days: days.reverse() });
+});
+
+// ---- Report (approved 28 Nov 2026): one book or all of them (Owner, Accountant, Viewer), Today, last 7 days or chosen
+// dates. A cashier gets only their own book. The page prints to PDF on the phone.
+
+const REPORT_MAX_DAYS = 92;
+cashBookRoutes.get('/businesses/:businessId/cashbook-report', requireRole('business.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const role = c.get('role');
+  const user = c.get('user');
+  const from = dayParam(c.req.query('from'));
+  const through = dayParam(c.req.query('to'));
+  if (through < from) fail(400, 'The last day must be on or after the first day.');
+  if (through > today()) fail(400, 'That day has not come yet.');
+  if (Date.parse(`${through}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`) >= REPORT_MAX_DAYS * 86400000) fail(400, `Choose at most ${REPORT_MAX_DAYS} days.`);
+  const which = c.req.query('book') ?? 'all';
+  const books = which === 'all' ? await booksOf(db, bid, user.id, role) : [await bookFor(db, bid, id404(which, 'Cash book'), user.id, role)];
+  const reports = [];
+  for (const b of books) reports.push(await bookReport(db, bid, b, from, through));
+  return c.json({ business: (await one<{ name: string }>(db, 'SELECT name FROM businesses WHERE id = ?', bid))?.name ?? '', from, through,
+    all: which === 'all', madeAt: now(), madeBy: user.name, reports });
 });
 
 // ---- Expenses and extra receipts: the accountant sets the head, the owner approves an expense or rejects it with a note.

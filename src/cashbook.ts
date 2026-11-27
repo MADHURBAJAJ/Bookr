@@ -277,3 +277,55 @@ export async function bookDays(db: DB, book: Book, from: string, through: string
   }
   return out;
 }
+
+/**
+ * Cash book report (approved 28 Nov 2026): one book, from..through, day by day with every line, what should be in hand,
+ * the count, and totals. Used for the report PDF (one cashier, or all of them one after another).
+ */
+export async function bookReport(db: DB, businessId: string, book: Book, from: string, through: string) {
+  const start = from < book.openingDate ? book.openingDate : from;
+  const head = { id: book.id, name: book.name, branchName: book.branchName, cashierName: book.cashierName, openingDate: book.openingDate };
+  if (through < start) return { book: head, from: start, through, openingPaise: null as number | null, days: [], totals: null, expenses: null, daysCounted: 0 };
+  const [opening, days, lines, out, inc, counts] = await Promise.all([
+    start <= book.openingDate ? Promise.resolve(book.openingBalancePaise) : inHandThrough(db, book, addDay(start, -1)),
+    bookDays(db, book, start, through),
+    all<{ id: string; day: string; kind: EntryKind; amountPaise: number; narration: string | null; headName: string | null; partyName: string | null;
+      reviewStatus: 'approved' | 'rejected' | null; feeReceipts: number | null; feeFirst: string | null; feeLast: string | null; enteredByName: string | null }>(db,
+      `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, h.name AS headName, p.name AS partyName, e.review_status AS reviewStatus,
+        e.fee_receipts AS feeReceipts, e.fee_first AS feeFirst, e.fee_last AS feeLast, u.name AS enteredByName
+      FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
+      WHERE e.account_id = ? AND e.day >= ? AND e.day <= ? ORDER BY e.day, e.entered_at`, book.id, start, through),
+    handovers(db, businessId, 'AND o.account_id = ? AND o.day >= ? AND o.day <= ?', book.id, start, through),
+    handovers(db, businessId, 'AND h.to_entry_id IN (SELECT id FROM cash_entries WHERE account_id = ? AND day >= ? AND day <= ?)', book.id, start, through),
+    all<{ day: string; settle: string | null }>(db, 'SELECT day, settle FROM cash_counts WHERE account_id = ? AND day >= ? AND day <= ?', book.id, start, through),
+  ]);
+  const toName = new Map(out.map((h) => [h.fromEntryId, h.toName]));
+  const fromName = new Map(inc.map((h) => [h.toEntryId!, h.fromBookName]));
+  const settle = new Map(counts.map((k) => [k.day, k.settle]));
+  const t = { feePaise: 0, receiptsPaise: 0, expensesPaise: 0, handedPaise: 0 };
+  const exp = { approved: { n: 0, paise: 0 }, waiting: { n: 0, paise: 0 }, rejected: { n: 0, paise: 0 } };
+  let prev = opening;
+  const out2 = days.map((d) => {
+    const ls = lines.filter((l) => l.day === d.day).map((l) => ({
+      kind: l.kind, amountPaise: l.amountPaise, narration: l.narration, headName: l.headName, reviewStatus: l.reviewStatus,
+      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName,
+      other: l.kind === 'handover_out' ? toName.get(l.id) ?? l.partyName : l.kind === 'handover_in' ? fromName.get(l.id) ?? null : null,
+    }));
+    for (const l of ls) {
+      if (l.kind === 'fee') t.feePaise += l.amountPaise;
+      else if (l.kind === 'other_in' || l.kind === 'handover_in') t.receiptsPaise += l.amountPaise;
+      else if (l.kind === 'expense' || l.kind === 'other_out') t.expensesPaise += l.amountPaise;
+      else t.handedPaise += l.amountPaise;
+      if (l.kind === 'expense') { const s = exp[l.reviewStatus ?? 'waiting']; s.n += 1; s.paise += l.amountPaise; }
+    }
+    // Once the fee day sheet is in, the sheet's cash counts instead of the typed total: the difference is its own line.
+    const feeAdjPaise = d.fee ? d.fee.countsPaise - (d.fee.typedPaise ?? 0) : 0;
+    t.feePaise += feeAdjPaise;
+    const row = { day: d.day, openingPaise: prev, lines: ls, feeAdjPaise, shouldPaise: d.shouldPaise,
+      count: d.count ? { ...d.count, settle: settle.get(d.day) ?? null } : null };
+    prev = d.shouldPaise;
+    return row;
+  });
+  return { book: head, from: start, through, openingPaise: opening, days: out2,
+    totals: { ...t, inHandPaise: prev }, expenses: exp, daysCounted: out2.filter((d) => d.count).length };
+}

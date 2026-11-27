@@ -11021,6 +11021,7 @@ async function cashBooksView(biz, oldEditId) {
       <section class="card grow3">
         <h2>${holding.length ? 'Cash in hand' : 'Cash with cashiers'} <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
         ${d.books.length ? books : html`<div class="note">No cashiers yet.${d.can.setup ? html` Add your schools and their cashiers on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.` : ''}</div>`}
+        ${d.books.length ? html`<div style="margin-top:10px"><a class="btn plain" href="#/b/${biz.id}/cbreport?book=all&p=7">Report (PDF)</a></div>` : ''}
         ${d.can.setup && d.books.length ? html`<div class="tiny" style="margin-top:8px">Add a cashier, invite one, or change opening cash on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.</div>` : ''}
       </section>
       <section class="card grow2">
@@ -11810,6 +11811,98 @@ async function cbHandedView(biz, accountId) {
 }
 
 /** More: bring in the fee sheet, my expenses and receipts, install, sign out. */
+// Cash book report (approved 28 Nov 2026): one cashier, or all cashiers (a summary page, then each book on its own
+// page), for Today, the last 7 days or chosen dates. "Save as PDF" prints the page; on a phone, Print gives Save as PDF.
+async function cbReportView(biz, query) {
+  const q = new URLSearchParams(query);
+  const t = todayIst();
+  const cashier = cbIsCashier(biz);
+  const per = ['today', '7', 'pick'].includes(q.get('p')) ? q.get('p') : '7';
+  const from = per === 'today' ? t : per === '7' ? lastDay7(t) : (isDay(q.get('from')) ? q.get('from') : lastDay7(t));
+  const to = per === 'pick' && isDay(q.get('to')) ? q.get('to') : t;
+  const { books } = await api('GET', `/businesses/${biz.id}/cashbooks`);
+  const book = cashier ? (books.find((b) => b.id === q.get('book')) ?? books[0])?.id : (q.get('book') && books.some((b) => b.id === q.get('book')) ? q.get('book') : 'all');
+  if (!book) return render(html`<div class="center"><section class="card"><div class="note">No cash book is linked to you yet.</div></section></div>`);
+  const href = (x) => { const n = new URLSearchParams({ book, p: per, ...(per === 'pick' ? { from, to } : {}), ...x }); return `#/b/${biz.id}/cbreport?${n}`; };
+  const back = cashier ? `#/b/${biz.id}/cbmore/${book}` : ownerPhone(biz) ? `#/b/${biz.id}/omore` : `#/b/${biz.id}/cashbooks`;
+  const ctl = html`<section class="card rp-ctl">
+      <div style="display:flex;justify-content:space-between;align-items:center"><a href="${back}">‹ Back</a><b>Report</b><span></span></div>
+      ${cashier ? '' : html`<div class="field"><label for="rp-book">Cashier</label><select id="rp-book">
+        <option value="all" ${book === 'all' ? 'selected' : ''}>All cashiers</option>
+        ${books.map((b) => html`<option value="${b.id}" ${book === b.id ? 'selected' : ''}>${b.name}${b.branchName ? ` · ${b.branchName}` : ''}</option>`)}</select></div>`}
+      <div class="form-row rp-per">
+        <a class="btn ${per === 'today' ? '' : 'plain'}" href="${href({ p: 'today' })}">Today</a>
+        <a class="btn ${per === '7' ? '' : 'plain'}" href="${href({ p: '7' })}">Last 7 days</a>
+        <a class="btn ${per === 'pick' ? '' : 'plain'}" href="${href({ p: 'pick', from, to })}">Choose dates</a></div>
+      ${per === 'pick' ? html`<form id="rp-dates" class="form-row" style="align-items:flex-end">
+        <div class="field"><label for="rp-f">From</label><input id="rp-f" name="from" type="date" value="${from}" max="${t}" required></div>
+        <div class="field"><label for="rp-t">To</label><input id="rp-t" name="to" type="date" value="${to}" max="${t}" required></div>
+        <button class="btn plain" type="submit">Show</button></form>` : ''}
+      <button type="button" class="btn" id="rp-pdf">Save as PDF</button>
+      <div class="tiny">${isIPhone() ? 'Opens Print: tap Share at the top, then Save to Files or WhatsApp.' : 'In the print box, choose "Save as PDF" as the printer.'}${innerWidth < 700 ? ' The pages below scroll sideways.' : ''}</div>
+      <div class="form-msg" id="rp-msg"></div></section>`;
+  let r;
+  try { r = await api('GET', `/businesses/${biz.id}/cashbook-report?${new URLSearchParams({ book, from, to })}`); }
+  catch (e) { return render(html`<div class="rp">${ctl}<div class="error">${e.message}</div></div>`); }
+  const period = from === to ? cbDayName(from) : `${shortDay(from)} – ${shortDay(to)} ${to.slice(0, 4)}`;
+  const made = `Made ${new Date(r.madeAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' })} by ${r.madeBy}`;
+  const who = (x) => html`${x.book.name}${x.book.branchName ? html` · ${x.book.branchName}` : ''}${x.book.cashierName && x.book.cashierName.toLowerCase() !== x.book.name.toLowerCase() ? html` <span class="rp-mute">(${x.book.cashierName})</span>` : ''}`;
+  const neg = (p) => (p < 0 ? 'rp-neg' : '');
+  const chip = (l) => (l.kind !== 'expense' ? '' : l.reviewStatus === 'approved' ? html` <span class="chip ok">approved</span>` : l.reviewStatus === 'rejected' ? html` <span class="chip bad">rejected</span>` : html` <span class="chip wait">waiting</span>`);
+  const what = (l) => (l.kind === 'fee' ? `Fee cash${l.feeReceipts ? ` · ${l.feeReceipts} receipt${l.feeReceipts === 1 ? '' : 's'}` : ''}${l.feeFirst ? ` · ${l.feeFirst}–${l.feeLast}` : ''}`
+    : l.kind === 'handover_out' ? `Handed over to ${l.other ?? '—'}${l.narration ? ` · ${l.narration}` : ''}`
+      : l.kind === 'handover_in' ? `Received from ${l.other ?? '—'}` : l.narration || l.headName || '—');
+  const IN = ['fee', 'other_in', 'handover_in'];
+  const countCell = (d) => (!d.count ? html`<span class="chip wait">not counted</span>`
+    : d.count.gapPaise === 0 ? html`counted ₹ ${rs(d.count.countedPaise)} ✓`
+      : html`counted ₹ ${rs(d.count.countedPaise)} · <b class="${neg(d.count.gapPaise)}">${d.count.gapPaise < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(d.count.gapPaise))}</b>${d.count.settle ? ' · settled' : ''}${d.count.note ? html` · "${d.count.note}"` : ''}`);
+  const bookPage = (x) => html`<section class="rp-page">
+      <div class="rp-top"><div><div class="rp-h">${who(x)}</div><div class="rp-mute">${r.business} · ${period}${x.book.openingDate > r.from ? ` · book starts ${shortDay(x.book.openingDate)}` : ''}</div></div>
+        <div style="text-align:right"><div class="rp-mute">In hand on ${shortDay(r.through)}</div><div class="rp-big ${neg(x.totals?.inHandPaise ?? 0)}">${x.totals ? `₹ ${rs(x.totals.inHandPaise)}` : '—'}</div></div></div>
+      ${!x.totals ? html`<div class="rp-mute">This book starts on ${shortDay(x.book.openingDate)}, after these dates.</div>` : html`
+      <table class="rp-t"><colgroup><col style="width:46%"><col style="width:20%"><col><col></colgroup>
+        ${x.days.map((d) => html`<tr class="rp-day"><th>${cbDayName(d.day)}</th><th>Head</th><th>In</th><th>Out</th></tr>
+          <tr><td class="rp-mute">Opening</td><td></td><td colspan="2" class="${neg(d.openingPaise)}">${rs(d.openingPaise)}</td></tr>
+          ${d.lines.map((l) => html`<tr><td>${what(l)}${chip(l)}</td><td class="${l.headName ? '' : 'rp-mute'}">${l.kind === 'fee' || l.kind.startsWith('handover') ? '' : l.headName ?? 'no head'}</td>
+            <td>${IN.includes(l.kind) ? rs(l.amountPaise) : ''}</td><td>${IN.includes(l.kind) ? '' : rs(l.amountPaise)}</td></tr>`)}
+          ${d.feeAdjPaise ? html`<tr><td>Fee sheet difference</td><td></td><td>${d.feeAdjPaise > 0 ? rs(d.feeAdjPaise) : ''}</td><td>${d.feeAdjPaise < 0 ? rs(-d.feeAdjPaise) : ''}</td></tr>` : ''}
+          ${!d.lines.length && !d.feeAdjPaise ? html`<tr><td class="rp-mute" colspan="4">Nothing written</td></tr>` : ''}
+          <tr class="rp-sum"><td>Should be in hand · ${countCell(d)}</td><td></td><td colspan="2" class="${neg(d.shouldPaise)}">${rs(d.shouldPaise)}</td></tr>`)}
+      </table>
+      <table class="rp-t" style="margin-top:12px"><tr><th>Totals</th><th>Fee cash</th><th>Receipts</th><th>Expenses</th><th>Handed over</th></tr>
+        <tr class="rp-sum"><td>₹</td><td>${rs(x.totals.feePaise)}</td><td>${rs(x.totals.receiptsPaise)}</td><td>${rs(x.totals.expensesPaise)}</td><td>${rs(x.totals.handedPaise)}</td></tr></table>
+      <div class="rp-mute" style="margin-top:6px">Expenses: ${x.expenses.approved.n} approved ₹ ${rs(x.expenses.approved.paise)} · ${x.expenses.waiting.n} waiting ₹ ${rs(x.expenses.waiting.paise)}${x.expenses.rejected.n ? ` · ${x.expenses.rejected.n} rejected ₹ ${rs(x.expenses.rejected.paise)}` : ''} · days counted ${x.daysCounted} of ${x.days.length}</div>`}
+      <div class="rp-sign"><span>Signature of cashier ____________________</span><span>Checked by ____________________</span></div>
+      <div class="rp-mute rp-made">${made}</div></section>`;
+  const sum = (f) => r.reports.reduce((a, x) => a + (x.totals ? f(x) : 0), 0);
+  const summary = html`<section class="rp-page">
+      <div class="rp-top"><div><div class="rp-h">${r.business} · All cashiers</div><div class="rp-mute">${period}</div></div><div class="rp-mute" style="text-align:right">${made}</div></div>
+      <table class="rp-t"><colgroup><col style="width:28%"><col><col><col><col><col><col></colgroup>
+        <tr><th>Cashier</th><th>Opening</th><th>Fee cash</th><th>Receipts</th><th>Expenses</th><th>Handed over</th><th>In hand</th></tr>
+        ${r.reports.map((x) => html`<tr><td>${who(x)}${x.book.openingDate > r.from ? html`<div class="rp-mute">from ${shortDay(x.book.openingDate)}</div>` : ''}</td>
+          ${x.totals ? html`<td>${rs(x.openingPaise)}</td><td>${rs(x.totals.feePaise)}</td><td>${rs(x.totals.receiptsPaise)}</td><td>${rs(x.totals.expensesPaise)}</td><td>${rs(x.totals.handedPaise)}</td><td class="${neg(x.totals.inHandPaise)}">${rs(x.totals.inHandPaise)}</td>`
+            : html`<td colspan="6" class="rp-mute">starts ${shortDay(x.book.openingDate)}</td>`}</tr>`)}
+        <tr class="rp-sum"><td>Total ₹</td><td>${rs(sum((x) => x.openingPaise))}</td><td>${rs(sum((x) => x.totals.feePaise))}</td><td>${rs(sum((x) => x.totals.receiptsPaise))}</td>
+          <td>${rs(sum((x) => x.totals.expensesPaise))}</td><td>${rs(sum((x) => x.totals.handedPaise))}</td><td>${rs(sum((x) => x.totals.inHandPaise))}</td></tr></table>
+      <div class="rp-tiles">
+        <div><span class="rp-mute">Expenses approved</span><b>₹ ${rs(sum((x) => x.expenses.approved.paise))} · ${sum((x) => x.expenses.approved.n)}</b></div>
+        <div><span class="rp-mute">Expenses waiting</span><b>₹ ${rs(sum((x) => x.expenses.waiting.paise))} · ${sum((x) => x.expenses.waiting.n)}</b></div>
+        <div><span class="rp-mute">Days counted</span><b>${sum((x) => x.daysCounted)} of ${sum((x) => x.days.length)}</b></div></div>
+      <div class="rp-mute" style="margin-top:8px">Each cashier's days follow, one page each.</div></section>`;
+  render(html`<div class="rp">${ctl}<div class="rp-scroll">${r.all ? summary : ''}${r.reports.map(bookPage)}</div></div>`);
+  document.title = `Bookr ${r.all ? 'all cashiers' : r.reports[0]?.book.name ?? ''} ${from}${from === to ? '' : ` to ${to}`}`;
+  // The title names the PDF file; back to plain Bookr on the next screen.
+  addEventListener('hashchange', () => { document.title = 'Bookr'; }, { once: true });
+  document.getElementById('rp-book')?.addEventListener('change', (e) => go(href({ book: e.target.value })));
+  document.getElementById('rp-dates')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    if (f.to.value < f.from.value) { document.getElementById('rp-msg').textContent = 'The last day must be on or after the first day.'; return; }
+    go(href({ p: 'pick', from: f.from.value, to: f.to.value }));
+  });
+  document.getElementById('rp-pdf').addEventListener('click', () => window.print());
+}
+
 async function cbMoreView(biz, accountId) {
   const t = todayIst();
   const [d, l] = await Promise.all([
@@ -11829,6 +11922,8 @@ async function cbMoreView(biz, accountId) {
       <input type="file" id="cb-sheet" accept=".xls,.xlsx,.html,.htm,text/html,application/vnd.ms-excel" hidden>
       <div class="tiny">${b.branchName ?? 'Your school'}, ${shortDay(t)}: ${d.fee?.sheetIn ? 'brought in ✓' : 'not brought in yet'}. The FeeDaySheet from the fee software; it replaces only the schools in the file.</div>
       <div class="form-msg" id="cb-sheet-msg"></div></section>` : ''}
+    <section class="card" style="gap:6px"><a class="btn" style="justify-content:center" href="#/b/${biz.id}/cbreport?book=${b.id}&p=7">Report (PDF)</a>
+      <div class="tiny">Your book for today, the last 7 days or dates you choose.</div></section>
     <section class="card cb-card"><div class="cb-hd" style="margin-top:0">My expenses and receipts ${toSet ? html`<span class="chip info">${toSet} waiting</span>` : ''}</div>
       ${lines.length ? lines : html`<div class="list-row"><span class="tiny">None in the last 60 days.</span><span></span></div>`}</section>
     <section class="card" style="gap:8px">
@@ -11998,6 +12093,8 @@ function ownerMoreView(biz) {
   render(ownerFrame(biz, 'more', html`<b>More</b>`, html`<div class="cb">
     ${me.businesses.length > 1 ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Business</div>
       ${me.businesses.map((x) => html`<a class="list-row" href="${home(x)}" style="color:inherit"><span>${x.name}</span><span class="tiny">${x.id === biz.id ? 'open' : ''}</span></a>`)}</section>` : ''}
+    <section class="card" style="gap:6px"><a class="btn" style="justify-content:center" href="#/b/${biz.id}/cbreport?book=all&p=7">Report (PDF)</a>
+      <div class="tiny">All cashiers or one, for today, the last 7 days or dates you choose.</div></section>
     <section class="card" style="gap:8px">
       <button type="button" class="btn plain" id="o-pc">Use the PC screens on this phone</button>
       <div class="tiny">Reports, settings, Schools and cashiers and the rest are on the PC screens. You can come back to this from their menu.</div>
@@ -12179,6 +12276,7 @@ async function routeInner() {
       if (screen === 'cbdays' && parts[3]) return cbDaysView(biz, parts[3]);
       if (screen === 'cbhanded' && parts[3]) return cbHandedView(biz, parts[3]);
       if (screen === 'cbmore' && parts[3]) return cbMoreView(biz, parts[3]);
+      if (screen === 'cbreport') return cbReportView(biz, query);
       if (screen === 'fees') return feesView(biz, parts[3]);
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);
