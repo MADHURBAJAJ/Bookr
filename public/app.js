@@ -1085,6 +1085,22 @@ function wireMyPhone(after) {
   });
 }
 
+// Messages with a sign-in link (28 Nov 2026) say how to put Bookr on the phone: there is no store download, the same
+// link opens Bookr and the phone adds it to the home screen.
+const INSTALL_STEPS = `Put Bookr on your phone:
+• Android: open the link in Chrome, then tap *Install* (or ⋮ › Add to Home screen)
+• iPhone: open the link in Safari, tap Share ⬆︎ › *Add to Home Screen*`;
+const joinText = (biz, link, { role, cashier } = {}) => `Join *${biz.name}* on Bookr ${cashier ? 'to keep your cash book' : `as ${role}`}.
+
+1. Open this link and choose a password: ${link}
+2. ${INSTALL_STEPS}
+3. From then on, open Bookr from the green *B* icon${cashier ? ' and sign in with your mobile number' : ''}.`;
+const resetText = (biz, link) => `Set a new Bookr password for *${biz.name}*. This link works once, within 24 hours: ${link}
+
+Then open Bookr from the green *B* icon on your phone. No icon yet?
+• Android: Chrome › *Install* (or ⋮ › Add to Home screen)
+• iPhone: Safari › Share ⬆︎ › *Add to Home Screen*`;
+
 async function usersView(biz, selectedId) {
   const { members, invites } = await api('GET', `/businesses/${biz.id}/members`);
   const selected = members.find((m) => m.id === selectedId) ?? members.find((m) => m.id !== me.user.id) ?? members[0];
@@ -1199,7 +1215,7 @@ async function usersView(biz, selectedId) {
   const resetMsg = document.getElementById('reset-msg');
   const makeReset = async () => {
     const res = await api('POST', `/businesses/${biz.id}/members/${selected.id}/reset`, {});
-    return { res, text: `Set a new Bookr password for ${biz.name}. Open this link within 24 hours (it works once): ${res.link}` };
+    return { res, text: resetText(biz, res.link) };
   };
   document.getElementById('reset-wa')?.addEventListener('click', async () => {
     const w = window.open('about:blank', '_blank');
@@ -1227,13 +1243,15 @@ async function usersView(biz, selectedId) {
     await usersView(biz, selected?.id);
     document.getElementById('invite-link').innerHTML = html`
       <div class="inset" style="margin-top:4px">
-        <div class="note">Invite created for ${d.email}. Email is not sent yet, so share this link with them. It works once and expires in 7 days.</div>
-        <div class="copy"><input id="link" readonly value="${link}"><button class="btn plain" type="button" id="copy">Copy</button></div>
+        <div class="note">Invite created for ${d.email}. Email is not sent yet, so share it with them: Copy message gives the link with how to put Bookr on their phone. It works once and expires in 7 days.</div>
+        <div class="copy"><input id="link" readonly value="${link}"><button class="btn plain" type="button" id="copy">Copy message</button></div>
+        <div class="tiny" id="copy-msg"></div>
       </div>`.__html;
-    document.getElementById('copy').addEventListener('click', () => {
-      const input = document.getElementById('link');
-      input.select();
-      navigator.clipboard?.writeText(input.value);
+    document.getElementById('copy').addEventListener('click', async () => {
+      const text = joinText(biz, link, { role: ROLE_LABELS[d.role] ?? d.role });
+      const out = document.getElementById('copy-msg');
+      try { await navigator.clipboard.writeText(text); out.textContent = 'Message copied. Paste it to them on WhatsApp or any chat.'; }
+      catch { document.getElementById('link').select(); out.textContent = 'Could not copy the message here; the link is selected, copy it by hand.'; }
     });
   });
 }
@@ -11201,7 +11219,7 @@ async function schoolsView(biz, editId) {
     f.querySelector('input').focus();
     const make = async () => {
       const res = await api('POST', `/businesses/${biz.id}/invites`, { phone: f.elements.phone.value, role: 'entry_staff', accountId: book.id });
-      return { res, text: `Join ${biz.name} on Bookr to keep your cash book. Open this link, choose a password, then sign in with your mobile number: ${res.link}\n\nThen tap Install when asked: Bookr sits on your home screen like any app.` };
+      return { res, text: joinText(biz, res.link, { cashier: true }) };
     };
     f.querySelector('[data-cancel]').addEventListener('click', again);
     f.addEventListener('submit', async (e) => {
