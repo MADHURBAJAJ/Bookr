@@ -153,9 +153,11 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, team
  */
 export async function deskPending(db: DB, bid: string) {
   const rows = await all<{ id: string; extRef: string; guestName: string | null; checkIn: string | null; checkOut: string | null; status: string; stayId: string | null;
-    deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; heldPaise: number; linkedOnPaise: number; linkedOffPaise: number; poolPaise: number }>(db, `
+    deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; billId: string | null; heldPaise: number; linkedOnPaise: number; linkedOffPaise: number; poolPaise: number }>(db, `
     SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
       k.check_in AS checkIn, k.check_out AS checkOut, k.status, k.stay_id AS stayId, k.desk_paid_paise AS deskPaidPaise, k.desk_paid_at AS deskPaidAt, k.entered_by AS enteredBy,
+      -- The bill it is on: a bed of a group is billed on the group's first room, so its bookings share that bill's receipts.
+      coalesce((SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id), k.stay_id) AS billId,
       coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0) AS heldPaise,
       -- A POS receipt someone linked to this booking's Djubo payment ("already taken in the POS") always counts in full:
       -- on its room bill (or the group's first room's, 26 Nov 2026) ...
@@ -178,16 +180,16 @@ export async function deskPending(db: DB, bid: string) {
     ORDER BY k.check_in, k.desk_paid_at, k.id`, bid);
   // Per room bill: what its receipts have left once the linked ones are taken out, shared oldest night first.
   const left = new Map<string, number>();
-  for (const r of rows) if (r.stayId && !left.has(r.stayId)) left.set(r.stayId, r.poolPaise);
-  for (const r of rows) if (r.stayId) left.set(r.stayId, Math.max(0, left.get(r.stayId)! - r.linkedOnPaise));
+  for (const r of rows) if (r.billId && !left.has(r.billId)) left.set(r.billId, r.poolPaise);
+  for (const r of rows) if (r.billId) left.set(r.billId, Math.max(0, left.get(r.billId)! - r.linkedOnPaise));
   const out = rows.map((r) => {
     let covered = r.heldPaise + r.linkedOnPaise + r.linkedOffPaise;
-    if (r.stayId) {
-      const take = Math.min(left.get(r.stayId)!, Math.max(0, r.deskPaidPaise - covered));
-      left.set(r.stayId, left.get(r.stayId)! - take);
+    if (r.billId) {
+      const take = Math.min(left.get(r.billId)!, Math.max(0, r.deskPaidPaise - covered));
+      left.set(r.billId, left.get(r.billId)! - take);
       covered += take;
     }
-    const { heldPaise: _h, linkedOnPaise: _on, linkedOffPaise: _off, poolPaise: _p, ...rest } = r;
+    const { heldPaise: _h, linkedOnPaise: _on, linkedOffPaise: _off, poolPaise: _p, billId: _b, ...rest } = r;
     return { ...rest, coveredPaise: covered, pendingPaise: r.deskPaidPaise - covered };
   });
   return out.filter((r) => r.pendingPaise > 0).sort((a, b) => (a.deskPaidAt ?? 0) - (b.deskPaidAt ?? 0));
