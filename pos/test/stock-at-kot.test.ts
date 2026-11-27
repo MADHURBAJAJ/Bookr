@@ -60,6 +60,23 @@ describe('stock at the KOT', () => {
       expect(use.items.find((i: any) => i.name === 'Sample Beer')).toMatchObject({ sold: 6, notBilled: 4 });
       expect(use.items.find((i: any) => i.name === 'Sample Batter')).toMatchObject({ sold: 150, notBilled: 0, waste: 0 });
 
+      // Tapping the row (26 Nov 2026): the bill it was sold on, the open table not billed, and a breakage with who.
+      await q("INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, reason, by_staff, shift_day, at) VALUES ('mv-brk', ?, 'si-beer', 'st-bar', 'waste', -1, 'Bottle broke while cooling', NULL, ?, ?)", s.businessId, day, Date.now());
+      const det = await ok(s.owner.get(`${B}/stock/consumption/item?itemId=si-beer&from=${day}&to=${day}`));
+      expect(det.bills.map((x: any) => [x.billNo, x.place, x.units])).toEqual([[expect.any(String), 'T9', 2]]);
+      expect(det.unbilled.map((x: any) => [x.orderId, x.place, x.status, x.units, !!x.kots])).toEqual([[o3, 'T12', 'open', 4, true]]);
+      expect(det.losses.map((x: any) => [x.kind, x.qty, x.reason, x.store])).toEqual([['breakage', 1, 'Bottle broke while cooling', 'Sample Bar']]);
+      // One store alone (26 Nov 2026): beer is a bar dish, so the Bar shows it all and the Kitchen none of it.
+      const bar = await ok(s.owner.get(`${B}/stock/consumption/item?itemId=si-beer&from=${day}&to=${day}&storeId=st-bar`));
+      expect([bar.bills.length, bar.unbilled.map((x: any) => [x.place, x.units]), bar.losses.length]).toEqual([1, [['T12', 4]], 1]);
+      const kit = await ok(s.owner.get(`${B}/stock/consumption/item?itemId=si-beer&from=${day}&to=${day}&storeId=st-kit`));
+      expect([kit.bills, kit.unbilled, kit.losses]).toEqual([[], [], []]);
+      const barUse = await ok(s.owner.get(`${B}/stock/consumption?from=${day}&to=${day}&storeId=st-bar`));
+      expect(barUse.items.find((i: any) => i.name === 'Sample Beer')).toMatchObject({ sold: 6, notBilled: 4 });
+      const kitUse = await ok(s.owner.get(`${B}/stock/consumption?from=${day}&to=${day}&storeId=st-kit`));
+      expect(kitUse.items.find((i: any) => i.name === 'Sample Batter')).toMatchObject({ sold: 150, notBilled: 0 });
+      expect((await s.owner.get(`${B}/stock/consumption/item?itemId=nope&from=${day}&to=${day}`)).status).toBe(404);
+
       // The Daily check lists what cancelled KOTs put back, to check at the stock count.
       const dc = await ok(s.owner.get(`${B}/reports/daily-check?day=${day}`));
       expect(dc.cancelReturns.map((x: any) => [x.name, x.qty, x.store]).sort()).toEqual([['Sample Batter', 150, 'Sample Kitchen'], ['Sample Beer', 3, 'Sample Bar']]);

@@ -24,8 +24,8 @@ stationRoutes.get('/station', async (c) => {
   const { device, station } = await stationDevice(c);
   const t = now();
   const [kots] = await Promise.all([
-    all<{ id: string; kot_no: number; place: string; lines: string; by: string | null; at: number; status: string; print_at: string; printed: number | null }>(c.env.DB,
-      `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, o.place, k.lines, st.name AS by, k.printed_at AS at, k.status, k.print_at, k.station_printed_at AS printed
+    all<{ id: string; kot_no: number; place: string; lines: string; by: string | null; at: number; status: string; print_at: string; printed: number | null; note: string | null }>(c.env.DB,
+      `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, o.place, k.lines, k.note, st.name AS by, k.printed_at AS at, k.status, k.print_at, k.station_printed_at AS printed
        FROM kots k JOIN orders o ON o.id = k.order_id LEFT JOIN staff st ON st.id = k.by_staff
        WHERE k.station_id = ? AND k.printed_at > ? AND (k.status <> 'ready' OR (k.print_at = 'station' AND k.station_printed_at IS NULL))
        ORDER BY k.printed_at, k.kot_no`, station.id, t - DAY),
@@ -33,7 +33,7 @@ stationRoutes.get('/station', async (c) => {
   ]);
   return c.json({
     station: { name: station.name, how: station.how, copies: station.copies }, business: station.business, device: device.name, now: t,
-    kots: kots.map((k) => ({ id: k.id, kotNo: k.kot_no, place: k.place, lines: JSON.parse(k.lines), by: k.by, at: k.at, status: k.status,
+    kots: kots.map((k) => ({ id: k.id, kotNo: k.kot_no, place: k.place, lines: JSON.parse(k.lines), note: k.note, by: k.by, at: k.at, status: k.status,
       toPrint: k.print_at === 'station' && !k.printed })),
   });
 });

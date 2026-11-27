@@ -9,8 +9,8 @@ import { all, newId, stmt, type DB } from '../../src/db';
 export const stockRule = { kotFrom: Date.parse('2026-11-25T02:30:00Z') };   // 25 Nov, 8 am India time: the shift start
 export const stockAtKot = (openedAt: number) => openedAt >= stockRule.kotFrom;
 
-const storesOf = (db: DB, bid: string) => all<{ id: string; kind: string }>(db, 'SELECT id, kind FROM stock_stores WHERE business_id = ? ORDER BY created_at', bid);
-const storeFor = (stores: { id: string; kind: string }[], station: string) => stores.find((s) => s.kind === station) ?? stores.find((s) => s.kind === 'main');
+export const storesOf = (db: DB, bid: string) => all<{ id: string; kind: string }>(db, 'SELECT id, kind FROM stock_stores WHERE business_id = ? ORDER BY created_at', bid);
+export const storeFor = (stores: { id: string; kind: string }[], station: string) => stores.find((s) => s.kind === station) ?? stores.find((s) => s.kind === 'main');
 
 /**
  * Stock moves for dishes: `qty` is how many of the dish, positive when used, negative when it goes back. kind 'waste'

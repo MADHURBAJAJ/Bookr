@@ -9,7 +9,10 @@ import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, dormBed, dormWhole, tableLayout, type Business } from '../util';
 import { phoneKey } from './settings';
 import { checkReceiptPayments, deskAdvance } from './settle';
-import { bookingUnits, deskPending, roomTax } from '../rooms';
+import { bookingUnits, nightsNotCharged, roomTax } from '../rooms';
+import { djuboPays, oldDeskPending } from '../djubo-desk';
+import { heldChanges } from './bookings';
+import { missingBeds } from './settings';
 import { shiftDayAt } from '../billing';
 import { formCPending } from './roomdesk';
 import type { AppEnv } from '../types';
@@ -81,7 +84,7 @@ export async function roomRevenueByDay(db: DB, b: Business, from: string, to: st
   const beds = secs.filter((x) => x.kind === 'dorms').flatMap((x) => x.rooms);
   const wholes: Record<string, string[]> = Object.assign({}, ...secs.map((x) => x.wholes));
   const startOf = (d: string) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), b.shift_start_hour) - 19_800_000;
-  const real = (r: string) => r.replace(/ \(past stay\)$/, '');
+  const real = (r: string) => r.replace(/ \((past stay|left room)\)$/, '');
   const unitsOf = (room: string) => {
     const w = Object.entries(wholes).find(([k]) => flat(k) === flat(real(room)));
     return w ? w[1] : [rooms.find((x) => flat(x) === flat(real(room))) ?? beds.find((x) => flat(x) === flat(real(room)))].filter((x): x is string => !!x);
@@ -98,7 +101,8 @@ export async function roomRevenueByDay(db: DB, b: Business, from: string, to: st
   for (const st of stays) if (st.group_stay_id) members.set(st.group_stay_id, (members.get(st.group_stay_id) ?? 0) + 1);
   for (const st of stays) {
     const units = unitsOf(st.room);
-    const outDay = st.out == null ? null : shiftDayAt(st.out, b.shift_start_hour);
+    // A guest who left the room with the bill open (27 Nov 2026) holds it no more from today.
+    const outDay = st.out == null ? (st.room.endsWith(' (left room)') ? today : null) : shiftDayAt(st.out, b.shift_start_hour);
     // The nights the stay covers: to check-out, or (in house) to the planned day; at least one.
     const endAll = outDay ?? (st.plan && st.plan > st.check_in ? st.plan : addDays(today > st.check_in ? today : st.check_in, 1));
     const end = endAll > st.check_in ? endAll : addDays(st.check_in, 1);
@@ -298,33 +302,59 @@ frontDeskRoutes.get(`${B}/frontdesk/today`, requireAction('stays.edit'), async (
        (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.reservation_id = r.id AND d.status = 'held') AS heldPaise
        FROM reservations r WHERE r.business_id = ? AND r.status IN ('confirmed', 'hold') AND r.booking_id IS NULL AND r.stay_id IS NULL AND r.check_in <= ? AND r.check_out > ?`, b.id, today, today),
     all<{ id: string; room: string; guestName: string; checkIn: string; plan: string | null; accountId: string; balancePaise: number }>(db, `SELECT s.id, s.room, s.guest_name AS guestName,
-      s.check_in AS checkIn, d.id AS accountId,
+      s.check_in AS checkIn, d.id AS accountId, s.group_stay_id AS groupStayId,
       coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id), (SELECT r.check_out FROM reservations r WHERE r.id = s.reservation_id)) AS plan,
       coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balancePaise
       FROM stays s JOIN debtor_accounts d ON d.stay_id = s.id WHERE s.business_id = ? AND s.checked_out_at IS NULL ORDER BY s.room`, b.id),
     chartData(db, b, today, 1),
     notInDjubo(db, b.id, today, t),
-    deskPending(db, b.id),
+    oldDeskPending(db, b.id, b.shift_start_hour),
     one<{ n: number }>(db, "SELECT count(*) AS n FROM bookings WHERE business_id = ? AND status = 'new' AND unplaced = 1", b.id),
   ]);
   const live = reservations.filter((r) => !(r.status === 'hold' && (r.holdUntil ?? 0) < t));
   const rooms = chart.sections.reduce((n, s) => n + s.rooms.length, 0);
   const busy = new Set(chart.bars.map((x) => x.room)).size;
+  // Rent maybe counted twice (26 Nov 2026): an extra night added by hand on a stay (or its group) that Djubo also sent as an
+  // extension booking. Shown until the hand-added rent is taken off.
+  const rentTwice = await all<{ stayId: string; room: string; guestName: string; handPaise: number; refs: string }>(db, `
+    SELECT s.id AS stayId, s.room, s.guest_name AS guestName,
+      (SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays m ON m.id = a.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL) AS handPaise,
+      (SELECT group_concat(k.ext_ref, ', ') FROM bookings k JOIN stays m ON m.id = k.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id)
+        AND k.status = 'checked_in' AND k.source = 'djubo' AND k.check_in > s.check_in) AS refs
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL
+      AND EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays m ON m.id = a.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND e.amount_paise > 0 AND e.note LIKE '%extra night%')
+      AND EXISTS (SELECT 1 FROM bookings k JOIN stays m ON m.id = k.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id)
+        AND k.status = 'checked_in' AND k.source = 'djubo' AND k.check_in > s.check_in)`, b.id);
+  // Money reception marked in Djubo (26 Nov 2026): already taken, so not to collect; it waits only for how it was paid.
+  const dj = await djuboPays(db, b.id, b.shift_start_hour);
+  const djOpen = dj.pays.filter((x) => !x.settlementId);
+  const sumBy = (key: 'bookingId' | 'stayId', id: string) => djOpen.filter((x) => x[key] === id).reduce((n, x) => n + x.amountPaise, 0);
   // From Djubo's daily report with no total yet (24 Nov 2026): what the report says is still to collect.
-  const due = (a: (typeof arrivals)[number]) => (a.fromReport && a.amountPaise === null ? Math.max(0, (a.reportDuePaise ?? 0) - a.heldPaise)
-    : Math.max(0, (a.amountPaise ?? 0) - Math.max(0, (a.paidPaise ?? 0) - a.deskPaidPaise) - a.heldPaise));
+  const due = (a: (typeof arrivals)[number]) => Math.max(0, (a.fromReport && a.amountPaise === null ? Math.max(0, (a.reportDuePaise ?? 0) - a.heldPaise)
+    : Math.max(0, (a.amountPaise ?? 0) - Math.max(0, (a.paidPaise ?? 0) - a.deskPaidPaise) - a.heldPaise)) - sumBy('bookingId', a.id));
+  const stayDjubo = (id: string) => sumBy('stayId', id);
   const toCollect = arrivals.reduce((n, a) => n + due(a), 0) + live.reduce((n, r) => n + Math.max(0, r.totalPaise - r.heldPaise), 0)
-    + stays.reduce((n, s) => n + Math.max(0, s.balancePaise), 0);
+    + stays.reduce((n, s) => n + Math.max(0, s.balancePaise - stayDjubo(s.id)), 0);
   return c.json({
     today,
-    arrivals: [...arrivals.map((a) => ({ ...a, kind: 'booking', duePaise: due(a) })),
+    arrivals: [...arrivals.map((a) => ({ ...a, kind: 'booking', duePaise: due(a), djuboPaise: sumBy('bookingId', a.id) })),
       ...live.map((r) => ({ id: r.id, kind: 'reservation', guestName: r.guestName, checkIn: r.checkIn, checkOut: r.checkOut, status: r.status, source: r.source,
         rooms: (JSON.parse(r.lines) as { type: string; rooms: number; roomNames?: string[] }[]).map((l) => `${l.type}${l.roomNames?.length ? ` ${l.roomNames.join(', ')}` : ` × ${l.rooms}`}`).join(' · '),
         duePaise: Math.max(0, r.totalPaise - r.heldPaise), totalPaise: r.totalPaise }))],
-    inHouse: stays,
-    leaving: stays.filter((s) => s.plan && s.plan <= today),
+    inHouse: stays.map((s) => ({ ...s, djuboPaise: stayDjubo(s.id) })),
+    leaving: stays.filter((s) => s.plan && s.plan <= today).map((s) => ({ ...s, djuboPaise: stayDjubo(s.id) })),
+    djubo: { open: djOpen, today: dj.pays.filter((x) => x.day === today), lowered: dj.lowered },
+    // Booking changes from Djubo or MakeMyTrip waiting for a person (26 Nov 2026).
+    held: await heldChanges(db, b.id),
+    // A booking's rooms or beds not all in the POS (26 Nov 2026).
+    missingBeds: await missingBeds(db, b.id),
+    // Nights a guest stays that no rent covers (26 Nov 2026: extensions are made in Djubo).
+    nightsNotCharged: await nightsNotCharged(db, b.id),
     stats: { arriving: arrivals.length + live.length, inHouse: stays.length, leaving: stays.filter((s) => s.plan && s.plan <= today).length, freeTonight: Math.max(0, rooms - busy), toCollectPaise: toCollect },
-    alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0 },
+    alerts: { notInDjubo: alerts, formC: await formCPending(db, b.id, t), deskToTake: desk.filter((d) => d.status !== 'checked_in').length, unplaced: unplaced?.n ?? 0,
+      djuboToMode: djOpen.length, djuboLowered: dj.lowered.length, rentTwice: rentTwice.filter((x) => x.handPaise > 0) },
   });
 });
 
@@ -409,10 +439,15 @@ frontDeskRoutes.get(`${B}/reservations`, requireAction('stays.edit'), async (c) 
     all<Record<string, unknown>>(c.env.DB, `SELECT k.id, k.source, k.ext_ref AS extRef, k.guest_name AS guestName, k.phone, k.room_type AS roomType, k.room_labels AS roomLabels, k.rooms,
       k.check_in AS checkIn, k.check_out AS checkOut, k.amount_paise AS amountPaise, k.paid_paise AS paidPaise, k.desk_paid_paise AS deskPaidPaise, k.status, k.problem, k.channel,
       k.unplaced, k.stay_id AS stayId, k.ota_ref AS otaRef, k.entered_by AS enteredBy,
-      (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)) AS heldPaise
-      FROM bookings k WHERE k.business_id = ? AND NOT (k.source = 'mmt' AND k.match_id IS NOT NULL)
+      (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)) AS heldPaise,
+      k.created_at AS createdAt, m.mailAt, m.mailFirstAt, coalesce(m.mailCount, 0) AS mailCount
+      FROM bookings k
+      -- When its emails came (28 Nov 2026, Reservations sorted by the latest email): its own and its MakeMyTrip twin's.
+      LEFT JOIN (SELECT coalesce(t.match_id, t.id) AS kid, max(v.received_at) AS mailAt, min(v.received_at) AS mailFirstAt, count(*) AS mailCount
+        FROM booking_versions v JOIN bookings t ON t.id = v.booking_id WHERE v.business_id = ? GROUP BY coalesce(t.match_id, t.id)) m ON m.kid = k.id
+      WHERE k.business_id = ? AND NOT (k.source = 'mmt' AND k.match_id IS NOT NULL)
       AND (? = '' AND k.check_out >= ? OR ? <> '' AND (lower(k.guest_name) LIKE ? OR lower(k.ext_ref) LIKE ? OR lower(coalesce(k.ota_ref, '')) LIKE ? OR (? <> '' AND k.phone LIKE ?)))
-      ORDER BY k.check_in, k.guest_name LIMIT 300`, b.id, q, addDays(today, -1), q, like, like, like, digits, `%${digits}%`),
+      ORDER BY k.check_in, k.guest_name LIMIT 300`, b.id, b.id, q, addDays(today, -1), q, like, like, like, digits, `%${digits}%`),
   ]);
   const masked = (p: unknown) => (typeof p === 'string' && p ? `••••${p.slice(-4)}` : null);
   return c.json({ today, now: now(), reservations: reservations.map((r) => ({ ...resOut(r), phone: masked(r.phone) })), bookings: bookings.map((k) => ({ ...k, phone: masked(k.phone) })) });

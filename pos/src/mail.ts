@@ -7,7 +7,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../sr
 import type { Env } from './types';
 import { readDjuboReport, readerFor, type DjuboReport, type ReadBooking, type ReportRoom } from './booking-readers';
 import { phoneKeySoft } from './booking-readers';
-import { linkWalkIn, recomputeDesk, syncStay, syncStayRent } from './rooms';
+import { followBookingDates, linkWalkIn, recomputeDesk, syncStay, syncStayRent } from './rooms';
 import { linkReservation } from './routes/frontdesk';
 import { CLOSED_TO, clock, tableLayout, type Business } from './util';
 
@@ -128,6 +128,37 @@ export async function storeMail(env: Env, businessId: string, raw: Uint8Array, s
   return id;
 }
 
+/** The bookings a kept mail says (no change made), for building each booking's history (26 Nov 2026). */
+export async function bookingsInMail(env: Env, businessId: string, mailId: string) {
+  const m = await one<{ r2_key: string; source: MailSource; message_id: string; received_at: number }>(env.DB,
+    'SELECT r2_key, source, message_id, received_at FROM inbound_mails WHERE id = ? AND business_id = ?', mailId, businessId);
+  if (!m || !env.BILLS || (m.source !== 'djubo' && m.source !== 'mmt')) return null;
+  const obj = await env.BILLS.get(m.r2_key);
+  if (!obj) return null;
+  let mail = await PostalMime.parse(new Uint8Array(await obj.arrayBuffer()));
+  if (m.message_id.startsWith('import:')) mail = await innerOf(mail);
+  if (m.source === 'djubo' && readDjuboReport(mail)) return null;
+  try { return { source: m.source, came: m.received_at, found: readerFor(m.source)(mail) }; } catch { return null; }
+}
+
+/** Adds kept mails read before the history began to their bookings' history (26 Nov 2026), a batch at a time (the cron).
+ *  Changes no booking: each mail's line is what it said, in Djubo's order. */
+export async function buildHistory(env: Env, limit = 40) {
+  const db = env.DB;
+  const ms = await all<{ id: string; business_id: string }>(db, `SELECT id, business_id FROM inbound_mails WHERE history_at IS NULL AND status = 'read'
+    AND source IN ('djubo', 'mmt') ORDER BY received_at LIMIT ?`, limit);
+  for (const m of ms) {
+    const r = await bookingsInMail(env, m.business_id, m.id).catch(() => null);
+    for (const x of r?.found ?? []) {
+      const k = await one<{ id: string }>(db, 'SELECT id FROM bookings WHERE business_id = ? AND source = ? AND ext_ref = ?', m.business_id, r!.source, x.extRef);
+      if (k) await stmt(db, `INSERT INTO booking_versions (booking_id, mail_id, business_id, order_at, received_at, data, status) VALUES (?, ?, ?, ?, ?, ?, 'applied')
+        ON CONFLICT (booking_id, mail_id) DO NOTHING`, k.id, m.id, m.business_id, orderOf(r!.source, x, r!.came), r!.came, JSON.stringify(x)).run();
+    }
+    await stmt(db, 'UPDATE inbound_mails SET history_at = ? WHERE id = ?', now(), m.id).run();
+  }
+  return ms.length;
+}
+
 /** Reads a kept mail again from R2 (after a reader is improved). */
 export async function readAgain(env: Env, businessId: string, mailId: string) {
   const m = await one<{ r2_key: string; source: MailSource; message_id: string; received_at: number }>(env.DB,
@@ -174,7 +205,17 @@ async function readMail(db: DB, businessId: string, mailId: string, source: Mail
       status = 'failed'; note = (e as Error).message.slice(0, 300);
     }
   }
-  await stmt(db, 'UPDATE inbound_mails SET status = ?, note = ? WHERE id = ?', status, note, mailId).run();
+  await stmt(db, 'UPDATE inbound_mails SET status = ?, note = ?, history_at = coalesce(history_at, ?) WHERE id = ?', status, note, now(), mailId).run();
+}
+
+/** A booking's room type checked against Settings (27 Nov 2026): a mixed one ("Quad Sharing, Hexa", a group) is checked
+ *  part by part, and only the parts Settings does not have are named; null when every part is known. */
+export function unknownTypes(type: string | undefined, known: string[]): string | null {
+  if (!type || !known.length) return null;
+  const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+  const k = known.map(norm);
+  const missing = type.split(',').map((t) => t.trim()).filter(Boolean).filter((t) => !k.includes(norm(t)));
+  return missing.length ? `room type "${missing.join(', ')}" is not in Settings` : null;
 }
 
 /** Room type names the business knows (Settings, Rooms and tables), for checking what a mail says. */
@@ -185,8 +226,11 @@ const roomTypes = (b: Business) => (tableLayout(b) ?? []).filter((s) => s.kind =
  * itself once automatic is on. The same stay from the other source (same phone or name, same check-in) is linked.
  */
 export async function saveBooking(db: DB, b: Business, autoFrom: number | null, source: 'mmt' | 'djubo', mailId: string | null, x: ReadBooking,
-  imp?: { at: number; notes: string[] }) {
+  imp?: { at: number; notes: string[] }, force = false) {
   const t = now();
+  // The mail's place in the booking's history (26 Nov 2026): Djubo's own time of the change, else when the mail came.
+  const came = mailId ? (await one<{ r: number }>(db, 'SELECT received_at AS r FROM inbound_mails WHERE id = ?', mailId))?.r ?? t : t;
+  const orderAt = orderOf(source, x, imp?.at ?? came);
   const phone = phoneKeySoft(x.phone);
   if (imp) {
     // An old mail brought in (25 Nov 2026): only stays not over yet; never over a newer mail the POS already has (it only
@@ -222,14 +266,44 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
     !x.checkIn && 'no check-in date',
     !x.checkOut && 'no check-out date',
     x.checkIn && x.checkOut && x.checkOut <= x.checkIn && 'check-out is not after check-in',
-    x.roomType && known.length && !known.includes(x.roomType.toLowerCase()) && `room type "${x.roomType}" is not in Settings`,
+    unknownTypes(x.roomType, known),
     !x.roomType && 'no room type',
   ].filter(Boolean).join('; ') || null;
-  const prev = await one<{ id: string; status: string }>(db, 'SELECT id, status FROM bookings WHERE business_id = ? AND source = ? AND ext_ref = ?', b.id, source, x.extRef);
+  const prev = await one<{ id: string; status: string; amount_paise: number | null; paid_paise: number | null; check_in: string | null; check_out: string | null; rooms: number | null }>(db,
+    'SELECT id, status, amount_paise, paid_paise, check_in, check_out, rooms FROM bookings WHERE business_id = ? AND source = ? AND ext_ref = ?', b.id, source, x.extRef);
   const goesIn = !problem && !x.unplaced && autoFrom !== null && t >= autoFrom;
   const labels = x.roomLabels?.length ? x.roomLabels.join(', ').slice(0, 200) : null;
   const extra = [x.otaRef ?? null, x.pnr ?? null, labels, x.channel?.slice(0, 40) ?? null, x.unplaced ? 1 : 0,
     x.bookedAt ?? null, x.changedAt ?? null, x.mealPlan ?? null, x.requests ?? null, x.enteredBy ?? null] as const;
+  if (prev && mailId && !imp) {
+    // History (26 Nov 2026): an older mail (read late, or read again) only fills what the booking lacks; a change that needs a
+    // person is held; a mail someone already kept or that waits for a person stays as it is.
+    const mine = await one<{ status: string }>(db, 'SELECT status FROM booking_versions WHERE booking_id = ? AND mail_id = ?', prev.id, mailId);
+    const newer = await one(db, `SELECT 1 FROM booking_versions WHERE booking_id = ? AND mail_id <> ? AND status IN ('applied', 'held')
+      AND (order_at > ? OR (order_at = ? AND received_at > ?))`, prev.id, mailId, orderAt, orderAt, came);
+    const keep = async (status: string, reason: string | null = null) => stmt(db, `INSERT INTO booking_versions (booking_id, mail_id, business_id, order_at, received_at, data, status, held_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (booking_id, mail_id) DO UPDATE SET data = excluded.data, order_at = excluded.order_at,
+        status = CASE WHEN booking_versions.status IN ('kept', 'held') AND excluded.status <> 'applied' THEN booking_versions.status ELSE excluded.status END,
+        held_reason = coalesce(excluded.held_reason, booking_versions.held_reason)`, prev.id, mailId, b.id, orderAt, came, JSON.stringify(x), status, reason).run();
+    if (!force && (mine?.status === 'kept' || mine?.status === 'held')) { await keep(mine.status); return prev.id; }
+    if (newer) {
+      await keep('older');
+      await stmt(db, 'UPDATE bookings SET booked_at = coalesce(booked_at, ?), phone = coalesce(phone, ?), ota_ref = coalesce(ota_ref, ?), pnr = coalesce(pnr, ?) WHERE id = ?',
+        x.bookedAt ?? null, phone, x.otaRef ?? null, x.pnr ?? null, prev.id).run();
+      // Its paid amount still takes its place in the order of payments.
+      await deskMoney(db, b.id, prev.id, source, mailId, x, false);
+      return prev.id;
+    }
+    const reason = force ? null : holdReason(prev, x);
+    if (reason) { await keep('held', reason); return prev.id; }
+    await keep('applied');
+    // A newer mail applied: older ones still waiting for a person are no longer the booking's latest.
+    await stmt(db, `UPDATE booking_versions SET status = 'kept', held_reason = coalesce(held_reason, '') || ' (a newer mail came)'
+      WHERE booking_id = ? AND mail_id <> ? AND status = 'held' AND order_at <= ?`, prev.id, mailId, orderAt).run();
+  } else if (prev && mailId && imp) {
+    await stmt(db, `INSERT INTO booking_versions (booking_id, mail_id, business_id, order_at, received_at, data, status) VALUES (?, ?, ?, ?, ?, ?, 'applied')
+      ON CONFLICT (booking_id, mail_id) DO UPDATE SET data = excluded.data, order_at = excluded.order_at`, prev.id, mailId, b.id, orderAt, came, JSON.stringify(x)).run();
+  }
   if (prev) {
     // A later mail about the same booking (changed dates, cancelled): brought up to date; a checked-in one keeps its status.
     const status = x.cancelled ? 'cancelled' : prev.status === 'checked_in' ? 'checked_in' : prev.status === 'approved' && !problem ? 'approved' : goesIn ? 'approved' : 'new';
@@ -241,8 +315,9 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
       status, problem, mailId, status, t, ...extra, prev.id).run();
     await afterSave(db, b.id, prev.id, x);
     await deskMoney(db, b.id, prev.id, source, mailId, x, !!imp);
-    // Already checked in (an extra night, a room change, a cancellation): the room's bill follows the booking.
-    if (prev.status === 'checked_in') await syncStayRent(db, b.id, prev.id);
+    // Already checked in (an extra night, a room change, a cancellation): the room's bill follows the booking, and the
+    // stay (with its group's beds) leaves when the bookings end (26 Nov 2026: extensions are made in Djubo).
+    if (prev.status === 'checked_in') { await followBookingDates(db, b.id, prev.id, prev.check_out); await syncStayRent(db, b.id, prev.id); }
     else await linkWalkIn(db, b.id, prev.id);
     return prev.id;
   }
@@ -252,10 +327,32 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id, b.id, source, x.extRef, x.guestName ?? null, phone, x.roomType ?? null, x.rooms ?? null, x.guests ?? null, x.checkIn ?? null, x.checkOut ?? null,
     x.amountPaise ?? null, x.paidPaise ?? null, x.cancelled ? 'cancelled' : goesIn ? 'approved' : 'new', goesIn && !x.cancelled ? 'auto' : null, problem, mailId, t, t, ...extra).run();
+  if (mailId) await stmt(db, `INSERT INTO booking_versions (booking_id, mail_id, business_id, order_at, received_at, data, status) VALUES (?, ?, ?, ?, ?, ?, 'applied')
+    ON CONFLICT (booking_id, mail_id) DO NOTHING`, id, mailId, b.id, orderAt, came, JSON.stringify(x)).run();
   await afterSave(db, b.id, id, x);
   await deskMoney(db, b.id, id, source, mailId, x, !!imp);
   await linkWalkIn(db, b.id, id);
   return id;
+}
+
+/** A mail's place in its booking's history: Djubo prints when the booking was changed ("Modified On", else "Created On",
+ *  India time); MakeMyTrip does not, so its mails go by when they came. */
+export function orderOf(source: string, x: ReadBooking, came: number): number {
+  const s = source === 'djubo' ? x.changedAt ?? x.bookedAt : undefined;
+  const ms = s && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s) ? Date.parse(`${s.replace(' ', 'T')}:00+05:30`) : NaN;
+  return Number.isNaN(ms) ? came : ms;
+}
+
+/** Why a mail's change needs a person before it is applied (26 Nov 2026), or null. Differences under ₹1 are rounding. */
+export function holdReason(prev: { status: string; amount_paise: number | null; paid_paise: number | null; check_in: string | null; check_out: string | null; rooms: number | null },
+  x: ReadBooking): string | null {
+  if (x.cancelled) return prev.status === 'checked_in' ? 'Cancelled while the guest is in house' : null;
+  if (x.paidPaise !== undefined && x.amountPaise !== undefined && x.paidPaise > x.amountPaise + 100) return 'Paid is more than the total';
+  if (x.paidPaise !== undefined && prev.paid_paise !== null && x.paidPaise < prev.paid_paise - 100) return 'What was paid went down';
+  const same = (x.checkIn ?? prev.check_in) === prev.check_in && (x.checkOut ?? prev.check_out) === prev.check_out && (x.rooms ?? prev.rooms) === prev.rooms;
+  if (same && x.amountPaise !== undefined && prev.amount_paise !== null && prev.amount_paise > 0
+    && Math.abs(x.amountPaise - prev.amount_paise) > Math.max(50_000, prev.amount_paise / 5)) return 'The total changed a lot, with the same dates and rooms';
+  return null;
 }
 
 /**
@@ -289,6 +386,9 @@ async function afterSave(db: DB, bid: string, id: string, x: ReadBooking) {
   }
   await linkMatch(db, bid, id);
   await adoptTwin(db, bid, id);
+  // Once paired, the Djubo side's desk money is checked against what MakeMyTrip says was paid online.
+  const pair = await all<{ id: string }>(db, `SELECT id FROM bookings WHERE source = 'djubo' AND (id = ?1 OR match_id = ?1 OR id = (SELECT match_id FROM bookings WHERE id = ?1))`, id);
+  for (const p of pair) await recomputeDesk(db, bid, p.id);
 }
 
 /** A MakeMyTrip booking whose mail has no room name (MakeMyTrip sometimes leaves it blank) takes the room type from its
@@ -311,7 +411,7 @@ async function linkMatch(db: DB, bid: string, id: string) {
   const byNo = await all<{ id: string }>(db, `SELECT id FROM bookings WHERE business_id = ? AND source <> ? AND unplaced = 0 AND match_id IS NULL
     AND ((? IS NOT NULL AND (ota_ref = ? OR ext_ref = ?)) OR (? IS NOT NULL AND pnr = ?))`, bid, me.source, me.ota_ref, me.ota_ref, me.ota_ref, me.pnr, me.pnr);
   if (byNo.length === 1) {
-    await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', byNo[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, byNo[0].id)]);
+    await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', byNo[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, byNo[0].id), ...followTwin(db, id, byNo[0].id)]);
     return;
   }
   if (!me.check_in) return;
@@ -320,7 +420,16 @@ async function linkMatch(db: DB, bid: string, id: string) {
   const same = (a: string | null, b: string | null) => !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
   const hits = others.filter((o) => (me.phone && o.phone === me.phone) || same(o.guest_name, me.guest_name));
   if (hits.length !== 1) return;   // none, or not sure which: a person links it
-  await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', hits[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, hits[0].id)]);
+  await db.batch([stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', hits[0].id, id), stmt(db, 'UPDATE bookings SET match_id = ? WHERE id = ?', id, hits[0].id), ...followTwin(db, id, hits[0].id)]);
+}
+
+/** A twin that arrives after the stay began (26 Nov 2026: an old mail brought in, or a late OTA mail) is checked in with
+ *  its pair, as a check-in does for both; the room bill counts a pair once. Either way round. */
+function followTwin(db: DB, a: string, b: string) {
+  const one_ = (x: string, y: string) => stmt(db, `UPDATE bookings SET status = 'checked_in', stay_id = (SELECT stay_id FROM bookings WHERE id = ?2), updated_at = ?3
+    WHERE id = ?1 AND stay_id IS NULL AND status IN ('new', 'approved')
+      AND EXISTS (SELECT 1 FROM bookings t WHERE t.id = ?2 AND t.status = 'checked_in' AND t.stay_id IS NOT NULL)`, x, y, now());
+  return [one_(a, b), one_(b, a)];
 }
 
 /** Applies today's Djubo daily report (24 Nov 2026). An older report is kept but not applied, so reading mails again never
@@ -337,7 +446,7 @@ async function applyReport(db: DB, b: Business, mailId: string, rep: DjuboReport
     for (const x of rep.bookings.filter((y) => y.section === 'arriving' || y.section === 'staying')) {
       if (await one(db, "SELECT 1 FROM bookings WHERE business_id = ? AND source = 'djubo' AND ext_ref = ?", b.id, x.extRef)) continue;
       const problem = [!x.guestName && 'no guest name', !x.checkIn && 'no check-in date', !x.checkOut && 'no check-out date',
-        x.roomType && known.length && !known.includes(x.roomType.toLowerCase()) && `room type "${x.roomType}" is not in Settings`].filter(Boolean).join('; ') || null;
+        unknownTypes(x.roomType, known)].filter(Boolean).join('; ') || null;
       const id = newId();
       await stmt(db, `INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, room_type, rooms, guests, check_in, check_out, status, how, problem, mail_id,
           created_at, updated_at, pnr, channel, meal_plan, from_report, report_due_paise) VALUES (?, ?, 'djubo', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
@@ -365,6 +474,11 @@ async function applyReport(db: DB, b: Business, mailId: string, rep: DjuboReport
     const labels = [...new Set(rows.map((r) => r.room))];
     if (!bk.room_labels) { await stmt(db, 'UPDATE bookings SET room_labels = ?, updated_at = ? WHERE id = ?', labels.join(', ').slice(0, 200), t, bk.id).run(); labelled++; }
     if (!rows.some((r) => r.status === 'staying') || bk.stay_id || bk.status === 'checked_in' || !bk.guest_name) continue;
+    // Never a second stay (26 Nov 2026): not when its MakeMyTrip copy is checked in, nor when a guest of the same name who
+    // came the same day is already in house (checked in under another booking).
+    if (await one(db, `SELECT 1 FROM bookings m WHERE m.business_id = ?1 AND m.stay_id IS NOT NULL AND (m.id = (SELECT match_id FROM bookings WHERE id = ?2) OR m.match_id = ?2)
+      UNION ALL SELECT 1 FROM stays s WHERE s.business_id = ?1 AND s.checked_out_at IS NULL AND lower(trim(s.guest_name)) = lower(trim(?3)) AND s.check_in = ?4`,
+      b.id, bk.id, bk.guest_name, bk.check_in ?? today)) continue;
     const room = labels.map(tableOf).find((x): x is string => !!x);
     if (!room) continue;
     const stayId = newId();

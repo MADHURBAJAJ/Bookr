@@ -7,7 +7,9 @@ import { all, newId, now, one, stmt, type DB } from '../../../src/db';
 import { parsePaise } from '../../../src/money';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { approval, isManager, requireAction, requireStaff } from '../auth';
-import { allocateLoose, rs } from '../billing';
+import { allocateLoose, fyOf, rs } from '../billing';
+import { djuboPays } from '../djubo-desk';
+import { restaurantAdvances } from '../restaurant-advances';
 import { audit, clock, event, isNcPlace, isTrigger, bizOf, loadBusiness, reasonLabel, tableLayout } from '../util';
 import { billOut } from './orders';
 import { phoneKey } from './settings';
@@ -16,6 +18,7 @@ import { syncStay } from '../rooms';
 import { saleMoves } from '../stock';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
+import { offlineStep } from '../offline';
 
 export const settleRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -245,7 +248,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   statements.push(...(await saleMoves(db, bid, ordered.map((x) => x.id), staff.id, shiftDay, t)));
   // One message per bill for Bookr, in the same batch, with the bill as printed and its share of each payment.
   for (const x of ordered) {
-    const { payments: _none, ...printed } = await billOut(db, bid, x.id);
+    const { payments: _none, accounts: _acc, ...printed } = await billOut(db, bid, x.id);
     delete (printed as Record<string, unknown>).status;
     statements.push(stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'bill_settled', ?, ?)",
       newId(), bid, JSON.stringify({ ...settledMessage(x.id, ordered, pays, pieces, shiftDay, t, staff.name), bill: printed,
@@ -302,7 +305,10 @@ settleRoutes.get(`${B}/bills/:id/credit-match`, requireAction('bills.settle'), a
 settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
-  const acc = await one<{ id: string; kind: string; name: string }>(db, 'SELECT id, kind, name FROM debtor_accounts WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  // A bed checked in with a group (27 Nov 2026): money taken on it goes on the group's bill, on the first room.
+  const acc = await one<{ id: string; kind: string; name: string }>(db, `SELECT coalesce(g.id, d.id) AS id, d.kind, coalesce(g.name, d.name) AS name FROM debtor_accounts d
+    LEFT JOIN stays s ON s.id = d.stay_id LEFT JOIN debtor_accounts g ON g.stay_id = s.group_stay_id
+    WHERE d.id = ? AND d.business_id = ?`, c.req.param('id'), bid);
   if (!acc) fail(404, 'Account not found.');
   const data = await body(c);
   const kind = data.kind;
@@ -346,6 +352,10 @@ settleRoutes.post(`${B}/debtors/:id/receipts`, requireAction('debtors.receive'),
 
 /** A numbered receipt (RCPT/26-27/0001): its settlement row, numbered in the same batch. */
 function receiptSettlement(db: DB, bid: string, settlementId: string, shiftDay: string, fy: string, staffId: string, t: number) {
+  // A receipt printed offline (27 Nov 2026) keeps the number on its paper (RCPT/26-27/A001); the yearly count is not used.
+  const off = offlineStep();
+  if (off?.receiptNo) return [stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no, offline_device) VALUES (?, ?, 'receipt', ?, ?, ?, ?, ?)`,
+    settlementId, bid, shiftDay, staffId, t, off.receiptNo, off.deviceId)];
   return [
     stmt(db, 'INSERT OR IGNORE INTO receipt_series (business_id, fy, next_no) VALUES (?, ?, 1)', bid, fy),
     stmt(db, `INSERT INTO settlements (id, business_id, kind, shift_day, by_staff, at, receipt_no)
@@ -509,8 +519,9 @@ settleRoutes.get(`${B}/debtors/:id`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
   const acc = await one(c.env.DB, 'SELECT id, kind, name, phone, credit_limit_paise AS creditLimitPaise FROM debtor_accounts WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
   if (!acc) fail(404, 'Account not found.');
-  const entries = await all(c.env.DB, `SELECT e.kind, e.amount_paise AS amountPaise, e.at, b.bill_no AS billNo, p.mode
-    FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id
+  const entries = await all(c.env.DB, `SELECT e.kind, e.amount_paise AS amountPaise, e.at, b.bill_no AS billNo, p.mode, s.receipt_no AS receiptNo, s.id AS settlementId,
+      EXISTS (SELECT 1 FROM receipt_cancels rc WHERE rc.settlement_id = p.settlement_id) AS cancelled, e.note
+    FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN settlements s ON s.id = p.settlement_id
     WHERE e.account_id = ? ORDER BY e.at, e.id`, c.req.param('id'));
   return c.json({ account: acc, entries, balancePaise: await balance(c.env.DB, c.req.param('id')) });
 });
@@ -561,5 +572,192 @@ settleRoutes.post(`${B}/payments/:id/change`, requireAction('bills.settle'), asy
     if (isTrigger(e, 'shift_closed')) fail(409, 'That shift is closed, so its payments cannot change now.');
     throw e;
   }
+  return c.json({ ok: true });
+});
+
+// ---------- money reception marked in Djubo (26 Nov 2026)
+// Someone picks how a Djubo payment was paid: it becomes a numbered POS receipt dated the day it was marked in Djubo (the
+// next open shift if that day is closed), on the guest's room bill, or held as an advance until check-in. The cash was
+// taken when it was marked, so the drawer holder is not asked.
+settleRoutes.post(`${B}/bookings/:id/djubo-paid`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const data = await body(c);
+  const b = bizOf(c);
+  const e = (await djuboPays(db, bid, b.shift_start_hour, isUuid(id) ? id : '00000000-0000-0000-0000-000000000000')).pays
+    .find((x) => x.mailId === data.mailId && !x.settlementId);
+  if (!e) fail(404, 'This Djubo payment has a receipt already, or is no longer waiting.');
+  const pay = await readPayment(db, bid, { ...(data as object), amount: (e.amountPaise / 100).toFixed(2) }, 1, ['cash', 'upi', 'card']);
+  const { shiftDay: today } = clock(b);
+  const closed = await one(db, 'SELECT 1 FROM shift_closes WHERE business_id = ? AND shift_day = ?', bid, e.day);
+  const shiftDay = closed || e.day > today ? today : e.day;
+  const fy = fyOf(shiftDay, b.fy_start_month);
+  const staff = c.get('staff');
+  const t = closed ? now() : e.at;
+  const settlementId = newId();
+  const acc = e.stayId ? await one<{ id: string; name: string }>(db, 'SELECT id, name FROM debtor_accounts WHERE stay_id = ? AND business_id = ?', e.stayId, bid) : null;
+  const room = e.stayId ? await one<{ room: string }>(db, 'SELECT room FROM stays WHERE id = ?', e.stayId) : null;
+  try {
+    await db.batch([
+      ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
+      insertPayment(db, bid, settlementId, { ...pay, debtorAccountId: null }, shiftDay, staff.id, t),
+      acc ? stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, booking_id, note, by_staff, at) VALUES (?, ?, ?, 'receipt', ?, ?, ?, ?, ?, ?)",
+        newId(), bid, acc.id, -pay.amountPaise, pay.id, e.bookingId, `Paid at reception, in Djubo (${e.by ?? ''})`.slice(0, 120), staff.id, t)
+        : stmt(db, `INSERT INTO desk_advances (id, business_id, booking_id, guest_name, phone, check_in, amount_paise, settlement_id, by_staff, at)
+          SELECT ?, ?, id, coalesce(guest_name, 'Guest'), phone, check_in, ?, ?, ?, ? FROM bookings WHERE id = ?`, newId(), bid, pay.amountPaise, settlementId, staff.id, t, e.bookingId),
+      stmt(db, 'UPDATE booking_paid_log SET settlement_id = ? WHERE booking_id = ? AND mail_id = ?', settlementId, e.bookingId, e.mailId),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
+        settlementId, kind: acc ? 'receipt' : 'advance', account: acc ? { id: acc.id, kind: 'room', name: acc.name } : { id: null, kind: 'booking', name: e.guestName ?? 'Guest', booking: e.extRef },
+        shiftDay, at: t, by: staff.name, djubo: { by: e.by, at: e.at },
+        payments: [{ paymentId: pay.id, mode: pay.mode, amountPaise: pay.amountPaise, payAccountId: pay.payAccountId, payAccountName: pay.payAccountName,
+          bookrAccountId: pay.bookrAccountId, cardApproval: pay.cardApproval, cardLast4: pay.cardLast4 }],
+      }), t),
+      audit(db, bid, staff.id, 'booking.djubo_paid', 'bookings', e.bookingId, null, { mailId: e.mailId, mode: pay.mode, amountPaise: pay.amountPaise, shiftDay, markedBy: e.by }),
+    ]);
+  } catch (err) {
+    if (isTrigger(err, 'shift_closed')) fail(409, 'That shift just closed. Try again: it goes to the open shift.');
+    throw err;
+  }
+  sendSoon(c, bid);
+  if (e.stayId) await syncStay(db, bid, e.stayId);
+  const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
+  const balancePaise = acc ? await balance(db, acc.id) : null;
+  return c.json({ receipt: { receiptNo, kind: acc ? 'receipt' : 'advance', at: t, name: e.guestName ?? 'Guest', room: room?.room ?? null, booking: e.extRef, checkIn: e.checkIn, checkOut: e.checkOut,
+    totalPaise: pay.amountPaise, balancePaise, payments: [{ mode: pay.mode, amountPaise: pay.amountPaise, payAccountName: pay.payAccountName, cardLast4: pay.cardLast4 }] }, shiftDay }, 201);
+});
+
+// "Already taken in the POS" (26 Nov 2026): a Djubo payment the desk also took here (a receipt on the guest's or the group's
+// room bill, or an advance) is linked to that receipt instead of making a new one, so it is counted once.
+async function djuboReceipts(db: DB, bid: string, bookingId: string, stayId: string | null) {
+  return all<{ settlementId: string; receiptNo: string; at: number; amountPaise: number; mode: string }>(db, `
+    SELECT s.id AS settlementId, s.receipt_no AS receiptNo, s.at, sum(p.amount_paise) AS amountPaise, min(p.mode) AS mode
+    FROM settlements s JOIN payments p ON p.settlement_id = s.id
+    WHERE s.business_id = ?1 AND s.kind = 'receipt' AND s.at > ?2 AND NOT EXISTS (SELECT 1 FROM booking_paid_log l WHERE l.settlement_id = s.id)
+      AND NOT EXISTS (SELECT 1 FROM receipt_cancels rc WHERE rc.settlement_id = s.id)
+      AND (EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id AND a.stay_id IN
+            (SELECT id FROM stays WHERE id = ?3 OR group_stay_id = ?3))
+        OR EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = s.id AND d.booking_id IN (?4, (SELECT match_id FROM bookings WHERE id = ?4))))
+    GROUP BY s.id ORDER BY s.at DESC LIMIT 20`, bid, now() - 14 * 86_400_000, stayId, bookingId);
+}
+settleRoutes.get(`${B}/bookings/:id/djubo-receipts`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const id = c.req.param('id');
+  const e = (await djuboPays(c.env.DB, bid, bizOf(c).shift_start_hour, isUuid(id) ? id : '00000000-0000-0000-0000-000000000000')).pays.find((x) => x.mailId === c.req.query('mailId') && !x.settlementId);
+  if (!e) fail(404, 'This Djubo payment has a receipt already, or is no longer waiting.');
+  return c.json({ receipts: await djuboReceipts(c.env.DB, bid, e.bookingId, e.stayId) });
+});
+settleRoutes.post(`${B}/bookings/:id/djubo-link`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const id = c.req.param('id');
+  const data = await body(c);
+  const e = (await djuboPays(db, bid, bizOf(c).shift_start_hour, isUuid(id) ? id : '00000000-0000-0000-0000-000000000000')).pays.find((x) => x.mailId === data.mailId && !x.settlementId);
+  if (!e) fail(404, 'This Djubo payment has a receipt already, or is no longer waiting.');
+  const r = (await djuboReceipts(db, bid, e.bookingId, e.stayId)).find((x) => x.settlementId === data.settlementId);
+  if (!r) fail(404, "That receipt is not on this guest's bill, or is linked already.");
+  if (r.amountPaise < e.amountPaise) fail(400, `${r.receiptNo} is ${rs(r.amountPaise)}, less than the ${rs(e.amountPaise)} marked in Djubo. Pick how the rest was paid instead.`);
+  await db.batch([
+    stmt(db, 'UPDATE booking_paid_log SET settlement_id = ? WHERE booking_id = ? AND mail_id = ? AND settlement_id IS NULL', r.settlementId, e.bookingId, e.mailId),
+    audit(db, bid, c.get('staff').id, 'booking.djubo_linked', 'bookings', e.bookingId, null, { mailId: e.mailId, receiptNo: r.receiptNo, amountPaise: e.amountPaise, markedBy: e.by }),
+  ]);
+  return c.json({ ok: true, receiptNo: r.receiptNo });
+});
+
+// ---------- advances on restaurant orders (26 Nov 2026)
+// Taken on a running order, or for a party booked ahead. The money goes on an advance account of its own with a numbered
+// receipt (counted in takings the day it is taken); at payment the bill uses it ("Use advance"), so it is not counted twice.
+
+settleRoutes.get(`${B}/restaurant-advances`, requireAction('pos.view'), async (c) => {
+  const id = c.req.query('orderId');
+  return c.json({ advances: await restaurantAdvances(c.env.DB, c.get('businessId'), id && isUuid(id) ? id : undefined) });
+});
+
+// Takes one: on an order (orderId), or for a party booked ahead (partyDay, optional time and people). Prints a receipt.
+settleRoutes.post(`${B}/restaurant-advances`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const data = await body(c);
+  let order: { id: string; place: string; guest_name: string | null; guest_phone: string | null } | null = null;
+  if (data.orderId !== undefined && data.orderId !== null && data.orderId !== '') {
+    order = await one(db, "SELECT id, place, guest_name, guest_phone FROM orders WHERE id = ? AND business_id = ? AND status IN ('open', 'tab')",
+      isUuid(String(data.orderId)) ? data.orderId : null, bid);
+    if (!order) fail(404, 'Order not found, or already billed.');
+  }
+  const partyDay = order ? null : (typeof data.partyDay === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(data.partyDay) ? data.partyDay : fail(400, 'Choose the day of the party.'));
+  const partyTime = order ? null : (typeof data.partyTime === 'string' && /^\d{2}:\d{2}$/.test(data.partyTime) ? data.partyTime : null);
+  const people = order ? null : (Number.isInteger(data.people) && (data.people as number) > 0 && (data.people as number) < 1000 ? data.people as number : null);
+  const name = (typeof data.guestName === 'string' && data.guestName.trim() ? data.guestName.trim() : order?.guest_name ?? '').slice(0, 80);
+  if (!name) fail(400, "Type the guest's name.");
+  const phone = data.phone ? phoneKey(data.phone) : order?.guest_phone ?? null;
+  if (data.phone && !phone) fail(400, 'Phone must be 6 to 15 digits.');
+  if (!order && !phone) fail(400, "Add the guest's phone, so the advance finds their table on the day.");
+  if (!Array.isArray(data.payments) || !data.payments.length || data.payments.length > 5) fail(400, 'Add how it was paid.');
+  const pays: Pay[] = [];
+  for (const [i, raw] of data.payments.entries()) pays.push(await readPayment(db, bid, raw, i + 1, ['cash', 'upi', 'card']));
+  const total = pays.reduce((s0, p) => s0 + p.amountPaise, 0);
+  const b = bizOf(c);
+  const { t, shiftDay, fy } = clock(b);
+  const staff = c.get('staff');
+  await cashGuard(c, pays.some((p) => p.mode === 'cash'));
+  const accId = newId();
+  const id = newId();
+  const settlementId = newId();
+  const accName = `Advance · ${name}${order ? ` · ${order.place}` : partyDay ? ` · ${partyDay}` : ''}`.slice(0, 120);
+  try {
+    await db.batch([
+      stmt(db, "INSERT INTO debtor_accounts (id, business_id, kind, name, phone, created_by, created_at) VALUES (?, ?, 'credit', ?, ?, ?, ?)", accId, bid, accName, phone, staff.id, t),
+      stmt(db, `INSERT INTO restaurant_advances (id, business_id, account_id, order_id, guest_name, phone, party_day, party_time, people, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, bid, accId, order?.id ?? null, name, phone, partyDay, partyTime, people, staff.id, t),
+      ...receiptSettlement(db, bid, settlementId, shiftDay, fy, staff.id, t),
+      ...pays.map((p) => insertPayment(db, bid, settlementId, { ...p, debtorAccountId: null }, shiftDay, staff.id, t)),
+      ...pays.map((p) => stmt(db, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, payment_id, by_staff, at) VALUES (?, ?, ?, 'advance', ?, ?, ?, ?)",
+        newId(), bid, accId, -p.amountPaise, p.id, staff.id, t)),
+      stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'receipt', ?, ?)", newId(), bid, JSON.stringify({
+        settlementId, kind: 'advance', account: { id: accId, kind: 'credit', name: accName }, shiftDay, at: t, by: staff.name,
+        payments: pays.map((p) => ({ paymentId: p.id, mode: p.mode, amountPaise: p.amountPaise, payAccountId: p.payAccountId, payAccountName: p.payAccountName,
+          bookrAccountId: p.bookrAccountId, cardApproval: p.cardApproval, cardLast4: p.cardLast4 })),
+      }), t),
+      audit(db, bid, staff.id, 'restaurant.advance', 'restaurant_advances', id, null, { orderId: order?.id ?? null, partyDay, amountPaise: total }),
+    ]);
+  } catch (e) {
+    if (isTrigger(e, 'shift_closed')) fail(409, 'This shift is closed. Open the screen again: money now goes to the next shift.');
+    throw e;
+  }
+  sendSoon(c, bid);
+  const receiptNo = (await one<{ receipt_no: string }>(db, 'SELECT receipt_no FROM settlements WHERE id = ?', settlementId))!.receipt_no;
+  return c.json({ id, accountId: accId, receipt: { receiptNo, kind: 'advance', at: t, name, room: null, place: order?.place ?? null, party: partyDay ? { day: partyDay, time: partyTime, people } : null,
+    totalPaise: total, balancePaise: null, payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amountPaise, payAccountName: p.payAccountName, cardLast4: p.cardLast4 })) } }, 201);
+});
+
+// Puts a party's advance on the order opened for it (the table on the day).
+settleRoutes.post(`${B}/restaurant-advances/:id/link`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const r = await one<{ id: string }>(c.env.DB, "SELECT id FROM restaurant_advances WHERE id = ? AND business_id = ? AND status = 'open'", c.req.param('id'), bid);
+  if (!r) fail(404, 'Advance not found.');
+  const o = await one<{ id: string; place: string }>(c.env.DB, "SELECT id, place FROM orders WHERE id = ? AND business_id = ? AND status IN ('open', 'tab')",
+    typeof data.orderId === 'string' && isUuid(data.orderId) ? data.orderId : null, bid);
+  if (!o) fail(404, 'Choose an open order.');
+  await c.env.DB.batch([
+    stmt(c.env.DB, 'UPDATE restaurant_advances SET order_id = ? WHERE id = ?', o.id, r.id),
+    audit(c.env.DB, bid, c.get('staff').id, 'restaurant.advance_link', 'restaurant_advances', r.id, null, { orderId: o.id, place: o.place }),
+  ]);
+  return c.json({ ok: true });
+});
+
+// A no-show's advance not given back: a manager keeps it, with a reason (it leaves the lists; the account keeps the record).
+settleRoutes.post(`${B}/restaurant-advances/:id/keep`, requireAction('debtors.receive'), async (c) => {
+  const bid = c.get('businessId');
+  const data = await body(c);
+  const note = text(data, 'note', 'Why it is kept', { max: 160 })!;
+  const approver = await approval(c, data, 'Keeping an advance');
+  const r = await one<{ id: string }>(c.env.DB, "SELECT id FROM restaurant_advances WHERE id = ? AND business_id = ? AND status = 'open'", c.req.param('id'), bid);
+  if (!r) fail(404, 'Advance not found.');
+  const kept = isManager(c) ? note : `${note} · Approved by ${approver.name}`.slice(0, 200);
+  await c.env.DB.batch([
+    stmt(c.env.DB, "UPDATE restaurant_advances SET status = 'kept', kept_note = ? WHERE id = ?", kept, r.id),
+    audit(c.env.DB, bid, c.get('staff').id, 'restaurant.advance_kept', 'restaurant_advances', r.id, null, { note: kept }),
+  ]);
   return c.json({ ok: true });
 });

@@ -1,17 +1,17 @@
 // Rooms, after the hotel manager's audit (25 Nov 2026): moving a room's balance to a company or another room, room credit
 // notes, no-shows, the night audit, extending a stay, Form C, the guest register and past stays, housekeeping, and room
 // moves. All check the role per business on the server; ID numbers are only ever kept as their last 4 characters.
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, isTrigger, tableLayout } from '../util';
-import { phoneKey, openStay, PAST_STAY, stayBill } from './settings';
+import { phoneKey, openStay, LEFT_ROOM, PAST_STAY, stayBill } from './settings';
 import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
-import { linkStay } from '../rooms';
+import { continuesOf, leadIntoStay, linkStay } from '../rooms';
 
 export const roomDeskRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -139,6 +139,10 @@ roomDeskRoutes.post(`${B}/bookings/:id/no-show`, requireAction('stays.edit'), as
   const k = await one<{ id: string; status: string; match_id: string | null; ext_ref: string }>(c.env.DB, 'SELECT id, status, match_id, ext_ref FROM bookings WHERE id = ? AND business_id = ?', isUuid(id) ? id : null, bid);
   if (!k) fail(404, 'Booking not found.');
   if (k.status === 'checked_in' || k.status === 'cancelled') fail(409, k.status === 'checked_in' ? 'This guest is checked in.' : 'This booking was cancelled.');
+  // A booking that continues a guest already in house is their extension, not a no-show (26 Nov 2026).
+  const kk = await one<{ phone: string | null; guest_name: string | null; check_in: string | null }>(c.env.DB, 'SELECT phone, guest_name, check_in FROM bookings WHERE id = ?', k.id);
+  const cont = (await continuesOf(c.env.DB, bid, [{ id: k.id, phone: kk?.phone ?? null, guestName: kk?.guest_name ?? null, checkIn: kk?.check_in ?? null }])).get(k.id);
+  if (cont?.length) fail(409, `${cont.map((x) => x.room).join(', ')}: this guest is in house. This booking is their extension: press Continue on it instead.`);
   const data = await body(c);
   const keep = data.advance === 'keep';
   const t = now();
@@ -182,14 +186,19 @@ roomDeskRoutes.post(`${B}/stays/:id/extend`, requireAction('stays.edit'), async 
   if (to <= from) fail(400, `The new check-out must be after ${from}.`);
   const nights = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
   const rate = data.rate === undefined || data.rate === '' ? null : paise(data, 'rate', 'Rate per night');
+  // Extensions are made in Djubo (26 Nov 2026, owner's choice): the date and rent follow Djubo's mail. This is the fallback
+  // when Djubo is down or its mail does not come: a manager, with the reason and the rent per night.
+  const why = text(data, 'reason', 'Why it is extended here and not in Djubo', { max: 120 })!;
+  const approver = await approval(c, data, 'Extending a stay without Djubo');
+  if (!rate) fail(400, 'Type the rent per night: without Djubo, the POS has no rent for these nights.');
   const t = now();
   await c.env.DB.batch([
     stmt(c.env.DB, 'UPDATE stays SET check_out_plan = ? WHERE id = ?', to, s.id),
     // The group's other rooms and beds stay as long (24 Nov 2026).
     stmt(c.env.DB, 'UPDATE stays SET check_out_plan = ? WHERE group_stay_id = ? AND checked_out_at IS NULL', to, s.id),
     ...(rate ? [stmt(c.env.DB, "INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, note, by_staff, at) VALUES (?, ?, ?, 'room_rent', ?, ?, ?, ?)",
-      newId(), bid, s.account_id, rate * nights, `Room rent · ${nights} extra night${nights === 1 ? '' : 's'} × ${rupeesText(rate)}`, c.get('staff').id, t)] : []),
-    audit(c.env.DB, bid, c.get('staff').id, 'stay.extend', 'stays', s.id, { checkOut: from }, { checkOut: to, ratePaise: rate }),
+      newId(), bid, s.account_id, rate * nights, `Room rent · ${nights} extra night${nights === 1 ? '' : 's'} × ${rupeesText(rate)} · by hand (manager, ${approver.name}): ${why}`.slice(0, 160), c.get('staff').id, t)] : []),
+    audit(c.env.DB, bid, c.get('staff').id, 'stay.extend', 'stays', s.id, { checkOut: from }, { checkOut: to, ratePaise: rate, reason: why, approvedBy: approver.name }),
   ]);
   return c.json(await stayBill(c, s.id), 201);
 });
@@ -220,7 +229,7 @@ roomDeskRoutes.get(`${B}/frontdesk/audit`, requireAction('stays.edit'), async (c
   const { t, shiftDay: today } = clock(b);
   const tomorrow = addDays(today, 1);
   const [bookings, reservations, stays, formC, djubo, dirty, tomorrowB, tomorrowR] = await Promise.all([
-    all(db, `SELECT k.id, k.guest_name AS guestName, k.check_in AS checkIn, k.check_out AS checkOut, k.room_type AS roomType, k.room_labels AS roomLabels, k.channel, k.source,
+    all<{ id: string; guestName: string | null; phone: string | null; checkIn: string | null; checkOut: string | null; createdAt: number }>(db, `SELECT k.id, k.guest_name AS guestName, k.phone, k.created_at AS createdAt, k.check_in AS checkIn, k.check_out AS checkOut, k.room_type AS roomType, k.room_labels AS roomLabels, k.channel, k.source,
         (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)) AS heldPaise
       FROM bookings k WHERE k.business_id = ? AND k.status IN ('new', 'approved') AND k.unplaced = 0 AND k.stay_id IS NULL AND k.check_in <= ?
       AND NOT (k.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = k.match_id AND m.status <> 'cancelled')) ORDER BY k.check_in, k.guest_name`, b.id, today),
@@ -238,9 +247,11 @@ roomDeskRoutes.get(`${B}/frontdesk/audit`, requireAction('stays.edit'), async (c
       AND NOT (k.source = 'mmt' AND match_id IS NOT NULL)`, b.id, tomorrow),
     all(db, "SELECT guest_name AS guestName, lines FROM reservations WHERE business_id = ? AND status IN ('confirmed', 'hold') AND booking_id IS NULL AND check_in = ?", b.id, tomorrow),
   ]);
+  // Nights a guest stayed before the desk checked them in here lead into their stay: not "did not arrive" (27 Nov 2026).
+  const stayed = await leadIntoStay(db, b.id, bookings, b.shift_start_hour ?? 8);
   return c.json({
     today, tomorrow,
-    notArrived: [...bookings.map((x) => ({ ...x, kind: 'booking' })), ...reservations.map((x) => ({ ...x, kind: 'reservation' }))],
+    notArrived: [...bookings.filter((x) => !stayed.has(x.id)).map(({ phone: _p, createdAt: _c, ...x }) => ({ ...x, kind: 'booking' })), ...reservations.map((x) => ({ ...x, kind: 'reservation' }))],
     overstays: stays.filter((s) => s.plan && s.plan < today),
     dueOut: stays.filter((s) => s.plan === today),
     noDate: stays.filter((s) => !s.plan),
@@ -325,7 +336,7 @@ roomDeskRoutes.post(`${B}/bookings/:id/continue`, requireAction('stays.edit'), a
   const stays = [];
   for (const a of asked) {
     const s = await openStay(c, typeof a.id === 'string' ? a.id : '', true);
-    if (s.checked_out_at || s.room.endsWith(PAST_STAY)) fail(409, `${s.room}: this guest is not in house.`);
+    if (s.checked_out_at || s.room.endsWith(PAST_STAY) || s.room.endsWith(LEFT_ROOM)) fail(409, `${s.room}: this guest is not in house.`);
     stays.push({ s, moveTo: typeof a.moveTo === 'string' && a.moveTo && a.moveTo !== s.room ? a.moveTo : null });
   }
   const rooms = (tableLayout(bizOf(c)) ?? []).filter((x) => x.kind === 'rooms' || x.kind === 'dorms').flatMap((x) => x.tables);
@@ -338,11 +349,13 @@ roomDeskRoutes.post(`${B}/bookings/:id/continue`, requireAction('stays.edit'), a
       batch.push(
         stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', moveTo, s.id),
         stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', `${/^\d/.test(moveTo) ? 'Room ' : ''}${moveTo} · ${s.guest_name}`, s.account_id),
-        stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", moveTo, s.id),
+        stmt(db, `UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ${LIVE}`, moveTo, s.id),
         dirtyUpsert(db, bid, s.room, 'dirty', staff, t, `Guest moved to ${moveTo} (Djubo ${b.ext_ref})`),
         audit(db, bid, staff, 'stay.move', 'stays', s.id, { room: s.room }, { room: moveTo, reason: `Djubo's room for booking ${b.ext_ref}` }));
     }
     batch.push(stmt(db, 'UPDATE stays SET check_out_plan = max(coalesce(check_out_plan, ?), ?) WHERE id = ?', b.check_out, b.check_out, s.id),
+      // Its group's other rooms and beds run as long (26 Nov 2026).
+      stmt(db, 'UPDATE stays SET check_out_plan = max(coalesce(check_out_plan, ?), ?) WHERE group_stay_id = ? AND checked_out_at IS NULL', b.check_out, b.check_out, s.id),
       audit(db, bid, staff, 'stay.continue', 'stays', s.id, null, { booking: b.ext_ref, till: b.check_out }));
   }
   try {
@@ -367,6 +380,50 @@ roomDeskRoutes.post(`${B}/bookings/:id/continue`, requireAction('stays.edit'), a
 
 // Swapping two in-house guests' rooms (25 Nov 2026): each guest takes the other's room in one step, with their bill and
 // open food orders; neither room is marked dirty (both stay occupied). Recorded once on each stay, with the reason.
+// What goes with a guest who moves or swaps rooms (27 Nov 2026), shown before the move: their bill, the food orders on it
+// (open, or printed and not paid yet), and orders on each room's table that are on nobody's bill, which move only if asked.
+type MoveOrder = { id: string; place: string; status: string; openedAt: number; billNo: string | null; totalPaise: number; items: string };
+const LIVE = "('open', 'tab', 'billed')";
+async function liveOrders(db: DB, bid: string, where: string, ...args: unknown[]) {
+  return all<MoveOrder>(db, `SELECT o.id, o.place, o.status, o.opened_at AS openedAt, b.bill_no AS billNo,
+      coalesce(b.total_paise, (SELECT coalesce(sum(l.price_paise * l.qty), 0) FROM order_lines l WHERE l.order_id = o.id)) AS totalPaise,
+      coalesce((SELECT group_concat(l.qty || ' ' || l.name, ', ') FROM order_lines l WHERE l.order_id = o.id AND l.qty > 0), '') AS items
+    FROM orders o LEFT JOIN bills b ON b.order_id = o.id AND b.status = 'printed'
+    WHERE o.business_id = ? AND o.status IN ${LIVE} AND ${where} ORDER BY o.opened_at`, bid, ...args);
+}
+const looseOn = (db: DB, bid: string, room: string) => liveOrders(db, bid, "o.kind = 'table' AND o.stay_id IS NULL AND lower(o.place) = lower(?)", room);
+const guestOut = async (db: DB, bid: string, s: { id: string; room: string; guest_name: string; account_id: string }, to: string) =>
+  ({ stayId: s.id, guestName: s.guest_name, from: s.room, to, balancePaise: await balanceOf(db, s.account_id), orders: await liveOrders(db, bid, 'o.stay_id = ?', s.id) });
+
+roomDeskRoutes.get(`${B}/stays/:id/move-check`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const a = await openStay(c, c.req.param('id'), true);
+  const withId = c.req.query('with');
+  if (withId) {
+    const b = await openStay(c, withId, true);
+    return c.json({ guests: [await guestOut(db, bid, a, b.room), await guestOut(db, bid, b, a.room)],
+      loose: [{ room: a.room, orders: await looseOn(db, bid, a.room) }, { room: b.room, orders: await looseOn(db, bid, b.room) }] });
+  }
+  const to = c.req.query('room') ?? '';
+  return c.json({ guests: [await guestOut(db, bid, a, to)],
+    loose: [{ room: a.room, orders: await looseOn(db, bid, a.room) }, ...(to ? [{ room: to, orders: await looseOn(db, bid, to) }] : [])] });
+});
+
+/** Orders on nobody's bill the person chose to put on a guest's bill: only those on the rooms in the move, to a guest in it. */
+async function attachOf(db: DB, bid: string, data: Record<string, unknown>, rooms: string[], stays: { id: string; room: string }[]) {
+  const asked = Array.isArray(data.attach) ? (data.attach as { orderId?: unknown; stayId?: unknown }[]).slice(0, 30) : [];
+  const out: { orderId: string; stay: { id: string; room: string } }[] = [];
+  for (const x of asked) {
+    const st = stays.find((y) => y.id === x.stayId);
+    if (!st || typeof x.orderId !== 'string' || !isUuid(x.orderId)) fail(400, 'Choose whose bill each order goes on.');
+    const o = await one<{ place: string }>(db, `SELECT place FROM orders WHERE id = ? AND business_id = ? AND kind = 'table' AND stay_id IS NULL AND status IN ${LIVE}`, x.orderId, bid);
+    if (!o || !rooms.some((r) => r.toLowerCase() === o.place.toLowerCase())) fail(409, 'An order changed since you looked: open Move room again.');
+    out.push({ orderId: x.orderId as string, stay: st });
+  }
+  return out;
+}
+
 roomDeskRoutes.post(`${B}/stays/:id/swap`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
   const db = c.env.DB;
@@ -375,20 +432,23 @@ roomDeskRoutes.post(`${B}/stays/:id/swap`, requireAction('stays.edit'), async (c
   const b = await openStay(c, typeof data.withStayId === 'string' ? data.withStayId : '', true);
   if (a.checked_out_at || b.checked_out_at) fail(409, 'Both guests must still be in house.');
   if (a.id === b.id) fail(400, 'Choose another guest\'s room.');
-  if (a.room.endsWith(PAST_STAY) || b.room.endsWith(PAST_STAY)) fail(409, 'A past stay keeps its room: finish its check-out first.');
-  const reason = text(data, 'reason', 'Why the rooms are swapped', { max: 80 })!;
+  if ([a.room, b.room].some((r) => r.endsWith(PAST_STAY) || r.endsWith(LEFT_ROOM))) fail(409, 'This guest has left the room: finish the check-out first.');
+  const reason = text(data, 'reason', 'Why the rooms are swapped', { optional: true, max: 80 }) ?? null;   // optional (26 Nov 2026)
   const name = (room: string, guest: string) => `${/^\d/.test(room) ? 'Room ' : ''}${room} · ${guest}`;
   const staff = c.get('staff').id;
   // One open stay per room: the first guest waits under a name no room has while the second moves in.
   const holding = `swap ${a.id}`;
+  // Each guest's orders on their bill go with them, printed ones too (27 Nov 2026); orders on nobody's bill only when asked.
+  const attach = await attachOf(db, bid, data, [a.room, b.room], [{ id: a.id, room: b.room }, { id: b.id, room: a.room }]);
   await db.batch([
     stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', holding, a.id),
     stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', a.room, b.id),
     stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', b.room, a.id),
     stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', name(b.room, a.guest_name), a.account_id),
     stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', name(a.room, b.guest_name), b.account_id),
-    stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", b.room, a.id),
-    stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", a.room, b.id),
+    stmt(db, `UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ${LIVE}`, b.room, a.id),
+    stmt(db, `UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ${LIVE}`, a.room, b.id),
+    ...attach.map((x) => stmt(db, 'UPDATE orders SET stay_id = ?, place = ? WHERE id = ?', x.stay.id, x.stay.room, x.orderId)),
     audit(db, bid, staff, 'stay.swap', 'stays', a.id, { room: a.room }, { room: b.room, with: b.guest_name, reason }),
     audit(db, bid, staff, 'stay.swap', 'stays', b.id, { room: b.room }, { room: a.room, with: a.guest_name, reason }),
   ]);
@@ -406,14 +466,16 @@ roomDeskRoutes.post(`${B}/stays/:id/move`, requireAction('stays.edit'), async (c
   const to = all_.find((r) => r === data.room);
   if (!to) fail(400, 'Choose a room or bed from the list.');
   if (to === s.room) fail(400, 'That is the same room.');
-  const reason = text(data, 'reason', 'Why the guest moves', { max: 80 })!;
+  const reason = text(data, 'reason', 'Why the guest moves', { optional: true, max: 80 }) ?? null;   // optional (26 Nov 2026)
   if (data.dirtyOk !== true && await roomIsDirty(db, bid, to)) return c.json({ error: `${to} is marked dirty. Move anyway?`, code: 'room_dirty' }, 409);
+  const attach = await attachOf(db, bid, data, [s.room, to], [{ id: s.id, room: to }]);
   const t = now();
   try {
     await db.batch([
       stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', to, s.id),
       stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', `${/^\d/.test(to) ? 'Room ' : ''}${to} · ${s.guest_name}`, s.account_id),
-      stmt(db, "UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ('open', 'tab')", to, s.id),
+      stmt(db, `UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ${LIVE}`, to, s.id),
+      ...attach.map((x) => stmt(db, 'UPDATE orders SET stay_id = ?, place = ? WHERE id = ?', s.id, to, x.orderId)),
       dirtyUpsert(db, bid, s.room, 'dirty', c.get('staff').id, t, `Guest moved to ${to}`),
       audit(db, bid, c.get('staff').id, 'stay.move', 'stays', s.id, { room: s.room }, { room: to, reason }),
     ]);
@@ -424,3 +486,66 @@ roomDeskRoutes.post(`${B}/stays/:id/move`, requireAction('stays.edit'), async (c
   return c.json(await stayBill(c, s.id));
 });
 
+
+
+// ---------- a guest who left the room with the bill still open (27 Nov 2026)
+// Check-out waits while food is open, so a guest eating in the restaurant after leaving the room held it: the next guest
+// could not be checked in. "Left the room" frees the room (marked dirty) and keeps the bill open under the guest's name;
+// their open food moves to the restaurant table they sit at, waits as a running order, or is billed to the room first
+// (the screen does that with the usual bill and payment). Check-out later works as before.
+const restaurantTables = (c: Context<AppEnv>) => (tableLayout(bizOf(c)) ?? []).filter((x) => x.kind !== 'rooms' && x.kind !== 'dorms' && x.kind !== 'nc').flatMap((x) => x.tables);
+
+async function leavers(c: Context<AppEnv>, id: string) {
+  const db = c.env.DB;
+  const head = await openStay(c, id);
+  if (head.checked_out_at) fail(409, 'This guest has checked out.');
+  if (head.room.endsWith(PAST_STAY) || head.room.endsWith(LEFT_ROOM)) fail(409, 'This guest is not in a room.');
+  const stays = await all<{ id: string; room: string }>(db, 'SELECT id, room FROM stays WHERE (id = ?1 OR group_stay_id = ?1) AND checked_out_at IS NULL ORDER BY group_stay_id IS NOT NULL, room', head.id);
+  const orders = await all<{ id: string; place: string; status: string; billId: string | null; totalPaise: number; unsent: number }>(db, `SELECT o.id, o.place, o.status,
+      (SELECT b.id FROM bills b WHERE b.order_id = o.id AND b.status = 'printed') AS billId,
+      coalesce((SELECT b.total_paise FROM bills b WHERE b.order_id = o.id AND b.status = 'printed'), (SELECT coalesce(sum(l.price_paise * l.qty), 0) FROM order_lines l WHERE l.order_id = o.id)) AS totalPaise,
+      (SELECT count(*) FROM order_lines l WHERE l.order_id = o.id AND l.qty > l.sent_qty) AS unsent
+    FROM orders o WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') AND o.stay_id IN (SELECT value FROM json_each(?)) ORDER BY o.opened_at`,
+    c.get('businessId'), JSON.stringify(stays.map((x) => x.id)));
+  return { head, stays, orders };
+}
+
+roomDeskRoutes.get(`${B}/stays/:id/left-room`, requireAction('stays.edit'), async (c) => {
+  const { head, stays, orders } = await leavers(c, c.req.param('id'));
+  const busy = new Set((await all<{ place: string }>(c.env.DB, "SELECT lower(place) AS place FROM orders WHERE business_id = ? AND kind = 'table' AND status IN ('open', 'tab', 'billed')", c.get('businessId'))).map((x) => x.place));
+  return c.json({ stay: { id: head.id, guestName: head.guest_name, accountId: head.account_id }, rooms: stays.map((x) => x.room), orders,
+    freeTables: restaurantTables(c).filter((t) => !busy.has(t.toLowerCase())) });
+});
+
+roomDeskRoutes.post(`${B}/stays/:id/left-room`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const { head, stays, orders } = await leavers(c, c.req.param('id'));
+  const data = await body(c);
+  const live = orders.filter((o) => o.status === 'open' || o.status === 'tab');
+  const away = `${head.guest_name} · left ${stays.map((x) => x.room).join(', ')}`.slice(0, 40);
+  let table: string | null = null;
+  if (orders.length) {
+    if (data.move === 'table') {
+      table = restaurantTables(c).find((t) => t.toLowerCase() === String(data.table ?? '').toLowerCase()) ?? null;
+      if (!table) fail(400, 'Choose a free restaurant table.');
+      if (live.length > 1) fail(409, `${head.guest_name} has ${live.length} open orders: bill them to the room, or keep them waiting.`);
+      if (await one(db, "SELECT 1 FROM orders WHERE business_id = ? AND kind = 'table' AND lower(place) = lower(?) AND status IN ('open', 'tab', 'billed')", bid, table)) fail(409, `${table} is not free.`);
+    } else if (data.move !== 'wait') fail(409, 'Food is still open on the room: bill it to the room, move it to a table, or keep it waiting.');
+  }
+  const t = now();
+  const staff = c.get('staff').id;
+  try {
+    await db.batch([
+      ...stays.map((x) => stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', x.room + LEFT_ROOM, x.id)),
+      ...stays.map((x) => dirtyUpsert(db, bid, x.room, 'dirty', staff, t, `${head.guest_name} left the room (bill open)`)),
+      // Open food goes to the table they sit at; anything else (printed, not paid) waits under their name.
+      ...orders.map((o) => stmt(db, 'UPDATE orders SET place = ? WHERE id = ?', table && (o.status === 'open' || o.status === 'tab') ? table : away, o.id)),
+      audit(db, bid, staff, 'stay.left_room', 'stays', head.id, { rooms: stays.map((x) => x.room) }, { orders: orders.length, to: table ?? (orders.length ? 'waiting' : null) }),
+    ]);
+  } catch (e) {
+    if (isUniqueViolation(e)) fail(409, 'Someone changed this room just now: open the room bill again.');
+    throw e;
+  }
+  return c.json({ ok: true, table, rooms: stays.map((x) => x.room) });
+});

@@ -11,6 +11,8 @@ import { reportRoutes } from './routes/reports';
 import { ownerReportRoutes } from './routes/owner-report';
 import { creditRoutes } from './routes/credit';
 import { stockRoutes } from './routes/stock';
+import { stockCountRoutes } from './routes/stock-counts';
+import { receiptCancelRoutes } from './routes/receipt-cancels';
 import { menuUploadRoutes } from './routes/menu-upload';
 import { stationRoutes } from './routes/station';
 import { adminRoutes } from './routes/admin';
@@ -20,6 +22,8 @@ import { bookingRoutes } from './routes/bookings';
 import { frontDeskRoutes } from './routes/frontdesk';
 import { roomDeskRoutes } from './routes/roomdesk';
 import { proofRoutes } from './routes/proof';
+import { offlineRoutes } from './routes/offline';
+import { whatsappRoutes } from './routes/whatsapp';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -40,15 +44,16 @@ app.use('*', async (c, next) => {
 });
 
 // The Bookr POS Windows app's installer and its update files (22 Nov 2026), kept under desktop/ in the R2 bucket and open
-// to anyone: they hold no password or key. Only plain file names; nothing else in the bucket is reachable from here.
+// to anyone: they hold no password or key. Also the WhatsApp listener's code as a .zip (27 Nov 2026), without .env or its
+// WhatsApp login. Only plain file names; nothing else in the bucket is reachable from here.
 app.get('/desktop/:file', async (c) => {
   const file = c.req.param('file');
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(file) || !/\.(exe|yml|blockmap)$/.test(file) || !c.env.BILLS) return c.json({ error: 'Not found.' }, 404);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(file) || !/\.(exe|yml|blockmap|zip)$/.test(file) || !c.env.BILLS) return c.json({ error: 'Not found.' }, 404);
   const obj = await c.env.BILLS.get(`desktop/${file}`);
   if (!obj) return c.json({ error: 'Not found.' }, 404);
-  const type = file.endsWith('.yml') ? 'text/yaml; charset=utf-8' : 'application/octet-stream';
+  const type = file.endsWith('.yml') ? 'text/yaml; charset=utf-8' : file.endsWith('.zip') ? 'application/zip' : 'application/octet-stream';
   return new Response(obj.body, { headers: { 'Content-Type': type, 'Content-Length': String(obj.size), 'Cache-Control': file.endsWith('.yml') ? 'no-store' : 'public, max-age=86400',
-    ...(file.endsWith('.exe') ? { 'Content-Disposition': `attachment; filename="${file}"` } : {}) } });
+    ...(/\.(exe|zip)$/.test(file) ? { 'Content-Disposition': `attachment; filename="${file}"` } : {}) } });
 });
 
 app.route('/', authRoutes);
@@ -61,6 +66,8 @@ app.route('/', reportRoutes);
 app.route('/', ownerReportRoutes);
 app.route('/', creditRoutes);
 app.route('/', stockRoutes);
+app.route('/', stockCountRoutes);
+app.route('/', receiptCancelRoutes);
 app.route('/', menuUploadRoutes);
 app.route('/', stationRoutes);
 app.route('/', eventRoutes);
@@ -69,6 +76,8 @@ app.route('/', bookingRoutes);
 app.route('/', frontDeskRoutes);
 app.route('/', roomDeskRoutes);
 app.route('/', proofRoutes);
+app.route('/', whatsappRoutes);
+app.route('/', offlineRoutes);
 app.route('/', adminRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));

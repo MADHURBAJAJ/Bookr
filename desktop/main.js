@@ -56,8 +56,18 @@ ipcMain.handle('print', async (event, job) => {
     return { ok: true, printer };
   } catch (e) {
     return { ok: false, error: `${printer}: ${e.message}` };
+  } finally {
+    refocus();
   }
 });
+// The keyboard back to the POS page (26 Nov 2026): on Windows, after a print window or an OK/Cancel box, text boxes stopped
+// taking typing until the app lost and regained focus. Doing that here brings typing back.
+function refocus() {
+  if (!main || main.isDestroyed() || main.isMinimized()) return;
+  if (main.isFocused()) { main.blur(); main.focus(); }
+  main.webContents.focus();
+}
+ipcMain.handle('window:refocus', (event) => { if (fromPos(event)) refocus(); });
 ipcMain.handle('printers:open', (event) => { if (fromPos(event)) openPrinters(); });
 ipcMain.handle('window:minimize', (event) => { if (fromPos(event)) main?.minimize(); });
 ipcMain.handle('window:fullscreen', (event) => { if (fromPos(event) && main) main.setFullScreen(!main.isFullScreen()); });
@@ -109,6 +119,12 @@ function createMain() {
     },
   });
   main.once('ready-to-show', () => { main.show(); main.setFullScreen(true); });
+  main.on('focus', () => main?.webContents.focus());
+  // The page's OK/Cancel and message boxes leave Windows text boxes deaf to typing: after each one, give the keyboard back.
+  main.webContents.on('did-finish-load', () => {
+    main?.webContents.executeJavaScript(`(() => { if (window.__bookrBoxes || !window.bookrDesktop?.refocus) return; window.__bookrBoxes = true;
+      for (const k of ['alert', 'confirm', 'prompt']) { const f = window[k].bind(window); window[k] = (...a) => { try { return f(...a); } finally { setTimeout(() => window.bookrDesktop.refocus(), 0); } }; } })()`).catch(() => {});
+  });
   main.loadURL(POS_URL);
   // Links to anywhere else open in the normal browser, never inside the POS window.
   main.webContents.setWindowOpenHandler(({ url }) => { openOutside(url); return { action: 'deny' }; });

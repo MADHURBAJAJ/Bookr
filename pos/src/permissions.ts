@@ -23,9 +23,14 @@ export const PERMISSIONS = {
   'reports.view': MANAGE,        // exceptions, shift reports, debtors
   'menu.edit': MANAGE,           // menu items and reason lists
   'stock.edit': MANAGE,          // stock items, recipes, receiving, transfers, breakage, counts and the stock report
+  'stock.count': TILL,
+  'receipts.cancel': MANAGE,     // cancel a receipt taken by mistake, the same open day (27 Nov 2026)           // typing a bar or kitchen count (27 Nov 2026); a manager approves it
   'menu.upload': OWNER,          // replace the whole menu from a sheet (CSV), after checking what it changes
   'entities.edit': OWNER,        // billing names, GST, limits, which are offered; UPI accounts
   'staff.manage': OWNER,         // staff, PINs, counter devices, business settings
+  'whatsapp.edit': MANAGE,       // Settings › WhatsApp: see whether reading works, switch a group's reading or its bill proof on or off (27 Nov 2026)
+  'whatsapp.add': OWNER,         // start reading a new group the reception phone is in
+  'whatsapp.link': OWNER,        // link, switch or unlink the WhatsApp number the reception PC reads (sees the QR)
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

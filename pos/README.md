@@ -69,12 +69,50 @@ tab age limit, menu and reason lists are settings per business.
 - **Credit notes.** Money given back on a paid bill: whole or chosen items, at the bill's own discount and GST, numbered per
   billing name (`C-CN2627-0001`), with a reason and how the money went back. A bill can be found by its number.
 - **Money out.** Cash paid out of the drawer, and an unused advance refunded; both reduce the cash expected at shift close.
+- **Payments with dates** (28 Nov 2026). Every time shows its date ("28 Nov, 12:41 am"). Pick one shift (◀ date ▶) or
+  From–To, up to 7 shifts, newest first, each under its own heading; Today's shift goes back. Only today's shift refreshes
+  every 12 seconds and lists bills still unpaid from before; a past shift or a range lists each bill under its own shift.
 - **Reports.** Sales by billing name with GST (credit notes netted), by payment mode and by item; discounts, complimentary
   bills and voids; who owes what, aged, with printable statements.
 - **Bar stock.** Stores (main, bar, kitchen), items in ml or pieces with their pack size and price, recipes per menu item;
   settled bills take stock by recipe; receiving, transfers, breakage and counts with variance; a stock report per store.
 - **Phones and tablets.** Menu and order side by side from tablet width; on a phone a bar at the bottom shows the order.
 - **Exceptions report.** Voids, reprints, cancelled KOT lines, discounts, complimentary bills and limit warnings, append-only.
+
+## Offline mode (27 Nov 2026)
+
+When the internet is off, a counter device the owner turned on (Settings, Counter devices, "Works offline") keeps working
+from what it saved on that PC: tables and takeaway, KOTs printed on its own printers, bills, cash / UPI / card payments,
+food to a room and payments from guests staying. Rooms (check-in, check-out, refunds), credit, reports, stock, day close
+and settings wait for the internet.
+
+- Each device turned on gets a letter (A, B, ...) that is never given again. Its offline bills are numbered
+  `C261127A001` (billing name's letter, print date, device letter, its own count), receipts `RCPT/26-27/A001`, KOTs `A1`,
+  `A2`. They never clash with the server's numbers and leave no gap in the day's or the year's count.
+- What it did is kept as steps on that PC (`pos/public/offline.js`, browser storage) and shown on **Not sent yet**
+  (`#/offline`). When the internet is back they go up one at a time to `POST /offline/replay`
+  (`pos/src/routes/offline.ts`), which runs each through the usual route with the same sign-in (so the role and every
+  rule are checked as usual), at the time it happened, keeping the printed numbers, and saves it once even if sent twice.
+- A step the server refuses stays on the PC as "needs a look" with the reason; nothing is dropped. A bill whose total on
+  the server differs from its paper is listed on the Daily check.
+- The pages themselves are kept by a service worker (`pos/public/sw.js`), so the Windows app opens with no internet once
+  it has opened the POS online.
+- The Worker needs the `nodejs_als` compatibility flag (in `wrangler.jsonc`) and migration `0050_offline_mode.sql`.
+
+## Settings › WhatsApp (27 Nov 2026)
+
+Bookr reads WhatsApp (the listener on the reception PC, see `listener/README.md`); this tab shows whether that works and
+chooses the groups, without signing in to Bookr. Owners and managers see it and switch a group's reading or its
+"Proof for bills"; only the Owner starts reading a new group, picked from the groups the reception phone is in.
+
+- The POS checks the role on every request (`whatsapp.edit`, `whatsapp.add` in `src/permissions.ts`) and asks Bookr
+  with its existing key (`BOOKR_KEYS`): `POST /api/pos/wa`, `/api/pos/wa/edit`, `/api/pos/wa/add` (`src/routes/pos.ts` in
+  Bookr). Bookr checks the key and the role again, and writes the POS person's name in its history
+  ("POS · Ravi (manager)").
+- No new secret and no migration. Without a Bookr key the tab says the POS is not connected.
+- **The WhatsApp number** (27 Nov 2026): the Owner links, switches or unlinks it here (`whatsapp.link`); the reception
+  PC picks the request up within a minute and the QR to scan shows on this page, to the Owner only, for 3 minutes. Bookr
+  keeps the request and the number's last 4 digits (migration `0044_wa_link.sql` in Bookr); see `listener/README.md`, 2a.
 
 ## Run and test
 

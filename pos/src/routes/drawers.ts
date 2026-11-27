@@ -13,6 +13,7 @@ import { rs } from '../billing';
 import { audit, bizOf } from '../util';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
+import { notCancelled } from './receipt-cancels';
 
 export const drawerRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -31,7 +32,7 @@ export async function openDrawer(db: DB, bid: string): Promise<DrawerRow | null>
 /** Cash into and out of the drawer between `from` (after) and `to` (up to): cash payments, cash paid out and refunded. */
 export async function cashBetween(db: DB, bid: string, from: number, to: number) {
   const r = await one<{ inP: number; outP: number; cnP: number }>(db, `SELECT
-      (SELECT coalesce(sum(amount_paise), 0) FROM payments WHERE business_id = ? AND mode = 'cash' AND at > ? AND at <= ?) AS inP,
+      (SELECT coalesce(sum(amount_paise), 0) FROM payments WHERE business_id = ? AND mode = 'cash' AND at > ? AND at <= ? AND ${notCancelled('payments.settlement_id')}) AS inP,
       (SELECT coalesce(sum(amount_paise), 0) FROM drawer_outs WHERE business_id = ? AND mode = 'cash' AND at > ? AND at <= ?) AS outP,
       (SELECT coalesce(sum(total_paise), 0) FROM credit_notes WHERE business_id = ? AND refund_mode = 'cash' AND at > ? AND at <= ?) AS cnP`,
     bid, from, to, bid, from, to, bid, from, to);
@@ -218,6 +219,18 @@ drawerRoutes.post(`${B}/drawer/count`, requireAction('shift.close'), async (c) =
   sendSoon(c, bid);
   return c.json({ ok: true, countedPaise, expectedPaise: expected, differencePaise: diff,
     message: `Drawer counted. ${diff === 0 ? 'It agrees.' : `It is ${diff < 0 ? 'short' : 'over'} by ${rs(Math.abs(diff))}.`}` });
+});
+
+// Whether Day close counts the drawer (26 Nov 2026; owners and managers): off closes the day without a count.
+drawerRoutes.put(`${B}/drawer/count-setting`, requireAction('drawer.float'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const data = await body(c);
+  if (typeof data.on !== 'boolean') fail(400, 'Say whether the drawer is counted at day close: on or off.');
+  const before = await one<{ drawer_count: number }>(db, 'SELECT drawer_count FROM businesses WHERE id = ?', bid);
+  await db.batch([stmt(db, 'UPDATE businesses SET drawer_count = ? WHERE id = ?', data.on ? 1 : 0, bid),
+    audit(db, bid, c.get('staff').id, 'business.drawer_count', 'businesses', bid, before, { drawer_count: data.on ? 1 : 0 })]);
+  return c.json({ ok: true, on: data.on });
 });
 
 // The float left in the drawer at each day close (managers and owners).

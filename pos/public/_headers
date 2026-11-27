@@ -14,3 +14,7 @@
   Cache-Control: no-cache
 /report.js
   Cache-Control: no-cache
+/offline.js
+  Cache-Control: no-cache
+/sw.js
+  Cache-Control: no-cache

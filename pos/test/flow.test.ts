@@ -351,6 +351,41 @@ describe('credit notes', () => {
     await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, full: true, reason: 'Wrong order', refundMode: 'account', debtorAccountId: acc.id });
     expect((await s.counter.get(`${s.B}/debtors/${acc.id}`)).json.balancePaise).toBe(0);
   });
+
+  it('gives a room bill back only to the room it was put on', async () => {
+    const s = await setupBusiness();
+    const stayA = (await s.counter.post(`${s.B}/stays`, { room: '301', guestName: 'K. Sample' })).json.id;
+    const stayB = (await s.counter.post(`${s.B}/stays`, { room: '302', guestName: 'K. Sample' })).json.id;
+    const stays = (await s.counter.get(`${s.B}/stays`)).json.stays;
+    const folioA = stays.find((x: any) => x.id === stayA).accountId;
+    const folioB = stays.find((x: any) => x.id === stayB).accountId;
+    const { bill } = await billed(s, [['Masala Chai', 1]]);
+    const done = (await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'room', amount: '42', debtorAccountId: folioA }] })).json.bills[0];
+    expect(done.accounts).toEqual([expect.objectContaining({ accountId: folioA, kind: 'room', open: true, leftPaise: 4200 })]);
+
+    const cn = { ...s.mgr, full: true, reason: 'Billed by mistake' };
+    // Another room, even with the same guest name, is refused; so is cash for a bill nobody paid in money.
+    expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...cn, refundMode: 'account', debtorAccountId: folioB })).json.error).toMatch(/Credit goes back there only/);
+    expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...cn, refundMode: 'cash' })).json.error).toMatch(/not paid in money/);
+    expect((await s.counter.get(`${s.B}/debtors/${folioB}`)).json.balancePaise).toBe(0);
+
+    const r = await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...cn, refundMode: 'account', debtorAccountId: folioA });
+    expect(r.status).toBe(201);
+    expect(r.json.bill.accounts[0].leftPaise).toBe(0);
+    expect((await s.counter.get(`${s.B}/debtors/${folioA}`)).json.balancePaise).toBe(0);
+    expect((await s.counter.get(`${s.B}/debtors/${folioB}`)).json.balancePaise).toBe(0);
+  });
+
+  it('gives a cash bill back in money, never to a room', async () => {
+    const s = await setupBusiness();
+    const stay = (await s.counter.post(`${s.B}/stays`, { room: '303', guestName: 'L. Sample' })).json.id;
+    const folio = (await s.counter.get(`${s.B}/stays`)).json.stays.find((x: any) => x.id === stay).accountId;
+    const { bill } = await billed(s, [['Masala Chai', 1]]);
+    await s.counter.post(`${s.B}/settlements`, { billIds: [bill.id], payments: [{ mode: 'cash', amount: '42' }] });
+    expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, full: true, reason: 'Wrong item', refundMode: 'account', debtorAccountId: folio })).json.error)
+      .toMatch(/not put on a room/);
+    expect((await s.counter.post(`${s.B}/bills/${bill.id}/credit-note`, { ...s.mgr, full: true, reason: 'Wrong item', refundMode: 'cash' })).status).toBe(201);
+  });
 });
 
 describe('bar stock', () => {

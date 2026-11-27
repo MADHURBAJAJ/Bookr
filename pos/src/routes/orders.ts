@@ -10,10 +10,11 @@ import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
 import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
-import { clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
+import { audit, clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
 import { dishMoves, cancelMoves, stockAtKot } from '../stock';
 import { sendSoon } from '../sync';
 import { istDay } from '../../../src/time';
+import { offlineStep } from '../offline';
 import type { AppEnv } from '../types';
 
 export const orderRoutes = new Hono<AppEnv>();
@@ -21,14 +22,14 @@ const B = '/businesses/:businessId';
 orderRoutes.use(`${B}/*`, requireStaff);
 
 interface OrderRow { id: string; kind: string; place: string; stay_id: string | null; guest_name: string | null; guest_phone: string | null; guest_id: string | null; covers: number | null; status: string; opened_at: number; opened_shift_day: string;
-  handed_at: number | null; handed_from_name: string | null; held_by_name: string | null }
-const ORDER_COLS = `id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day, handed_at,
+  handed_at: number | null; handed_from_name: string | null; held_by_name: string | null; kot_note: string | null }
+const ORDER_COLS = `id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, status, opened_at, opened_shift_day, handed_at, kot_note,
   (SELECT name FROM staff WHERE id = orders.handed_from) AS handed_from_name, (SELECT name FROM staff WHERE id = orders.held_by) AS held_by_name`;
-interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number }
+interface LineRow { id: string; item_id: string; name: string; price_paise: number; sac: string; station: string; qty: number; sent_qty: number; variant: string; options: string | null; price_by: string | null; station_id: string | null; kot: number; remark: string | null }
 /** What was chosen on a line: [{group, name, addPaise}], in the dish's order of groups. */
 type Chosen = { group: string; name: string; addPaise: number }[];
 const chosenOf = (l: { options: string | null }): Chosen => (l.options ? JSON.parse(l.options) : []);
-const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by, station_id, kot';
+const LINE_COLS = 'id, item_id, name, price_paise, sac, station, qty, sent_qty, variant, options, price_by, station_id, kot, remark';
 
 async function order(c: { env: { DB: D1Database } }, bid: string, id: string, editable = false): Promise<OrderRow> {
   if (!isUuid(id)) fail(404, 'Order not found.');
@@ -73,11 +74,11 @@ const lines = (db: D1Database, orderId: string) =>
 function orderOut(o: OrderRow, ls: LineRow[], bill: unknown = null) {
   return {
     id: o.id, kind: o.kind, place: o.place, stayId: o.stay_id, guestName: o.guest_name, guestPhone: maskPhone(o.guest_phone), covers: o.covers, status: o.status,
-    openedAt: o.opened_at, openedShiftDay: o.opened_shift_day,
+    openedAt: o.opened_at, openedShiftDay: o.opened_shift_day, kotNote: o.kot_note,
     // Handed over between cashiers (24 Nov 2026): from whom, to whom, when.
     handedFrom: o.handed_from_name, heldBy: o.held_by_name, handedAt: o.handed_at,
     lines: ls.filter((l) => l.qty > 0).map((l) => ({ id: l.id, itemId: l.item_id, name: l.name, pricePaise: l.price_paise, qty: l.qty, sentQty: l.sent_qty,
-      options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0 })),
+      options: chosenOf(l), typedPrice: !!l.price_by, noKot: l.kot === 0, remark: l.remark })),
     itemsPaise: ls.reduce((s, l) => s + l.qty * l.price_paise, 0), bill,
   };
 }
@@ -88,7 +89,7 @@ orderRoutes.get(`${B}/orders`, requireAction('pos.view'), async (c) => {
   const fixed = tableList(bizOf(c));
   const [os, ls, bills, used] = await Promise.all([
     all<OrderRow>(c.env.DB, `SELECT ${ORDER_COLS} FROM orders WHERE business_id = ? AND status IN ('open', 'tab', 'billed') ORDER BY opened_at`, bid),
-    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by, l.station_id, l.kot FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
+    all<LineRow & { order_id: string }>(c.env.DB, "SELECT l.order_id, l.id, l.item_id, l.name, l.price_paise, l.sac, l.station, l.qty, l.sent_qty, l.variant, l.options, l.price_by, l.station_id, l.kot, l.remark FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE o.business_id = ? AND o.status IN ('open', 'tab', 'billed') ORDER BY l.created_at, l.rowid", bid),
     all<{ id: string; order_id: string; bill_no: string; total_paise: number; entity_id: string }>(c.env.DB,
       "SELECT id, order_id, bill_no, total_paise, entity_id FROM bills WHERE business_id = ? AND status = 'printed'", bid),
     // The counter's table grid: the restaurant's own list from Settings, or else the tables used in the last 60 days.
@@ -150,6 +151,14 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
         'SELECT id, room, guest_name, phone, guest_id FROM stays WHERE business_id = ? AND checked_out_at IS NULL', bid)).find((x) => roomKey(x.room) === key);
       if (st) { stayId = st.id; fromStay(st); }
     }
+    // A restaurant table for a guest in house (27 Nov 2026), picked when it is opened: their check-out waits for it, and
+    // paying offers their room bill first. Room tiles and beds link by themselves (above).
+    else if (typeof data.guestStayId === 'string' && data.guestStayId) {
+      const st = await one<{ id: string; guest_name: string; phone: string | null; guest_id: string | null }>(c.env.DB,
+        'SELECT id, guest_name, phone, guest_id FROM stays WHERE id = ? AND business_id = ? AND checked_out_at IS NULL', data.guestStayId, bid);
+      if (!st) fail(400, 'That guest is no longer in house.');
+      stayId = st.id; fromStay(st);
+    }
     // A dorm is sold bed by bed, or whole to one group: not both at once.
     if (at?.dorm) {
       const others = at.whole ? sectionTables({ kind: 'dorms', dorms: at.section.dorms!.filter((d) => d.name === at.dorm) }).filter((x) => x !== dormWhole(at.dorm!)) : [dormWhole(at.dorm)];
@@ -166,6 +175,29 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
     stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       id, bid, kind, place, stayId, guest, guestPhone, guestId, covers, c.get('staff').id, t, shiftDay)]);
   return c.json({ id }, 201);
+});
+
+// Link a restaurant table to a guest in house, or unlink it (27 Nov 2026), while nothing on it is paid.
+orderRoutes.post(`${B}/orders/:id/stay`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const o = await one<{ id: string; kind: string; place: string; status: string; stay_id: string | null }>(db,
+    'SELECT id, kind, place, status, stay_id FROM orders WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  if (!o) fail(404, 'Order not found.');
+  if (o.kind !== 'table' || (o.status !== 'open' && o.status !== 'tab')) fail(409, 'Only an open table order can be linked to a guest.');
+  const at = placeOf(tableLayout(bizOf(c)), o.place);
+  if (at && (at.section.kind === 'rooms' || at.section.kind === 'dorms')) fail(409, 'A room or bed tile belongs to the guest staying in it.');
+  const data = await body(c);
+  let st: { id: string; guest_name: string } | null = null;
+  if (typeof data.stayId === 'string' && data.stayId) {
+    st = await one<{ id: string; guest_name: string }>(db, 'SELECT id, guest_name FROM stays WHERE id = ? AND business_id = ? AND checked_out_at IS NULL', data.stayId, bid);
+    if (!st) fail(400, 'That guest is no longer in house.');
+  }
+  await db.batch([
+    stmt(db, 'UPDATE orders SET stay_id = ?, guest_name = coalesce(?, guest_name) WHERE id = ?', st?.id ?? null, st?.guest_name ?? null, o.id),
+    audit(db, bid, c.get('staff').id, st ? 'order.link_guest' : 'order.unlink_guest', 'orders', o.id, { stayId: o.stay_id }, { stayId: st?.id ?? null }),
+  ]);
+  return c.json({ ok: true });
 });
 
 orderRoutes.get(`${B}/orders/:id`, requireAction('pos.view'), async (c) => {
@@ -221,13 +253,20 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
       priceBy = c.get('staff').id;
     }
     const unit = Math.max(0, base + chosen.reduce((s, x) => s + x.addPaise, 0));
-    const variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
+    let variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
+    // The menu price changed since this dish went on the order (26 Nov 2026): what was ordered keeps its price, more of it
+    // goes on a line of its own at today's price. A line taken off (none left) takes today's price when added again.
+    if (!item.open_price) {
+      const ex = await one<{ qty: number; price_paise: number }>(db, 'SELECT qty, price_paise FROM order_lines WHERE order_id = ? AND item_id = ? AND variant = ?', o.id, item.id, variant);
+      if (ex && ex.qty > 0 && ex.price_paise !== unit) variant = `${variant}|p${unit}`;
+    }
     // Its station and whether it makes a KOT come from the dish, else its category. A no-KOT line counts as sent at once.
     await stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, kot, station_id)
         SELECT ?, ?, ?, m.id, m.name, ?, m.sac, m.station, ?, CASE coalesce(m.kot, c.kot, 1) WHEN 0 THEN ? ELSE 0 END, ?, ?, ?, ?, r.kot, r.station_id
         FROM menu_items m ${CATEGORY_JOIN} JOIN (SELECT ${ITEM_ROUTE} FROM menu_items m ${CATEGORY_JOIN} WHERE m.id = ?) r WHERE m.id = ?
         ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = order_lines.qty + excluded.qty,
-          sent_qty = CASE order_lines.kot WHEN 0 THEN order_lines.qty + excluded.qty ELSE order_lines.sent_qty END`,
+          sent_qty = CASE order_lines.kot WHEN 0 THEN order_lines.qty + excluded.qty ELSE order_lines.sent_qty END,
+          price_paise = CASE WHEN order_lines.qty = 0 THEN excluded.price_paise ELSE order_lines.price_paise END`,
       newId(), bid, o.id, unit, delta, delta, t, variant, chosen.length ? JSON.stringify(chosen) : null, priceBy, item.id, item.id).run();
     // A no-KOT item (a bottle at the counter) is handed over at once: its stock goes now (24 Nov 2026).
     if (stockAtKot(o.opened_at)) {
@@ -305,28 +344,88 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
   const groups = new Map<string, LineRow[]>();
   for (const l of send) { const s = stationOf(l); if (s) groups.set(s.id, [...(groups.get(s.id) ?? []), l]); }
   const ids: string[] = [];
+  // Sent up after the internet was off (27 Nov 2026): the counter already printed it, and the kitchen has made it.
+  const off = offlineStep();
   const statements = [...groups].map(([sid, gl]) => {
     const s = stations.find((x) => x.id === sid)!;
     const online = isOnline(s.seen, t);
-    const printAt = !online ? 'counter' : s.how === 'screen' ? 'none' : 'station';
+    const label = off ? off.kotLabels?.[s.id] ?? off.kotLabels?.[s.name] ?? (Object.values(off.kotLabels ?? {}).join(' ') || null) : null;
+    const printAt = off ? 'counter' : !online ? 'counter' : s.how === 'screen' ? 'none' : 'station';
     const id = newId();
     ids.push(id);
     // The printed number starts at 101 each shift day (21 Nov 2026); kot_no keeps running underneath.
-    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no)
-      SELECT ?, ?, ?, coalesce(max(kot_no), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?,
-        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ? AND shift_day = ?), 100) + 1 FROM kots WHERE business_id = ?`,
+    return stmt(db, `INSERT INTO kots (id, business_id, order_id, kot_no, station, lines, by_staff, printed_at, station_id, print_at, status, shift_day, day_no, note, offline_label)
+      SELECT ?1, ?2, ?3, coalesce(max(kot_no), 0) + 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+        coalesce((SELECT max(day_no) FROM kots WHERE business_id = ?12 AND shift_day = ?13), 100) + 1, (SELECT kot_note FROM orders WHERE id = ?3), ?15 FROM kots WHERE business_id = ?14`,
       id, bid, orderId, s.name, JSON.stringify(gl.map((l) => ({ name: l.name, qty: l.qty - l.sent_qty, options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise,
-        ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid);
+        ...(l.remark ? { remark: l.remark } : {}), ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, off || s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid, label);
   });
   return { ids, statements };
 }
 /** KOTs as the counter gets them: those it must print itself have printAt 'counter'. */
 async function kotsOut(db: D1Database, ids: string[], place: string) {
   if (!ids.length) return [];
-  const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null }>(db,
-    `SELECT coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.lines, k.print_at, s.copies FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
-  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1 }));
+  const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null; note: string | null }>(db,
+    `SELECT coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.lines, k.print_at, s.copies, k.note FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
+  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1, note: k.note }));
 }
+
+// Quick picks for remarks and order notes (26 Nov 2026): worked out from what staff typed on orders of the last 60 days,
+// most used first; per dish for remarks. A remark with commas counts as its parts. Nothing to set up.
+orderRoutes.get(`${B}/kot-picks`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const since = now() - 60 * 86_400_000;
+  const [rems, notes] = await Promise.all([
+    all<{ item_id: string; remark: string }>(c.env.DB, `SELECT l.item_id, l.remark FROM order_lines l JOIN orders o ON o.id = l.order_id
+      WHERE o.business_id = ? AND l.remark IS NOT NULL AND l.created_at > ? LIMIT 5000`, bid, since),
+    all<{ note: string }>(c.env.DB, 'SELECT kot_note AS note FROM orders WHERE business_id = ? AND kot_note IS NOT NULL AND opened_at > ? LIMIT 2000', bid, since),
+  ]);
+  const parts = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
+  const tally = (texts: string[]) => {
+    const m = new Map<string, { text: string; n: number }>();
+    for (const t of texts) for (const p of parts(t)) { const k = p.toLowerCase(); const e = m.get(k) ?? { text: p, n: 0 }; e.n++; m.set(k, e); }
+    return [...m.values()].sort((a, b) => b.n - a.n || a.text.localeCompare(b.text)).map((e) => [e.text, e.n] as [string, number]);
+  };
+  const byItem: Record<string, [string, number][]> = {};
+  for (const id of new Set(rems.map((r) => r.item_id))) byItem[id] = tally(rems.filter((r) => r.item_id === id).map((r) => r.remark)).slice(0, 8);
+  return c.json({ byItem, all: tally(rems.map((r) => r.remark)).slice(0, 30), notes: tally(notes.map((n) => n.note)).slice(0, 12) });
+});
+
+// A remark on a line for the kitchen (26 Nov 2026): "no onion", "extra sugar". Only what is not yet sent takes it: it
+// becomes a line of its own (joining one with the same remark), so 2 teas with extra sugar and 1 without stay apart.
+orderRoutes.put(`${B}/orders/:id/lines/:lineId/remark`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const o = await order(c, bid, c.req.param('id'), true);
+  const data = await body(c);
+  const remark = text(data, 'remark', 'Remark', { optional: true, max: 120 }) ?? null;
+  const l = await one<LineRow>(db, `SELECT ${LINE_COLS} FROM order_lines WHERE id = ? AND order_id = ?`, c.req.param('lineId'), o.id);
+  if (!l) fail(404, 'That item is not on the order.');
+  if (l.qty <= l.sent_qty) fail(409, 'This has gone to the kitchen already. Add a new line, or a note for the order.');
+  const base = l.variant.replace(/#r:.*$/s, '');
+  const variant = remark ? `${base}#r:${remark.toLowerCase()}` : base;
+  if (variant === l.variant && remark === l.remark) return c.json({ order: orderOut(o, await lines(db, o.id)) });
+  const unsent = l.qty - l.sent_qty;
+  const t = now();
+  // The unsent part moves to the line with this remark (made if missing); what was sent stays where it was.
+  await db.batch([
+    stmt(db, 'UPDATE order_lines SET qty = qty - ? WHERE id = ?', unsent, l.id),
+    stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot, remark)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = order_lines.qty + excluded.qty, remark = excluded.remark`,
+      newId(), bid, o.id, l.item_id, l.name, l.price_paise, l.sac, l.station, unsent, t, variant, l.options, l.price_by, l.station_id, l.kot, remark),
+    stmt(db, 'DELETE FROM order_lines WHERE id = ? AND qty = 0 AND sent_qty = 0', l.id),
+  ]);
+  return c.json({ order: orderOut(o, await lines(db, o.id)) });
+});
+
+// A note for the whole order (26 Nov 2026): "extra tissues", "serve together". It prints on every KOT sent from now on.
+orderRoutes.put(`${B}/orders/:id/note`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const o = await order(c, bid, c.req.param('id'), true);
+  const note = text(await body(c), 'note', 'Note', { optional: true, max: 200 }) ?? null;
+  await stmt(c.env.DB, 'UPDATE orders SET kot_note = ? WHERE id = ?', note, o.id).run();
+  return c.json({ order: orderOut({ ...o, kot_note: note }, await lines(c.env.DB, o.id)) });
+});
 
 // Split by item: chosen quantities move to a new order at the same place ("T4 · 2"), billed on its own with its own number
 // and GST. What was already sent to the kitchen stays sent, so no new KOT prints for it.
@@ -361,9 +460,9 @@ orderRoutes.post(`${B}/orders/:id/split`, requireAction('orders.edit'), async (c
       const sentMoved = Math.max(0, qty - (line.qty - line.sent_qty)); // not-yet-sent move first
       return [
         stmt(c.env.DB, 'UPDATE order_lines SET qty = qty - ?, sent_qty = sent_qty - ? WHERE id = ?', qty, sentMoved, line.id),
-        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by, line.station_id, line.kot),
+        stmt(c.env.DB, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, station_id, kot, remark)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          newId(), bid, id, line.item_id, line.name, line.price_paise, line.sac, line.station, qty, sentMoved, t, line.variant, line.options, line.price_by, line.station_id, line.kot, line.remark),
       ];
     }),
   ]);
@@ -515,6 +614,9 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   const id = newId();
   const printDay = istDay(t);
   const yymmdd = printDay.slice(2).replace(/-/g, '');
+  // A bill printed offline keeps the number on its paper (C261126A001: the device's letter, then its own count); it has
+  // no place in the day's server count. The replay checked the number is this device's and this day's.
+  const offNo = offlineStep()?.billNo ?? null;
   const guest = text(data, 'guestName', 'Guest name', { optional: true, max: 80 }) ?? o.guest_name;
   const staffId = c.get('staff').id;
   try {
@@ -525,12 +627,13 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
       stmt(c.env.DB, `INSERT INTO bills (id, business_id, order_id, entity_id, fy, seq, bill_no, shift_day, printed_at, printed_by, gross_paise, discount_paise,
           discount_reason, taxable_paise, nongst_paise, gst_rate_bp, cgst_paise, sgst_paise, round_off_paise, total_paise, guest_name, print_day, day_seq, guest_phone,
           service_charge_bp, service_charge_paise)
-        SELECT ?, ?, ?, ?, ?, s.next_no, ? || ? || printf('%03d', d.n), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, d.n, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, s.next_no, ${offNo ? "? || ? || ''" : "? || ? || printf('%03d', d.n)"}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${offNo ? 'NULL' : 'd.n'}, ?, ?, ?
         FROM bill_series s, (SELECT coalesce(max(day_seq), 0) + 1 AS n FROM bills WHERE entity_id = ? AND print_day = ?) d WHERE s.entity_id = ? AND s.fy = ?`,
-        id, bid, o.id, e.id, fy, e.series_prefix, yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
+        id, bid, o.id, e.id, fy, offNo ?? e.series_prefix, offNo ? '' : yymmdd, shiftDay, t, staffId, totals.grossPaise, totals.discountPaise, discountReason,
         totals.taxablePaise, totals.nonGstPaise, e.gst_rate_bp, totals.cgstPaise, totals.sgstPaise, totals.roundOffPaise, totals.totalPaise, guest, printDay, o.guest_phone,
         scBp, totals.serviceChargePaise ?? 0, e.id, printDay, e.id, fy),
       stmt(c.env.DB, 'UPDATE bill_series SET next_no = next_no + 1 WHERE entity_id = ? AND fy = ?', e.id, fy),
+      ...(offNo ? [stmt(c.env.DB, 'UPDATE bills SET offline_device = ? WHERE id = ?', offlineStep()!.deviceId, id)] : []),
       ...ls.map((l) => {
         const tx = lineTax(l.id);
         const fl = flags(l.id);
@@ -558,6 +661,21 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   return c.json({ bill: await billOut(c.env.DB, bid, id), warning }, 201);
 });
 
+/**
+ * The rooms and credit accounts a bill was put on (27 Nov 2026): a credit note "to a room" goes back only to one of
+ * these, and only up to what is still on it from this bill. A room whose guest has left is closed: its money goes back
+ * by cash, UPI or card instead.
+ */
+export async function billAccounts(db: D1Database, billId: string) {
+  const rows = await all<{ accountId: string; name: string; kind: string; open: number; chargedPaise: number; creditedPaise: number }>(db, `SELECT d.id AS accountId, d.name, d.kind,
+      (d.kind <> 'room' OR EXISTS (SELECT 1 FROM stays s WHERE s.id = d.stay_id AND s.checked_out_at IS NULL)) AS open,
+      sum(a.amount_paise) AS chargedPaise,
+      coalesce((SELECT sum(n.total_paise) FROM credit_notes n WHERE n.bill_id = ?1 AND n.refund_mode = 'account' AND n.debtor_account_id = d.id), 0) AS creditedPaise
+    FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id
+    WHERE a.bill_id = ?1 AND p.mode IN ('room', 'credit') GROUP BY d.id ORDER BY min(p.at), d.id`, billId);
+  return rows.map(({ chargedPaise, creditedPaise, open, ...r }) => ({ ...r, open: !!open, leftPaise: Math.max(0, chargedPaise - creditedPaise) }));
+}
+
 export async function billOut(db: D1Database, bid: string, id: string) {
   const b = await one<Record<string, unknown> & { entity_id: string }>(db, `SELECT b.id, b.bill_no AS billNo, b.order_id AS orderId, b.shift_day AS shiftDay, b.printed_at AS printedAt,
       b.gross_paise AS grossPaise, b.discount_paise AS discountPaise, b.discount_reason AS discountReason, b.taxable_paise AS taxablePaise,
@@ -568,7 +686,7 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
-  const [items, creditNotes, pays, differences, taxRows] = await Promise.all([
+  const [items, creditNotes, pays, differences, taxRows, accounts] = await Promise.all([
     all<Record<string, unknown> & { options: string | null }>(db, `SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, discount_paise AS discountPaise, taxed, options,
       coalesce(tax_kind, CASE WHEN taxed = 1 THEN 'gst' ELSE 'liquor' END) AS taxKind, gst_bp AS gstBp, price_by IS NOT NULL AS typedPrice,
       service_charge AS serviceCharge, price_incl AS priceIncl FROM bill_lines WHERE bill_id = ? ORDER BY rowid`, id),
@@ -581,11 +699,12 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     WHERE d.bill_id = ? OR (d.kind = 'tip' AND d.settlement_id = (SELECT settlement_id FROM bills WHERE id = ?)) ORDER BY d.rowid`, id, id),
     all<{ kind: TaxRow['kind']; bp: number; valuePaise: number; cgstPaise: number; sgstPaise: number }>(db,
       `SELECT kind, gst_bp AS bp, value_paise AS valuePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise FROM bill_taxes WHERE bill_id = ? ORDER BY CASE kind WHEN 'gst' THEN 0 WHEN 'liquor' THEN 1 ELSE 2 END, gst_bp`, id),
+    billAccounts(db, id),
   ]);
   const { entity_id, ...rest } = b;
   const taxes = billTaxRows(b as unknown as { gstRateBp: number; taxablePaise: number; nonGstPaise: number; cgstPaise: number; sgstPaise: number }, taxRows);
   return { ...rest, entityId: entity_id, items: items.map((i) => ({ ...i, gstBp: i.gstBp ?? (i.taxKind === 'gst' ? b.gstRateBp : null), options: i.options ? JSON.parse(i.options) : [] })),
-    taxes, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
+    taxes, payments: pays, accounts, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
 
 // One search for the counter (22 Nov 2026): a bill number (or its end), a guest name, 4 or more digits of a phone, or a
@@ -631,19 +750,52 @@ orderRoutes.get(`${B}/bill-list`, requireAction('bills.print'), async (c) => {
   const day = /^\d{4}-\d{2}-\d{2}$/.test(c.req.query('day') ?? '') ? c.req.query('day')! : clock(bizOf(c)).shiftDay;
   if (!isManager(c) && Date.parse(day) < Date.now() - 90 * 86_400_000) fail(403, 'Older bills: a manager or owner looks them up.');
   const rows = await all<{ id: string; bill_no: string; status: string; total: number; printed_at: number; place: string; guest_name: string | null; guest_phone: string | null;
-    modes: string | null; room: string | null; credit: string | null }>(c.env.DB, `
+    modes: string | null; room: string | null; credit: string | null; room_place: string | null; room_out: number | null; room_inv: string | null; credit_owes: number | null }>(c.env.DB, `
     SELECT b.id, b.bill_no, b.status, b.total_paise AS total, b.printed_at, o.place, coalesce(b.guest_name, o.guest_name) AS guest_name,
       coalesce(b.guest_phone, o.guest_phone) AS guest_phone,
       (SELECT group_concat(DISTINCT p.mode) FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = b.id) AS modes,
       (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room,
-      (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1) AS credit
+      (SELECT d.name FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1) AS credit,
+      -- Posted to a room (26 Nov 2026): the room, whether that guest has checked out, and the room invoice it was settled with.
+      (SELECT st.room FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id JOIN stays st ON st.id = d.stay_id
+        WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room_place,
+      (SELECT st.checked_out_at IS NOT NULL FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id JOIN stays st ON st.id = d.stay_id
+        WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room_out,
+      (SELECT i.invoice_no FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id JOIN stays st ON st.id = d.stay_id
+        JOIN room_invoices i ON i.stay_id = coalesce(st.group_stay_id, st.id) WHERE a.bill_id = b.id AND p.mode = 'room' LIMIT 1) AS room_inv,
+      -- On credit: what that account still owes now.
+      (SELECT sum(e.amount_paise) FROM debtor_entries e WHERE e.account_id = (SELECT p.debtor_account_id FROM allocations a JOIN payments p ON p.id = a.payment_id
+        WHERE a.bill_id = b.id AND p.mode = 'credit' LIMIT 1)) AS credit_owes
     FROM bills b JOIN orders o ON o.id = b.order_id WHERE b.business_id = ? AND b.shift_day = ? ORDER BY b.printed_at DESC LIMIT 500`, bid, day);
   // The shift's room invoices too (made at check-out): a tap opens the guest's room bill.
-  const roomInvoices = await all(c.env.DB, `SELECT i.id, i.invoice_no AS invoiceNo, i.at, i.room, i.guest_name AS guestName, i.total_paise AS totalPaise, i.stay_id AS stayId,
+  const invs = await all<{ id: string; invoiceNo: string; at: number; room: string; guestName: string; totalPaise: number; stayId: string; billToName: string | null; creditNotes: number }>(c.env.DB,
+    `SELECT i.id, i.invoice_no AS invoiceNo, i.at, i.room, i.guest_name AS guestName, i.total_paise AS totalPaise, i.stay_id AS stayId,
       i.bill_to_name AS billToName, (SELECT count(*) FROM room_credit_notes n WHERE n.invoice_id = i.id) AS creditNotes
     FROM room_invoices i WHERE i.business_id = ? AND i.shift_day = ? ORDER BY i.at DESC`, bid, day);
+  // How each room was paid (26 Nov 2026), from the room bill's ledger of the stay and its group: money taken by mode
+  // (receipts and advances, less refunds), paid before arrival (and to whom), moved to a credit account, food bills on it.
+  const roomInvoices = [];
+  for (const i of invs) {
+    const es = await all<{ kind: string; mode: string | null; amt: number; note: string | null; ch: string | null; bills: number }>(c.env.DB,
+      `SELECT e.kind, p.mode, sum(-e.amount_paise) AS amt, max(e.note) AS note, max(coalesce(k.channel, k.source)) AS ch, count(e.bill_id) AS bills
+       FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays st ON st.id = a.stay_id
+       LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN bookings k ON k.id = e.booking_id
+       WHERE a.business_id = ? AND (st.id = ?2 OR st.group_stay_id = ?2) AND e.kind IN ('receipt', 'advance', 'refund', 'prepaid', 'transfer', 'charge')
+       GROUP BY e.kind, p.mode, e.note`, bid, i.stayId);
+    const modes: Record<string, number> = {};
+    for (const e of es) if ((e.kind === 'receipt' || e.kind === 'advance' || e.kind === 'refund') && e.mode) modes[e.mode] = (modes[e.mode] ?? 0) + e.amt;
+    const prepaid = es.filter((e) => e.kind === 'prepaid').reduce((t, e) => t + e.amt, 0);
+    const moved = es.filter((e) => e.kind === 'transfer' && e.amt > 0);
+    roomInvoices.push({ ...i,
+      paid: Object.entries(modes).filter(([, v]) => v > 0).map(([mode, amountPaise]) => ({ mode, amountPaise })),
+      prepaidPaise: prepaid > 0 ? prepaid : 0, prepaidTo: es.find((e) => e.kind === 'prepaid' && e.ch)?.ch ?? null,
+      movedTo: moved.map((e) => (e.note ?? '').replace(/^Moved to\s*/, '').replace(/\s*·.*$/, '')).filter(Boolean),
+      movedPaise: moved.reduce((t, e) => t + e.amt, 0),
+      foodBills: es.filter((e) => e.kind === 'charge').reduce((t, e) => t + e.bills, 0) });
+  }
   return c.json({ day, roomInvoices, bills: rows.map((b) => ({ id: b.id, billNo: b.bill_no, status: b.status, totalPaise: b.total, printedAt: b.printed_at, place: b.place, guestName: b.guest_name,
-    phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [], room: b.room, credit: b.credit })) });
+    phone: maskPhone(b.guest_phone), modes: b.modes ? b.modes.split(',') : [], room: b.room, credit: b.credit,
+    roomPlace: b.room_place, roomOut: !!b.room_out, roomInvoiceNo: b.room_inv, creditOwesPaise: b.credit_owes })) });
 });
 
 // Finds a bill by its number (the end of it is enough, e.g. "418"): the most recent first.

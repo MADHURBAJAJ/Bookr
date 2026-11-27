@@ -1,5 +1,5 @@
 // Swapping two in-house guests' rooms (25 Nov 2026): each takes the other's room with their bill and open food orders,
-// in one step, with a reason; neither room is marked dirty. All names and numbers are invented.
+// in one step, with a reason if one is given (optional since 26 Nov 2026); neither room is marked dirty. All names and numbers are invented.
 import { afterAll, describe, expect, it } from 'vitest';
 import { dispose, q, setupBusiness } from './helpers';
 
@@ -15,9 +15,8 @@ describe('room swap', () => {
     await ok(counter.post(`${B}/stays/${b}/charges`, { amount: '3000', note: 'Room rent' }));
     const order = (await ok(counter.post(`${B}/orders`, { kind: 'room', place: 'Room XXI', stayId: a }))).id;
 
-    expect((await counter.post(`${B}/stays/${a}/swap`, { withStayId: b })).status).toBe(400);   // a reason is needed
     expect((await counter.post(`${B}/stays/${a}/swap`, { withStayId: a, reason: 'Guests asked' })).status).toBe(400);
-    const bill = await ok(counter.post(`${B}/stays/${a}/swap`, { withStayId: b, reason: 'Guests asked' }));
+    const bill = await ok(counter.post(`${B}/stays/${a}/swap`, { withStayId: b }));   // no reason needed
     expect(bill.stay).toMatchObject({ id: a, room: 'XXII' });
     expect((await q('SELECT id, room FROM stays WHERE id IN (?, ?) ORDER BY room', a, b))).toEqual([{ id: b, room: 'XXI' }, { id: a, room: 'XXII' }]);
     expect((await ok(counter.get(`${B}/stays/${b}/bill`))).balancePaise).toBe(300_000);   // B's bill went with B
