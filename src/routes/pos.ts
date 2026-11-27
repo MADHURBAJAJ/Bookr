@@ -10,7 +10,8 @@ import { requireRole } from '../auth';
 import { all, newId, now, one, stmt, type DB } from '../db';
 import { randomToken, sha256 } from '../crypto';
 import { fail, isUuid } from '../http';
-import { shiftDayOf } from '../time';
+import { IST_OFFSET_MS, shiftDayOf } from '../time';
+import { addGroup, editGroup, groupsView, InboxError } from '../waInbox';
 import { loadProof, matchProof, shiftWindow, type PosMode, type ProofBill } from '../posProof';
 
 export const posRoutes = new Hono<AppEnv>();
@@ -346,4 +347,91 @@ posRoutes.get('/businesses/:businessId/pos/proof', requireRole('sales.view'), as
     receipts.set(l.payment_id, r);
   }
   return c.json(await proofAnswer(db, bid, day, 8, [...bills, ...receipts.values()]));
+});
+
+// ---------- WhatsApp reading, from the POS's Settings › WhatsApp (approved 27 Nov 2026)
+// The POS checks its own staff's role on every request (owner or manager to switch a group, owner only to start a new
+// one) and says who it is in `by`; Bookr checks the POS key, keeps the role rule too, and writes the name in the history
+// (user_id empty, "by" in the change). Groups read for another business are never shown or changed.
+
+/** The business the POS key proves, or a 401. */
+async function posBusiness(c: { req: { header: (n: string) => string | undefined }; env: AppEnv['Bindings'] }, data: Obj): Promise<string> {
+  const auth = c.req.header('Authorization') ?? '';
+  const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  const bid = typeof data.businessId === 'string' ? data.businessId : '';
+  if (!key || !isUuid(bid) || !(await one(c.env.DB, 'SELECT 1 AS ok FROM pos_links WHERE business_id = ? AND key_hash = ?', bid, await sha256(key)))) {
+    fail(401, 'This POS is not connected to that business.');
+  }
+  return bid;
+}
+async function posBody(c: { req: { json: () => Promise<unknown> } }): Promise<Obj> {
+  try { return obj(await c.req.json(), 'body'); } catch { fail(400, 'Send JSON.'); }
+}
+const WA_ROLES = ['owner', 'manager'] as const;
+/** "POS · Ravi (manager)", from { name, role }. */
+function posBy(data: Obj, roles: readonly string[] = WA_ROLES): string {
+  const by = data.by && typeof data.by === 'object' ? data.by as Obj : {};
+  const name = typeof by.name === 'string' ? by.name.trim().slice(0, 60) : '';
+  const role = typeof by.role === 'string' ? by.role : '';
+  if (!name) fail(400, 'by.name is missing.');
+  if (!roles.includes(role)) fail(403, roles.length === 1 ? 'Only the Owner can start reading a new group.' : 'Only an owner or manager can change WhatsApp reading.');
+  return `POS · ${name} (${role})`;
+}
+const waAct = async <T>(fn: () => Promise<T>): Promise<T> => {
+  try { return await fn(); } catch (e) { if (e instanceof InboxError) fail(e.status, e.message); throw e; }
+};
+
+async function waStatus(db: DB, bid: string) {
+  const day = 86_400_000;
+  const t = now();
+  const todayFrom = Math.floor((t + IST_OFFSET_MS) / day) * day - IST_OFFSET_MS;
+  const [view, listener, today] = await Promise.all([
+    groupsView(db, bid),
+    one<{ last_heartbeat_at: number | null; last_message_at: number | null; state: string | null }>(db,
+      'SELECT last_heartbeat_at, last_message_at, state FROM wa_listener_status WHERE id = 1'),
+    all<{ group_id: string; n: number }>(db, 'SELECT group_id, count(*) AS n FROM wa_items WHERE business_id = ? AND sent_at >= ? GROUP BY group_id', bid, todayFrom),
+  ]);
+  const byGroup = new Map(today.map((r) => [r.group_id, r.n]));
+  return {
+    listener: { lastSeenAt: listener?.last_heartbeat_at ?? null, lastMessageAt: listener?.last_message_at ?? null, state: listener?.state ?? null },
+    groups: view.groups.map((g) => ({ id: g.id, name: g.name, department: g.department, active: g.active, posProof: g.posProof, lastAt: g.lastAt,
+      today: byGroup.get(g.id) ?? 0 })),
+    seen: view.seen,
+    departments: view.departments,
+    at: t,
+  };
+}
+
+// POST /api/pos/wa  { businessId }  The listener's state and this business's groups.
+posRoutes.post('/pos/wa', async (c) => {
+  const data = await posBody(c);
+  const bid = await posBusiness(c, data);
+  return c.json(await waStatus(c.env.DB, bid));
+});
+
+// POST /api/pos/wa/edit  { businessId, groupId, active?, posProof?, by: { name, role } }  Owner or manager.
+posRoutes.post('/pos/wa/edit', async (c) => {
+  const data = await posBody(c);
+  const bid = await posBusiness(c, data);
+  const by = posBy(data);
+  const id = typeof data.groupId === 'string' && isUuid(data.groupId) ? data.groupId : fail(404, 'Group not found.');
+  for (const k of ['active', 'posProof']) if (data[k] !== undefined && typeof data[k] !== 'boolean') fail(400, `${k} must be true or false.`);
+  if (data.active === undefined && data.posProof === undefined) fail(400, 'Nothing to change.');
+  await waAct(() => editGroup(c.env.DB, bid, null, id, { active: data.active as boolean | undefined, posProof: data.posProof as boolean | undefined }, by));
+  return c.json(await waStatus(c.env.DB, bid));
+});
+
+// POST /api/pos/wa/add  { businessId, waGroupId, department?, posProof?, by: { name, role } }  Owner only.
+posRoutes.post('/pos/wa/add', async (c) => {
+  const data = await posBody(c);
+  const bid = await posBusiness(c, data);
+  const by = posBy(data, ['owner']);
+  const waGroupId = typeof data.waGroupId === 'string' && /^[0-9-]+@g\.us$/.test(data.waGroupId.trim()) ? data.waGroupId.trim() : fail(400, 'Choose a group the reception phone is in.');
+  // Only a group the listener has seen: the POS picks from that list, never types an id.
+  if (!await one(c.env.DB, 'SELECT 1 AS ok FROM wa_seen_groups WHERE wa_group_id = ?', waGroupId)) fail(400, 'The reception phone is not in that group.');
+  const dep = data.department === undefined || data.department === null ? null : typeof data.department === 'string' && data.department.trim().length <= 80
+    ? data.department.trim() || null : fail(400, 'Department must be short text.');
+  if (data.posProof !== undefined && typeof data.posProof !== 'boolean') fail(400, 'posProof must be true or false.');
+  await waAct(() => addGroup(c.env.DB, bid, null, { waGroupId, department: dep, posProof: data.posProof as boolean | undefined }, by));
+  return c.json(await waStatus(c.env.DB, bid), 201);
 });

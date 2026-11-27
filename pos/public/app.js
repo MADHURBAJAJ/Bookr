@@ -5498,12 +5498,13 @@ actions.tablesSave = async () => {
 actions.tablesClear = async () => { if (!confirm('Clear all rooms and tables? The counter then shows the tables used lately.')) return; await api('PUT', B() + '/tables', { sections: [] }); flash = { kind: 'ok', text: 'Cleared.' }; route(); };
 async function settingsScreen(tab = 'menu') {
   const tabs = [['menu', 'Menu', 'menu.edit'], ['categories', 'Categories', 'menu.edit'], ['addons', 'Add-ons', 'menu.edit'], ['stations', 'Stations', 'menu.edit'], ['tables', 'Rooms and tables', 'menu.edit'], ['reasons', 'Reasons', 'menu.edit'], ['entities', 'Billing names', 'entities.edit'], ['accounts', 'UPI accounts', 'entities.edit'],
-    ['bookings', 'Rooms and bookings', 'menu.edit'], ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
+    ['bookings', 'Rooms and bookings', 'menu.edit'], ['whatsapp', 'WhatsApp', 'whatsapp.edit'], ['staff', 'Staff and PINs', 'staff.manage'], ['device', 'This device', 'staff.manage']].filter((t) => can(t[2]));
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];
   await load('menu', 'reasons', 'entities', 'payAccounts');
   if (tab === 'staff') { ui.staff = (await api('GET', B() + '/staff')).staff; if (!me.support) ui.supportInfo = await api('GET', B() + '/support'); }
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
+  if (tab === 'whatsapp') { ui.wa = await api('GET', B() + '/whatsapp'); ui.waAdding = null; }
   // Rooms and bookings (25 Nov 2026): mail approval, reception's Djubo users and room rates, moved here from Rooms.
   if (tab === 'bookings') {
     const today = me.business.shiftDay;
@@ -5612,6 +5613,7 @@ async function settingsScreen(tab = 'menu') {
         ${ui.editStaff ? html`<label class="f">Status<select class="in" data-model="sActive"><option value="yes">Active</option><option value="no" ${ui.sActive === 'no' ? 'selected' : ''}>Inactive (cannot sign in)</option></select></label>` : ''}
         <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
     if (tab === 'bookings') body = html`<div class="stack" style="max-width:900px">${errorBox()}${bookingsPanel(ui.bk, 'settings')}${ratesForm(true)}</div>`;
+    if (tab === 'whatsapp') body = whatsappSettings();
     if (tab === 'device') body = html`${window.bookrDesktop ? html`<section class="panel" style="margin-bottom:16px"><h2>Printers on this PC</h2>
       <p class="quiet small">This PC runs the Bookr POS Windows app (version ${window.bookrDesktop.version || '1'}): bills and each station's KOTs print straight to their own printers.</p>
       <button class="btn pri" type="button" data-act="deskPrinters">Choose printers</button></section>` : ''}<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}
@@ -5625,6 +5627,82 @@ async function settingsScreen(tab = 'menu') {
   };
   rerender();
 }
+// ---------- Settings › WhatsApp (approved 27 Nov 2026). Bookr reads WhatsApp through the listener on the reception PC;
+// this tab shows whether that works and chooses the groups. Owners and managers switch a group's reading or its bill
+// proof; only the Owner starts reading a new group. The server checks the role; Bookr records who changed what.
+const WA_STALE_MS = 10 * 60_000;
+const waAgo = (ms) => { const m = Math.round((Date.now() - ms) / 60_000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : dateTime(ms); };
+const waSwitch = (on, act, id, label, disabled = false) =>
+  html`<button type="button" class="wa-sw" role="switch" aria-checked="${on}" data-act="${act}" data-id="${id}" ${disabled ? 'disabled' : ''}><i aria-hidden="true"></i>${label}</button>`;
+function whatsappSettings() {
+  const d = ui.wa ?? {};
+  const never = html`<section class="panel"><h2>What reading never does</h2><ul class="small wa-never">
+    <li>Send a message or a reaction</li><li>Show blue ticks (mark as read)</li><li>Show “online” or “typing”</li>
+    <li>Read private chats</li><li>Keep text or voice notes</li><li>Change a group</li></ul>
+    <p class="small quiet">The only thing it ever sends is the morning Daily check to the owner, if that is turned on.</p></section>`;
+  if (!d.connected) return html`<div class="stack" style="max-width:900px">${errorBox()}<div class="msg warn">This POS is not connected to Bookr, so WhatsApp reading cannot be seen or changed here. Bookr reads WhatsApp; connect the POS to Bookr first.</div>${never}</div>`;
+  if (d.error) return html`<div class="stack" style="max-width:900px">${errorBox()}<div class="msg warn">${d.error} Open this page again in a minute.</div>${never}</div>`;
+  const L = d.listener ?? {};
+  if (!L.lastSeenAt) return html`<div class="stack" style="max-width:900px">${errorBox()}<section class="panel"><h2>WhatsApp reading is not set up yet</h2>
+    <p class="quiet" style="margin:6px 0 12px">When it is on, photos and PDF bills posted in the groups you choose (UPI screenshots, card slips, bill photos) come into Bookr by themselves, and the Payments screen shows each bill's proof.</p>
+    <h3>What is needed, once</h3><ol class="small" style="margin:6px 0 0;padding-left:22px;line-height:1.6">
+      <li><b>The reception PC</b> runs Bookr's small reading program, linked to the reception phone like WhatsApp Web (on the phone: WhatsApp › Linked devices › Link a device).</li>
+      <li><b>A secret</b> the PC and Bookr share. It is set on the server only, never typed here.</li>
+      <li><b>Come back here</b> and choose the groups to read.</li></ol>
+    <p class="small quiet" style="margin-top:10px">Steps 1 and 2 are done once by whoever sets up the PC (the listener guide in Bookr). This page shows it working within a minute of the PC starting.</p></section>${never}</div>`;
+  const off = Date.now() - L.lastSeenAt > WA_STALE_MS;
+  const reading = d.groups.filter((g) => g.active);
+  const today = reading.reduce((n, g) => n + g.today, 0);
+  const owner = can('whatsapp.add');
+  const head = off ? 'Not reading: the reception PC is off' : reading.length ? `Reading ${plural(reading.length, 'group')}` : 'Set up, but no group is turned on';
+  const group = (g) => html`<div class="wa-row"><div class="grow"><strong>${g.name}</strong>
+      <div class="small quiet">${g.active ? (g.lastAt ? `Newest photo ${waAgo(g.lastAt)} · ${g.today} today` : 'No photos yet') : 'Off: not read'}</div>
+      ${g.department ? html`<span class="status mute">${g.department}</span> ` : ''}${g.active && g.posProof ? html`<span class="status info">Payment proof at the counter</span>` : ''}</div>
+    ${waSwitch(g.posProof, 'waProof', g.id, 'Proof for bills', !g.active)}${waSwitch(g.active, 'waRead', g.id, g.active ? 'Reading' : 'Off')}</div>`;
+  const seen = (s) => html`<div class="wa-row"><div class="grow"><strong>${s.name}</strong><div class="small quiet">Seen ${waAgo(s.lastSeenAt)}</div></div>
+      ${owner ? html`<button class="btn ${ui.waAdding === s.waGroupId ? '' : 'pri'}" type="button" data-act="waAddOpen" data-id="${s.waGroupId}">Start reading</button>` : html`<span class="small quiet">The Owner can start reading it</span>`}</div>
+    ${ui.waAdding === s.waGroupId ? html`<form class="wa-add"><h3>Read “${s.name}”</h3>
+      <label class="f">Department<input class="in" data-model="waDept" list="wa-depts" value="${ui.waDept ?? ''}" placeholder="Front desk" maxlength="80"></label>
+      <datalist id="wa-depts">${d.departments.map((x) => html`<option value="${x}">`)}</datalist>
+      <label class="tickline"><input type="checkbox" data-model="waProofNew" ${ui.waProofNew ? 'checked' : ''}> Use its photos as payment proof for bills at the counter</label>
+      <p class="small quiet">Photos and PDF bills posted in it from now on are stored in Bookr.</p>
+      <div class="row"><button class="btn pri" type="submit" data-act="waAddSave" data-submit>Start reading</button><button class="btn" type="button" data-act="waAddCancel">Cancel</button></div></form>` : ''}`;
+  return html`<div class="stack" style="max-width:900px">${errorBox()}
+    <section class="panel"><div class="row between"><h2>${head}</h2><span class="status ${off ? 'bad' : reading.length ? 'ok' : 'warn'}">${off ? 'Stopped' : reading.length ? 'Working' : 'Nothing read'}</span></div>
+      <p class="quiet small" style="margin:4px 0 12px">${off ? 'Nothing is lost: photos posted while it is off come in when the PC is back on.' : 'New photos and PDF bills show in Bookr within a minute.'}</p>
+      <div class="kpis" style="margin:0">${kpi('Reception PC', off ? 'Off' : 'Online', `last heard ${waAgo(L.lastSeenAt)}`, off ? 'bad' : '')}
+        ${kpi('Newest photo', L.lastMessageAt ? time(L.lastMessageAt) : '—', L.lastMessageAt ? waAgo(L.lastMessageAt) : '')}${kpi('Photos today', String(today), 'in the groups read')}</div></section>
+    ${off ? html`<div class="msg bad">Ask reception to switch on the PC and check it is online. If it stays off too long, WhatsApp unlinks it and the reception phone must link it again.</div>` : ''}
+    <section class="panel"><h2>Groups read</h2><p class="quiet small">Turn a group off to stop reading it; its photos already in Bookr stay. “Proof for bills” puts its photos on the Payments screen.</p>
+      ${d.groups.length ? d.groups.map(group) : html`<p class="quiet" style="margin-top:10px">No group yet.${owner ? ' Start reading one below.' : ''}</p>`}</section>
+    <section class="panel"><h2>Other groups on the reception phone</h2><p class="quiet small">Seen by the PC, not read. Nothing from these is downloaded.</p>
+      ${d.seen.length ? d.seen.map(seen) : html`<p class="quiet" style="margin-top:10px">None.</p>`}</section>
+    ${never}</div>`;
+}
+const waChange = async (id, change) => { ui.wa = await api('PATCH', `${B()}/whatsapp/groups/${id}`, change); };
+actions.waRead = async (d) => {
+  const g = ui.wa.groups.find((x) => x.id === d.id);
+  if (g.active && !confirm(`Stop reading “${g.name}”? New photos in it will not come into Bookr. Photos already in stay.`)) return;
+  await waChange(d.id, { active: !g.active });
+  flash = { kind: 'ok', text: g.active ? `Stopped reading ${g.name}.` : `Reading ${g.name} again. The reception PC picks this up within a minute.` };
+  rerender();
+};
+actions.waProof = async (d) => {
+  const g = ui.wa.groups.find((x) => x.id === d.id);
+  await waChange(d.id, { posProof: !g.posProof });
+  flash = { kind: 'ok', text: g.posProof ? `${g.name}'s photos no longer show as payment proof.` : `${g.name}'s photos now show as payment proof on the Payments screen.` };
+  rerender();
+};
+actions.waAddOpen = (d) => { ui.waAdding = ui.waAdding === d.id ? null : d.id; ui.waDept = ''; ui.waProofNew = false; rerender(); };
+actions.waAddCancel = () => { ui.waAdding = null; rerender(); };
+actions.waAddSave = async () => {
+  const s = ui.wa.seen.find((x) => x.waGroupId === ui.waAdding);
+  ui.wa = await api('POST', `${B()}/whatsapp/groups`, { waGroupId: ui.waAdding, department: ui.waDept || null, posProof: !!ui.waProofNew });
+  ui.waAdding = null;
+  flash = { kind: 'ok', text: `Reading ${s?.name ?? 'the group'} now. The reception PC picks this up within a minute.` };
+  rerender();
+};
+
 // Support access: off unless the owner turns it on; every visit by Bookr POS support is listed here.
 function supportPanel() {
   const s = ui.supportInfo;

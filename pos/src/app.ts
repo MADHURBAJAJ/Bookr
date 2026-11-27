@@ -22,6 +22,7 @@ import { frontDeskRoutes } from './routes/frontdesk';
 import { roomDeskRoutes } from './routes/roomdesk';
 import { proofRoutes } from './routes/proof';
 import { offlineRoutes } from './routes/offline';
+import { whatsappRoutes } from './routes/whatsapp';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -72,6 +73,7 @@ app.route('/', bookingRoutes);
 app.route('/', frontDeskRoutes);
 app.route('/', roomDeskRoutes);
 app.route('/', proofRoutes);
+app.route('/', whatsappRoutes);
 app.route('/', offlineRoutes);
 app.route('/', adminRoutes);
 
