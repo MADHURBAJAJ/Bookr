@@ -9,6 +9,7 @@ import { body, fail, isUuid, text } from '../../../src/http';
 import { isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, event } from '../util';
 import type { AppEnv } from '../types';
+import { countMove, firstStockIn } from './stock';
 
 export const stockCountRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -272,13 +273,17 @@ stockCountRoutes.post(`${B}/stock/count-sessions/:id/approve`, requireAction('st
   const staff = c.get('staff').id;
   const st = [];
   const rows = groups.flatMap((g) => g.items).filter((r) => r.counted !== null);
+  const opened = new Set<string>();
   for (const r of rows) {
     if (!r.diff) continue;
     const when = k.mode === 'after_shift' ? k.counted_at! : r.at!;
-    st.push(stmt(db, "INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, counted_qty, ref, by_staff, shift_day, at) VALUES (?, ?, ?, ?, 'count', ?, ?, ?, ?, ?, ?)",
-      newId(), bid, r.id, k.store_id, r.diff, r.counted, `count ${k.id}`, k.by_staff ?? staff, clock(b, when).shiftDay, when));
+    // An item's first count is its opening stock, not stock found extra (27 Nov 2026).
+    const opening = r.diff > 0 && await firstStockIn(db, bid, r.id, k.store_id, when);
+    if (opening) opened.add(r.id);
+    st.push(countMove(db, { bid, itemId: r.id, storeId: k.store_id, diff: r.diff, counted: r.counted!, ref: `count ${k.id}`, by: k.by_staff ?? staff,
+      shiftDay: clock(b, when).shiftDay, at: when, opening }));
   }
-  const differ = rows.filter((r) => r.diff);
+  const differ = rows.filter((r) => r.diff && !opened.has(r.id));
   const { shiftDay } = clock(b);
   st.push(
     stmt(db, "UPDATE stock_counts SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", staff, now(), k.id),

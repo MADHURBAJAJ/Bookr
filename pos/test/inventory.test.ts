@@ -47,6 +47,29 @@ describe('inventory', () => {
     expect(buys.receipts.find((x: any) => x.opening)).toMatchObject({ vendor: 'Opening stock', amountPaise: 120000 });
   });
 
+  it("an item's first count is its opening stock, not stock found extra; later counts are variances", async () => {
+    const s = await setupBusiness();
+    const { B, owner, counter, ok } = s;
+    const bar = (await ok(owner.post(`${B}/stock/stores`, { name: 'Bar', kind: 'bar' }))).id;
+    const beer = (await ok(owner.post(`${B}/stock/items`, { name: 'Sample Lager', unit: 'pcs', packName: 'case', packSize: 12, costPerPack: '1200' }))).id;
+    await ok(owner.put(`${B}/stock/recipes/${s.items['Beer 650 ml']}`, { lines: [{ stockItemId: beer, qty: 1 }] }));
+    // Sold before any stock was entered: the book goes below zero.
+    const b1 = await billed(s, [['Beer 650 ml', 2]]);
+    await ok(counter.post(`${B}/settlements`, { billIds: [b1.bill.id], payments: [{ mode: 'cash', amount: String(b1.bill.totalPaise / 100) }] }));
+    // The first count finds 10 on the shelf: opening stock, nothing extra.
+    const first = (await ok(owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: beer, counted: 10 }] }))).lines;
+    expect(first).toMatchObject([{ book: -2, counted: 10, variance: 0, opening: true, valuePaise: 0 }]);
+    // The next count finds 1 missing: a variance as before.
+    await ok(owner.post(`${B}/stock/counts`, { storeId: bar, lines: [{ itemId: beer, counted: 9 }] }));
+    expect(await q("SELECT kind, qty, vendor FROM stock_moves WHERE item_id = ? AND kind IN ('purchase', 'count') ORDER BY at, kind DESC", beer)).toEqual([
+      { kind: 'purchase', qty: 12, vendor: 'Opening stock' }, { kind: 'count', qty: -1, vendor: null }]);
+    const day = b1.bill.shiftDay;
+    const r = await ok(owner.get(`${B}/stock/report?storeId=${bar}&from=${day}&to=${day}`));
+    expect(r.items[0]).toMatchObject({ opening: 0, received: 12, sold: 2, variance: -1, closing: 9 });
+    expect(r.cost.missingPaise).toBe(10000);   // one beer at 1200 / 12
+    expect(r.cost.actualCostPaise).toBeGreaterThan(0);
+  });
+
   it('lists bill photos not yet received, and discards one; a received one stays', async () => {
     const s = await setupBusiness();
     const { B, owner, ok } = s;
