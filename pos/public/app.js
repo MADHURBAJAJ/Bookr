@@ -1423,6 +1423,8 @@ async function settleScreen(billId) {
   ui.ncPlace = ord?.kind === 'table' && (sections ?? []).some((x) => x.kind === 'nc' && x.tables.some((t) => t.toLowerCase() === ord.place.toLowerCase())) ? ord.place : null;
   // Room service, a private room or a dorm bed with a guest staying: the bill goes to their folio, ready to post (21 Nov 2026).
   ui.folio = !ui.ncPlace && ord?.stayId ? cache.stays.find((x) => x.id === ord.stayId) ?? null : null;
+  // A room's order not linked to anyone (opened before the guest came, 27 Nov 2026): the guest staying there now.
+  if (!ui.folio && !ui.ncPlace && ord?.kind === 'table') ui.folio = cache.stays.find((x) => roomKeyOf(x.room) === roomKeyOf(ord.place)) ?? null;
   ui.bill = bill; ui.others = orders.filter((o) => o.status === 'billed' && o.bill && o.bill.id !== billId);
   ui.together = []; ui.pays = []; ui.mode = ui.folio ? 'room' : 'cash';
   if (ui.folio) ui.debtorAccountId = ui.folio.accountId;
@@ -3055,7 +3057,8 @@ actions.pickArrival = async (d, _el, quiet) => {
   ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
   ui.ciBooked = Math.max(a.rooms ?? 1, 1); ui.ciShare = false;
   ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
-  ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
+  // A mixed type ("Quad Sharing, Hexa") would match nothing: the search starts empty (27 Nov 2026).
+  ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length || (a.roomType ?? '').includes(',') ? '' : a.roomType ?? '';
   if (!quiet) rerender();
 };
 /** Bookings from mail: waiting for a person (approve, fix, cancel), arriving soon, the mails received, and automatic. */

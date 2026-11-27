@@ -1025,6 +1025,13 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
     }
     throw e;
   }
+  // Food already ordered on the room's tile with nobody linked (opened before the guest came) becomes the guest's
+  // (27 Nov 2026): its bill goes to their room bill. Not for a past stay.
+  if (!past) {
+    const mine = await all<{ id: string; room: string }>(c.env.DB, 'SELECT id, room FROM stays WHERE (id = ?1 OR group_stay_id = ?1) AND checked_out_at IS NULL', id);
+    await c.env.DB.batch(mine.map((m) => stmt(c.env.DB, `UPDATE orders SET stay_id = ? WHERE business_id = ? AND kind = 'table' AND stay_id IS NULL
+      AND status IN ('open', 'tab', 'billed') AND lower(place) = lower(?)`, m.id, bid, m.room)));
+  }
   // From a booking: its room rent and what was paid before arrival go on the room's bill (24 Nov 2026).
   if (typeof data.bookingId === 'string') await syncStay(c.env.DB, bid, id);
   // From a reservation made here and not yet in Djubo: its rate for this room goes on the bill (replaced by Djubo's

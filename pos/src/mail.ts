@@ -208,6 +208,16 @@ async function readMail(db: DB, businessId: string, mailId: string, source: Mail
   await stmt(db, 'UPDATE inbound_mails SET status = ?, note = ?, history_at = coalesce(history_at, ?) WHERE id = ?', status, note, now(), mailId).run();
 }
 
+/** A booking's room type checked against Settings (27 Nov 2026): a mixed one ("Quad Sharing, Hexa", a group) is checked
+ *  part by part, and only the parts Settings does not have are named; null when every part is known. */
+export function unknownTypes(type: string | undefined, known: string[]): string | null {
+  if (!type || !known.length) return null;
+  const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+  const k = known.map(norm);
+  const missing = type.split(',').map((t) => t.trim()).filter(Boolean).filter((t) => !k.includes(norm(t)));
+  return missing.length ? `room type "${missing.join(', ')}" is not in Settings` : null;
+}
+
 /** Room type names the business knows (Settings, Rooms and tables), for checking what a mail says. */
 const roomTypes = (b: Business) => (tableLayout(b) ?? []).filter((s) => s.kind === 'rooms' || s.kind === 'dorms').map((s) => s.name.toLowerCase());
 
@@ -256,7 +266,7 @@ export async function saveBooking(db: DB, b: Business, autoFrom: number | null, 
     !x.checkIn && 'no check-in date',
     !x.checkOut && 'no check-out date',
     x.checkIn && x.checkOut && x.checkOut <= x.checkIn && 'check-out is not after check-in',
-    x.roomType && known.length && !known.includes(x.roomType.toLowerCase()) && `room type "${x.roomType}" is not in Settings`,
+    unknownTypes(x.roomType, known),
     !x.roomType && 'no room type',
   ].filter(Boolean).join('; ') || null;
   const prev = await one<{ id: string; status: string; amount_paise: number | null; paid_paise: number | null; check_in: string | null; check_out: string | null; rooms: number | null }>(db,
@@ -436,7 +446,7 @@ async function applyReport(db: DB, b: Business, mailId: string, rep: DjuboReport
     for (const x of rep.bookings.filter((y) => y.section === 'arriving' || y.section === 'staying')) {
       if (await one(db, "SELECT 1 FROM bookings WHERE business_id = ? AND source = 'djubo' AND ext_ref = ?", b.id, x.extRef)) continue;
       const problem = [!x.guestName && 'no guest name', !x.checkIn && 'no check-in date', !x.checkOut && 'no check-out date',
-        x.roomType && known.length && !known.includes(x.roomType.toLowerCase()) && `room type "${x.roomType}" is not in Settings`].filter(Boolean).join('; ') || null;
+        unknownTypes(x.roomType, known)].filter(Boolean).join('; ') || null;
       const id = newId();
       await stmt(db, `INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, room_type, rooms, guests, check_in, check_out, status, how, problem, mail_id,
           created_at, updated_at, pnr, channel, meal_plan, from_report, report_due_paise) VALUES (?, ?, 'djubo', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
