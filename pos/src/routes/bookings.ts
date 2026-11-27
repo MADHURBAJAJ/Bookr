@@ -9,7 +9,7 @@ import { audit, bizOf, clock } from '../util';
 import { bookingsInMail, orderOf, readAgain, saveBooking } from '../mail';
 import type { ReadBooking } from '../booking-readers';
 import { CLOSED_TO, type Business } from '../util';
-import { continuesOf, linkStay, recomputeDesk } from '../rooms';
+import { continuesOf, linkStay, nameKey, recomputeDesk } from '../rooms';
 import { oldDeskPending } from '../djubo-desk';
 import { phoneKey } from './settings';
 import type { AppEnv } from '../types';
@@ -208,6 +208,53 @@ bookingRoutes.get(`${B}/bookings/:id/history`, requireAction('stays.edit'), asyn
       amountPaise: x.amountPaise ?? null, paidPaise: x.paidPaise ?? null, checkIn: x.checkIn ?? null, checkOut: x.checkOut ?? null, rooms: x.rooms ?? null,
       roomType: x.roomType ?? null, roomLabels: x.roomLabels ?? null };
   }) });
+});
+
+/**
+ * A stay's email history (27 Nov 2026): every booking on its bill (Djubo makes one per night or extension, and their
+ * MakeMyTrip twins), and the same guest's bookings just before it that never came onto a bill (Djubo sent them late), each
+ * email marked with its booking, night, and whether it is on this bill.
+ */
+bookingRoutes.get(`${B}/stays/:id/history`, requireAction('stays.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const st = await one<{ id: string; guest_name: string; phone: string | null; check_in: string; group_stay_id: string | null }>(db,
+    'SELECT id, guest_name, phone, check_in, group_stay_id FROM stays WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  if (!st) fail(404, 'Stay not found.');
+  const head = st.group_stay_id ?? st.id;
+  const onBill = await all<{ id: string; match_id: string | null; check_in: string | null }>(db,
+    'SELECT id, match_id, check_in FROM bookings WHERE business_id = ? AND stay_id IN (SELECT id FROM stays WHERE id = ? OR group_stay_id = ?)', bid, head, head);
+  const ids = new Set<string>();
+  for (const k of onBill) { ids.add(k.id); if (k.match_id) ids.add(k.match_id); }
+  // The same guest's bookings that end where this stay began (and so on back), with no stay of their own.
+  const digits = (p: string | null) => { const d = (p ?? '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
+  const same = (k: { guest_name: string | null; phone: string | null }) =>
+    (digits(st.phone) !== '' && digits(st.phone) === digits(k.phone)) || (nameKey(st.guest_name).length >= 4 && nameKey(st.guest_name) === nameKey(k.guest_name));
+  const loose = (await all<{ id: string; guest_name: string | null; phone: string | null; check_in: string | null; check_out: string | null }>(db,
+    "SELECT id, guest_name, phone, check_in, check_out FROM bookings WHERE business_id = ? AND stay_id IS NULL AND status <> 'cancelled' AND check_out <= ? AND check_out >= ?",
+    bid, st.check_in, new Date(Date.parse(st.check_in) - 30 * 86_400_000).toISOString().slice(0, 10))).filter(same);
+  const firstIn = [st.check_in, ...onBill.map((k) => k.check_in).filter((x): x is string => !!x)].sort()[0];
+  const before = new Set<string>();
+  for (let day = firstIn, guard = 0; guard < 30; guard++) {
+    const prev = loose.filter((k) => k.check_out === day && !before.has(k.id));
+    if (!prev.length) break;
+    for (const k of prev) before.add(k.id);
+    day = prev.map((k) => k.check_in ?? day).sort()[0];
+  }
+  const all_ = [...ids, ...before];
+  const rows = all_.length ? await all<{ booking_id: string; mail_id: string; order_at: number; received_at: number; data: string; status: string; held_reason: string | null;
+    decided_by: string | null; decided_at: number | null; source: string; ext_ref: string; subject: string | null; check_in: string | null; check_out: string | null }>(db, `
+    SELECT v.booking_id, v.mail_id, v.order_at, v.received_at, v.data, v.status, v.held_reason, (SELECT name FROM staff WHERE id = v.decided_by) AS decided_by, v.decided_at,
+      b.source, b.ext_ref, m.subject, b.check_in, b.check_out
+    FROM booking_versions v JOIN bookings b ON b.id = v.booking_id JOIN inbound_mails m ON m.id = v.mail_id
+    WHERE v.business_id = ? AND v.booking_id IN (SELECT value FROM json_each(?)) ORDER BY v.order_at DESC, v.received_at DESC`, bid, JSON.stringify(all_)) : [];
+  return c.json({ history: rows.map((r) => {
+    const x = JSON.parse(r.data) as ReadBooking;
+    return { bookingId: r.booking_id, mailId: r.mail_id, source: r.source, extRef: r.ext_ref, subject: r.subject, orderAt: r.order_at, receivedAt: r.received_at,
+      status: r.status, heldReason: r.held_reason, decidedBy: r.decided_by, decidedAt: r.decided_at, enteredBy: x.enteredBy ?? null, cancelled: !!x.cancelled,
+      amountPaise: x.amountPaise ?? null, paidPaise: x.paidPaise ?? null, checkIn: x.checkIn ?? r.check_in, checkOut: x.checkOut ?? r.check_out, rooms: x.rooms ?? null,
+      roomType: x.roomType ?? null, roomLabels: x.roomLabels ?? null, onBill: !before.has(r.booking_id), night: r.check_in ? `${r.check_in}|${r.check_out ?? ''}` : null };
+  }), bookings: ids.size + before.size, offBill: before.size });
 });
 
 /** Changes held for a person: what the booking has now beside what the mail says. */

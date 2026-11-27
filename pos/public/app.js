@@ -2754,8 +2754,30 @@ function histList(list) {
 }
 actions.bkHist = async (d) => {
   if (ui.bkHist?.id === d.id) { ui.bkHist = null; rerender(); return; }
+  // On a room bill (27 Nov 2026): the whole stay's bookings, one per night, and the guest's earlier ones not on a bill.
+  if (d.stay) { const r = await api('GET', `${B()}/stays/${d.stay}/history`); ui.bkHist = { id: d.id, stay: true, list: r.history, n: r.bookings, off: r.offBill, f: 'all' }; rerender(); return; }
   ui.bkHist = { id: d.id, list: (await api('GET', `${B()}/bookings/${d.id}/history`)).history }; rerender();
 };
+actions.bkHistF = (d) => { ui.bkHist.f = d.f; rerender(); };
+/** A stay's email history: each booking's newest applied email is the one its bill follows; each line says its night. */
+function stayHistList(h) {
+  const list = h.list.filter((x) => h.f === 'all' || (h.f === 'bill' ? x.onBill : !x.onBill));
+  const cur = new Set(); const seen = new Set();
+  for (const x of h.list) if (x.onBill && x.status === 'applied' && !seen.has(x.bookingId)) { seen.add(x.bookingId); cur.add(x.mailId + x.bookingId); }
+  const nOn = h.list.filter((x) => x.onBill).length;
+  return html`${h.n > 1 || h.off ? html`<p class="small" style="margin:4px 0">${plural(h.n, 'booking')}${h.n > 1 ? ', one per night or extension' : ''}${h.off ? ` · ${h.off} before this bill, not on it` : ''}</p>
+      <div class="chips" style="margin-bottom:6px"><button type="button" class="chip" aria-pressed="${h.f === 'all'}" data-act="bkHistF" data-f="all">All ${h.list.length} emails</button>
+        <button type="button" class="chip" aria-pressed="${h.f === 'bill'}" data-act="bkHistF" data-f="bill">On this bill (${nOn})</button>
+        ${h.off ? html`<button type="button" class="chip" aria-pressed="${h.f === 'off'}" data-act="bkHistF" data-f="off">Not on this bill (${h.list.length - nOn})</button>` : ''}</div>` : ''}
+    ${list.length ? html`<div class="hist">${list.map((x) => { const [cls, label] = HIST_STATUS[x.status] ?? ['', x.status]; const isCur = cur.has(x.mailId + x.bookingId);
+      return html`<div class="hev ${isCur ? 'cur' : ''} ${x.status}"><span class="hdot" aria-hidden="true" style="${x.onBill ? '' : 'border-color:var(--warn)'}"></span><div>
+        ${x.checkIn ? html`<div class="tiny" style="font-weight:800;color:var(--pri);letter-spacing:.3px">NIGHT ${dayName(x.checkIn)} → ${dayName(x.checkOut)}</div>` : ''}
+        <div class="line" style="gap:8px;flex-wrap:wrap"><strong>${x.cancelled ? 'Cancelled' : x.subject?.match(/revised|modif/i) ? 'Revised' : 'Booking'} · ${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef}</strong>
+          <span class="status ${!x.onBill ? 'warn' : isCur ? 'ok' : cls === 'held' ? 'warn' : 'mute'}">${!x.onBill ? 'Not on this bill' : isCur ? 'The bill follows this one' : label}</span></div>
+        <div class="small quiet">${x.source === 'djubo' ? 'Djubo changed' : 'Email came'} ${dateTime(x.orderAt)}${x.enteredBy ? ` by ${x.enteredBy}` : ''}${x.decidedBy ? ` · ${x.status === 'kept' ? 'kept' : 'applied'} by ${x.decidedBy}` : ''}</div>
+        <div class="small">Total ${x.amountPaise === null ? '—' : rs(x.amountPaise)} · Paid ${x.paidPaise === null ? '—' : rs(x.paidPaise)}${x.roomLabels?.length ? ` · ${x.roomLabels.join(', ')}` : ''}</div>
+        ${x.heldReason ? html`<div class="small" style="color:var(--warn)">${x.heldReason}</div>` : ''}</div></div>`; })}</div>` : html`<p class="small quiet">No emails kept for these bookings yet.</p>`}`;
+}
 const heldVal = (x, k) => (k === 'status' ? (x.cancelled ? 'Cancelled' : x.status === 'checked_in' ? 'Checked in' : x.status ?? 'Confirmed') : x[k] === null || x[k] === undefined ? '—' : rs(x[k]));
 function heldPanel() {
   const list = ui.fd?.held ?? [];
@@ -3041,8 +3063,8 @@ function roomBillPanel(r) {
       <div class="small">This stay began before the POS: its booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}), and that must be paid first. Djubo or the OTA has its invoice. To print a POS invoice instead, type the total rent from Djubo (optional).</div>
       <div class="row" style="margin-top:6px"><input class="in" inputmode="decimal" data-model="rptRent" value="${ui.rptRent ?? ''}" placeholder="Total rent in Djubo (₹)" style="max-width:220px">
         <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
-    ${r.booking ? html`${bookingCard(r.booking, true)}<div class="row" style="margin:4px 0 8px"><button class="btn sm ghost" type="button" data-act="bkHist" data-id="${r.booking.id}">${ui.bkHist?.id === r.booking.id ? 'Hide email history' : 'Email history'}</button></div>
-      ${ui.bkHist?.id === r.booking.id ? histList(ui.bkHist.list) : ''}` : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
+    ${r.booking ? html`${bookingCard(r.booking, true)}<div class="row" style="margin:4px 0 8px"><button class="btn sm ghost" type="button" data-act="bkHist" data-id="${r.booking.id}" data-stay="${st.id}">${ui.bkHist?.id === r.booking.id ? 'Hide email history' : 'Email history'}</button></div>
+      ${ui.bkHist?.id === r.booking.id ? (ui.bkHist.stay ? stayHistList(ui.bkHist) : histList(ui.bkHist.list)) : ''}` : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
       ${r.lines.map((l) => { const rcpt = ['receipt', 'advance', 'deposit'].includes(l.kind) && l.settlementId; const undo = rcpt && l.amountPaise > 0;
         return html`<tr><td>${undo ? html`<span class="quiet">${l.note ?? 'Receipt cancelled'}</span>` : html`<span style="${rcpt && l.cancelled ? 'text-decoration:line-through' : ''}">${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}</span>${rcpt ? rcTag(l.cancelled) : ''}${rcpt && l.amountPaise < 0 ? rcBtn(l.settlementId, l.cancelled) : ''}`}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`; })}
