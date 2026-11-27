@@ -110,9 +110,12 @@ export async function heartbeat(db: DB, b: z.infer<typeof HeartbeatBody>) {
   await stmt(db, `UPDATE wa_listener_status SET last_heartbeat_at = ?, state = coalesce(?, state), version = coalesce(?, version),
       last_message_at = CASE WHEN ? IS NULL THEN last_message_at ELSE max(coalesce(last_message_at, 0), ?) END WHERE id = 1`,
     t, b.state ?? null, b.version ?? null, b.lastMessageAt ?? null, b.lastMessageAt ?? null).run();
+  // The list is the groups the linked phone is in now, so it replaces the one before (28 Nov 2026): after a switch of
+  // number, the old phone's groups (a personal number's, say) are gone at the next list, not offered for ever.
+  // All in one batch, so a reader never sees it empty.
   if (b.groups?.length) {
-    await db.batch(b.groups.map((g) => stmt(db, `INSERT INTO wa_seen_groups (wa_group_id, name, last_seen_at) VALUES (?, ?, ?)
-      ON CONFLICT (wa_group_id) DO UPDATE SET name = excluded.name, last_seen_at = excluded.last_seen_at`, g.id, g.name, t)));
+    await db.batch([stmt(db, 'DELETE FROM wa_seen_groups'), ...b.groups.map((g) => stmt(db, `INSERT INTO wa_seen_groups (wa_group_id, name, last_seen_at) VALUES (?, ?, ?)
+      ON CONFLICT (wa_group_id) DO UPDATE SET name = excluded.name, last_seen_at = excluded.last_seen_at`, g.id, g.name, t))]);
   }
   return t;
 }

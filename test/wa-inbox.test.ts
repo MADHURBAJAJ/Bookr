@@ -247,4 +247,13 @@ describe('groups', () => {
     await heartbeat(env.DB, { groups: [{ id: '120363000000000009@g.us', name: 'Vendor bills (new)' }] });
     expect(await sql`SELECT name FROM wa_seen_groups`).toEqual([{ name: 'Vendor bills (new)' }]);
   });
+
+  it('a new list replaces the old one: after a switch of number, the old phone\'s groups are gone', async () => {
+    const { heartbeat } = await import('../src/wa');
+    await heartbeat(env.DB, { groups: [{ id: '120363000000000011@g.us', name: 'Sample family group' }, { id: '120363000000000012@g.us', name: 'Sample friends' }] });
+    await heartbeat(env.DB, { state: 'connected' });   // no list this time: nothing changes
+    expect((await sql`SELECT name FROM wa_seen_groups ORDER BY name`).map((r: any) => r.name)).toEqual(['Sample family group', 'Sample friends']);
+    await heartbeat(env.DB, { groups: [{ id: '120363000000000013@g.us', name: 'Sample reception group' }] });
+    expect((await sql`SELECT name FROM wa_seen_groups`).map((r: any) => r.name)).toEqual(['Sample reception group']);
+  });
 });
