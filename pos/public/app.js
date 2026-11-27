@@ -1912,7 +1912,7 @@ const drawerOpen = () => !!(ui.roomBill || ui.chartSel || ui.drawer);
 /** The guests in house, as before (for a captain who cannot check in). */
 const inHouseTable = () => html`<section class="panel"><h2>In house</h2>${ui.recv || ui.refund || ui.roomBill || ui.adv ? '' : errorBox()}
   <div class="scroll"><table class="t cards"><thead><tr><th>Room</th><th>Guest</th><th>Since</th><th class="num">Owes</th><th></th></tr></thead><tbody>
-    ${cache.stays.filter((s) => !s.groupStayId || !cache.stays.some((y) => y.id === s.groupStayId)).map((s) => { const grp = [s, ...cache.stays.filter((y) => y.groupStayId === s.id)];
+    ${byRoom(cache.stays.filter((s) => !s.groupStayId || !cache.stays.some((y) => y.id === s.groupStayId))).map((s) => { const grp = [s, ...cache.stays.filter((y) => y.groupStayId === s.id)];
       return { ...s, room: compactRooms(grp.map((y) => y.room)), balancePaise: grp.reduce((n, y) => n + y.balancePaise, 0) }; }).map((s) => html`<tr><td data-label="Room"><strong>${s.room}</strong></td><td data-label="Guest">${s.guestName}</td><td data-label="Since">${dayName(s.checkIn)}</td><td class="num" data-label="Owes">${rs(s.balancePaise)}</td>
       <td class="act"><div class="row">${can('stays.edit') ? html`<button class="btn pri" type="button" data-act="roomBill" data-id="${s.id}">Room bill</button>` : ''}
       ${can('debtors.receive') ? html`<button class="btn" type="button" data-act="recv" data-id="${s.accountId}" data-n="Room ${s.room} · ${s.guestName}" data-room="1">Take payment</button>` : ''}</div></td></tr>`)}
@@ -1965,7 +1965,7 @@ function todayView() {
     const bal = all.reduce((n, x) => n + x.balancePaise, 0);
     const right = kind === 'out' ? (bal === 0 ? html`<span class="status ok">Ready to check out</span>` : owes(bal))
       : html`${dj ? html`<span class="status info">Paid in Djubo ${rs(dj)}</span> ` : ''}${owes(bal - dj)}`;
-    const sub = kind === 'out' ? 'check-out 11 am' : `${first.plan ? `till ${dayName(first.plan)}` : 'no check-out date'}${dj ? ' · pick how the Djubo payment was paid' : ''}`;
+    const sub = kind === 'out' ? 'check-out 11 am' : `${first.plan ? `till ${dayName(first.plan)}` : 'no check-out date'}${dj ? ' · Djubo payment: pick how paid' : ''}`;
     if (all.length === 1) return row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${first.room} · ${first.guestName}</strong><small>${sub}</small>`, right);
     const two = t.bills.length > 1;
     const roomsOf = (b) => compactRooms([b.head, ...b.members].map((x) => x.room));
@@ -2002,6 +2002,23 @@ function todayView() {
 }
 actions.openFoodGo = (d) => { ui.openFood = null; ui.error = null; ui.roomBill = null; go(`#/order/${d.id}`); };
 actions.tileTog = (d) => { ui.tileOpen = { ...ui.tileOpen, [d.k]: !ui.tileOpen?.[d.k] }; rerender(); };
+/** A room name's Roman number (XIV A → 14), or null when it does not start with one. */
+function romanOf(room) {
+  const m = /^([IVXLC]+)(?=\s|$|[-–,])/.exec(String(room ?? '').trim());
+  if (!m) return null;
+  const V = { I: 1, V: 5, X: 10, L: 50, C: 100 };
+  let n = 0;
+  for (let i = 0; i < m[1].length; i++) { const a = V[m[1][i]], b = V[m[1][i + 1]] ?? 0; n += a < b ? -a : a; }
+  return n;
+}
+/** Rooms in their real order (27 Nov 2026): I, II … XXIV by number, then the bed letter; other names after, numbers in order. */
+function cmpRoom(a, b) {
+  const ra = romanOf(a), rb = romanOf(b);
+  if (ra !== null && rb !== null && ra !== rb) return ra - rb;
+  if ((ra === null) !== (rb === null)) return ra === null ? 1 : -1;
+  return String(a ?? '').localeCompare(String(b ?? ''), 'en', { numeric: true, sensitivity: 'base' });
+}
+const byRoom = (list) => [...list].sort((x, y) => cmpRoom(x.room, y.room));
 /** Rooms in short: "XIV A–F" when the beds of one room run in order, else listed. */
 function compactRooms(list) {
   const by = new Map();
@@ -2017,7 +2034,7 @@ function compactRooms(list) {
  * for the same guest and the same check-in day (Vikash Kumar's X and VI A) on one tile, each keeping its own bill.
  */
 function partyTiles(list) {
-  const heads = list.filter((x) => !x.groupStayId || !list.some((y) => y.id === x.groupStayId));
+  const heads = byRoom(list.filter((x) => !x.groupStayId || !list.some((y) => y.id === x.groupStayId)));
   const tiles = [];
   for (const h of heads) {
     const bill = { head: h, members: list.filter((x) => x.groupStayId === h.id) };

@@ -915,6 +915,11 @@ body.desk main:has(> .drawer) { max-width: none; }
 .drow strong { display: block; font-size: 13.5px; font-weight: 600; }
 .drow small { display: block; color: var(--quiet); font-size: 12px; margin-top: 1px; }
 .drow .dright { flex: none; }
+/* Today's columns (27 Nov 2026): the name keeps at least 60% of the row; when the tags do not fit beside it, they drop to a line of their own. */
+.dcol .drow { flex-wrap: wrap; row-gap: 6px; }
+.dcol .drow > .grow { min-width: 60%; }
+.dcol .drow > .dright { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; max-width: 100%; }
+.dcol .drow > .dright:empty { display: none; }
 .attn .drow { align-items: flex-start; }
 .attn .drow > .grow { display: flex; gap: 10px; align-items: flex-start; }
 .ico { width: 22px; height: 22px; flex: none; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; }
