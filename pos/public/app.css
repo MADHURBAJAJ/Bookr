@@ -1170,3 +1170,10 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .wa-spin { width: 18px; height: 18px; border: 3px solid var(--line); border-top-color: var(--pri); border-radius: 50%; animation: wa-spin 1s linear infinite; flex: none; }
 @keyframes wa-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .wa-spin { animation: none; } }
+
+/* Payments with dates (28 Nov 2026): the date bar, and the date always shown with a time. */
+.pay-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 14px; }
+.pay-bar .in[type="date"] { width: auto; min-height: 44px; }
+.pay-mode { display: inline-flex; gap: 4px; }
+.pay-lab { display: inline-flex; align-items: center; gap: 6px; }
+.pay-when { white-space: nowrap; }

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payments dates mock</title>
+<style>
+/* Mock only. Colours are the POS's own tokens (pos/public/app.css). All bills, amounts and names are invented. */
+:root {
+  --bg:#f3f4f2; --panel:#fff; --ink:#17201f; --quiet:#4d5b59; --line:#dde2e0; --rule:#e8ecea; --field:#fff; --field-line:#a3afac;
+  --pri:#0f6e6e; --pri-tint:#e3f1f0; --on-pri:#fff;
+  --go:#2f6b1f; --go-tint:#e8f2e2; --go-line:#a6cf96;
+  --warn:#8a4b00; --warn-tint:#fbefdd; --warn-line:#e8c48f;
+  --bad:#a52a1f; --bad-tint:#fbe9e6; --bad-line:#e6aaa3;
+  --top:#0f4f4f; --top-ink:#eef6f5; --top-quiet:#b6d3d0; --soft:#f6f7f5; --mock:#fff7d6; --mock-line:#e3cf7a;
+  --font:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif; color-scheme:light;
+}
+:root[data-theme="night"] {
+  --bg:#0e1516; --panel:#141d1e; --ink:#e4ecec; --quiet:#a9b8b8; --line:#2b3c3d; --rule:#223031; --field:#0f1819; --field-line:#557070;
+  --pri:#5cc6c0; --pri-tint:#173a39; --on-pri:#081010;
+  --go:#7cc46a; --go-tint:#1a3018; --go-line:#3d6634;
+  --warn:#f0b264; --warn-tint:#33260f; --warn-line:#6b4b1c;
+  --bad:#f08a80; --bad-tint:#3a1714; --bad-line:#7a3a33;
+  --top:#081010; --top-ink:#e6f0ef; --top-quiet:#8fa6a4; --soft:#1a2526; --mock:#2c2810; --mock-line:#6b5d22; color-scheme:dark;
+}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 var(--font)}
+button,input,select{font:inherit;color:inherit}
+.mockbar{background:var(--mock);border-bottom:1px solid var(--mock-line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;font-size:14px}
+.seg{display:inline-flex;border:1px solid var(--mock-line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:transparent;padding:4px 10px;cursor:pointer}.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+.top{background:var(--top);color:var(--top-ink);padding:10px 16px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:15px}
+.top b{font-size:17px}.top span{color:var(--top-quiet)}.top .on{color:var(--top-ink);text-decoration:underline;text-underline-offset:5px}
+main{max-width:1180px;margin:0 auto;padding:18px 16px 60px}
+h1{font-size:24px;margin:0} h2{font-size:17px;margin:0} p{margin:0}
+.quiet{color:var(--quiet)} .small{font-size:14px} .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap} .mono{font-family:ui-monospace,Consolas,monospace}
+.datebar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 16px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:8px 12px;font-weight:600;min-height:40px;cursor:pointer}
+.btn.pri{background:var(--pri);border-color:var(--pri);color:var(--on-pri)}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.in{border:1px solid var(--field-line);background:var(--field);border-radius:10px;padding:7px 10px;min-height:40px}
+.chips{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.chips button{border:0;background:var(--panel);padding:8px 12px;cursor:pointer;font-weight:600}.chips button[aria-pressed="true"]{background:var(--pri);color:var(--on-pri)}
+.grow{flex:1}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:14px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi .k{font-size:14px;color:var(--quiet);font-weight:650}.kpi .v{font-size:24px;font-weight:800}.kpi .n{font-size:13px;color:var(--quiet)}
+.kpi.good{background:var(--go-tint);border-color:var(--go-line)} .kpi.bad{background:var(--bad-tint);border-color:var(--bad-line)} .kpi.warn{background:var(--warn-tint);border-color:var(--warn-line)}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin-bottom:12px}
+.tabs a{padding:8px 12px;color:var(--quiet);text-decoration:none;font-weight:600;border-bottom:2px solid transparent}.tabs a.cur{color:var(--ink);border-bottom-color:var(--pri)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px} th{text-align:left;color:var(--quiet);font-weight:650;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap} td{padding:8px;border-bottom:1px solid var(--rule);vertical-align:top}
+.when{white-space:nowrap}.when .d{font-weight:600}
+.status{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.ok{color:var(--go);background:var(--go-tint)} .warn{color:var(--warn);background:var(--warn-tint)} .bad{color:var(--bad);background:var(--bad-tint)} .info{color:var(--pri);background:var(--pri-tint)}
+.dayhead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.note{font-size:13px;color:var(--quiet)}
+.ask{border:1px dashed var(--mock-line);background:var(--mock);border-radius:8px;padding:6px 10px;font-size:13px;margin:6px 0 12px}
+@media (max-width:560px){.top span{display:none}.top span.on{display:inline}}
+</style>
+</head>
+<body>
+<div class="mockbar" role="region" aria-label="Mock controls"><b>MOCK</b>
+  <span>Screen <span class="seg" id="theme"><button aria-pressed="true" data-v="day">Day</button><button aria-pressed="false" data-v="night">Night</button></span></span>
+  <span class="small">Try ◀ ▶, "Today's shift", and switch to <b>From–To</b>.</span>
+</div>
+<div class="top"><b>XOXO Hostel</b><span>Counter</span><span>Tables</span><span>Rooms</span><span class="on">Payments</span><span>Day close</span><span>Reports</span><span>Daily check</span><span>Settings</span></div>
+<main id="app"></main>
+<script>
+// Invented shifts. Each shift runs 8 am to 8 am; rows after midnight belong to the shift before.
+const SHIFTS = {
+  '2026-11-27': { name: 'Thu 27 Nov', open: true, rows: [
+    ['2026-11-28 00:41', 'C261127090', 'Room 4', 450, 'Cash 450', [['Bill photo', '“cash”', '28 Nov, 12:43 am']], 'matched'],
+    ['2026-11-27 23:52', 'C261127089', 'T3', 1260, 'UPI 1,260', [['UPI 1,260', '', '27 Nov, 11:53 pm']], 'matched'],
+    ['2026-11-27 22:10', 'C261127088', 'T7', 2310, 'UPI 2,310', [], 'missing'],
+    ['2026-11-27 21:35', 'C261127087', 'Bar 2', 980, 'Card 980', [['Card slip 890', '', '27 Nov, 9:36 pm']], 'difference'],
+    ['2026-11-27 20:05', 'C261127086', 'T1', 640, '', [], 'waiting'],
+    ['2026-11-27 13:20', 'C261127085', 'Takeaway', 315, 'UPI 315', [['UPI 315', '', '27 Nov, 1:21 pm']], 'matched'],
+  ], extras: [['28 Nov, 12:12 am', 'UPI ₹500, no POS bill', '', 'Reception']] },
+  '2026-11-26': { name: 'Wed 26 Nov', rows: [
+    ['2026-11-27 01:15', 'C261126061', 'Room 9', 720, 'UPI 720', [['UPI 720', '', '27 Nov, 1:16 am']], 'matched'],
+    ['2026-11-26 22:40', 'C261126060', 'T2', 1540, 'Cash 1,540', [['Bill photo', '“cash”', '26 Nov, 10:42 pm']], 'matched'],
+    ['2026-11-26 19:05', 'C261126059', 'T5', 860, 'UPI 860', [], 'missing'],
+  ], extras: [] },
+  '2026-11-25': { name: 'Tue 25 Nov', rows: [
+    ['2026-11-25 21:00', 'C261125044', 'T4', 1190, 'UPI 1,190', [['UPI 1,190', '', '25 Nov, 9:01 pm']], 'matched'],
+    ['2026-11-25 14:30', 'C261125043', 'Takeaway', 260, 'Cash 260', [['Bill photo', '“cash”', '25 Nov, 2:31 pm']], 'matched'],
+  ], extras: [] },
+};
+const DAYS = Object.keys(SHIFTS).sort();
+const TODAY = '2026-11-27';
+const S = { mode: 'one', day: TODAY, from: '2026-11-25', to: TODAY, tab: '' };
+const STATUS = { matched: ['ok', '✓ Matched'], missing: ['bad', 'Settled, no proof'], difference: ['info', 'Difference'], waiting: ['warn', 'Printed, no proof yet'] };
+const fmt = (s) => { const [d, t] = s.split(' '); const dt = new Date(`${d}T${t}:00`); const day = dt.getDate() + ' ' + dt.toLocaleString('en-IN', { month: 'short' });
+  let h = dt.getHours(); const m = String(dt.getMinutes()).padStart(2, '0'); const ap = h < 12 ? 'am' : 'pm'; h = h % 12 || 12; return [day, `${h}:${m} ${ap}`]; };
+const rs = (n) => '₹' + n.toLocaleString('en-IN');
+const range = () => S.mode === 'one' ? [S.day] : DAYS.filter((d) => d >= S.from && d <= S.to).reverse();
+const counts = (days) => { const all = days.flatMap((d) => SHIFTS[d].rows); const c = (s) => all.filter((r) => r[6] === s).length;
+  return { matched: c('matched'), missing: c('missing'), waiting: c('waiting'), diff: c('difference'), extras: days.reduce((n, d) => n + SHIFTS[d].extras.length, 0), needing: all.filter((r) => r[4]).length - c('waiting') }; };
+
+function table(day) {
+  const sh = SHIFTS[day];
+  let rows = sh.rows;
+  if (S.tab === 'diff') rows = rows.filter((r) => r[6] === 'difference');
+  if (S.tab === 'missing') rows = rows.filter((r) => r[6] === 'missing');
+  if (S.tab === 'extras') return sh.extras.length ? `<div class="scroll"><table><thead><tr><th>Posted</th><th>What</th><th>Caption</th><th>By</th></tr></thead><tbody>${sh.extras.map((e) => `<tr><td class="when"><span class="d">${e[0].split(',')[0]}</span>, ${e[0].split(', ')[1]}</td><td>${e[1]}</td><td>${e[2]}</td><td>${e[3]}</td></tr>`).join('')}</tbody></table></div>` : '<p class="quiet small">No extra proof this day.</p>';
+  if (!rows.length) return '<p class="quiet small">Nothing here this day.</p>';
+  return `<div class="scroll"><table><thead><tr><th>Date and time</th><th>Bill</th><th>Table</th><th class="num">Amount</th><th>Paid by</th><th>Proof posted</th><th>Status</th></tr></thead><tbody>${rows.map((r) => {
+    const [d, t] = fmt(r[0]); const [tone, label] = STATUS[r[6]];
+    return `<tr><td class="when"><span class="d">${d}</span>, ${t}</td><td class="mono">${r[1]}</td><td>${r[2]}</td><td class="num">${rs(r[3])}</td><td>${r[4] || '<span class="quiet">not paid</span>'}</td>
+      <td class="small">${r[5].length ? r[5].map((p) => `<div>${p[0]}${p[1] ? ' · ' + p[1] : ''} · <span class="when"><b>${p[2].split(',')[0]}</b>,${p[2].split(',')[1]}</span></div>`).join('') : '<span class="quiet">—</span>'}</td>
+      <td><span class="status ${tone}">${label}</span>${r[6] === 'difference' ? '<div class="small">Card slip ₹890, settled ₹980</div>' : ''}${r[6] === 'missing' ? '<div class="small">No UPI screenshot</div>' : ''}</td></tr>`; }).join('')}</tbody></table></div>`;
+}
+
+function render() {
+  const days = range();
+  const c = counts(days);
+  const one = S.mode === 'one';
+  const i = DAYS.indexOf(S.day);
+  const title = one ? `Payments · ${SHIFTS[S.day].name}${S.day === TODAY ? ' (today\'s shift)' : ''}` : `Payments · ${SHIFTS[S.from]?.name ?? S.from} to ${SHIFTS[S.to]?.name ?? S.to}`;
+  let h = `<h1>${title}</h1><p class="quiet small" style="margin-top:4px">Every bill and receipt against the proof posted in the Guest payment group. A shift runs 8 am to 8 am, so a bill at 12:41 am belongs to the shift before.</p>
+  <div class="datebar">
+    <span class="chips" role="group" aria-label="One day or several"><button data-act="mode" data-v="one" aria-pressed="${one}">One day</button><button data-act="mode" data-v="range" aria-pressed="${!one}">From–To</button></span>
+    ${one ? `<button class="btn" data-act="prev" ${i <= 0 ? 'disabled' : ''} aria-label="Previous day">◀</button>
+      <input class="in" type="date" value="${S.day}" min="${DAYS[0]}" max="${TODAY}" data-act="day" aria-label="Shift day">
+      <button class="btn" data-act="next" ${S.day >= TODAY ? 'disabled' : ''} aria-label="Next day">▶</button>`
+    : `<label class="small">From <input class="in" type="date" value="${S.from}" min="${DAYS[0]}" max="${TODAY}" data-act="from"></label>
+      <label class="small">To <input class="in" type="date" value="${S.to}" min="${DAYS[0]}" max="${TODAY}" data-act="to"></label>
+      <span class="note">Up to 7 days</span>`}
+    <span class="grow"></span>
+    <button class="btn ${one && S.day === TODAY ? '' : 'pri'}" data-act="today">Today's shift</button>
+  </div>
+  ${one && S.day !== TODAY ? '<p class="note" style="margin:-6px 0 12px">A past day: shown as it was checked now, not refreshed every 12 seconds.</p>' : ''}
+  <div class="kpis">
+    <div class="kpi good"><div class="k">Matched</div><div class="v">${c.matched}</div><div class="n">of ${c.matched + c.missing + c.diff} paid needing proof</div></div>
+    <div class="kpi ${c.missing ? 'bad' : ''}"><div class="k">Settled, no proof</div><div class="v">${c.missing}</div></div>
+    <div class="kpi warn"><div class="k">Printed, not paid</div><div class="v">${c.waiting}</div></div>
+    <div class="kpi ${c.diff ? 'bad' : ''}"><div class="k">Differences</div><div class="v">${c.diff}</div></div>
+    <div class="kpi"><div class="k">Extras</div><div class="v">${c.extras}</div><div class="n">proof with no POS bill</div></div>
+  </div>
+  <nav class="tabs">${[['', 'All'], ['diff', 'Differences'], ['missing', 'No proof'], ['extras', 'Extras'], ['bills', 'Bills']].map(([k, t]) => `<a href="#" data-act="tab" data-v="${k}" class="${S.tab === k ? 'cur' : ''}">${t}${k && k !== 'bills' && (k === 'extras' ? c.extras : c[k]) ? ` <span class="status ${k === 'extras' ? 'info' : 'bad'}">${k === 'extras' ? c.extras : c[k]}</span>` : ''}</a>`).join('')}</nav>`;
+  if (one) h += `<section class="panel">${table(S.day)}</section>`;
+  else for (const d of days) { const k = counts([d]);
+    h += `<section class="panel"><div class="dayhead"><h2>${SHIFTS[d].name} shift</h2><span class="small quiet">${SHIFTS[d].rows.length} bills · ${k.matched} matched${k.missing ? ` · <b style="color:var(--bad)">${k.missing} no proof</b>` : ''}${k.diff ? ` · ${k.diff} difference` : ''}</span></div>${table(d)}</section>`; }
+  h += `<div class="ask">To decide: in From–To, should the days be newest first (as here) or oldest first?</div>`;
+  document.getElementById('app').innerHTML = h;
+}
+const app = document.getElementById('app');
+app.addEventListener('click', (e) => { const b = e.target.closest('[data-act]'); if (!b || b.disabled || b.tagName === 'INPUT') return; e.preventDefault();
+  const a = b.dataset.act, i = DAYS.indexOf(S.day);
+  if (a === 'mode') S.mode = b.dataset.v;
+  if (a === 'prev' && i > 0) S.day = DAYS[i - 1];
+  if (a === 'next' && i < DAYS.length - 1) S.day = DAYS[i + 1];
+  if (a === 'today') { S.mode = 'one'; S.day = TODAY; }
+  if (a === 'tab') S.tab = b.dataset.v === 'bills' ? S.tab : b.dataset.v;
+  render(); });
+app.addEventListener('change', (e) => { const el = e.target; const v = el.value; if (!SHIFTS[v] && el.dataset.act === 'day') return;
+  if (el.dataset.act === 'day') S.day = v; if (el.dataset.act === 'from') S.from = v; if (el.dataset.act === 'to') S.to = v; render(); });
+document.getElementById('theme').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#theme button').forEach((x) => x.setAttribute('aria-pressed', x === b)); document.documentElement.dataset.theme = b.dataset.v === 'night' ? 'night' : ''; });
+render();
+</script>
+</body>
+</html>

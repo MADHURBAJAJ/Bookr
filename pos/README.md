@@ -69,6 +69,9 @@ tab age limit, menu and reason lists are settings per business.
 - **Credit notes.** Money given back on a paid bill: whole or chosen items, at the bill's own discount and GST, numbered per
   billing name (`C-CN2627-0001`), with a reason and how the money went back. A bill can be found by its number.
 - **Money out.** Cash paid out of the drawer, and an unused advance refunded; both reduce the cash expected at shift close.
+- **Payments with dates** (28 Nov 2026). Every time shows its date ("28 Nov, 12:41 am"). Pick one shift (◀ date ▶) or
+  From–To, up to 7 shifts, newest first, each under its own heading; Today's shift goes back. Only today's shift refreshes
+  every 12 seconds and lists bills still unpaid from before; a past shift or a range lists each bill under its own shift.
 - **Reports.** Sales by billing name with GST (credit notes netted), by payment mode and by item; discounts, complimentary
   bills and voids; who owes what, aged, with printable statements.
 - **Bar stock.** Stores (main, bar, kitchen), items in ml or pieces with their pack size and price, recipes per menu item;
