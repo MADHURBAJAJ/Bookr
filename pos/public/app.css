@@ -1104,3 +1104,17 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .stp.look { color: var(--warn); background: var(--warn-tint); border-color: var(--warn-line); }
 .tcell .offtag { position: absolute; top: -9px; right: 8px; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--tab); color: var(--panel); letter-spacing: .02em; }
 .tcell:has(.offtag) { position: relative; }
+/* Money reception marked in Djubo (26 Nov 2026): one payment, its details and how it was paid. */
+.djrow { border-top: 1px solid var(--line); padding: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.djrow:first-of-type { border-top: 0; }
+.djrow .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Each booking's mail history (26 Nov 2026): one line per email, newest first. */
+.hist { display: flex; flex-direction: column; margin-bottom: 10px; }
+.hev { display: grid; grid-template-columns: 14px 1fr; gap: 10px; padding-bottom: 12px; position: relative; }
+.hev::before { content: ""; position: absolute; left: 6px; top: 16px; bottom: 0; width: 2px; background: var(--line); }
+.hev:last-child::before { display: none; }
+.hdot { width: 14px; height: 14px; border-radius: 50%; border: 3px solid var(--pri); background: var(--panel); margin-top: 3px; }
+.hev.cur .hdot { background: var(--pri); }
+.hev.held .hdot { border-color: var(--warn); }
+.hev.older .hdot, .hev.kept .hdot { border-color: var(--line); }

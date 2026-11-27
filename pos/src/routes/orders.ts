@@ -222,13 +222,20 @@ orderRoutes.post(`${B}/orders/:id/items`, requireAction('orders.edit'), async (c
       priceBy = c.get('staff').id;
     }
     const unit = Math.max(0, base + chosen.reduce((s, x) => s + x.addPaise, 0));
-    const variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
+    let variant = [...picked].sort().join(',') + (item.open_price ? `|${base}` : '');
+    // The menu price changed since this dish went on the order (26 Nov 2026): what was ordered keeps its price, more of it
+    // goes on a line of its own at today's price. A line taken off (none left) takes today's price when added again.
+    if (!item.open_price) {
+      const ex = await one<{ qty: number; price_paise: number }>(db, 'SELECT qty, price_paise FROM order_lines WHERE order_id = ? AND item_id = ? AND variant = ?', o.id, item.id, variant);
+      if (ex && ex.qty > 0 && ex.price_paise !== unit) variant = `${variant}|p${unit}`;
+    }
     // Its station and whether it makes a KOT come from the dish, else its category. A no-KOT line counts as sent at once.
     await stmt(db, `INSERT INTO order_lines (id, business_id, order_id, item_id, name, price_paise, sac, station, qty, sent_qty, created_at, variant, options, price_by, kot, station_id)
         SELECT ?, ?, ?, m.id, m.name, ?, m.sac, m.station, ?, CASE coalesce(m.kot, c.kot, 1) WHEN 0 THEN ? ELSE 0 END, ?, ?, ?, ?, r.kot, r.station_id
         FROM menu_items m ${CATEGORY_JOIN} JOIN (SELECT ${ITEM_ROUTE} FROM menu_items m ${CATEGORY_JOIN} WHERE m.id = ?) r WHERE m.id = ?
         ON CONFLICT (order_id, item_id, variant) DO UPDATE SET qty = order_lines.qty + excluded.qty,
-          sent_qty = CASE order_lines.kot WHEN 0 THEN order_lines.qty + excluded.qty ELSE order_lines.sent_qty END`,
+          sent_qty = CASE order_lines.kot WHEN 0 THEN order_lines.qty + excluded.qty ELSE order_lines.sent_qty END,
+          price_paise = CASE WHEN order_lines.qty = 0 THEN excluded.price_paise ELSE order_lines.price_paise END`,
       newId(), bid, o.id, unit, delta, delta, t, variant, chosen.length ? JSON.stringify(chosen) : null, priceBy, item.id, item.id).run();
     // A no-KOT item (a bottle at the counter) is handed over at once: its stock goes now (24 Nov 2026).
     if (stockAtKot(o.opened_at)) {

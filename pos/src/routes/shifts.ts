@@ -7,7 +7,9 @@ import { parsePaise } from '../../../src/money';
 import { body, date, fail, text } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
 import { rs, shiftDayAt } from '../billing';
-import { deskPending } from '../rooms';
+import { djuboPays, oldDeskPending } from '../djubo-desk';
+import { restaurantAdvances } from '../restaurant-advances';
+import { tonightNotCharged } from '../rooms';
 import { notInDjubo } from './frontdesk';
 import { audit, clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
@@ -63,11 +65,17 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const cashOut = outs.filter((o) => o.mode === 'cash').reduce((s, o) => s + o.amount_paise, 0)
     + creditNotes.filter((n) => n.refund_mode === 'cash').reduce((s, n) => s + n.total_paise, 0);
   // Money reception entered in Djubo during this shift with no POS receipt (24 Nov 2026).
-  const deskMissing = (await deskPending(db, bid)).filter((r) => r.deskPaidAt !== null && shiftDayAt(r.deskPaidAt, startHour) === day)
+  const deskMissing = (await oldDeskPending(db, bid, startHour)).filter((r) => r.deskPaidAt !== null && shiftDayAt(r.deskPaidAt, startHour) === day)
     .map((r) => ({ bookingId: r.id, extRef: r.extRef, guestName: r.guestName, enteredBy: r.enteredBy, at: r.deskPaidAt, pendingPaise: r.pendingPaise }));
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
   return { shiftDay: day, byMode, receipts, byAccount, billed, events, payments, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut, deskMissing,
+    // Money reception marked in Djubo on this day (26 Nov 2026): counted here; each needs a mode before the day closes.
+    // Restaurant advances not used on a bill yet (26 Nov 2026).
+    advancesHeld: await restaurantAdvances(db, bid),
+    // Guests in house tonight with no rent for the night (26 Nov 2026): the day cannot close until Djubo has it.
+    notCharged: await tonightNotCharged(db, bid, day),
+    djubo: (await djuboPays(db, bid, startHour)).pays.filter((x) => x.day === day || (x.settlementId && payments.some((p) => p.receiptNo === x.receiptNo))),
     // Reservations made at the desk that Djubo has not confirmed (25 Nov 2026).
     notInDjubo: await notInDjubo(db, bid, day),
     drawerOuts: outs.map((o) => ({ kind: o.kind, mode: o.mode, amountPaise: o.amount_paise, note: o.note, at: o.at, byName: o.by_name })),
@@ -125,6 +133,10 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   const overdue = await overdueOrders(db, bid, day);
   if (overdue.length) fail(409, `Open since an earlier day: ${overdue.map((o) => `${o.place}${o.bill_no ? ` (${o.bill_no})` : ''}`).join(', ')}. Take payment, post to a room, put on credit, or void (manager) first.`);
   const s = await shiftSummary(db, bid, day, b.tab_age_days, b.shift_start_hour);
+  // Money reception marked in Djubo today needs how it was paid, so cash, UPI and card add up (26 Nov 2026, required).
+  const noMode = s.djubo.filter((x) => !x.settlementId);
+  if (noMode.length) fail(409, `Pick Cash, UPI or Card for the money marked in Djubo today: ${noMode.map((x) => `${x.guestName ?? x.extRef} ${rs(x.amountPaise)}`).join(', ')}.`);
+  if (s.notCharged.length) fail(409, `No rent for tonight: ${s.notCharged.map((x) => `${x.room} · ${x.guestName}`).join(', ')}. Extend in Djubo (the rent comes with its mail), or a manager extends without Djubo.`);
 
   const data = await body(c);
   // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).

@@ -41,7 +41,11 @@ export async function syncStay(db: DB, bid: string, stayId: string) {
     const rent = live ? Math.max(0, bk.amount_paise ?? 0) : 0;
     // Of Djubo's advance, the part reception entered was taken at the desk: it is collected here with a receipt (24 Nov 2026),
     // so only the rest counts as paid before arrival.
-    const paid = live ? Math.min(Math.max(0, (bk.paid_paise ?? 0) - bk.desk_paid_paise), rent) : 0;
+    // What the OTA says was paid online counts when Djubo shows less (26 Nov 2026), never above the rent. A booking from
+    // Djubo's daily report with no total keeps no rent here (owner's choice): its invoice is not the POS's.
+    const ota = bk.source === 'djubo' && bk.amount_paise !== null ? (await one<{ p: number | null }>(db, `SELECT max(paid_paise) AS p FROM bookings
+      WHERE id IN (SELECT value FROM json_each(?)) AND source = 'mmt' AND status <> 'cancelled'`, JSON.stringify(ids)))?.p ?? 0 : 0;
+    const paid = live ? Math.min(Math.max(0, Math.max(bk.paid_paise ?? 0, ota) - bk.desk_paid_paise), rent) : 0;
     const put = (kind: 'room_rent' | 'prepaid', target: number, note: string | null) => stmt(db, `INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, booking_id, note, at)
       SELECT ?, ?, ?, ?, x.d, ?, ?, ? FROM (SELECT ? - coalesce((SELECT sum(amount_paise) FROM debtor_entries WHERE account_id = ? AND kind = ?
         AND booking_id IN (SELECT value FROM json_each(?))), 0) AS d) x WHERE x.d <> 0`, newId(), bid, acc.id, kind, bk.id, note, t, target, acc.id, kind, JSON.stringify(ids));
@@ -90,27 +94,55 @@ export async function bookingTeam(db: DB, bid: string): Promise<string[]> {
  * or changed by anyone but the booking team and the OTAs ("System") is money taken at the desk; a decrease takes it back.
  * The same however often mails are read. (24 Nov 2026: by who needs no receipt, so a new or unlisted person needs one.)
  */
-export async function recomputeDesk(db: DB, bid: string, bookingId: string, team?: string[]) {
+/** The first shift day money marked in Djubo is counted in the POS on the day marked (26 Nov 2026). Tests set it. */
+export const djuboDeskRule = { from: '2026-11-26' };
+
+export async function recomputeDesk(db: DB, bid: string, bookingId: string, team?: string[], dry = false): Promise<number> {
   const noReceipt = team ?? await bookingTeam(db, bid);
+  // Before the POS (26 Nov 2026, owner's choice): what reception marked in Djubo before djuboDeskRule.from was received then
+  // (the paper register or the bank): it counts as paid before arrival, except what the POS itself took for the booking then
+  // (a 25 Nov advance), which stays desk money so it is not counted twice. A guest who came before the POS and whose first
+  // Djubo mail the POS sees only now: what that mail says was paid is the starting point, not desk money.
+  const k = await one<{ check_in: string | null; h: number; stay_id: string | null; match_id: string | null }>(db,
+    'SELECT k.check_in, b.shift_start_hour AS h, k.stay_id, k.match_id FROM bookings k JOIN businesses b ON b.id = k.business_id WHERE k.id = ?', bookingId);
+  const cut = Date.parse(`${djuboDeskRule.from}T00:00:00Z`) + (k?.h ?? 8) * 3_600_000 - 19_800_000;
   const atDesk = (name: string | null) => { const n = (name ?? '').trim().toLowerCase(); return !!n && n !== 'system' && !noReceipt.includes(n); };
-  const log = await all<{ paid_paise: number; entered_by: string | null; received_at: number }>(db,
-    'SELECT paid_paise, entered_by, received_at FROM booking_paid_log WHERE booking_id = ? ORDER BY received_at, mail_id', bookingId);
+  // In the order Djubo made the changes (the booking's mail history), else as the mails came.
+  const log = await all<{ paid_paise: number; entered_by: string | null; received_at: number }>(db, `SELECT l.paid_paise, l.entered_by, l.received_at FROM booking_paid_log l
+    LEFT JOIN booking_versions v ON v.booking_id = l.booking_id AND v.mail_id = l.mail_id WHERE l.booking_id = ?
+    ORDER BY coalesce(v.order_at, l.received_at), l.received_at, l.mail_id`, bookingId);
   let prev = 0;
   let desk = 0;
+  let pre = 0;
   let at: number | null = null;
-  for (const r of log) {
+  const cameBefore = k?.check_in != null && k.check_in < djuboDeskRule.from;
+  log.forEach((r, i) => {
+    if (i === 0 && cameBefore && r.received_at >= cut) { prev = r.paid_paise; return; }   // first seen after go-live
     const d = r.paid_paise - prev;
+    const early = r.received_at < cut;
     if (atDesk(r.entered_by)) {
-      if (d > 0) { desk += d; at = r.received_at; } else if (d < 0) desk = Math.max(0, desk + d);
-    } else if (d < 0) desk = Math.min(desk, r.paid_paise);
+      if (early) pre = d > 0 ? pre + d : Math.max(0, pre + d);
+      else if (d > 0) { desk += d; at = r.received_at; } else if (d < 0) desk = Math.max(0, desk + d);
+    } else if (d < 0) { desk = Math.min(desk, r.paid_paise); pre = Math.min(pre, r.paid_paise); }
     prev = r.paid_paise;
+  });
+  if (pre > 0) {
+    // What the POS took for this booking before go-live (an advance, or a receipt on its room bill on the trial day).
+    const posBefore = (await one<{ p: number }>(db, `SELECT coalesce((SELECT sum(p.amount_paise) FROM desk_advances d JOIN payments p ON p.settlement_id = d.settlement_id
+        WHERE d.booking_id IN (?1, ?2) AND p.shift_day < ?4), 0)
+      + coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN payments p ON p.id = e.payment_id
+        WHERE a.stay_id = ?3 AND e.kind IN ('receipt', 'advance') AND p.shift_day < ?4
+          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.booking_id IN (?1, ?2))), 0) AS p`,
+      bookingId, k?.match_id ?? '', k?.stay_id ?? '', djuboDeskRule.from))!.p;
+    desk += Math.min(pre, posBefore);
   }
   // What its MakeMyTrip twin says was paid online is never desk money (26 Nov 2026): reception may enter an OTA booking in
   // Djubo by hand and mark it paid, which is the OTA's payment, not cash at the desk.
   const twin = await one<{ p: number | null }>(db, `SELECT max(paid_paise) AS p FROM bookings WHERE source = 'mmt' AND status <> 'cancelled'
     AND (id = (SELECT match_id FROM bookings WHERE id = ?1) OR match_id = ?1)`, bookingId);
   desk = Math.max(0, Math.min(desk, prev - (twin?.p ?? 0)));
-  await stmt(db, 'UPDATE bookings SET desk_paid_paise = ?, desk_paid_at = ? WHERE id = ?', desk, desk ? at : null, bookingId).run();
+  if (!dry) await stmt(db, 'UPDATE bookings SET desk_paid_paise = ?, desk_paid_at = ? WHERE id = ?', desk, desk ? at : null, bookingId).run();
+  return desk;
 }
 
 /**
@@ -122,8 +154,20 @@ export async function deskPending(db: DB, bid: string) {
     deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; coveredPaise: number }>(db, `SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
       k.check_in AS checkIn, k.check_out AS checkOut, k.status, k.stay_id AS stayId, k.desk_paid_paise AS deskPaidPaise, k.desk_paid_at AS deskPaidAt, k.entered_by AS enteredBy,
       coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0)
-      + coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id = k.stay_id AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0) AS coveredPaise
+      -- Receipts on the room bill cover it only past what they paid of food and other charges (26 Nov 2026): a food payment
+      -- must not hide rent reception took in Djubo.
+      -- A bed in a group has its payments on the group's first room (26 Nov 2026), so that bill counts too. A POS receipt
+      -- someone linked to this booking's Djubo payment ("already taken in the POS") always counts in full.
+      + max(coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
+          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0),
+        max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0)
+        - max(0, coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('charge', 'credit_note', 'transfer')), 0)))
+        + coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
+          AND NOT EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id
+            AND a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)))
+          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0)) AS coveredPaise
     FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in') ORDER BY k.desk_paid_at`, bid);
   return rows.map((r) => ({ ...r, pendingPaise: r.deskPaidPaise - r.coveredPaise })).filter((r) => r.pendingPaise > 0);
 }
@@ -211,6 +255,67 @@ export async function continuesOf(db: DB, bid: string, bookings: { id: string; p
     const hits = stays.filter((s) => s.plan && b.checkIn && s.plan >= b.checkIn && s.check_in < b.checkIn
       && ((b.phone && s.phone === b.phone) || (nameKey(b.guestName).length >= 4 && nameKey(s.guest_name) === nameKey(b.guestName))));
     if (hits.length) out.set(b.id, hits.map((s) => ({ id: s.id, room: s.room, guestName: s.guest_name })));
+  }
+  return out;
+}
+
+// ---------- extensions are made in Djubo (26 Nov 2026)
+
+/** When Djubo changes a checked-in booking's dates, the stay and its group's beds leave when the bookings end. A date a
+ *  manager extended by hand past the bookings stays. */
+export async function followBookingDates(db: DB, bid: string, bookingId: string, oldCheckOut: string | null) {
+  const k = await one<{ stay_id: string | null }>(db, 'SELECT stay_id FROM bookings WHERE id = ? AND business_id = ?', bookingId, bid);
+  if (!k?.stay_id) return;
+  const head = (await one<{ h: string }>(db, 'SELECT coalesce(group_stay_id, id) AS h FROM stays WHERE id = ?', k.stay_id))!.h;
+  const end = (await one<{ e: string | null }>(db, `SELECT max(b.check_out) AS e FROM bookings b JOIN stays s ON s.id = b.stay_id
+    WHERE (s.id = ?1 OR s.group_stay_id = ?1) AND b.status = 'checked_in'`, head))?.e;
+  if (!end) return;
+  await stmt(db, `UPDATE stays SET check_out_plan = ?1 WHERE (id = ?2 OR group_stay_id = ?2) AND checked_out_at IS NULL
+    AND (check_out_plan IS NULL OR check_out_plan = ?3 OR check_out_plan < ?1)`, end, head, oldCheckOut ?? end).run();
+}
+
+/** Nights the guest stays that no rent covers: their bookings' last day plus nights a manager added by hand ("N extra
+ *  night(s)", less any taken off), against the day they leave. Only for stays from bookings. */
+export async function nightsNotCharged(db: DB, bid: string) {
+  const rows = await all<{ id: string; room: string; guest_name: string; plan: string | null; booked_to: string | null; hand: string | null }>(db, `
+    SELECT s.id, s.room, s.guest_name, s.check_out_plan AS plan,
+      (SELECT max(b.check_out) FROM bookings b JOIN stays m ON m.id = b.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id) AND b.status = 'checked_in') AS booked_to,
+      (SELECT json_group_array(json_object('a', e.amount_paise, 'n', e.note)) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id JOIN stays m ON m.id = d.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND lower(e.note) LIKE '%extra night%') AS hand
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)'`, bid);
+  const out: { stayId: string; room: string; guestName: string; plan: string; coveredTo: string; nights: number }[] = [];
+  for (const r of rows) {
+    if (!r.booked_to) continue;
+    let hand = 0;
+    for (const e of JSON.parse(r.hand ?? '[]') as { a: number; n: string }[]) {
+      const n = Number(/(\d+)\s+extra night/i.exec(e.n ?? '')?.[1] ?? 1);
+      hand += e.a > 0 ? n : e.a < 0 ? -n : 0;
+    }
+    const covered = new Date(Date.parse(r.booked_to) + Math.max(0, hand) * 86_400_000).toISOString().slice(0, 10);
+    const plan = r.plan ?? r.booked_to;
+    if (plan > covered) out.push({ stayId: r.id, room: r.room, guestName: r.guest_name, plan, coveredTo: covered, nights: Math.round((Date.parse(plan) - Date.parse(covered)) / 86_400_000) });
+  }
+  return out;
+}
+
+/** Guests in house tonight whose night has no rent (an overstay, or an extension not in Djubo): blocks the day's close. */
+export async function tonightNotCharged(db: DB, bid: string, day: string) {
+  const rows = await all<{ id: string; room: string; guest_name: string; booked_to: string | null; hand: string | null }>(db, `
+    SELECT s.id, s.room, s.guest_name,
+      (SELECT max(b.check_out) FROM bookings b JOIN stays m ON m.id = b.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id) AND b.status = 'checked_in') AS booked_to,
+      (SELECT json_group_array(json_object('a', e.amount_paise, 'n', e.note)) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id JOIN stays m ON m.id = d.stay_id
+        WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND lower(e.note) LIKE '%extra night%') AS hand
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)'`, bid);
+  const out: { stayId: string; room: string; guestName: string; coveredTo: string }[] = [];
+  for (const r of rows) {
+    if (!r.booked_to) continue;
+    let hand = 0;
+    for (const e of JSON.parse(r.hand ?? '[]') as { a: number; n: string }[]) {
+      const n = Number(/(\d+)\s+extra night/i.exec(e.n ?? '')?.[1] ?? 1);
+      hand += e.a > 0 ? n : e.a < 0 ? -n : 0;
+    }
+    const covered = new Date(Date.parse(r.booked_to) + Math.max(0, hand) * 86_400_000).toISOString().slice(0, 10);
+    if (covered <= day) out.push({ stayId: r.id, room: r.room, guestName: r.guest_name, coveredTo: covered });
   }
   return out;
 }

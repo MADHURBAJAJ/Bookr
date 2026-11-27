@@ -1,6 +1,6 @@
 import { app } from './app';
 import { sendAll } from './sync';
-import { receiveMail } from './mail';
+import { buildHistory, receiveMail } from './mail';
 import { autoCloseAll } from './routes/shifts';
 import type { Env } from './types';
 
@@ -16,6 +16,8 @@ export default {
   },
   scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     // Also closes the shift just ended at the shift's hour if nobody did (24 Nov 2026).
-    ctx.waitUntil(autoCloseAll(env.DB).catch((e) => console.error('auto close', e)).then(() => sendAll(env)));
+    ctx.waitUntil(autoCloseAll(env.DB).catch((e) => console.error('auto close', e)).then(() => sendAll(env))
+      // Each booking's mail history (26 Nov 2026): the mails kept before it began are added a batch at a time.
+      .then(() => buildHistory(env)).catch((e) => console.error('mail history', e)));
   },
 };

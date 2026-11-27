@@ -62,7 +62,7 @@ describe('rooms after the audit', () => {
     await ok(counter.post(`${B}/frontdesk/housekeeping`, { rooms: ['XI'], status: 'clean' }));
     await ok(counter.post(`${B}/stays`, { room: 'XI', guestName: 'Next Guest' }));
     // Extend the lead by two nights at ₹2,100.
-    const ext = await ok(counter.post(`${B}/stays/${a}/extend`, { to: plus(3), rate: '2100' }));
+    const ext = await ok(counter.post(`${B}/stays/${a}/extend`, { to: plus(3), rate: '2100', reason: 'Djubo down (test)', ...s.mgr }));   // a manager, without Djubo (26 Nov 2026)
     expect([ext.stay.checkOutPlan, ext.rentPaise]).toEqual([plus(3), 630_000]);
   });
 

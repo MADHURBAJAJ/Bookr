@@ -454,6 +454,9 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault(); go('#/rooms/new');
   } else if ((ev.key === 'c' || ev.key === 'C') && onDesk() && can('stays.edit')) {
     ev.preventDefault(); go('#/rooms/checkin');
+  } else if ((ev.key === 'a' || ev.key === 'A') && /^#\/(counter|tables)?$|^$|^#$/.test(location.hash) && can('debtors.receive')) {
+    // A party's advance (A), from the Counter (26 Nov 2026).
+    ev.preventDefault(); actions.partyAdv();
   } else if (['t', 'r', 'k'].includes(ev.key.toLowerCase()) && onDesk() && can('orders.edit')) {
     // New table (T), room service (R), takeaway (K) from Counter, Tables or Rooms (24 Nov 2026).
     ev.preventDefault();
@@ -511,6 +514,78 @@ const KIND_TEXT = { table: 'Table', room: 'Room service', takeaway: 'Takeaway' }
 // (running tables, carried over first; room service, takeaway and tabs), front desk on the right (today's numbers, every
 // room and bed tonight, arriving, leaving, money owed), with one search and the alerts on top. Shortcut keys: / search,
 // T new table, R room service, K takeaway, C check in, N new reservation (also on Tables and Rooms).
+// ---------- advances on restaurant orders (26 Nov 2026): on a running order, or for a party booked ahead.
+function advanceTakeForm() {
+  const f = ui.advForm;
+  const accs = (cache.payAccounts ?? []).filter((a) => a.active);
+  return html`<form class="panel" style="border-color:var(--pri-line);margin:8px 0"><h3 style="margin:0">${f.orderId ? `Advance on ${f.place}` : 'Advance for a party booked ahead'}</h3>${errorBox()}
+    <div class="grid2"><label class="f">Guest name<input class="in" data-model="advGName" value="${ui.advGName ?? f.name ?? ''}" autofocus></label>
+      <label class="f">Phone${f.orderId ? ' (optional)' : ''}<input class="in" inputmode="tel" data-model="advGPhone" value="${ui.advGPhone ?? ''}"></label></div>
+    ${f.orderId ? '' : html`<div class="grid3"><label class="f">Day<input class="in" type="date" data-model="advDay" value="${ui.advDay ?? me.business.shiftDay}"></label>
+      <label class="f">Time<input class="in" type="time" data-model="advTime" value="${ui.advTime ?? ''}"></label>
+      <label class="f">People<input class="in" inputmode="numeric" data-model="advPeople" value="${ui.advPeople ?? ''}"></label></div>`}
+    <div class="grid2"><label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="advAmt" value="${ui.advAmt ?? ''}"></label>
+      <div class="f">Paid by<div class="chips">${[['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.advMode ?? 'cash') === k}" data-act="pick" data-k="advMode" data-id="${k}">${t}</button>`)}</div></div></div>
+    ${ui.advMode === 'upi' ? html`<div class="f">QR paid into<div class="chips">${accs.map((a) => html`<button type="button" class="chip" aria-pressed="${ui.advAcc === a.id}" data-act="pick" data-k="advAcc" data-id="${a.id}">${a.name}</button>`)}</div></div>` : ''}
+    <div class="row"><button class="btn pri" type="submit" data-act="advTakeGo" data-submit>Take advance and print receipt</button><button class="btn" type="button" data-act="advFormNo">Cancel</button></div></form>`;
+}
+actions.partyAdv = () => { ui.advForm = {}; ui.advMode = 'cash'; Object.assign(ui, { advGName: undefined, advGPhone: undefined, advDay: undefined, advTime: undefined, advPeople: undefined, advAmt: undefined, advAcc: undefined }); ui.error = null; rerender(); };
+actions.advOrder = () => { ui.advForm = { orderId: ui.order.id, place: ui.order.place, name: ui.order.guestName ?? '' }; ui.advMode = 'cash'; Object.assign(ui, { advGName: undefined, advGPhone: undefined, advAmt: undefined, advAcc: undefined }); ui.error = null; rerender(); };
+actions.advFormNo = () => { ui.advForm = null; rerender(); };
+actions.advTakeGo = async () => {
+  const f = ui.advForm;
+  const mode = ui.advMode ?? 'cash';
+  if (mode === 'upi' && !ui.advAcc) throw new Error("Choose which account's QR was paid.");
+  const people = Number(ui.advPeople);
+  const r = await api('POST', `${B()}/restaurant-advances`, { orderId: f.orderId, guestName: ui.advGName ?? f.name ?? '', phone: ui.advGPhone || undefined,
+    partyDay: f.orderId ? undefined : ui.advDay ?? me.business.shiftDay, partyTime: f.orderId ? undefined : ui.advTime || undefined, people: Number.isInteger(people) && people > 0 ? people : undefined,
+    payments: [{ mode, amount: ui.advAmt ?? '', payAccountId: mode === 'upi' ? ui.advAcc : undefined }] });
+  printJobs([{ kind: 'bill', html: asHtml(receiptSlip(r.receipt)) }]);
+  ui.advForm = null;
+  flash = { kind: 'ok', text: `${r.receipt.receiptNo}: advance ${rs(r.receipt.totalPaise)} from ${r.receipt.name} taken.` };
+  if (f.orderId) { ui.oadv = (await api('GET', `${B()}/restaurant-advances?orderId=${f.orderId}`)).advances; rerender(); } else route();
+};
+function advancesHeldList() {
+  const today = me.business.shiftDay;
+  // Restaurant tables only (not rooms or dorm beds), not running now.
+  const restTables = (ui.sections ?? []).filter((x) => !['rooms', 'dorms', 'nc'].includes(x.kind)).flatMap((x) => x.tables ?? []);
+  const free = (restTables.length ? restTables : ui.tables ?? []).filter((t) => !(ui.orders ?? []).some((o) => o.kind === 'table' && o.place.toLowerCase() === t.toLowerCase()));
+  return html`<div class="sect"><h3 style="margin:0">Advances held</h3><span class="small quiet">${ui.radv.length} · ${rs(ui.radv.reduce((t, x) => t + x.leftPaise, 0))}</span></div>
+    <div class="ctrlist">${ui.radv.map((x) => { const done = x.orderStatus === 'closed' || x.orderStatus === 'cancelled'; const noShow = !x.orderId && x.partyDay && x.partyDay < today;
+      return html`<div class="drow" style="flex-wrap:wrap"><span class="grow"><strong>${x.guestName}</strong>
+        <small>${x.orderId ? `${x.place}${done ? ' · bill paid, advance left over' : ''}` : `Party ${dayName(x.partyDay)}${x.partyTime ? `, ${x.partyTime}` : ''}${x.people ? ` · ${x.people} people` : ''}${noShow ? ' · date passed' : ''}`} · ${x.receipts ?? ''}${x.phoneEnd ? ` · phone …${x.phoneEnd}` : ''}</small></span>
+        <span class="dright"><span class="num">${rs(x.leftPaise)}</span>
+          ${!x.orderId && !noShow && can('orders.edit') ? html`<button class="btn sm" type="button" data-act="advOpenAsk" data-id="${x.id}">${ui.advOpen === x.id ? 'Cancel' : 'Open their table'}</button>` : ''}
+          ${(done || noShow) && isMgr() ? html`<button class="btn sm" type="button" data-act="advBack" data-id="${x.id}" data-a="${x.accountId}" data-m="cash" data-amt="${rupees(x.leftPaise)}">Give back cash</button>
+            <button class="btn sm" type="button" data-act="advBack" data-id="${x.id}" data-a="${x.accountId}" data-m="upi" data-amt="${rupees(x.leftPaise)}">Give back UPI</button>
+            <button class="btn sm ghost" type="button" data-act="advKeep" data-id="${x.id}">Keep</button>` : (done || noShow) ? html`<span class="status warn">A manager gives it back or keeps it</span>` : ''}</span>
+        ${ui.advOpen === x.id ? html`<div class="chips" style="width:100%;margin-top:6px"><span class="small quiet">Their table:</span>${free.map((t) => html`<button type="button" class="chip" data-act="advOpenGo" data-id="${x.id}" data-place="${t}">${t}</button>`)}</div>` : ''}</div>`; })}</div>`;
+}
+actions.advOpenAsk = (d) => { ui.advOpen = ui.advOpen === d.id ? null : d.id; rerender(); };
+actions.advOpenGo = async (d) => {
+  const x = ui.radv.find((y) => y.id === d.id);
+  const r = await api('POST', B() + '/orders', { kind: 'table', place: d.place });
+  await api('POST', `${B()}/restaurant-advances/${d.id}/link`, { orderId: r.id });
+  flash = { kind: 'ok', text: `${x.guestName}'s ${rs(x.leftPaise)} advance is on ${d.place}.` };
+  go(`#/order/${r.id}`);
+};
+actions.advBack = async (d) => {
+  await api('POST', `${B()}/debtors/${d.a}/refund`, { mode: d.m, amount: d.amt, note: 'Restaurant advance given back' });
+  flash = { kind: 'ok', text: `₹${d.amt} given back (${d.m === 'cash' ? 'cash from the drawer' : 'UPI'}).` }; route();
+};
+actions.advKeep = async (d) => {
+  const note = prompt('Why is this advance kept (not given back)?');
+  if (!note || !note.trim()) return;
+  await api('POST', `${B()}/restaurant-advances/${d.id}/keep`, { note: note.trim() });
+  flash = { kind: 'ok', text: 'Advance kept.' }; route();
+};
+actions.advLinkHere = async (d) => {
+  await api('POST', `${B()}/restaurant-advances/${d.id}/link`, { orderId: ui.order.id });
+  ui.oadv = (await api('GET', `${B()}/restaurant-advances?orderId=${ui.order.id}`)).advances;
+  ui.waitAdv = (ui.waitAdv ?? []).filter((x) => x.id !== d.id);
+  flash = { kind: 'ok', text: 'Advance put on this order.' }; rerender();
+};
+
 async function counterScreen() {
   const today = me.business.shiftDay;
   const [{ orders, tables, tablesFixed, sections }, fd, chart] = await Promise.all([
@@ -521,6 +596,8 @@ async function counterScreen() {
   ]);
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.fd = fd; ui.cchart = chart;
   ui.arrivals = (fd?.arrivals ?? []).filter((a) => a.kind === 'booking');
+  ui.radv = can('pos.view') ? (await api('GET', B() + '/restaurant-advances').catch(() => ({ advances: [] }))).advances : [];
+  if (can('debtors.receive')) await load('payAccounts').catch(() => null);
   rerender = () => {
     const orderN = (st) => ui.orders.filter((o) => orderState(o) === st).length;
     const toPay = ui.orders.filter((o) => orderState(o) === 'billed').reduce((t, o) => t + (o.bill?.totalPaise ?? 0), 0);
@@ -530,6 +607,8 @@ async function counterScreen() {
     const f = ui.fd;
     const alerts = [
       ...(f?.alerts.notInDjubo ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', text: `Not in Djubo yet: ${x.guestName} · ${x.rooms}`, href: '#/rooms/list' })),
+      ...(ui.radv ?? []).filter((x) => !x.orderId && x.partyDay === today).map((x) => ({ tone: 'info', text: `Party today: ${x.guestName}${x.partyTime ? `, ${x.partyTime}` : ''} · ${rs(x.leftPaise)} advance`, href: '#/' })),
+      ...(ui.radv ?? []).filter((x) => (!x.orderId && x.partyDay && x.partyDay < today) || x.orderStatus === 'closed' || x.orderStatus === 'cancelled').map((x) => ({ tone: 'warn', text: `Advance to give back: ${x.guestName} · ${rs(x.leftPaise)}`, href: '#/' })),
       ...overdue.map((o) => ({ tone: 'bad', text: `${o.place} open since ${dayName(o.openedShiftDay)}: clear before the day closes`, href: orderHref(o) })),
       ...(f?.alerts.deskToTake ? [{ tone: 'warn', text: `Reception money to take: ${plural(f.alerts.deskToTake, 'booking')}`, href: '#/rooms' }] : []),
       ...(f?.alerts.unplaced ? [{ tone: 'bad', text: `Djubo could not place ${plural(f.alerts.unplaced, 'booking')}`, href: '#/rooms/list' }] : []),
@@ -549,11 +628,14 @@ async function counterScreen() {
           <div class="row"><h2 class="grow" style="margin:0">Restaurant</h2>
             ${can('orders.edit') ? html`<button class="btn pri sm" type="button" data-act="newOrder" data-kind="table">New table · T</button>
               <button class="btn sm" type="button" data-act="newOrder" data-kind="room">Room service · R</button>
-              <button class="btn sm" type="button" data-act="newOrder" data-kind="takeaway">Takeaway · K</button>` : ''}</div>
+              <button class="btn sm" type="button" data-act="newOrder" data-kind="takeaway">Takeaway · K</button>` : ''}
+            ${can('debtors.receive') ? html`<button class="btn sm" type="button" data-act="partyAdv">Party advance · A</button>` : ''}</div>
           ${ui.picking ? newOrderForm() : ''}
+          ${ui.advForm ? advanceTakeForm() : ''}
           <div class="kpis">${kpi('Running', String(ui.orders.length))}${kpi('To pay', rs(toPay), plural(orderN('billed'), 'bill'))}${kpi('With kitchen', String(orderN('open')))}
             ${kpi('Not sent', String(orderN('new')), '', orderN('new') ? 'warn' : '')}${kpi('Carried over', String(carried.length), overdue.length ? `${overdue.length} overdue` : '', overdue.length ? 'bad' : '')}</div>
           ${can('orders.edit') && ui.tables.length ? tableGrid() : ''}
+          ${(ui.radv ?? []).length ? advancesHeldList() : ''}
           <div class="sect"><h3 style="margin:0">Room service, takeaway and tabs</h3><span class="small quiet">${rest.length}</span></div>
           ${rest.length ? html`<div class="ctrlist">${rest.map((o) => { const st = orderState(o); return html`<a class="drow" href="${orderHref(o)}"><span class="grow"><strong>${o.place}</strong>
             <small>${KIND_TEXT[o.kind] ?? o.kind}${o.guestName ? ` · ${o.guestName}` : ''} · ${since(o.openedAt)}</small></span>
@@ -616,6 +698,9 @@ async function tablesScreen() {
   const [{ orders, tables, tablesFixed, sections }, ev] = await Promise.all([api('GET', B() + '/orders'), api('GET', B() + '/event-mode/now').catch(() => ({ event: null })), load('stays')]);
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.event = ev.event;
   if (pendingPick) { ui.picking = pendingPick; pendingPick = null; }
+  // Restaurant advances (26 Nov 2026): taken and held here as on the Counter.
+  ui.radv = can('pos.view') ? (await api('GET', B() + '/restaurant-advances').catch(() => ({ advances: [] }))).advances : [];
+  if (can('debtors.receive')) await load('payAccounts').catch(() => null);
   rerender = () => {
     const showGrid = can('orders.edit') && ui.tables.length > 0;
     // Orders that need the cashier first: bills waiting for money, then dishes not yet sent, then the rest.
@@ -637,11 +722,13 @@ async function tablesScreen() {
         ${can('orders.edit') ? html`<div class="startbar" role="group" aria-label="Start an order">
           <button class="btn ${ui.picking === 'table' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="table">New table order</button>
           <button class="btn ${ui.picking === 'room' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="room">Room service</button>
-          <button class="btn ${ui.picking === 'takeaway' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button></div>` : ''}
+          <button class="btn ${ui.picking === 'takeaway' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button>
+          ${can('debtors.receive') ? html`<button class="btn ${ui.advForm ? 'pri' : ''}" type="button" data-act="partyAdv">Party advance</button>` : ''}</div>` : ''}
       </div>
       ${errorBox()}
       ${ui.event ? eventStrip(ui.event) : ''}
       ${ui.picking ? newOrderForm() : ''}
+      ${ui.advForm ? advanceTakeForm() : ''}
       <div class="row between" style="margin-bottom:14px;align-items:center">
         <div class="counts" style="margin:0">
           <span class="badge billed">${n('billed')} to pay</span><span class="badge new">${n('new')} not sent</span>
@@ -652,6 +739,7 @@ async function tablesScreen() {
       </div>
       ${ui.found ? searchResults(ui.found) : ''}
       ${showGrid ? tableGrid() : ''}
+      ${(ui.radv ?? []).length ? advancesHeldList() : ''}
       <div class="sect"><h2>${showGrid ? 'Room service, takeaway and tabs' : 'Open orders'}</h2>
         ${rest.length ? html`<span class="small quiet">Bills to pay first, then oldest</span>` : ''}</div>
       ${rest.length ? html`<div class="olist">${rest.map(card)}</div>` : html`<p class="empty">${showGrid ? 'No room service, takeaway or tab open.' : 'No open orders. Start one above.'}</p>`}`));
@@ -864,6 +952,11 @@ async function orderScreen(id) {
   const [o, ev] = await Promise.all([api('GET', `${B()}/orders/${id}`), api('GET', `${B()}/event-mode/now`).catch(() => ({ event: null }))]);
   ui.order = o.order; ui.event = ev.event; ui.guest = o.order.guest;
   ui.cat = 'All'; ui.q = '';
+  // Advances on this order, and parties' advances waiting for a table (26 Nov 2026).
+  const adv = can('pos.view') ? (await api('GET', `${B()}/restaurant-advances`).catch(() => ({ advances: [] }))).advances : [];
+  ui.oadv = adv.filter((x) => x.orderId === id);
+  ui.waitAdv = adv.filter((x) => !x.orderId && x.partyDay && x.partyDay <= me.business.shiftDay);
+  if (can('debtors.receive')) await load('payAccounts').catch(() => null);
   rerender = () => {
     const o = ui.order;
     if (o.status === 'billed' || o.status === 'closed') { paint(shell('#/', html`<p class="empty">This order is already billed. <a href="#/">Back to tables</a></p>`)); return; }
@@ -947,12 +1040,16 @@ async function orderScreen(id) {
             <div class="row" style="margin-top:8px"><button class="btn pri" type="submit" data-act="tabGo" data-submit>Keep as tab</button></div></form>` : ''}
         </div>
         <div class="tk-foot">
+          ${(ui.oadv ?? []).map((x) => html`<div class="msg ok" style="display:block;margin-bottom:6px"><strong>Advance ${rs(x.leftPaise)}</strong> · ${x.guestName} · ${x.receipts ?? ''}<div class="small">It comes off the bill at payment.</div></div>`)}
+          ${(ui.waitAdv ?? []).length && can('orders.edit') ? html`<div class="msg warn" style="display:block;margin-bottom:6px"><strong>Party advance waiting</strong>
+            ${ui.waitAdv.map((x) => html`<div class="line" style="gap:8px;margin-top:4px"><span class="grow small">${x.guestName} · ${dayName(x.partyDay)}${x.partyTime ? `, ${x.partyTime}` : ''} · ${rs(x.leftPaise)}${x.phoneEnd ? ` · …${x.phoneEnd}` : ''}</span><button class="btn sm" type="button" data-act="advLinkHere" data-id="${x.id}">Put on this table</button></div>`)}</div>` : ''}
+          ${ui.advForm ? advanceTakeForm() : ''}
           <div class="tk-total"><span>${plural(count, 'item')}</span><strong>${rs(total)}</strong></div>
           <div class="tk-main ${can('bills.print') ? '' : 'one'}">
             <button class="btn ${unsent ? 'pri' : ''}" type="button" data-act="kot" ${unsent ? '' : 'disabled'}>Send KOT${unsent ? ` · ${newCount} new` : ''}</button>
             ${can('bills.print') ? html`<button class="btn ${o.lines.length && !unsent ? 'go' : ''}" type="button" data-act="toBill" ${!o.lines.length || unsent ? 'disabled' : ''}>Bill</button>` : ''}</div>
           ${unsent && can('bills.print') ? html`<p class="hint">Send the new dishes to the kitchen before billing.</p>` : ''}
-          <div class="tk-more">${count > 1 && !ui.splitting ? html`<button class="btn" type="button" data-act="splitAsk">Split bill</button>` : ''}
+          <div class="tk-more">${can('debtors.receive') && !ui.advForm ? html`<button class="btn" type="button" data-act="advOrder">Take advance</button>` : ''}${count > 1 && !ui.splitting ? html`<button class="btn" type="button" data-act="splitAsk">Split bill</button>` : ''}
             ${o.status === 'open' ? html`<button class="btn" type="button" data-act="keepTab">Keep as a tab</button>` : ''}
             ${!o.lines.some((l) => l.sentQty) ? html`<button class="btn danger" type="button" data-act="dropOrder">Cancel order</button>`
               : ui.wholeCancel ? '' : html`<button class="btn danger" type="button" data-act="wholeAsk">Cancel whole order</button>`}</div>
@@ -1348,9 +1445,23 @@ async function settleScreen(billId) {
   ui.ncPlace = ord?.kind === 'table' && (sections ?? []).some((x) => x.kind === 'nc' && x.tables.some((t) => t.toLowerCase() === ord.place.toLowerCase())) ? ord.place : null;
   // Room service, a private room or a dorm bed with a guest staying: the bill goes to their folio, ready to post (21 Nov 2026).
   ui.folio = !ui.ncPlace && ord?.stayId ? cache.stays.find((x) => x.id === ord.stayId) ?? null : null;
+  // A room's order not linked to anyone (opened before the guest came, 27 Nov 2026): the guest staying there now.
+  if (!ui.folio && !ui.ncPlace && ord?.kind === 'table') ui.folio = cache.stays.find((x) => roomKeyOf(x.room) === roomKeyOf(ord.place)) ?? null;
   ui.bill = bill; ui.others = orders.filter((o) => o.status === 'billed' && o.bill && o.bill.id !== billId);
   ui.together = []; ui.pays = []; ui.mode = ui.folio ? 'room' : 'cash';
   if (ui.folio) ui.debtorAccountId = ui.folio.accountId;
+  // An advance taken on this order is used by itself (26 Nov 2026): the guest pays only the rest.
+  if (ord && !ui.ncPlace) {
+    const adv = (await api('GET', `${B()}/restaurant-advances?orderId=${ord.id}`).catch(() => ({ advances: [] }))).advances;
+    let left = bill.totalPaise;
+    for (const x of adv) {
+      const use = Math.min(x.leftPaise, left);
+      if (use <= 0) continue;
+      ui.pays.push({ mode: 'advance', amount: rupees(use), amountPaise: use, debtorAccountId: x.accountId, label: 'Advance', detail: `${x.guestName} · ${x.receipts ?? ''}` });
+      left -= use;
+    }
+    if (ui.pays.length) ui.mode = 'cash';
+  }
   rerender = () => {
     const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
     const paid = ui.pays.reduce((s, p) => s + p.amountPaise, 0);
@@ -1521,11 +1632,14 @@ actions.addPay = () => {
 actions.quick = async (d) => {
   const due = ui.bill.totalPaise + ui.together.reduce((s, id) => s + ui.others.find((o) => o.bill.id === id).bill.totalPaise, 0);
   const acct = cache.payAccounts.find((a) => a.id === d.id);
-  ui.pays = [d.m === 'cash' ? { mode: 'cash', amount: rupees(due), amountPaise: due, label: 'Cash', detail: 'Exact' }
-    : { mode: 'upi', amount: rupees(due), amountPaise: due, payAccountId: acct.id, label: 'UPI', detail: acct.name }];
+  // Advances already on the bill stay; the rest is paid now (26 Nov 2026).
+  const kept = ui.pays.filter((p) => p.mode === 'advance');
+  const rest = due - kept.reduce((t, p) => t + p.amountPaise, 0);
+  ui.pays = [...kept, d.m === 'cash' ? { mode: 'cash', amount: rupees(rest), amountPaise: rest, label: 'Cash', detail: 'Exact' }
+    : { mode: 'upi', amount: rupees(rest), amountPaise: rest, payAccountId: acct.id, label: 'UPI', detail: acct.name }];
   ui.diff = null;
   // A refusal clears the payment again; a "billing name differs" question keeps it, so "Settle anyway" works.
-  try { await actions.settle({}); } catch (e) { ui.pays = []; throw e; }
+  try { await actions.settle({}); } catch (e) { ui.pays = ui.pays.filter((p) => p.mode === 'advance'); throw e; }
 };
 actions.settle = async (d) => {
   ui.error = null;
@@ -1821,6 +1935,15 @@ function todayView() {
   const items = [
     ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
+    ...(fd.nightsNotCharged ?? []).map((x) => ({ tone: 'bad', icon: '₹', title: `Nights not charged: ${x.room} · ${x.guestName}`,
+      sub: `staying till ${dayName(x.plan)}, rent till ${dayName(x.coveredTo)} (${plural(x.nights, 'night')}). Extend in Djubo: the rent comes with its email`, act: 'roomBill', id: x.stayId })),
+    ...(fd.missingBeds ?? []).map((x) => ({ tone: 'warn', icon: '⇆', title: `Beds missing: ${x.guestName} · ${x.room}`,
+      sub: `Booked ${x.booked}, ${x.have} in the POS${x.sharing ? ` (+${x.sharing} sharing)` : ''}. Assign ${x.missing} more, or mark as sharing`, act: 'bedsPanel', id: x.stayId })),
+    ...((fd.held ?? []).length ? [{ tone: fd.held.some((x) => x.reason?.startsWith('Cancelled')) ? 'bad' : 'warn', icon: '!', title: `${plural(fd.held.length, 'booking change')} to check before applying`,
+      sub: fd.held.slice(0, 3).map((x) => `${x.room ?? x.extRef} · ${x.guestName ?? ''}: ${x.reason}`).join(' · '), act: 'heldPanel' }] : []),
+    ...(fd.alerts.djuboToMode ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.djuboToMode, 'payment')} taken in Djubo · ${rs(fd.djubo.open.reduce((t, x) => t + x.amountPaise, 0))}`, sub: 'Counted on the day marked. Pick Cash, UPI or Card for each', act: 'djPanel' }] : []),
+    ...(fd.alerts.djuboLowered ? [{ tone: 'bad', icon: '₹', title: `Djubo lowered ${plural(fd.alerts.djuboLowered, 'payment')} after its receipt`, sub: 'Refund it, or correct it in Djubo', act: 'djPanel' }] : []),
+    ...(fd.alerts.rentTwice ?? []).map((x) => ({ tone: 'bad', icon: '₹', title: `Rent may be counted twice: ${x.room} · ${x.guestName}`, sub: `extra night added by hand, and Djubo sent ${x.refs} for it. Take the hand-added night off`, act: 'roomBill', id: x.stayId })),
     ...(fd.alerts.deskToTake ? [{ tone: 'warn', icon: '₹', title: `${plural(fd.alerts.deskToTake, 'payment')} entered in Djubo by reception`, sub: 'Take it here so a receipt prints', act: 'deskPanel' }] : []),
     ...(fd.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: 'C', title: `Form C not filed: ${x.room} · ${x.guestName}`, sub: `checked in ${x.hours} h ago · due within 24 h`, act: 'roomBill', id: x.stayId })),
     ...(a?.overstays ?? []).map((x) => ({ tone: 'bad', icon: '⏱', title: `Past check-out: ${x.room} · ${x.guestName}`, sub: `was due out ${dayName(x.plan)}`, act: 'roomBill', id: x.id })),
@@ -1841,9 +1964,10 @@ function todayView() {
       <section class="dcol"><div class="dch"><h2>Arriving</h2><span class="faint">${fd.arrivals.length}</span></div>
         ${fd.arrivals.length ? fd.arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
           html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}${(() => { const c = (ui.arrivals ?? []).find((y) => y.id === x.id)?.continues; return c ? ` · already in ${c.map((y) => y.room).join(', ')}: extension` : ''; })()}</small>`,
-          due(x.duePaise))) : html`<p class="empty">No more arrivals today.</p>`}</section>
+          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${due(x.duePaise)}`)) : html`<p class="empty">No more arrivals today.</p>`}</section>
       <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${fd.inHouse.length}</span></div>
-        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}</small>`, owes(x.balancePaise)))
+        ${fd.inHouse.length ? fd.inHouse.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>${x.plan ? `till ${dayName(x.plan)}` : 'no check-out date'}${x.djuboPaise ? ' · pick how the Djubo payment was paid' : ''}</small>`,
+          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${owes(x.balancePaise - (x.djuboPaise ?? 0))}`))
           : html`<p class="empty">No guests in house.</p>`}</section>
       <section class="dcol"><div class="dch"><h2>Leaving today</h2><span class="faint">${fd.leaving.length}</span></div>
         ${fd.leaving.length ? fd.leaving.map((x) => row(html`data-act="roomBill" data-id="${x.id}"`, html`<strong>${x.room} · ${x.guestName}</strong><small>check-out 11 am</small>`,
@@ -2465,6 +2589,10 @@ function roomPicker() {
     <label class="tickline small"><input type="checkbox" data-act="ciMultiTog" ${ui.ciMulti ? 'checked' : ''}> Several rooms or beds for this guest${ui.ciMulti ? ': tap each one; the first holds the bill' : ''}</label>
     ${(ui.ciTaken ?? []).length ? html`<div class="msg warn">Djubo has ${ui.ciTaken.join(', ')} for this booking, but ${ui.ciTaken.length === 1 ? 'it is' : 'they are'} taken now. Choose ${ui.ciTaken.length === 1 ? 'another' : 'others'} below, or check the guest there out first.</div>` : ''}
     ${(ui.ciRooms ?? []).length ? html`<div class="msg ok">Checking in to <strong>${[ui.room, ...ui.ciRooms].join(', ')}</strong> · one bill, on ${ui.room}</div>` : ''}
+    ${ui.bookingId && ui.room && (ui.ciBooked ?? 1) > 1 + (ui.ciMulti ? (ui.ciRooms ?? []).length : 0) ? html`<div class="msg warn" style="display:block"><strong>Booked for ${ui.ciBooked} rooms or beds, ${1 + (ui.ciMulti ? (ui.ciRooms ?? []).length : 0)} picked.</strong>
+      Pick the others where the guests are, or:
+      <label class="tickline small" style="margin-top:4px"><input type="checkbox" data-model="ciShare" data-live ${ui.ciShare ? 'checked' : ''}> The others share (no extra beds)</label>
+      <div class="small">Not ticked: the check-in goes ahead and Today shows "Beds missing" until they are assigned.</div></div>` : ''}
     <div class="rpick">${groups.length ? groups.map((g) => html`<div class="rpg"><div class="rph"><strong>${g.x.name}</strong><span class="small quiet">${g.free} of ${g.total} free</span></div>
       <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken && !(ui.ciLeft && ui.ciOutToo) ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
         title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}" ${u.taken && ui.ciLeft && ui.ciOutToo ? 'data-past="1"' : ''}>${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
@@ -2485,6 +2613,92 @@ const stampText = (v) => {
   return `${dayName(d)}, ${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`;
 };
 /** The booking card (24 Nov 2026): who, how long, where it was booked, when, the room, and what is still to collect. */
+// ---------- each booking's mail history and changes held for a person (26 Nov 2026)
+const HIST_STATUS = { applied: ['cur', 'Used'], older: ['', 'Older: not used'], held: ['held', 'Waiting for a check'], kept: ['', 'Kept as it was'] };
+function histList(list) {
+  if (!list.length) return html`<p class="small quiet">No emails kept for this booking yet.</p>`;
+  const first = list.findIndex((x) => x.status === 'applied');
+  return html`<div class="hist">${list.map((x, i) => { const [cls, label] = HIST_STATUS[x.status] ?? ['', x.status];
+    return html`<div class="hev ${i === first ? 'cur' : ''} ${x.status}"><span class="hdot" aria-hidden="true"></span><div>
+      <div class="line" style="gap:8px;flex-wrap:wrap"><strong>${x.cancelled ? 'Cancelled' : x.subject?.match(/revised|modif/i) ? 'Revised' : 'Booking'} · ${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef}</strong>
+        <span class="status ${i === first ? 'ok' : cls === 'held' ? 'warn' : 'mute'}">${i === first ? 'The bill follows this one' : label}</span></div>
+      <div class="small quiet">${x.source === 'djubo' ? 'Djubo changed' : 'Email came'} ${dateTime(x.orderAt)}${x.enteredBy ? ` by ${x.enteredBy}` : ''}${x.decidedBy ? ` · ${x.status === 'kept' ? 'kept' : 'applied'} by ${x.decidedBy}` : ''}</div>
+      <div class="small">Total ${x.amountPaise === null ? '—' : rs(x.amountPaise)} · Paid ${x.paidPaise === null ? '—' : rs(x.paidPaise)}${x.checkIn ? ` · ${dayName(x.checkIn)} → ${dayName(x.checkOut)}` : ''}${x.roomLabels?.length ? ` · ${x.roomLabels.join(', ')}` : ''}</div>
+      ${x.heldReason ? html`<div class="small" style="color:var(--warn)">${x.heldReason}</div>` : ''}</div></div>`; })}</div>`;
+}
+actions.bkHist = async (d) => {
+  if (ui.bkHist?.id === d.id) { ui.bkHist = null; rerender(); return; }
+  ui.bkHist = { id: d.id, list: (await api('GET', `${B()}/bookings/${d.id}/history`)).history }; rerender();
+};
+const heldVal = (x, k) => (k === 'status' ? (x.cancelled ? 'Cancelled' : x.status === 'checked_in' ? 'Checked in' : x.status ?? 'Confirmed') : x[k] === null || x[k] === undefined ? '—' : rs(x[k]));
+function heldPanel() {
+  const list = ui.fd?.held ?? [];
+  return html`<div class="dhead"><h2>Booking changes to check</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+    <p class="small quiet">These changes from Djubo or MakeMyTrip were not applied by themselves: check them in Djubo, then apply or keep. Until then the bill stays as it is.</p>
+    ${list.length ? list.map((x) => html`<div class="msg ${x.reason?.startsWith('Cancelled') ? 'bad' : 'warn'}" style="display:block;margin-top:10px">
+      <strong>${x.reason}: ${x.room ? `${x.room} · ` : ''}${x.guestName ?? 'No name'}</strong>
+      <div class="small">${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef} · changed ${dateTime(x.at)}${x.mail.enteredBy ? ` by ${x.mail.enteredBy}` : ''}</div>
+      <div class="scroll"><table class="t" style="margin-top:6px"><thead><tr><th></th><th class="num">Now</th><th class="num">The new email says</th></tr></thead><tbody>
+        ${x.mail.cancelled || x.now.status === 'checked_in' ? html`<tr><td>Status</td><td class="num">${x.now.status === 'checked_in' ? 'Checked in' : 'Confirmed'}</td><td class="num"><strong>${x.mail.cancelled ? 'Cancelled' : 'Confirmed'}</strong></td></tr>` : ''}
+        <tr><td>Total</td><td class="num">${heldVal(x.now, 'amountPaise')}</td><td class="num">${x.mail.cancelled ? '—' : heldVal(x.mail, 'amountPaise')}</td></tr>
+        <tr><td>Paid</td><td class="num">${heldVal(x.now, 'paidPaise')}</td><td class="num">${heldVal(x.mail, 'paidPaise')}</td></tr>
+        <tr><td>Dates</td><td class="num">${x.now.checkIn ? `${dayName(x.now.checkIn)} → ${dayName(x.now.checkOut)}` : '—'}</td><td class="num">${x.mail.checkIn ? `${dayName(x.mail.checkIn)} → ${dayName(x.mail.checkOut)}` : '—'}</td></tr></tbody></table></div>
+      ${x.reason?.startsWith('Cancelled') ? html`<div class="small">Often a room change or a rebooking in Djubo: if the guest is staying, keep it, and the new booking's rent comes when it is linked. Apply only if the guest has really left.</div>` : ''}
+      <div class="row" style="margin-top:8px"><button class="btn" type="button" data-act="heldKeep" data-b="${x.bookingId}" data-m="${x.mailId}">Keep as it is</button>
+        <button class="btn ${x.reason?.startsWith('Cancelled') ? '' : 'pri'}" type="button" data-act="heldApply" data-b="${x.bookingId}" data-m="${x.mailId}">${x.reason?.startsWith('Cancelled') ? 'Apply: the guest left' : 'Apply the change'}</button></div></div>`)
+      : html`<p class="empty">Nothing to check.</p>`}`;
+}
+// A booking's rooms or beds missing in the POS (26 Nov 2026): add them where the guests are, or mark that they share.
+function bedsPanel() {
+  const x = (ui.fd?.missingBeds ?? []).find((y) => y.stayId === ui.bedsFor);
+  if (!x) return html`<div class="dhead"><h2>Assign beds</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="">Close</button></div><p class="empty">Nothing missing now.</p>`;
+  const busy = new Set((cache.stays ?? []).map((s) => roomKeyOf(s.room)));
+  const secs = (ui.roomSecs ?? []).map((sec) => ({ name: sec.name, beds: (sec.tables ?? []).filter((t) => !/· whole$/.test(t) && !busy.has(roomKeyOf(t))) })).filter((sec) => sec.beds.length);
+  const mine = secs.findIndex((sec) => (ui.roomSecs.find((r) => r.name === sec.name)?.tables ?? []).some((t) => roomKeyOf(t) === roomKeyOf(x.room)));
+  if (mine > 0) secs.unshift(...secs.splice(mine, 1));
+  const picked = ui.bedsPick ?? [];
+  const djubo = (x.djuboBeds ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+  const djuboTaken = djubo.filter((t) => busy.has(roomKeyOf(t)) && roomKeyOf(t) !== roomKeyOf(x.room));
+  return html`<div class="dhead"><h2>Assign beds · ${x.guestName}</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>${errorBox()}
+    <p class="small">${x.extRef ? `Djubo ${x.extRef} · ` : ''}<strong>booked ${x.booked}</strong> · in the POS: <strong>${x.have}</strong>${x.sharing ? ` (+${x.sharing} sharing)` : ''} · first room <strong>${x.room}</strong></p>
+    ${djubo.length ? html`<div class="msg warn" style="display:block">Djubo has <strong>${djubo.join(', ')}</strong> for this booking${djuboTaken.length ? html`, but ${djuboTaken.join(', ')} ${djuboTaken.length === 1 ? 'has' : 'have'} another guest` : ''}. Djubo's beds are only a suggestion: pick where the guests really are.</div>` : ''}
+    <h3 style="margin-top:10px">Free beds tonight, same kind first · pick ${x.missing}</h3>
+    ${secs.length ? secs.map((sec) => html`<div class="small quiet" style="margin-top:6px">${sec.name}</div><div class="chips">${sec.beds.map((t) => html`<button type="button" class="chip" aria-pressed="${picked.includes(t)}" data-act="bedsToggle" data-id="${t}">${t}</button>`)}</div>`)
+      : html`<p class="empty">No free beds tonight.</p>`}
+    <div class="row" style="margin-top:12px"><button class="btn pri" type="button" data-act="bedsGo" ${picked.length ? '' : 'disabled'}>${picked.length ? `Add ${picked.join(', ')} to ${x.guestName}'s group` : 'Pick the beds'}</button>
+      <button class="btn" type="button" data-act="bedsShare">${x.missing === 1 ? 'Sharing (no extra bed)' : `The other ${x.missing} share (no extra beds)`}</button></div>
+    <p class="small quiet">Added beds join the group: food and payments go on ${x.room}'s bill; rent stays as the booking has it.</p>`;
+}
+actions.bedsPanel = (d) => { ui.roomBill = null; ui.chartSel = null; ui.bedsFor = d.id; ui.bedsPick = []; ui.error = null; ui.drawer = bedsPanel; rerender(); };
+actions.bedsToggle = (d) => { const p = ui.bedsPick ?? []; ui.bedsPick = p.includes(d.id) ? p.filter((t) => t !== d.id) : [...p, d.id]; rerender(); };
+const bedsDone = async (text) => {
+  [ui.fd] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), load('stays')]);
+  cache.stays = (await api('GET', B() + '/stays')).stays ?? cache.stays;
+  flash = { kind: 'ok', text }; ui.bedsPick = [];
+  if (!(ui.fd?.missingBeds ?? []).some((y) => y.stayId === ui.bedsFor)) ui.drawer = null;
+  rerender();
+};
+actions.bedsGo = async () => {
+  const x = ui.fd.missingBeds.find((y) => y.stayId === ui.bedsFor);
+  await api('POST', `${B()}/stays/${ui.bedsFor}/add-beds`, { rooms: ui.bedsPick });
+  await bedsDone(`${ui.bedsPick.join(', ')} added to ${x.guestName}'s group.`);
+};
+actions.bedsShare = async () => {
+  const x = ui.fd.missingBeds.find((y) => y.stayId === ui.bedsFor);
+  await api('POST', `${B()}/stays/${ui.bedsFor}/sharing`, { beds: x.missing });
+  await bedsDone(`Marked as sharing: no extra beds for ${x.guestName}.`);
+};
+actions.heldPanel = () => { ui.roomBill = null; ui.chartSel = null; ui.drawer = heldPanel; rerender(); };
+const heldDo = async (d, what) => {
+  await api('POST', `${B()}/bookings/${d.b}/versions/${encodeURIComponent(d.m)}/${what}`, {});
+  ui.fd = await api('GET', B() + '/frontdesk/today').catch(() => ui.fd);
+  flash = { kind: 'ok', text: what === 'apply' ? 'Change applied.' : 'Kept as it was.' };
+  if (!(ui.fd?.held ?? []).length) ui.drawer = null;
+  rerender();
+};
+actions.heldApply = (d) => heldDo(d, 'apply');
+actions.heldKeep = (d) => heldDo(d, 'keep');
+
 function bookingCard(a, onBill = false) {
   const nights = a.checkIn && a.checkOut ? Math.max(1, Math.round((Date.parse(a.checkOut) - Date.parse(a.checkIn)) / 86400000)) : null;
   // On the room bill, the bill itself says what is left to collect; the card shows only what the booking says.
@@ -2519,7 +2733,73 @@ function folioLabel(l) {
   })[l.kind] ?? l.kind;
 }
 /** The room's bill (24 Nov 2026): rent, charges, food, payments, what is still to collect, and check-out with the invoice. */
+// ---------- money reception marked in Djubo (26 Nov 2026): counted on the day it was marked; pick how it was paid.
+const djDone = {};   // mailId -> its receipt, picked in this session (for Print)
+function djRow(x) {
+  const k = x.mailId;
+  const done = djDone[k];
+  const accs = (cache.payAccounts ?? []).filter((a) => a.active);
+  return html`<div class="djrow"><div class="line" style="gap:8px;align-items:baseline"><span class="grow"><strong>${x.guestName ?? 'No name'}</strong> · Djubo ${x.extRef}${x.checkIn ? ` · stay ${dayName(x.checkIn)} → ${dayName(x.checkOut)}` : ''}
+      <span class="small quiet" style="display:block">Marked by ${x.by ?? '?'}, ${dateTime(x.at)}</span></span><strong class="num">${rs(x.amountPaise)}</strong></div>
+    ${x.settlementId || done ? html`<div class="line" style="gap:8px"><span class="status ok">${MODE_NAME[done?.payments[0].mode ?? x.mode] ?? x.mode} · ${done?.receiptNo ?? x.receiptNo}</span>
+        ${done ? html`<button class="btn sm ghost" type="button" data-act="djPrint" data-m="${k}">Print receipt</button>` : ''}</div>`
+      : html`<div class="chips" role="group" aria-label="How ${x.guestName ?? 'the guest'} paid">${['cash', 'upi', 'card'].map((m) => html`<button type="button" class="chip" aria-pressed="${ui.djUpi === k && m === 'upi'}" data-act="djMode" data-b="${x.bookingId}" data-m="${k}" data-mode="${m}">${MODE_NAME[m]}</button>`)}
+          <button type="button" class="chip" data-act="djLinkOpen" data-b="${x.bookingId}" data-m="${k}">Already taken in the POS</button>
+          <span class="status warn">Pick how it was paid</span></div>
+        ${ui.djLink?.mailId === k ? html`<div style="margin-top:4px">${ui.djLink.list.length ? html`<div class="small quiet">The same money, already taken here: pick its receipt (no new receipt is made)</div>
+            <div class="chips">${ui.djLink.list.map((r) => html`<button type="button" class="chip" data-act="djLinkGo" data-b="${x.bookingId}" data-m="${k}" data-id="${r.settlementId}">${r.receiptNo} · ${MODE_NAME[r.mode] ?? r.mode} · ${rs(r.amountPaise)} · ${dateTime(r.at)}</button>`)}</div>`
+          : html`<div class="small" style="color:var(--warn)">No receipt for this guest in the last 14 days that isn't linked already. Pick Cash, UPI or Card instead.</div>`}</div>` : ''}
+        ${ui.djUpi === k ? html`<div class="chips" style="margin-top:4px"><span class="small quiet">QR paid into</span>${accs.map((a) => html`<button type="button" class="chip" data-act="djUpiAcc" data-b="${x.bookingId}" data-m="${k}" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}`}</div>`;
+}
+async function djSave(bookingId, mailId, mode, payAccountId) {
+  const r = await api('POST', `${B()}/bookings/${bookingId}/djubo-paid`, { mailId, mode, payAccountId });
+  djDone[mailId] = r.receipt; ui.djUpi = null;
+  flash = { kind: 'ok', text: `${r.receipt.receiptNo}: ${rs(r.receipt.totalPaise)} from ${r.receipt.name}, ${MODE_NAME[mode]}, counted on ${dayName(r.shiftDay)}.` };
+  if (location.hash.startsWith('#/rooms')) {
+    const [fd, bill] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), ui.roomBill ? api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`) : null]);
+    ui.fd = fd; if (bill) ui.roomBill = bill;
+    rerender();
+  } else route();
+}
+actions.djMode = async (d) => {
+  if (d.mode === 'upi') {
+    const accs = (cache.payAccounts ?? []).filter((a) => a.active);
+    if (accs.length !== 1) { ui.djUpi = d.m; rerender(); return; }
+    return djSave(d.b, d.m, 'upi', accs[0].id);
+  }
+  return djSave(d.b, d.m, d.mode);
+};
+actions.djUpiAcc = (d) => djSave(d.b, d.m, 'upi', d.id);
+actions.djLinkOpen = async (d) => {
+  if (ui.djLink?.mailId === d.m) { ui.djLink = null; rerender(); return; }
+  const r = await api('GET', `${B()}/bookings/${d.b}/djubo-receipts?mailId=${encodeURIComponent(d.m)}`);
+  ui.djLink = { mailId: d.m, list: r.receipts }; rerender();
+};
+actions.djLinkGo = async (d) => {
+  const r = await api('POST', `${B()}/bookings/${d.b}/djubo-link`, { mailId: d.m, settlementId: d.id });
+  ui.djLink = null;
+  flash = { kind: 'ok', text: `Linked to ${r.receiptNo}: counted once, no new receipt.` };
+  if (location.hash.startsWith('#/rooms')) {
+    const [fd, bill] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), ui.roomBill ? api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`) : null]);
+    ui.fd = fd; if (bill) ui.roomBill = bill;
+    rerender();
+  } else route();
+};
+actions.djPrint = (d) => { if (djDone[d.m]) printJobs([{ kind: 'bill', html: asHtml(receiptSlip(djDone[d.m])) }]); };
+actions.djPanel = () => {
+  ui.roomBill = null; ui.chartSel = null;
+  ui.drawer = () => { const f = ui.fd?.djubo ?? { open: [], lowered: [] }; return html`<div class="dhead"><h2>Taken in Djubo by reception</h2><button class="btn ghost" type="button" data-act="pick" data-k="drawer" data-id="" title="Close (Esc)">Close</button></div>
+    <p class="small quiet">Money reception marked in Djubo, counted on the day it was marked. Pick how each was paid: that makes its receipt. A day can't close until each of its payments has one.</p>
+    ${f.lowered.length ? html`<div class="msg warn" style="display:block">${f.lowered.map((x) => html`<div><strong>Djubo lowered ${x.guestName ?? x.extRef} by ${rs(x.paise)}</strong> after its receipt: refund it, or correct it in Djubo.</div>`)}</div>` : ''}
+    ${f.open.length ? f.open.map(djRow) : html`<p class="empty">Nothing waiting.</p>`}`; };
+  rerender();
+};
+
 function roomBillPanel(r) {
+  // Money reception marked in Djubo for this stay, waiting for its mode (26 Nov 2026): already taken, so not to collect.
+  const djWait = r.djubo ?? [];
+  const djSum = djWait.reduce((t, x) => t + x.amountPaise, 0);
+  if (djSum) r = { ...r, balancePaise: r.balancePaise - djSum };
   const st = r.stay;
   const grp = (st.group ?? []).filter((g) => !g.checkedOutAt);
   const name = `Room ${[st.room, ...grp.map((g) => g.room)].join(', ')} · ${st.guestName}`;
@@ -2540,22 +2820,27 @@ function roomBillPanel(r) {
           ${ui.tfAcc === 'new' ? html`<div class="grid2"><label class="f">Company or person<input class="in" data-model="tfName" value="${ui.tfName ?? st.company ?? ''}"></label><label class="f">Phone<input class="in" inputmode="tel" data-model="tfPhone" value="${ui.tfPhone ?? ''}"></label></div>` : ''}`}
       <label class="f">Amount (₹)<input class="in" inputmode="decimal" data-model="tfAmt" value="${ui.tfAmt ?? rupees(r.balancePaise)}"></label>
       <div class="row"><button class="btn pri" type="submit" data-act="rbTransfer" data-submit>Move it</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
-    if (f === 'move' && ui.mvSwap) return html`<form class="panel" style="margin-top:10px"><h3>Swap rooms with another guest</h3>
-      <div class="chips"><button type="button" class="chip" aria-pressed="false" data-act="pick" data-k="mvSwap" data-id="">To a free room</button><button type="button" class="chip" aria-pressed="true">Swap with another guest</button></div>
-      <div class="grid2"><label class="f">Swap with<select class="in" data-model="swWith"><option value="">Choose</option>${(cache.stays ?? []).filter((y) => y.id !== st.id && !/\(past stay\)$/.test(y.room)).map((y) => html`<option value="${y.id}" ${ui.swWith === y.id ? 'selected' : ''}>${y.room} · ${y.guestName}</option>`)}</select></label>
-        <label class="f">Why (optional)<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. guests asked to exchange"></label></div>
-      <p class="small quiet">${st.guestName} goes to the other room and that guest comes to ${st.room}, each with their bill and open food orders. Neither room is marked dirty. Change both in Djubo too.</p>
-      <div class="row"><button class="btn pri" type="submit" data-act="rbSwap" data-submit>Swap rooms</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
-    if (f === 'move') return html`<form class="panel" style="margin-top:10px"><h3>Move the guest to another room</h3>
-      <div class="chips"><button type="button" class="chip" aria-pressed="true">To a free room</button><button type="button" class="chip" aria-pressed="false" data-act="pick" data-k="mvSwap" data-id="1">Swap with another guest</button></div>
-      <div class="grid2"><label class="f">New room or bed<select class="in" data-model="mvRoom"><option value="">Choose</option>${ui.roomSecs.flatMap((x) => x.tables ?? []).filter((t) => t !== st.room && !/· whole$/.test(t) && !(cache.stays ?? []).some((y) => y.room === t)).map((t) => html`<option ${ui.mvRoom === t ? 'selected' : ''}>${t}</option>`)}</select></label>
-        <label class="f">Why (optional)<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="e.g. AC not working, upgrade"></label></div>
-      <p class="small quiet">The bill, open food orders and history go with the guest. ${st.room} is marked dirty. Change the room in Djubo too.</p>
-      <div class="row"><button class="btn pri" type="submit" data-act="rbMove" data-submit>Move guest</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
-    if (f === 'extend') return html`<form class="panel" style="margin-top:10px"><h3>Extend the stay</h3>
-      <div class="grid2"><label class="f">New check-out<input class="in" type="date" data-model="exTo" value="${ui.exTo ?? addDays(st.checkOutPlan ?? me.business.shiftDay, 1)}"></label>
-        <label class="f">Rate per extra night (₹, GST incl.; empty if Djubo will send it)<input class="in" inputmode="decimal" data-model="exRate" value="${ui.exRate ?? ''}"></label></div>
-      ${r.booking ? html`<p class="small quiet">This guest came through Djubo: extend it in Djubo too. Leave the rate empty if Djubo's revised mail will add the rent.</p>` : ''}
+    // Move room (27 Nov 2026): one box, the form and what moves under it, filled in as soon as a room or guest is picked.
+    if (f === 'move') {
+      const swap = !!ui.mvSwap;
+      return html`<form class="panel" style="margin-top:10px"><h3>${swap ? 'Swap rooms with another guest' : 'Move the guest to another room'}</h3>
+      <div class="chips"><button type="button" class="chip" aria-pressed="${!swap}" data-act="mvKind" data-id="">To a free room</button><button type="button" class="chip" aria-pressed="${swap}" data-act="mvKind" data-id="1">Swap with another guest</button></div>
+      <div class="grid2">${swap
+        ? html`<label class="f">Swap with<select class="in" data-model="swWith" data-act-change="mvLoad"><option value="">Choose</option>${(cache.stays ?? []).filter((y) => y.id !== st.id && !/\(past stay\)$/.test(y.room)).map((y) => html`<option value="${y.id}" ${ui.swWith === y.id ? 'selected' : ''}>${y.room} · ${y.guestName}</option>`)}</select></label>`
+        : html`<label class="f">New room or bed<select class="in" data-model="mvRoom" data-act-change="mvLoad"><option value="">Choose</option>${ui.roomSecs.flatMap((x) => x.tables ?? []).filter((t) => t !== st.room && !/· whole$/.test(t) && !(cache.stays ?? []).some((y) => y.room === t)).map((t) => html`<option ${ui.mvRoom === t ? 'selected' : ''}>${t}</option>`)}</select></label>`}
+        <label class="f">Why (optional)<input class="in" data-model="mvWhy" value="${ui.mvWhy ?? ''}" placeholder="${swap ? 'e.g. guests asked to exchange' : 'e.g. AC not working, upgrade'}"></label></div>
+      ${mvBox(st)}
+      <div class="row"><button class="btn pri" type="submit" data-act="${swap ? 'rbSwap' : 'rbMove'}" data-submit>${mvButton(st)}</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
+    }
+    // Extensions are made in Djubo (26 Nov 2026): the date and rent follow its mail. A manager can extend here when Djubo is down.
+    if (f === 'djuboExt') return html`<div class="msg ok" style="display:block;margin-top:10px"><strong>Extend this booking in Djubo</strong>
+      <div class="small">Change the check-out in Djubo${r.booking ? ` (Djubo ${r.booking.extRef})` : ''}. The POS updates the date and the rent by itself when Djubo's email comes, usually in a few minutes; a new booking from Djubo for the extra nights shows under Arrivals as "extension": press Continue on it.</div>
+      ${isMgr() ? html`<div class="row" style="margin-top:8px"><button class="btn sm ghost" type="button" data-act="rbForm" data-f="extend">Djubo is down: extend without Djubo (manager)</button></div>` : ''}</div>`;
+    if (f === 'extend') return html`<form class="panel" style="margin-top:10px"><h3>Extend without Djubo (manager)</h3>
+      <div class="grid3"><label class="f">New check-out<input class="in" type="date" data-model="exTo" value="${ui.exTo ?? addDays(st.checkOutPlan ?? me.business.shiftDay, 1)}"></label>
+        <label class="f">Rent per extra night (₹, GST incl.)<input class="in" inputmode="decimal" data-model="exRate" value="${ui.exRate ?? ''}"></label>
+        <label class="f">Why not in Djubo<input class="in" data-model="exWhy" value="${ui.exWhy ?? ''}" placeholder="e.g. Djubo down"></label></div>
+      <p class="small quiet">Marked "by hand (manager)". When Djubo's booking for these nights comes and is continued, this rent gives way to Djubo's. Put it in Djubo as soon as it is back, so OTAs don't sell the room.</p>
       <div class="row"><button class="btn pri" type="submit" data-act="rbExtend" data-submit>Extend</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
     if (f === 'checkout') return html`<form class="panel" style="margin-top:10px"><h3>${r.rentPaise > 0 ? 'Check out and print the room invoice' : r.booking?.fromReport && r.booking.amountPaise == null ? 'Check out (no POS invoice: total rent not known, stay began before the POS)' : 'Check out (no room rent on this bill: no invoice)'}</h3>
       <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-model="coCo" data-live ${ui.coCo ?? !!st.company ? 'checked' : ''}> Invoice in a company's name (GST claim)</label>
@@ -2580,9 +2865,11 @@ function roomBillPanel(r) {
       <div class="small">This stay began before the POS: its booking came from Djubo's daily report, which has only what is still to collect (${rs(r.booking.reportDuePaise ?? 0)}), and that must be paid first. Djubo or the OTA has its invoice. To print a POS invoice instead, type the total rent from Djubo (optional).</div>
       <div class="row" style="margin-top:6px"><input class="in" inputmode="decimal" data-model="rptRent" value="${ui.rptRent ?? ''}" placeholder="Total rent in Djubo (₹)" style="max-width:220px">
         <button class="btn pri" type="submit" data-act="reportRent" data-id="${st.id}" data-submit>Save total</button></div></form>` : ''}
-    ${r.booking ? bookingCard(r.booking, true) : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
+    ${r.booking ? html`${bookingCard(r.booking, true)}<div class="row" style="margin:4px 0 8px"><button class="btn sm ghost" type="button" data-act="bkHist" data-id="${r.booking.id}">${ui.bkHist?.id === r.booking.id ? 'Hide email history' : 'Email history'}</button></div>
+      ${ui.bkHist?.id === r.booking.id ? histList(ui.bkHist.list) : ''}` : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
       ${r.lines.map((l) => html`<tr><td>${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
+      ${djWait.map((x) => html`<tr><td>Paid at reception, in Djubo<div class="small quiet">${dateTime(x.at)} · ${x.by ?? ''} · pick how it was paid, below</div></td><td class="num">${rs(-x.amountPaise)}</td></tr>`)}
       <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
     </tbody></table>
     ${inv ? html`<div class="msg ok" style="margin-top:8px;display:block">Invoice <strong>${inv.invoiceNo}</strong> · ${rs(inv.totalPaise)}${inv.billToName ? ` · to ${inv.billToName}${inv.billToGstin ? ` (${inv.billToGstin})` : ''}` : ''}
@@ -2597,10 +2884,11 @@ function roomBillPanel(r) {
       ${r.rentPaise > 0 ? html`<button class="btn ghost" type="button" data-act="rbForm" data-f="lower">Take rent off</button>` : ''}
       ${r.balancePaise > 0 ? html`<button class="btn" type="button" data-act="rbForm" data-f="transfer">Bill to company / another room</button>` : ''}
       <button class="btn" type="button" data-act="rbForm" data-f="move">Move room</button>
-      <button class="btn" type="button" data-act="rbForm" data-f="extend">Extend stay</button>
+      <button class="btn" type="button" data-act="rbForm" data-f="${f === 'djuboExt' ? '' : 'djuboExt'}">Extend in Djubo</button>
       <button class="btn ghost" type="button" data-act="rbGrc" data-id="${st.id}">Registration card</button>
       ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
-      ${r.balancePaise === 0 ? (() => {
+      ${djWait.length ? html`<div class="msg warn" style="display:block;width:100%"><strong>Paid at reception, in Djubo: pick how</strong>${djWait.map(djRow)}<div class="small">Check-out waits for this.</div></div>` : ''}
+      ${r.balancePaise === 0 && !djWait.length ? (() => {
         // One click (25 Nov 2026): the form opens only for a company invoice, or when a manager must approve (no room rent).
         const rentUnknown = !!(r.booking?.fromReport && r.booking.amountPaise == null);
         return r.rentPaise <= 0 && !rentUnknown && !isMgr()
@@ -2615,7 +2903,7 @@ function roomBillPanel(r) {
 actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbForm = null; ui.error = null; if (!cache.credit) await load('credit'); rerender(); scrollTo(0, 0); };
 actions.rbClose = () => { ui.roomBill = null; ui.rbForm = null; rerender(); };
 actions.rbForm = async (d) => {
-  ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.mvSwap = null; ui.error = null;
+  ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.mvSwap = null; ui.mvCheck = null; ui.mvAtt = null; ui.mvRoom = ui.swWith = undefined; ui.error = null;
   if (d.f === 'transfer') await load('credit');
   // No room rent on the bill: a manager approves the check-out (25 Nov 2026).
   if (d.f === 'checkout' && !isMgr() && (ui.roomBill?.rentPaise ?? 0) <= 0 && !ui.approvers) { ui.approvers = (await api('GET', `${B()}/approvers`).catch(() => ({ approvers: [] }))).approvers; ui.apId = ui.approvers[0]?.id; ui.apPin = ''; }
@@ -2633,23 +2921,64 @@ actions.rbTransfer = async () => {
   ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/transfer`, body);
   ui.rbForm = null; flash = { kind: 'ok', text: 'Moved off the room bill.' }; await load('stays', 'credit'); rerender();
 };
+const mvFor = () => (ui.mvSwap ? `w:${ui.swWith ?? ''}` : `r:${ui.mvRoom ?? ''}`);
+const mvCk = () => (ui.mvCheck && ui.mvCheckFor === mvFor() ? ui.mvCheck : null);
+function mvButton(st) {
+  const ck = mvCk();
+  if (ui.mvSwap) return ck ? `Swap with ${ck.guests[1].guestName}` : 'Swap rooms';
+  return ui.mvRoom ? `Move ${st.guestName} to ${ui.mvRoom}` : 'Move guest';
+}
+function mvBox(st) {
+  const ck = mvCk();
+  if (!ck) return html`<p class="small quiet">${ui.mvSwap ? 'Choose the guest' : 'Choose the room'} to see what moves with ${st.guestName}.</p>`;
+  const ordName = (o) => `Food order${o.billNo ? ` · bill ${o.billNo}, printed, not paid` : o.status === 'tab' ? ' · on a tab' : ' · open'}${o.items ? ` · ${o.items}` : ''}`;
+  const guest = (g) => {
+    const food = g.orders.reduce((t, o) => t + o.totalPaise, 0);
+    return html`<div class="msg ok" style="display:flex;flex-direction:column;gap:4px"><strong>Goes with ${g.guestName} to ${g.to}</strong>
+      <div class="row small"><span>Room bill (rent, payments, food already on it)</span><span class="num">${rs(g.balancePaise)}</span></div>
+      ${g.orders.map((o) => html`<div class="row small"><span>${ordName(o)}</span><span class="num">${rs(o.totalPaise)}</span></div>`)}
+      ${g.orders.length ? html`<div class="row small"><strong>Due with these orders</strong><strong class="num">${rs(g.balancePaise + food)}</strong></div>` : ''}</div>`;
+  };
+  const loose = ck.loose.filter((x) => x.orders.length).map((x) => html`<div class="msg warn" style="display:flex;flex-direction:column;gap:6px"><strong>On the ${x.room} table, on nobody's bill</strong>
+    ${x.orders.map((o) => html`<div class="row small"><span>${ordName(o)} · ${dateTime(o.openedAt)}</span><span class="num">${rs(o.totalPaise)}</span></div>
+      <div class="chips">${ck.guests.map((g) => html`<button type="button" class="chip" aria-pressed="${ui.mvAtt?.[o.id] === g.stayId}" data-act="mvAtt" data-o="${o.id}" data-s="${g.stayId}">Put on ${g.guestName}'s bill</button>`)}
+        <button type="button" class="chip" aria-pressed="${!ui.mvAtt?.[o.id]}" data-act="mvAtt" data-o="${o.id}" data-s="">Leave on the ${x.room} table</button></div>`)}</div>`);
+  return html`<div style="display:flex;flex-direction:column;gap:8px">${ck.guests.map(guest)}${loose}
+    <p class="small quiet">${ui.mvSwap ? 'Neither room is marked dirty.' : `${st.room} is marked dirty.`} Change the room in Djubo too.</p></div>`;
+}
+actions.mvKind = (d) => { ui.mvSwap = d.id || null; ui.mvCheck = null; rerender(); };
+actions.mvAtt = (d) => { ui.mvAtt = { ...ui.mvAtt, [d.o]: d.s }; rerender(); };
+actions.mvLoad = async () => {
+  const key = mvFor();
+  const q = ui.mvSwap ? (ui.swWith ? `with=${encodeURIComponent(ui.swWith)}` : '') : (ui.mvRoom ? `room=${encodeURIComponent(ui.mvRoom)}` : '');
+  if (!q) { ui.mvCheck = null; rerender(); return; }
+  const ck = await api('GET', `${B()}/stays/${ui.roomBill.stay.id}/move-check?${q}`);
+  if (mvFor() !== key) return;
+  // An order on nobody's bill starts on the bill of the guest whose room it is on; on a free room it stays on the table.
+  const att = {};
+  for (const x of ck.loose) { const g = ck.guests.find((y) => y.from === x.room); for (const o of x.orders) att[o.id] = g?.stayId ?? ''; }
+  ui.mvCheck = ck; ui.mvCheckFor = key; ui.mvAtt = att; rerender();
+};
+const mvAttach = () => { const ck = mvCk(); return ck ? ck.loose.flatMap((x) => x.orders).filter((o) => ui.mvAtt?.[o.id]).map((o) => ({ orderId: o.id, stayId: ui.mvAtt[o.id] })) : []; };
 actions.rbMove = async (d) => {
   if (!ui.mvRoom) throw new Error('Choose the new room.');
-  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/move`, { room: ui.mvRoom, reason: ui.mvWhy ?? '', dirtyOk: d.dirtyOk === '1' || undefined });
-  ui.rbForm = null; flash = { kind: 'ok', text: `Moved to ${ui.mvRoom}. Change it in Djubo too.` }; reopenStay = ui.roomBill.stay.id; route();
+  if (!mvCk()) await actions.mvLoad();
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/move`, { room: ui.mvRoom, reason: ui.mvWhy ?? '', attach: mvAttach(), dirtyOk: d.dirtyOk === '1' || undefined });
+  ui.rbForm = null; ui.mvCheck = null; flash = { kind: 'ok', text: `Moved to ${ui.mvRoom}. Change it in Djubo too.` }; reopenStay = ui.roomBill.stay.id; route();
 };
 // Two in-house guests exchange rooms (25 Nov 2026).
 actions.rbSwap = async () => {
   if (!ui.swWith) throw new Error('Choose the guest to swap with.');
   const other = (cache.stays ?? []).find((y) => y.id === ui.swWith);
   const from = ui.roomBill.stay.room;
-  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/swap`, { withStayId: ui.swWith, reason: ui.mvWhy ?? '' });
-  ui.rbForm = null; ui.mvSwap = null; await load('stays');
+  if (!mvCk()) await actions.mvLoad();
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/swap`, { withStayId: ui.swWith, reason: ui.mvWhy ?? '', attach: mvAttach() });
+  ui.rbForm = null; ui.mvSwap = null; ui.mvCheck = null; await load('stays');
   flash = { kind: 'ok', text: `Swapped: ${ui.roomBill.stay.guestName} is now in ${ui.roomBill.stay.room}${other ? `, ${other.guestName} in ${from}` : ''}. Change both in Djubo too.` };
   reopenStay = ui.roomBill.stay.id; route();
 };
 actions.rbExtend = async () => {
-  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/extend`, { to: ui.exTo ?? addDays(ui.roomBill.stay.checkOutPlan ?? me.business.shiftDay, 1), rate: ui.exRate || undefined });
+  ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/extend`, { to: ui.exTo ?? addDays(ui.roomBill.stay.checkOutPlan ?? me.business.shiftDay, 1), rate: ui.exRate || undefined, reason: ui.exWhy ?? '' });
   ui.rbForm = null; flash = { kind: 'ok', text: `Stay extended to ${dayName(ui.roomBill.stay.checkOutPlan)}.` }; rerender();
 };
 actions.rbCn = async () => {
@@ -2668,7 +2997,7 @@ actions.formC = async (d) => { await api('POST', `${B()}/stays/${d.id}/form-c`);
 /** A payment receipt slip (24 Nov 2026): its number, the room and guest, how it was paid, and what is left to pay. */
 const receiptSlip = (r) => html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">${r.kind === 'deposit' ? 'DEPOSIT RECEIPT (REFUNDABLE)' : r.kind === 'advance' ? 'ADVANCE RECEIPT' : 'PAYMENT RECEIPT'}</div>
   <div class="rl"><span>${r.receiptNo}</span><span>${dateTime(r.at)}</span></div>
-  <div>${r.room ? `Room ${r.room} · ` : ''}${r.name}</div>${r.booking ? html`<div>Booking ${r.booking}</div>` : ''}${r.checkIn ? html`<div>Stay from ${dayName(r.checkIn)}${r.checkOut ? ` to ${dayName(r.checkOut)}` : ''}</div>` : ''}<hr>
+  <div>${r.room ? `Room ${r.room} · ` : r.place ? `${r.place} · ` : ''}${r.name}</div>${r.party ? html`<div>Party ${dayName(r.party.day)}${r.party.time ? `, ${r.party.time}` : ''}${r.party.people ? ` · ${r.party.people} people` : ''}</div>` : ''}${r.booking ? html`<div>Booking ${r.booking}</div>` : ''}${r.checkIn ? html`<div>Stay from ${dayName(r.checkIn)}${r.checkOut ? ` to ${dayName(r.checkOut)}` : ''}</div>` : ''}<hr>
   ${r.payments.map((p) => html`<div class="rl"><span>${MODE_NAME[p.mode] ?? p.mode}${p.payAccountName ? ` (${p.payAccountName})` : ''}${p.cardLast4 ? ` ****${p.cardLast4}` : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}
   <div class="rl" style="font-weight:700"><span>RECEIVED</span><span>${rs(r.totalPaise)}</span></div><hr>
   ${r.balancePaise === null || r.balancePaise === undefined ? '' : html`<div class="rl"><span>${r.balancePaise > 0 ? 'Still to pay' : r.balancePaise < 0 ? 'Held for you' : 'Nothing more to pay'}</span><span>${r.balancePaise ? rs(Math.abs(r.balancePaise)) : ''}</span></div>`}
@@ -2789,8 +3118,10 @@ actions.pickArrival = async (d, _el, quiet) => {
   ui.ciHits = hits;
   ctPrepare(a, hits);
   ui.ciMulti = labels.length > 1 || (a.rooms ?? 1) > 1;
+  ui.ciBooked = Math.max(a.rooms ?? 1, 1); ui.ciShare = false;
   ui.room = free[0] ?? null; ui.ciRooms = free.slice(1);
-  ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length ? '' : a.roomType ?? '';
+  // A mixed type ("Quad Sharing, Hexa") would match nothing: the search starts empty (27 Nov 2026).
+  ui.roomQ = hits.length === 1 && free.length ? hits[0] : hits.length || (a.roomType ?? '').includes(',') ? '' : a.roomType ?? '';
   if (!quiet) rerender();
 };
 /** Bookings from mail: waiting for a person (approve, fix, cancel), arriving soon, the mails received, and automatic. */
@@ -2893,7 +3224,8 @@ actions.openStay = async (d = {}) => {
     .filter((x) => String(x.number).trim());
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
   const r = await api('POST', B() + '/stays', { room: ui.room, rooms: ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
-    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
+    reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults,
+    sharingBeds: ui.ciShare ? Math.max(0, (ui.ciBooked ?? 1) - 1 - (ui.ciMulti ? (ui.ciRooms ?? []).length : 0)) || undefined : undefined, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
     goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign, past: !!(ui.ciLate && ui.ciLeft && ui.ciOutToo) || undefined, ...(ui.ciLate > 2 && !isMgr() ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
   if (!d.noprint) printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${r.id}/grc`)).grc)) }]);
   const due = dueOf(ui.arrivals?.find((a) => a.id === ui.bookingId));
@@ -3178,28 +3510,31 @@ actions.recvGo = async () => {
 // (a table of money in by type and where from; a tap on an amount lists the bills and receipts behind it).
 const TK_MODES = [['cash', 'Cash'], ['upi', 'UPI'], ['card', 'Card']];
 const tkOf = (rows, mode) => rows.find((x) => x.mode === mode)?.paise ?? 0;
+/** Money given back the same day by this mode (26 Nov 2026): refunds from the drawer and credit-note refunds, taken off takings. */
+const tkBack = (s, mode) => (s.drawerOuts ?? []).filter((o) => o.kind === 'refund' && o.mode === mode).reduce((t, o) => t + o.amountPaise, 0)
+  + (s.creditNotes ?? []).filter((n) => n.refundMode === mode).reduce((t, n) => t + n.totalPaise, 0);
 function takingsClose(s) {
-  const tot = TK_MODES.map(([m, t]) => ({ m, t, bills: tkOf(s.byMode, m), rooms: tkOf(s.receipts, m) }));
-  const all = tot.reduce((x, r) => x + r.bills + r.rooms, 0);
+  const tot = TK_MODES.map(([m, t]) => ({ m, t, bills: tkOf(s.byMode, m), rooms: tkOf(s.receipts, m), back: tkBack(s, m) }));
+  const all = tot.reduce((x, r) => x + r.bills + r.rooms - r.back, 0);
   const notMoney = [['room', 'on rooms'], ['credit', 'on credit']].map(([m, t]) => [t, tkOf(s.byMode, m)]).filter(([, v]) => v);
   const look = [...s.events.filter((e) => e.n).map((e) => `${{ void: 'Voids', reprint: 'Reprints', kot_cancel: 'Cancelled KOT lines', discount: 'Discounts', comp: 'Complimentary', limit_warning: 'Limit warnings', credit_note: 'Credit notes', stock_waste: 'Stock breakage', stock_count: 'Stock count variances', pay_change: 'Payment type changed' }[e.kind] ?? e.kind} ${e.n}`),
     ...(s.tips.length ? [`Tips ${rs(s.tips.reduce((t, x) => t + x.paise, 0))}`] : []), ...(s.discountsAtPayment.n ? [`Discounts at payment ${s.discountsAtPayment.n}`] : []),
     ...(s.drawerOuts.length ? [`Paid out ${rs(s.drawerOuts.reduce((t, o) => t + o.amountPaise, 0))}`] : [])];
   const billed = s.billed.reduce((t, b) => t + b.paise, 0);
   const step = (n, title, sub, value) => html`<div class="tkstep"><span class="tkn">${n}</span><div><strong>${title}</strong><div class="small quiet">${sub}</div></div><div class="tkv">${value}</div></div>`;
-  return html`<div class="tkcards">${tot.map((r) => html`<div class="tkcard"><span class="l">${r.t}</span><span class="v">${rs(r.bills + r.rooms)}</span><span class="s">bills ${rs(r.bills)} · rooms ${rs(r.rooms)}</span></div>`)}</div>
+  return html`<div class="tkcards">${tot.map((r) => html`<div class="tkcard"><span class="l">${r.t}</span><span class="v">${rs(r.bills + r.rooms - r.back)}</span><span class="s">bills ${rs(r.bills)} · rooms ${rs(r.rooms)}${r.back ? ` · given back −${rs(r.back)}` : ''}</span></div>`)}</div>
     <div class="tkbig"><span>Money in today</span><span>${rs(all)}</span></div>
     <p class="label" style="margin:6px 0 0">To close the day</p>
     <div>${ui.countOn ? step(1, 'Count the cash drawer', 'Use the "Count the cash drawer" form. What the drawer should hold shows after you count.', '') : ''}
-      ${step(ui.countOn ? 2 : 1, s.byAccount.length === 1 ? `Match UPI in the ${s.byAccount[0].name} app` : 'Match UPI in each bank app', s.byAccount.length > 1 ? s.byAccount.map((a) => `${a.name} ${rs(a.paise)}`).join(' · ') : 'all UPI today, bills and rooms', rs(tot[1].bills + tot[1].rooms))}
-      ${step(ui.countOn ? 3 : 2, 'Card machine settlement', tot[2].bills + tot[2].rooms ? 'all card payments today, bills and rooms' : 'no card payments today', rs(tot[2].bills + tot[2].rooms))}
+      ${step(ui.countOn ? 2 : 1, s.byAccount.length === 1 ? `Match UPI in the ${s.byAccount[0].name} app` : 'Match UPI in each bank app', s.byAccount.length > 1 ? s.byAccount.map((a) => `${a.name} ${rs(a.paise)}`).join(' · ') : 'all UPI today, bills and rooms, less refunds', rs(tot[1].bills + tot[1].rooms - tot[1].back))}
+      ${step(ui.countOn ? 3 : 2, 'Card machine settlement', tot[2].bills + tot[2].rooms ? 'all card payments today, bills and rooms' : 'no card payments today', rs(tot[2].bills + tot[2].rooms - tot[2].back))}
       ${step(ui.countOn ? 4 : 3, 'Bills printed today', html`${s.billed.map((b) => `${b.first} to ${b.last}${b.voids ? ` (${b.voids} void)` : ''}`).join(' · ') || 'no bills'}${notMoney.length ? ` · ${notMoney.map(([t, v]) => `${rs(v)} ${t}, not money yet`).join(' · ')}` : ''}${s.unpaidBills.length ? html` · <span style="color:var(--warn)">${plural(s.unpaidBills.length, 'bill')} not paid yet</span>` : s.billed.length ? html` · all paid <span style="color:var(--go)">✓</span>` : ''}`, rs(billed))}
       ${step(ui.countOn ? 5 : 4, 'Anything to look at', look.length ? look.join(' · ') : 'voids, discounts, credit notes, cancelled KOTs, paid out', look.length ? html`<button type="button" class="chip" data-act="pick" data-k="tkTab" data-id="detail">See breakdown</button>` : html`<span class="status mute">none</span>`)}</div>`;
 }
 function takingsTable(s) {
   const pays = s.payments ?? [];
   const cell = (m, k, v) => (v ? html`<button type="button" class="tkcell" aria-pressed="${ui.tkList === `${m}:${k}`}" data-act="pick" data-k="tkList" data-id="${ui.tkList === `${m}:${k}` ? '' : `${m}:${k}`}">${rs(v)}</button>` : html`<span class="quiet">${rs(0)}</span>`);
-  const rows = TK_MODES.map(([m, t]) => ({ m, t: m === 'upi' && s.byAccount.length === 1 ? `UPI · ${s.byAccount[0].name}` : t, bills: tkOf(s.byMode, m), rooms: tkOf(s.receipts, m) }));
+  const rows = TK_MODES.map(([m, t]) => ({ m, t: m === 'upi' && s.byAccount.length === 1 ? `UPI · ${s.byAccount[0].name}` : t, bills: tkOf(s.byMode, m), rooms: tkOf(s.receipts, m), back: tkBack(s, m) }));
   const [lm, lk] = (ui.tkList ?? '').split(':');
   const listed = lm ? pays.filter((p) => p.mode === lm && (lk === 'all' || (lk === 'bills' ? p.kind === 'bills' : p.kind !== 'bills'))) : [];
   const ref = (p) => (p.kind === 'bills' ? html`<a href="#/done/${p.billId}">${p.bills}</a>`
@@ -3208,7 +3543,8 @@ function takingsTable(s) {
   const notMoney = [['room', 'To room (not paid yet)'], ['credit', 'On credit'], ['comp', 'Complimentary'], ['advance', 'Paid from advances taken earlier']].map(([m, t]) => [t, tkOf(s.byMode, m)]).filter(([, v]) => v);
   return html`<div class="scroll"><table class="t"><thead><tr><th>Money in</th><th class="num">Restaurant bills</th><th class="num">Rooms and credit</th><th class="num">Total today</th></tr></thead><tbody>
     ${rows.map((r) => html`<tr><td>${r.t}</td><td class="num">${cell(r.m, 'bills', r.bills)}</td><td class="num">${cell(r.m, 'rooms', r.rooms)}</td><td class="num"><strong>${cell(r.m, 'all', r.bills + r.rooms)}</strong></td></tr>`)}
-    <tr class="tktot"><td>Total</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.rooms, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills + r.rooms, 0))}</td></tr></tbody></table></div>
+    ${rows.some((r) => r.back) ? html`<tr><td>Given back (refunds)</td><td></td><td></td><td class="num">${rows.filter((r) => r.back).map((r) => `${r.t} −${rs(r.back)}`).join(' · ')}</td></tr>` : ''}
+    <tr class="tktot"><td>Total</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.rooms, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills + r.rooms - r.back, 0))}</td></tr></tbody></table></div>
     ${lm ? html`<div class="tklist"><div class="row between"><strong>${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[lm]} · ${{ bills: 'restaurant bills', rooms: 'rooms and credit', all: 'all today' }[lk]} · ${listed.length}</strong>
         <button type="button" class="btn" data-act="pick" data-k="tkList" data-id="">Close</button></div>
       <div class="scroll"><table class="t"><tbody>${listed.map((p) => html`<tr><td>${time(p.at)}</td><td>${ref(p)}</td><td>${what(p)}</td><td class="num">${rs(p.amountPaise)}</td></tr>`)}</tbody></table></div>
@@ -3219,7 +3555,7 @@ async function shiftScreen() {
   // The day moves on at its hour or when it is closed by hand (24 Nov 2026): read the current one afresh.
   try { me = await api('GET', '/me'); } catch { /* keep the one we have */ }
   const day = me.business.shiftDay;
-  const d = await api('GET', `${B()}/shifts/${day}`);
+  const [d] = await Promise.all([api('GET', `${B()}/shifts/${day}`), load('payAccounts').catch(() => null)]);
   ui.s = d.summary; ui.closed = d.closed; ui.counts = {}; ui.last = d.lastClosed; ui.endsAt = d.endsAt; ui.dz = d.drawer; ui.floatSet = d.floatPaise; ui.overdue = d.overdue; ui.notIn = d.notCheckedIn ?? []; ui.countOn = d.drawerCount !== false;
   const notes = NOTE_VALUES;
   rerender = () => {
@@ -3227,12 +3563,14 @@ async function shiftScreen() {
     const counted = notes.reduce((t, n) => t + (Number(ui.counts[n]) || 0) * Number(n) * 100, 0) + (toPaise(ui.loose || '0') ?? 0);
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
     const carried = [...s.openOrders.map((o) => o.place), ...s.unpaidBills.map((x) => `${x.place ?? ''} ${x.bill_no}`.trim())];
-    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0);
+    const djOpen = (s.djubo ?? []).filter((x) => !x.settlementId);
+    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0) + djOpen.length + (s.notCharged?.length ?? 0);
     const cd = ui.countDiff;
     // Counting turned off (26 Nov 2026): the page is the takings and what is pending, and Close the day closes it.
-    const moneyIn = [...s.byMode, ...s.receipts].filter((m) => ['cash', 'upi', 'card'].includes(m.mode)).reduce((t, m) => t + m.paise, 0);
-    const cashIn = [...s.byMode, ...s.receipts].filter((m) => m.mode === 'cash').reduce((t, m) => t + m.paise, 0);
-    const upiIn = [...s.byMode, ...s.receipts].filter((m) => m.mode === 'upi').reduce((t, m) => t + m.paise, 0);
+    // Refunds given back today come off (26 Nov 2026): a receipt taken by mistake and refunded nets to nothing.
+    const moneyIn = [...s.byMode, ...s.receipts].filter((m) => ['cash', 'upi', 'card'].includes(m.mode)).reduce((t, m) => t + m.paise, 0) - ['cash', 'upi', 'card'].reduce((t, m) => t + tkBack(s, m), 0);
+    const cashIn = [...s.byMode, ...s.receipts].filter((m) => m.mode === 'cash').reduce((t, m) => t + m.paise, 0) - tkBack(s, 'cash');
+    const upiIn = [...s.byMode, ...s.receipts].filter((m) => m.mode === 'upi').reduce((t, m) => t + m.paise, 0) - tkBack(s, 'upi');
     const billedPaise = s.billed.reduce((t, b) => t + b.paise, 0);
     const openPaise = s.openOrders.reduce((t, o) => t + o.paise, 0);
     paint(shell('#/shift', html`${pageHead(`Day close · ${dayName(s.shiftDay)}`, ui.countOn ? `The day runs ${me.business.shift_start_hour} am to ${me.business.shift_start_hour} am. Count the drawer, check the day, then close it. Closing does not change who holds the drawer.`
@@ -3255,6 +3593,11 @@ async function shiftScreen() {
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
       ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
+        ${(s.notCharged ?? []).length ? html`<div class="msg bad" style="display:block"><strong>No rent for tonight: ${s.notCharged.map((x) => `${x.room} · ${x.guestName}`).join(', ')}</strong>
+          <div class="small">Staying tonight past their booking (rent till ${s.notCharged.map((x) => dayName(x.coveredTo)).join(', ')}). Extend in Djubo (the rent comes with its email, and Continue a new booking), or a manager extends without Djubo.</div>
+          <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+        ${djOpen.length ? html`<div class="msg warn" style="display:block"><strong>Taken in Djubo today, how it was paid not picked: ${plural(djOpen.length, 'payment')} · ${rs(djOpen.reduce((t, x) => t + x.amountPaise, 0))}</strong>
+          <div class="small">Pick Cash, UPI or Card for each, in "Taken in Djubo today" below.</div></div>` : ''}
         ${ui.overdue.length ? html`<div class="msg bad" style="display:block"><strong>Open since an earlier day:</strong> ${ui.overdue.map((o) => `${o.place}${o.bill_no ? ` (${o.bill_no})` : ''} · since ${dayName(o.since)}`).join(', ')}
           <div class="small">Take payment, post to a room, put on credit, or void with a manager. <a href="#/">Go to Tables</a></div></div>` : ''}
         ${s.notInDjubo?.length ? html`<div class="msg bad" style="display:block"><strong>Reservations made here, not in Djubo yet: ${s.notInDjubo.length}</strong>
@@ -3264,6 +3607,12 @@ async function shiftScreen() {
           ${s.deskMissing.map((x) => html`<div class="small">Djubo ${x.extRef} · ${x.guestName ?? ''} · ${x.enteredBy ?? ''}, ${time(x.at)} · ${rs(x.pendingPaise)}</div>`)}
           <div class="small">Take it in Rooms so a receipt prints, or give a reason below.</div><div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
       </section>` : ''}
+      ${(s.djubo ?? []).length ? html`<section class="panel" style="margin-bottom:12px"><div class="row between"><h2>Taken in Djubo today · ${rs(s.djubo.reduce((t, x) => t + x.amountPaise, 0))}</h2>${djOpen.length ? html`<span class="status warn">${djOpen.length} to pick</span>` : html`<span class="status ok">All picked</span>`}</div>
+        <p class="small quiet" style="margin:0">Marked in Djubo today by reception (not the booking team or the OTAs), for any stay date. Counted in today's takings once you pick how each was paid; the day can't close before.</p>
+        ${s.djubo.map(djRow)}</section>` : ''}
+      ${(s.advancesHeld ?? []).length ? html`<section class="panel" style="margin-bottom:12px"><div class="row between"><h2>Restaurant advances held · ${rs(s.advancesHeld.reduce((t, x) => t + x.leftPaise, 0))}</h2><span class="small quiet">not used on a bill yet</span></div>
+        ${s.advancesHeld.map((x) => html`<div class="line" style="gap:8px;border-top:1px solid var(--line);padding:6px 0"><span class="grow small"><strong>${x.guestName}</strong> · ${x.orderId ? x.place : `party ${dayName(x.partyDay)}${x.partyTime ? `, ${x.partyTime}` : ''}`} · ${x.receipts ?? ''}</span><span class="num">${rs(x.leftPaise)}</span></div>`)}
+        <p class="small quiet" style="margin:4px 0 0">Counted in takings on the day each was taken; using it on a bill later is not counted again.</p></section>` : ''}
       ${carried.length ? html`<p class="small quiet" style="margin-bottom:12px">Carrying into ${dayName(addDays(s.shiftDay, 1))}: ${carried.join(', ')}. Their sale stays on the day the bill was printed; the money counts when paid.</p>` : ''}
       <div class="two rev">
       <section class="panel"><div class="row between"><h2>Takings</h2><div class="chips">${[['close', 'Close'], ['detail', 'Breakdown']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${(ui.tkTab ?? 'close') === k}" data-act="pick" data-k="tkTab" data-id="${k}">${t}</button>`)}</div></div>
@@ -3285,7 +3634,7 @@ async function shiftScreen() {
         <p class="small quiet">Closes ${dayName(s.shiftDay)} now and starts ${dayName(addDays(s.shiftDay, 1))}.${s.openOrders.length ? ` The ${plural(s.openOrders.length, 'open table')} carry on.` : ''} No drawer count (turned off in Settings, Staff).</p>
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length ? 'disabled' : ''}>Close the day</button></form>`}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}</form>`}
       ${ui.closed || !ui.countOn ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
         ${ui.floatSet ? html`<div class="row between"><span>Float (fixed in Settings)</span><strong>${rs(ui.floatSet)}</strong></div>`
           : html`<label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" value="${ui.float ?? ''}"></label>`}
@@ -3297,7 +3646,7 @@ async function shiftScreen() {
         ${cd ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}" autofocus></label>` : ''}
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}" placeholder="e.g. Entered in Djubo, mail not come yet"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length ? 'disabled' : ''}>Close the day</button>
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}
         <p class="small quiet">${Date.now() < ui.endsAt ? `The day ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts ${dayName(addDays(s.shiftDay, 1))} at once: money taken after this goes there.` : ''}</p></form>`}
       ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen ${dayName(ui.last.shiftDay)} (owner)</summary>
         <p class="small quiet">Closed ${ui.last.auto ? 'by itself' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); close it again after. Bookr keeps the first close it was sent.</p>
@@ -5791,9 +6140,18 @@ actions.addItem = async () => {
     openPrice: open, minPrice: open ? ui.iMin ?? '' : '', addonGroups: (ui.iGroups ?? []).map((id) => ({ id, prices: itemPricesOut(id) })) };
   const fromChoice = !open && choicePrice();
   if (fromChoice) body.price = fromChoice;
-  if (ui.editItem) { const m = cache.menu.find((x) => x.id === ui.editItem); await api('PUT', `${B()}/menu/${m.id}`, { ...body, sac: m.sac, active: !!m.active }); }
+  let lowered = '';
+  if (ui.editItem) {
+    const m = cache.menu.find((x) => x.id === ui.editItem);
+    const r = await api('PUT', `${B()}/menu/${m.id}`, { ...body, sac: m.sac, active: !!m.active });
+    // A lower price (26 Nov 2026): offer it on open orders still at the old price.
+    if (r.openHigher && confirm(`${m.name} is cheaper now. Lower it on ${plural(r.openHigher, 'open order')} that still ${r.openHigher === 1 ? 'has' : 'have'} the old price? (Bills already printed stay as they are.)`)) {
+      const x = await api('POST', `${B()}/menu/${m.id}/reprice-open`, {});
+      lowered = x.places.length ? ` Lowered on ${x.places.join(', ')}.` : '';
+    }
+  }
   else await api('POST', B() + '/menu', body);
-  flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.` }; route();
+  flash = { kind: 'ok', text: `${ui.iName} ${ui.editItem ? 'saved' : 'added'}.${lowered}` }; route();
 };
 /** Items the Menu tab shows: matching the search (name or category, any word order) and the chosen category. */
 function menuFilter() {
