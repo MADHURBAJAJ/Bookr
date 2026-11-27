@@ -44,15 +44,16 @@ app.use('*', async (c, next) => {
 });
 
 // The Bookr POS Windows app's installer and its update files (22 Nov 2026), kept under desktop/ in the R2 bucket and open
-// to anyone: they hold no password or key. Only plain file names; nothing else in the bucket is reachable from here.
+// to anyone: they hold no password or key. Also the WhatsApp listener's code as a .zip (27 Nov 2026), without .env or its
+// WhatsApp login. Only plain file names; nothing else in the bucket is reachable from here.
 app.get('/desktop/:file', async (c) => {
   const file = c.req.param('file');
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(file) || !/\.(exe|yml|blockmap)$/.test(file) || !c.env.BILLS) return c.json({ error: 'Not found.' }, 404);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(file) || !/\.(exe|yml|blockmap|zip)$/.test(file) || !c.env.BILLS) return c.json({ error: 'Not found.' }, 404);
   const obj = await c.env.BILLS.get(`desktop/${file}`);
   if (!obj) return c.json({ error: 'Not found.' }, 404);
-  const type = file.endsWith('.yml') ? 'text/yaml; charset=utf-8' : 'application/octet-stream';
+  const type = file.endsWith('.yml') ? 'text/yaml; charset=utf-8' : file.endsWith('.zip') ? 'application/zip' : 'application/octet-stream';
   return new Response(obj.body, { headers: { 'Content-Type': type, 'Content-Length': String(obj.size), 'Cache-Control': file.endsWith('.yml') ? 'no-store' : 'public, max-age=86400',
-    ...(file.endsWith('.exe') ? { 'Content-Disposition': `attachment; filename="${file}"` } : {}) } });
+    ...(/\.(exe|zip)$/.test(file) ? { 'Content-Disposition': `attachment; filename="${file}"` } : {}) } });
 });
 
 app.route('/', authRoutes);
