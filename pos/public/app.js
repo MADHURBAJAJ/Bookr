@@ -1966,8 +1966,13 @@ function todayView() {
   ];
   const row = (attrs, left, right) => html`<button type="button" class="drow" ${attrs}><span class="grow">${left}</span><span class="dright">${right}</span></button>`;
   // One tile per party, closed each time the screen opens (27 Nov 2026).
-  const inTiles = partyTiles(fd.inHouse);
-  const outTiles = partyTiles(fd.leaving);
+  // Search (27 Nov 2026): by guest name or room, over arriving, in-house and leaving.
+  const rq = (ui.rmQ ?? '').trim().toLowerCase();
+  const hit = (...xs) => !rq || xs.some((x) => String(x ?? '').toLowerCase().includes(rq));
+  const tileHit = (t) => !rq || t.bills.some((b) => [b.head, ...b.members].some((x) => hit(x.guestName, x.room)));
+  const arrivals = fd.arrivals.filter((x) => hit(x.guestName, x.roomLabels, x.rooms, x.roomType));
+  const inTiles = partyTiles(fd.inHouse).filter(tileHit);
+  const outTiles = partyTiles(fd.leaving).filter(tileHit);
   const tile = (t, kind) => {
     const all = t.bills.flatMap((b) => [b.head, ...b.members]);
     const first = t.bills[0].head;
@@ -1996,22 +2001,25 @@ function todayView() {
   const owes = (b) => (b > 0 ? html`<span class="status warn">Owes ${rs(b)}</span>` : b < 0 ? html`<span class="status info">Holds ${rs(-b)}</span>` : html`<span class="status ok">Settled</span>`);
   return html`<div class="kpis">${kpi('Arriving today', String(s.arriving))}${kpi('In house', String(s.inHouse))}${kpi('Leaving today', String(s.leaving))}${kpi('Free tonight', String(s.freeTonight), 'rooms and beds')}${kpi('To collect today', rs(s.toCollectPaise), '', s.toCollectPaise ? 'warn' : '')}</div>
     ${errorBox()}
+    <div class="row"><input class="in grow" type="search" data-model="rmQ" data-live value="${ui.rmQ ?? ''}" placeholder="Search guest name or room" aria-label="Search rooms by guest name or room" autocomplete="off">
+      ${rq ? html`<button class="btn sm" type="button" data-act="rmQClear">Clear</button>` : ''}</div>
     <div class="today4">
       <section class="dcol attn"><div class="dch"><h2>Needs attention</h2>${items.length ? html`<span class="status ${items.some((x) => x.tone === 'bad') ? 'bad' : 'warn'}">${items.length}</span>` : html`<span class="status ok">All clear</span>`}</div>
         ${items.length ? items.map((x) => row(html`data-act="${x.act}" data-id="${x.id ?? ''}" data-href="${x.href ?? ''}"`,
           html`<span class="ico t-${x.tone}" aria-hidden="true">${x.icon}</span><span><strong>${x.title}</strong><small>${x.sub}</small></span>`, '')) : html`<p class="empty">Nothing needs you right now.</p>`}
         <div class="dfoot"><button class="btn sm" type="button" data-act="advNew">Take advance (no booking yet)</button></div></section>
-      <section class="dcol"><div class="dch"><h2>Arriving</h2><span class="faint">${fd.arrivals.length}</span></div>
-        ${fd.arrivals.length ? fd.arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
+      <section class="dcol"><div class="dch"><h2>Arriving</h2><span class="faint">${arrivals.length}</span></div>
+        ${arrivals.length ? arrivals.map((x) => row(html`data-act="todayArrival" data-kind="${x.kind}" data-id="${x.id}"`,
           html`<strong>${x.guestName ?? 'No name'}</strong><small>${x.kind === 'reservation' ? x.rooms : `${x.roomType ?? '?'}${x.roomLabels ? ` ${x.roomLabels}` : ''}`} · till ${dayName(x.checkOut)} · ${x.kind === 'reservation' ? `${x.source}, not in Djubo` : x.channel ?? (x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo')}${(() => { const c = (ui.arrivals ?? []).find((y) => y.id === x.id)?.continues; return c ? ` · already in ${c.map((y) => y.room).join(', ')}: extension` : ''; })()}</small>`,
-          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${due(x.duePaise)}`)) : html`<p class="empty">No more arrivals today.</p>`}</section>
-      <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${inTiles.length}${inTiles.length !== fd.inHouse.length ? ` · ${fd.inHouse.length} rooms and beds` : ''}</span></div>
-        ${inTiles.length ? inTiles.map((t) => tile(t, 'in')) : html`<p class="empty">No guests in house.</p>`}</section>
+          html`${x.djuboPaise ? html`<span class="status info">Paid in Djubo ${rs(x.djuboPaise)}</span> ` : ''}${due(x.duePaise)}`)) : html`<p class="empty">${rq ? 'No arrival matches.' : 'No more arrivals today.'}</p>`}</section>
+      <section class="dcol"><div class="dch"><h2>In house</h2><span class="faint">${inTiles.length}${!rq && inTiles.length !== fd.inHouse.length ? ` · ${fd.inHouse.length} rooms and beds` : ''}</span></div>
+        ${inTiles.length ? inTiles.map((t) => tile(t, 'in')) : html`<p class="empty">${rq ? 'No guest in house matches.' : 'No guests in house.'}</p>`}</section>
       <section class="dcol"><div class="dch"><h2>Leaving today</h2><span class="faint">${outTiles.length}</span></div>
-        ${outTiles.length ? outTiles.map((t) => tile(t, 'out')) : html`<p class="empty">Nobody is due to leave today.</p>`}</section>
+        ${outTiles.length ? outTiles.map((t) => tile(t, 'out')) : html`<p class="empty">${rq ? 'Nobody leaving matches.' : 'Nobody is due to leave today.'}</p>`}</section>
     </div>`;
 }
 actions.openFoodGo = (d) => { ui.openFood = null; ui.error = null; ui.roomBill = null; go(`#/order/${d.id}`); };
+actions.rmQClear = () => { ui.rmQ = ''; rerender(); };
 actions.tileTog = (d) => { ui.tileOpen = { ...ui.tileOpen, [d.k]: !ui.tileOpen?.[d.k] }; rerender(); };
 /** A room name's Roman number (XIV A → 14), or null when it does not start with one. */
 function romanOf(room) {
