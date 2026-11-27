@@ -46,4 +46,18 @@ describe('beds missing', () => {
     await ok(counter.post(`${B}/stays`, { room: 'E1', guestName: 'Pair Guest', bookingId: '00000000-0000-4000-8000-00000000b002', sharingBeds: 1 }));
     expect((await ok(counter.get(`${B}/frontdesk/today`))).missingBeds).toEqual([]);
   });
+
+  it('counts Djubo\'s rooms, not the OTA\'s, when Djubo split an OTA booking (27 Nov 2026)', async () => {
+    const s = await setupBusiness();
+    const { B, counter, ok, owner } = s;
+    await ok(owner.call('PUT', `${B}/tables`, { sections: [{ name: 'Mixed', kind: 'rooms', tables: ['M1', 'M2'] }] }));
+    const day = (await ok(owner.get('/me'))).business.shiftDay;
+    const out = new Date(Date.parse(day) + 86_400_000).toISOString().slice(0, 10);
+    const stay = (await ok(counter.post(`${B}/stays`, { room: 'M2', guestName: 'Split Guest' }))).id;
+    const t = Date.now();
+    await q(`INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, room_type, rooms, check_in, check_out, amount_paise, paid_paise, status, created_at, updated_at, stay_id)
+      VALUES ('00000000-0000-4000-8000-00000000c001', ?1, 'mmt', 'OTA-2R', 'Split Guest', 'Deluxe', 2, ?2, ?3, 400000, 400000, 'checked_in', ?4, ?4, ?5),
+             ('00000000-0000-4000-8000-00000000c002', ?1, 'djubo', 'DJ-1B', 'Split Guest', 'Quad Sharing', 1, ?2, ?3, 100000, 100000, 'checked_in', ?4, ?4, ?5)`, s.businessId, day, out, t, stay);
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).missingBeds).toEqual([]);
+  });
 });

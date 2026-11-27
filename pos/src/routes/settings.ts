@@ -1359,7 +1359,9 @@ settingsRoutes.put(`${B}/credit-accounts/:id`, requireAction('reports.view'), as
 export async function missingBeds(db: DB, bid: string) {
   const rows = await all<{ id: string; room: string; guest_name: string; booked: number; have: number; sharing: number; labels: string | null; ext_ref: string }>(db, `
     SELECT s.id, s.room, s.guest_name, s.sharing_beds AS sharing,
-      (SELECT max(coalesce(k.rooms, 1)) FROM bookings k WHERE k.stay_id = s.id AND k.status = 'checked_in') AS booked,
+      -- Djubo splits an OTA booking per room or bed (27 Nov 2026): when the stay has a Djubo booking, count its rooms, not the OTA's.
+      (SELECT max(coalesce(k.rooms, 1)) FROM bookings k WHERE k.stay_id = s.id AND k.status = 'checked_in'
+        AND (k.source = 'djubo' OR NOT EXISTS (SELECT 1 FROM bookings d WHERE d.stay_id = s.id AND d.status = 'checked_in' AND d.source = 'djubo'))) AS booked,
       1 + (SELECT count(*) FROM stays m WHERE m.group_stay_id = s.id AND m.checked_out_at IS NULL) AS have,
       (SELECT k.room_labels FROM bookings k WHERE k.stay_id = s.id AND k.source = 'djubo' ORDER BY k.updated_at DESC LIMIT 1) AS labels,
       (SELECT k.ext_ref FROM bookings k WHERE k.stay_id = s.id ORDER BY k.source = 'djubo' DESC, k.updated_at DESC LIMIT 1) AS ext_ref
