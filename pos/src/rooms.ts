@@ -271,7 +271,7 @@ export async function continuesOf(db: DB, bid: string, bookings: { id: string; p
   if (!bookings.length) return new Map<string, { id: string; room: string; guestName: string }[]>();
   const stays = await all<{ id: string; room: string; guest_name: string; phone: string | null; plan: string | null; check_in: string }>(db, `SELECT s.id, s.room, s.guest_name, s.phone, s.check_in,
       coalesce(s.check_out_plan, (SELECT max(k.check_out) FROM bookings k WHERE k.stay_id = s.id)) AS plan
-    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.room NOT LIKE '%(past stay)' ORDER BY s.room`, bid);
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.room NOT LIKE '%(past stay)' AND s.room NOT LIKE '%(left room)' ORDER BY s.room`, bid);
   const out = new Map<string, { id: string; room: string; guestName: string }[]>();
   for (const b of bookings) {
     // Ends on the booking's first day, or was already extended past it by hand (25 Nov 2026), having begun before it.
@@ -340,7 +340,7 @@ export async function nightsNotCharged(db: DB, bid: string) {
       (SELECT max(b.check_out) FROM bookings b JOIN stays m ON m.id = b.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id) AND b.status = 'checked_in') AS booked_to,
       (SELECT json_group_array(json_object('a', e.amount_paise, 'n', e.note)) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id JOIN stays m ON m.id = d.stay_id
         WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND lower(e.note) LIKE '%extra night%') AS hand
-    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)'`, bid);
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)' AND s.room NOT LIKE '%(left room)'`, bid);
   const out: { stayId: string; room: string; guestName: string; plan: string; coveredTo: string; nights: number }[] = [];
   for (const r of rows) {
     if (!r.booked_to) continue;
@@ -363,7 +363,7 @@ export async function tonightNotCharged(db: DB, bid: string, day: string) {
       (SELECT max(b.check_out) FROM bookings b JOIN stays m ON m.id = b.stay_id WHERE (m.id = s.id OR m.group_stay_id = s.id) AND b.status = 'checked_in') AS booked_to,
       (SELECT json_group_array(json_object('a', e.amount_paise, 'n', e.note)) FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id JOIN stays m ON m.id = d.stay_id
         WHERE (m.id = s.id OR m.group_stay_id = s.id) AND e.kind = 'room_rent' AND e.booking_id IS NULL AND lower(e.note) LIKE '%extra night%') AS hand
-    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)'`, bid);
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL AND s.room NOT LIKE '%(past stay)' AND s.room NOT LIKE '%(left room)'`, bid);
   const out: { stayId: string; room: string; guestName: string; coveredTo: string }[] = [];
   for (const r of rows) {
     if (!r.booked_to) continue;

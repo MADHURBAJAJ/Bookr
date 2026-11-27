@@ -10,7 +10,7 @@ import { all, newId, now, one, stmt } from '../../../src/db';
 import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
 import { billTaxRows, billTotals, limitState, rs, type Discount, type LineTax, type TaxRow } from '../billing';
-import { clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
+import { audit, clock, dormWhole, event, isNcPlace, isTrigger, bizOf, loadBusiness, placeOf, reasonLabel, sectionTables, tableLayout, tableList } from '../util';
 import { dishMoves, cancelMoves, stockAtKot } from '../stock';
 import { sendSoon } from '../sync';
 import { istDay } from '../../../src/time';
@@ -151,6 +151,14 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
         'SELECT id, room, guest_name, phone, guest_id FROM stays WHERE business_id = ? AND checked_out_at IS NULL', bid)).find((x) => roomKey(x.room) === key);
       if (st) { stayId = st.id; fromStay(st); }
     }
+    // A restaurant table for a guest in house (27 Nov 2026), picked when it is opened: their check-out waits for it, and
+    // paying offers their room bill first. Room tiles and beds link by themselves (above).
+    else if (typeof data.guestStayId === 'string' && data.guestStayId) {
+      const st = await one<{ id: string; guest_name: string; phone: string | null; guest_id: string | null }>(c.env.DB,
+        'SELECT id, guest_name, phone, guest_id FROM stays WHERE id = ? AND business_id = ? AND checked_out_at IS NULL', data.guestStayId, bid);
+      if (!st) fail(400, 'That guest is no longer in house.');
+      stayId = st.id; fromStay(st);
+    }
     // A dorm is sold bed by bed, or whole to one group: not both at once.
     if (at?.dorm) {
       const others = at.whole ? sectionTables({ kind: 'dorms', dorms: at.section.dorms!.filter((d) => d.name === at.dorm) }).filter((x) => x !== dormWhole(at.dorm!)) : [dormWhole(at.dorm)];
@@ -167,6 +175,29 @@ orderRoutes.post(`${B}/orders`, requireAction('orders.edit'), async (c) => {
     stmt(c.env.DB, 'INSERT INTO orders (id, business_id, kind, place, stay_id, guest_name, guest_phone, guest_id, covers, opened_by, opened_at, opened_shift_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       id, bid, kind, place, stayId, guest, guestPhone, guestId, covers, c.get('staff').id, t, shiftDay)]);
   return c.json({ id }, 201);
+});
+
+// Link a restaurant table to a guest in house, or unlink it (27 Nov 2026), while nothing on it is paid.
+orderRoutes.post(`${B}/orders/:id/stay`, requireAction('orders.edit'), async (c) => {
+  const bid = c.get('businessId');
+  const db = c.env.DB;
+  const o = await one<{ id: string; kind: string; place: string; status: string; stay_id: string | null }>(db,
+    'SELECT id, kind, place, status, stay_id FROM orders WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
+  if (!o) fail(404, 'Order not found.');
+  if (o.kind !== 'table' || (o.status !== 'open' && o.status !== 'tab')) fail(409, 'Only an open table order can be linked to a guest.');
+  const at = placeOf(tableLayout(bizOf(c)), o.place);
+  if (at && (at.section.kind === 'rooms' || at.section.kind === 'dorms')) fail(409, 'A room or bed tile belongs to the guest staying in it.');
+  const data = await body(c);
+  let st: { id: string; guest_name: string } | null = null;
+  if (typeof data.stayId === 'string' && data.stayId) {
+    st = await one<{ id: string; guest_name: string }>(db, 'SELECT id, guest_name FROM stays WHERE id = ? AND business_id = ? AND checked_out_at IS NULL', data.stayId, bid);
+    if (!st) fail(400, 'That guest is no longer in house.');
+  }
+  await db.batch([
+    stmt(db, 'UPDATE orders SET stay_id = ?, guest_name = coalesce(?, guest_name) WHERE id = ?', st?.id ?? null, st?.guest_name ?? null, o.id),
+    audit(db, bid, c.get('staff').id, st ? 'order.link_guest' : 'order.unlink_guest', 'orders', o.id, { stayId: o.stay_id }, { stayId: st?.id ?? null }),
+  ]);
+  return c.json({ ok: true });
 });
 
 orderRoutes.get(`${B}/orders/:id`, requireAction('pos.view'), async (c) => {

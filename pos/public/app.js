@@ -919,6 +919,37 @@ actions.openOrder = async () => {
 // ---------- order
 
 /** The guest on an order (22 Nov 2026): name and phone boxes, always shown, saved when you leave them; a returning guest's visits. */
+/**
+ * A restaurant table for a guest in house (27 Nov 2026): linked, their check-out waits for it and paying offers their
+ * room bill first. Before typing, only guests who left their room with the bill open are offered; typing shows the top 5.
+ */
+function guestLinkBox(o) {
+  if (o.kind !== 'table' || (o.status !== 'open' && o.status !== 'tab') || !can('orders.edit')) return '';
+  const stays = cache.stays ?? [];
+  const linked = o.stayId ? stays.find((x) => x.id === o.stayId) : null;
+  // A room or bed tile belongs to whoever is staying in it: nothing to choose.
+  if (linked && roomKeyOf(roomShow(linked.room)) === roomKeyOf(o.place)) return '';
+  if (o.stayId && !linked) return '';
+  if (linked) return html`<div class="small" style="padding:0 16px 8px">For a guest in house: <strong>${roomShow(linked.room)} · ${linked.guestName}</strong>${String(linked.room).endsWith(' (left room)') ? html` <span class="status warn">Left room</span>` : ''}
+    <button class="btn sm ghost" type="button" data-act="glSet" data-id="">Not this guest</button></div>`;
+  if (!ui.glOpen) return html`<div class="small" style="padding:0 16px 8px"><button class="btn sm ghost" type="button" data-act="glAsk">For a guest in house?</button></div>`;
+  const q = String(ui.glQ ?? '').trim().toLowerCase();
+  const heads = stays.filter((x) => !x.groupStayId);
+  const list = q ? heads.filter((x) => `${roomShow(x.room)} ${x.guestName}`.toLowerCase().includes(q)).slice(0, 5) : heads.filter((x) => String(x.room).endsWith(' (left room)')).slice(0, 5);
+  return html`<div class="panel" style="margin:0 16px 10px;padding:10px"><div class="row" style="justify-content:space-between"><strong class="small">For a guest in house?</strong><button class="btn sm ghost" type="button" data-act="glNo">Cancel</button></div>
+    <input class="in" data-model="glQ" data-live value="${ui.glQ ?? ''}" placeholder="Type a name or room" autofocus>
+    <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px">${list.map((x) => html`<button class="btn sm" type="button" style="text-align:left" data-act="glSet" data-id="${x.id}">${roomShow(x.room)} · ${x.guestName}${String(x.room).endsWith(' (left room)') ? ' · left room' : ''}</button>`)}
+      ${list.length ? '' : html`<span class="small quiet">${q ? 'No guest in house matches.' : 'Type 2 or 3 letters of the name or room.'}</span>`}</div></div>`;
+}
+actions.glAsk = async () => { ui.glOpen = true; ui.glQ = ''; await load('stays'); rerender(); };
+actions.glNo = () => { ui.glOpen = false; rerender(); };
+actions.glSet = async (d) => {
+  await api('POST', `${B()}/orders/${ui.order.id}/stay`, { stayId: d.id || null });
+  ui.glOpen = false;
+  ui.order = (await api('GET', `${B()}/orders/${ui.order.id}`)).order;
+  flash = { kind: 'ok', text: d.id ? 'Linked: their check-out waits for this table, and paying offers their room bill.' : 'Unlinked.' };
+  rerender();
+};
 function guestLine(o) {
   const g = ui.guest ?? { name: o.guestName, phone: o.guestPhone, visits: 0 };
   return html`<form class="guestedit"><div class="grid2">
@@ -950,7 +981,8 @@ actions.gSave = async () => {
 };
 
 async function orderScreen(id) {
-  await load('menu', 'reasons');
+  await load('menu', 'reasons', 'stays');
+  ui.glOpen = false;
   const [o, ev] = await Promise.all([api('GET', `${B()}/orders/${id}`), api('GET', `${B()}/event-mode/now`).catch(() => ({ event: null }))]);
   ui.order = o.order; ui.event = ev.event; ui.guest = o.order.guest;
   ui.cat = 'All'; ui.q = '';
@@ -1017,7 +1049,7 @@ async function orderScreen(id) {
         <div class="tk-head"><div><p class="tiny quiet" style="font-weight:700">${KIND_TEXT[o.kind] ?? o.kind}${o.status === 'tab' ? ` · tab since ${dayName(o.openedShiftDay)}` : ''}</p><h2>${o.place}</h2>
             <p class="quiet small">opened ${time(o.openedAt)}</p></div>
           <a class="btn" href="#/">Tables</a></div>
-        ${guestLine(o)}
+        ${guestLine(o)}${guestLinkBox(o)}
         <div class="tk-body">
           ${errorBox()}
           ${ui.kotDone ? html`<div class="msg ok" role="status">${ui.kotDone}</div>` : ''}
@@ -1980,21 +2012,24 @@ function todayView() {
     const bal = all.reduce((n, x) => n + x.balancePaise, 0);
     const right = kind === 'out' ? (bal === 0 ? html`<span class="status ok">Ready to check out</span>` : owes(bal))
       : html`${dj ? html`<span class="status info">Paid in Djubo ${rs(dj)}</span> ` : ''}${owes(bal - dj)}`;
-    const sub = kind === 'out' ? 'check-out 11 am' : `${first.plan ? `till ${dayName(first.plan)}` : 'no check-out date'}${dj ? ' · Djubo payment: pick how paid' : ''}`;
+    // A guest who left the room with the bill open (27 Nov 2026): still in house, tagged, until checked out.
+    const left = all.some((x) => String(x.room).endsWith(' (left room)'));
+    const sub = left ? 'left the room · bill open, check out when paid' : kind === 'out' ? 'check-out 11 am' : `${first.plan ? `till ${dayName(first.plan)}` : 'no check-out date'}${dj ? ' · Djubo payment: pick how paid' : ''}`;
+    const tag = left ? html` <span class="status warn">Left room</span>` : '';
     // One tile per guest or party (27 Nov 2026): a group's beds or bills open inside its own tile.
-    if (all.length === 1) return html`<div class="dtile">${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${first.room} · ${first.guestName}</strong><small>${sub}</small>`, right)}</div>`;
+    if (all.length === 1) return html`<div class="dtile ${left ? 'left' : ''}">${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${roomShow(first.room)} · ${first.guestName}${tag}</strong><small>${sub}</small>`, right)}</div>`;
     const two = t.bills.length > 1;
-    const roomsOf = (b) => compactRooms([b.head, ...b.members].map((x) => x.room));
+    const roomsOf = (b) => compactRooms([b.head, ...b.members].map((x) => roomShow(x.room)));
     const k = `${kind}:${t.key}`;
     const open = !!ui.tileOpen?.[k];
     const n = two ? t.bills.length : all.length;
-    return html`<div class="dtile grp">
-      ${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${t.bills.map(roomsOf).join(', ')} · ${first.guestName}</strong><small>${sub}${two ? ' · 2 bookings, one party' : ''}</small>`, right)}
+    return html`<div class="dtile grp ${left ? 'left' : ''}">
+      ${row(html`data-act="roomBill" data-id="${first.id}"`, html`<strong>${t.bills.map(roomsOf).join(', ')} · ${first.guestName}${tag}</strong><small>${sub}${two ? ' · 2 bookings, one party' : ''}</small>`, right)}
       <div class="dtbar"><button type="button" class="chip" aria-expanded="${open}" data-act="tileTog" data-k="${k}">${open ? '▾' : '▸'} ${n} ${two ? (n === 1 ? 'bill' : 'bills') : (n === 1 ? 'bed' : 'beds')}</button></div>
       ${open ? html`<div class="dtbeds">${two
         ? t.bills.map((b) => { const bb = [b.head, ...b.members]; const v = bb.reduce((q, x) => q + x.balancePaise - (kind === 'out' ? 0 : x.djuboPaise ?? 0), 0);
             return row(html`data-act="roomBill" data-id="${b.head.id}"`, html`<span>${roomsOf(b)} · its own bill</span>`, owes(v)); })
-        : all.map((x, i) => row(html`data-act="roomBill" data-id="${first.id}"`, html`<span>${x.room}${i === 0 ? ' · the bill' : ''}</span>`, ''))}</div>` : ''}
+        : all.map((x, i) => row(html`data-act="roomBill" data-id="${first.id}"`, html`<span>${roomShow(x.room)}${i === 0 ? ' · the bill' : ''}</span>`, ''))}</div>` : ''}
     </div>`;
   };
   const due = (p, prepaidText = 'Prepaid') => (p ? html`<span class="status warn">Collect ${rs(p)}</span>` : html`<span class="status ok">${prepaidText}</span>`);
@@ -2038,6 +2073,8 @@ function cmpRoom(a, b) {
   return String(a ?? '').localeCompare(String(b ?? ''), 'en', { numeric: true, sensitivity: 'base' });
 }
 const byRoom = (list) => [...list].sort((x, y) => cmpRoom(x.room, y.room));
+/** A room as shown: without the "(left room)" mark the POS keeps on a guest who left it with the bill open. */
+const roomShow = (r) => String(r).replace(/ \(left room\)$/, '');
 /** Rooms in short: "XIV A–F" when the beds of one room run in order, else listed. */
 function compactRooms(list) {
   const by = new Map();
@@ -2921,6 +2958,21 @@ function roomBillPanel(r) {
       ${mvBox(st)}
       <div class="row"><button class="btn pri" type="submit" data-act="${swap ? 'rbSwap' : 'rbMove'}" data-submit>${mvButton(st)}</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div></form>`;
     }
+    // The guest left the room but the bill is still open (27 Nov 2026): free the room, and choose what happens to open food.
+    if (f === 'left') {
+      const lr = ui.lr;
+      if (!lr) return html`<p class="quiet" style="margin-top:10px">Loading…</p>`;
+      const live = lr.orders.filter((o) => o.status === 'open' || o.status === 'tab');
+      return html`<div class="panel" style="margin-top:10px"><h3>${lr.stay.guestName} has left ${lr.rooms.join(', ')}</h3>
+        <p class="small quiet" style="margin:0">${lr.rooms.join(', ')} ${lr.rooms.length > 1 ? 'are' : 'is'} freed and marked dirty, so the next guest can be checked in. The bill stays open, and the guest stays in In house tagged "Left room" until checked out.</p>
+        ${lr.orders.length ? html`<div class="small"><strong>Food still open:</strong> ${lr.orders.map((o) => `${o.place} ${rs(o.totalPaise)}${o.status === 'billed' ? ' (printed, not paid)' : ''}${o.unsent ? ` · ${o.unsent} not sent to the kitchen` : ''}`).join(' · ')}</div>
+          <div class="row"><button class="btn pri" type="button" data-act="lrBill">Bill it to the room now</button></div>
+          <p class="small quiet" style="margin:0">Prints each bill and puts it on the room bill.${lr.orders.some((o) => o.unsent) ? ' Send the KOT (or remove) the items not sent first.' : ''}</p>
+          ${live.length <= 1 ? html`<div class="small">Or move it to the table they are sitting at:</div>
+            <div class="chips">${lr.freeTables.slice(0, 24).map((t) => html`<button type="button" class="chip" data-act="lrGo" data-move="table" data-t="${t}">${t}</button>`)}</div>` : ''}
+          <div class="row"><button class="btn" type="button" data-act="lrGo" data-move="wait">Not at a table yet: keep it waiting</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div>`
+        : html`<div class="row"><button class="btn pri" type="button" data-act="lrGo" data-move="">Free the room</button><button class="btn" type="button" data-act="rbFormNo">Cancel</button></div>`}</div>`;
+    }
     // Extensions are made in Djubo (26 Nov 2026): the date and rent follow its mail. A manager can extend here when Djubo is down.
     if (f === 'djuboExt') return html`<div class="msg ok" style="display:block;margin-top:10px"><strong>Extend this booking in Djubo</strong>
       <div class="small">Change the check-out in Djubo${r.booking ? ` (Djubo ${r.booking.extRef})` : ''}. The POS updates the date and the rent by itself when Djubo's email comes, usually in a few minutes; a new booking from Djubo for the extra nights shows under Arrivals as "extension": press Continue on it.</div>
@@ -2973,6 +3025,7 @@ function roomBillPanel(r) {
       ${r.rentPaise > 0 ? html`<button class="btn ghost" type="button" data-act="rbForm" data-f="lower">Take rent off</button>` : ''}
       ${r.balancePaise > 0 ? html`<button class="btn" type="button" data-act="rbForm" data-f="transfer">Bill to company / another room</button>` : ''}
       <button class="btn" type="button" data-act="rbForm" data-f="move">Move room</button>
+      ${String(st.room).endsWith(' (left room)') ? '' : html`<button class="btn" type="button" data-act="lrOpen">Left the room, bill still open</button>`}
       <button class="btn" type="button" data-act="rbForm" data-f="${f === 'djuboExt' ? '' : 'djuboExt'}">Extend in Djubo</button>
       <button class="btn ghost" type="button" data-act="rbGrc" data-id="${st.id}">Registration card</button>
       ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
@@ -2999,6 +3052,29 @@ actions.rbForm = async (d) => {
   rerender();
 };
 actions.rbFormNo = () => { ui.rbForm = null; rerender(); };
+actions.lrOpen = async () => { ui.rbForm = 'left'; ui.lr = null; ui.error = null; rerender(); ui.lr = await api('GET', `${B()}/stays/${ui.roomBill.stay.id}/left-room`); rerender(); };
+actions.lrGo = async (d) => {
+  const r = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/left-room`, d.move ? { move: d.move, table: d.t } : {});
+  ui.rbForm = null; ui.lr = null;
+  flash = { kind: 'ok', text: `${r.rooms.join(', ')} freed and marked dirty.${r.table ? ` The open food is on ${r.table}.` : ''} Check out when the guest pays.` };
+  reopenStay = ui.roomBill.stay.id; await load('stays'); route();
+};
+/** Bill each open order to the room (the usual bill and payment), then free the room. */
+actions.lrBill = async () => {
+  const lr = ui.lr;
+  await load('entities');
+  const ents = counterEntities();
+  const ent = (ents.find((e) => e.is_default) ?? ents[0])?.id;
+  for (const o of lr.orders) {
+    let billId = o.billId; let total = o.totalPaise;
+    if (!billId) {
+      const b = await api('POST', `${B()}/orders/${o.id}/bill`, { entityId: ent, discount: { kind: 'none' } });
+      billId = b.bill.id; total = b.bill.totalPaise;
+    }
+    await api('POST', `${B()}/settlements`, { billIds: [billId], payments: [{ mode: 'room', amount: rupees(total), debtorAccountId: lr.stay.accountId }] });
+  }
+  await actions.lrGo({ move: '' });
+};
 actions.rbChargeGo = async () => {
   ui.roomBill = await api('POST', `${B()}/stays/${ui.roomBill.stay.id}/charges`, { amount: ui.rbAmt ?? '', note: ui.rbNote ?? '', lower: ui.rbForm === 'lower' });
   ui.rbForm = null; flash = { kind: 'ok', text: 'Room bill updated.' }; rerender();

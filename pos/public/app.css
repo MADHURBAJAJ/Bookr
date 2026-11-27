@@ -1161,3 +1161,4 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .dcol .dtile .dtbeds { border-top: 1px dashed var(--line); background: var(--soft); padding: 2px 0 2px 12px; }
 .dcol .dtile .dtbeds .drow { padding: 6px 12px; font-size: 13px; }
 .dcol .dtile .dtbeds .drow + .drow { border-top: 1px solid var(--line); }
+.dcol .dtile.left { border-left: 4px solid var(--warn); }

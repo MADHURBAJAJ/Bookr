@@ -84,7 +84,7 @@ export async function roomRevenueByDay(db: DB, b: Business, from: string, to: st
   const beds = secs.filter((x) => x.kind === 'dorms').flatMap((x) => x.rooms);
   const wholes: Record<string, string[]> = Object.assign({}, ...secs.map((x) => x.wholes));
   const startOf = (d: string) => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), b.shift_start_hour) - 19_800_000;
-  const real = (r: string) => r.replace(/ \(past stay\)$/, '');
+  const real = (r: string) => r.replace(/ \((past stay|left room)\)$/, '');
   const unitsOf = (room: string) => {
     const w = Object.entries(wholes).find(([k]) => flat(k) === flat(real(room)));
     return w ? w[1] : [rooms.find((x) => flat(x) === flat(real(room))) ?? beds.find((x) => flat(x) === flat(real(room)))].filter((x): x is string => !!x);
@@ -101,7 +101,8 @@ export async function roomRevenueByDay(db: DB, b: Business, from: string, to: st
   for (const st of stays) if (st.group_stay_id) members.set(st.group_stay_id, (members.get(st.group_stay_id) ?? 0) + 1);
   for (const st of stays) {
     const units = unitsOf(st.room);
-    const outDay = st.out == null ? null : shiftDayAt(st.out, b.shift_start_hour);
+    // A guest who left the room with the bill open (27 Nov 2026) holds it no more from today.
+    const outDay = st.out == null ? (st.room.endsWith(' (left room)') ? today : null) : shiftDayAt(st.out, b.shift_start_hour);
     // The nights the stay covers: to check-out, or (in house) to the planned day; at least one.
     const endAll = outDay ?? (st.plan && st.plan > st.check_in ? st.plan : addDays(today > st.check_in ? today : st.check_in, 1));
     const end = endAll > st.check_in ? endAll : addDays(st.check_in, 1);

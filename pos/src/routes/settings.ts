@@ -894,7 +894,9 @@ settingsRoutes.get(`${B}/guests/lookup`, requireAction('stays.edit'), async (c) 
  * never takes the room from anyone; at check-out it gets the room's own name, and the room is not marked dirty.
  */
 export const PAST_STAY = ' (past stay)';
-export const realRoom = (room: string) => (room.endsWith(PAST_STAY) ? room.slice(0, -PAST_STAY.length) : room);
+/** A guest who left the room with the bill still open (27 Nov 2026): the room is free for the next guest; checked out later. */
+export const LEFT_ROOM = ' (left room)';
+export const realRoom = (room: string) => (room.endsWith(PAST_STAY) ? room.slice(0, -PAST_STAY.length) : room.endsWith(LEFT_ROOM) ? room.slice(0, -LEFT_ROOM.length) : room);
 
 settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
   const bid = c.get('businessId');
@@ -1239,7 +1241,8 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   const owing = [...(row.group_stay_id ? [{ room: row.room, balance: row.balance }] : []), ...members].filter((m) => m.balance !== 0);
   if (owing.length) fail(409, `${owing.map((m) => m.room).join(', ')} still ${owing.length === 1 ? 'has' : 'have'} money on ${owing.length === 1 ? 'its' : 'their'} own bill: move it to the first room's bill first (Move to another room).`);
   // A past stay's room (25 Nov 2026) takes its own name at check-out, and is not marked dirty: nobody left it today.
-  const dirtyStmt = (room: string, at: number) => (room.endsWith(PAST_STAY) ? [] : [stmt(db, `INSERT INTO room_status (business_id, room, status, by_staff, at) VALUES (?, ?, 'dirty', ?, ?)
+  // A guest who left the room earlier: it was marked dirty then, and someone else may be in it now.
+  const dirtyStmt = (room: string, at: number) => (room.endsWith(PAST_STAY) || room.endsWith(LEFT_ROOM) ? [] : [stmt(db, `INSERT INTO room_status (business_id, room, status, by_staff, at) VALUES (?, ?, 'dirty', ?, ?)
     ON CONFLICT (business_id, room) DO UPDATE SET status = 'dirty', note = NULL, by_staff = excluded.by_staff, at = excluded.at`, bid, room, c.get('staff').id, at)]);
   if (row.group_stay_id) {
     const t0 = now();
