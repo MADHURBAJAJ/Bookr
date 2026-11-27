@@ -95,6 +95,14 @@ export const HeartbeatBody = z.object({
   version: z.string().trim().max(40).optional(),
   // The groups the listener can see (phase 4): shown on the group setup screen so nobody types a group id.
   groups: z.array(z.object({ id: z.string().regex(/^[0-9-]+@g\.us$/), name: z.string().trim().min(1).max(200) })).max(300).optional(),
+  // Linking from the POS (27 Nov 2026, src/waLink.ts): the linked number's last 4 digits (null: not linked), and the
+  // request it is working on: the QR to scan while linking, then how it ended.
+  linkedLast4: z.string().regex(/^\d{4}$/).nullable().optional(),
+  link: z.object({
+    id: z.string().uuid(),
+    qrRows: z.array(z.string().regex(/^[01]+$/).max(177)).min(21).max(177).optional(),
+    result: z.enum(['linked', 'unlinked', 'expired', 'cancelled']).optional(),
+  }).optional(),
 });
 
 export async function heartbeat(db: DB, b: z.infer<typeof HeartbeatBody>) {

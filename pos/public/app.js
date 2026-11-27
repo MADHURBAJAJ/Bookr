@@ -202,6 +202,7 @@ async function route() {
   document.title = 'Bookr POS';
   stopStation();
   stopProof();
+  stopWaLink();
   try {
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
@@ -5812,7 +5813,11 @@ function whatsappSettings() {
   const reading = d.groups.filter((g) => g.active);
   const today = reading.reduce((n, g) => n + g.today, 0);
   const owner = can('whatsapp.add');
-  const head = off ? 'Not reading: the reception PC is off' : reading.length ? `Reading ${plural(reading.length, 'group')}` : 'Set up, but no group is turned on';
+  waPoll();
+  // No number linked (the Owner unlinked it, or a switch is under way): nothing is read, whatever the groups say.
+  const noNumber = !off && d.link && !d.link.last4;
+  const head = off ? 'Not reading: the reception PC is off' : noNumber ? 'Not reading: no WhatsApp number linked'
+    : reading.length ? `Reading ${plural(reading.length, 'group')}` : 'Set up, but no group is turned on';
   const group = (g) => html`<div class="wa-row"><div class="grow"><strong>${g.name}</strong>
       <div class="small quiet">${g.active ? (g.lastAt ? `Newest photo ${waAgo(g.lastAt)} · ${g.today} today` : 'No photos yet') : 'Off: not read'}</div>
       ${g.department ? html`<span class="status mute">${g.department}</span> ` : ''}${g.active && g.posProof ? html`<span class="status info">Payment proof at the counter</span>` : ''}</div>
@@ -5826,17 +5831,91 @@ function whatsappSettings() {
       <p class="small quiet">Photos and PDF bills posted in it from now on are stored in Bookr.</p>
       <div class="row"><button class="btn pri" type="submit" data-act="waAddSave" data-submit>Start reading</button><button class="btn" type="button" data-act="waAddCancel">Cancel</button></div></form>` : ''}`;
   return html`<div class="stack" style="max-width:900px">${errorBox()}
-    <section class="panel"><div class="row between"><h2>${head}</h2><span class="status ${off ? 'bad' : reading.length ? 'ok' : 'warn'}">${off ? 'Stopped' : reading.length ? 'Working' : 'Nothing read'}</span></div>
-      <p class="quiet small" style="margin:4px 0 12px">${off ? 'Nothing is lost: photos posted while it is off come in when the PC is back on.' : 'New photos and PDF bills show in Bookr within a minute.'}</p>
+    <section class="panel"><div class="row between"><h2>${head}</h2><span class="status ${off ? 'bad' : noNumber ? 'warn' : reading.length ? 'ok' : 'warn'}">${off ? 'Stopped' : noNumber ? 'No number' : reading.length ? 'Working' : 'Nothing read'}</span></div>
+      <p class="quiet small" style="margin:4px 0 12px">${off ? 'Nothing is lost: photos posted while it is off come in when the PC is back on.' : noNumber ? 'Link the reception number below to start reading.' : 'New photos and PDF bills show in Bookr within a minute.'}</p>
       <div class="kpis" style="margin:0">${kpi('Reception PC', off ? 'Off' : 'Online', `last heard ${waAgo(L.lastSeenAt)}`, off ? 'bad' : '')}
         ${kpi('Newest photo', L.lastMessageAt ? time(L.lastMessageAt) : '—', L.lastMessageAt ? waAgo(L.lastMessageAt) : '')}${kpi('Photos today', String(today), 'in the groups read')}</div></section>
     ${off ? html`<div class="msg bad">Ask reception to switch on the PC and check it is online. If it stays off too long, WhatsApp unlinks it and the reception phone must link it again.</div>` : ''}
+    ${waLinkBox(d.link)}
     <section class="panel"><h2>Groups read</h2><p class="quiet small">Turn a group off to stop reading it; its photos already in Bookr stay. “Proof for bills” puts its photos on the Payments screen.</p>
       ${d.groups.length ? d.groups.map(group) : html`<p class="quiet" style="margin-top:10px">No group yet.${owner ? ' Start reading one below.' : ''}</p>`}</section>
     <section class="panel"><h2>Other groups on the reception phone</h2><p class="quiet small">Seen by the PC, not read. Nothing from these is downloaded.</p>
       ${d.seen.length ? d.seen.map(seen) : html`<p class="quiet" style="margin-top:10px">None.</p>`}</section>
     ${never}</div>`;
 }
+// The WhatsApp number (27 Nov 2026): Owner only links, switches or unlinks it. While a link or unlink is open the screen
+// asks every 3 seconds; the QR changes every 20 seconds and the link closes after 3 minutes.
+let waLinkTimer = null;
+function stopWaLink() { if (waLinkTimer) { clearInterval(waLinkTimer); waLinkTimer = null; } }
+function waPoll() {
+  if (!ui.wa?.link?.request) { stopWaLink(); return; }
+  if (waLinkTimer) return;
+  waLinkTimer = setInterval(async () => {
+    if (!location.hash.startsWith('#/settings/whatsapp')) { stopWaLink(); return; }
+    try {
+      const was = ui.wa.link?.request;
+      ui.wa = await api('GET', B() + '/whatsapp');
+      const now = ui.wa.link;
+      if (was && !now?.request) {
+        stopWaLink();
+        const r = now?.lastResult;
+        flash = r === 'linked' ? { kind: 'ok', text: `Linked: phone ending ${now.last4}. Reading starts within a minute.` }
+          : r === 'unlinked' ? { kind: 'ok', text: 'Unlinked. The reception PC has stopped reading WhatsApp.' }
+          : r === 'expired' ? { kind: 'warn', text: 'Nobody scanned the code in 3 minutes, so no number is linked. Press Link to try again.' }
+          : null;
+      }
+      rerender();
+    } catch { /* tried again in 3 seconds */ }
+  }, 3000);
+}
+/** The QR as a picture, drawn here from rows of 0 and 1 (nothing else is accepted), with the white border phones need. */
+function waQr(rows) {
+  if (!Array.isArray(rows) || !rows.length || !rows.every((r) => typeof r === 'string' && /^[01]+$/.test(r) && r.length === rows.length)) return '';
+  const n = rows.length; const q = 4;
+  let d = '';
+  rows.forEach((r, y) => { for (let x = 0; x < n; x++) if (r[x] === '1') d += `M${x + q} ${y + q}h1v1h-1z`; });
+  return { __html: `<svg viewBox="0 0 ${n + 2 * q} ${n + 2 * q}" role="img" aria-label="Code to scan with the phone" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><path d="${d}" fill="#000"/></svg>` };
+}
+function waLinkBox(k) {
+  if (!k) return '';
+  const owner = can('whatsapp.link');
+  const req = k.request;
+  const left = req ? Math.max(0, Math.round((req.endsAt - Date.now()) / 1000)) : 0;
+  const tag = req ? html`<span class="status warn">${req.action === 'unlink' ? 'Unlinking' : k.qrRows ? 'Scan now' : 'Linking'}</span>`
+    : k.last4 ? html`<span class="status ok">Linked</span>` : html`<span class="status mute">No number</span>`;
+  let body;
+  if (req && req.action === 'link' && k.qrRows && owner) {
+    body = html`<div class="wa-qrwrap"><div class="wa-qr">${waQr(k.qrRows)}<p class="small" style="margin-top:6px;color:#4d5b59">Closes in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}</p></div>
+      <div class="grow"><h3>On the phone to link (the reception phone)</h3><ol class="small" style="margin:6px 0 0;padding-left:22px;line-height:1.7">
+        <li>Open WhatsApp</li><li>Tap <b>Settings</b> (iPhone) or <b>⋮</b> (Android)</li><li>Tap <b>Linked devices</b> › <b>Link a device</b></li><li>Point the phone at this code</li></ol>
+        <p class="small quiet" style="margin-top:8px">The code changes on its own every 20 seconds. It stops after 3 minutes if nobody scans; press Link again then.</p>
+        <div class="row" style="margin-top:10px"><button class="btn" type="button" data-act="waLink" data-a="cancel">Cancel</button></div></div></div>`;
+  } else if (req) {
+    body = html`<div class="row" style="margin-top:10px"><span class="wa-spin" aria-hidden="true"></span><span>${req.action === 'unlink' ? 'Asking the reception PC to unlink' : `Asking the reception PC for a code${k.last4 ? ` (it stops reading phone ending ${k.last4} first)` : ''}`}. This takes up to a minute.</span></div>
+      ${owner && req.action === 'link' ? html`<div class="row" style="margin-top:10px"><button class="btn" type="button" data-act="waLink" data-a="cancel">Cancel</button></div>` : ''}`;
+  } else if (k.last4) {
+    body = html`<div class="wa-phone"><div class="small quiet">The reception PC reads WhatsApp as</div><div class="wa-big">Phone ending ${k.last4}</div>
+        ${k.linkedAt ? html`<div class="small quiet">Linked ${dateTime(k.linkedAt)}${k.linkedBy ? ` by ${k.linkedBy.replace(/^POS · /, '')}` : ' on the PC'}</div>` : ''}</div>
+      ${owner ? html`<div class="row" style="margin-top:12px"><button class="btn" type="button" data-act="waLink" data-a="link" ${k.pcOn ? '' : 'disabled'}>Switch to another number</button>
+        <button class="btn danger" type="button" data-act="waLink" data-a="unlink" ${k.pcOn ? '' : 'disabled'}>Unlink</button></div>
+        <p class="small quiet" style="margin-top:8px">${k.pcOn ? 'After switching or unlinking, remove the PC on the old phone too: WhatsApp › Linked devices.' : 'The reception PC is off, so the number cannot be changed from here now. Switch the PC on first.'}</p>`
+        : html`<p class="small quiet" style="margin-top:10px">Only the Owner can link, switch or unlink the number.</p>`}`;
+  } else {
+    body = html`<p class="quiet" style="margin-top:8px">No WhatsApp number is linked, so nothing is read.</p>
+      ${owner ? html`<div class="row" style="margin-top:12px"><button class="btn pri" type="button" data-act="waLink" data-a="link" ${k.pcOn ? '' : 'disabled'}>Link a WhatsApp number</button></div>
+        ${k.pcOn ? '' : html`<p class="small quiet" style="margin-top:8px">The reception PC is off. Switch it on first.</p>`}` : html`<p class="small quiet" style="margin-top:10px">Ask the Owner to link the reception number.</p>`}`;
+  }
+  return html`<section class="panel"><div class="row between"><h2>WhatsApp number</h2>${tag}</div>${body}</section>`;
+}
+actions.waLink = async (d) => {
+  const k = ui.wa?.link;
+  if (d.a === 'unlink' && !confirm(`Unlink phone ending ${k?.last4}? The reception PC stops reading WhatsApp until a number is linked again.`)) return;
+  if (d.a === 'link' && k?.last4 && !confirm(`Switch from phone ending ${k.last4}? The reception PC stops reading it, then shows a code here to scan with the other phone.`)) return;
+  ui.wa = await api('POST', B() + '/whatsapp/link', { action: d.a });
+  if (d.a === 'cancel') flash = { kind: 'ok', text: 'Linking cancelled.' };
+  rerender();
+};
+
 const waChange = async (id, change) => { ui.wa = await api('PATCH', `${B()}/whatsapp/groups/${id}`, change); };
 actions.waRead = async (d) => {
   const g = ui.wa.groups.find((x) => x.id === d.id);

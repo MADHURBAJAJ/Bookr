@@ -1162,3 +1162,11 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .dcol .dtile .dtbeds .drow { padding: 6px 12px; font-size: 13px; }
 .dcol .dtile .dtbeds .drow + .drow { border-top: 1px solid var(--line); }
 .dcol .dtile.left { border-left: 4px solid var(--warn); }
+.wa-phone { background: var(--soft); border-radius: var(--radius); padding: 12px; margin-top: 12px; }
+.wa-big { font-size: 22px; font-weight: 800; letter-spacing: .02em; }
+.wa-qrwrap { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; margin-top: 14px; }
+.wa-qr { background: #fff; padding: 10px; border-radius: var(--radius); border: 1px solid var(--line); width: 264px; max-width: 100%; }
+.wa-qr svg { display: block; width: 100%; height: auto; }
+.wa-spin { width: 18px; height: 18px; border: 3px solid var(--line); border-top-color: var(--pri); border-radius: 50%; animation: wa-spin 1s linear infinite; flex: none; }
+@keyframes wa-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .wa-spin { animation: none; } }

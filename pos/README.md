@@ -107,6 +107,9 @@ chooses the groups, without signing in to Bookr. Owners and managers see it and 
   Bookr). Bookr checks the key and the role again, and writes the POS person's name in its history
   ("POS · Ravi (manager)").
 - No new secret and no migration. Without a Bookr key the tab says the POS is not connected.
+- **The WhatsApp number** (27 Nov 2026): the Owner links, switches or unlinks it here (`whatsapp.link`); the reception
+  PC picks the request up within a minute and the QR to scan shows on this page, to the Owner only, for 3 minutes. Bookr
+  keeps the request and the number's last 4 digits (migration `0044_wa_link.sql` in Bookr); see `listener/README.md`, 2a.
 
 ## Run and test
 

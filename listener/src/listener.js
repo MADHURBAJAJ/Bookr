@@ -9,6 +9,7 @@ import { pick } from './media.js';
 import { statsLine } from './guard.js';
 
 const HEARTBEAT_MS = 60_000;
+const LINK_BEAT_MS = 5_000;
 const GROUP_LIST_MS = 30 * 60_000;
 const SEND_EVERY_MS = 5_000;
 const DOWNLOADS_PER_MIN = 20;
@@ -41,6 +42,13 @@ export function createListener({ cfg, log, bookr, stats, download, now = () => D
   const recent = [];
   let sending = false;
   let wakeSender = () => {};
+  // Linking from the POS (27 Nov 2026): the linked number's last 4 digits (undefined until known, null when not linked),
+  // the request being worked on ({ id, qrRows } while linking, { id, result } once it ended, until Bookr has heard it),
+  // and what to do with the request Bookr answers.
+  let linkedLast4;
+  let linkWork = null;
+  let onLink = () => {};
+  let beating = null;
 
   const reads = (g) => serverGroups.has(g) && (!cfg.localGroups || cfg.localGroups.has(g));
   const me = () => sock?.user() ?? {};
@@ -59,8 +67,16 @@ export function createListener({ cfg, log, bookr, stats, download, now = () => D
     }
   }
 
-  async function heartbeat() {
+  /** One heartbeat at a time; a call while one is on its way waits for it. */
+  function heartbeat() {
+    if (!beating) beating = beat().finally(() => { beating = null; });
+    return beating;
+  }
+  async function beat() {
     const body = { lastMessageAt, state };
+    if (linkedLast4 !== undefined) body.linkedLast4 = linkedLast4;
+    const work = linkWork;
+    if (work) body.link = { id: work.id, ...(work.qrRows ? { qrRows: work.qrRows } : {}), ...(work.result ? { result: work.result } : {}) };
     if (sock && state === 'connected' && now() - groupsSentAt >= GROUP_LIST_MS) {
       try {
         const all = await sock.groupFetchAllParticipating();
@@ -74,6 +90,8 @@ export function createListener({ cfg, log, bookr, stats, download, now = () => D
       if (r.status === 200 && Array.isArray(r.body?.readGroups)) {
         if (setupProblem) { log.info('Bookr accepts the listener again.'); setupProblem = ''; }
         setReadGroups(r.body.readGroups);
+        if (work?.result && linkWork === work) linkWork = null;   // Bookr has heard how it ended
+        try { onLink(r.body.link ?? null); } catch (e) { log.error(`link: ${e.message}`); }
         return true;
       }
       noteSetup(r.status, r.body?.error);
@@ -187,12 +205,23 @@ export function createListener({ cfg, log, bookr, stats, download, now = () => D
     onMessages,
     onGroups(list) { for (const g of list ?? []) if (g?.id && g.subject) names.set(g.id, g.subject); },
     heartbeat,
+    /** The linked number's last 4 digits, or null when this PC is not linked. */
+    setLinked(last4) { linkedLast4 = last4; },
+    /** Linking for request id: the QR to scan now (rows of 0 and 1). Sent to Bookr at once. */
+    linkProgress(id, qrRows) { linkWork = { id, qrRows }; void heartbeat(); },
+    /** The request ended: linked, unlinked, expired or cancelled. Sent to Bookr at once, and again until it answers. */
+    linkDone(id, result) { linkWork = { id, result }; void heartbeat(); },
+    get linking() { return !!linkWork && !linkWork.result; },
+    /** What to do with the link request in each heartbeat answer ({ id, action } or null). */
+    setLinkHandler(fn) { onLink = fn; },
     sendDue,
     runDownloads,
     /** Starts the timers: heartbeat every minute, sending every 5 seconds (or at once when a file is kept), hourly counts. */
     start() {
       wakeSender = () => void sendDue();
       timers.push(setInterval(() => void heartbeat(), HEARTBEAT_MS));
+      // While a link is open (or its end not yet heard by Bookr), every 5 seconds: the QR changes every 20.
+      timers.push(setInterval(() => { if (linkWork) void heartbeat(); }, LINK_BEAT_MS));
       timers.push(setInterval(() => void sendDue(), SEND_EVERY_MS));
       timers.push(setInterval(() => {
         log.info(statsLine(stats));

@@ -89,6 +89,14 @@ if (mode === 'link') {
   const ok = await listener.heartbeat();
   if (!ok) log.warn('Bookr was not reached at start; using the group list from last time until it answers.');
   listener.start();
+  // Link, switch or unlink asked for from the POS (27 Nov 2026), passed on by Bookr in each heartbeat answer.
+  listener.setLinkHandler((req) => {
+    if (!wa) return;
+    const working = wa.linkingId();
+    if (working && req?.id !== working) wa.endLink(working, 'cancelled');   // cancelled in the POS, or replaced by a new request
+    if (req?.action === 'link') wa.link(req.id);
+    else if (req?.action === 'unlink') wa.unlink(req.id);
+  });
   wa = await runWhatsApp({ cfg, log, logger, mode, listener, permit, onReady: (h) => { wa = h; } });
   void listener.sendDue();
   daily.start();

@@ -121,6 +121,22 @@ When you are done, remove the test PC from the test phone (Linked devices), and 
 
 ---
 
+## 2a. Link, switch or unlink the number from the POS (27 Nov 2026)
+
+Once the listener runs on the PC (steps 1–4, 6 and 7 above), nobody needs to touch the PC to link a number. Step 5
+(`npm run link`) can be skipped:
+
+1. In the POS, the Owner opens **Settings › WhatsApp** and presses **Link a WhatsApp number** (or **Switch to another
+   number**).
+2. Within a minute the PC forgets any number it had and a QR appears on that page. It changes every 20 seconds.
+3. On the phone to link: WhatsApp › Linked devices › Link a device, and scan it. The page then shows "Phone ending 1234".
+   Nobody scanning in 3 minutes ends it; press Link again.
+4. **Unlink** makes the PC forget its login and stop reading.
+
+Only the Owner can do this, and only the QR picture goes to Bookr while linking, for 3 minutes at most. Only the last 4
+digits of the number are kept. Switching or unlinking does not log the old phone out (that would mean sending something
+to WhatsApp): remove the PC on the old phone too, under Linked devices.
+
 ## 3. Everyday
 
 - **Choosing groups:** in Bookr, Settings → WhatsApp groups. Changes reach the listener within a minute. Nothing needs
@@ -168,8 +184,8 @@ npm run link
 Start-ScheduledTask -TaskName 'Bookr WhatsApp listener'
 ```
 
-**Move to another number** (for example from the test number to reception): stop the task, delete `auth\`, then relink
-with the other phone.
+**Move to another number** (for example from the test number to reception): from the POS, Settings › WhatsApp ›
+Switch to another number (section 2a). Or on the PC: stop the task, delete `auth\`, then relink with the other phone.
 
 **Remove it:**
 
@@ -189,6 +205,8 @@ with the other phone.
   3. The listener checks this at start-up and refuses to run when it is not so.
 - Calls to Bookr:
   - `POST /api/wa/ingest`: multipart, with `meta` and `file`.
-  - `POST /api/wa/heartbeat`: every minute. Bookr answers with `readGroups`.
+  - `POST /api/wa/heartbeat`: every minute (every 5 seconds while a link from the POS is open). It says the linked
+    number's last 4 digits and, while linking, the QR as rows of 0 and 1, then how the link ended. Bookr answers with
+    `readGroups` and `link` (the request to work on, if any; see `src/waLink.ts` in Bookr).
   - Both send the secret in the `X-Bookr-WA-Secret` header. See `src/routes/wa.ts` in Bookr.
 - Never commit `.env`, `auth/`, `data/` or `logs/`. The repo's `.gitignore` keeps them out.

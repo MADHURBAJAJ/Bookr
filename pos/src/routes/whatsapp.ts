@@ -6,6 +6,7 @@
 import { Hono, type Context } from 'hono';
 import { body, fail, isUuid } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
+import { can } from '../permissions';
 import { bookrLink } from '../sync';
 import type { AppEnv, Env } from '../types';
 
@@ -46,8 +47,22 @@ function changed(c: Context<AppEnv>, r: Awaited<ReturnType<typeof askBookr>>, ok
   return c.json(r, ok as 200);
 }
 
+/** The QR to scan is the Owner's only: whoever scans it links their phone to the reception PC. */
+function forRole(c: Context<AppEnv>, r: Record<string, unknown>) {
+  const link = r.link as Record<string, unknown> | undefined;
+  if (!link || can(c.get('staff').role, 'whatsapp.link')) return r;
+  return { ...r, link: { ...link, qrRows: null } };
+}
+
 whatsappRoutes.get('/businesses/:businessId/whatsapp', requireAction('whatsapp.edit'), async (c) =>
-  c.json(await askBookr(c.env, c.get('businessId'), 'wa')));
+  c.json(forRole(c, await askBookr(c.env, c.get('businessId'), 'wa'))));
+
+// Link, switch (link again) or unlink the number, or cancel a link not yet scanned. Owner only (27 Nov 2026).
+whatsappRoutes.post(`${B}/link`, requireAction('whatsapp.link'), async (c) => {
+  const b = await body(c);
+  if (b.action !== 'link' && b.action !== 'unlink' && b.action !== 'cancel') fail(400, 'action is link, unlink or cancel.');
+  return changed(c, await askBookr(c.env, c.get('businessId'), 'wa/link', { action: b.action, by: by(c) }));
+});
 
 whatsappRoutes.patch(`${B}/groups/:id`, requireAction('whatsapp.edit'), async (c) => {
   const id = c.req.param('id');

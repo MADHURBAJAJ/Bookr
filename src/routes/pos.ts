@@ -12,6 +12,7 @@ import { randomToken, sha256 } from '../crypto';
 import { fail, isUuid } from '../http';
 import { IST_OFFSET_MS, shiftDayOf } from '../time';
 import { addGroup, editGroup, groupsView, InboxError } from '../waInbox';
+import { askLink, LinkError, linkView } from '../waLink';
 import { loadProof, matchProof, shiftWindow, type PosMode, type ProofBill } from '../posProof';
 
 export const posRoutes = new Hono<AppEnv>();
@@ -375,12 +376,12 @@ async function posBody(c: { req: { json: () => Promise<unknown> } }): Promise<Ob
 }
 const WA_ROLES = ['owner', 'manager'] as const;
 /** "POS · Ravi (manager)", from { name, role }. */
-function posBy(data: Obj, roles: readonly string[] = WA_ROLES): string {
+function posBy(data: Obj, roles: readonly string[] = WA_ROLES, refusal?: string): string {
   const by = data.by && typeof data.by === 'object' ? data.by as Obj : {};
   const name = typeof by.name === 'string' ? by.name.trim().slice(0, 60) : '';
   const role = typeof by.role === 'string' ? by.role : '';
   if (!name) fail(400, 'by.name is missing.');
-  if (!roles.includes(role)) fail(403, roles.length === 1 ? 'Only the Owner can start reading a new group.' : 'Only an owner or manager can change WhatsApp reading.');
+  if (!roles.includes(role)) fail(403, refusal ?? (roles.length === 1 ? 'Only the Owner can start reading a new group.' : 'Only an owner or manager can change WhatsApp reading.'));
   return `POS · ${name} (${role})`;
 }
 const waAct = async <T>(fn: () => Promise<T>): Promise<T> => {
@@ -391,11 +392,12 @@ async function waStatus(db: DB, bid: string) {
   const day = 86_400_000;
   const t = now();
   const todayFrom = Math.floor((t + IST_OFFSET_MS) / day) * day - IST_OFFSET_MS;
-  const [view, listener, today] = await Promise.all([
+  const [view, listener, today, link] = await Promise.all([
     groupsView(db, bid),
     one<{ last_heartbeat_at: number | null; last_message_at: number | null; state: string | null }>(db,
       'SELECT last_heartbeat_at, last_message_at, state FROM wa_listener_status WHERE id = 1'),
     all<{ group_id: string; n: number }>(db, 'SELECT group_id, count(*) AS n FROM wa_items WHERE business_id = ? AND sent_at >= ? GROUP BY group_id', bid, todayFrom),
+    linkView(db),
   ]);
   const byGroup = new Map(today.map((r) => [r.group_id, r.n]));
   return {
@@ -404,6 +406,7 @@ async function waStatus(db: DB, bid: string) {
       today: byGroup.get(g.id) ?? 0 })),
     seen: view.seen,
     departments: view.departments,
+    link,
     at: t,
   };
 }
@@ -440,4 +443,15 @@ posRoutes.post('/pos/wa/add', async (c) => {
   if (data.posProof !== undefined && typeof data.posProof !== 'boolean') fail(400, 'posProof must be true or false.');
   await waAct(() => addGroup(c.env.DB, bid, null, { waGroupId, department: dep, posProof: data.posProof as boolean | undefined }, by));
   return c.json(await waStatus(c.env.DB, bid), 201);
+});
+
+// POST /api/pos/wa/link  { businessId, action: link | unlink | cancel, by: { name, role } }  Owner only (27 Nov 2026).
+// Link: the PC logs out of any number and shows a QR here to scan, for 3 minutes. Unlink: it logs out and stops reading.
+posRoutes.post('/pos/wa/link', async (c) => {
+  const data = await posBody(c);
+  const bid = await posBusiness(c, data);
+  const by = posBy(data, ['owner'], 'Only the Owner can link, switch or unlink the WhatsApp number.');
+  const action = data.action === 'link' || data.action === 'unlink' || data.action === 'cancel' ? data.action : fail(400, 'action is link, unlink or cancel.');
+  try { await askLink(c.env.DB, bid, action, by); } catch (e) { if (e instanceof LinkError) fail(e.status, e.message); throw e; }
+  return c.json(await waStatus(c.env.DB, bid));
 });
