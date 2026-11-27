@@ -18,6 +18,21 @@ const B = '/businesses/:businessId';
 offlineRoutes.use(`${B}/offline/*`, requireStaff);
 offlineRoutes.use(`${B}/devices/:id/offline`, requireStaff);
 
+// For the Daily check: what was made offline in a shift (bills, receipts) and anything the manager must check.
+offlineRoutes.get(`${B}/offline/day`, requireAction('reports.view'), async (c) => {
+  const bid = c.get('businessId');
+  const day = c.req.query('day') ?? '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) fail(400, 'Day is not valid.');
+  const [bills, receipts, problems] = await Promise.all([
+    all(c.env.DB, `SELECT b.bill_no AS billNo, b.total_paise AS totalPaise, d.name AS device FROM bills b LEFT JOIN devices d ON d.id = b.offline_device
+      WHERE b.business_id = ? AND b.shift_day = ? AND b.offline_device IS NOT NULL ORDER BY b.printed_at`, bid, day),
+    all(c.env.DB, `SELECT s.receipt_no AS receiptNo, d.name AS device FROM settlements s LEFT JOIN devices d ON d.id = s.offline_device
+      WHERE s.business_id = ? AND s.shift_day = ? AND s.offline_device IS NOT NULL ORDER BY s.at`, bid, day),
+    all(c.env.DB, `SELECT problem, offline_at AS at FROM offline_steps WHERE business_id = ? AND problem IS NOT NULL AND offline_at > ? ORDER BY offline_at`, bid, Date.parse(day) - 86_400_000),
+  ]);
+  return c.json({ bills, receipts, problems });
+});
+
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const DAY = 86_400_000;
 
@@ -73,6 +88,7 @@ const ALLOWED: [string, RegExp][] = [
   ['PUT', /^\/orders\/[0-9a-f-]{36}\/note$/],
   ['POST', /^\/orders\/[0-9a-f-]{36}\/kot$/],
   ['POST', /^\/orders\/[0-9a-f-]{36}\/bill$/],
+  ['POST', /^\/orders\/[0-9a-f-]{36}\/cancel$/],
   ['POST', /^\/settlements$/],
   ['POST', /^\/debtors\/[0-9a-f-]{36}\/receipts$/],
 ];

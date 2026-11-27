@@ -79,6 +79,12 @@ describe('offline mode', () => {
     await ok(counter.post(`${B}/orders/${online}/kot`));
     const ob = (await ok(counter.post(`${B}/orders/${online}/bill`, { entityId: s.company }))).bill;
     expect(ob.billNo).toBe(`C${yymmdd(Date.now())}001`);
+    // The Daily check: offline numbers leave no gap in the day's or the year's count, and are listed as made offline.
+    const shiftDay = (await ok(owner.get('/me'))).business.shiftDay;
+    const dc = await ok(owner.get(`${B}/reports/daily-check?day=${shiftDay}`));
+    expect(dc.series.flatMap((x: any) => x.missing)).toEqual([]);
+    expect((await ok(owner.get(`${B}/offline/day?day=${shiftDay}`))).bills).toEqual([{ billNo, totalPaise: 56_700, device: 'Billing counter' }]);
+    expect((await counter.get(`${B}/offline/day?day=${shiftDay}`)).status).toBe(403);
     // The counter learns which offline numbers it already used, in case its saved data was cleared.
     expect((await ok(counter.get(`${B}/offline/device`))).used).toMatchObject({ bills: [billNo], kots: [{ label: 'A1' }] });
   });
@@ -107,6 +113,8 @@ describe('offline mode', () => {
     const b = await ok(send(`${local}:b3`, { at, method: 'POST', path: `/orders/${local}/bill`, body: { entityId: s.company }, billNo, expectTotalPaise: 9_900 }));
     expect(b).toMatchObject({ ok: true, mismatch: true });
     expect((await q('SELECT problem FROM offline_steps WHERE step_id = ?', `${local}:b3`))[0].problem).toMatch(/printed offline on Billing counter for 99.00; it is saved as 42.00/);
+    const day = (await ok(owner.get('/me'))).business.shiftDay;
+    expect((await ok(owner.get(`${B}/offline/day?day=${day}`))).problems).toHaveLength(1);
   });
 
   it('a room payment taken offline keeps its receipt number', async () => {

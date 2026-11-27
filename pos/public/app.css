@@ -1087,3 +1087,20 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .useln { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
 .useln:last-child { border-bottom: 0; }
 .useln .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---------- Offline mode (27 Nov 2026): purple says "only on this PC"; amber says "sending" or "needs a look". Every state
+   is also said in words. */
+.netpill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 11px; font-weight: 700; font-size: 13px; border: 2px solid; text-decoration: none; white-space: nowrap; }
+.netpill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.netpill.off { background: var(--tab-tint); color: var(--tab); border-color: var(--tab-line); }
+.netpill.sync, .netpill.look { background: var(--warn-tint); color: var(--warn); border-color: var(--warn-line); }
+.netband { padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 15px; display: grid; gap: 4px; }
+.netband.off { background: var(--tab-tint); color: var(--tab); }
+.netband.sync, .netband.look { background: var(--warn-tint); color: var(--warn); }
+.netband a { color: inherit; font-weight: 700; }
+.stp { display: inline-block; font-size: 12.5px; font-weight: 700; border-radius: 999px; padding: 2px 9px; border: 1px solid; white-space: nowrap; }
+.stp.wait { color: var(--tab); background: var(--tab-tint); border-color: var(--tab-line); }
+.stp.ok { color: var(--go); background: var(--go-tint); border-color: var(--go-line); }
+.stp.look { color: var(--warn); background: var(--warn-tint); border-color: var(--warn-line); }
+.tcell .offtag { position: absolute; top: -9px; right: 8px; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--tab); color: var(--panel); letter-spacing: .02em; }
+.tcell:has(.offtag) { position: relative; }
