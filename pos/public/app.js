@@ -2939,7 +2939,7 @@ function roomBillPanel(r) {
   };
   return html`<section class="panel" style="margin-bottom:16px;max-width:820px;border-color:var(--pri-line)">
     <div class="line"><h2 class="grow" style="margin:0">${name}${out ? html` <span class="badge bad">checked out ${dateTime(st.checkedOutAt)}</span>` : ''}</h2><button class="btn ghost" type="button" data-act="rbClose">Close</button></div>${ui.recv || ui.refund || ui.adv ? '' : errorBox()}
-    ${!out && grp.length ? html`<div class="msg ok" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="grow">One bill for ${st.room} and ${grp.map((g) => g.room).join(', ')}: food and payments of all of them come here. Checking out ${st.room} checks out all.</span>
+    ${!out && grp.length ? html`<div class="msg ok" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="flex:1 1 100%">One bill for ${st.room} and ${grp.map((g) => g.room).join(', ')}: food and payments of all of them come here. Checking out ${st.room} checks out all.</span>
       ${grp.map((g) => html`<button class="btn sm" type="button" data-act="bedOut" data-id="${g.id}" data-r="${g.room}">${g.room} leaves early</button>`)}</div>` : ''}
     ${!out && st.foreign && !st.formCAt ? html`<div class="msg warn" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="grow">Foreign guest: Form C is due within 24 hours of arrival.</span><button class="btn" type="button" data-act="formC" data-id="${st.id}">Form C filed</button></div>` : ''}
     ${r.booking?.fromReport && r.booking.amountPaise == null && !st.checkedOutAt ? html`<form class="msg warn" style="display:block;margin-top:8px"><strong>Total rent not known: check-out goes without a POS invoice</strong>
