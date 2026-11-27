@@ -37,7 +37,7 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
   const books = await booksOf(db, bid, user.id, role);
   const mine = new Set(books.map((b) => b.id));
   const [branches, counts, open, done] = await Promise.all([
-    all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? ORDER BY name', bid),
+    all<{ id: string; name: string; common: number }>(db, 'SELECT id, name, is_common AS common FROM branches WHERE business_id = ? ORDER BY is_common, name', bid),
     all<{ accountId: string; day: string; countedPaise: number; note: string | null; settle: string | null }>(db, `SELECT account_id AS accountId, day,
         counted_paise AS countedPaise, note, settle FROM cash_counts c
       WHERE business_id = ? AND day = (SELECT max(day) FROM cash_counts x WHERE x.account_id = c.account_id)`, bid),
@@ -102,15 +102,17 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks', requireRole('business.vi
 // ---- Set up: branches, and books (a cash account with a branch and a cashier).
 
 cashBookRoutes.post('/businesses/:businessId/branches', requireRole('accounts.edit'), async (c) => {
-  const name = text(await body(c), 'name', 'Branch name', { max: 80 })!;
+  const data = await body(c);
+  const name = text(data, 'name', 'Branch name', { max: 80 })!;
+  const common = data.common === true ? 1 : 0;
   const db = c.env.DB;
   const bid = c.get('businessId');
   const id = newId();
   const t = now();
   try {
     await db.batch([
-      stmt(db, 'INSERT INTO branches (id, business_id, name, created_at) VALUES (?, ?, ?, ?)', id, bid, name, t),
-      audit(db, { businessId: bid, userId: c.get('user').id, action: 'branch.create', table: 'branches', rowId: id, after: { name }, at: t }),
+      stmt(db, 'INSERT INTO branches (id, business_id, name, is_common, created_at) VALUES (?, ?, ?, ?, ?)', id, bid, name, common, t),
+      audit(db, { businessId: bid, userId: c.get('user').id, action: 'branch.create', table: 'branches', rowId: id, after: { name, common: !!common }, at: t }),
     ]);
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, 'A branch with this name already exists.');
@@ -132,13 +134,32 @@ async function bookInput(db: DB, bid: string, data: Record<string, unknown>, hol
     return { branchId: null, cashierUserId };
   }
   if (!branchId) fail(400, 'Choose the branch.');
-  if (!isUuid(branchId) || !(await one(db, 'SELECT 1 AS ok FROM branches WHERE id = ? AND business_id = ?', branchId, bid))) fail(400, 'Choose the branch.');
+  if (!isUuid(branchId) || !(await one(db, 'SELECT 1 AS ok FROM branches WHERE id = ? AND business_id = ? AND is_common = 0', branchId, bid))) fail(400, 'Choose the branch (a school, not common expenses).');
   if (cashierUserId && (!isUuid(cashierUserId) || !(await one(db, 'SELECT 1 AS ok FROM memberships WHERE user_id = ? AND business_id = ?', cashierUserId, bid)))) {
     fail(400, 'The cashier must be a user of this business. Invite them first on Users and roles.');
   }
   return { branchId, cashierUserId };
 }
 
+
+// Common, not a school (28 Nov 2026): the Owner or Accountant marks an entry such as "Bajaj Group" as the group's common
+// expenses. Expenses can be for it; fee report codes cannot; a cashier's book cannot belong to it.
+cashBookRoutes.put('/businesses/:businessId/branches/:branchId/common', requireRole('accounts.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const id = c.req.param('branchId');
+  const br = isUuid(id) ? await one<{ id: string; name: string; common: number }>(db, 'SELECT id, name, is_common AS common FROM branches WHERE id = ? AND business_id = ?', id, bid) : null;
+  if (!br) fail(404, 'School not found.');
+  const common = (await body(c)).common === true ? 1 : 0;
+  if (common && await one(db, 'SELECT 1 AS ok FROM accounts WHERE branch_id = ? AND business_id = ?', id, bid)) fail(409, `${br.name} has a cashier's book, so it is a school. Move the book first.`);
+  if (common && await one(db, 'SELECT 1 AS ok FROM fee_codes WHERE branch_id = ? AND business_id = ?', id, bid)) fail(409, `${br.name} has a fee report code, so it is a school. Remove the code first.`);
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE branches SET is_common = ? WHERE id = ?', common, id),
+    audit(db, { businessId: bid, userId: c.get('user').id, action: 'branch.common', table: 'branches', rowId: id, before: { common: !!br.common }, after: { common: !!common }, at: t }),
+  ]);
+  return c.json({ ok: true });
+});
 cashBookRoutes.post('/businesses/:businessId/cashbooks', requireRole('accounts.edit'), async (c) => {
   const data = await body(c);
   const db = c.env.DB;
@@ -285,7 +306,7 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/day/:day', requ
       WHERE a.business_id = ? AND a.kind = 'cash' AND a.id <> ? AND a.closed_at IS NULL AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL) ORDER BY b.name, a.name`, bid, book.id),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE business_id = ? AND kind = 'bank' ORDER BY name", bid),
     all<{ name: string }>(db, `SELECT DISTINCT p.name FROM cash_handovers h JOIN parties p ON p.id = h.to_party_id WHERE h.business_id = ? ORDER BY p.name`, bid),
-    all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? ORDER BY name', bid),
+    all<{ id: string; name: string; common: number }>(db, 'SELECT id, name, is_common AS common FROM branches WHERE business_id = ? ORDER BY is_common, name', bid),
   ]);
   const canWrite = !book.closedAt && can(role, 'rows.edit') && (seesAllBooks(role) || book.cashierUserId === user.id);
   return c.json({ ...d, today: today(), heads, targets, banks, branches, people: people.map((p) => p.name), can: { write: canWrite, approve: can(role, 'rows.approve') } });
@@ -714,7 +735,7 @@ cashBookRoutes.get('/businesses/:businessId/cashbook-report', requireRole('busin
 
 const reviewSql = `SELECT e.id, e.account_id AS accountId, a.name AS bookName, b.name AS branchName, e.day, e.kind, e.amount_paise AS amountPaise, e.narration,
     e.head_id AS headId, h.name AS headName, e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName, e.reviewed_at AS reviewedAt,
-    u.name AS enteredByName, e.entered_at AS enteredAt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName
+    u.name AS enteredByName, e.entered_at AS enteredAt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName, coalesce(fb.is_common, 0) AS forCommon
   FROM cash_entries e JOIN accounts a ON a.id = e.account_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN heads h ON h.id = e.head_id
     LEFT JOIN branches fb ON fb.id = e.for_branch_id
     LEFT JOIN users u ON u.id = e.entered_by LEFT JOIN users ru ON ru.id = e.reviewed_by

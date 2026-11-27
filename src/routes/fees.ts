@@ -90,7 +90,7 @@ feeRoutes.get('/businesses/:businessId/fees/:day', requireRole('sales.view'), as
     one<{ id: string; fileName: string | null; footer: string; createdAt: number; importedByName: string | null }>(db, `SELECT r.id, r.file_name AS fileName, r.footer,
       r.created_at AS createdAt, u.name AS importedByName FROM fee_reports r LEFT JOIN users u ON u.id = r.imported_by WHERE r.business_id = ? AND r.day = ?`, bid, day),
     all<{ day: string }>(db, 'SELECT day FROM fee_reports WHERE business_id = ? ORDER BY day DESC LIMIT 60', bid),
-    all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? ORDER BY name', bid),
+    all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? AND is_common = 0 ORDER BY name', bid),
   ]);
   const base = { day, days: days.map((d) => d.day), branches, can: { import: can(role, 'sales.import'), setup: can(role, 'accounts.edit'), approve: can(role, 'rows.approve') } };
   if (!report) return c.json({ ...base, report: null });
@@ -161,7 +161,7 @@ feeRoutes.put('/businesses/:businessId/fees/codes/:code', requireRole('accounts.
   const db = c.env.DB;
   const bid = c.get('businessId');
   const user = c.get('user');
-  if (branchId && (!isUuid(branchId) || !(await one(db, 'SELECT 1 AS ok FROM branches WHERE id = ? AND business_id = ?', branchId, bid)))) fail(400, 'Choose the school.');
+  if (branchId && (!isUuid(branchId) || !(await one(db, 'SELECT 1 AS ok FROM branches WHERE id = ? AND business_id = ? AND is_common = 0', branchId, bid)))) fail(400, 'Choose the school.');
   const t = now();
   await db.batch([
     stmt(db, `INSERT INTO fee_codes (business_id, code, branch_id, created_at) VALUES (?, ?, ?, ?)
