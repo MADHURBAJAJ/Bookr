@@ -11041,7 +11041,8 @@ async function cashBooksView(biz, oldEditId) {
       <section class="card grow3">
         <h2>${holding.length ? 'Cash in hand' : 'Cash with cashiers'} <span class="amount" style="float:right">₹ ${rs(total)}</span></h2>
         ${d.books.length ? books : html`<div class="note">No cashiers yet.${d.can.setup ? html` Add your schools and their cashiers on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.` : ''}</div>`}
-        ${d.books.length ? html`<div style="margin-top:10px"><a class="btn plain" href="#/b/${biz.id}/cbreport?book=all&p=7">Report (PDF)</a></div>` : ''}
+        ${d.books.length ? html`<div class="form-row" style="margin-top:10px">${d.can.approve ? html`<a class="btn" href="#/b/${biz.id}/cbexpenses">${biz.role === 'owner' ? 'Approve expenses' : 'Set expense heads'}</a>` : ''}
+          <a class="btn plain" href="#/b/${biz.id}/cbreport?book=all&p=7">Report (PDF)</a></div>` : ''}
         ${d.can.setup && d.books.length ? html`<div class="tiny" style="margin-top:8px">Add a cashier, invite one, or change opening cash on <a href="#/b/${biz.id}/schools">Schools and cashiers</a>.</div>` : ''}
       </section>
       <section class="card grow2">
@@ -11357,7 +11358,7 @@ function ownerFrame(biz, tab, head, body) {
   </div>`;
 }
 /** How many things wait on the Owner, shown on the Approve tab (fetched after the page is drawn). */
-const lookCount = (l) => l.handovers.length + l.expenses.length + l.fees.filter((f) => f.state !== 'kept').length + l.counts.length;
+const lookCount = (l) => (l.notices ?? []).filter((n) => n.kind !== 'line_removed').length + l.handovers.length + l.expenses.length + l.fees.filter((f) => f.state !== 'kept').length + l.counts.length;
 function ownerBadge(biz, known) {
   const set = (n) => app.querySelectorAll('[data-olookn]').forEach((x) => { x.textContent = String(n); x.hidden = !n; });
   if (known) return set(lookCount(known));
@@ -11636,11 +11637,16 @@ async function cashBookDayView(biz, accountId, dayIn) {
       <div><div class="cb-big">₹ ${rs(d.shouldPaise)}</div><div class="tiny">should be in hand${f?.sheetIn ? html` · <span class="chip ok">sheet in</span>` : typed.length ? html` · <span class="chip wait">sheet not in yet</span>` : ''}</div></div>`}
       ${b.closedAt ? html`<div class="cb-box info">This book is closed: read only. Reopen it on Schools and cashiers.</div>` : ''}
       ${waiting}
+      ${(d.notices ?? []).map((n) => html`<div class="cb-box bad cb-notice"><span><b>${n.byName ?? 'The owner'} removed an expense</b><br>
+          ${n.detail.narration ?? 'Expense'} ₹ ${rs(n.detail.amountPaise)} · ${shortDay(n.detail.day)}${n.detail.note ? ` · "${n.detail.note}"` : ''}. ₹ ${rs(n.detail.amountPaise)} is back in your cash.</span>
+        <span><button type="button" class="btn plain" style="min-height:32px" data-cbnoticeok="${n.id}">OK</button></span></div>`)}
       ${cbFeeBox(f, d.can.write, { bring: `#/b/${biz.id}/cbmore/${b.id}`, view: `#/b/${biz.id}/fees/${day}` })}
       <section class="card cb-card">
         ${row('Opening', '', `₹ ${rs(d.openingPaise)}`, '')}
         ${fold ? folded : html`${feeRows.length ? feeRows : !d.before && !holder ? row(html`Today's fee cash <span class="chip wait">not entered</span>`, '', '—', '') : ''}
         ${others}`}
+        ${(d.removed ?? []).map((r) => html`<div class="list-row cb-line cb-removed"><span><s>${r.narration || 'Expense'}</s>
+            <div class="tiny">removed by ${r.removedByName ?? 'the owner'}${r.note ? ` · ${r.note}` : ''} · not in the total</div></span><span class="cb-amt"><s>₹ ${rs(r.amountPaise)}</s></span></div>`)}
         <div class="list-row cb-total"><span>Should be in hand</span><span class="amount">₹ ${rs(d.shouldPaise)}</span></div>
         ${d.count ? html`<div class="list-row"><span>Counted${d.count.countedByName ? html` <span class="tiny">by ${d.count.countedByName}</span>` : ''}</span><span class="amount">₹ ${rs(d.count.countedPaise)}</span></div>
           <div class="cb-gap ${gap === 0 ? 'ok' : 'bad'}">${gap === 0 ? 'Count matches ✓' : `Cash ${gap < 0 ? 'short' : 'extra'} ₹ ${rs(Math.abs(gap))}`}
@@ -11677,6 +11683,10 @@ async function cashBookDayView(biz, accountId, dayIn) {
       await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreopen}/review`, { status: null });
     }
   });
+  app.querySelectorAll('[data-cbnoticeok]').forEach((x) => x.addEventListener('click', async () => {
+    x.disabled = true;
+    try { await api('POST', `/businesses/${biz.id}/notices/${x.dataset.cbnoticeok}/done`, {}); await reload(); } catch (err) { alert(err.message); x.disabled = false; }
+  }));
   // Which school an expense is for: tap the chip, pick the school.
   app.querySelectorAll('[data-cbbranch]').forEach((x) => x.addEventListener('click', (ev) => {
     ev.preventDefault();
@@ -12088,6 +12098,131 @@ async function ownerCashView(biz) {
 }
 
 /** Owner phone, Approve: everything that waits on the Owner. Each line acts here or opens that day of the book. */
+// Expenses waiting for the Owner (approved 28 Nov 2026): one list for every school, grouped by book. The Owner approves
+// the ticked ones at once (a line needs its head first); the Accountant ticks lines and sets one head for all of them.
+// Heads learnt from the same words come set, marked "learnt". ⋯ on a line: Edit, Change head, and for the Owner
+// Keep pending, Reject (with a reason) and Delete (reason optional; the cashier sees the line struck off).
+function cbExpList(biz, lines, heads, owner) {
+  const exp = lines.filter((e) => e.kind === 'expense' && !e.reviewStatus);
+  if (!exp.length) return html`<div class="cb-box ok">No expense is waiting.</div>`;
+  const hs = heads.filter((h) => h.type === 'expense');
+  const pick = (e, label) => html`<select class="compact" data-xh="${e.id}" aria-label="Head for ${e.narration ?? 'expense'}"><option value="">${label}</option>
+    ${hs.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>`;
+  const groups = new Map();
+  for (const e of exp) { const k = `${e.branchName ?? 'Cash holder'} · ${e.bookName}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(e); }
+  const noHead = exp.filter((e) => !e.headId).length;
+  const line = (e) => html`<div class="list-row" style="align-items:flex-start;gap:10px">
+      <input type="checkbox" data-xt="${e.id}" data-p="${e.amountPaise}" ${owner ? (e.headId ? 'checked' : 'disabled') : ''} aria-label="Tick ${e.narration ?? 'expense'}" style="margin-top:3px;width:18px;height:18px;flex:none">
+      <span style="flex:1;min-width:0"><a href="#/b/${biz.id}/cashbook/${e.accountId}/${e.day}" style="color:inherit">${e.narration || 'Expense'}</a>${e.forBranchName && e.forBranchName !== e.branchName ? html` <span class="chip wait">for ${e.forBranchName}</span>` : ''}
+        <div class="tiny">${shortDay(e.day)} · ${e.headName ? html`<span class="chip info">${e.headName}</span>${e.headLearnt ? html` <span class="chip ok">learnt</span>` : ''}` : html`<span class="chip wait">head needed</span>`}</div>
+        ${e.headId ? '' : html`<div style="margin-top:4px">${pick(e, 'Pick head…')}</div>`}
+        <div class="form-row" data-xm="${e.id}" hidden style="margin-top:6px;gap:6px;flex-wrap:wrap">
+          <a class="btn plain" style="min-height:30px" href="#/b/${biz.id}/cashbook/${e.accountId}/${e.day}">Edit</a>
+          ${e.headId ? pick(e, 'Change head…') : ''}
+          ${owner ? html`<button type="button" class="btn plain" style="min-height:30px" data-xkeep="${e.id}">Keep pending</button>
+            <button type="button" class="btn plain" style="min-height:30px" data-xreject="${e.id}">Reject</button>
+            <button type="button" class="btn plain" style="min-height:30px;color:var(--bad,#B91C1C)" data-xdel="${e.id}" data-acc="${e.accountId}">Delete</button>` : ''}</div></span>
+      <span style="text-align:right;flex:none"><span class="amount">₹ ${rs(e.amountPaise)}</span><br><button type="button" class="linkbtn" data-xmore="${e.id}" aria-label="More for ${e.narration ?? 'expense'}" style="font-size:18px">⋯</button></span></div>`;
+  return html`<div class="list-row"><span><b>${exp.length}</b> waiting${noHead ? html` · <span class="chip wait">${noHead} need a head</span>` : ''}</span>
+      <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-xall ${owner ? 'checked' : ''}> All</label></div>
+    ${[...groups].map(([k, xs]) => html`<div class="cb-branch"><span>${k}</span><span class="amount">₹ ${rs(xs.reduce((t, e) => t + e.amountPaise, 0))}</span></div>${xs.map(line)}`)}
+    <div class="xbar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-top:10px">
+      ${owner ? html`<button type="button" class="btn" data-xapprove style="flex:1;justify-content:center">Approve ticked</button>`
+        : html`<select class="compact" data-xbulkhead aria-label="Head for the ticked lines"><option value="">Head…</option>${hs.map((h) => html`<option value="${h.id}">${h.name}</option>`)}</select>
+          <button type="button" class="btn" data-xsethead>Set head for ticked</button>`}</div>
+    <div class="form-msg" data-xmsg></div>`;
+}
+function cbExpWire(biz, owner, again) {
+  const ticks = () => [...app.querySelectorAll('[data-xt]')].filter((x) => x.checked);
+  const update = () => {
+    const t = ticks();
+    const total = t.reduce((a, x) => a + Number(x.dataset.p), 0);
+    const ap = app.querySelector('[data-xapprove]');
+    if (ap) ap.textContent = t.length ? `Approve ${t.length} ticked · ₹ ${rs(total)}` : 'Tick expenses to approve';
+    const sh = app.querySelector('[data-xsethead]');
+    if (sh) sh.textContent = t.length ? `Set head for ${t.length} ticked` : 'Tick lines to set a head';
+  };
+  const msg = (m) => { const x = app.querySelector('[data-xmsg]'); if (x) { x.textContent = m; x.className = 'form-msg error'; } };
+  app.querySelectorAll('[data-xt]').forEach((x) => x.addEventListener('change', update));
+  app.querySelector('[data-xall]')?.addEventListener('change', (e) => { app.querySelectorAll('[data-xt]').forEach((x) => { if (!x.disabled) x.checked = e.target.checked; }); update(); });
+  app.querySelectorAll('[data-xmore]').forEach((x) => x.addEventListener('click', () => { const m = app.querySelector(`[data-xm="${x.dataset.xmore}"]`); m.hidden = !m.hidden; }));
+  app.querySelectorAll('[data-xkeep]').forEach((x) => x.addEventListener('click', () => {
+    const t = app.querySelector(`[data-xt="${x.dataset.xkeep}"]`); if (t) t.checked = false;
+    app.querySelector(`[data-xm="${x.dataset.xkeep}"]`).hidden = true; update();
+  }));
+  app.querySelectorAll('[data-xh]').forEach((x) => x.addEventListener('change', async () => {
+    if (!x.value) return;
+    x.disabled = true;
+    try { await api('PUT', `/businesses/${biz.id}/cashbook-lines/${x.dataset.xh}/head`, { headId: x.value }); await again(); } catch (err) { msg(err.message); x.disabled = false; }
+  }));
+  app.querySelectorAll('[data-xreject]').forEach((x) => x.addEventListener('click', async () => {
+    const note = prompt('Why is it rejected? The cashier sees this.');
+    if (!note?.trim()) return;
+    try { await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.xreject}/review`, { status: 'rejected', note }); await again(); } catch (err) { msg(err.message); }
+  }));
+  app.querySelectorAll('[data-xdel]').forEach((x) => x.addEventListener('click', async () => {
+    const note = prompt('Delete this expense? The cash goes back into the cashier\'s book and they see it struck off.\n\nReason (optional, the cashier sees it):', '');
+    if (note === null) return;
+    try { await api('DELETE', `/businesses/${biz.id}/cashbooks/${x.dataset.acc}/entries/${x.dataset.xdel}`, { note: note.trim() || null }); await again(); doneToast('Expense deleted. The cashier sees it struck off.', null, null); }
+    catch (err) { msg(err.message); }
+  }));
+  app.querySelector('[data-xapprove]')?.addEventListener('click', async (e) => {
+    const ids = ticks().map((x) => x.dataset.xt);
+    if (!ids.length) return;
+    e.target.disabled = true;
+    try {
+      await api('POST', `/businesses/${biz.id}/cashbook-lines/review-many`, { ids, status: 'approved' });
+      await again();
+      doneToast(`${ids.length} expense${ids.length === 1 ? '' : 's'} approved.`, () => api('POST', `/businesses/${biz.id}/cashbook-lines/review-many`, { ids, status: null }), again);
+    } catch (err) { msg(err.message); e.target.disabled = false; }
+  });
+  app.querySelector('[data-xsethead]')?.addEventListener('click', async (e) => {
+    const ids = ticks().map((x) => x.dataset.xt);
+    const headId = app.querySelector('[data-xbulkhead]').value;
+    if (!ids.length) return msg('Tick the lines first.');
+    if (!headId) return msg('Choose the head.');
+    e.target.disabled = true;
+    try { await api('PUT', `/businesses/${biz.id}/cashbook-lines/heads`, { ids, headId }); await again(); } catch (err) { msg(err.message); e.target.disabled = false; }
+  });
+  update();
+}
+/** Notices for an Owner (28 Nov 2026): a change after approval. "Approve" clears it; an Accountant's head change can be changed back. */
+function cbNotices(notices) {
+  return notices.filter((n) => n.kind !== 'line_removed').map((n) => {
+    const d = n.detail;
+    const title = n.kind === 'head_after_approval' ? 'Head changed after approval' : d.reopened ? `${n.byName ?? 'An owner'} reopened an approved expense` : `Changed by ${n.byName ?? 'an owner'} after approval`;
+    return html`<div class="list-row" style="align-items:flex-start"><span><b>${title}</b>
+        <div class="tiny">${d.narration ?? 'Expense'} · ₹ ${rs(d.amountPaise ?? 0)} · ${d.bookName ?? ''}${d.day ? ` · ${shortDay(d.day)}` : ''}</div>
+        ${d.reopened ? '' : html`<div class="tiny">${d.beforeHead ?? 'no head'} → <b>${d.afterHead ?? ''}</b> · by ${n.byName ?? ''}, ${when(n.createdAt)}</div>`}
+        <span style="display:flex;gap:6px;margin-top:6px"><button type="button" class="btn" style="min-height:32px" data-nok="${n.id}">Approve</button>
+          ${n.kind === 'head_after_approval' ? html`<button type="button" class="btn plain" style="min-height:32px" data-nback="${n.id}">Change back</button>` : ''}</span></span></div>`;
+  });
+}
+function cbNoticesWire(biz, again) {
+  const go2 = (sel, path) => app.querySelectorAll(sel).forEach((x) => x.addEventListener('click', async () => {
+    x.disabled = true;
+    try { await api('POST', `/businesses/${biz.id}/notices/${x.dataset[path[0]]}/${path[1]}`, {}); await again(); } catch (err) { alert(err.message); x.disabled = false; }
+  }));
+  go2('[data-nok]', ['nok', 'done']);
+  go2('[data-nback]', ['nback', 'change-back']);
+}
+
+/** PC: the same list (28 Nov 2026), for the Owner (approves) and the Accountant (sets heads). */
+async function cbExpensesView(biz) {
+  const owner = biz.role === 'owner';
+  const [r, n] = await Promise.all([api('GET', `/businesses/${biz.id}/cashbook-reviews`), owner ? api('GET', `/businesses/${biz.id}/notices`) : { notices: [] }]);
+  const notes = cbNotices(n.notices);
+  render(shell(biz, 'cashbooks', 'Expenses', owner ? 'Every school\'s expenses waiting for you. Tick and approve at once.' : 'Set the heads; the owner approves. A head set once is learnt for the same words.', html`
+    <div class="row"><div class="grow3" style="display:flex;flex-direction:column;gap:14px">
+      ${notes.length ? html`<section class="card"><h2>Notices</h2>${notes}</section>` : ''}
+      <section class="card">${cbExpList(biz, r.lines, r.heads, owner)}</section>
+      <a class="tiny" href="#/b/${biz.id}/cashbooks">‹ Cash books</a></div></div>`));
+  wireShell();
+  const again = () => cbExpensesView(biz);
+  cbExpWire(biz, owner, again);
+  cbNoticesWire(biz, again);
+}
+
 async function ownerLookView(biz) {
   const l = await api('GET', `/businesses/${biz.id}/owner-look`);
   const day = (bookId, dd) => `#/b/${biz.id}/cashbook/${bookId}/${dd}`;
@@ -12122,9 +12257,12 @@ async function ownerLookView(biz) {
       <div class="tiny">${what} · ${x.byName ?? ''}</div></span><span class="chip wait">changed after count</span></a>`;
   });
   const sec = (title, rows) => (rows.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">${title}</div>${rows}</section>` : '');
+  const notes = cbNotices(l.notices ?? []);
   render(ownerFrame(biz, 'look', html`<b>Needs a look</b>`, html`<div class="cb">
-    ${sec('Cash not accepted', hand)}${sec('Expenses to approve', exp)}${sec('Fee check', fees)}${sec('Count short or extra', counts)}
-    ${hand.length + exp.length + fees.length + counts.length ? html`<div class="tiny">Tap a line to open that day of the book.</div>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
+    ${sec('Notices', notes)}
+    ${exp.length ? html`<section class="card cb-card"><div class="cb-hd" style="margin-top:0">Expenses to approve</div>${cbExpList(biz, l.expenses, l.heads, true)}</section>` : ''}
+    ${sec('Cash not accepted', hand)}${sec('Fee check', fees)}${sec('Count short or extra', counts)}
+    ${notes.length + hand.length + exp.length + fees.length + counts.length ? html`<div class="tiny">Tap a line to open that day of the book.</div>` : html`<div class="cb-box ok">Nothing waits on you.</div>`}
     ${sec('Changed after count · last 7 days', changed)}
   </div>`));
   wireShell();
@@ -12151,6 +12289,8 @@ async function ownerLookView(biz) {
     if (note?.trim()) await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreject}/review`, { status: 'rejected', note });
   });
   app.querySelectorAll('[data-ohead]').forEach((x) => x.addEventListener('click', () => ownerHeadPicker(biz, x.dataset.ohead, again)));
+  cbExpWire(biz, true, again);
+  cbNoticesWire(biz, again);
 }
 
 /** Owner phone, More: switch business, PC screens on this phone, install, sign out. */
@@ -12342,6 +12482,7 @@ async function routeInner() {
       if (screen === 'cbhanded' && parts[3]) return cbHandedView(biz, parts[3]);
       if (screen === 'cbmore' && parts[3]) return cbMoreView(biz, parts[3]);
       if (screen === 'cbreport') return cbReportView(biz, query);
+      if (screen === 'cbexpenses' && biz.actions.includes('rows.approve')) return cbExpensesView(biz);
       if (screen === 'fees') return feesView(biz, parts[3]);
       if (screen === 'accounts') return accountsView(biz, parts[3]);
       if (screen === 'heads') return headsView(biz, parts[3]);

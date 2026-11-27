@@ -910,3 +910,7 @@ details.inst-slim[open] { display: grid; gap: 8px; }
   .rp-page:last-child { break-after: auto; }
   .rp-t tr { break-inside: avoid; }
 }
+/* Expense approval (28 Nov 2026): a removed expense shows struck off in red, out of the total. */
+.cb-notice { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.cb-removed { color: var(--bad, #B91C1C); opacity: .85; }
+.cb-removed s { text-decoration-thickness: 2px; }

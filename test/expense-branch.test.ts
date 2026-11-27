@@ -36,16 +36,18 @@ describe('expense for a school', () => {
     // The cash leaves this book whichever school it is for.
     expect(day.shouldPaise).toBe(1000000 - 30000 - 50000 - 20000);
 
-    // The cashier moves their own line to the group; after the owner approves, only Owner or Accountant can.
+    // The cashier moves their own line to the group; once the owner approves, the school stays for everyone (reopen first).
     const put = (who: typeof o, id: string, branchId: string) => who.put(`/businesses/${h.bid}/cashbook-lines/${id}/branch`, { branchId });
     expect((await put(c, own, group)).status).toBe(200);
     const heads = (await o.get(`/businesses/${h.bid}/heads`)).json.heads as { id: string; type: string }[];
     await o.put(`/businesses/${h.bid}/cashbook-lines/${own}/head`, { headId: heads.find((x) => x.type === 'expense')!.id });
     await o.post(`/businesses/${h.bid}/cashbook-lines/${own}/review`, { status: 'approved' });
     expect((await put(c, own, north)).status).toBe(409);
-    expect((await put(h.clients.accountant, own, north)).status).toBe(200);
-    expect((await put(h.clients.accountant, own, group)).status).toBe(200);
-    expect((await put(h.clients.viewer, own, north)).status).toBe(403);
+    expect((await put(h.clients.accountant, own, north)).status).toBe(409);
+    expect((await put(o, own, north)).status).toBe(409);
+    expect((await put(h.clients.accountant, forSouth, north)).status).toBe(200);
+    expect((await put(h.clients.accountant, forSouth, south)).status).toBe(200);
+    expect((await put(h.clients.viewer, forSouth, north)).status).toBe(403);
 
     const rep = (await o.get(`/businesses/${h.bid}/cashbook-report?book=all&from=${t}&to=${t}`)).json.reports[0];
     expect(Object.fromEntries(rep.expensesByBranch.map((x: { branch: string; paise: number }) => [x.branch, x.paise])))

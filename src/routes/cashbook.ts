@@ -9,7 +9,7 @@ import type { AppEnv } from '../types';
 import { requireRole } from '../auth';
 import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, date, fail, isUuid, paise, signInSql, text } from '../http';
-import { bookDay, bookDays, bookFor, booksOf, bookReport, depositCandidates, feeChecks, handovers, inHandThrough, receiptRange, seesAllBooks, type HandoverRow } from '../cashbook';
+import { bookDay, bookDays, bookFor, booksOf, bookReport, headKey, depositCandidates, feeChecks, handovers, inHandThrough, receiptRange, seesAllBooks, type HandoverRow } from '../cashbook';
 import { can } from '../permissions';
 import { refillAll } from '../fees';
 
@@ -20,6 +20,14 @@ const audit = (db: DB, e: { businessId: string; userId: string; action: string; 
     e.businessId, e.userId, e.action, e.table, e.rowId, e.before === undefined ? null : JSON.stringify(e.before), e.after === undefined ? null : JSON.stringify(e.after), e.at);
 
 const today = () => new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+/** A person's notices not yet cleared, newest first (28 Nov 2026). */
+async function noticesOf(db: DB, bid: string, userId: string, kind?: string) {
+  const rows = await all<{ id: string; kind: string; entryId: string | null; detail: string; createdAt: number; byName: string | null }>(db,
+    `SELECT n.id, n.kind, n.entry_id AS entryId, n.detail, n.created_at AS createdAt, u.name AS byName FROM notices n LEFT JOIN users u ON u.id = n.by_user_id
+     WHERE n.business_id = ? AND n.user_id = ? AND n.done_at IS NULL ${kind ? 'AND n.kind = ?' : ''} ORDER BY n.created_at DESC LIMIT 100`,
+    bid, userId, ...(kind ? [kind] : []));
+  return rows.map((r) => ({ ...r, detail: JSON.parse(r.detail) }));
+}
 const dayParam = (v: string | undefined) => {
   if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(`${v}T00:00:00Z`))) fail(400, 'Day must be a date (YYYY-MM-DD).');
   return v;
@@ -287,8 +295,13 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/day/:day', requ
     all<{ name: string }>(db, `SELECT DISTINCT p.name FROM cash_handovers h JOIN parties p ON p.id = h.to_party_id WHERE h.business_id = ? ORDER BY p.name`, bid),
     all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? ORDER BY name', bid),
   ]);
+  const [notices, removed] = await Promise.all([
+    noticesOf(db, bid, user.id, 'line_removed'),
+    all(db, `SELECT r.id, r.kind, r.amount_paise AS amountPaise, r.narration, r.note, r.removed_at AS removedAt, u.name AS removedByName
+      FROM removed_cash_lines r LEFT JOIN users u ON u.id = r.removed_by WHERE r.account_id = ? AND r.day = ? ORDER BY r.removed_at`, book.id, day),
+  ]);
   const canWrite = !book.closedAt && can(role, 'rows.edit') && (seesAllBooks(role) || book.cashierUserId === user.id);
-  return c.json({ ...d, today: today(), heads, targets, banks, branches, people: people.map((p) => p.name), can: { write: canWrite, approve: can(role, 'rows.approve') } });
+  return c.json({ ...d, today: today(), heads, targets, banks, branches, notices, removed, people: people.map((p) => p.name), can: { write: canWrite, approve: can(role, 'rows.approve') } });
 });
 
 // ---- Add a line: a fee, an expense, other money in or out, or cash handed over (to a book, a person or the bank).
@@ -340,6 +353,13 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
   }
   // Which school the expense is for (28 Nov 2026): the cashier's own school unless they choose another.
   const forBranchId = kind === 'expense' ? await branchFor(db, bid, data.forBranchId, book.branchId) : null;
+  // A head learnt from the same words before (28 Nov 2026) is set by itself, marked learnt.
+  let learnt = 0;
+  if (kind === 'expense' && !headId) {
+    const key = headKey(narration);
+    const m = key ? await one<{ headId: string }>(db, 'SELECT head_id AS headId FROM head_memory WHERE business_id = ? AND key = ?', bid, key) : null;
+    if (m) { headId = m.headId; learnt = 1; }
+  }
   const entryId = newId();
   const t = now();
   const st: D1PreparedStatement[] = [];
@@ -360,8 +380,8 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
       to = { kind: 'person', accountId: null, partyId, name: found?.name ?? name };
     } else fail(400, 'Say who the cash went to: another cashier, a person, or the bank.');
   }
-  st.push(stmt(db, `INSERT INTO cash_entries (id, business_id, account_id, day, kind, amount_paise, head_id, narration, for_branch_id, entered_by, entered_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, entryId, bid, book.id, day, kind, amount, headId, narration, forBranchId, user.id, t, t));
+  st.push(stmt(db, `INSERT INTO cash_entries (id, business_id, account_id, day, kind, amount_paise, head_id, head_learnt, narration, for_branch_id, entered_by, entered_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, entryId, bid, book.id, day, kind, amount, headId, learnt, narration, forBranchId, user.id, t, t));
   if (to) {
     st.push(stmt(db, `INSERT INTO cash_handovers (id, business_id, from_entry_id, to_kind, to_account_id, to_party_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       newId(), bid, entryId, to.kind, to.accountId, to.partyId, t));
@@ -460,7 +480,17 @@ cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:ent
   if (h && h.status !== 'sent') fail(409, 'The other side already shows this cash. Undo it there first.');
   await changeWindow(c, book.id, e.day);
   const t = now();
+  // An expense removed by someone other than the book's cashier (28 Nov 2026) stays on that day struck off, and the
+  // cashier gets a notice. The reason is optional.
+  const note = text(await body(c), 'note', 'Reason', { optional: true, max: 200 }) ?? null;
+  const told = e.kind === 'expense' && book.cashierUserId && book.cashierUserId !== user.id;
   await db.batch([
+    ...(told ? [
+      stmt(db, `INSERT INTO removed_cash_lines (id, business_id, account_id, day, kind, amount_paise, narration, removed_by, removed_at, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, newId(), bid, book.id, e.day, e.kind, e.amountPaise, e.narration, user.id, t, note),
+      notice(db, { bid, userId: book.cashierUserId!, kind: 'line_removed', entryId: null, by: user.id,
+        detail: { narration: e.narration, amountPaise: e.amountPaise, day: e.day, bookId: book.id, note, byName: user.name }, at: t }),
+    ] : []),
     stmt(db, "UPDATE cash_handovers SET to_entry_id = NULL, status = 'sent', settled_by = NULL, settled_at = NULL WHERE to_entry_id = ?", e.id),
     stmt(db, 'DELETE FROM cash_entries WHERE id = ?', e.id),
     audit(db, { businessId: bid, userId: user.id, action: 'cashbook.entry.remove', table: 'cash_entries', rowId: e.id, before: { bookId: book.id, id: e.id, kind: e.kind, day: e.day, amountPaise: e.amountPaise, narration: e.narration }, at: t }),
@@ -617,7 +647,8 @@ cashBookRoutes.get('/businesses/:businessId/owner-look', requireRole('members.ma
       const b = byId.get((after ?? before).bookId);
       return b ? { bookId: b.id, bookName: b.name, branchName: b.branchName, what: r.action.split('.').pop(), at: r.at, byName: r.byName, before, after } : null;
     }).filter((x) => x);
-  return c.json({ today: t, handovers: due, expenses, heads, fees, counts: gaps, changed });
+  const notices = await noticesOf(db, bid, user.id);
+  return c.json({ today: t, handovers: due, expenses, heads, fees, counts: gaps, changed, notices });
 });
 
 // ---- The cashier's fee cash total for a day, and sorting out a difference with the fee day sheet (21 Nov 2026).
@@ -714,7 +745,7 @@ cashBookRoutes.get('/businesses/:businessId/cashbook-report', requireRole('busin
 
 const reviewSql = `SELECT e.id, e.account_id AS accountId, a.name AS bookName, b.name AS branchName, e.day, e.kind, e.amount_paise AS amountPaise, e.narration,
     e.head_id AS headId, h.name AS headName, e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName, e.reviewed_at AS reviewedAt,
-    u.name AS enteredByName, e.entered_at AS enteredAt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName
+    u.name AS enteredByName, e.entered_at AS enteredAt, e.head_learnt AS headLearnt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName
   FROM cash_entries e JOIN accounts a ON a.id = e.account_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN heads h ON h.id = e.head_id
     LEFT JOIN branches fb ON fb.id = e.for_branch_id
     LEFT JOIN users u ON u.id = e.entered_by LEFT JOIN users ru ON ru.id = e.reviewed_by
@@ -740,8 +771,8 @@ cashBookRoutes.get('/businesses/:businessId/cashbook-reviews', requireRole('rows
   return c.json({ lines: waiting, heads, can: { approve: can(role, 'members.manage') } });
 });
 
-// Changing which school an expense is for (28 Nov 2026). It moves no cash, so the Owner and the Accountant can change it
-// at any time, approved or not; the cashier only on their own lines of today and yesterday, before the owner reviews.
+// Changing which school an expense is for (28 Nov 2026). Owner and Accountant until the owner reviews it; the cashier only
+// on their own lines of today and yesterday. After review it stays: reopen to change it.
 cashBookRoutes.put('/businesses/:businessId/cashbook-lines/:entryId/branch', requireRole('rows.edit'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
@@ -753,9 +784,10 @@ cashBookRoutes.put('/businesses/:businessId/cashbook-lines/:entryId/branch', req
   if (!e) fail(404, 'Line not found.');
   const book = await bookFor(db, bid, e.accountId, user.id, role);
   if (e.kind !== 'expense') fail(400, 'Only an expense is for a school.');
+  // Once reviewed, the school stays (28 Nov 2026): the Owner reopens the expense to change it.
+  if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this expense. Reopen it to change the school.`);
   if (!can(role, 'rows.approve')) {
     if (book.cashierUserId !== user.id) fail(403, 'Only this book\'s cashier can change it.');
-    if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this line.`);
     if (e.day < yesterday()) fail(403, 'You can change only today\'s and yesterday\'s lines. Ask the owner or the accountant to change an older day.');
   }
   const forBranchId = await branchFor(db, bid, (await body(c)).branchId, null);
@@ -777,22 +809,140 @@ async function reviewLine(db: DB, bid: string, id: string | undefined) {
   return e;
 }
 
+// ---- Heads (28 Nov 2026): the Accountant (or Owner) sets them, one line or many ticked at once. An approved expense's head
+// can still be changed: an Accountant's change goes to every Owner as a notice, an Owner's change to the other Owners.
+// Each head set on an expense is learnt from its words and given to waiting expenses with the same words.
+
+async function ownersOf(db: DB, bid: string) {
+  return (await all<{ userId: string }>(db, "SELECT user_id AS userId FROM memberships WHERE business_id = ? AND role = 'owner'", bid)).map((x) => x.userId);
+}
+const notice = (db: DB, n: { bid: string; userId: string; kind: 'head_after_approval' | 'owner_change' | 'line_removed'; entryId: string | null; by: string; detail: unknown; at: number }) =>
+  stmt(db, 'INSERT INTO notices (id, business_id, user_id, kind, entry_id, by_user_id, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    newId(), n.bid, n.userId, n.kind, n.entryId, n.by, JSON.stringify(n.detail), n.at);
+
+async function setHeads(c: Context<AppEnv>, ids: string[], headId: unknown) {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const role = c.get('role');
+  const user = c.get('user');
+  if (!ids.length) fail(400, 'Tick the lines first.');
+  if (ids.length > 200) fail(400, 'Tick at most 200 lines at once.');
+  const lines = await all<{ id: string; kind: string; headId: string | null; headName: string | null; reviewStatus: string | null; narration: string | null;
+    amountPaise: number; day: string; bookName: string }>(db,
+    `SELECT e.id, e.kind, e.head_id AS headId, h.name AS headName, e.review_status AS reviewStatus, e.narration, e.amount_paise AS amountPaise, e.day, a.name AS bookName
+     FROM cash_entries e JOIN accounts a ON a.id = e.account_id LEFT JOIN heads h ON h.id = e.head_id
+     WHERE e.business_id = ? AND e.kind IN ('expense', 'other_in') AND e.id IN (${ids.map(() => '?').join(', ')})`, bid, ...ids);
+  if (lines.length !== new Set(ids).size) fail(404, 'Line not found.');
+  const kinds = new Set(lines.map((l) => l.kind));
+  if (kinds.size > 1) fail(400, 'Tick only expenses, or only receipts.');
+  const type = lines[0].kind === 'expense' ? 'expense' : 'income';
+  const head = typeof headId === 'string' && isUuid(headId)
+    ? await one<{ id: string; name: string }>(db, 'SELECT id, name FROM heads WHERE id = ? AND business_id = ? AND type = ?', headId, bid, type) : null;
+  if (!head) fail(400, `Choose the ${type} head.`);
+  const rejected = lines.find((l) => l.reviewStatus === 'rejected');
+  if (rejected) fail(409, `The owner has already rejected "${rejected.narration ?? 'this expense'}".`);
+  const t = now();
+  const owners = await ownersOf(db, bid);
+  const st: D1PreparedStatement[] = [];
+  const learn = new Map<string, string>();
+  for (const l of lines) {
+    if (l.headId === head.id) continue;
+    st.push(stmt(db, 'UPDATE cash_entries SET head_id = ?, head_learnt = 0 WHERE id = ?', head.id, l.id),
+      audit(db, { businessId: bid, userId: user.id, action: 'cashbook.head', table: 'cash_entries', rowId: l.id, before: { headId: l.headId }, after: { headId: head.id }, at: t }));
+    if (l.reviewStatus === 'approved') {
+      const detail = { narration: l.narration, amountPaise: l.amountPaise, day: l.day, bookName: l.bookName, beforeHeadId: l.headId, beforeHead: l.headName, afterHeadId: head.id, afterHead: head.name, byName: user.name };
+      for (const o of owners) {
+        if (o === user.id) continue;
+        st.push(notice(db, { bid, userId: o, kind: role === 'owner' ? 'owner_change' : 'head_after_approval', entryId: l.id, by: user.id, detail, at: t }));
+      }
+    }
+    const k = l.kind === 'expense' ? headKey(l.narration) : null;
+    if (k) learn.set(k, head.id);
+  }
+  for (const [k, h] of learn) {
+    st.push(stmt(db, `INSERT INTO head_memory (business_id, key, head_id, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT (business_id, key) DO UPDATE SET head_id = excluded.head_id, updated_at = excluded.updated_at`, bid, k, h, t));
+  }
+  // Waiting expenses with no head yet and the same words get the learnt head now.
+  if (learn.size) {
+    const open = await all<{ id: string; narration: string | null }>(db,
+      "SELECT id, narration FROM cash_entries WHERE business_id = ? AND kind = 'expense' AND head_id IS NULL AND review_status IS NULL", bid);
+    for (const o of open) {
+      const h = learn.get(headKey(o.narration) ?? '');
+      if (h && !ids.includes(o.id)) st.push(stmt(db, 'UPDATE cash_entries SET head_id = ?, head_learnt = 1 WHERE id = ? AND head_id IS NULL', h, o.id));
+    }
+  }
+  if (st.length) await db.batch(st);
+  return lines.length;
+}
+
 cashBookRoutes.put('/businesses/:businessId/cashbook-lines/:entryId/head', requireRole('rows.approve'), async (c) => {
+  await setHeads(c, [id404(c.req.param('entryId'), 'Line')], (await body(c)).headId);
+  return c.json({ ok: true });
+});
+
+const idList = (v: unknown) => {
+  if (!Array.isArray(v) || v.some((x) => !isUuid(x))) fail(400, 'Tick the lines first.');
+  return [...new Set(v as string[])];
+};
+cashBookRoutes.put('/businesses/:businessId/cashbook-lines/heads', requireRole('rows.approve'), async (c) => {
+  const data = await body(c);
+  return c.json({ ok: true, lines: await setHeads(c, idList(data.ids), data.headId) });
+});
+
+// Approving many expenses at once (28 Nov 2026), Owner only. Each needs its head; status null puts them back to waiting
+// (Undo right after approving).
+cashBookRoutes.post('/businesses/:businessId/cashbook-lines/review-many', requireRole('members.manage'), async (c) => {
   const db = c.env.DB;
   const bid = c.get('businessId');
   const user = c.get('user');
-  const e = await reviewLine(db, bid, c.req.param('entryId'));
-  if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this expense.`);
-  const headId = (await body(c)).headId;
-  const type = e.kind === 'expense' ? 'expense' : 'income';
-  if (typeof headId !== 'string' || !isUuid(headId) || !(await one(db, 'SELECT 1 AS ok FROM heads WHERE id = ? AND business_id = ? AND type = ?', headId, bid, type))) {
-    fail(400, `Choose the ${type} head.`);
+  const data = await body(c);
+  const ids = idList(data.ids);
+  if (!ids.length || ids.length > 200) fail(400, 'Tick between 1 and 200 expenses.');
+  const status = data.status;
+  if (status !== 'approved' && status !== null) fail(400, 'Approve, or undo.');
+  const lines = await all<{ id: string; kind: string; headId: string | null; reviewStatus: string | null; narration: string | null; fromSettle: number }>(db,
+    `SELECT e.id, e.kind, e.head_id AS headId, e.review_status AS reviewStatus, e.narration,
+       EXISTS (SELECT 1 FROM cash_counts k WHERE k.settle_entry_id = e.id) AS fromSettle
+     FROM cash_entries e WHERE e.business_id = ? AND e.id IN (${ids.map(() => '?').join(', ')})`, bid, ...ids);
+  if (lines.length !== ids.length) fail(404, 'Line not found.');
+  for (const l of lines) {
+    if (l.kind !== 'expense') fail(400, 'Only expenses are approved.');
+    if (l.fromSettle) fail(409, 'A line from settling a count is not approved here.');
+    if (status === 'approved' && l.reviewStatus) fail(409, `"${l.narration ?? 'An expense'}" is already ${l.reviewStatus}.`);
+    if (status === 'approved' && !l.headId) fail(400, `"${l.narration ?? 'An expense'}" has no head yet.`);
+    if (status === null && l.reviewStatus !== 'approved') fail(409, `"${l.narration ?? 'An expense'}" is not approved.`);
   }
   const t = now();
-  await db.batch([
-    stmt(db, 'UPDATE cash_entries SET head_id = ? WHERE id = ?', headId, e.id),
-    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.head', table: 'cash_entries', rowId: e.id, before: { headId: e.headId }, after: { headId }, at: t }),
-  ]);
+  await db.batch(lines.flatMap((l) => [
+    stmt(db, 'UPDATE cash_entries SET review_status = ?, reviewed_by = ?, reviewed_at = ?, review_note = NULL WHERE id = ?', status, status ? user.id : null, status ? t : null, l.id),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.review', table: 'cash_entries', rowId: l.id, before: { status: l.reviewStatus }, after: { status, many: true }, at: t }),
+  ]));
+  return c.json({ ok: true, lines: lines.length });
+});
+
+// ---- Notices (28 Nov 2026): each person's own; "Approve" (done) clears it. Change back undoes a head change.
+cashBookRoutes.get('/businesses/:businessId/notices', requireRole('business.view'), async (c) => {
+  return c.json({ notices: await noticesOf(c.env.DB, c.get('businessId'), c.get('user').id) });
+});
+cashBookRoutes.post('/businesses/:businessId/notices/:noticeId/done', requireRole('business.view'), async (c) => {
+  const db = c.env.DB;
+  const r = await db.prepare('UPDATE notices SET done_at = ? WHERE id = ? AND business_id = ? AND user_id = ? AND done_at IS NULL')
+    .bind(now(), id404(c.req.param('noticeId'), 'Notice'), c.get('businessId'), c.get('user').id).run();
+  if (!r.meta.changes) fail(404, 'Notice not found.');
+  return c.json({ ok: true });
+});
+cashBookRoutes.post('/businesses/:businessId/notices/:noticeId/change-back', requireRole('members.manage'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const n = await one<{ id: string; kind: string; entryId: string | null; detail: string }>(db,
+    'SELECT id, kind, entry_id AS entryId, detail FROM notices WHERE id = ? AND business_id = ? AND user_id = ? AND done_at IS NULL',
+    id404(c.req.param('noticeId'), 'Notice'), bid, c.get('user').id);
+  if (!n) fail(404, 'Notice not found.');
+  const d = JSON.parse(n.detail) as { beforeHeadId?: string | null };
+  if (n.kind !== 'head_after_approval' || !n.entryId || !d.beforeHeadId) fail(400, 'This change cannot be changed back here.');
+  await setHeads(c, [n.entryId], d.beforeHeadId);
+  await db.prepare('UPDATE notices SET done_at = ? WHERE id = ?').bind(now(), n.id).run();
   return c.json({ ok: true });
 });
 
@@ -810,7 +960,12 @@ cashBookRoutes.post('/businesses/:businessId/cashbook-lines/:entryId/review', re
   if (status === 'approved' && !e.headId) fail(400, 'The accountant sets the head first.');
   if (status === 'rejected' && !note) fail(400, 'Write why it is rejected.');
   const t = now();
+  // Reopening an approved expense is a change after approval: the other Owners are told (28 Nov 2026).
+  const told = e.reviewStatus === 'approved' && status === null ? (await ownersOf(db, bid)).filter((o) => o !== user.id) : [];
+  const line = told.length ? await one<{ narration: string | null; amountPaise: number; day: string; bookName: string }>(db,
+    'SELECT e.narration, e.amount_paise AS amountPaise, e.day, a.name AS bookName FROM cash_entries e JOIN accounts a ON a.id = e.account_id WHERE e.id = ?', e.id) : null;
   await db.batch([
+    ...told.map((o) => notice(db, { bid, userId: o, kind: 'owner_change', entryId: e.id, by: user.id, detail: { ...line, reopened: true, byName: user.name }, at: t })),
     stmt(db, 'UPDATE cash_entries SET review_status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE id = ?',
       status, status ? user.id : null, status ? t : null, status ? note : null, e.id),
     audit(db, { businessId: bid, userId: user.id, action: 'cashbook.review', table: 'cash_entries', rowId: e.id,

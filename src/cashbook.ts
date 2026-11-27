@@ -342,3 +342,15 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
     totals: { ...t, inHandPaise: prev }, expenses: exp, daysCounted: out2.filter((d) => d.count).length,
     expensesByBranch: [...byBranch].map(([branch, paise]) => ({ branch, paise })) };
 }
+
+const MONTHS = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/g;
+/**
+ * The words an expense head is learnt by (28 Nov 2026): what it was for, without "paid to …", numbers, months and
+ * punctuation, in lower case. "Newspaper bill Nov" and "newspaper bill" learn the same head.
+ */
+export function headKey(narration: string | null | undefined) {
+  if (!narration) return null;
+  const k = narration.split(' · paid to ')[0].toLowerCase().replace(/[0-9]+/g, ' ').replace(/[^a-zऀ-ॿ]+/g, ' ')
+    .replace(MONTHS, ' ').replace(/\s+/g, ' ').trim();
+  return k.length >= 2 ? k : null;
+}

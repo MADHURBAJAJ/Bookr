@@ -140,6 +140,7 @@ describe('cashier app', () => {
     expect(lines.find((l) => l.id === e1)?.reviewStatus).toBe('approved');
     expect((await s.day()).shouldPaise).toBe(2045000 - 45000 - 30000 + 60000);
     expect((await s.cashier.del(`${s.base}/entries/${e1}`)).status).toBe(409);
-    expect((await s.clients.accountant.put(`/businesses/${s.bid}/cashbook-lines/${e1}/head`, { headId: exp })).status).toBe(409);
+    // A rejected expense's head stays; an approved one's head can still change (see expense-approval.test.ts).
+    expect((await s.clients.accountant.put(`/businesses/${s.bid}/cashbook-lines/${e2}/head`, { headId: exp })).status).toBe(409);
   });
 });
