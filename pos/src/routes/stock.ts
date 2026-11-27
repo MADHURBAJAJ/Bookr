@@ -523,6 +523,23 @@ stockRoutes.post(`${B}/stock/waste`, requireAction('stock.edit'), async (c) => {
   return c.json({ ok: true }, 201);
 });
 
+/**
+ * The first stock of an item in a store (27 Nov 2026): a count of an item that never had stock in there before (no purchase,
+ * opening stock, transfer in or count) puts what is on the shelf in as its opening stock, not as stock found extra.
+ */
+export async function firstStockIn(db: DB, bid: string, itemId: string, storeId: string, before: number) {
+  return !(await one(db, `SELECT 1 AS x FROM stock_moves WHERE business_id = ? AND item_id = ? AND store_id = ? AND kind IN ('purchase', 'transfer_in', 'count') AND at < ? LIMIT 1`,
+    bid, itemId, storeId, before));
+}
+/** The stock move for one counted item: opening stock on its first count, else the difference from the book. */
+export function countMove(db: DB, x: { bid: string; itemId: string; storeId: string; diff: number; counted: number; ref: string | null; by: string; shiftDay: string; at: number; opening: boolean }) {
+  return x.opening
+    ? stmt(db, "INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, counted_qty, ref, vendor, by_staff, shift_day, at) VALUES (?, ?, ?, ?, 'purchase', ?, ?, ?, 'Opening stock', ?, ?, ?)",
+      newId(), x.bid, x.itemId, x.storeId, x.diff, x.counted, x.ref ?? 'First count', x.by, x.shiftDay, x.at)
+    : stmt(db, "INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, counted_qty, ref, by_staff, shift_day, at) VALUES (?, ?, ?, ?, 'count', ?, ?, ?, ?, ?, ?)",
+      newId(), x.bid, x.itemId, x.storeId, x.diff, x.counted, x.ref, x.by, x.shiftDay, x.at);
+}
+
 // A physical count: for each item counted, the difference from the book is recorded as a variance.
 stockRoutes.post(`${B}/stock/counts`, requireAction('stock.edit'), async (c) => {
   const bid = c.get('businessId');
@@ -539,13 +556,12 @@ stockRoutes.post(`${B}/stock/counts`, requireAction('stock.edit'), async (c) => 
     const counted = whole(r.counted, `Count of ${i.name}`, 0);
     const book = await onHand(db, bid, i.id, s.id);
     const diff = counted - book;
-    result.push({ name: i.name, unit: i.unit, book, counted, variance: diff, valuePaise: Math.round((diff * i.cost_per_pack_paise) / i.pack_size) });
+    const opening = diff > 0 && await firstStockIn(db, bid, i.id, s.id, t);
+    result.push({ name: i.name, unit: i.unit, book, counted, variance: opening ? 0 : diff, opening, valuePaise: opening ? 0 : Math.round((diff * i.cost_per_pack_paise) / i.pack_size) });
     if (diff === 0) continue;
-    statements.push(
-      stmt(db, "INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, counted_qty, by_staff, shift_day, at) VALUES (?, ?, ?, ?, 'count', ?, ?, ?, ?, ?)",
-        newId(), bid, i.id, s.id, diff, counted, c.get('staff').id, shiftDay, t),
-      event(db, bid, 'stock_count', `${i.name} · ${s.name}`, Math.round((diff * i.cost_per_pack_paise) / i.pack_size), null,
-        `Book ${book} ${i.unit}, counted ${counted} ${i.unit} (${diff > 0 ? '+' : ''}${diff})`, c.get('staff').id, shiftDay));
+    statements.push(countMove(db, { bid, itemId: i.id, storeId: s.id, diff, counted, ref: null, by: c.get('staff').id, shiftDay, at: t, opening }));
+    if (!opening) statements.push(event(db, bid, 'stock_count', `${i.name} · ${s.name}`, Math.round((diff * i.cost_per_pack_paise) / i.pack_size), null,
+      `Book ${book} ${i.unit}, counted ${counted} ${i.unit} (${diff > 0 ? '+' : ''}${diff})`, c.get('staff').id, shiftDay));
   }
   // One summary line per count, even when everything agrees: it marks the handover time (Stock, Bar handover).
   const differ = result.filter((l) => l.variance !== 0);
