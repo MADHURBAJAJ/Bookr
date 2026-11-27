@@ -45,14 +45,18 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   // The caller's role in the business the path names comes in the same query (one trip to the database, not two);
   // requireRole still checks it for every request.
   const bizInPath = /\/businesses\/([0-9a-f-]{36})(?:\/|$)/i.exec(c.req.path)?.[1] ?? null;
-  const row = await one<{ id: string; name: string; email: string; last_seen_at: number; role: string | null }>(db, `
-    SELECT u.id, u.name, ${signInSql('u')} AS email, s.last_seen_at, m.role
+  const row = await one<{ id: string; name: string; email: string; last_seen_at: number; app_last_at: number | null; role: string | null }>(db, `
+    SELECT u.id, u.name, ${signInSql('u')} AS email, s.last_seen_at, u.app_last_at, m.role
     FROM sessions s JOIN users u ON u.id = s.user_id
     LEFT JOIN memberships m ON m.user_id = u.id AND m.business_id = ?
     WHERE s.id = ? AND s.expires_at > ?`, bizInPath, id, t);
   if (!row) {
     deleteCookie(c, SESSION_COOKIE, { path: '/', secure: true });
     fail(401, 'Please sign in.');
+  }
+  // Opened from the home-screen icon (28 Nov 2026): the app sends X-Bookr-App: 1. Kept at most every few minutes.
+  if (c.req.header('X-Bookr-App') === '1' && (row.app_last_at ?? 0) < t - TOUCH_MS) {
+    await run(db, 'UPDATE users SET app_first_at = coalesce(app_first_at, ?), app_last_at = ? WHERE id = ?', t, t, row.id);
   }
   if (row.last_seen_at < t - TOUCH_MS) {
     await db.batch([

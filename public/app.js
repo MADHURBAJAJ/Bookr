@@ -60,13 +60,15 @@ async function bizDetail(id) {
 
 // A change always goes as JSON (the server refuses anything else, see app.ts), so one with no body sends {}.
 const bodyFor = (method, body) => (body === undefined && method !== 'GET' ? {} : body);
+// Opened from the home-screen icon (28 Nov 2026): every request says so, and the Owner sees it on Schools and cashiers.
+const APP_HEADER = (matchMedia('(display-mode: standalone)').matches || navigator.standalone === true) ? { 'X-Bookr-App': '1' } : {};
 async function api(method, path, body) {
   body = bodyFor(method, body);
   const hit = method === 'GET' ? GET_CACHE.get(path) : null;
   if (hit && Date.now() - hit.at < CACHE_MS) return structuredClone(hit.data);
   const res = await fetch(`/api${path}`, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+    headers: body !== undefined ? { 'Content-Type': 'application/json', ...APP_HEADER } : { ...APP_HEADER },
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
   });
@@ -2195,7 +2197,7 @@ function wireDeletes(biz, msgEl, after) {
 async function apiUpload(path, file) {
   const ext = (file.name.split('.').pop() || '').toLowerCase();
   const type = file.type || ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', pdf: 'application/pdf' })[ext] || 'application/octet-stream';
-  const res = await fetch(`/api${path}`, { method: 'POST', headers: { 'Content-Type': type }, body: file, credentials: 'same-origin' });
+  const res = await fetch(`/api${path}`, { method: 'POST', headers: { 'Content-Type': type, ...APP_HEADER }, body: file, credentials: 'same-origin' });
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error(data?.error ?? 'Upload failed.');
   return data;
@@ -2228,7 +2230,7 @@ const discWord = (p) => (p > 0 ? `Discount ₹ ${rs(p)}` : p < 0 ? `Tip ₹ ${rs
 const rowEditBody = (was, now, extra = {}) => ({ ...now, ...extra, only: ROW_FIELDS.filter((f) => !sameRowField(f, was[f], now[f])), was });
 async function apiFull(method, path, body) {
   body = bodyFor(method, body);
-  const res = await fetch(`/api${path}`, { method, headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
+  const res = await fetch(`/api${path}`, { method, headers: body !== undefined ? { 'Content-Type': 'application/json', ...APP_HEADER } : { ...APP_HEADER }, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
   const data = await res.json().catch(() => null);
   if (!res.ok && data?.code === 'amount_unread' && method === 'PUT' && body && !(body.confirm ?? []).includes('amount')) {
     if (window.confirm(`${data.error}\n\nOK = the bill really is ₹0 (complimentary). Cancel = type the amount first.`)) return apiFull(method, path, { ...body, confirm: [...(body.confirm ?? []), 'amount'] });
@@ -11042,6 +11044,7 @@ async function schoolsView(biz, editId) {
   const otherCodes = d.codes.filter((c) => !c.branchId).map((c) => c.code);
   const who = (b) => (b.cashierUserId
     ? html`<span class="chip ok">${b.cashierName && b.cashierName !== b.name ? `${b.cashierName} signed in` : 'signed in'}</span>${b.cashierLastActive ? html` <span class="tiny">last seen ${when(b.cashierLastActive)}</span>` : ''}
+        <div class="tiny">${b.cashierApp?.firstAt ? `📱 Opened from the app icon · first ${shortDay(new Date(b.cashierApp.firstAt + IST_MS).toISOString().slice(0, 10))} · last ${when(b.cashierApp.lastAt)}` : 'Not opened from the app icon yet (browser only)'}</div>
         ${d.can.invite && b.cashierRole !== 'owner' && b.cashierUserId !== me.user.id ? html` <button type="button" class="linkbtn tiny" data-cbremove="${b.cashierUserId}" data-name="${b.cashierName ?? b.name}">Remove login</button>` : ''}`
     : b.invite ? html`<span class="chip wait">invite sent</span> <span class="tiny">to ${cbPhone(b.invite.phone)} on ${shortDay(new Date(b.invite.createdAt + IST_MS).toISOString().slice(0, 10))}, not joined yet</span>
         ${d.can.invite ? html` <button type="button" class="linkbtn tiny" data-cbinvite="${b.id}" data-phone="${cbPhone(b.invite.phone)}">Send again</button>
