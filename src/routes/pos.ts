@@ -111,6 +111,12 @@ async function file(db: DB, bid: string, id: string, kind: string, body: Obj): P
   if (kind === 'receipt') {
     const at = int(body, 'at')!;
     const k = str(body, 'kind')!;
+    // A receipt cancelled at the POS (27 Nov 2026, managers only, the same open day): its lines leave the day's payments here.
+    if (k === 'cancel') {
+      const ids = Array.isArray(body.paymentIds) ? body.paymentIds.filter((x): x is string => typeof x === 'string') : [];
+      if (!ids.length) throw new Bad('paymentIds are missing.');
+      return [stmt(db, 'DELETE FROM pos_payment_lines WHERE business_id = ? AND payment_id IN (SELECT value FROM json_each(?))', bid, JSON.stringify(ids))];
+    }
     if (k !== 'receipt' && k !== 'advance') throw new Bad('kind must be receipt or advance.');
     const acc = obj(body.account, 'account');
     const pays = body.payments;

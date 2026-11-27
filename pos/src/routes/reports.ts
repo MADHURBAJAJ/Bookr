@@ -9,6 +9,7 @@ import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing
 import type { AppEnv } from '../types';
 import { occupancy, roomRevenueByDay } from './frontdesk';
 import { drawersOfDay } from './drawers';
+import { cancelledReceipts } from './receipt-cancels';
 
 export const reportRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -182,8 +183,10 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
     return out;
   };
   const HOUR = 3_600_000;
+  // Receipts cancelled this day (27 Nov 2026): who, why, how much.
+  const cancelledReceiptsOfDay = await cancelledReceipts(db, bid, day);
   return {
-    day, fy,
+    day, fy, cancelledReceipts: cancelledReceiptsOfDay,
     sales: { bills: sales!.bills ?? 0, netPaise: sales!.net, totalPaise: sales!.total, voids: sales!.voids ?? 0, ncBills: sales!.nc ?? 0, ncMenuPaise: sales!.ncMenu }, byMode,
     events: Object.fromEntries(events.map((e) => [e.kind, { n: e.n, paise: e.paise }])),
     differences: Object.fromEntries(diffs.map((d) => [d.kind, { n: d.n, paise: d.paise }])),

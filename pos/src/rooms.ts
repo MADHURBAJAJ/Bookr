@@ -254,8 +254,10 @@ export function roomTax(totalPaise: number, perNightPaise: number, gstRegistered
 
 /** What the room bill shows: every entry on the folio in plain words, with its bill or receipt number. */
 export async function folioLines(db: DB, accountId: string) {
-  return all<{ kind: string; amountPaise: number; at: number; note: string | null; billNo: string | null; mode: string | null; receiptNo: string | null; bookingRef: string | null }>(db,
-    `SELECT e.kind, e.amount_paise AS amountPaise, e.at, e.note, b.bill_no AS billNo, p.mode, s.receipt_no AS receiptNo, k.ext_ref AS bookingRef
+  return all<{ kind: string; amountPaise: number; at: number; note: string | null; billNo: string | null; mode: string | null; receiptNo: string | null; bookingRef: string | null;
+    settlementId: string | null; cancelled: number }>(db,
+    `SELECT e.kind, e.amount_paise AS amountPaise, e.at, e.note, b.bill_no AS billNo, p.mode, s.receipt_no AS receiptNo, k.ext_ref AS bookingRef,
+       s.id AS settlementId, EXISTS (SELECT 1 FROM receipt_cancels rc WHERE rc.settlement_id = s.id) AS cancelled
      FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN settlements s ON s.id = p.settlement_id
      LEFT JOIN bookings k ON k.id = e.booking_id WHERE e.account_id = ? ORDER BY e.at, e.kind <> 'room_rent', e.id`, accountId);
 }

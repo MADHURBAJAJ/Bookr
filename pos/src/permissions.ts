@@ -23,7 +23,8 @@ export const PERMISSIONS = {
   'reports.view': MANAGE,        // exceptions, shift reports, debtors
   'menu.edit': MANAGE,           // menu items and reason lists
   'stock.edit': MANAGE,          // stock items, recipes, receiving, transfers, breakage, counts and the stock report
-  'stock.count': TILL,           // typing a bar or kitchen count (27 Nov 2026); a manager approves it
+  'stock.count': TILL,
+  'receipts.cancel': MANAGE,     // cancel a receipt taken by mistake, the same open day (27 Nov 2026)           // typing a bar or kitchen count (27 Nov 2026); a manager approves it
   'menu.upload': OWNER,          // replace the whole menu from a sheet (CSV), after checking what it changes
   'entities.edit': OWNER,        // billing names, GST, limits, which are offered; UPI accounts
   'staff.manage': OWNER,         // staff, PINs, counter devices, business settings

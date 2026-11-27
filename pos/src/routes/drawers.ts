@@ -13,6 +13,7 @@ import { rs } from '../billing';
 import { audit, bizOf } from '../util';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
+import { notCancelled } from './receipt-cancels';
 
 export const drawerRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -31,7 +32,7 @@ export async function openDrawer(db: DB, bid: string): Promise<DrawerRow | null>
 /** Cash into and out of the drawer between `from` (after) and `to` (up to): cash payments, cash paid out and refunded. */
 export async function cashBetween(db: DB, bid: string, from: number, to: number) {
   const r = await one<{ inP: number; outP: number; cnP: number }>(db, `SELECT
-      (SELECT coalesce(sum(amount_paise), 0) FROM payments WHERE business_id = ? AND mode = 'cash' AND at > ? AND at <= ?) AS inP,
+      (SELECT coalesce(sum(amount_paise), 0) FROM payments WHERE business_id = ? AND mode = 'cash' AND at > ? AND at <= ? AND ${notCancelled('payments.settlement_id')}) AS inP,
       (SELECT coalesce(sum(amount_paise), 0) FROM drawer_outs WHERE business_id = ? AND mode = 'cash' AND at > ? AND at <= ?) AS outP,
       (SELECT coalesce(sum(total_paise), 0) FROM credit_notes WHERE business_id = ? AND refund_mode = 'cash' AND at > ? AND at <= ?) AS cnP`,
     bid, from, to, bid, from, to, bid, from, to);

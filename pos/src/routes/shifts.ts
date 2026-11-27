@@ -14,6 +14,7 @@ import { notInDjubo } from './frontdesk';
 import { audit, clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
 import type { AppEnv } from '../types';
+import { cancelledReceipts, notCancelled } from './receipt-cancels';
 import { cashBetween, cashGuard, closeDrawerStmts, countResult, drawersOfDay, openDrawer, readCounted, startDrawer } from './drawers';
 import { isManager } from '../auth';
 
@@ -27,10 +28,10 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const byMode = await all<{ mode: string; n: number; paise: number }>(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise
     FROM payments p JOIN settlements s ON s.id = p.settlement_id WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'bills' GROUP BY p.mode ORDER BY p.mode`, bid, day);
   const receipts = await all<{ mode: string; n: number; paise: number }>(db, `SELECT p.mode, count(*) AS n, sum(p.amount_paise) AS paise
-    FROM payments p JOIN settlements s ON s.id = p.settlement_id WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'receipt' GROUP BY p.mode ORDER BY p.mode`, bid, day);
+    FROM payments p JOIN settlements s ON s.id = p.settlement_id WHERE p.business_id = ? AND p.shift_day = ? AND s.kind = 'receipt' AND ${notCancelled('s.id')} GROUP BY p.mode ORDER BY p.mode`, bid, day);
   const byAccount = await all<{ name: string; entity: string; paise: number }>(db, `SELECT a.name, e.name AS entity, sum(p.amount_paise) AS paise
     FROM payments p JOIN pay_accounts a ON a.id = p.pay_account_id JOIN billing_entities e ON e.id = a.entity_id
-    WHERE p.business_id = ? AND p.shift_day = ? AND p.mode = 'upi' GROUP BY a.id ORDER BY a.name`, bid, day);
+    WHERE p.business_id = ? AND p.shift_day = ? AND p.mode = 'upi' AND ${notCancelled('p.settlement_id')} GROUP BY a.id ORDER BY a.name`, bid, day);
   const billed = await all<{ entity: string; first: string; last: string; n: number; voids: number; paise: number }>(db, `SELECT e.name AS entity,
       min(b.bill_no) AS first, max(b.bill_no) AS last, count(*) AS n, sum(b.status = 'void') AS voids, sum(CASE WHEN b.status <> 'void' THEN b.total_paise ELSE 0 END) AS paise
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id WHERE b.business_id = ? AND b.shift_day = ? GROUP BY e.id ORDER BY e.is_default DESC, e.name`, bid, day);
@@ -52,13 +53,14 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   // Each money payment of the day (26 Nov 2026), for Day close's Breakdown: what it paid (bill numbers, or the receipt and
   // the room or account it went on, or a desk advance's guest) so a tap on a total lists them.
   const payments = await all<{ id: string; mode: string; amountPaise: number; kind: string; at: number; receiptNo: string | null; bills: string | null; billId: string | null;
-    place: string | null; account: string | null; stayId: string | null; advGuest: string | null }>(db, `SELECT p.id, p.mode, p.amount_paise AS amountPaise, s.kind, s.at, s.receipt_no AS receiptNo,
+    place: string | null; account: string | null; stayId: string | null; advGuest: string | null; settlementId: string; cancelled: number }>(db, `SELECT p.id, p.mode, p.amount_paise AS amountPaise, s.kind, s.at, s.receipt_no AS receiptNo, s.id AS settlementId,
       (SELECT group_concat(b.bill_no, ', ') FROM allocations a JOIN bills b ON b.id = a.bill_id WHERE a.payment_id = p.id) AS bills,
       (SELECT a.bill_id FROM allocations a WHERE a.payment_id = p.id LIMIT 1) AS billId,
       (SELECT o.place FROM allocations a JOIN bills b ON b.id = a.bill_id JOIN orders o ON o.id = b.order_id WHERE a.payment_id = p.id LIMIT 1) AS place,
       (SELECT d.name FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id WHERE e.payment_id = p.id LIMIT 1) AS account,
       (SELECT d.stay_id FROM debtor_entries e JOIN debtor_accounts d ON d.id = e.account_id WHERE e.payment_id = p.id LIMIT 1) AS stayId,
-      (SELECT g.guest_name FROM desk_advances g WHERE g.settlement_id = s.id LIMIT 1) AS advGuest
+      (SELECT g.guest_name FROM desk_advances g WHERE g.settlement_id = s.id LIMIT 1) AS advGuest,
+      NOT ${notCancelled('s.id')} AS cancelled
     FROM payments p JOIN settlements s ON s.id = p.settlement_id
     WHERE p.business_id = ? AND p.shift_day = ? AND p.mode IN ('cash', 'upi', 'card') ORDER BY s.at DESC, p.rowid DESC LIMIT 1000`, bid, day);
   const cashIn = [...byMode, ...receipts].filter((r) => r.mode === 'cash').reduce((s, r) => s + r.paise, 0);
@@ -68,7 +70,7 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
   const deskMissing = (await oldDeskPending(db, bid, startHour)).filter((r) => r.deskPaidAt !== null && shiftDayAt(r.deskPaidAt, startHour) === day)
     .map((r) => ({ bookingId: r.id, extRef: r.extRef, guestName: r.guestName, enteredBy: r.enteredBy, at: r.deskPaidAt, pendingPaise: r.pendingPaise }));
   const oldTabDay = new Date(Date.parse(day + 'T00:00:00Z') - tabAgeDays * 86400000).toISOString().slice(0, 10);
-  return { shiftDay: day, byMode, receipts, byAccount, billed, events, payments, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
+  return { shiftDay: day, cancelledReceipts: await cancelledReceipts(db, bid, day), byMode, receipts, byAccount, billed, events, payments, openOrders, unpaidBills: unpaid, tabs: tabs.map((x) => ({ ...x, old: x.since <= oldTabDay })),
     cashInPaise: cashIn, cashOutPaise: cashOut, deskMissing,
     // Money reception marked in Djubo on this day (26 Nov 2026): counted here; each needs a mode before the day closes.
     // Restaurant advances not used on a bill yet (26 Nov 2026).

@@ -519,8 +519,9 @@ settleRoutes.get(`${B}/debtors/:id`, requireAction('pos.view'), async (c) => {
   const bid = c.get('businessId');
   const acc = await one(c.env.DB, 'SELECT id, kind, name, phone, credit_limit_paise AS creditLimitPaise FROM debtor_accounts WHERE id = ? AND business_id = ?', c.req.param('id'), bid);
   if (!acc) fail(404, 'Account not found.');
-  const entries = await all(c.env.DB, `SELECT e.kind, e.amount_paise AS amountPaise, e.at, b.bill_no AS billNo, p.mode
-    FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id
+  const entries = await all(c.env.DB, `SELECT e.kind, e.amount_paise AS amountPaise, e.at, b.bill_no AS billNo, p.mode, s.receipt_no AS receiptNo, s.id AS settlementId,
+      EXISTS (SELECT 1 FROM receipt_cancels rc WHERE rc.settlement_id = p.settlement_id) AS cancelled, e.note
+    FROM debtor_entries e LEFT JOIN bills b ON b.id = e.bill_id LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN settlements s ON s.id = p.settlement_id
     WHERE e.account_id = ? ORDER BY e.at, e.id`, c.req.param('id'));
   return c.json({ account: acc, entries, balancePaise: await balance(c.env.DB, c.req.param('id')) });
 });
@@ -633,6 +634,7 @@ async function djuboReceipts(db: DB, bid: string, bookingId: string, stayId: str
     SELECT s.id AS settlementId, s.receipt_no AS receiptNo, s.at, sum(p.amount_paise) AS amountPaise, min(p.mode) AS mode
     FROM settlements s JOIN payments p ON p.settlement_id = s.id
     WHERE s.business_id = ?1 AND s.kind = 'receipt' AND s.at > ?2 AND NOT EXISTS (SELECT 1 FROM booking_paid_log l WHERE l.settlement_id = s.id)
+      AND NOT EXISTS (SELECT 1 FROM receipt_cancels rc WHERE rc.settlement_id = s.id)
       AND (EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id AND a.stay_id IN
             (SELECT id FROM stays WHERE id = ?3 OR group_stay_id = ?3))
         OR EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = s.id AND d.booking_id IN (?4, (SELECT match_id FROM bookings WHERE id = ?4))))

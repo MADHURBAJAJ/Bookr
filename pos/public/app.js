@@ -162,7 +162,7 @@ function shell(active, body) {
   </div></header>
   ${netBand(active)}
   ${me.support ? html`<div class="supportbar" role="status">You are in ${me.business.name} as Bookr POS support. The owner can see this visit.</div>` : ''}
-  <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span>${flash.link ? html`<a href="${flash.link[0]}" ${/^https?:/.test(flash.link[0]) ? html`target="_blank" rel="noopener noreferrer"` : ''}>${flash.link[1]}</a>` : ''}</div>` : ''}${active === '#/rooms' ? '' : deskBannerBox()}${body}</main>`;
+  <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span>${flash.link ? html`<a href="${flash.link[0]}" ${/^https?:/.test(flash.link[0]) ? html`target="_blank" rel="noopener noreferrer"` : ''}>${flash.link[1]}</a>` : ''}</div>` : ''}${active === '#/rooms' ? '' : deskBannerBox()}${body}${rcModal()}</main>`;
 }
 /** A page title with an optional line under it and controls on the right. */
 const pageHead = (title, sub, right) => html`<div class="phead"><div><h1>${title}</h1>${sub ? html`<p class="sub">${sub}</p>` : ''}</div>${right ?? ''}</div>`;
@@ -1993,7 +1993,7 @@ function todayView() {
     ...(fd.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: 'C', title: `Form C not filed: ${x.room} · ${x.guestName}`, sub: `checked in ${x.hours} h ago · due within 24 h`, act: 'roomBill', id: x.stayId })),
     ...(a?.overstays ?? []).map((x) => ({ tone: 'bad', icon: '⏱', title: `Past check-out: ${x.room} · ${x.guestName}`, sub: `was due out ${dayName(x.plan)}`, act: 'roomBill', id: x.id })),
     ...(a?.notArrived ?? []).filter((x) => x.checkIn < today).map((x) => ({ tone: 'warn', icon: '?', title: `Did not arrive: ${x.guestName ?? 'No name'}`, sub: `was due ${dayName(x.checkIn)} · no-show?`, act: 'goTo', href: '#/rooms/audit' })),
-    ...(a?.noDate ?? []).map((x) => ({ tone: 'mute', icon: '?', title: `No check-out date: ${x.room} · ${x.guestName}`, sub: 'Set it with Extend stay', act: 'roomBill', id: x.id })),
+    ...(a?.noDate ?? []).map((x) => ({ tone: 'mute', icon: '?', title: `No check-out date: ${roomShow(x.room)} · ${x.guestName}`, sub: 'Set it with Extend stay', act: 'roomBill', id: x.id })),
     ...(a?.dirty?.length ? [{ tone: 'mute', icon: '◆', title: `${plural(a.dirty.length, 'room')} not ready`, sub: a.dirty.slice(0, 6).map((x) => `${x.room} ${x.status}`).join(' · '), act: 'goTo', href: '#/rooms/house' }] : []),
   ];
   const row = (attrs, left, right) => html`<button type="button" class="drow" ${attrs}><span class="grow">${left}</span><span class="dright">${right}</span></button>`;
@@ -2847,6 +2847,41 @@ actions.reportRent = async (d) => {
 };
 /** One line of the room bill in plain words. */
 const MODE_NAME = { cash: 'Cash', upi: 'UPI', card: 'Card' };
+// ---------- cancelling a receipt taken by mistake (27 Nov 2026): managers and owners, the same open day, with a reason.
+// What has to be done first is said before the form opens.
+function rcModal() {
+  const x = ui.rcx;
+  if (!x) return '';
+  const r = x.receipt;
+  return html`<div class="scrim" style="position:fixed;inset:0;background:var(--scrim);z-index:60;display:flex;align-items:center;justify-content:center;padding:16px">
+    <div class="panel" role="dialog" aria-modal="true" aria-label="Cancel receipt" style="max-width:520px;width:100%;max-height:90vh;overflow:auto">
+      <div class="row" style="justify-content:space-between;align-items:center"><h2>Cancel ${r.receiptNo ?? 'receipt'}</h2><button class="btn ghost" type="button" data-act="rcClose">Close</button></div>
+      <p style="margin:4px 0">${r.who} · <strong>${rs(r.totalPaise)}</strong> · ${r.modes}<br><span class="small quiet">Taken ${dateTime(r.at)}</span></p>
+      ${errorBox()}
+      ${x.blockers.length ? html`<div class="msg warn" role="alert" style="display:block"><strong>This receipt can't be cancelled yet</strong>
+          <ul style="margin:6px 0 0;padding-left:18px">${x.blockers.map((b) => html`<li>${b}</li>`)}</ul></div>
+        <div class="row" style="margin-top:10px"><button class="btn" type="button" data-act="rcClose">Close</button></div>`
+      : html`<div class="f" style="margin-top:8px">Why is it cancelled?<div class="chips">${x.reasons.map((w) => html`<button type="button" class="chip" aria-pressed="${ui.rcWhy === w}" data-act="pick" data-k="rcWhy" data-id="${w}">${w}</button>`)}</div></div>
+        <label class="f">Note (optional)<input class="in" data-model="rcNote" value="${ui.rcNote ?? ''}" maxlength="200" placeholder="e.g. guest paid by UPI, the cash receipt was printed by mistake"></label>
+        <p class="small quiet" style="margin:0">The receipt number stays, marked CANCELLED. ${rs(r.totalPaise)} comes off the guest's bill and off today's money; a slip prints and the Daily check lists it.</p>
+        <div class="row" style="margin-top:10px"><button class="btn danger" type="button" data-act="rcGo" ${ui.rcWhy ? '' : 'disabled'}>Cancel the receipt</button><button class="btn" type="button" data-act="rcClose">Keep it</button></div>`}
+    </div></div>`;
+}
+actions.rcAsk = async (d) => { ui.error = null; ui.rcWhy = null; ui.rcNote = ''; ui.rcx = await api('GET', `${B()}/receipts/${d.id}/cancel`); rerender(); };
+actions.rcClose = () => { ui.rcx = null; ui.error = null; rerender(); };
+actions.rcGo = async () => {
+  const r = await api('POST', `${B()}/receipts/${ui.rcx.receipt.id}/cancel`, { reason: ui.rcWhy, note: ui.rcNote ?? '' });
+  const x = r.slip;
+  printJobs([{ kind: 'bill', html: asHtml(html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="hd" style="border:2px solid #000;margin:6px 0">RECEIPT CANCELLED</div>
+    <div class="rl"><span>${x.receiptNo ?? ''}</span><span>${rs(x.totalPaise)}</span></div><div>${x.who}</div><div>${x.modes}</div>
+    <div>Taken: ${dateTime(x.takenAt)}</div><div>Cancelled: ${dateTime(x.cancelledAt)}</div><div>By: ${x.by}</div><div>Why: ${x.reason}</div>${x.note ? html`<div>Note: ${x.note}</div>` : ''}</div>`) }]);
+  ui.rcx = null;
+  flash = { kind: 'ok', text: `${x.receiptNo ?? 'Receipt'} cancelled: ${rs(x.totalPaise)} is off the bill and off today's money.` };
+  route();
+};
+/** A receipt's number, struck through and marked when it was cancelled; a Cancel button for managers otherwise. */
+const rcTag = (cancelled) => (cancelled ? html` <span class="status bad">CANCELLED</span>` : '');
+const rcBtn = (sid, cancelled) => (sid && !cancelled && can('receipts.cancel') ? html` <button class="btn sm ghost" type="button" data-act="rcAsk" data-id="${sid}">Cancel</button>` : '');
 function folioLabel(l) {
   const no = l.receiptNo ? ` ${l.receiptNo}` : '';
   const how = l.mode ? ` · ${MODE_NAME[l.mode] ?? l.mode}` : '';
@@ -3009,7 +3044,8 @@ function roomBillPanel(r) {
     ${r.booking ? html`${bookingCard(r.booking, true)}<div class="row" style="margin:4px 0 8px"><button class="btn sm ghost" type="button" data-act="bkHist" data-id="${r.booking.id}">${ui.bkHist?.id === r.booking.id ? 'Hide email history' : 'Email history'}</button></div>
       ${ui.bkHist?.id === r.booking.id ? histList(ui.bkHist.list) : ''}` : html`<p class="small quiet">${st.checkOutPlan ? `Staying till ${dayName(st.checkOutPlan)}. ` : ''}No booking from Djubo on this room: add the room rent by hand (Add charge, "Room rent").</p>`}
     <table class="t" style="margin-top:10px"><tbody>
-      ${r.lines.map((l) => html`<tr><td>${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`)}
+      ${r.lines.map((l) => { const rcpt = ['receipt', 'advance', 'deposit'].includes(l.kind) && l.settlementId; const undo = rcpt && l.amountPaise > 0;
+        return html`<tr><td>${undo ? html`<span class="quiet">${l.note ?? 'Receipt cancelled'}</span>` : html`<span style="${rcpt && l.cancelled ? 'text-decoration:line-through' : ''}">${l.billNo && ['charge', 'advance_used', 'credit_note'].includes(l.kind) ? html`<a href="#/billno/${l.billNo}">${folioLabel(l)}</a>` : folioLabel(l)}</span>${rcpt ? rcTag(l.cancelled) : ''}${rcpt && l.amountPaise < 0 ? rcBtn(l.settlementId, l.cancelled) : ''}`}<div class="small quiet">${dateTime(l.at)}</div></td><td class="num">${rs(l.amountPaise)}</td></tr>`; })}
       ${djWait.map((x) => html`<tr><td>Paid at reception, in Djubo<div class="small quiet">${dateTime(x.at)} · ${x.by ?? ''} · pick how it was paid, below</div></td><td class="num">${rs(-x.amountPaise)}</td></tr>`)}
       <tr><td><strong>${r.balancePaise > 0 ? 'To collect' : r.balancePaise < 0 ? 'Held for the guest (deposit or advance)' : 'Nothing to collect'}</strong></td><td class="num"><strong>${rs(Math.abs(r.balancePaise))}</strong></td></tr>
     </tbody></table>
@@ -3455,6 +3491,7 @@ async function paymentsScreen(tab = '') {
           ${[...r.differences, ...r.missing].map((x) => html`<div class="small">${x}</div>`)}</td></tr>`;
     };
     paint(shell('#/payments', html`${pageHead(`Payments · ${dayName(d.day)}`, 'Every bill and receipt of the shift against the proof posted in the Guest payment group: a UPI screenshot, the card slip, or “cash” on the bill photo. Post proof until the day closes.')}
+      ${(d.cancelledReceipts ?? []).length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><b>Cancelled receipts (no proof needed)</b>${d.cancelledReceipts.map((x) => html`<div><span style="text-decoration:line-through">${x.receiptNo ?? 'Receipt'} · ${rs(x.totalPaise)}</span> <span class="status bad">CANCELLED</span> · ${x.who ?? ''} · ${x.reason} · by ${x.byName ?? ''}</div>`)}</div>` : ''}
       ${d.connected === false ? html`<div class="msg warn">This POS is not connected to Bookr, so no proof is shown. The bills are listed below.</div>` : ''}
       ${d.error ? html`<div class="msg warn">Bookr could not be reached (${d.error}). Trying again every few seconds; the bills are listed below.</div>` : ''}
       ${neverSeen ? html`<div class="msg warn">WhatsApp is not connected to Bookr yet, so no payment proof can show. The listener on the reception PC needs setting up, and the Guest payment group adding in Bookr (Settings › WhatsApp groups, with POS proof on).</div>` : ''}
@@ -3712,8 +3749,9 @@ function takingsTable(s) {
     <tr class="tktot"><td>Total</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.rooms, 0))}</td><td class="num">${rs(rows.reduce((t, r) => t + r.bills + r.rooms - r.back, 0))}</td></tr></tbody></table></div>
     ${lm ? html`<div class="tklist"><div class="row between"><strong>${{ cash: 'Cash', upi: 'UPI', card: 'Card' }[lm]} · ${{ bills: 'restaurant bills', rooms: 'rooms and credit', all: 'all today' }[lk]} · ${listed.length}</strong>
         <button type="button" class="btn" data-act="pick" data-k="tkList" data-id="">Close</button></div>
-      <div class="scroll"><table class="t"><tbody>${listed.map((p) => html`<tr><td>${time(p.at)}</td><td>${ref(p)}</td><td>${what(p)}</td><td class="num">${rs(p.amountPaise)}</td></tr>`)}</tbody></table></div>
+      <div class="scroll"><table class="t"><tbody>${listed.map((p) => html`<tr><td>${time(p.at)}</td><td>${ref(p)}${p.kind !== 'bills' ? html`${rcTag(p.cancelled)}${rcBtn(p.settlementId, p.cancelled)}` : ''}</td><td>${what(p)}</td><td class="num" style="${p.cancelled ? 'text-decoration:line-through' : ''}">${rs(p.amountPaise)}</td></tr>`)}</tbody></table></div>
       <p class="small quiet">Tap a bill number to open the bill, or a receipt number to open the room bill.</p></div>` : html`<p class="small quiet">Tap an amount to list the bills and receipts behind it.</p>`}
+    ${(s.cancelledReceipts ?? []).length ? html`<div class="sums"><div><strong>Receipts cancelled today (not counted above)</strong></div>${s.cancelledReceipts.map((x) => html`<div><span>${x.receiptNo ?? 'Receipt'} · ${x.who ?? ''} · ${x.reason}${x.byName ? ` · by ${x.byName}` : ''}</span><span>${rs(x.totalPaise)}</span></div>`)}</div>` : ''}
     ${notMoney.length ? html`<div class="sums"><div><strong>Not money yet, or counted on another day</strong></div>${notMoney.map(([t, v]) => html`<div><span>${t}</span><span>${rs(v)}</span></div>`)}</div>` : ''}`;
 }
 async function shiftScreen() {
@@ -4328,7 +4366,7 @@ async function reportsScreen(tab = 'sales', range = '') {
       ${ui.statement ? html`<section class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2>Statement · ${ui.statement.account.name}</h2><button class="btn" type="button" data-act="printStatement">Print</button></div>
         <div class="scroll"><table class="t"><thead><tr><th>When</th><th>What</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr></thead><tbody>
           ${(() => { let bal = 0; return ui.statement.entries.map((e) => { bal += e.amountPaise; return html`<tr><td>${dateTime(e.at)}</td>
-            <td>${{ charge: 'Bill', receipt: 'Payment', advance: 'Advance paid', advance_used: 'Advance used on bill', refund: 'Advance refunded' }[e.kind]}${e.billNo ? ' ' + e.billNo : ''}${e.mode ? ' · ' + e.mode : ''}</td>
+            <td>${e.receiptNo && e.amountPaise > 0 && ['receipt', 'advance'].includes(e.kind) ? html`<span class="quiet">${e.note ?? 'Receipt cancelled'}</span>` : html`${{ charge: 'Bill', receipt: 'Payment', advance: 'Advance paid', advance_used: 'Advance used on bill', refund: 'Advance refunded' }[e.kind]}${e.receiptNo ? ' ' + e.receiptNo : ''}${e.receiptNo && e.amountPaise < 0 ? html`${rcTag(e.cancelled)}${rcBtn(e.settlementId, e.cancelled)}` : ''}`}${e.billNo ? ' ' + e.billNo : ''}${e.mode ? ' · ' + e.mode : ''}</td>
             <td class="num">${e.amountPaise > 0 ? rs(e.amountPaise) : ''}</td><td class="num">${e.amountPaise < 0 ? rs(-e.amountPaise) : ''}</td><td class="num">${rs(bal)}</td></tr>`; }); })()}
         </tbody></table></div></section>` : ''}`));
     rerender();
@@ -5298,6 +5336,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
     d.shiftClose ? `Cash close: ${d.shiftClose.differencePaise === 0 ? 'matched' : `${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`}` : 'Shift not closed yet',
     `Bill numbers: ${broken.length ? 'gaps found' : 'unbroken'}`,
     d.unpaid.length ? `Sent to kitchen, not paid: ${d.unpaid.length}${oldUnpaid ? ` (${oldUnpaid} overdue)` : ''}` : '',
+    (d.cancelledReceipts ?? []).length ? `Receipts cancelled: ${d.cancelledReceipts.map((x) => `${x.receiptNo} ${rs(x.totalPaise)} (${x.reason}, ${x.byName ?? ''})`).join(' · ')}` : '',
   ].filter(Boolean).join('\n');
   // ----- Sent to the kitchen or bar, not paid (25 Nov 2026): five ways food leaves with no money, and who.
   const placeOf = (ref) => String(ref ?? '').split(' · ')[0];
@@ -5362,6 +5401,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
         <button class="btn pri" type="button" data-act="exCopy">Copy for WhatsApp</button></form></div>
     ${off?.problems?.length ? html`<div class="msg warn" role="alert" style="display:block;margin-bottom:12px"><b>Made offline: check ${plural(off.problems.length, 'bill')}.</b>${off.problems.map((x) => html`<div>${x.problem}</div>`)}</div>` : ''}
     ${off?.bills?.length || off?.receipts?.length ? html`<p class="small quiet" style="margin-bottom:12px">Made with no internet this shift: ${[...off.bills.map((x) => x.billNo), ...off.receipts.map((x) => x.receiptNo)].join(', ')}. They keep the numbers printed on their paper.</p>` : ''}
+    ${(d.cancelledReceipts ?? []).length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><b>Receipts cancelled: ${d.cancelledReceipts.length}</b>
+      ${d.cancelledReceipts.map((x) => html`<div>${x.receiptNo ?? 'Receipt'} · ${x.who ?? ''} · ${rs(x.totalPaise)} · ${x.reason}${x.note ? ` (${x.note})` : ''} · by ${x.byName ?? ''}, ${time(x.at)}</div>`)}</div>` : ''}
     ${look.length ? html`<div class="dc-look"><span class="badge-n">${plural(look.length, 'thing')} to look at</span><span>${look.join(' · ')}</span></div>`
       : html`<div class="dc-look ok"><span class="badge-n">All clear</span><span>Cash matched, nothing unpaid for long, no unusual cancels.</span></div>`}
     <div class="kpis dc-kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), change === null ? `${rs(d.sales.totalPaise)} with GST` : `${change >= 0 ? '▲' : '▼'} ${Math.abs(change)}% on last ${new Date(day + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long' })}`)}

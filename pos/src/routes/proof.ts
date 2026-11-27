@@ -2,6 +2,7 @@
 // staff post in the Guest payment group (UPI screenshot, card slip, "cash" on the bill photo). Bookr reads WhatsApp and
 // matches; the POS sends its own bills of the shift (printed ones too, so they show amber at once) and shows the answer.
 // Nothing at the counter waits on this: settling never asks for proof.
+import { cancelledReceipts } from './receipt-cancels';
 import { Hono } from 'hono';
 import { all, type DB } from '../../../src/db';
 import { date } from '../../../src/http';
@@ -37,7 +38,7 @@ export async function shiftBills(db: DB, bid: string, day: string): Promise<Proo
     `SELECT s.id AS settlementId, p.id AS paymentId, p.mode, p.amount_paise AS amountPaise, p.amount_paise AS totalPaise, p.card_approval AS cardApproval,
        p.card_last4 AS cardLast4, p.at AS paidAt, d.name AS debtor
      FROM settlements s JOIN payments p ON p.settlement_id = s.id LEFT JOIN debtor_accounts d ON d.id = p.debtor_account_id
-     WHERE s.business_id = ? AND s.kind = 'receipt' AND s.shift_day = ? ORDER BY p.at`, bid, day);
+     WHERE s.business_id = ? AND s.kind = 'receipt' AND s.shift_day = ? AND NOT EXISTS (SELECT 1 FROM receipt_cancels rc WHERE rc.settlement_id = s.id) ORDER BY p.at`, bid, day);
   const tender = ({ paymentId, mode, amountPaise, totalPaise, cardApproval, cardLast4, paidAt }: Tender): Tender =>
     ({ paymentId, mode, amountPaise, totalPaise, cardApproval, cardLast4, paidAt });
   const out: ProofBill[] = bills.map((b) => ({ key: b.id, billNo: b.bill_no, kind: 'bill', state: b.status, totalPaise: b.total_paise, discountPaise: b.discount_paise,
@@ -79,5 +80,6 @@ proofRoutes.get(`${B}/proof`, requireAction('pos.view'), async (c) => {
   const b = bizOf(c);
   const q = c.req.query('day');
   const day = q ? date({ day: q }, 'day', 'Shift day') : clock(b).shiftDay;
-  return c.json(await proofList(c.env, c.get('businessId'), day, b.shift_start_hour));
+  // Receipts cancelled this day (27 Nov 2026): listed as cancelled; no proof is asked for them.
+  return c.json({ ...(await proofList(c.env, c.get('businessId'), day, b.shift_start_hour)), cancelledReceipts: await cancelledReceipts(c.env.DB, c.get('businessId'), day) });
 });
