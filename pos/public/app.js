@@ -1,6 +1,8 @@
 // Restaurant POS counter screens. Talks only to /api on the same origin; the server decides every permission and rule.
 // Hiding buttons by role here is for tidiness only. Every value from the server is escaped before it is shown.
 
+import * as offline from './offline.js';
+
 const root = document.getElementById('app');
 const printArea = document.getElementById('print');
 
@@ -47,15 +49,31 @@ let approvalCreds = null;   // extra fields while a step is tried again: a manag
 async function api(method, path, body, extraHeaders = {}) {
   if (body === undefined && method !== 'GET') body = {};
   if (approvalCreds && method !== 'GET' && body && typeof body === 'object') body = { ...body, ...approvalCreds };
-  const res = await fetch(`/api${path}`, {
-    method, credentials: 'same-origin',
-    headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  // Offline mode (27 Nov 2026): with no internet, or for an order still only on this PC, the counter answers from this PC.
+  if (offline.handles(method, path, body)) return localApi(method, path, body);
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      method, credentials: 'same-origin',
+      headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    if (!offline.ready()) offline.restore();
+    if (offline.ready() && !path.startsWith('/admin') && !path.startsWith('/auth')) { offline.wentOffline(); return localApi(method, path, body); }
+    throw new ApiError('No internet. Check the Wi-Fi, then try again.', 0, 'network');
+  }
   const data = await res.json().catch(() => null);
+  if (res.ok && method === 'GET') { offline.remember(path, data); return offline.merge(path, data); }
   if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401, 'signin'); }
   if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data?.code, data);
   return data;
+}
+async function localApi(method, path, body) {
+  try { return await offline.local(method, path, body); } catch (e) {
+    if (e instanceof offline.OfflineError) throw new ApiError(e.message, e.status, e.code);
+    throw e;
+  }
 }
 
 // ---------- state
@@ -139,9 +157,10 @@ function shell(active, body) {
       : html`<a class="brand" href="#/" title="${me.business.name}">${me.business.name}</a>`}</div>
     <nav class="mainnav" aria-label="Main">${navLinks}</nav>
     ${links.length > 1 ? html`<details class="navmenu"><summary aria-label="Go to: ${current}">${current} <span aria-hidden="true">▾</span></summary><nav aria-label="Main">${navLinks}</nav></details>` : ''}
-    <div class="who">${drawerChip()}${fullButton()}${themeButton()}<span class="shiftchip" title="Shift of ${dayName(me.business.shiftDay)}: a shift runs 8 am to 8 am" aria-label="Shift ${dayName(me.business.shiftDay)}">${dayName(me.business.shiftDay)}</span>
+    <div class="who">${netChip()}${drawerChip()}${fullButton()}${themeButton()}<span class="shiftchip" title="Shift of ${dayName(me.business.shiftDay)}: a shift runs 8 am to 8 am" aria-label="Shift ${dayName(me.business.shiftDay)}">${dayName(me.business.shiftDay)}</span>
       <span class="person">${me.staff.name}</span><button type="button" data-act="logout">Sign out</button></div>
   </div></header>
+  ${netBand(active)}
   ${me.support ? html`<div class="supportbar" role="status">You are in ${me.business.name} as Bookr POS support. The owner can see this visit.</div>` : ''}
   <main>${flash ? html`<div class="msg ${flash.kind} flash" role="status"><span>${flash.text}</span>${flash.link ? html`<a href="${flash.link[0]}" ${/^https?:/.test(flash.link[0]) ? html`target="_blank" rel="noopener noreferrer"` : ''}>${flash.link[1]}</a>` : ''}</div>` : ''}${active === '#/rooms' ? '' : deskBannerBox()}${body}</main>`;
 }
@@ -192,7 +211,10 @@ async function route() {
       try { me = await api('GET', '/me'); } catch { me = null; }
     }
     if (!me) return await signIn();
+    offlineReady();
     const [path, a, b] = location.hash.replace(/^#\/?/, '').split('/');
+    if (path === 'offline') return offlineScreen();
+    if (!offline.isOnline() && !OFFLINE_PATHS.includes(path ?? '')) return offlineOnly();
     if (startHere) {
       startHere = false;
       if ((path === '' || path === 'signin') && can('stays.edit')) { location.replace('#/counter'); return; }
@@ -765,7 +787,7 @@ function tableGrid() {
     }
     const s = orderState(o);
     const who = guest?.guestName ?? o.guestName;
-    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}">${carriedTag(o)}<span class="tn">${label}</span>${who ? html`<span class="tg">${who}</span>` : ''}
+    return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}${o.notSent ? ', not sent yet' : ''}">${carriedTag(o)}${o.notSent ? html`<span class="offtag">NOT SENT</span>` : ''}<span class="tn">${label}</span>${who ? html`<span class="tg">${who}</span>` : ''}
       <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
   };
   const used = (t) => busy.has(t.toLowerCase()) || !!stayAt(t);
@@ -4976,6 +4998,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   const [{ events }, d, prev] = await Promise.all([api('GET', `${B()}/events?day=${encodeURIComponent(day)}`), api('GET', `${B()}/reports/daily-check?day=${encodeURIComponent(day)}`),
     api('GET', `${B()}/reports/daily-check?day=${addDays(day, -7)}`).catch(() => null)]);
   ui.exPrev = prev;
+  // Made with no internet (27 Nov 2026): kept with their printed numbers; anything that differs from its paper is listed.
+  const off = await api('GET', `${B()}/offline/day?day=${encodeURIComponent(day)}`).catch(() => null);
   const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance', pay_change: 'Payment type changed' };
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const ev = (k) => d.events[k] ?? { n: 0, paise: 0 };
@@ -5058,6 +5082,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
         <label class="f">Shift<input class="in" type="date" data-model="day" value="${ui.day ?? day}" style="width:auto"></label>
         <button class="btn" type="button" data-act="exStep" data-n="1" aria-label="Next shift">›</button><button class="btn" type="submit" data-act="exDay" data-submit>Show</button>
         <button class="btn pri" type="button" data-act="exCopy">Copy for WhatsApp</button></form></div>
+    ${off?.problems?.length ? html`<div class="msg warn" role="alert" style="display:block;margin-bottom:12px"><b>Made offline: check ${plural(off.problems.length, 'bill')}.</b>${off.problems.map((x) => html`<div>${x.problem}</div>`)}</div>` : ''}
+    ${off?.bills?.length || off?.receipts?.length ? html`<p class="small quiet" style="margin-bottom:12px">Made with no internet this shift: ${[...off.bills.map((x) => x.billNo), ...off.receipts.map((x) => x.receiptNo)].join(', ')}. They keep the numbers printed on their paper.</p>` : ''}
     ${look.length ? html`<div class="dc-look"><span class="badge-n">${plural(look.length, 'thing')} to look at</span><span>${look.join(' · ')}</span></div>`
       : html`<div class="dc-look ok"><span class="badge-n">All clear</span><span>Cash matched, nothing unpaid for long, no unusual cancels.</span></div>`}
     <div class="kpis dc-kpis">${kpi(`Net sales · ${plural(d.sales.bills, 'bill')}`, rs(d.sales.netPaise), change === null ? `${rs(d.sales.totalPaise)} with GST` : `${change >= 0 ? '▲' : '▼'} ${Math.abs(change)}% on last ${new Date(day + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long' })}`)}
@@ -5406,8 +5432,11 @@ async function settingsScreen(tab = 'menu') {
     if (tab === 'device') body = html`${window.bookrDesktop ? html`<section class="panel" style="margin-bottom:16px"><h2>Printers on this PC</h2>
       <p class="quiet small">This PC runs the Bookr POS Windows app (version ${window.bookrDesktop.version || '1'}): bills and each station's KOTs print straight to their own printers.</p>
       <button class="btn pri" type="button" data-act="deskPrinters">Choose printers</button></section>` : ''}<section class="panel"><h2>Counter devices</h2><p class="quiet small">Counter staff sign in with a PIN only on a device set up here. Set up the billing PC or tablet by signing in on it as the Owner and pressing the button below.</p>${errorBox()}
-      <div class="scroll"><table class="t"><thead><tr><th>Device</th><th>Added</th><th></th></tr></thead><tbody>
-        ${ui.devices.map((d) => html`<tr><td>${d.name}</td><td>${dateTime(d.createdAt)}</td><td>${d.revokedAt ? 'Removed' : iconBtn('revoke', d.id, 'trash', `Remove ${d.name}`, 'danger')}</td></tr>`)}</tbody></table></div>
+      <p class="quiet small">Works offline: a device turned on keeps taking orders, printing KOTs and bills, and taking payments when the internet is off, and sends them up when it is back. Its offline bills carry its letter (C261126A001). Turn it on for the billing PC only.</p>
+      <div class="scroll"><table class="t"><thead><tr><th>Device</th><th>Added</th><th>Works offline</th><th></th></tr></thead><tbody>
+        ${ui.devices.map((d) => html`<tr><td>${d.name}</td><td>${dateTime(d.createdAt)}</td>
+          <td>${d.station ? html`<span class="quiet">Station screen</span>` : d.offlineLetter ? html`<b>Yes · letter ${d.offlineLetter}</b>` : d.revokedAt ? '' : html`<button class="btn" type="button" data-act="devOffline" data-id="${d.id}">Turn on</button>`}</td>
+          <td>${d.revokedAt ? 'Removed' : iconBtn('revoke', d.id, 'trash', `Remove ${d.name}`, 'danger')}</td></tr>`)}</tbody></table></div>
       <form class="row"><label class="f grow">Name for this device<input class="in" data-model="dName" placeholder="Billing counter"></label><button class="btn pri" type="submit" data-act="addDevice" data-submit>Make this a counter device</button></form></section>`;
     paint(shell('#/settings', html`${head}${body}`));
   };
@@ -6225,6 +6254,14 @@ actions.addStaff = async () => {
   flash = { kind: 'ok', text: `${ui.sName} ${ui.editStaff ? 'saved' : 'added'}.` }; route();
 };
 actions.staffEdit = (d) => { const p = ui.staff.find((x) => x.id === d.id); Object.assign(ui, { editStaff: p.id, sName: p.name, sRole: p.role, sEmail: p.email ?? '', sActive: p.active ? 'yes' : 'no', sPin: '', sPassword: '' }); rerender(); };
+actions.devOffline = async (d) => {
+  const dev = ui.devices.find((x) => x.id === d.id);
+  if (!confirm(`Turn on offline for ${dev.name}? It can then print bills with no internet, numbered with its own letter. This cannot be turned off; remove the device instead.`)) return;
+  const r = await api('POST', `${B()}/devices/${d.id}/offline`);
+  flash = { kind: 'ok', text: `${dev.name} works offline now, with letter ${r.letter}. It saves what it needs while the POS is open on it with the internet on.` };
+  offlineAsked = false;
+  route();
+};
 actions.addDevice = async () => { await api('POST', B() + '/devices', { name: ui.dName || 'Billing counter' }); flash = { kind: 'ok', text: 'This browser is now a counter device. Staff can sign in here with their PIN.' }; route(); };
 actions.revoke = async (d) => {
   const dev = ui.devices.find((x) => x.id === d.id);
@@ -6234,3 +6271,98 @@ actions.revoke = async (d) => {
 
 route();
 
+
+// ---------- offline mode (27 Nov 2026): the counter keeps working with no internet and sends it all up later
+
+offline.useHooks({ previewTotals, dishTax, dishFlags });
+const OFFLINE_PATHS = ['', 'order', 'bill', 'settle', 'done', 'rooms', 'counter', 'offline', 'signin'];
+let offlineAsked = false;
+let lastKeep = 0;
+/** Starts offline mode for this person, and (online, a device turned on) saves what the counter needs, every 10 minutes. */
+function offlineReady() {
+  offline.start(me);
+  if (!offline.isOnline()) return;
+  if (!offlineAsked) {
+    offlineAsked = true;
+    api('GET', `${B()}/offline/device`).then((d) => { offline.setDevice(d); keepForOffline(); offline.sync(); }).catch(() => { offlineAsked = false; });
+  } else keepForOffline();
+}
+function keepForOffline() {
+  if (!offline.letter() || !offline.isOnline() || Date.now() - lastKeep < 10 * 60_000) return;
+  lastKeep = Date.now();
+  for (const p of ['/menu', '/reasons', '/entities', '/pay-accounts', '/credit-accounts', '/orders']) api('GET', B() + p).catch(() => {});
+  // Each guest staying, with their room bill, so a payment can be taken offline.
+  api('GET', B() + '/stays').then((r) => { for (const st of r.stays ?? []) api('GET', `${B()}/stays/${st.id}/bill`).catch(() => {}); }).catch(() => {});
+}
+const offSince = () => (offline.offlineSince() ? time(offline.offlineSince()) : 'a moment ago');
+const shown = (list) => list.filter((x) => !x.quiet);
+function netChip() {
+  if (!offline.ready()) return '';
+  const n = shown(offline.waiting()).length;
+  if (!offline.isOnline()) return html`<a id="netchip" class="netpill off" href="#/offline" title="No internet. Tap to see what is not sent yet."><span class="dot"></span>OFFLINE${n ? ` · ${n} not sent` : ''}</a>`;
+  if (offline.isSyncing()) return html`<a id="netchip" class="netpill sync" href="#/offline"><span class="dot"></span>SENDING · ${n} left</a>`;
+  if (offline.problems().length) return html`<a id="netchip" class="netpill look" href="#/offline"><span class="dot"></span>${plural(shown(offline.problems()).length || 1, 'needs a look', 'need a look')}</a>`;
+  return html`<span id="netchip" hidden></span>`;
+}
+function netBand(active) {
+  if (!offline.ready()) return html`<div id="netband" hidden></div>`;
+  const n = shown(offline.waiting()).length;
+  const rooms = active === '#/rooms' ? offline.roomSteps() : [];
+  const roomLine = rooms.length ? html`<div>Not sent yet: ${rooms.map((x) => `Room ${x.room.room} ${x.room.amountPaise > 0 ? 'food' : 'payment'} ${rs(Math.abs(x.room.amountPaise))}`).join(' · ')}.</div>` : '';
+  if (!offline.isOnline()) {
+    return html`<div id="netband" class="netband off" role="status"><div><b>No internet since ${offSince()}.</b> ${offline.letter()
+      ? (active === '#/rooms' ? 'Rooms shows who is staying as saved when the internet went off. Food can still go to a room, and payments from guests staying can be taken. Check-ins, check-outs and refunds wait.'
+        : 'Keep taking orders: KOTs and bills print on this PC and go up when the internet is back.')
+      : 'This device is not turned on for offline, so it can only show what it saved. The owner turns it on in Settings, Counter devices.'}
+      ${n ? html` <a href="#/offline">See the ${n} not sent</a>` : ''}</div>${roomLine}</div>`;
+  }
+  if (offline.isSyncing()) return html`<div id="netband" class="netband sync" role="status"><b>Internet is back.</b> Sending what was done offline: ${n} left. You can keep working.</div>`;
+  if (offline.problems().length) return html`<div id="netband" class="netband look" role="alert"><b>${plural(shown(offline.problems()).length || 1, 'step', 'steps')} made offline could not be sent.</b> A manager checks them. <a href="#/offline">See what and why</a>${active === '#/shift' ? html`<div>Close the day only after this PC shows everything sent.</div>` : ''}</div>`;
+  return html`<div id="netband" hidden></div>`;
+}
+let hadWork = false;
+offline.onChange(() => {
+  const chip = document.getElementById('netchip');
+  const band = document.getElementById('netband');
+  const active = (location.hash.match(/^#\/[a-z]*/) ?? ['#/'])[0];
+  if (chip) chip.outerHTML = asHtml(netChip());
+  if (band) band.outerHTML = asHtml(netBand(active === '#/' ? '#/' : active));
+  const n = offline.waiting().length;
+  if (n) hadWork = true;
+  // Everything sent: back to the server's own copies.
+  if (hadWork && !n && offline.isOnline() && !offline.isSyncing()) {
+    hadWork = false;
+    flash = { kind: 'ok', text: 'Internet is back. Everything done offline is sent.' };
+    if (/^#\/(order|bill|settle|done)\//.test(location.hash) || location.hash === '#/offline') go('#/'); else if (OFFLINE_PATHS.includes(location.hash.replace(/^#\/?/, '').split('/')[0])) route();
+  }
+  else if (location.hash === '#/offline' && typeof rerender === 'function') rerender();
+});
+function offlineOnly() {
+  paint(shell(location.hash.match(/^#\/[a-z]*/)?.[0] ?? '#/', html`<section class="panel" style="max-width:640px"><h2>This needs the internet</h2>
+    <p class="quiet">With no internet the counter keeps working for tables, takeaway, KOTs, bills, payments, and rooms (see who is staying, food to a room, payments). This page opens again when the internet is back.</p>
+    <p style="margin-top:12px"><a class="btn pri" href="#/">Back to tables</a></p></section>`));
+}
+const STEP_STATE = { wait: ['wait', 'Waiting'], sent: ['ok', 'Sent'], look: ['look', 'Needs a look'], blocked: ['look', 'Waiting for the one above'] };
+function offlineScreen() {
+  rerender = () => {
+    const steps = shown(offline.allSteps()).slice().reverse();
+    const waiting = steps.filter((x) => x.status !== 'sent');
+    const sent = steps.filter((x) => x.status === 'sent');
+    const row = (x) => html`<tr><td>${time(x.at)}</td><td>${x.what}${x.note ? html`<div class="small quiet">${x.note}</div>` : ''}${x.error ? html`<div class="small" style="color:var(--warn)">${x.error}</div>` : ''}</td>
+      <td>${x.place ?? ''}</td><td class="num">${x.amountPaise ? rs(Math.abs(x.amountPaise)) : ''}</td><td>${x.staff ?? ''}</td>
+      <td><span class="stp ${STEP_STATE[x.status][0]}">${offline.isSyncing() && x.status === 'wait' ? 'Sending' : STEP_STATE[x.status][1]}</span></td></tr>`;
+    const table = (list) => html`<div class="scroll"><table class="t"><thead><tr><th>Time</th><th>What</th><th>Where</th><th class="num">Amount</th><th>By</th><th>Status</th></tr></thead><tbody>${list.map(row)}</tbody></table></div>`;
+    paint(shell('#/offline', html`${pageHead(waiting.length ? 'Not sent yet · this PC' : 'Everything is sent', offline.isOnline()
+      ? (waiting.length ? 'These go up by themselves. Bills keep the numbers they printed with.' : 'Nothing made on this PC is waiting.')
+      : 'Kept safely on this PC. Keep it on, and do not clear the browser or remove the app: these go up by themselves when the internet is back.',
+      offline.isOnline() && waiting.length && !offline.isSyncing() ? html`<button class="btn pri" type="button" data-act="offSend">${offline.problems().length ? 'Try again' : 'Send now'}</button>` : '')}
+      ${errorBox()}
+      ${offline.problems().length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><b>Needs a look:</b> the server did not take these, for the reason shown. Fix what it says (for example, hand over the cash drawer), then press Try again. Nothing is lost: they stay here until they are sent.</div>` : ''}
+      ${waiting.length ? html`<section class="panel">${table(waiting)}</section>` : html`<p class="empty">Nothing waiting.</p>`}
+      ${sent.length ? html`<section class="panel" style="margin-top:16px"><h2>Sent in the last day</h2>${table(sent)}</section>` : ''}`));
+  };
+  rerender();
+}
+actions.offSend = async () => { await offline.retry(); rerender(); };
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { /* the counter works online without it */ });

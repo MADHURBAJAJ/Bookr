@@ -76,6 +76,26 @@ tab age limit, menu and reason lists are settings per business.
 - **Phones and tablets.** Menu and order side by side from tablet width; on a phone a bar at the bottom shows the order.
 - **Exceptions report.** Voids, reprints, cancelled KOT lines, discounts, complimentary bills and limit warnings, append-only.
 
+## Offline mode (27 Nov 2026)
+
+When the internet is off, a counter device the owner turned on (Settings, Counter devices, "Works offline") keeps working
+from what it saved on that PC: tables and takeaway, KOTs printed on its own printers, bills, cash / UPI / card payments,
+food to a room and payments from guests staying. Rooms (check-in, check-out, refunds), credit, reports, stock, day close
+and settings wait for the internet.
+
+- Each device turned on gets a letter (A, B, ...) that is never given again. Its offline bills are numbered
+  `C261127A001` (billing name's letter, print date, device letter, its own count), receipts `RCPT/26-27/A001`, KOTs `A1`,
+  `A2`. They never clash with the server's numbers and leave no gap in the day's or the year's count.
+- What it did is kept as steps on that PC (`pos/public/offline.js`, browser storage) and shown on **Not sent yet**
+  (`#/offline`). When the internet is back they go up one at a time to `POST /offline/replay`
+  (`pos/src/routes/offline.ts`), which runs each through the usual route with the same sign-in (so the role and every
+  rule are checked as usual), at the time it happened, keeping the printed numbers, and saves it once even if sent twice.
+- A step the server refuses stays on the PC as "needs a look" with the reason; nothing is dropped. A bill whose total on
+  the server differs from its paper is listed on the Daily check.
+- The pages themselves are kept by a service worker (`pos/public/sw.js`), so the Windows app opens with no internet once
+  it has opened the POS online.
+- The Worker needs the `nodejs_als` compatibility flag (in `wrangler.jsonc`) and migration `0050_offline_mode.sql`.
+
 ## Run and test
 
 ```bash

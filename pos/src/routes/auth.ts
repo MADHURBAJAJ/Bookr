@@ -145,7 +145,7 @@ authRoutes.post('/businesses/:businessId/devices', requireStaff, requireAction('
 
 authRoutes.get('/businesses/:businessId/devices', requireStaff, requireAction('staff.manage'), async (c) => {
   return c.json({ devices: await all(c.env.DB,
-    `SELECT d.id, d.name, d.created_at AS createdAt, d.revoked_at AS revokedAt, d.last_seen_at AS lastSeenAt, s.name AS station
+    `SELECT d.id, d.name, d.created_at AS createdAt, d.revoked_at AS revokedAt, d.last_seen_at AS lastSeenAt, s.name AS station, d.offline_letter AS offlineLetter
      FROM devices d LEFT JOIN stations s ON s.id = d.station_id WHERE d.business_id = ? ORDER BY d.created_at`, c.get('businessId')) });
 });
 

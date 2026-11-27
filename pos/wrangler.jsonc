@@ -5,6 +5,8 @@
   "name": "pos-demo",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
+  // Offline mode (27 Nov 2026): steps sent up from a counter run at the time they happened (pos/src/offline.ts).
+  "compatibility_flags": ["nodejs_als"],
   // Runs the Worker next to its database (APAC, Singapore), so each database question is a few milliseconds.
   // Smart Placement left it wherever the guest's request lands (often Europe for Indian networks), ~170 ms per question.
   "placement": { "region": "aws:ap-southeast-1" },
