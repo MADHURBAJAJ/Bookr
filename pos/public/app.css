@@ -1118,3 +1118,18 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .hev.cur .hdot { background: var(--pri); }
 .hev.held .hdot { border-color: var(--warn); }
 .hev.older .hdot, .hev.kept .hdot { border-color: var(--line); }
+
+/* Count sheet (27 Nov 2026): A4, by category, with blanks to write the count. */
+@media print {
+  #print .countsheet { width: auto; font: 10.5pt/1.35 Inter, "Segoe UI", system-ui, sans-serif; color: #000; }
+  #print .countsheet h1 { font-size: 15pt; margin: 0 0 2pt; }
+  #print .countsheet p { margin: 0 0 8pt; font-size: 9.5pt; }
+  #print .countsheet table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  #print .countsheet th, #print .countsheet td { border: 0.6pt solid #888; padding: 4pt 6pt; text-align: left; vertical-align: bottom; }
+  #print .countsheet th { font-size: 9pt; }
+  #print .countsheet td small { display: block; font-size: 8pt; color: #444; }
+  #print .countsheet td.r { text-align: right; font-weight: 700; white-space: nowrap; }
+  #print .countsheet tr.cat td { background: #eee; font-weight: 700; font-size: 9pt; text-transform: uppercase; letter-spacing: .5pt; }
+  #print .countsheet tr { page-break-inside: avoid; }
+  #print .countsheet .bl { display: inline-block; width: 26pt; border-bottom: 0.8pt solid #000; height: 11pt; margin: 0 2pt 0 4pt; }
+}
