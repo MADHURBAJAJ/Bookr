@@ -86,6 +86,11 @@ describe('Settings › WhatsApp', () => {
     expect((await s.owner.get(W())).json).toEqual({ connected: false });
     expect((await s.owner.call('PATCH', `${W()}/groups/${payGroup}`, { active: false })).status).toBe(409);
     Object.assign(posEnv, { BOOKR_KEYS: keys });
+
+    // A Bookr not yet updated for this tab: says so plainly.
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ error: 'Not found.' }), { status: 404 }));
+    expect((await s.owner.get(W())).json.error).toBe('Bookr has not been updated for this tab yet: deploy Bookr (not only the POS).');
+    vi.stubGlobal('fetch', toBookr);
   });
 
   it('Bookr refuses a wrong key, and a POS claiming a role that may not do it', async () => {

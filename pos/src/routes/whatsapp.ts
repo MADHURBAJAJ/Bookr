@@ -26,6 +26,8 @@ export async function askBookr(env: Env, bid: string, path: string, extra: Recor
       body: JSON.stringify({ businessId: link.bookrId, ...extra }),
     });
     const answer = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    // A Bookr from before this tab has no /api/pos/wa and answers a bare 404: say what to do rather than "Not found."
+    if (res.status === 404 && path === 'wa') return { connected: true as const, status: 502, error: 'Bookr has not been updated for this tab yet: deploy Bookr (not only the POS).' };
     if (!res.ok) return { connected: true as const, status: res.status, error: typeof answer.error === 'string' ? answer.error : `Bookr answered ${res.status}` };
     return { connected: true as const, ...answer };
   } catch (e) {
