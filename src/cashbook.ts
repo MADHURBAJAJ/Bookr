@@ -63,6 +63,8 @@ export interface EntryRow {
   feeReportId: string | null;
   /** An expense or other money in: the owner's review (null = waiting), who and the note. */
   reviewStatus: 'approved' | 'rejected' | null; reviewNote: string | null; reviewedByName: string | null;
+  /** An expense: the school it is for (28 Nov 2026), the book's own school unless another was chosen. */
+  forBranchId: string | null; forBranchName: string | null;
   /** Last change (audit log), if the line was edited. */
   editedAt: number | null; editedByName: string | null;
   /** Written by the Owner settling a count (changed only by undoing the settle). */
@@ -94,13 +96,15 @@ export async function bookDay(db: DB, businessId: string, book: Book, day: strin
     all<Omit<EntryRow, 'handover' | 'changedAfterCount'>>(db, `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, e.head_id AS headId, h.name AS headName,
         p.name AS partyName, e.entered_by AS enteredBy, u.name AS enteredByName, e.entered_at AS enteredAt, e.fee_report_id AS feeReportId,
         e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName,
+        CASE WHEN e.kind = 'expense' THEN coalesce(e.for_branch_id, ?) END AS forBranchId,
+        CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName,
         EXISTS (SELECT 1 FROM cash_counts k WHERE k.settle_entry_id = e.id) AS fromSettle,
         (SELECT l.created_at FROM audit_log l WHERE l.row_table = 'cash_entries' AND l.row_id = e.id AND l.action = 'cashbook.entry.edit' ORDER BY l.id DESC LIMIT 1) AS editedAt,
         (SELECT lu.name FROM audit_log l LEFT JOIN users lu ON lu.id = l.user_id
           WHERE l.row_table = 'cash_entries' AND l.row_id = e.id AND l.action = 'cashbook.entry.edit' ORDER BY l.id DESC LIMIT 1) AS editedByName
       FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
-        LEFT JOIN users ru ON ru.id = e.reviewed_by
-      WHERE e.account_id = ? AND e.day = ? ORDER BY e.entered_at`, book.id, day),
+        LEFT JOIN users ru ON ru.id = e.reviewed_by LEFT JOIN branches fb ON fb.id = e.for_branch_id
+      WHERE e.account_id = ? AND e.day = ? ORDER BY e.entered_at`, book.branchId, book.branchName, book.id, day),
     one<{ countedPaise: number; countedAt: number; countedByName: string | null; note: string | null; settle: string | null; settleNote: string | null;
       settleGapPaise: number | null; settledByName: string | null; settledAt: number | null }>(db, `SELECT c.counted_paise AS countedPaise, c.counted_at AS countedAt,
         u.name AS countedByName, c.note, c.settle, c.settle_note AS settleNote, c.settle_gap_paise AS settleGapPaise, su.name AS settledByName, c.settled_at AS settledAt
@@ -285,16 +289,19 @@ export async function bookDays(db: DB, book: Book, from: string, through: string
 export async function bookReport(db: DB, businessId: string, book: Book, from: string, through: string) {
   const start = from < book.openingDate ? book.openingDate : from;
   const head = { id: book.id, name: book.name, branchName: book.branchName, cashierName: book.cashierName, openingDate: book.openingDate };
-  if (through < start) return { book: head, from: start, through, openingPaise: null as number | null, days: [], totals: null, expenses: null, daysCounted: 0 };
+  if (through < start) return { book: head, from: start, through, openingPaise: null as number | null, days: [], totals: null, expenses: null, daysCounted: 0, expensesByBranch: [] };
   const [opening, days, lines, out, inc, counts] = await Promise.all([
     start <= book.openingDate ? Promise.resolve(book.openingBalancePaise) : inHandThrough(db, book, addDay(start, -1)),
     bookDays(db, book, start, through),
     all<{ id: string; day: string; kind: EntryKind; amountPaise: number; narration: string | null; headName: string | null; partyName: string | null;
-      reviewStatus: 'approved' | 'rejected' | null; feeReceipts: number | null; feeFirst: string | null; feeLast: string | null; enteredByName: string | null }>(db,
+      reviewStatus: 'approved' | 'rejected' | null; feeReceipts: number | null; feeFirst: string | null; feeLast: string | null; enteredByName: string | null;
+      forBranchName: string | null }>(db,
       `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, h.name AS headName, p.name AS partyName, e.review_status AS reviewStatus,
-        e.fee_receipts AS feeReceipts, e.fee_first AS feeFirst, e.fee_last AS feeLast, u.name AS enteredByName
+        e.fee_receipts AS feeReceipts, e.fee_first AS feeFirst, e.fee_last AS feeLast, u.name AS enteredByName,
+        CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName
       FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
-      WHERE e.account_id = ? AND e.day >= ? AND e.day <= ? ORDER BY e.day, e.entered_at`, book.id, start, through),
+        LEFT JOIN branches fb ON fb.id = e.for_branch_id
+      WHERE e.account_id = ? AND e.day >= ? AND e.day <= ? ORDER BY e.day, e.entered_at`, book.branchName, book.id, start, through),
     handovers(db, businessId, 'AND o.account_id = ? AND o.day >= ? AND o.day <= ?', book.id, start, through),
     handovers(db, businessId, 'AND h.to_entry_id IN (SELECT id FROM cash_entries WHERE account_id = ? AND day >= ? AND day <= ?)', book.id, start, through),
     all<{ day: string; settle: string | null }>(db, 'SELECT day, settle FROM cash_counts WHERE account_id = ? AND day >= ? AND day <= ?', book.id, start, through),
@@ -304,11 +311,12 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
   const settle = new Map(counts.map((k) => [k.day, k.settle]));
   const t = { feePaise: 0, receiptsPaise: 0, expensesPaise: 0, handedPaise: 0 };
   const exp = { approved: { n: 0, paise: 0 }, waiting: { n: 0, paise: 0 }, rejected: { n: 0, paise: 0 } };
+  const byBranch = new Map<string, number>();
   let prev = opening;
   const out2 = days.map((d) => {
     const ls = lines.filter((l) => l.day === d.day).map((l) => ({
       kind: l.kind, amountPaise: l.amountPaise, narration: l.narration, headName: l.headName, reviewStatus: l.reviewStatus,
-      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName,
+      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName, forBranchName: l.forBranchName,
       other: l.kind === 'handover_out' ? toName.get(l.id) ?? l.partyName : l.kind === 'handover_in' ? fromName.get(l.id) ?? null : null,
     }));
     for (const l of ls) {
@@ -316,7 +324,11 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
       else if (l.kind === 'other_in' || l.kind === 'handover_in') t.receiptsPaise += l.amountPaise;
       else if (l.kind === 'expense' || l.kind === 'other_out') t.expensesPaise += l.amountPaise;
       else t.handedPaise += l.amountPaise;
-      if (l.kind === 'expense') { const s = exp[l.reviewStatus ?? 'waiting']; s.n += 1; s.paise += l.amountPaise; }
+      if (l.kind === 'expense') {
+        const s = exp[l.reviewStatus ?? 'waiting']; s.n += 1; s.paise += l.amountPaise;
+        const k = l.forBranchName ?? 'No school';
+        byBranch.set(k, (byBranch.get(k) ?? 0) + l.amountPaise);
+      }
     }
     // Once the fee day sheet is in, the sheet's cash counts instead of the typed total: the difference is its own line.
     const feeAdjPaise = d.fee ? d.fee.countsPaise - (d.fee.typedPaise ?? 0) : 0;
@@ -327,5 +339,6 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
     return row;
   });
   return { book: head, from: start, through, openingPaise: opening, days: out2,
-    totals: { ...t, inHandPaise: prev }, expenses: exp, daysCounted: out2.filter((d) => d.count).length };
+    totals: { ...t, inHandPaise: prev }, expenses: exp, daysCounted: out2.filter((d) => d.count).length,
+    expensesByBranch: [...byBranch].map(([branch, paise]) => ({ branch, paise })) };
 }

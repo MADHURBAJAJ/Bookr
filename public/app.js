@@ -11468,7 +11468,17 @@ async function cashBookDayView(biz, accountId, dayIn) {
     && !(e.kind === 'handover_out' && e.handover?.status !== 'sent') && (d.can.approve || e.day >= yest);
   const del = (e) => (changeable(e) ? html`${e.kind !== 'handover_in' ? html`<button type="button" class="linkbtn tiny" data-cbedit="${e.id}" aria-label="Change this line">✎</button>` : ''}
     <button type="button" class="linkbtn tiny" data-cbdel="${e.id}" aria-label="Remove this line">✕</button>` : '');
-  const marks = (e) => html`${e.editedAt ? html` <button type="button" class="chip info cb-chipbtn" data-cbhist="${e.id}" title="See what changed">edited</button>` : ''}${e.changedAfterCount ? html` <span class="chip wait">changed after count</span>` : ''}`;
+  // Which school an expense is for (28 Nov 2026): a chip on every expense, marked when it is another school's.
+  // Owner and Accountant change it any time; the cashier while the line can still be changed.
+  const branchChip = (e) => {
+    if (e.kind !== 'expense') return '';
+    const other = e.forBranchId !== b.branchId;
+    const label = e.forBranchName ?? 'no school';
+    return (d.can.approve || (d.can.write && changeable(e) && !e.reviewStatus))
+      ? html` <button type="button" class="chip ${other ? 'wait' : 'info'} cb-chipbtn" data-cbbranch="${e.id}" title="Change which school this is for">${other ? 'for ' : ''}${label} ▾</button>`
+      : html` <span class="chip ${other ? 'wait' : 'info'}">${other ? 'for ' : ''}${label}</span>`;
+  };
+  const marks = (e) => html`${branchChip(e)}${e.editedAt ? html` <button type="button" class="chip info cb-chipbtn" data-cbhist="${e.id}" title="See what changed">edited</button>` : ''}${e.changedAfterCount ? html` <span class="chip wait">changed after count</span>` : ''}`;
   const reopen = (e) => (owner && e.kind === 'expense' && e.reviewStatus && !e.fromSettle
     ? html` <button type="button" class="linkbtn tiny" data-oreopen="${e.id}">Reopen</button>` : '');
   const row = (label, sub, amt, sign, cls = '', extra = '') => html`<div class="list-row cb-line ${cls}"><span>${label}${sub ? html`<div class="tiny">${sub}</div>` : ''}</span>
@@ -11575,6 +11585,10 @@ async function cashBookDayView(biz, accountId, dayIn) {
       <div style="font-weight:500">+ Expense</div>
       <div class="field"><label for="cbe-a">Amount (₹)</label><input id="cbe-a" name="amount" class="mono" inputmode="decimal" required placeholder="450"></div>
       <div class="field"><label for="cbe-w">What for</label><input id="cbe-w" name="what" required placeholder="Registers and chalk"></div>
+      ${d.branches.length ? html`<div class="field"><label for="cbe-b">For which school</label><select id="cbe-b" name="forBranchId">
+        ${b.branchId ? '' : html`<option value="">Not for a school</option>`}
+        ${d.branches.map((x) => html`<option value="${x.id}" ${x.id === b.branchId ? 'selected' : ''}>${x.name}${x.id === b.branchId ? ' (this school)' : ''}</option>`)}</select>
+        <span class="tiny">Change it only if the expense is for another school or the group.</span></div>` : ''}
       <div class="field"><label for="cbe-p">Paid to (optional)</label><input id="cbe-p" name="paidTo" placeholder="Gupta Stationers"></div>
       <div class="tiny">The cash leaves your book now. The accountant sets the head and the owner approves.</div>
       <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save expense</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
@@ -11663,6 +11677,24 @@ async function cashBookDayView(biz, accountId, dayIn) {
       await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreopen}/review`, { status: null });
     }
   });
+  // Which school an expense is for: tap the chip, pick the school.
+  app.querySelectorAll('[data-cbbranch]').forEach((x) => x.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    if (x.nextElementSibling?.matches('select[data-cbbranchpick]')) return;
+    const e = d.entries.find((y) => y.id === x.dataset.cbbranch);
+    const sel = document.createElement('select');
+    sel.dataset.cbbranchpick = '';
+    sel.className = 'compact';
+    sel.setAttribute('aria-label', 'Which school this expense is for');
+    sel.innerHTML = html`${d.branches.map((y) => html`<option value="${y.id}" ${y.id === e.forBranchId ? 'selected' : ''}>${y.name}</option>`)}`.__html;
+    x.after(sel);
+    sel.focus();
+    sel.addEventListener('change', async () => {
+      sel.disabled = true;
+      try { await api('PUT', `/businesses/${biz.id}/cashbook-lines/${e.id}/branch`, { branchId: sel.value }); await reload(); }
+      catch (err) { alert(err.message); sel.disabled = false; }
+    });
+  }));
   // "edited": what the line was, one tap away (from the audit log).
   app.querySelectorAll('[data-cbhist]').forEach((x) => x.addEventListener('click', async (ev) => {
     ev.preventDefault();
@@ -11734,7 +11766,7 @@ async function cashBookDayView(biz, accountId, dayIn) {
     await reload();
   });
   onSubmit(fm('expense'), async (x) => {
-    await api('POST', `${base}/entries`, { day, kind: 'expense', amount: x.amount, narration: `${x.what.trim()}${x.paidTo?.trim() ? ` · paid to ${x.paidTo.trim()}` : ''}` });
+    await api('POST', `${base}/entries`, { day, kind: 'expense', amount: x.amount, forBranchId: x.forBranchId || null, narration: `${x.what.trim()}${x.paidTo?.trim() ? ` · paid to ${x.paidTo.trim()}` : ''}` });
     await reload();
   });
   const to = fm('handover').querySelector('[name=to]');
@@ -11869,6 +11901,7 @@ async function cbReportView(biz, query) {
   const made = `Made ${new Date(r.madeAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' })} by ${r.madeBy}`;
   const who = (x) => html`${x.book.name}${x.book.branchName ? html` · ${x.book.branchName}` : ''}${x.book.cashierName && x.book.cashierName.toLowerCase() !== x.book.name.toLowerCase() ? html` <span class="rp-mute">(${x.book.cashierName})</span>` : ''}`;
   const neg = (p) => (p < 0 ? 'rp-neg' : '');
+  const forChip = (l, x) => (l.kind === 'expense' && l.forBranchName && l.forBranchName !== x.book.branchName ? html` <span class="chip wait">for ${l.forBranchName}</span>` : '');
   const chip = (l) => (l.kind !== 'expense' ? '' : l.reviewStatus === 'approved' ? html` <span class="chip ok">approved</span>` : l.reviewStatus === 'rejected' ? html` <span class="chip bad">rejected</span>` : html` <span class="chip wait">waiting</span>`);
   const what = (l) => (l.kind === 'fee' ? `Fee cash${l.feeReceipts ? ` · ${l.feeReceipts} receipt${l.feeReceipts === 1 ? '' : 's'}` : ''}${l.feeFirst ? ` · ${l.feeFirst}–${l.feeLast}` : ''}`
     : l.kind === 'handover_out' ? `Handed over to ${l.other ?? '—'}${l.narration ? ` · ${l.narration}` : ''}`
@@ -11884,7 +11917,7 @@ async function cbReportView(biz, query) {
       <table class="rp-t"><colgroup><col style="width:46%"><col style="width:20%"><col><col></colgroup>
         ${x.days.map((d) => html`<tr class="rp-day"><th>${cbDayName(d.day)}</th><th>Head</th><th>In</th><th>Out</th></tr>
           <tr><td class="rp-mute">Opening</td><td></td><td colspan="2" class="${neg(d.openingPaise)}">${rs(d.openingPaise)}</td></tr>
-          ${d.lines.map((l) => html`<tr><td>${what(l)}${chip(l)}</td><td class="${l.headName ? '' : 'rp-mute'}">${l.kind === 'fee' || l.kind.startsWith('handover') ? '' : l.headName ?? 'no head'}</td>
+          ${d.lines.map((l) => html`<tr><td>${what(l)}${forChip(l, x)}${chip(l)}</td><td class="${l.headName ? '' : 'rp-mute'}">${l.kind === 'fee' || l.kind.startsWith('handover') ? '' : l.headName ?? 'no head'}</td>
             <td>${IN.includes(l.kind) ? rs(l.amountPaise) : ''}</td><td>${IN.includes(l.kind) ? '' : rs(l.amountPaise)}</td></tr>`)}
           ${d.feeAdjPaise ? html`<tr><td>Fee sheet difference</td><td></td><td>${d.feeAdjPaise > 0 ? rs(d.feeAdjPaise) : ''}</td><td>${d.feeAdjPaise < 0 ? rs(-d.feeAdjPaise) : ''}</td></tr>` : ''}
           ${!d.lines.length && !d.feeAdjPaise ? html`<tr><td class="rp-mute" colspan="4">Nothing written</td></tr>` : ''}
@@ -11896,6 +11929,13 @@ async function cbReportView(biz, query) {
       <div class="rp-sign"><span>Signature of cashier ____________________</span><span>Checked by ____________________</span></div>
       <div class="rp-mute rp-made">${made}</div></section>`;
   const sum = (f) => r.reports.reduce((a, x) => a + (x.totals ? f(x) : 0), 0);
+  // Expenses by the school they are for (28 Nov 2026), whichever cashier paid them.
+  const bb = new Map();
+  for (const x of r.reports) for (const e of x.expensesByBranch ?? []) {
+    const v = bb.get(e.branch) ?? { paise: 0, from: new Set() };
+    v.paise += e.paise; v.from.add(x.book.name); bb.set(e.branch, v);
+  }
+  const byBranch = [...bb].sort((p, q) => p[0].localeCompare(q[0]));
   const summary = html`<section class="rp-page">
       <div class="rp-top"><div><div class="rp-h">${r.business} · All cashiers</div><div class="rp-mute">${period}</div></div><div class="rp-mute" style="text-align:right">${made}</div></div>
       <table class="rp-t"><colgroup><col style="width:28%"><col><col><col><col><col><col></colgroup>
@@ -11909,6 +11949,10 @@ async function cbReportView(biz, query) {
         <div><span class="rp-mute">Expenses approved</span><b>₹ ${rs(sum((x) => x.expenses.approved.paise))} · ${sum((x) => x.expenses.approved.n)}</b></div>
         <div><span class="rp-mute">Expenses waiting</span><b>₹ ${rs(sum((x) => x.expenses.waiting.paise))} · ${sum((x) => x.expenses.waiting.n)}</b></div>
         <div><span class="rp-mute">Days counted</span><b>${sum((x) => x.daysCounted)} of ${sum((x) => x.days.length)}</b></div></div>
+      ${byBranch.length ? html`<table class="rp-t" style="margin-top:14px"><colgroup><col style="width:40%"><col><col style="width:40%"></colgroup>
+        <tr><th>Expenses by school</th><th>₹</th><th>Paid from</th></tr>
+        ${byBranch.map(([name, v]) => html`<tr><td>${name}</td><td>${rs(v.paise)}</td><td class="rp-mute" style="white-space:normal">${[...v.from].join(', ')}</td></tr>`)}
+        <tr class="rp-sum"><td>Total</td><td>${rs(byBranch.reduce((t, [, v]) => t + v.paise, 0))}</td><td></td></tr></table>` : ''}
       <div class="rp-mute" style="margin-top:8px">Each cashier's days follow, one page each.</div></section>`;
   render(html`<div class="rp">${ctl}<div class="rp-scroll">${r.all ? summary : ''}${r.reports.map(bookPage)}</div></div>`);
   document.title = `Bookr ${r.all ? 'all cashiers' : r.reports[0]?.book.name ?? ''} ${from}${from === to ? '' : ` to ${to}`}`;
@@ -12057,7 +12101,7 @@ async function ownerLookView(biz) {
       <div class="tiny">sent ${shortDay(h.day)} · <span class="chip wait">${waited(h)}</span>${h.narration ? ` · ${h.narration}` : ''}</div></span>
     <span style="text-align:right"><span class="amount">₹ ${rs(h.amountPaise)}</span><br>${handAct(h)}</span></div>`);
   const exp = l.expenses.map((e) => html`<div class="list-row" style="align-items:flex-start"><span><a href="${day(e.accountId, e.day)}" style="color:inherit">${e.narration || 'Expense'}</a>
-      <div class="tiny">${e.bookName} · ${shortDay(e.day)} · ${e.headName ? e.headName : html`<span class="chip wait">no head yet</span>`}</div></span>
+      <div class="tiny">${e.bookName} · ${shortDay(e.day)} · ${e.headName ? e.headName : html`<span class="chip wait">no head yet</span>`}${e.forBranchName && e.forBranchName !== e.branchName ? html` · <span class="chip wait">for ${e.forBranchName}</span>` : ''}</div></span>
     <span style="text-align:right"><span class="amount">₹ ${rs(e.amountPaise)}</span><br>
       ${e.headId ? html`<span style="display:inline-flex;gap:6px;margin-top:4px"><button type="button" class="btn" style="min-height:32px" data-oapprove="${e.id}">Approve</button>
         <button type="button" class="btn plain" style="min-height:32px" data-oreject="${e.id}">Reject</button></span>`

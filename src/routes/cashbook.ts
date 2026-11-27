@@ -277,7 +277,7 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/day/:day', requ
   const user = c.get('user');
   const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, role);
   const day = dayParam(c.req.param('day'));
-  const [d, heads, targets, banks, people] = await Promise.all([
+  const [d, heads, targets, banks, people, branches] = await Promise.all([
     bookDay(db, bid, book, day),
     all<{ id: string; name: string; type: string }>(db, 'SELECT id, name, type FROM heads WHERE business_id = ? ORDER BY type, name', bid),
     all<{ id: string; name: string; branchName: string | null; cashierName: string | null }>(db, `SELECT a.id, a.name, b.name AS branchName, u.name AS cashierName
@@ -285,9 +285,10 @@ cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/day/:day', requ
       WHERE a.business_id = ? AND a.kind = 'cash' AND a.id <> ? AND a.closed_at IS NULL AND (a.branch_id IS NOT NULL OR a.cashier_user_id IS NOT NULL) ORDER BY b.name, a.name`, bid, book.id),
     all<{ id: string; name: string }>(db, "SELECT id, name FROM accounts WHERE business_id = ? AND kind = 'bank' ORDER BY name", bid),
     all<{ name: string }>(db, `SELECT DISTINCT p.name FROM cash_handovers h JOIN parties p ON p.id = h.to_party_id WHERE h.business_id = ? ORDER BY p.name`, bid),
+    all<{ id: string; name: string }>(db, 'SELECT id, name FROM branches WHERE business_id = ? ORDER BY name', bid),
   ]);
   const canWrite = !book.closedAt && can(role, 'rows.edit') && (seesAllBooks(role) || book.cashierUserId === user.id);
-  return c.json({ ...d, today: today(), heads, targets, banks, people: people.map((p) => p.name), can: { write: canWrite, approve: can(role, 'rows.approve') } });
+  return c.json({ ...d, today: today(), heads, targets, banks, branches, people: people.map((p) => p.name), can: { write: canWrite, approve: can(role, 'rows.approve') } });
 });
 
 // ---- Add a line: a fee, an expense, other money in or out, or cash handed over (to a book, a person or the bank).
@@ -301,6 +302,15 @@ async function writableBook(c: Context<AppEnv>) {
   if (!seesAllBooks(role) && book.cashierUserId !== user.id) fail(403, 'Only this book\'s cashier can write in it.');
   if (book.closedAt) fail(409, 'This book is closed. Reopen it on Schools and cashiers to write in it.');
   return book;
+}
+
+/** A school of this business for an expense, or the fallback (the book's own school) when none is given. */
+async function branchFor(db: DB, bid: string, v: unknown, fallback: string | null) {
+  if (v === undefined || v === null || v === '') return fallback;
+  if (typeof v !== 'string' || !isUuid(v) || !(await one(db, 'SELECT 1 AS ok FROM branches WHERE id = ? AND business_id = ?', v, bid))) {
+    fail(400, 'Choose which school this expense is for.');
+  }
+  return v as string;
 }
 
 cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requireRole('rows.edit'), async (c) => {
@@ -328,6 +338,8 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
     }
     if (!headId && !narration) fail(400, 'Write what this was for.');
   }
+  // Which school the expense is for (28 Nov 2026): the cashier's own school unless they choose another.
+  const forBranchId = kind === 'expense' ? await branchFor(db, bid, data.forBranchId, book.branchId) : null;
   const entryId = newId();
   const t = now();
   const st: D1PreparedStatement[] = [];
@@ -348,14 +360,14 @@ cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries', requ
       to = { kind: 'person', accountId: null, partyId, name: found?.name ?? name };
     } else fail(400, 'Say who the cash went to: another cashier, a person, or the bank.');
   }
-  st.push(stmt(db, `INSERT INTO cash_entries (id, business_id, account_id, day, kind, amount_paise, head_id, narration, entered_by, entered_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, entryId, bid, book.id, day, kind, amount, headId, narration, user.id, t, t));
+  st.push(stmt(db, `INSERT INTO cash_entries (id, business_id, account_id, day, kind, amount_paise, head_id, narration, for_branch_id, entered_by, entered_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, entryId, bid, book.id, day, kind, amount, headId, narration, forBranchId, user.id, t, t));
   if (to) {
     st.push(stmt(db, `INSERT INTO cash_handovers (id, business_id, from_entry_id, to_kind, to_account_id, to_party_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       newId(), bid, entryId, to.kind, to.accountId, to.partyId, t));
   }
   st.push(audit(db, { businessId: bid, userId: user.id, action: 'cashbook.entry.add', table: 'cash_entries', rowId: entryId,
-    after: { bookId: book.id, day, kind, amountPaise: amount, headId, narration, to: to ? { kind: to.kind, name: to.name } : null }, at: t }));
+    after: { bookId: book.id, day, kind, amountPaise: amount, headId, narration, forBranchId, to: to ? { kind: to.kind, name: to.name } : null }, at: t }));
   await db.batch(st);
   return c.json({ id: entryId }, 201);
 });
@@ -702,8 +714,9 @@ cashBookRoutes.get('/businesses/:businessId/cashbook-report', requireRole('busin
 
 const reviewSql = `SELECT e.id, e.account_id AS accountId, a.name AS bookName, b.name AS branchName, e.day, e.kind, e.amount_paise AS amountPaise, e.narration,
     e.head_id AS headId, h.name AS headName, e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName, e.reviewed_at AS reviewedAt,
-    u.name AS enteredByName, e.entered_at AS enteredAt
+    u.name AS enteredByName, e.entered_at AS enteredAt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName
   FROM cash_entries e JOIN accounts a ON a.id = e.account_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN heads h ON h.id = e.head_id
+    LEFT JOIN branches fb ON fb.id = e.for_branch_id
     LEFT JOIN users u ON u.id = e.entered_by LEFT JOIN users ru ON ru.id = e.reviewed_by
   WHERE e.business_id = ? AND e.kind IN ('expense', 'other_in')`;
 
@@ -725,6 +738,35 @@ cashBookRoutes.get('/businesses/:businessId/cashbook-reviews', requireRole('rows
     all<{ id: string; name: string; type: string }>(db, 'SELECT id, name, type FROM heads WHERE business_id = ? ORDER BY type, name', bid),
   ]);
   return c.json({ lines: waiting, heads, can: { approve: can(role, 'members.manage') } });
+});
+
+// Changing which school an expense is for (28 Nov 2026). It moves no cash, so the Owner and the Accountant can change it
+// at any time, approved or not; the cashier only on their own lines of today and yesterday, before the owner reviews.
+cashBookRoutes.put('/businesses/:businessId/cashbook-lines/:entryId/branch', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const role = c.get('role');
+  const user = c.get('user');
+  const e = await one<{ id: string; accountId: string; day: string; kind: string; forBranchId: string | null; reviewStatus: string | null }>(db,
+    `SELECT id, account_id AS accountId, day, kind, for_branch_id AS forBranchId, review_status AS reviewStatus FROM cash_entries WHERE id = ? AND business_id = ?`,
+    id404(c.req.param('entryId'), 'Line'), bid);
+  if (!e) fail(404, 'Line not found.');
+  const book = await bookFor(db, bid, e.accountId, user.id, role);
+  if (e.kind !== 'expense') fail(400, 'Only an expense is for a school.');
+  if (!can(role, 'rows.approve')) {
+    if (book.cashierUserId !== user.id) fail(403, 'Only this book\'s cashier can change it.');
+    if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this line.`);
+    if (e.day < yesterday()) fail(403, 'You can change only today\'s and yesterday\'s lines. Ask the owner or the accountant to change an older day.');
+  }
+  const forBranchId = await branchFor(db, bid, (await body(c)).branchId, null);
+  if (!forBranchId) fail(400, 'Choose which school this expense is for.');
+  const t = now();
+  await db.batch([
+    stmt(db, 'UPDATE cash_entries SET for_branch_id = ? WHERE id = ?', forBranchId, e.id),
+    audit(db, { businessId: bid, userId: user.id, action: 'cashbook.entry.branch', table: 'cash_entries', rowId: e.id,
+      before: { forBranchId: e.forBranchId ?? book.branchId }, after: { forBranchId }, at: t }),
+  ]);
+  return c.json({ ok: true });
 });
 
 async function reviewLine(db: DB, bid: string, id: string | undefined) {
