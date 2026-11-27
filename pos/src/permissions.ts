@@ -30,6 +30,7 @@ export const PERMISSIONS = {
   'staff.manage': OWNER,         // staff, PINs, counter devices, business settings
   'whatsapp.edit': MANAGE,       // Settings › WhatsApp: see whether reading works, switch a group's reading or its bill proof on or off (27 Nov 2026)
   'whatsapp.add': OWNER,         // start reading a new group the reception phone is in
+  'whatsapp.link': OWNER,        // link, switch or unlink the WhatsApp number the reception PC reads (sees the QR)
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Action = keyof typeof PERMISSIONS;

@@ -8,6 +8,7 @@ import { parsePaise } from '../money';
 import { istToMs } from '../time';
 import { HeartbeatBody, heartbeat, ingest, IngestMeta, readGroupIds, secretOk, WA_MAX_BYTES, WA_SECRET_HEADER } from '../wa';
 import { runWaQueue } from '../waRead';
+import { noteLink } from '../waLink';
 import { PairError, pairByHand, unpair } from '../waPair';
 import { addGroup, confirmAgreeing, confirmItem, confirmPair, editGroup, editItem, groupsView, inbox, InboxError, itemFile, rejectItem,
   restoreItem, TABS, type ItemEdit, type Tab } from '../waInbox';
@@ -20,7 +21,8 @@ import { addGroup, confirmAgreeing, confirmItem, confirmPair, editGroup, editIte
  *   stored, 200 with stored: false when it was dropped on purpose (group not listed, already here) so the listener does
  *   not try again. Anything 4xx is the listener's mistake; 5xx can be tried again.
  * - POST /wa/heartbeat: JSON { lastMessageAt?, state?, version?, groups? ([{ id, name }]: the groups it can see) }, every minute.
- *   Answers { ok, serverTime, readGroups }: the group ids Bookr reads. The listener downloads files from those only.
+ *   Answers { ok, serverTime, readGroups, link }: the group ids Bookr reads (the listener downloads files from those only),
+ *   and the link request it should work on ({ id, action: link | unlink } or null; see src/waLink.ts).
  *
  * The inbox (phase 4) is under /businesses/:businessId/wa, for a signed-in Owner or Accountant (wa.review).
  */
@@ -63,7 +65,8 @@ waRoutes.post('/wa/heartbeat', async (c) => {
   const parsed = HeartbeatBody.safeParse(raw);
   if (!parsed.success) fail(400, 'Heartbeat is not right.');
   const at = await heartbeat(c.env.DB, parsed.data);
-  return c.json({ ok: true, serverTime: at, readGroups: await readGroupIds(c.env.DB) });
+  const link = await noteLink(c.env.DB, parsed.data);
+  return c.json({ ok: true, serverTime: at, readGroups: await readGroupIds(c.env.DB), link });
 });
 
 // ----- the inbox (phase 4)
