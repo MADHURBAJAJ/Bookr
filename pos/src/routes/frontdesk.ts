@@ -439,10 +439,15 @@ frontDeskRoutes.get(`${B}/reservations`, requireAction('stays.edit'), async (c) 
     all<Record<string, unknown>>(c.env.DB, `SELECT k.id, k.source, k.ext_ref AS extRef, k.guest_name AS guestName, k.phone, k.room_type AS roomType, k.room_labels AS roomLabels, k.rooms,
       k.check_in AS checkIn, k.check_out AS checkOut, k.amount_paise AS amountPaise, k.paid_paise AS paidPaise, k.desk_paid_paise AS deskPaidPaise, k.status, k.problem, k.channel,
       k.unplaced, k.stay_id AS stayId, k.ota_ref AS otaRef, k.entered_by AS enteredBy,
-      (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)) AS heldPaise
-      FROM bookings k WHERE k.business_id = ? AND NOT (k.source = 'mmt' AND k.match_id IS NOT NULL)
+      (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)) AS heldPaise,
+      k.created_at AS createdAt, m.mailAt, m.mailFirstAt, coalesce(m.mailCount, 0) AS mailCount
+      FROM bookings k
+      -- When its emails came (28 Nov 2026, Reservations sorted by the latest email): its own and its MakeMyTrip twin's.
+      LEFT JOIN (SELECT coalesce(t.match_id, t.id) AS kid, max(v.received_at) AS mailAt, min(v.received_at) AS mailFirstAt, count(*) AS mailCount
+        FROM booking_versions v JOIN bookings t ON t.id = v.booking_id WHERE v.business_id = ? GROUP BY coalesce(t.match_id, t.id)) m ON m.kid = k.id
+      WHERE k.business_id = ? AND NOT (k.source = 'mmt' AND k.match_id IS NOT NULL)
       AND (? = '' AND k.check_out >= ? OR ? <> '' AND (lower(k.guest_name) LIKE ? OR lower(k.ext_ref) LIKE ? OR lower(coalesce(k.ota_ref, '')) LIKE ? OR (? <> '' AND k.phone LIKE ?)))
-      ORDER BY k.check_in, k.guest_name LIMIT 300`, b.id, q, addDays(today, -1), q, like, like, like, digits, `%${digits}%`),
+      ORDER BY k.check_in, k.guest_name LIMIT 300`, b.id, b.id, q, addDays(today, -1), q, like, like, like, digits, `%${digits}%`),
   ]);
   const masked = (p: unknown) => (typeof p === 'string' && p ? `••••${p.slice(-4)}` : null);
   return c.json({ today, now: now(), reservations: reservations.map((r) => ({ ...resOut(r), phone: masked(r.phone) })), bookings: bookings.map((k) => ({ ...k, phone: masked(k.phone) })) });

@@ -2303,15 +2303,32 @@ const resStatus = (r, now) => (r.status === 'cancelled' ? ['bad', 'Cancelled'] :
   : r.status === 'hold' ? ((r.holdUntil ?? 0) < now ? ['bad', 'Hold lapsed'] : ['new', `Hold till ${time(r.holdUntil)}`]) : ['new', 'Not in Djubo yet']);
 const bkStatus = (k) => (k.status === 'cancelled' ? ['bad', 'Cancelled'] : k.status === 'checked_in' ? ['open', 'Checked in'] : k.unplaced ? ['bad', 'Djubo could not place']
   : k.problem ? ['new', /hold/.test(k.problem) ? 'Website hold' : 'Check it'] : ['open', 'Confirmed']);
+// Reservations sorted by the latest email (28 Nov 2026): the choice is kept on this computer.
+const RES_SORT_KEY = 'bookr-pos-res-sort';
+function resSort() { try { return localStorage.getItem(RES_SORT_KEY) === 'stay' ? 'stay' : 'mail'; } catch { return 'mail'; } }
+actions.resSort = (d) => { try { localStorage.setItem(RES_SORT_KEY, d.id); } catch { /* this visit only */ } rerender(); };
+/** When the row's latest email came (a desk reservation: when it was made), for sorting and the "Email came" column. */
+const mailWhen = (kind, x) => (kind === 'res' ? x.createdAt : x.mailAt ?? x.createdAt) ?? 0;
+function mailCell(kind, x, nowMs) {
+  const at = mailWhen(kind, x);
+  if (!at) return html`<span class="quiet">—</span>`;
+  const fresh = nowMs - at < 3600000;
+  const what = kind === 'res' ? `Made here${x.madeBy ? ` by ${x.madeBy}` : ''}` : x.status === 'cancelled' ? 'Cancelled' : (x.mailCount ?? 0) > 1 ? 'Revised' : 'New booking';
+  const first = kind === 'bk' && x.mailFirstAt && x.mailCount > 1 && dayKey(x.mailFirstAt) !== dayKey(at) ? html`<br>first ${dateTime(x.mailFirstAt)}` : '';
+  return html`<strong class="money">${dateTime(at)}</strong>${fresh ? html` <span class="status warn">NEW</span>` : ''}
+    <div class="small quiet">${what}${kind === 'bk' && x.mailCount > 1 ? ` · ${x.mailCount} emails` : ''}${first}</div>`;
+}
+const dayKey = (ms) => new Date(ms + 19800000).toISOString().slice(0, 10);
 function listView() {
   const r = ui.res ?? { reservations: [], bookings: [] };
   const f = ui.resF ?? 'upcoming';
+  const sort = resSort();
   const rows = [
     ...r.reservations.filter((x) => x.status !== 'linked').map((x) => ({ kind: 'res', x, checkIn: x.checkIn, st: resStatus(x, r.now) })),
     ...r.bookings.map((x) => ({ kind: 'bk', x, checkIn: x.checkIn ?? '', st: bkStatus(x) })),
   ].filter((y) => f === 'all' || (f === 'upcoming' && !['Cancelled', 'Hold lapsed'].includes(y.st[1]) && y.st[1] !== 'Checked in')
     || (f === 'house' && y.st[1] === 'Checked in') || (f === 'holds' && /hold/i.test(y.st[1])) || (f === 'nodjubo' && y.st[1] === 'Not in Djubo yet') || (f === 'cancelled' && y.st[1] === 'Cancelled'))
-    .sort((a, b) => a.checkIn.localeCompare(b.checkIn));
+    .sort((a, b) => (sort === 'mail' ? mailWhen(b.kind, b.x) - mailWhen(a.kind, a.x) || a.checkIn.localeCompare(b.checkIn) : a.checkIn.localeCompare(b.checkIn)));
   const sel = ui.resSel;
   const inbox = inboxCount(ui.bk);
   const seg = html`<div class="segs" style="margin-bottom:12px"><button type="button" class="chip" aria-pressed="${ui.resTab !== 'inbox'}" data-act="pick" data-k="resTab" data-id="list">All reservations</button>
@@ -2319,11 +2336,13 @@ function listView() {
   if (ui.resTab === 'inbox') return html`${seg}${errorBox()}${ui.bk ? bookingsPanel(ui.bk) : html`<p class="empty">Could not load bookings from mail.</p>`}`;
   return html`${seg}<form class="row" style="margin-bottom:10px"><input class="in" type="search" data-model="resQ" value="${ui.resQ ?? ''}" placeholder="Name, phone, Djubo or MakeMyTrip number" style="flex:1 1 240px" aria-label="Search reservations">
       <button class="btn" type="submit" data-act="resSearch" data-submit>Search</button></form>
-    <div class="chips" style="margin-bottom:10px">${[['upcoming', 'Upcoming'], ['house', 'In house'], ['holds', 'Holds'], ['nodjubo', 'Not in Djubo'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="resF" data-id="${k}">${t}</button>`)}</div>
+    <div class="row" style="margin-bottom:10px;justify-content:space-between;gap:8px"><div class="chips">${[['upcoming', 'Upcoming'], ['house', 'In house'], ['holds', 'Holds'], ['nodjubo', 'Not in Djubo'], ['cancelled', 'Cancelled'], ['all', 'All']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${f === k}" data-act="pick" data-k="resF" data-id="${k}">${t}</button>`)}</div>
+      <div class="chips" role="group" aria-label="Sort"><span class="small quiet" style="align-self:center">Sort</span>${[['mail', 'Latest email first'], ['stay', 'Stay date']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${sort === k}" data-act="resSort" data-id="${k}">${t}</button>`)}</div></div>
     ${errorBox()}
     ${sel ? reservationCard(sel, r.now) : ''}
-    <section class="panel" style="padding:0;overflow:hidden"><div class="scroll" style="max-height:calc(100vh - 290px)"><table class="t cards"><thead><tr><th data-sort>Guest</th><th data-sort>Stay</th><th data-sort>Room</th><th data-sort>Source</th><th data-sort>Status</th><th class="num" data-sort>Total</th><th class="num" data-sort>To collect</th></tr></thead><tbody>
+    <section class="panel" style="padding:0;overflow:hidden"><div class="scroll" style="max-height:calc(100vh - 290px)"><table class="t cards"><thead><tr><th>Email came</th><th data-sort>Guest</th><th data-sort>Stay</th><th data-sort>Room</th><th data-sort>Source</th><th data-sort>Status</th><th class="num" data-sort>Total</th><th class="num" data-sort>To collect</th></tr></thead><tbody>
       ${rows.length ? rows.map(({ kind, x, st }) => html`<tr>
+        <td data-label="Email came">${mailCell(kind, x, r.now ?? Date.now())}</td>
         <td data-label="Guest">${kind === 'res' ? html`<button class="linkbtn" type="button" data-act="resPick" data-id="${x.id}"><strong>${x.guestName}</strong></button>` : html`<button class="linkbtn" type="button" data-act="bkOpen" data-id="${x.id}"><strong>${x.guestName ?? 'No name'}</strong></button>`}
           <div class="small quiet">${kind === 'res' ? 'made here' : `${x.source === 'mmt' ? 'MakeMyTrip' : 'Djubo'} ${x.extRef}`}${x.phone ? ` · ${x.phone}` : ''}</div></td>
         <td data-label="Stay" data-v="${x.checkIn}">${dayName(x.checkIn)} → ${dayName(x.checkOut)}</td>
@@ -2331,7 +2350,7 @@ function listView() {
         <td data-label="Source">${kind === 'res' ? x.source : x.channel ?? '—'}</td>
         <td data-label="Status"><span class="badge ${st[0]}">${st[1]}</span></td>
         <td class="num" data-label="Total">${kind === 'res' ? rs(x.totalPaise) : x.amountPaise != null ? rs(x.amountPaise) : x.fromReport ? html`—<div class="small quiet">Djubo's report</div>` : '—'}</td>
-        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise || (x.fromReport && x.amountPaise == null) ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="7"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
+        <td class="num" data-label="To collect">${kind === 'res' ? rs(Math.max(0, x.totalPaise - x.advancePaise)) : x.amountPaise || (x.fromReport && x.amountPaise == null) ? rs(dueOf(x)) : '—'}</td></tr>`) : html`<tr><td colspan="8"><p class="empty">No reservations match. Try "All", or search by name, phone or booking number.</p></td></tr>`}
     </tbody></table></div></section>`;
 }
 actions.resSearch = async () => { ui.res = await api('GET', `${B()}/reservations${ui.resQ ? `?q=${encodeURIComponent(ui.resQ)}` : ''}`); ui.resF = 'all'; rerender(); };
