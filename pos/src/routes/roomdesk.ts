@@ -11,7 +11,7 @@ import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
-import { continuesOf, linkStay } from '../rooms';
+import { continuesOf, leadIntoStay, linkStay } from '../rooms';
 
 export const roomDeskRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -229,7 +229,7 @@ roomDeskRoutes.get(`${B}/frontdesk/audit`, requireAction('stays.edit'), async (c
   const { t, shiftDay: today } = clock(b);
   const tomorrow = addDays(today, 1);
   const [bookings, reservations, stays, formC, djubo, dirty, tomorrowB, tomorrowR] = await Promise.all([
-    all(db, `SELECT k.id, k.guest_name AS guestName, k.check_in AS checkIn, k.check_out AS checkOut, k.room_type AS roomType, k.room_labels AS roomLabels, k.channel, k.source,
+    all<{ id: string; guestName: string | null; phone: string | null; checkIn: string | null; checkOut: string | null; createdAt: number }>(db, `SELECT k.id, k.guest_name AS guestName, k.phone, k.created_at AS createdAt, k.check_in AS checkIn, k.check_out AS checkOut, k.room_type AS roomType, k.room_labels AS roomLabels, k.channel, k.source,
         (SELECT coalesce(sum(d.amount_paise), 0) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)) AS heldPaise
       FROM bookings k WHERE k.business_id = ? AND k.status IN ('new', 'approved') AND k.unplaced = 0 AND k.stay_id IS NULL AND k.check_in <= ?
       AND NOT (k.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = k.match_id AND m.status <> 'cancelled')) ORDER BY k.check_in, k.guest_name`, b.id, today),
@@ -247,9 +247,11 @@ roomDeskRoutes.get(`${B}/frontdesk/audit`, requireAction('stays.edit'), async (c
       AND NOT (k.source = 'mmt' AND match_id IS NOT NULL)`, b.id, tomorrow),
     all(db, "SELECT guest_name AS guestName, lines FROM reservations WHERE business_id = ? AND status IN ('confirmed', 'hold') AND booking_id IS NULL AND check_in = ?", b.id, tomorrow),
   ]);
+  // Nights a guest stayed before the desk checked them in here lead into their stay: not "did not arrive" (27 Nov 2026).
+  const stayed = await leadIntoStay(db, b.id, bookings, b.shift_start_hour ?? 8);
   return c.json({
     today, tomorrow,
-    notArrived: [...bookings.map((x) => ({ ...x, kind: 'booking' })), ...reservations.map((x) => ({ ...x, kind: 'reservation' }))],
+    notArrived: [...bookings.filter((x) => !stayed.has(x.id)).map(({ phone: _p, createdAt: _c, ...x }) => ({ ...x, kind: 'booking' })), ...reservations.map((x) => ({ ...x, kind: 'reservation' }))],
     overstays: stays.filter((s) => s.plan && s.plan < today),
     dueOut: stays.filter((s) => s.plan === today),
     noDate: stays.filter((s) => !s.plan),

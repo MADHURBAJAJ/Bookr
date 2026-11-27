@@ -282,6 +282,41 @@ export async function continuesOf(db: DB, bid: string, bookings: { id: string; p
   return out;
 }
 
+/**
+ * Bookings that lead into a stay (27 Nov 2026): Djubo makes a night or an extension as a new booking, so a guest who came
+ * before the desk checked them in here has earlier bookings with no stay of their own. A booking ending on the day the
+ * same guest (same phone, or the same name) began a stay here, or ending on the day another such booking began, was
+ * stayed, not missed: it is not a "did not arrive". Only for a booking the POS first heard of after its stay had ended
+ * (Djubo sent it late, e.g. when reception marked it paid): one known in time and not checked in is still asked about.
+ */
+export async function leadIntoStay(db: DB, bid: string, bookings: { id: string; phone: string | null; guestName: string | null; checkIn: string | null; checkOut: string | null; createdAt: number }[], startHour = 8) {
+  const out = new Set<string>();
+  const ended = (k: { checkOut: string | null; createdAt: number }) => !!k.checkOut && k.createdAt >= Date.parse(`${k.checkOut}T00:00:00Z`) + startHour * 3_600_000 - 19_800_000;
+  if (!bookings.length) return out;
+  const digits = (p: string | null) => { const d = (p ?? '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
+  const same = (a: { phone: string | null; name: string | null }, b: { phone: string | null; name: string | null }) =>
+    (digits(a.phone) !== '' && digits(a.phone) === digits(b.phone)) || (nameKey(a.name).length >= 4 && nameKey(a.name) === nameKey(b.name));
+  // Where a guest's time here began: each stay's first day.
+  const starts = await all<{ phone: string | null; name: string | null; day: string }>(db, `SELECT phone, guest_name AS name, check_in AS day FROM stays
+    WHERE business_id = ? AND check_in IS NOT NULL`, bid);
+  const anchors = starts.slice();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const k of bookings) {
+      if (out.has(k.id) || !ended(k)) continue;
+      const me = { phone: k.phone, name: k.guestName };
+      if (anchors.some((a) => a.day === k.checkOut && same(a, me))) {
+        out.add(k.id);
+        // Its own first day now leads on to the stay too, for the night before it.
+        if (k.checkIn) anchors.push({ ...me, day: k.checkIn });
+        grew = true;
+      }
+    }
+  }
+  return out;
+}
+
 // ---------- extensions are made in Djubo (26 Nov 2026)
 
 /** When Djubo changes a checked-in booking's dates, the stay and its group's beds leave when the bookings end. A date a
