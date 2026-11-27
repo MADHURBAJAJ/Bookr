@@ -1673,6 +1673,9 @@ async function doneScreen(billId) {
   rerender = () => {
     const cn = ui.cn;
     const anyLeft = bill.items.some((i) => leftOf(i) > 0);
+    // Credit to a room goes back only to the room (or credit account) this bill was put on, while it is open.
+    const onAcc = (bill.accounts ?? []).filter((a) => a.open && a.leftPaise > 0);
+    const allOnAcc = onAcc.length > 0 && bill.payments.every((p) => p.mode === 'room' || p.mode === 'credit');
     const st = bill.status === 'settled' ? ['', '✓', 'Paid and settled'] : bill.status === 'void' ? ['void', '×', 'Void'] : ['wait', '!', 'Printed, not paid'];
     paint(shell('#/', html`<div class="two rev">
     <section class="panel">
@@ -1699,9 +1702,10 @@ async function doneScreen(billId) {
           <button class="sq" type="button" data-act="cnLess" data-id="${i.id}" aria-label="One less ${i.name}">−</button><span class="qty" style="width:26px;text-align:center;font-weight:800">${cn.qty[i.id] ?? 0}</span>
           <button class="sq" type="button" data-act="cnMore" data-id="${i.id}" data-max="${leftOf(i)}" aria-label="One more ${i.name}">+</button></div>`)}
         <label class="f">Reason (required)<input class="in" data-model="cnReason" value="${ui.cnReason ?? ''}" placeholder="e.g. Cold food, wrong order"></label>
-        <div class="f">Money goes back by<div class="chips">${[['cash', 'Cash from the drawer'], ['upi', 'UPI'], ['card', 'Card machine reversal'], ['account', 'Credit to folio or account'], ['none', 'Nothing (not paid in money)']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${cn.mode === k}" data-act="cnMode" data-m="${k}">${t}</button>`)}</div></div>
+        <div class="f">Money goes back by<div class="chips">${onAcc.map((a) => html`<button type="button" class="chip" aria-pressed="${cn.mode === 'account' && cn.debtorAccountId === a.accountId}" data-act="cnAcc" data-id="${a.accountId}">Take off ${a.name} bill</button>`)}
+          ${[...(allOnAcc ? [] : [['cash', 'Cash from the drawer'], ['upi', 'UPI'], ['card', 'Card machine reversal']]), ['none', 'Nothing (not paid in money)']].map(([k, t]) => html`<button type="button" class="chip" aria-pressed="${cn.mode === k}" data-act="cnMode" data-m="${k}">${t}</button>`)}</div>
+          ${onAcc.length ? html`<span class="small quiet">Goes back only to the ${onAcc.length > 1 ? 'rooms or accounts' : onAcc[0].kind === 'room' ? 'room' : 'account'} this bill was put on${allOnAcc ? '. Cash, UPI and card are hidden: it was not paid in money.' : '.'}</span>` : ''}</div>
         ${cn.mode === 'upi' ? html`<div class="chips">${cache.payAccounts.filter((a) => a.active).map((a) => html`<button type="button" class="chip" aria-pressed="${cn.payAccountId === a.id}" data-act="cnPick" data-k="payAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
-        ${cn.mode === 'account' ? html`<div class="chips">${[...cache.stays.map((x) => ({ id: x.accountId, name: `Room ${x.room} · ${x.guestName}` })), ...cache.credit.map((x) => ({ id: x.id, name: x.name }))].map((a) => html`<button type="button" class="chip" aria-pressed="${cn.debtorAccountId === a.id}" data-act="cnPick" data-k="debtorAccountId" data-id="${a.id}">${a.name}</button>`)}</div>` : ''}
         <div class="row"><button class="btn danger" type="submit" data-act="cnGo" data-submit>Make credit note</button><button class="btn" type="button" data-act="cnNo">Cancel</button></div></form>` : ''}
     </section>
     <section class="panel" style="align-items:center"><p class="label" style="align-self:flex-start">Receipt</p>${receipt(bill, true)}</section></div>`));
@@ -1718,7 +1722,13 @@ actions.pcGo = async () => {
   await api('POST', `${B()}/payments/${p.id}/change`, { mode: p.mode, payAccountId: p.payAccountId ?? undefined, cardApproval: ui.pcAppr, cardLast4: ui.pcLast4, reason: ui.pcWhy });
   flash = { kind: 'ok', text: 'Payment changed. It shows on the Daily check.' }; route();
 };
-actions.cnAsk = () => { ui.cn = { full: true, qty: {}, mode: 'cash' }; rerender(); };
+actions.cnAsk = () => {
+  const onAcc = (ui.done.accounts ?? []).filter((a) => a.open && a.leftPaise > 0);
+  const allOnAcc = onAcc.length > 0 && ui.done.payments.every((p) => p.mode === 'room' || p.mode === 'credit');
+  ui.cn = allOnAcc ? { full: true, qty: {}, mode: 'account', debtorAccountId: onAcc[0].accountId } : { full: true, qty: {}, mode: 'cash' };
+  rerender();
+};
+actions.cnAcc = (d) => { ui.cn.mode = 'account'; ui.cn.debtorAccountId = d.id; rerender(); };
 actions.cnNo = () => { ui.cn = null; rerender(); };
 actions.cnFull = () => { ui.cn.full = true; rerender(); };
 actions.cnPart = () => { ui.cn.full = false; rerender(); };

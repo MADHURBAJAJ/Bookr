@@ -10,7 +10,7 @@ import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { creditNote, rs, type LineTax, type TaxRow, type Totals } from '../billing';
 import { clock, event, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendSoon } from '../sync';
-import { billOut } from './orders';
+import { billAccounts, billOut } from './orders';
 import type { AppEnv } from '../types';
 import { cashGuard } from './drawers';
 
@@ -96,10 +96,21 @@ creditRoutes.post(`${B}/bills/:id/credit-note`, requireAction('bills.refund'), a
     payAccount = (await one<{ id: string }>(db, 'SELECT id FROM pay_accounts WHERE id = ? AND business_id = ?', data.payAccountId, bid))?.id ?? null;
     if (!payAccount) fail(400, 'Choose the account the UPI refund was sent from.');
   }
+  // Money put on a room or credit account goes back only to that same one, while it is open (27 Nov 2026): credit on
+  // another room leaves this bill due where it was put, and a different guest's folio shows money it never had.
+  const [accounts, modes] = await Promise.all([billAccounts(db, billId),
+    all<{ mode: string }>(db, 'SELECT DISTINCT p.mode FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = ?', billId)]);
+  const open = accounts.filter((a) => a.open && a.leftPaise > 0);
   if (mode === 'account') {
-    debtor = await one(db, 'SELECT id, name FROM debtor_accounts WHERE id = ? AND business_id = ?', data.debtorAccountId, bid);
-    if (!debtor) fail(400, 'Choose the folio or credit account to credit.');
+    if (!open.length) fail(409, accounts.length ? 'The room this bill was put on is closed. Give the money back by cash, UPI or card.'
+      : 'This bill was not put on a room or credit account. Give the money back by cash, UPI or card.');
+    const a = open.find((x) => x.accountId === data.debtorAccountId);
+    if (!a) fail(400, `This bill was put on ${open.map((x) => x.name).join(' and ')}. Credit goes back there only.`);
+    if (totals.totalPaise > a.leftPaise) fail(409, `Only ${rs(a.leftPaise)} of this bill is on ${a.name}. Give the rest back by cash, UPI or card.`);
+    debtor = { id: a.accountId, name: a.name };
   }
+  if (['cash', 'upi', 'card'].includes(mode as string) && open.length && modes.every((m) => m.mode === 'room' || m.mode === 'credit'))
+    fail(409, `This bill is on ${open.map((x) => x.name).join(' and ')}, not paid in money. Take it off that bill instead.`);
 
   // Money given back: a manager approves (21 Nov 2026).
   const approver = await approval(c, data, 'Giving money back');

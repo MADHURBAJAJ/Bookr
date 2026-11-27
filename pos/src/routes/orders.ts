@@ -630,6 +630,21 @@ orderRoutes.post(`${B}/orders/:id/bill`, requireAction('bills.print'), async (c)
   return c.json({ bill: await billOut(c.env.DB, bid, id), warning }, 201);
 });
 
+/**
+ * The rooms and credit accounts a bill was put on (27 Nov 2026): a credit note "to a room" goes back only to one of
+ * these, and only up to what is still on it from this bill. A room whose guest has left is closed: its money goes back
+ * by cash, UPI or card instead.
+ */
+export async function billAccounts(db: D1Database, billId: string) {
+  const rows = await all<{ accountId: string; name: string; kind: string; open: number; chargedPaise: number; creditedPaise: number }>(db, `SELECT d.id AS accountId, d.name, d.kind,
+      (d.kind <> 'room' OR EXISTS (SELECT 1 FROM stays s WHERE s.id = d.stay_id AND s.checked_out_at IS NULL)) AS open,
+      sum(a.amount_paise) AS chargedPaise,
+      coalesce((SELECT sum(n.total_paise) FROM credit_notes n WHERE n.bill_id = ?1 AND n.refund_mode = 'account' AND n.debtor_account_id = d.id), 0) AS creditedPaise
+    FROM allocations a JOIN payments p ON p.id = a.payment_id JOIN debtor_accounts d ON d.id = p.debtor_account_id
+    WHERE a.bill_id = ?1 AND p.mode IN ('room', 'credit') GROUP BY d.id ORDER BY min(p.at), d.id`, billId);
+  return rows.map(({ chargedPaise, creditedPaise, open, ...r }) => ({ ...r, open: !!open, leftPaise: Math.max(0, chargedPaise - creditedPaise) }));
+}
+
 export async function billOut(db: D1Database, bid: string, id: string) {
   const b = await one<Record<string, unknown> & { entity_id: string }>(db, `SELECT b.id, b.bill_no AS billNo, b.order_id AS orderId, b.shift_day AS shiftDay, b.printed_at AS printedAt,
       b.gross_paise AS grossPaise, b.discount_paise AS discountPaise, b.discount_reason AS discountReason, b.taxable_paise AS taxablePaise,
@@ -640,7 +655,7 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     FROM bills b JOIN billing_entities e ON e.id = b.entity_id JOIN orders o ON o.id = b.order_id LEFT JOIN staff st ON st.id = b.printed_by
     WHERE b.id = ? AND b.business_id = ?`, id, bid);
   if (!b) fail(404, 'Bill not found.');
-  const [items, creditNotes, pays, differences, taxRows] = await Promise.all([
+  const [items, creditNotes, pays, differences, taxRows, accounts] = await Promise.all([
     all<Record<string, unknown> & { options: string | null }>(db, `SELECT id, name, sac, qty, rate_paise AS ratePaise, amount_paise AS amountPaise, discount_paise AS discountPaise, taxed, options,
       coalesce(tax_kind, CASE WHEN taxed = 1 THEN 'gst' ELSE 'liquor' END) AS taxKind, gst_bp AS gstBp, price_by IS NOT NULL AS typedPrice,
       service_charge AS serviceCharge, price_incl AS priceIncl FROM bill_lines WHERE bill_id = ? ORDER BY rowid`, id),
@@ -653,11 +668,12 @@ export async function billOut(db: D1Database, bid: string, id: string) {
     WHERE d.bill_id = ? OR (d.kind = 'tip' AND d.settlement_id = (SELECT settlement_id FROM bills WHERE id = ?)) ORDER BY d.rowid`, id, id),
     all<{ kind: TaxRow['kind']; bp: number; valuePaise: number; cgstPaise: number; sgstPaise: number }>(db,
       `SELECT kind, gst_bp AS bp, value_paise AS valuePaise, cgst_paise AS cgstPaise, sgst_paise AS sgstPaise FROM bill_taxes WHERE bill_id = ? ORDER BY CASE kind WHEN 'gst' THEN 0 WHEN 'liquor' THEN 1 ELSE 2 END, gst_bp`, id),
+    billAccounts(db, id),
   ]);
   const { entity_id, ...rest } = b;
   const taxes = billTaxRows(b as unknown as { gstRateBp: number; taxablePaise: number; nonGstPaise: number; cgstPaise: number; sgstPaise: number }, taxRows);
   return { ...rest, entityId: entity_id, items: items.map((i) => ({ ...i, gstBp: i.gstBp ?? (i.taxKind === 'gst' ? b.gstRateBp : null), options: i.options ? JSON.parse(i.options) : [] })),
-    taxes, payments: pays, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
+    taxes, payments: pays, accounts, differences, creditNotes: creditNotes.map((n) => ({ ...n, lines: JSON.parse(String(n.lines)) })) };
 }
 
 // One search for the counter (22 Nov 2026): a bill number (or its end), a guest name, 4 or more digits of a phone, or a

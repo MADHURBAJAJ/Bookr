@@ -248,7 +248,7 @@ settleRoutes.post(`${B}/settlements`, requireAction('bills.settle'), async (c) =
   statements.push(...(await saleMoves(db, bid, ordered.map((x) => x.id), staff.id, shiftDay, t)));
   // One message per bill for Bookr, in the same batch, with the bill as printed and its share of each payment.
   for (const x of ordered) {
-    const { payments: _none, ...printed } = await billOut(db, bid, x.id);
+    const { payments: _none, accounts: _acc, ...printed } = await billOut(db, bid, x.id);
     delete (printed as Record<string, unknown>).status;
     statements.push(stmt(db, "INSERT INTO outbox (id, business_id, kind, body, created_at) VALUES (?, ?, 'bill_settled', ?, ?)",
       newId(), bid, JSON.stringify({ ...settledMessage(x.id, ordered, pays, pieces, shiftDay, t, staff.name), bill: printed,
