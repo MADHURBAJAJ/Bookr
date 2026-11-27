@@ -3,7 +3,7 @@
 // time it was counted) or live (each row compared with the stock when it is typed). Each item can be found in two places
 // (the bar counter and the store). Stock changes only when a manager approves; then each difference is a count move at
 // the counted time, and shows on the Bar handover report.
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../../src/db';
 import { body, fail, isUuid, text } from '../../../src/http';
 import { isManager, requireAction, requireStaff } from '../auth';
@@ -66,7 +66,7 @@ stockCountRoutes.get(`${B}/stock/count-lists`, requireAction('stock.count'), asy
   });
 });
 
-async function saveList(c: Parameters<Parameters<typeof stockCountRoutes.post>[1]>[0], id: string | null) {
+async function saveList(c: Context<AppEnv>, id: string | null) {
   if (!isManager(c)) fail(403, 'Count lists are set by a manager or owner.');
   const bid = c.get('businessId');
   const db = c.env.DB;
