@@ -15,7 +15,7 @@ const Rupees = z.string().nullable().describe('Rupees exactly as shown: digits w
 const Text = z.string().nullable();
 
 export const WaReading = z.object({
-  kind: z.enum(['upi', 'bill', 'card', 'other']).describe('upi: a UPI payment screen or receipt (Paytm, Google Pay, PhonePe, a bank app, or a photo of a phone showing one). bill: a printed bill or invoice. card: a card machine (POS terminal) charge slip. other: anything else.'),
+  kind: z.enum(['upi', 'bill', 'card', 'other']).describe('upi: a UPI payment screen or receipt (Paytm, Google Pay, PhonePe, a bank app, or a photo of a phone showing one). bill: a printed bill or invoice. card: a card machine (POS terminal) charge slip, or a photo of the card machine\'s own screen showing a card payment. other: anything else.'),
   legible: z.enum(['clear', 'unsure', 'unreadable']).describe('clear: every value you give is plainly readable. unsure: some values are a best guess (blur, glare, cracks, partly covered). unreadable: the key values cannot be read.'),
   upi: z.object({
     amount: Rupees,
@@ -42,12 +42,13 @@ export const WaReading = z.object({
     items: Text.describe('A short summary of the items, e.g. "2 Heineken, 1 Sev Puri".'),
   }).nullable().describe('Fill only when kind is bill; otherwise null.'),
   card: z.object({
-    amount: Rupees.describe('The amount charged (AMOUNT / TOTAL / SALE). Rupees as shown, no ₹ sign, no commas.'),
-    date: Text.describe('Date exactly as printed.'),
-    time: Text.describe('Time exactly as printed.'),
-    approval_code: Text.describe('APPR CODE / AUTH CODE / Approval code exactly as printed.'),
-    last4: Text.describe('The last 4 digits of the card number (printed like XXXX XXXX XXXX 1234). Digits only.'),
-    status: z.enum(['approved', 'declined', 'unknown']).describe('approved only when the slip says APPROVED / SALE completed; declined when it says DECLINED, VOID or failed.'),
+    source: z.enum(['slip', 'screen']).optional().describe('slip: the printed charge slip. screen: a photo of the card machine\'s display, with no slip.'),
+    amount: Rupees.describe('The amount charged (AMOUNT / TOTAL / SALE), on the slip or the machine\'s screen. Rupees as shown, no ₹ sign, no commas.'),
+    date: Text.describe('Date exactly as printed or shown on the machine. null if not shown. Not a phone\'s clock.'),
+    time: Text.describe('Time exactly as printed or shown on the machine. null if not shown. Not a phone\'s clock.'),
+    approval_code: Text.describe('APPR CODE / AUTH CODE / Approval code exactly as printed or shown. null if not shown (a machine\'s screen often shows none).'),
+    last4: Text.describe('The last 4 digits of the card number (printed like XXXX XXXX XXXX 1234). Digits only. null if not shown.'),
+    status: z.enum(['approved', 'declined', 'unknown']).describe('approved only when the slip or screen says APPROVED / SALE completed / Transaction successful; declined when it says DECLINED, VOID or failed.'),
   }).nullable().describe('Fill only when kind is card; otherwise null.'),
   unclear: z.array(z.string()).describe('Names of the fields that are shown but could not be read with confidence. A field the image simply does not show is null and is not listed here.'),
 });
@@ -62,7 +63,7 @@ function istWall(ms: number) {
 /** What Claude is asked. The caption and time help only with the year and context: the picture decides the values. */
 export function waInstructions(item: { sent_at: number; caption: string | null; group_name: string }) {
   return [
-    'This image or PDF was posted in a WhatsApp work group of a hotel in Goa, India. It is usually a guest\'s UPI payment screen (often a photo of the guest\'s phone), a printed bill from the hotel, or a card machine\'s charge slip.',
+    'This image or PDF was posted in a WhatsApp work group of a hotel in Goa, India. It is usually a guest\'s UPI payment screen (often a photo of the guest\'s phone), a printed bill from the hotel, a card machine\'s charge slip, or a photo of the card machine\'s screen after a card payment.',
     `Message details: group "${item.group_name}", sent ${istWall(item.sent_at)} India time${item.caption ? `, caption "${item.caption.slice(0, 200)}"` : ''}.`,
     'Read only what the image shows. Never fill a value from the caption or guess one: give null and name the field in unclear instead.',
     'Ignore adverts, offers, scratch cards and rewards on payment screens.',
@@ -163,7 +164,8 @@ export function settle(r: WaReading, sentAt: number): WaRead {
     const last4 = (c.last4 ?? '').replace(/\D/g, '').slice(-4);
     out = { ...out, amountPaise: money(c.amount), cardApproval: c.approval_code?.replace(/\s+/g, '').toUpperCase() || null,
       cardLast4: last4.length === 4 ? last4 : null, docAt: docTime(c.date, c.time, sentAt) };
-    if (c.status === 'declined') { out.failed = true; notes.unshift('The slip shows a declined or void charge.'); }
+    if (c.source === 'screen') notes.push('A photo of the card machine screen, not the printed slip.');
+    if (c.status === 'declined') { out.failed = true; notes.unshift(`${c.source === 'screen' ? 'The card machine screen' : 'The slip'} shows a declined or void charge.`); }
     else if (c.status !== 'approved') notes.push('Card slip: approval not clear.');
   }
   if (out.kind !== 'other' && !out.amountPaise && r.legible !== 'unreadable') notes.push('No amount read.');

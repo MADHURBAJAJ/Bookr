@@ -43,6 +43,11 @@ describe('settle: what is kept from a reading', () => {
       cardLast4: '4417', docAt: istToMs(2026, 11, 23, 21, 6), failed: false, notes: [] });
     expect(settle(card({ status: 'declined' }), SENT)).toMatchObject({ failed: true, notes: ['The slip shows a declined or void charge.'] });
     expect(settle(card({ status: 'unknown', last4: '44' }), SENT)).toMatchObject({ cardLast4: null, notes: ['Card slip: approval not clear.'] });
+    // A photo of the card machine's screen (28 Nov 2026): the amount and time it shows, often no approval code or digits.
+    expect(settle(card({ source: 'screen', amount: '980', approval_code: null, last4: null }), SENT)).toMatchObject({ kind: 'card', amountPaise: 98000,
+      cardApproval: null, cardLast4: null, docAt: istToMs(2026, 11, 23, 21, 6), failed: false, notes: ['A photo of the card machine screen, not the printed slip.'] });
+    expect(settle(card({ source: 'screen', status: 'declined' }), SENT)).toMatchObject({ failed: true, notes: ['The card machine screen shows a declined or void charge.', 'A photo of the card machine screen, not the printed slip.'] });
+    expect(waInstructions({ sent_at: SENT, caption: null, group_name: 'Guest payment' })).toContain('a photo of the card machine\'s screen');
   });
 
   it('a failed payment is marked, a pending one noted', () => {
