@@ -147,29 +147,50 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, team
 
 /**
  * Money reception entered in Djubo that has no POS receipt yet: the desk's part of each booking less the advances taken
- * here for it and, once checked in, the payments taken on its room bill.
+ * here for it and, once checked in, the payments taken on its room bill. A room bill's receipts cover its bookings once
+ * between them, oldest night first (27 Nov 2026): with a booking per night, one receipt must not cover every night, or
+ * money reception marked in Djubo without a POS receipt is never asked for.
  */
 export async function deskPending(db: DB, bid: string) {
   const rows = await all<{ id: string; extRef: string; guestName: string | null; checkIn: string | null; checkOut: string | null; status: string; stayId: string | null;
-    deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; coveredPaise: number }>(db, `SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
+    deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; heldPaise: number; linkedOnPaise: number; linkedOffPaise: number; poolPaise: number }>(db, `
+    SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
       k.check_in AS checkIn, k.check_out AS checkOut, k.status, k.stay_id AS stayId, k.desk_paid_paise AS deskPaidPaise, k.desk_paid_at AS deskPaidAt, k.entered_by AS enteredBy,
-      coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0)
-      -- Receipts on the room bill cover it only past what they paid of food and other charges (26 Nov 2026): a food payment
-      -- must not hide rent reception took in Djubo.
-      -- A bed in a group has its payments on the group's first room (26 Nov 2026), so that bill counts too. A POS receipt
-      -- someone linked to this booking's Djubo payment ("already taken in the POS") always counts in full.
-      + max(coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
-          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0),
-        max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
+      coalesce((SELECT sum(d.amount_paise) FROM desk_advances d WHERE d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id)), 0) AS heldPaise,
+      -- A POS receipt someone linked to this booking's Djubo payment ("already taken in the POS") always counts in full:
+      -- on its room bill (or the group's first room's, 26 Nov 2026) ...
+      coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
+        AND EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id
+          AND a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)))
+        AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0) AS linkedOnPaise,
+      -- ... or not on it.
+      coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
+        AND NOT EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id
+          AND a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)))
+        AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0) AS linkedOffPaise,
+      -- Receipts on the room bill, past what they paid of food and other charges (26 Nov 2026): a food payment must not
+      -- hide rent reception took in Djubo.
+      max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
           WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0)
         - max(0, coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('charge', 'credit_note', 'transfer')), 0)))
-        + coalesce((SELECT sum(p.amount_paise) FROM booking_paid_log l JOIN payments p ON p.settlement_id = l.settlement_id WHERE l.booking_id = k.id
-          AND NOT EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id
-            AND a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)))
-          AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0)) AS coveredPaise
-    FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in') ORDER BY k.desk_paid_at`, bid);
-  return rows.map((r) => ({ ...r, pendingPaise: r.deskPaidPaise - r.coveredPaise })).filter((r) => r.pendingPaise > 0);
+          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('charge', 'credit_note', 'transfer')), 0))) AS poolPaise
+    FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in')
+    ORDER BY k.check_in, k.desk_paid_at, k.id`, bid);
+  // Per room bill: what its receipts have left once the linked ones are taken out, shared oldest night first.
+  const left = new Map<string, number>();
+  for (const r of rows) if (r.stayId && !left.has(r.stayId)) left.set(r.stayId, r.poolPaise);
+  for (const r of rows) if (r.stayId) left.set(r.stayId, Math.max(0, left.get(r.stayId)! - r.linkedOnPaise));
+  const out = rows.map((r) => {
+    let covered = r.heldPaise + r.linkedOnPaise + r.linkedOffPaise;
+    if (r.stayId) {
+      const take = Math.min(left.get(r.stayId)!, Math.max(0, r.deskPaidPaise - covered));
+      left.set(r.stayId, left.get(r.stayId)! - take);
+      covered += take;
+    }
+    const { heldPaise: _h, linkedOnPaise: _on, linkedOffPaise: _off, poolPaise: _p, ...rest } = r;
+    return { ...rest, coveredPaise: covered, pendingPaise: r.deskPaidPaise - covered };
+  });
+  return out.filter((r) => r.pendingPaise > 0).sort((a, b) => (a.deskPaidAt ?? 0) - (b.deskPaidAt ?? 0));
 }
 
 /**
