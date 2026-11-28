@@ -218,3 +218,13 @@ describe('serving time', () => {
     expect((await owner.post(`${B}/menu/upload/check`, { csv: changed.replace('30 min', 'soon') })).json.errors[0]).toContain('serve time "soon"');
   });
 });
+
+describe('serve page on the home screen', () => {
+  it('gives each business a home-screen app that opens its Serve page', async () => {
+    const s = await setupBusiness();
+    const r = await s.owner.get(`/serve-manifest/${s.businessId}`);
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ short_name: 'Serve', start_url: `/#/serve/${s.businessId}`, scope: '/' });
+    expect((await s.owner.get('/serve-manifest/not-a-business')).status).toBe(404);
+  });
+});

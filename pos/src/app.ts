@@ -46,6 +46,18 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+// A server's phone app (28 Nov 2026): the Serve page added to the home screen opens on that business's Serve page (the
+// POS's own app opens at the staff sign-in, where a server's PIN does not work). Open to anyone: it holds only the id.
+app.get('/serve-manifest/:bid', (c) => {
+  const bid = c.req.param('bid');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bid)) return c.json({ error: 'Not found.' }, 404);
+  return new Response(JSON.stringify({
+    name: 'Bookr Serve', short_name: 'Serve', description: 'Mark food served.', id: `/serve/${bid}`, start_url: `/#/serve/${bid}`, scope: '/',
+    display: 'standalone', background_color: '#f2efea', theme_color: '#0f4f4f',
+    icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
+  }), { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' } });
+});
+
 // The Bookr POS Windows app's installer and its update files (22 Nov 2026), kept under desktop/ in the R2 bucket and open
 // to anyone: they hold no password or key. Also the WhatsApp listener's code as a .zip (27 Nov 2026), without .env or its
 // WhatsApp login. Only plain file names; nothing else in the bucket is reachable from here.
