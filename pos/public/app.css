@@ -950,6 +950,14 @@ body.desk main:has(> .drawer) { max-width: none; }
 .rp.taken { opacity: .5; cursor: not-allowed; }
 .rp .rpd { font-weight: 500; font-size: 11px; color: var(--quiet); }
 .rp.on .rpd { color: var(--on-pri); }
+/* Djubo's rooms at check-in (28 Nov 2026): a dashed purple edge and a small tag; picked rooms stay solid. */
+.rp.dj { border: 2px dashed #7a4fc2; position: relative; }
+.rp.on.dj { border-style: solid; box-shadow: 0 0 0 2px #7a4fc2; }
+.rp .rptag { font-size: 9.5px; font-weight: 800; letter-spacing: .3px; text-transform: uppercase; background: #7a4fc2; color: #fff; border-radius: 999px; padding: 0 5px; }
+.cibar { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); background: var(--field); border-radius: 10px; padding: 8px 12px; margin: 6px 0; }
+.cibar.same { border-color: var(--go-line); background: var(--go-tint); }
+.cibar.diff { border-color: var(--warn-line); background: var(--warn-tint); }
+.cibar .cibig { font-size: 17px; }
 .tickline { display: flex; gap: 8px; align-items: center; font-size: 13.5px; }
 
 /* ---------- Rooms › Housekeeping and Night audit (25 Nov 2026 redesign) */

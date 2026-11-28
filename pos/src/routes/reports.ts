@@ -1,6 +1,6 @@
 // Reports the POS gives on its own, before it is connected to Bookr: sales by billing name with GST, by payment mode and by
 // item; discounts and complimentary bills; and who owes what, aged, with each account's statement (GET /debtors/:id).
-import { noRentOf } from './shifts';
+import { noRentOf, waitingOf } from './shifts';
 import { Hono } from 'hono';
 import { all, one, type DB } from '../../../src/db';
 import { date, fail } from '../../../src/http';
@@ -215,7 +215,7 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
       // Closed with counting turned off (26 Nov 2026): not a missed count, so not flagged.
       noCount: (() => { try { return !!JSON.parse(String(close.totals ?? '{}')).noCount; } catch { return false; } })(),
       // Closed by itself with guests still in house and no rent for the night (28 Nov 2026).
-      noRent: close.auto ? noRentOf(close.totals) : [] } : null,
+      noRent: close.auto ? noRentOf(close.totals) : [], waitingRoom: close.auto ? waitingOf(close.totals) : [] } : null,
     // Sent to the kitchen or bar, not paid (25 Nov 2026): bills voided this shift whose order was not billed and paid
     // again, and the stock a cancelled KOT put back on the book, to check at the stock count.
     voidedNotRebilled: await all(db, `SELECT b.bill_no AS billNo, b.total_paise AS totalPaise, o.place

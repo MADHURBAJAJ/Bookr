@@ -6,7 +6,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../..
 import { body, fail, isUuid, paise, text } from '../../../src/http';
 import { approval, isManager, requireAction, requireStaff } from '../auth';
 import { audit, bizOf, clock, isTrigger, tableLayout } from '../util';
-import { phoneKey, openStay, LEFT_ROOM, PAST_STAY, stayBill } from './settings';
+import { phoneKey, openStay, isWaiting, LEFT_ROOM, PAST_STAY, stayBill } from './settings';
 import { notInDjubo, addDays } from './frontdesk';
 import { sendSoon } from '../sync';
 import type { AppEnv } from '../types';
@@ -474,10 +474,12 @@ roomDeskRoutes.post(`${B}/stays/:id/move`, requireAction('stays.edit'), async (c
     await db.batch([
       stmt(db, 'UPDATE stays SET room = ? WHERE id = ?', to, s.id),
       stmt(db, 'UPDATE debtor_accounts SET name = ? WHERE id = ?', `${/^\d/.test(to) ? 'Room ' : ''}${to} · ${s.guest_name}`, s.account_id),
-      stmt(db, `UPDATE orders SET place = ? WHERE stay_id = ? AND status IN ${LIVE}`, to, s.id),
+      // Only orders in the old room move with the guest: a restaurant table linked to them stays at its table (28 Nov 2026).
+      stmt(db, `UPDATE orders SET place = ? WHERE stay_id = ? AND (kind = 'room' OR place = ? OR place = 'Room ' || ?) AND status IN ${LIVE}`, to, s.id, s.room, s.room),
       ...attach.map((x) => stmt(db, 'UPDATE orders SET stay_id = ?, place = ? WHERE id = ?', s.id, to, x.orderId)),
-      dirtyUpsert(db, bid, s.room, 'dirty', c.get('staff').id, t, `Guest moved to ${to}`),
-      audit(db, bid, c.get('staff').id, 'stay.move', 'stays', s.id, { room: s.room }, { room: to, reason }),
+      // A guest waiting for a room (room later) had no room to clean.
+      ...(isWaiting(s.room) ? [] : [dirtyUpsert(db, bid, s.room, 'dirty', c.get('staff').id, t, `Guest moved to ${to}`)]),
+      audit(db, bid, c.get('staff').id, isWaiting(s.room) ? 'stay.give_room' : 'stay.move', 'stays', s.id, { room: s.room }, { room: to, reason }),
     ]);
   } catch (e) {
     if (isUniqueViolation(e)) fail(409, `${to} already has a guest.`);

@@ -1982,6 +1982,8 @@ function todayView() {
   const items = [
     ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
+    ...(cache.stays ?? []).filter((x) => String(x.room).startsWith(WAITING_ROOM)).map((x) => ({ tone: 'warn', icon: '⌂', title: `Waiting for a room: ${x.guestName}`,
+      sub: 'Checked in, no room yet. Give a room when one is free and clean', act: 'giveRoom', id: x.id })),
     ...(fd.nightsNotCharged ?? []).map((x) => ({ tone: 'bad', icon: '₹', title: `Nights not charged: ${x.room} · ${x.guestName}`,
       sub: `staying till ${dayName(x.plan)}, rent till ${dayName(x.coveredTo)} (${plural(x.nights, 'night')}). Extend in Djubo: the rent comes with its email`, act: 'roomBill', id: x.stayId })),
     ...(fd.missingBeds ?? []).map((x) => ({ tone: 'warn', icon: '⇆', title: `Beds missing: ${x.guestName} · ${x.room}`,
@@ -2076,7 +2078,9 @@ function cmpRoom(a, b) {
 }
 const byRoom = (list) => [...list].sort((x, y) => cmpRoom(x.room, y.room));
 /** A room as shown: without the "(left room)" mark the POS keeps on a guest who left it with the bill open. */
-const roomShow = (r) => String(r).replace(/ \(left room\)$/, '');
+const roomShow = (r) => (String(r).startsWith(WAITING_ROOM) ? 'No room yet' : String(r).replace(/ \(left room\)$/, ''));
+/** A guest checked in before a room was free (room later, 28 Nov 2026): their stay's placeholder room starts with this. */
+const WAITING_ROOM = 'Waiting for room · ';
 /** Rooms in short: "XIV A–F" when the beds of one room run in order, else listed. */
 function compactRooms(list) {
   const by = new Map();
@@ -2705,11 +2709,30 @@ function checkinView() {
               <input class="in" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-model="apPin" placeholder="Manager's PIN" aria-label="Manager's PIN" style="max-width:160px"></div>`
               : html`<p class="small">More than 2 days late: a manager or owner must do this (no manager has a PIN yet).</p>`) : ''}</div>` : ''}
           <div class="row"><button class="btn pri" type="submit" data-act="openStay" data-submit>Check in and print registration card</button>
-            <button class="btn" type="button" data-act="openStay" data-noprint="1">Check in without printing</button><span class="small quiet">Enter checks in</span></div>`)}
+            <button class="btn" type="button" data-act="openStay" data-noprint="1">Check in without printing</button>
+            ${ui.ciLate ? '' : html`<button class="btn" type="button" data-act="openStay" data-later="1" title="Room not ready yet: check in now and give the room from Rooms › Today">Check in now, room later</button>`}<span class="small quiet">Enter checks in</span></div>`)}
       </div>
       <div class="cicol">${step(2, 'Room', ui.roomSecs.length ? roomPicker() : html`<label class="f">Room or bed<input class="in" data-model="room" value="${ui.room ?? ''}" placeholder="e.g. 101, or Dorm A · Bed 2"></label>`,
         ui.room ? html`<span class="status info" style="margin-left:auto">${[ui.room, ...(ui.ciRooms ?? [])].join(', ')}</span>` : html`<span class="status mute" style="margin-left:auto">choose one</span>`)}</div>
     </form>`;
+}
+/**
+ * Where the guest is going, against Djubo (28 Nov 2026): the rooms picked, in big letters; green when they are Djubo's,
+ * amber when not, with why Djubo's room was not used (a guest not out yet, not cleaned).
+ */
+function djuboBar(who, hk) {
+  const picked = ui.room ? [ui.room, ...(ui.ciMulti ? ui.ciRooms ?? [] : [])] : [];
+  const dj = ui.ciHits ?? [];
+  if (!ui.bookingId || !picked.length) return '';
+  const missing = dj.filter((t) => !picked.includes(t));
+  const extra = picked.filter((t) => !dj.includes(t));
+  const why = (t) => (who(t) ? `${t}: ${who(t).guestName} not out yet` : hk[t] === 'dirty' ? `${t}: not cleaned` : '');
+  if (!dj.length) return html`<div class="cibar"><span class="small quiet">Checking in to</span><strong class="cibig">${picked.join(', ')}</strong><span class="small">Djubo gave no room: tell Djubo which room after check-in.</span></div>`;
+  if (!missing.length && !extra.length) return html`<div class="cibar same"><span class="small quiet">Checking in to</span><strong class="cibig">${picked.join(', ')}</strong><span class="small">✓ Same as Djubo.</span></div>`;
+  const reasons = missing.map(why).filter(Boolean);
+  return html`<div class="cibar diff"><span class="small quiet">Checking in to</span><strong class="cibig">${picked.join(', ')}</strong>
+    <span><strong>Different from Djubo</strong> (Djubo: ${dj.join(', ')})${missing.length && extra.length ? `: ${extra.join(', ')} instead of ${missing.join(', ')}` : ''}.</span>
+    ${reasons.length ? html`<span class="small">${reasons.join(' · ')}</span>` : ''}<span class="small">After check-in, move the guest in Djubo too.</span></div>`;
 }
 /** The room picker at check-in: search, only free (default), rooms and beds grouped by type with free counts and dirty marks. */
 function roomPicker() {
@@ -2734,6 +2757,7 @@ function roomPicker() {
   return html`<div class="row"><input class="in grow" type="search" data-model="roomQ" data-live value="${ui.roomQ ?? ''}" placeholder="Search room, bed or type   /" aria-label="Search rooms and beds" autocomplete="off">
       <button type="button" class="chip sm" aria-pressed="${!all}" data-act="pick" data-k="rpAll" data-id="${all ? '' : '1'}">Only free</button></div>
     <label class="tickline small"><input type="checkbox" data-act="ciMultiTog" ${ui.ciMulti ? 'checked' : ''}> Several rooms or beds for this guest${ui.ciMulti ? ': tap each one; the first holds the bill' : ''}</label>
+    ${djuboBar(who, hk)}
     ${(ui.ciTaken ?? []).length ? html`<div class="msg warn">Djubo has ${ui.ciTaken.join(', ')} for this booking, but ${ui.ciTaken.length === 1 ? 'it is' : 'they are'} taken now. Choose ${ui.ciTaken.length === 1 ? 'another' : 'others'} below, or check the guest there out first.</div>` : ''}
     ${(ui.ciRooms ?? []).length ? html`<div class="msg ok">Checking in to <strong>${[ui.room, ...ui.ciRooms].join(', ')}</strong> · one bill, on ${ui.room}</div>` : ''}
     ${ui.bookingId && ui.room && (ui.ciBooked ?? 1) > 1 + (ui.ciMulti ? (ui.ciRooms ?? []).length : 0) ? html`<div class="msg warn" style="display:block"><strong>Booked for ${ui.ciBooked} rooms or beds, ${1 + (ui.ciMulti ? (ui.ciRooms ?? []).length : 0)} picked.</strong>
@@ -2741,8 +2765,8 @@ function roomPicker() {
       <label class="tickline small" style="margin-top:4px"><input type="checkbox" data-model="ciShare" data-live ${ui.ciShare ? 'checked' : ''}> The others share (no extra beds)</label>
       <div class="small">Not ticked: the check-in goes ahead and Today shows "Beds missing" until they are assigned.</div></div>` : ''}
     <div class="rpick">${groups.length ? groups.map((g) => html`<div class="rpg"><div class="rph"><strong>${g.x.name}</strong><span class="small quiet">${g.free} of ${g.total} free</span></div>
-      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''}" ${u.taken && !(ui.ciLeft && ui.ciOutToo) ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
-        title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}" ${u.taken && ui.ciLeft && ui.ciOutToo ? 'data-past="1"' : ''}>${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
+      <div class="rpc">${g.shown.map((u) => html`<button type="button" class="rp ${ui.room === u.t || (ui.ciRooms ?? []).includes(u.t) ? 'on' : ''} ${u.taken ? 'taken' : ''} ${hk[u.t] === 'dirty' ? 'dirty' : ''} ${(ui.ciHits ?? []).includes(u.t) ? 'dj' : ''}" ${u.taken && !(ui.ciLeft && ui.ciOutToo) ? 'disabled' : ''} data-act="pickRoom" data-name="${u.t}"
+        title="${u.taken ? `${u.t}: ${u.taken}` : hk[u.t] === 'dirty' ? `${u.t}: dirty` : u.t}" ${u.taken && ui.ciLeft && ui.ciOutToo ? 'data-past="1"' : ''}>${(ui.ciHits ?? []).includes(u.t) ? html`<span class="rptag">Djubo</span>` : ''}${u.label}${hk[u.t] === 'dirty' && !u.taken ? html`<span class="rpd">dirty</span>` : ''}${u.taken ? html`<span class="rpd">${u.taken}</span>` : ''}</button>`)}</div></div>`)
       : html`<p class="empty">No free room or bed matches. Turn off "Only free" to see taken ones.</p>`}</div>`;
 }
 /** What is still to pay on a booking (Djubo's total less its advance), or 0. */
@@ -3129,6 +3153,8 @@ function roomBillPanel(r) {
 }
 actions.roomBill = async (d) => { ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); ui.recv = ui.refund = ui.rbForm = null; ui.error = null; if (!cache.credit) await load('credit'); rerender(); scrollTo(0, 0); };
 actions.rbClose = () => { ui.roomBill = null; ui.rbForm = null; rerender(); };
+/** Give a room to a guest checked in with "room later": their bill with Move room open. */
+actions.giveRoom = async (d) => { await actions.roomBill(d); await actions.rbForm({ f: 'move' }); rerender(); };
 actions.rbForm = async (d) => {
   ui.rbForm = d.f; ui.rbAmt = ui.rbNote = undefined; ui.mvSwap = null; ui.mvCheck = null; ui.mvAtt = null; ui.mvRoom = ui.swWith = undefined; ui.error = null;
   if (d.f === 'transfer') await load('credit');
@@ -3473,7 +3499,8 @@ actions.openStay = async (d = {}) => {
   const idDocs = Array.from({ length: adults }, (_, i) => ({ type: ui[`idT_${i}`] ?? (foreignGuest ? 'Passport' : 'Aadhaar'), number: ui[`idN_${i}`] ?? '', name: ui[`idName_${i}`] ?? (i === 0 ? ui.guest : '') }))
     .filter((x) => String(x.number).trim());
   const foreign = foreignGuest ? { passport: ui.fPass ?? '', visa: ui.fVisa ?? '', visaExpiry: ui.fVisaTo ?? '', arrivedOn: ui.fArr ?? '', formC: !!ui.fFormC } : undefined;
-  const r = await api('POST', B() + '/stays', { room: ui.room, rooms: ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
+  const later = d.later === '1';
+  const r = await api('POST', B() + '/stays', { room: later ? undefined : ui.room, roomLater: later || undefined, rooms: later ? [] : ui.ciMulti ? ui.ciRooms ?? [] : [], guestName: ui.guest, phone: ui.gPhone || undefined, city: ui.gCity || undefined, bookingId: ui.bookingId || undefined,
     reservationId: ui.resPicked?.id, dirtyOk: d.dirtyOk === '1' || undefined, adults,
     sharingBeds: ui.ciShare ? Math.max(0, (ui.ciBooked ?? 1) - 1 - (ui.ciMulti ? (ui.ciRooms ?? []).length : 0)) || undefined : undefined, children: Number(ui.ciKids) || 0, checkOutPlan: ui.ciOut ?? addDays(me.business.shiftDay, 1), idDocs, address: ui.ciAddr || undefined, comingFrom: ui.gCity || undefined,
     goingTo: ui.ciNext || undefined, nationality: ui.ciNat || undefined, foreign, past: !!(ui.ciLate && ui.ciLeft && ui.ciOutToo) || undefined, ...(ui.ciLate > 2 && !isMgr() ? { approverId: ui.apId, approverPin: ui.apPin } : {}) });
@@ -3483,7 +3510,7 @@ actions.openStay = async (d = {}) => {
   reopenStay = r.id;
   pendingOut = !!(ui.ciLate && ui.ciLeft && ui.ciOutToo);
   if (pendingOut) { flash = { kind: 'warn', text: `${ui.guest} checked in late to ${(r.rooms ?? [ui.room]).join(', ')}. ${due ? `Take the ${rs(due)} that was paid (Take payment), or move it to Credit if it was not, then` : 'Now'} check out below.` }; await refreshDeskAlerts(); go('#/rooms'); return; }
-  flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in to ${(r.rooms ?? [ui.room]).join(', ')}${r.grcNo ? ` · ${r.grcNo}` : ''}.${due ? ` Collect ${rs(due)} still to pay (Take payment, below).` : ''}` };
+  flash = { kind: due ? 'warn' : 'ok', text: `${ui.guest} checked in ${later ? 'with no room yet: give one from Rooms › Today when it is ready' : `to ${(r.rooms ?? [ui.room]).join(', ')}`}${r.grcNo ? ` · ${r.grcNo}` : ''}.${due ? ` Collect ${rs(due)} still to pay (Take payment, below).` : ''}` };
   await refreshDeskAlerts(); go('#/rooms');
 };
 /** The guest registration card, printed at check-in for the guest to sign. */
@@ -3910,7 +3937,7 @@ async function shiftScreen() {
     const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
     const carried = [...s.openOrders.map((o) => o.place), ...s.unpaidBills.map((x) => `${x.place ?? ''} ${x.bill_no}`.trim())];
     const djOpen = (s.djubo ?? []).filter((x) => !x.settlementId);
-    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0) + djOpen.length + (s.notCharged?.length ?? 0);
+    const block = ui.overdue.length + (s.notInDjubo?.length ?? 0) + (s.deskMissing?.length ?? 0) + djOpen.length + (s.notCharged?.length ?? 0) + (s.waitingRoom?.length ?? 0);
     const cd = ui.countDiff;
     // Counting turned off (26 Nov 2026): the page is the takings and what is pending, and Close the day closes it.
     // Refunds given back today come off (26 Nov 2026): a receipt taken by mistake and refunded nets to nothing.
@@ -3939,6 +3966,9 @@ async function shiftScreen() {
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
       ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
+        ${(s.waitingRoom ?? []).length ? html`<div class="msg bad" style="display:block"><strong>Waiting for a room: ${s.waitingRoom.map((x) => x.guestName).join(', ')}</strong>
+          <div class="small">Checked in with no room yet. Give each a room (Rooms › Today, Give room) before the day closes.</div>
+          <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
         ${(() => {
           // Rent till today means they leave today (28 Nov 2026): not "no rent" until they are still here at the close.
           const past = (s.notCharged ?? []).filter((x) => x.coveredTo < s.shiftDay);
@@ -3989,7 +4019,7 @@ async function shiftScreen() {
         <p class="small quiet">Closes ${dayName(s.shiftDay)} now and starts ${dayName(addDays(s.shiftDay, 1))}.${s.openOrders.length ? ` The ${plural(s.openOrders.length, 'open table')} carry on.` : ''} No drawer count (turned off in Settings, Staff).</p>
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}</form>`}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length || (s.waitingRoom ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}</form>`}
       ${ui.closed || !ui.countOn ? '' : html`<form class="panel"><h2>Count the cash drawer</h2>${errorBox()}
         ${ui.floatSet ? html`<div class="row between"><span>Float (fixed in Settings)</span><strong>${rs(ui.floatSet)}</strong></div>`
           : html`<label class="f">Opening float (₹)<input class="in" inputmode="decimal" data-model="float" value="${ui.float ?? ''}"></label>`}
@@ -4001,7 +4031,7 @@ async function shiftScreen() {
         ${cd ? html`<label class="f">Reason for the difference (required)<input class="in" data-model="reason" value="${ui.reason ?? ''}" autofocus></label>` : ''}
         ${s.notInDjubo?.length ? html`<label class="f">Why ${plural(s.notInDjubo.length, 'reservation')} made here ${s.notInDjubo.length === 1 ? 'is' : 'are'} not in Djubo yet (required)<input class="in" data-model="djuboReason" value="${ui.djuboReason ?? ''}" placeholder="e.g. Entered in Djubo, mail not come yet"></label>` : ''}
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
-        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}
+        <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length || (s.waitingRoom ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}
         <p class="small quiet">${Date.now() < ui.endsAt ? `The day ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts ${dayName(addDays(s.shiftDay, 1))} at once: money taken after this goes there.` : ''}</p></form>`}
       ${(ui.last?.noRent ?? []).length ? html`<div class="msg bad" style="display:block;margin-top:14px"><strong>${dayName(ui.last.shiftDay)} closed by itself with no rent for: ${ui.last.noRent.map((x) => `${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`).join(', ')}</strong>
         <div class="small">Get the nights into Djubo (the rent comes with its email), or a manager extends without Djubo.</div></div>` : ''}
@@ -5554,6 +5584,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   ui.npOpen ??= !!(unpaidOld.length || heavy.length);
   // ----- What to look at first.
   const look = [
+    ...((d.shiftClose?.waitingRoom ?? []).length ? [`Closed automatically with guests still waiting for a room: ${d.shiftClose.waitingRoom.join(', ')}`] : []),
     ...((d.shiftClose?.noRent ?? []).length ? [`Closed automatically with no rent for: ${d.shiftClose.noRent.map((x) => `${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`).join(', ')}`] : []),
     ...(d.shiftClose && !d.shiftClose.countedAt && !d.shiftClose.noCount ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
     ...(d.drawers ?? []).filter((x) => x.differencePaise).map((x) => `Cash ${x.differencePaise < 0 ? 'short' : 'over'} ${rs(Math.abs(x.differencePaise))} in ${x.holder}'s drawer`),

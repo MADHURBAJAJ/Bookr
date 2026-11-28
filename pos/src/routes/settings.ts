@@ -896,6 +896,10 @@ settingsRoutes.get(`${B}/guests/lookup`, requireAction('stays.edit'), async (c) 
 export const PAST_STAY = ' (past stay)';
 /** A guest who left the room with the bill still open (27 Nov 2026): the room is free for the next guest; checked out later. */
 export const LEFT_ROOM = ' (left room)';
+/** A guest checked in before a room was free (28 Nov 2026, "room later"): their stay holds this placeholder, unique per
+ *  stay, until Give room moves them in. Never a real room: nothing is marked dirty for it, and the day can't close with it. */
+export const WAITING_ROOM = 'Waiting for room · ';
+export const isWaiting = (room: string) => room.startsWith(WAITING_ROOM);
 export const realRoom = (room: string) => (room.endsWith(PAST_STAY) ? room.slice(0, -PAST_STAY.length) : room.endsWith(LEFT_ROOM) ? room.slice(0, -LEFT_ROOM.length) : room);
 
 settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
@@ -928,10 +932,12 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
     }
     return name;
   };
-  const room = await checkRoom(text(data, 'room', 'Room', { max: 40 })!);
+  // Room later (28 Nov 2026): checked in now, the room given when one is free and clean (Rooms › Today, Give room).
+  const later = data.roomLater === true && !past;
+  const room = later ? `${WAITING_ROOM}${guest.slice(0, 40)} #${crypto.randomUUID().slice(0, 4)}` : await checkRoom(text(data, 'room', 'Room', { max: 40 })!);
   // One check-in for a booking of several rooms or beds (24 Nov 2026): the other rooms come in `rooms`; each becomes its
   // own stay in the group of the first, so it shows taken, while the rent, food and payments go on the first room's bill.
-  const extraTyped = Array.isArray(data.rooms) ? (data.rooms as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim()).slice(0, 30) : [];
+  const extraTyped = Array.isArray(data.rooms) && !later ? (data.rooms as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim()).slice(0, 30) : [];
   const extra: string[] = [];
   for (const x of extraTyped) {
     const n = await checkRoom(x.trim().slice(0, 40));
@@ -943,7 +949,7 @@ settingsRoutes.post(`${B}/stays`, requireAction('stays.edit'), async (c) => {
     if (at?.dorm && [room, ...extra].some((o) => o !== n && wholeOf(o)?.dorm === at.dorm && (at.whole || wholeOf(o)?.whole))) fail(409, `${at.dorm} cannot be taken whole and by bed in one check-in.`);
   }
   // Housekeeping (25 Nov 2026): a room still marked dirty is asked about first (not for a past stay: nobody moves in).
-  const dirty = data.dirtyOk === true || past ? [] : await all<{ room: string }>(c.env.DB, "SELECT room FROM room_status WHERE business_id = ? AND status = 'dirty' AND room IN (SELECT value FROM json_each(?))",
+  const dirty = data.dirtyOk === true || past || later ? [] : await all<{ room: string }>(c.env.DB, "SELECT room FROM room_status WHERE business_id = ? AND status = 'dirty' AND room IN (SELECT value FROM json_each(?))",
     bid, JSON.stringify([room, ...extra]));
   if (dirty.length) {
     const names = dirty.map((x) => x.room).join(', ');
@@ -1245,7 +1251,7 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
   if (owing.length) fail(409, `${owing.map((m) => m.room).join(', ')} still ${owing.length === 1 ? 'has' : 'have'} money on ${owing.length === 1 ? 'its' : 'their'} own bill: move it to the first room's bill first (Move to another room).`);
   // A past stay's room (25 Nov 2026) takes its own name at check-out, and is not marked dirty: nobody left it today.
   // A guest who left the room earlier: it was marked dirty then, and someone else may be in it now.
-  const dirtyStmt = (room: string, at: number) => (room.endsWith(PAST_STAY) || room.endsWith(LEFT_ROOM) ? [] : [stmt(db, `INSERT INTO room_status (business_id, room, status, by_staff, at) VALUES (?, ?, 'dirty', ?, ?)
+  const dirtyStmt = (room: string, at: number) => (room.endsWith(PAST_STAY) || room.endsWith(LEFT_ROOM) || isWaiting(room) ? [] : [stmt(db, `INSERT INTO room_status (business_id, room, status, by_staff, at) VALUES (?, ?, 'dirty', ?, ?)
     ON CONFLICT (business_id, room) DO UPDATE SET status = 'dirty', note = NULL, by_staff = excluded.by_staff, at = excluded.at`, bid, room, c.get('staff').id, at)]);
   if (row.group_stay_id) {
     const t0 = now();
