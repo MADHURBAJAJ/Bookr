@@ -4570,7 +4570,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   const today = me.business.shiftDay;
   const ranges = [['This shift', today, today], ['Last shift', addDays(today, -1), addDays(today, -1)], ['Last 7 shifts', addDays(today, -6), today], ['This month', today.slice(0, 8) + '01', today]];
   const head = html`${pageHead('Reports', tab === 'owed' ? 'Rooms and credit accounts: what is owed right now.' : tab === 'gst' ? `GSTR-1 working for ${ui.gstMonth}` : `Shift ${from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`} · a shift runs 8 am to 8 am`)}
-    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['rooms', 'Rooms'], ['gst', 'GSTR-1'], ['owed', 'Who owes'], ['serving', 'Serving time']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
+    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['rooms', 'Rooms'], ['gst', 'GSTR-1'], ['owed', 'Who owes'], ['serving', 'Serving time'], ['kots', 'KOTs']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
     ${tab === 'gst' ? html`<form class="row" style="align-items:end;margin-bottom:16px"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
       <button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></form>`
     : tab !== 'owed' && tab !== 'events' ? html`<div class="row" style="align-items:end;margin-bottom:16px;justify-content:space-between">
@@ -4605,6 +4605,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   if (tab === 'gst') { await gstTab(head, ui.gstMonth); return; }
   if (tab === 'rooms') { await roomsReportTab(head, from, to); return; }
   if (tab === 'serving') { await servingTab(head, from, to); return; }
+  if (tab === 'kots') { await kotsTab(head, from, to); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   const cnTotal = r.creditNotes.reduce((t, n) => t + n.totalPaise, 0);
@@ -7346,6 +7347,90 @@ function servingCard(sv, day) {
       ${sv.undoneNotServed.map((x) => html`<tr><td>${time(x.at)}</td><td>${x.place} · ${x.qty} × ${x.name}</td><td><span class="badge bad">Undone, not served again</span></td><td>${x.by ?? ''}</td><td>${x.reason ?? ''}</td></tr>`)}</tbody></table></div>` : ''}
     <p class="small quiet" style="margin:0">Late is worked out from the first time an item was marked served, so an undo never makes a late item look on time. Times can't be typed or changed.</p></section>`;
 }
+/**
+ * Reports › KOTs (28 Nov 2026, managers and owners): every KOT with the bill it ended on, dishes cancelled after sending,
+ * food sent but not billed, and served times; or by item and category. A served photo loads only when its 📷 is tapped.
+ */
+async function kotsTab(head, from, to) {
+  const r = await api('GET', `${B()}/reports/kots?from=${from}&to=${to}`);
+  ui.kr = { r, view: 'kot', station: '', by: '', show: 'all', open: null, cat: '', q: '', sort: 'sent', photo: null };
+  const BILL = { paid: ['ok', 'Paid'], room: ['ok', 'To room'], credit: ['ok', 'On credit'], unpaid: ['warn', 'Billed, not paid'], open: ['warn', 'Table open'], void: ['bad', 'Bill voided · not billed'], cancelled: ['bad', 'Order cancelled'] };
+  const val = (l, q) => q * l.pricePaise;
+  rerender = () => {
+    const S = ui.kr;
+    const all = S.r.kots.filter((k) => !k.cancelKot);
+    const stations = [...new Set(all.map((k) => k.station))].sort();
+    const people = [...new Set(all.map((k) => k.by).filter(Boolean))].sort();
+    const served = (k) => {
+      const t = k.lines.filter((l) => l.mins !== null && l.qty > l.cancelledQty);
+      if (!t.length) return ['mute', 'Not timed'];
+      if (t.some((l) => l.late)) return ['bad', 'Late'];
+      if (t.some((l) => l.notMarked)) return ['warn', 'Not marked'];
+      if (t.every((l) => l.servedAt)) return ['ok', `On time · ${Math.round((Math.max(...t.map((l) => l.servedAt)) - k.at) / 60000)} min`];
+      return ['mute', 'Waiting'];
+    };
+    const rows = all.filter((k) => (!S.station || k.station === S.station) && (!S.by || k.by === S.by)
+      && (S.show === 'all' || (S.show === 'cx' && k.lines.some((l) => l.cancelledQty)) || (S.show === 'nb' && k.lines.some((l) => l.notBilledQty)) || (S.show === 'late' && served(k)[0] === 'bad')));
+    const lines = rows.flatMap((k) => k.lines.map((l) => ({ ...l, k })));
+    const cxQty = lines.reduce((t, l) => t + l.cancelledQty, 0), cxVal = lines.reduce((t, l) => t + val(l, l.cancelledQty), 0);
+    const nbVal = lines.reduce((t, l) => t + val(l, l.notBilledQty), 0), nbKots = rows.filter((k) => k.lines.some((l) => l.notBilledQty)).length;
+    const allCx = rows.filter((k) => k.lines.length && k.lines.every((l) => l.cancelledQty >= l.qty)).length;
+    const timed = rows.filter((k) => served(k)[0] !== 'mute' || k.lines.some((l) => l.mins !== null));
+    const late = rows.filter((k) => served(k)[0] === 'bad').length;
+    const items = lines.reduce((t, l) => t + l.qty, 0);
+    const byStation = stations.map((st) => `${st} ${rows.filter((k) => k.station === st).length}`).join(' · ');
+    const tiles = html`<div class="kpis">${kpi('KOTs sent', String(rows.length), byStation)}${kpi('Items sent', String(items), rows.length ? `avg ${(items / rows.length).toFixed(1)} per KOT` : '')}
+      ${kpi('Dishes cancelled after sending', String(cxQty), `${rs(cxVal)} at menu price${allCx ? ` · ${plural(allCx, 'KOT')} all cancelled` : ''}`, cxQty ? 'warn' : '')}
+      ${kpi('Sent, not billed', rs(nbVal), nbKots ? `${plural(nbKots, 'KOT')} · bill voided or order cancelled` : 'nothing', nbVal ? 'bad' : '')}
+      ${kpi('Served late', String(late), `of ${timed.length} timed`, late ? 'bad' : '')}</div>`;
+    const filters = html`<div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:12px">
+      <label class="f">Station<select class="in" data-act-change="krSet" data-k="station"><option value="">All</option>${stations.map((x) => html`<option ${S.station === x ? 'selected' : ''}>${x}</option>`)}</select></label>
+      <label class="f">Who sent<select class="in" data-act-change="krSet" data-k="by"><option value="">Anyone</option>${people.map((x) => html`<option ${S.by === x ? 'selected' : ''}>${x}</option>`)}</select></label>
+      <div class="f">Show<div class="chips">${[['all', 'All'], ['cx', 'Cancelled dishes'], ['nb', 'Not billed'], ['late', 'Late']].map(([v, t]) => html`<button type="button" class="chip" aria-pressed="${S.show === v}" data-act="krPick" data-k="show" data-v="${v}">${t}</button>`)}</div></div></div>`;
+    const sw = html`<div class="segs" style="margin-bottom:10px"><button type="button" class="chip" aria-pressed="${S.view === 'kot'}" data-act="krPick" data-k="view" data-v="kot">By KOT</button><button type="button" class="chip" aria-pressed="${S.view === 'item'}" data-act="krPick" data-k="view" data-v="item">By item and category</button></div>`;
+    const kotTable = html`<div class="scroll"><table class="t"><thead><tr><th>KOT</th><th>Time</th><th>Table / room</th><th>Station</th><th>Sent by</th><th class="num">Items</th><th>Bill</th><th>Served</th>${S.r.photos ? html`<th>Photo</th>` : ''}</tr></thead><tbody>
+      ${rows.length ? rows.map((k) => { const b = BILL[k.bill.state] ?? ['mute', k.bill.state]; const sv = served(k); const cx = k.lines.filter((l) => l.cancelledQty).length; const allc = k.lines.length && k.lines.every((l) => l.cancelledQty >= l.qty);
+        return html`<tr class="clickrow" data-act="krPick" data-k="open" data-v="${k.id}"><td><strong>KOT ${k.kotNo}</strong>${allc ? html` <span class="status bad">All cancelled</span>` : cx ? html` <span class="status warn">${cx} cancelled</span>` : ''}</td>
+          <td>${S.r.from !== S.r.to ? `${dayName(k.shiftDay)}, ` : ''}${time(k.at)}</td><td>${k.place}</td><td>${k.station}</td><td>${k.by ?? ''}</td><td class="num">${k.lines.reduce((t, l) => t + l.qty, 0)}</td>
+          <td>${k.bill.no ? `${k.bill.no} ` : ''}<span class="status ${b[0]}">${b[1]}</span></td><td><span class="status ${sv[0]}">${sv[1]}</span></td>
+          ${S.r.photos ? html`<td>${k.photo ? html`<button type="button" class="btn sm" data-act="krPhoto" data-id="${k.id}" aria-label="Served photo of KOT ${k.kotNo}">📷</button>` : html`<span class="quiet">—</span>`}</td>` : ''}</tr>
+          ${S.open === k.id ? html`<tr><td colspan="9" style="background:var(--soft)">${k.lines.map((l) => html`<div class="row between"><span style="${l.cancelledQty >= l.qty ? 'text-decoration:line-through;color:var(--bad)' : ''}">${l.qty} × ${l.name} <span class="small quiet">· ${l.category}</span></span>
+            <span class="small">${l.cancelledQty ? html`<span style="color:var(--bad)">${l.cancelledQty} cancelled${l.cancelBy ? ` by ${l.cancelBy}` : ''}${l.cancelReason ? ` · ${l.cancelReason}` : ''}</span>` : ''}${l.notBilledQty ? html` <span class="status bad">${l.notBilledQty} not billed</span>` : ''}${l.servedAt ? ` served ${time(l.servedAt)}` : ''}</span></div>`)}</td></tr>` : ''}`; })
+        : html`<tr><td colspan="9"><p class="empty">No KOTs match.</p></td></tr>`}</tbody></table></div>`;
+    // By item and category
+    const it = new Map();
+    for (const l of lines) {
+      const x = it.get(l.name) ?? { name: l.name, category: l.category, sent: 0, cx: 0, cxVal: 0, nb: 0, nbVal: 0, serveMins: [], late: 0, timed: 0, hours: new Map() };
+      x.sent += l.qty; x.cx += l.cancelledQty; x.cxVal += val(l, l.cancelledQty); x.nb += l.notBilledQty; x.nbVal += val(l, l.notBilledQty);
+      if (l.mins !== null && l.servedAt) { x.serveMins.push((l.servedAt - l.k.at) / 60000); x.timed++; if (l.late) x.late++; }
+      const h = new Date(l.k.at + 19800000).getUTCHours(); x.hours.set(h, (x.hours.get(h) ?? 0) + l.qty);
+      it.set(l.name, x);
+    }
+    const cats = [...new Set([...it.values()].map((x) => x.category))].sort();
+    const key = { sent: (x) => x.sent, cx: (x) => x.cx, nb: (x) => x.nbVal || x.nb, late: (x) => (x.timed ? x.late / x.timed : -1) }[S.sort];
+    const q = S.q.trim().toLowerCase();
+    const its = [...it.values()].filter((x) => (!S.cat || x.category === S.cat) && (!q || x.name.toLowerCase().includes(q))).sort((a, b) => key(b) - key(a));
+    const busiest = (x) => { const [h] = [...x.hours].sort((a, b) => b[1] - a[1])[0] ?? []; return h === undefined ? '' : `${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`; };
+    const itemTable = html`<div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:10px;align-items:end"><label class="f">Category<select class="in" data-act-change="krSet" data-k="cat"><option value="">All</option>${cats.map((x) => html`<option ${S.cat === x ? 'selected' : ''}>${x}</option>`)}</select></label>
+        <label class="f">Item<input class="in" type="search" data-act-change="krSet" data-k="q" value="${S.q}" placeholder="Search item"></label>
+        <div class="f">Sort by<div class="chips">${[['sent', 'Most sent'], ['cx', 'Most cancelled'], ['nb', 'Not billed'], ['late', 'Most late']].map(([v, t]) => html`<button type="button" class="chip" aria-pressed="${S.sort === v}" data-act="krPick" data-k="sort" data-v="${v}">${t}</button>`)}</div></div></div>
+      <div class="scroll"><table class="t"><thead><tr><th>Item</th><th>Category</th><th class="num">Qty sent</th><th class="num">Cancelled</th><th class="num">Not billed</th><th class="num">Avg to serve</th><th class="num">Late</th><th>Busiest</th></tr></thead><tbody>
+      ${its.length ? its.map((x) => html`<tr><td><strong>${x.name}</strong></td><td>${x.category}</td><td class="num">${x.sent}</td>
+        <td class="num">${x.cx ? html`<span class="status warn">${x.cx} · ${rs(x.cxVal)}</span>` : '—'}</td><td class="num">${x.nb ? html`<span class="status bad">${x.nb}${x.nbVal ? ` · ${rs(x.nbVal)}` : ''}</span>` : '—'}</td>
+        <td class="num">${x.serveMins.length ? `${Math.round(x.serveMins.reduce((a, b) => a + b, 0) / x.serveMins.length)} min` : html`<span class="quiet">not timed</span>`}</td>
+        <td class="num">${x.timed ? (x.late / x.timed >= 0.25 ? html`<span class="status bad">${Math.round((x.late / x.timed) * 100)}%</span>` : `${Math.round((x.late / x.timed) * 100)}%`) : '—'}</td><td>${busiest(x)}</td></tr>`)
+        : html`<tr><td colspan="8"><p class="empty">No items match.</p></td></tr>`}</tbody></table></div>`;
+    const ph = S.photo ? (() => { const withP = rows.filter((k) => k.photo); const k = withP.find((x) => x.id === S.photo) ?? withP[0];
+      return k ? html`<div class="modal" role="dialog" aria-label="Served photo"><div class="panel" style="max-width:520px;width:100%"><div class="row between"><strong>KOT ${k.kotNo} · ${k.place}</strong><button class="btn" type="button" data-act="krPhoto" data-id="">Close</button></div>
+        <img src="/api${B()}/serving/photo/${k.photo}" alt="Served photo of KOT ${k.kotNo}" style="width:100%;max-height:70vh;object-fit:contain;border-radius:10px;background:var(--soft)">
+        <div class="row between"><span class="small quiet">${time(k.at)} · ${k.station}</span>${withP.length > 1 ? html`<button class="btn" type="button" data-act="krPhoto" data-id="${withP[(withP.indexOf(k) + 1) % withP.length].id}">Next photo ›</button>` : ''}</div></div></div>` : ''; })() : '';
+    paint(shell('#/reports', html`${head}<div class="stack">${tiles}<section class="panel">${filters}${sw}${S.view === 'kot' ? kotTable : itemTable}</section></div>${ph}`));
+  };
+  rerender();
+}
+actions.krPick = (d) => { const S = ui.kr; if (d.k === 'open') S.open = S.open === d.v ? null : d.v; else S[d.k] = d.v; rerender(); };
+actions.krSet = (d, el) => { ui.kr[d.k] = el.value; rerender(); };
+actions.krPhoto = (d) => { ui.kr.photo = d.id || null; rerender(); };
 async function servingTab(head, from, to) {
   const r = await api('GET', `${B()}/reports/serving?from=${from}&to=${to}`);
   const pctLate = (x) => (x.marked ? `${Math.round((x.late / x.marked) * 100)}%` : '');

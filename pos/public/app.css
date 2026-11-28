@@ -1222,3 +1222,8 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .cisearch { margin-bottom: 8px; }
 .cisearch .in { font-size: 15px; }
 .cimore { margin-top: 8px; text-align: left; justify-content: flex-start; border-style: dashed; }
+
+/* Reports › KOTs (28 Nov 2026): rows open to their dishes; the served photo opens over the page. */
+tr.clickrow { cursor: pointer; }
+tr.clickrow:hover td { background: var(--soft); }
+.modal { position: fixed; inset: 0; z-index: 50; background: var(--scrim); display: grid; place-items: center; padding: 16px; }

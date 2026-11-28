@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { all, one, type DB } from '../../../src/db';
 import { date, fail } from '../../../src/http';
 import { requireAction, requireStaff } from '../auth';
+import { can } from '../permissions';
 import { clock, bizOf, loadBusiness, type Business } from '../util';
 import { billNo, billTaxRows, creditNoteNo, fyOf, type TaxRow } from '../billing';
 import type { AppEnv } from '../types';
@@ -282,6 +283,97 @@ reportRoutes.get(`${B}/reports/serving`, requireAction('reports.view'), async (c
   if (Date.parse(to) - Date.parse(from) > 92 * 86_400_000) fail(400, 'Choose at most 3 months.');
   const sum = servingSummary(await timedLines(c.env.DB, c.get('businessId'), { from, to }));
   return c.json({ from, to, ...sum });
+});
+
+/**
+ * KOTs (28 Nov 2026, managers and owners): every KOT of the shifts chosen, each dish with its category and menu price; the
+ * dishes cancelled after sending (from the cancel KOTs, with who and why from the exceptions log); the bill each KOT ended on
+ * (paid, to a room, on credit, table open, bill voided, order cancelled); served times and the served photo, if any. "Not
+ * billed" is food sent and not cancelled whose order was cancelled, or whose every bill was voided and the order is closed.
+ */
+reportRoutes.get(`${B}/reports/kots`, requireAction('reports.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const from = date({ v: c.req.query('from') }, 'v', 'From');
+  const to = date({ v: c.req.query('to') }, 'v', 'To');
+  if (to < from) fail(400, 'The end date is before the start.');
+  if (Date.parse(to) - Date.parse(from) > 92 * 86_400_000) fail(400, 'Choose at most 3 months.');
+  type K = { id: string; kot_no: number; station: string; printed_at: number; lines: string; order_id: string; place: string; o_status: string; by_name: string | null; shift_day: string };
+  const kots = await all<K>(db, `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.printed_at, k.lines, k.order_id, o.place, o.status AS o_status, s.name AS by_name, k.shift_day
+    FROM kots k JOIN orders o ON o.id = k.order_id LEFT JOIN staff s ON s.id = k.by_staff
+    WHERE k.business_id = ? AND k.shift_day BETWEEN ? AND ? ORDER BY k.printed_at DESC LIMIT 3000`, bid, from, to);
+  const orderIds = JSON.stringify([...new Set(kots.map((k) => k.order_id))]);
+  const [cancels, bills, events] = await Promise.all([
+    // Cancel KOTs of these orders, whenever they were made (a cancel can come the next shift).
+    all<{ order_id: string; printed_at: number; lines: string; place: string }>(db, `SELECT k.order_id, k.printed_at, k.lines, o.place FROM kots k JOIN orders o ON o.id = k.order_id
+      WHERE k.business_id = ? AND k.order_id IN (SELECT value FROM json_each(?)) AND k.lines LIKE '%"cancelled":true%'`, bid, orderIds),
+    all<{ order_id: string; bill_no: string; status: string; room: number; credit: number }>(db, `SELECT b.order_id, b.bill_no, b.status,
+        EXISTS (SELECT 1 FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = b.id AND p.mode = 'room') AS room,
+        EXISTS (SELECT 1 FROM allocations a JOIN payments p ON p.id = a.payment_id WHERE a.bill_id = b.id AND p.mode = 'credit') AS credit
+      FROM bills b WHERE b.business_id = ? AND b.order_id IN (SELECT value FROM json_each(?)) ORDER BY b.printed_at`, bid, orderIds),
+    all<{ ref: string; reason: string | null; detail: string | null; at: number; by_name: string | null }>(db, `SELECT e.ref, e.reason, e.detail, e.at, s.name AS by_name
+      FROM pos_events e LEFT JOIN staff s ON s.id = e.by_staff WHERE e.business_id = ? AND e.kind = 'kot_cancel' AND e.shift_day >= ?`, bid, from),
+  ]);
+  // Each dish's category and menu price, by its order line (or by name for KOTs before lines were kept on them).
+  const parsed = kots.map((k) => ({ k, lines: JSON.parse(k.lines) as { name: string; qty: number; lineId?: string; cancelled?: boolean; mins?: number }[] }));
+  const lineIds = JSON.stringify([...new Set(parsed.flatMap((x) => x.lines.map((l) => l.lineId).filter((v): v is string => typeof v === 'string')))]);
+  const [olines, menu] = await Promise.all([
+    all<{ id: string; price_paise: number; category: string | null }>(db, `SELECT ol.id, ol.price_paise, m.category FROM order_lines ol LEFT JOIN menu_items m ON m.id = ol.item_id
+      WHERE ol.id IN (SELECT value FROM json_each(?))`, lineIds),
+    all<{ name: string; price_paise: number; category: string }>(db, 'SELECT name, price_paise, category FROM menu_items WHERE business_id = ?', bid),
+  ]);
+  const byLine = new Map(olines.map((x) => [x.id, x]));
+  const byName = new Map(menu.map((m) => [m.name.toLowerCase(), m]));
+  // What was cancelled, per order line (or per order and dish name), and who cancelled it and why.
+  const cancelled = new Map<string, { qty: number; by: string | null; reason: string | null }>();
+  for (const ck of cancels) {
+    const ev = events.find((e) => e.ref.startsWith(`${ck.place} · `) && Math.abs(e.at - ck.printed_at) < 15_000);
+    for (const l of JSON.parse(ck.lines) as { name: string; qty: number; lineId?: string; cancelled?: boolean }[]) {
+      if (!l.cancelled) continue;
+      const key = l.lineId ?? `${ck.order_id}|${l.name.toLowerCase()}`;
+      const v = cancelled.get(key) ?? { qty: 0, by: ev?.by_name ?? null, reason: ev?.reason ?? null };
+      v.qty += Math.abs(Number(l.qty) || 0);
+      cancelled.set(key, v);
+    }
+  }
+  const billOf = (orderId: string, oStatus: string) => {
+    const bs = bills.filter((b) => b.order_id === orderId);
+    const live = bs.filter((b) => b.status !== 'void');
+    const last = live[live.length - 1] ?? bs[bs.length - 1] ?? null;
+    if (oStatus === 'cancelled') return { no: last?.bill_no ?? null, state: 'cancelled' };
+    if (!live.length) return { no: last?.bill_no ?? null, state: bs.length && oStatus === 'closed' ? 'void' : 'open' };
+    if (live.some((b) => b.status === 'printed')) return { no: last!.bill_no, state: 'unpaid' };
+    return { no: last!.bill_no, state: live.some((b) => b.room) ? 'room' : live.some((b) => b.credit) ? 'credit' : 'paid' };
+  };
+  const timed = await timedLines(db, bid, { from, to });
+  const served = new Map(timed.map((t) => [`${t.kotId}|${t.lineNo}`, t]));
+  // Oldest first, so a cancel comes off the earlier KOT of the same dish; then newest first again.
+  const out = [...parsed].reverse().map(({ k, lines }) => {
+    const isCancelKot = lines.length > 0 && lines.every((l) => l.cancelled);
+    const bill = billOf(k.order_id, k.o_status);
+    const notBilledOrder = bill.state === 'cancelled' || bill.state === 'void';
+    let photo: string | null = null;
+    const ls = lines.map((l, lineNo) => {
+      const ol = l.lineId ? byLine.get(l.lineId) : undefined;
+      const m = byName.get(String(l.name).toLowerCase());
+      const key = l.lineId ?? `${k.order_id}|${String(l.name).toLowerCase()}`;
+      const cx = cancelled.get(key);
+      const qty = Math.abs(Number(l.qty) || 0);
+      // A cancel shared over the KOTs of the same dish: the earliest KOT carries it first.
+      const cq = isCancelKot || !cx ? 0 : Math.min(qty, cx.qty);
+      if (cx && cq) cx.qty -= cq;
+      const t = served.get(`${k.id}|${lineNo}`);
+      if (t?.photo && t.batch && !photo) photo = t.batch;
+      return { name: String(l.name), qty, category: ol?.category ?? m?.category ?? 'Other', pricePaise: ol?.price_paise ?? m?.price_paise ?? 0,
+        cancelledQty: cq, cancelBy: cq ? cx?.by ?? null : null, cancelReason: cq ? cx?.reason ?? null : null,
+        notBilledQty: notBilledOrder && !isCancelKot ? qty - cq : 0,
+        mins: typeof l.mins === 'number' ? l.mins : null, servedAt: t?.firstAt ?? null, late: !!(t && t.firstAt && t.firstAt > t.dueAt),
+        notMarked: !!(t && !t.firstAt && !t.orderOpen) };
+    });
+    return { id: k.id, kotNo: k.kot_no, at: k.printed_at, shiftDay: k.shift_day, place: k.place, station: k.station, by: k.by_name, cancelKot: isCancelKot,
+      bill, photo, lines: ls };
+  }).reverse();
+  return c.json({ from, to, kots: out, photos: can(c.get('staff').role, 'serve.manage') });
 });
 
 // GSTR-1 working for one calendar month, per GST-registered billing name: sales to unregistered buyers (B2C small) by rate,
