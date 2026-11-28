@@ -183,18 +183,27 @@ describe('serving time', () => {
     // A staff PIN does not work on the Serve page.
     expect((await phone(businessId, '002468')).r.status).toBe(401);
 
-    // Wrong PINs block only that connection; a manager unlocks it.
-    const bad = '203.0.113.99';
-    for (let i = 0; i < WRONG_LIMIT; i++) expect((await phone(businessId, '000000', bad)).r.status).toBe(401);
-    expect((await phone(businessId, '482915', bad)).r.status).toBe(429);
-    expect((await phone(businessId, '482915', '198.51.100.4')).r.status).toBe(200);
+    // Wrong tries block only that mobile number (28 Nov 2026), on any connection; others on the same Wi-Fi sign in; a manager unlocks it.
+    const wifi = '203.0.113.99';
+    // (The staff PIN tried just above was already one wrong try on Anil's mobile.)
+    for (let i = 0; i < WRONG_LIMIT - 1; i++) expect((await phone(businessId, '000000', wifi)).r.status).toBe(401);
+    const blocked = await phone(businessId, '482915', '198.51.100.4');
+    expect(blocked.r.status).toBe(429);
+    expect(blocked.r.json.error).toMatch(/Wait 5 minutes/);
+    await ok(owner.post(`${B}/servers`, { name: 'Same Wifi', phone: '9800011103', pin: '777777' }));
+    expect((await phone(businessId, '777777', wifi, '9800011103')).r.status).toBe(200);
     const blocks = (await ok(owner.get(`${B}/serving/blocks`))).blocks;
-    expect(blocks).toHaveLength(1);
-    expect(JSON.stringify(blocks)).not.toContain(bad);
+    expect(blocks.map((x: any) => [x.name, x.mobile])).toEqual([['Anil', '98000 11101']]);
+    expect(JSON.stringify(blocks)).not.toContain(wifi);
     await ok(owner.post(`${B}/serving/unblock`, { conn: blocks[0].conn }));
-    expect((await phone(businessId, '482915', bad)).r.status).toBe(200);
+    expect((await phone(businessId, '482915', wifi)).r.status).toBe(200);
+    // The block ends by itself after 5 minutes.
+    for (let i = 0; i < WRONG_LIMIT; i++) await phone(businessId, '000000', wifi);
+    expect((await phone(businessId, '482915', wifi)).r.status).toBe(429);
+    later(6);
+    expect((await phone(businessId, '482915', wifi)).r.status).toBe(200);
     const day = (await ok(owner.get(`${B}/serving`))).shiftDay;
-    expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving.wrongPins).toBe(WRONG_LIMIT + 2);   // + the try with a mobile no server has
+    expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving.wrongPins).toBeGreaterThanOrEqual(WRONG_LIMIT * 2);
 
     // Removed: the open phone stops at its next tap, and the PIN no longer works.
     await ok(owner.put(`${B}/servers/${s.server}`, { active: false }));

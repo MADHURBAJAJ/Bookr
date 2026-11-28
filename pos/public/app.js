@@ -7204,7 +7204,7 @@ async function servingScreen() {
     paint(shell('#/', html`${pageHead('Serving', `Shift of ${dayName(m.shiftDay)} · timers move every 30 seconds`, html`<a class="btn" href="#/">Back to tables</a>`)}${errorBox()}
       <div class="msg">A server can undo their own tap for 2 minutes. After that, only a manager can, here, with a reason. Every undo and every item marked here shows on the Daily check.
         Servers sign in at <b>${location.origin}/serve/${me.business.id}</b></div>
-      ${(ui.svBlocks ?? []).length ? html`<section class="panel"><h2>Blocked by wrong server PINs</h2>${ui.svBlocks.map((b) => html`<div class="row between"><span>A connection${b.known ? ' servers use (likely the hotel Wi-Fi)' : ''}: ${b.wrong} wrong PINs, last at ${time(b.last)}. Free again at ${time(b.until)}.</span>
+      ${(ui.svBlocks ?? []).length ? html`<section class="panel"><h2>Blocked by wrong server PINs (5 minutes)</h2>${ui.svBlocks.map((b) => html`<div class="row between"><span>${b.mobile ? `${b.name ?? 'Mobile'} · ${b.mobile}` : 'A connection with no mobile number'}: ${b.wrong} wrong tries, last at ${time(b.last)}; open again at ${time(b.until)}</span>
         <button class="btn" type="button" data-act="svUnblock" data-c="${b.conn}">Unlock</button></div>`)}</section>` : ''}
       <section class="panel"><h2>Waiting to be served</h2>
         ${m.waiting.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Table</th><th>Item</th><th>Sent</th><th>Due</th><th>State</th><th></th></tr></thead><tbody>

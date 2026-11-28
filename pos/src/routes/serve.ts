@@ -57,7 +57,8 @@ async function tries(db: D1Database, bid: string, conn: string, t: number) {
   const r = await one<{ wrong: number; known: number }>(db, `SELECT
       (SELECT count(*) FROM serve_signins WHERE business_id = ?1 AND conn = ?2 AND ok = 0 AND cleared_at IS NULL AND at > ?3) AS wrong,
       EXISTS (SELECT 1 FROM serve_signins WHERE business_id = ?1 AND conn = ?2 AND ok = 1 AND at > ?4) AS known`, bid, conn, t - TRY_WINDOW_MS, t - KNOWN_MS);
-  return { wrong: r?.wrong ?? 0, limit: r?.known ? WRONG_LIMIT_KNOWN : WRONG_LIMIT };
+  // A mobile number gets 10 wrong tries; the larger allowance is only for a shared connection without a mobile.
+  return { wrong: r?.wrong ?? 0, limit: r?.known && !conn.startsWith('m:') ? WRONG_LIMIT_KNOWN : WRONG_LIMIT };
 }
 
 // ---------- the server's phone
@@ -74,7 +75,9 @@ serveRoutes.post('/serve/signin', async (c) => {
   const b = await loadBusiness(c.env.DB, bid);
   const t = now();
   const day = clock(b, t).shiftDay;
-  const conn = await connOf(c, bid);
+  // Wrong tries block only that mobile number (28 Nov 2026), not everyone on the hotel Wi-Fi. A try without a mobile
+  // number is counted against the connection, as before.
+  const conn = phone ? `m:${phone}` : await connOf(c, bid);
   const tr = await tries(c.env.DB, bid, conn, t);
   if (tr.wrong >= tr.limit) fail(429, 'Too many wrong tries. Wait 5 minutes and try again, or ask a manager to unlock it (Counter › Serving).');
   // The mobile number says who it is (28 Nov 2026); the PIN proves it.
@@ -283,8 +286,13 @@ serveRoutes.get(`${B}/serving/blocks`, requireAction('serve.manage'), async (c) 
     SELECT s.conn, count(*) AS wrong, max(s.at) AS last,
       EXISTS (SELECT 1 FROM serve_signins k WHERE k.business_id = s.business_id AND k.conn = s.conn AND k.ok = 1 AND k.at > ?3) AS known
     FROM serve_signins s WHERE s.business_id = ?1 AND s.ok = 0 AND s.cleared_at IS NULL AND s.at > ?2 GROUP BY s.conn`, bid, t - TRY_WINDOW_MS, t - KNOWN_MS);
-  return c.json({ blocks: rows.filter((r) => r.wrong >= (r.known ? WRONG_LIMIT_KNOWN : WRONG_LIMIT))
-    .map((r) => ({ conn: r.conn, wrong: r.wrong, last: r.last, known: !!r.known, until: r.last + TRY_WINDOW_MS })) });
+  const names = new Map((await all<{ phone: string; name: string }>(c.env.DB, 'SELECT phone, name FROM servers WHERE business_id = ? AND active = 1 AND phone IS NOT NULL', bid)).map((s) => [s.phone, s.name]));
+  return c.json({ blocks: rows.filter((r) => r.wrong >= (r.known && !r.conn.startsWith('m:') ? WRONG_LIMIT_KNOWN : WRONG_LIMIT))
+    .map((r) => {
+      const phone = r.conn.startsWith('m:') ? r.conn.slice(2) : null;
+      return { conn: r.conn, wrong: r.wrong, last: r.last, known: !!r.known, until: r.last + TRY_WINDOW_MS,
+        mobile: phone ? `${phone.slice(0, 5)} ${phone.slice(5)}` : null, name: phone ? names.get(phone) ?? null : null };
+    }) });
 });
 serveRoutes.post(`${B}/serving/unblock`, requireAction('serve.manage'), async (c) => {
   const data = await body(c);
