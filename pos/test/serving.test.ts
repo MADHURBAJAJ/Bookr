@@ -154,10 +154,31 @@ describe('serving time', () => {
     expect(tiles).toHaveLength(1);
     expect(tiles[0].items.map((i: any) => i.name)).toEqual(['Masala Dosa']);
     const day = (await ok(owner.get(`${B}/serving`))).shiftDay;
-    // While the order runs, the dosa is still waiting; once its bill is closed and it was never marked, it is "not marked".
+    // While the order runs, the dosa is still waiting.
     expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving).toMatchObject({ timed: 1, waiting: 1, notMarked: 0, late: 0 });
+    // Paid before the food went out (28 Nov 2026): still on the Serve list, still waiting, and it can be marked served.
     await q("UPDATE orders SET status = 'closed' WHERE id = ?", o);
+    expect((await p.get('/serve/kots')).json.kots.map((k: any) => k.place)).toEqual(['T8']);
+    expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving).toMatchObject({ timed: 1, waiting: 1, notMarked: 0 });
+    // Once the day is closed and it was never marked: off the list (for the manager), counted as "not marked".
+    await q(`INSERT INTO shift_closes (id, business_id, shift_day, opening_float_paise, counted, counted_paise, expected_paise, difference_paise, totals, closed_at)
+      VALUES (?, ?, ?, 0, '{}', 0, 0, 0, '{}', ?)`, crypto.randomUUID(), businessId, day, Date.now());
+    expect((await ok(owner.get(`${B}/serving`))).waiting).toEqual([]);
     expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving).toMatchObject({ timed: 1, waiting: 0, notMarked: 1, late: 0 });
+  });
+
+  it('keeps a paid KOT on the Serve list until it is marked served', async () => {
+    const s = await business();
+    const { B, counter, ok, businessId } = s;
+    const o = (await ok(counter.post(`${B}/orders`, { kind: 'table', place: 'OH1' }))).id;
+    await ok(counter.post(`${B}/orders/${o}/items`, { itemId: s.items['Masala Dosa'], delta: 1 }));
+    await ok(counter.post(`${B}/orders/${o}/kot`));
+    const kotId = (await q('SELECT id FROM kots WHERE order_id = ?', o))[0].id;
+    await q("UPDATE orders SET status = 'closed' WHERE id = ?", o);
+    const { p } = await phone(businessId, '482915');
+    expect((await p.get('/serve/kots')).json.kots.map((k: any) => k.place)).toEqual(['OH1']);
+    await ok(p.post(`/serve/kots/${kotId}/served`, { lines: [0] }));
+    expect((await p.get('/serve/kots')).json.kots).toEqual([]);
   });
 
   it('keeps servers to the Serve page: PIN rules, wrong-PIN blocks per connection, removal and day close', async () => {

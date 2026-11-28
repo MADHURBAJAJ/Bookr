@@ -7795,8 +7795,8 @@ function servingCard(sv, day) {
     <div class="dc-tiles">
       <div class="dc-tile none"><span class="k">Items timed</span><span class="v">${sv.timed}</span><span class="n">${sv.marked ? `${Math.round((sv.onTime / sv.marked) * 100)}% of served on time` : 'none served yet'}</span></div>
       <div class="dc-tile ${sv.late ? 'bad' : 'none'}"><span class="k">Late</span><span class="v">${sv.late}</span><span class="n">${sv.late ? `average ${sv.avgLateMins} min late` : 'none'}</span></div>
-      <div class="dc-tile ${sv.notMarked ? 'warn' : 'none'}"><span class="k">Not marked served</span><span class="v">${sv.notMarked}</span><span class="n">bill closed, never marked</span></div>
-      ${sv.waiting ? html`<div class="dc-tile none"><span class="k">Still waiting</span><span class="v">${sv.waiting}</span><span class="n">orders still open</span></div>` : ''}
+      <div class="dc-tile ${sv.notMarked ? 'warn' : 'none'}"><span class="k">Not marked served</span><span class="v">${sv.notMarked}</span><span class="n">never marked by day close</span></div>
+      ${sv.waiting ? html`<div class="dc-tile none"><span class="k">Still waiting</span><span class="v">${sv.waiting}</span><span class="n">on the Serve list now</span></div>` : ''}
       <div class="dc-tile ${sv.undoneByManager ? 'warn' : 'none'}"><span class="k">Undone by manager</span><span class="v">${sv.undoneByManager}</span><span class="n">${sv.undoneByManager ? 'see below' : 'none'}</span></div>
       <div class="dc-tile ${sv.undoneByServer ? 'warn' : 'none'}"><span class="k">Undone by server (2 min)</span><span class="v">${sv.undoneByServer}</span><span class="n">${sv.serverUndos.map((x) => `${x.name} ${x.n}`).join(' · ') || 'none'}</span></div>
       <div class="dc-tile ${sv.undoneNotServed.length ? 'bad' : 'none'}"><span class="k">Undone, not served again</span><span class="v">${sv.undoneNotServed.length}</span><span class="n">${sv.undoneNotServed.length ? 'check' : 'none'}</span></div>
@@ -7899,7 +7899,7 @@ async function servingTab(head, from, to) {
     ${rows.map((x) => html`<tr><td>${x.label ?? x.key}</td><td class="num">${x.timed}</td><td class="num">${x.late}</td><td class="num">${pctLate(x)}</td><td class="num">${x.notMarked || ''}</td><td class="num">${x.avgMins ?? ''}</td>${extra ? html`<td class="num">${x.setMins}</td>` : ''}</tr>`)}</tbody></table></div>` : html`<p class="quiet">Nothing timed.</p>`}</section>`;
   rerender = () => paint(shell('#/reports', html`${head}
     <div class="kpis">${kpi('Items timed', String(r.timed), r.marked ? `${Math.round((r.onTime / r.marked) * 100)}% of served on time` : '')}${kpi('Late', String(r.late), r.late ? `average ${r.avgLateMins} min late` : '', r.late ? 'bad' : '')}
-      ${kpi('Not marked served', String(r.notMarked), 'bill closed, never marked: not counted as late or on time', r.notMarked ? 'warn' : '')}${r.waiting ? kpi('Still waiting', String(r.waiting), 'orders still open') : ''}</div>
+      ${kpi('Not marked served', String(r.notMarked), 'never marked by day close: not counted as late or on time', r.notMarked ? 'warn' : '')}${r.waiting ? kpi('Still waiting', String(r.waiting), 'on the Serve list now') : ''}</div>
     <p class="small quiet" style="margin:-4px 0 12px">Time is from the KOT to when the item was first marked served. "Set" is the serve time the KOT was sent with. An item often late may have its time set too low.</p>
     <div class="stack">${table('By item', r.byItem, 'Item', true)}${table('By hour the KOT was sent', r.byHour.map((x) => ({ ...x, label: `${x.key}:00` })), 'Hour')}
       ${table('By day', r.byDay.map((x) => ({ ...x, label: dayName(x.key) })), 'Shift')}${table('By server', r.byServer, 'Server')}</div>`));

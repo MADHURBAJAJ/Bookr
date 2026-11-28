@@ -86,7 +86,7 @@ tab age limit, menu and reason lists are settings per business.
 - **Serving time.** Each category has a "Serve in … min" (empty: not timed; bar categories start empty); an item may have
   its own (0: never timed), also as the "Serve time (min)" column of the menu sheet. Each KOT line keeps its minutes, so
   later menu changes don't change old results. Servers (their own role, kept apart from staff) sign in on their own phones
-  at `/#/serve/<business id>` with a 6-digit PIN that works only there and opens only the Serve screen: running KOTs,
+  at `/#/serve/<business id>` with a 6-digit PIN that works only there and opens only the Serve screen: running KOTs (a KOT stays there until its food is marked served, even once the bill is paid; at day close what is left counts as not marked),
   **Complete** / **Part** / **Served**, a photo of the KOT and the food. Wrong PINs block only that connection (10 in 15
   minutes; 30 from a connection servers use), a manager unlocks it. Removing a server ends their sign-in at once; sign-ins
   end at day close. A server can undo their own tap for 2 minutes; after that a manager undoes it on **Tables › Serving**

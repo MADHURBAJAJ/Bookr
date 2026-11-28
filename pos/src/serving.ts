@@ -27,24 +27,33 @@ export interface TimedLine {
   kotId: string; kotNo: number; orderId: string; place: string; station: string; lineNo: number;
   name: string; qty: number; options: string[]; remark: string | null; mins: number;
   sentAt: number; dueAt: number; shiftDay: string;
-  /** Its order is still running (open, tab or billed): a line not marked yet is still waiting, not "not marked". */
+  /**
+   * Still on the running list: its order is open, a tab or billed, or (paid or not) its shift day is not closed yet. A line
+   * not marked yet is then still waiting; once the day is closed (or its order long done) it is "not marked".
+   */
   orderOpen: boolean;
   servedId: string | null; firstAt: number | null; servedAt: number | null; batch: string | null;
   by: string | null; byManager: boolean; photo: boolean; undoneAt: number | null; undoneBy: string | null; undoReason: string | null;
 }
-interface KotRow { id: string; kot_no: number; station: string; printed_at: number; lines: string; order_id: string; place: string; shift_day: string; status: string }
+interface KotRow { id: string; kot_no: number; station: string; printed_at: number; lines: string; order_id: string; place: string; shift_day: string; status: string; running: number }
 interface ServedRow { id: string; kot_id: string; line_no: number; batch: string; first_at: number; served_at: number | null; photo_at: number | null;
   undone_at: number | null; undone_by: string | null; undo_reason: string | null; server_name: string | null; staff_name: string | null; staff_id: string | null }
 
 /**
- * Timed KOT lines: `running` = KOTs of open orders from the last day (the Serve screen, tables, the manager's page);
+ * A KOT stays on the running list until its food is marked served (owner, 28 Nov 2026): a paid bill does not take it off.
+ * It leaves when its order is cancelled, or once its shift day is closed if the order is no longer open.
+ */
+const RUNNING = `o.status <> 'cancelled' AND (o.status IN ('open', 'tab', 'billed')
+  OR NOT EXISTS (SELECT 1 FROM shift_closes x WHERE x.business_id = k.business_id AND x.shift_day >= k.shift_day))`;
+/**
+ * Timed KOT lines: `running` = KOTs still on the running list from the last day (the Serve screen, tables, the manager's page);
  * else the KOTs of shift days from..to (the Daily check and the report). Cancelled orders are left out.
  */
 export async function timedLines(db: DB, bid: string, opts: { running: true; now: number } | { running?: false; from: string; to: string }): Promise<TimedLine[]> {
   const kots = opts.running
-    ? await all<KotRow>(db, `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.printed_at, k.lines, k.order_id, o.place, k.shift_day, o.status
-        FROM kots k JOIN orders o ON o.id = k.order_id WHERE k.business_id = ? AND o.status IN ('open', 'tab', 'billed') AND k.printed_at > ? ORDER BY k.printed_at`, bid, opts.now - 86_400_000)
-    : await all<KotRow>(db, `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.printed_at, k.lines, k.order_id, o.place, k.shift_day, o.status
+    ? await all<KotRow>(db, `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.printed_at, k.lines, k.order_id, o.place, k.shift_day, o.status, 1 AS running
+        FROM kots k JOIN orders o ON o.id = k.order_id WHERE k.business_id = ? AND ${RUNNING} AND k.printed_at > ? ORDER BY k.printed_at`, bid, opts.now - 86_400_000)
+    : await all<KotRow>(db, `SELECT k.id, coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.printed_at, k.lines, k.order_id, o.place, k.shift_day, o.status, (${RUNNING}) AS running
         FROM kots k JOIN orders o ON o.id = k.order_id WHERE k.business_id = ? AND o.status <> 'cancelled' AND k.shift_day BETWEEN ? AND ? ORDER BY k.printed_at`, bid, opts.from, opts.to);
   // Only KOTs that carry a timed line (older KOTs and cancel KOTs carry none).
   const timed = kots.map((k) => ({ k, lines: (JSON.parse(k.lines) as Record<string, unknown>[]) }))
@@ -69,7 +78,7 @@ export async function timedLines(db: DB, bid: string, opts: { running: true; now
       out.push({
         kotId: k.id, kotNo: k.kot_no, orderId: k.order_id, place: k.place, station: k.station, lineNo,
         name: String(l.name), qty: Number(l.qty), options: Array.isArray(l.options) ? (l.options as string[]) : [], remark: typeof l.remark === 'string' ? l.remark : null,
-        mins: l.mins, sentAt: k.printed_at, dueAt: k.printed_at + l.mins * MIN, shiftDay: k.shift_day, orderOpen: ['open', 'tab', 'billed'].includes(k.status),
+        mins: l.mins, sentAt: k.printed_at, dueAt: k.printed_at + l.mins * MIN, shiftDay: k.shift_day, orderOpen: !!k.running,
         servedId: s?.id ?? null, firstAt: s?.first_at ?? null, servedAt: s?.served_at ?? null, batch: s?.batch ?? null,
         by: s ? (s.staff_id ? s.staff_name ?? 'Manager' : s.server_name ?? 'Server') : null, byManager: !!s?.staff_id, photo: !!s?.photo_at,
         undoneAt: s?.undone_at ?? null, undoneBy: s?.undone_by ?? null, undoReason: s?.undo_reason ?? null,
