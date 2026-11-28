@@ -1227,3 +1227,28 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 tr.clickrow { cursor: pointer; }
 tr.clickrow:hover td { background: var(--soft); }
 .modal { position: fixed; inset: 0; z-index: 50; background: var(--scrim); display: grid; place-items: center; padding: 16px; }
+/* The Bar Count app on a bar staff's phone (28 Nov 2026) */
+.sv.ca { padding-bottom: 96px; }
+.ca-card { font: inherit; color: var(--ink); text-align: left; display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer; }
+.ca-card:disabled { cursor: default; opacity: .8; }
+.ca-card.sent_back { border-color: var(--bad-line); background: var(--bad-tint); }
+.ca-card.draft { border-color: var(--warn-line); }
+.ca-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.ca-tabs .chip { white-space: nowrap; }
+.ca-item { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; gap: 8px; }
+.ca-item.done { border-color: var(--go); }
+.ca-item.again { border-color: var(--warn-line); background: var(--warn-tint); }
+.ca-places { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ca-place { display: grid; gap: 4px; min-width: 0; }
+.ca-pl { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--quiet); font-weight: 650; }
+.ca-qty { display: flex; gap: 4px; }
+.ca-qty label { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 11px; color: var(--quiet); }
+.ca-qty input { font: inherit; font-size: 18px; font-variant-numeric: tabular-nums; width: 100%; min-height: 44px; text-align: center; border: 1px solid var(--field-line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+.ca-foot { position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; max-width: 520px; margin: 0 auto; }
+.ca-foot .grow { flex: 1; }
+.ca-foot #caSync { display: flex; align-items: center; gap: 8px; }
+.ca-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--go); display: inline-block; }
+.ca-dot.off { background: var(--warn); }
+.ca-ok { color: var(--go-dark); font-weight: 700; }
+.ca-short { color: var(--bad); font-weight: 700; }
+.ca-more { color: var(--warn); font-weight: 700; }

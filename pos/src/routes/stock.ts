@@ -532,7 +532,7 @@ export async function firstStockIn(db: DB, bid: string, itemId: string, storeId:
     bid, itemId, storeId, before));
 }
 /** The stock move for one counted item: opening stock on its first count, else the difference from the book. */
-export function countMove(db: DB, x: { bid: string; itemId: string; storeId: string; diff: number; counted: number; ref: string | null; by: string; shiftDay: string; at: number; opening: boolean }) {
+export function countMove(db: DB, x: { bid: string; itemId: string; storeId: string; diff: number; counted: number; ref: string | null; by: string | null; shiftDay: string; at: number; opening: boolean }) {
   return x.opening
     ? stmt(db, "INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, counted_qty, ref, vendor, by_staff, shift_day, at) VALUES (?, ?, ?, ?, 'purchase', ?, ?, ?, 'Opening stock', ?, ?, ?)",
       newId(), x.bid, x.itemId, x.storeId, x.diff, x.counted, x.ref ?? 'First count', x.by, x.shiftDay, x.at)

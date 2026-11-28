@@ -204,12 +204,15 @@ async function route() {
   stopProof();
   stopWaLink();
   stopServe();
+  stopCount();
   stopLive();
   try {
     // A server's own phone (28 Nov 2026): the Serve page, its own PIN sign-in, nothing else.
     // Its own address since 28 Nov 2026 (/serve/<business>), so the phone installs "Serve"; old #/serve/ links move there.
     if (location.hash.startsWith('#/serve/')) { location.replace(`/serve/${location.hash.split('/')[2] ?? ''}`); return; }
     if (servePath()) return await serveScreen(servePath());
+    // The Bar Count app (28 Nov 2026): bar staff count on their own phones, at /count/<business>.
+    if (countPath()) return await countAppScreen(countPath());
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
     // Bookr POS admin: its own sign-in, separate from every restaurant's.
@@ -5359,7 +5362,7 @@ actions.stCount = async () => {
 // live, and a manager's approval before stock changes.
 async function countLoad() {
   const [cl, cs] = await Promise.all([api('GET', `${B()}/stock/count-lists`), api('GET', `${B()}/stock/count-sessions`)]);
-  ui.cl = cl; ui.cs = cs.counts;
+  ui.cl = cl; ui.cs = cs.counts; ui.ckCanApprove = !!cs.canApprove;
   if (!ui.ctList || !cl.lists.some((l) => l.id === ui.ctList)) ui.ctList = cl.lists[0]?.id ?? null;
   if (ui.ckId) ui.ck = await api('GET', `${B()}/stock/count-sessions/${ui.ckId}`).catch(() => null);
 }
@@ -5380,7 +5383,7 @@ function countView(st) {
   if (ui.clEdit) return countListEdit(st);
   if (ck) return countSheetView(ck);
   const list = cl.lists.find((l) => l.id === ui.ctList);
-  const status = { draft: 'Not sent yet', waiting: 'Waiting for a manager', sent_back: 'Sent back to recount', approved: 'Approved', dropped: 'Dropped' };
+  const status = { draft: 'Not sent yet', waiting: 'Waiting for approval', sent_back: 'Sent back to recount', approved: 'Approved', dropped: 'Dropped' };
   return html`<section class="panel"><div class="row" style="justify-content:space-between;align-items:center"><h2>Count</h2>
       ${isMgr() ? html`<div class="row"><button class="btn sm" type="button" data-act="clNew">New count list</button>${list ? html`<button class="btn sm" type="button" data-act="clOpen" data-id="${list.id}">Change ${list.name}</button>` : ''}</div>` : ''}</div>
     ${errorBox()}
@@ -5391,13 +5394,14 @@ function countView(st) {
       : html`<p class="quiet">${isMgr() ? 'Make a count list first: pick the categories and items to count (New count list).' : 'A manager makes the count list first.'}</p>`}
     ${(ui.cs ?? []).length ? html`<h3 style="margin-top:12px">Counts</h3><div class="scroll"><table class="t"><thead><tr><th>Started</th><th>List</th><th>How</th><th>By</th><th class="num">Rows</th><th>Status</th></tr></thead><tbody>
       ${ui.cs.map((k) => html`<tr class="userow" tabindex="0" data-act="ckOpen" data-id="${k.id}" style="cursor:pointer"><td>${dateTime(k.createdAt)}</td><td>${k.list ?? k.store}</td><td>${k.mode === 'live' ? 'Live' : `From paper${k.countedAt ? ` · counted ${dateTime(k.countedAt)}` : ''}`}</td>
-        <td>${k.byName ?? ''}</td><td class="num">${k.rows}</td><td><span class="status ${k.status === 'waiting' || k.status === 'sent_back' ? 'warn' : k.status === 'approved' ? 'ok' : 'mute'}">${status[k.status]}</span></td></tr>`)}</tbody></table></div>` : ''}
+        <td>${k.byName ?? ''}${k.onPhone ? html` <span class="small quiet">· phone</span>` : ''}</td><td class="num">${k.rows}</td><td><span class="status ${k.status === 'waiting' || k.status === 'sent_back' ? 'warn' : k.status === 'approved' ? 'ok' : 'mute'}">${status[k.status]}</span></td></tr>`)}</tbody></table></div>` : ''}
   </section>`;
 }
 function countSheetView(ck) {
   const k = ck.count;
   const typing = k.status === 'draft' || k.status === 'sent_back';
-  const review = k.status === 'waiting' && isMgr();
+  // Approve counts is a tick box the Owner sets (28 Nov 2026): the Owner always, managers unless unticked.
+  const review = k.status === 'waiting' && ui.ckCanApprove;
   const rows = ck.groups.flatMap((g) => g.items);
   const done = rows.filter((r) => r.counted !== null);
   const diffCell = (r) => (r.diff == null ? '' : r.diff === 0 ? html`<span style="color:var(--go-dark);font-weight:700">matches</span>`
@@ -5412,9 +5416,9 @@ function countSheetView(ck) {
   };
   const head = html`<div class="row" style="justify-content:space-between;align-items:center"><h2>${k.list ?? k.store} · ${k.mode === 'live' ? 'live count' : 'count from paper'}</h2>
     <button class="btn ghost sm" type="button" data-act="ckClose">Back to counts</button></div>
-    <p class="small quiet" style="margin:0">Started by ${k.by ?? ''} · ${dateTime(k.createdAt)}${k.sentAt ? ` · sent ${dateTime(k.sentAt)}` : ''}${k.decidedBy ? ` · ${k.status === 'approved' ? 'approved' : 'closed'} by ${k.decidedBy} ${dateTime(k.decidedAt)}` : ''}</p>
+    <p class="small quiet" style="margin:0">Started by ${k.by ?? ''}${k.onPhone ? ' on the phone' : ''} · ${dateTime(k.createdAt)}${k.sentAt ? ` · sent ${dateTime(k.sentAt)}` : ''}${k.decidedBy ? ` · ${k.status === 'approved' ? 'approved' : 'closed'} by ${k.decidedBy} ${dateTime(k.decidedAt)}` : ''}</p>
     ${k.status === 'sent_back' ? html`<div class="msg warn" style="display:block">Sent back to count again${k.note ? `: ${k.note}` : ''}. Rows marked "count again" are shown first in each group.</div>` : ''}
-    ${k.status === 'waiting' && !isMgr() ? html`<div class="msg ok" style="display:block">With the manager. Stock changes when they approve.</div>` : ''}`;
+    ${k.status === 'waiting' && !ui.ckCanApprove ? html`<div class="msg ok" style="display:block">Waiting for approval. Stock changes when it is approved.</div>` : ''}`;
   const when = k.mode === 'after_shift'
     ? html`<label class="f" style="max-width:260px">Counted at<input class="in" type="datetime-local" data-model="ckAt" value="${ui.ckAt ?? (k.countedAt ? localDT(k.countedAt) : '')}" ${typing ? '' : 'disabled'}></label>
       <p class="small quiet" style="margin:0">In hand is the stock as it was at this time, so sales after the count do not show as missing.</p>`
@@ -6003,9 +6007,11 @@ async function settingsScreen(tab = 'menu') {
         <button class="btn" type="submit" data-act="floatSave" data-submit>Save</button></form>
       <p class="small quiet">The day close keeps this much in the drawer for change; the rest goes to the safe. The first cash of a new drawer starts from it. 0 means the float is typed at each day close.</p></section>
       <section class="panel"><h2>Staff and PINs</h2>${errorBox()}
-      <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th></tr></thead><tbody>
+      <div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Sign-in</th><th>Approve counts</th></tr></thead><tbody>
         ${ui.staff.filter((s) => !s.support).map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (inactive)'}</td><td>${s.role}</td><td>${s.email ?? ''}${s.hasPin ? ' · PIN set' : ''}</td>
+          <td><label class="tickline"><input type="checkbox" data-act-change="staffCountApprove" data-id="${s.id}" ${s.countApprove ? 'checked' : ''} ${s.role === 'owner' ? 'disabled' : ''} aria-label="${s.name} may approve counts"> ${s.role === 'owner' ? 'always' : ''}</label></td>
           <td class="act">${iconBtn('staffEdit', s.id, 'edit', `Edit ${s.name}`)}</td></tr>`)}</tbody></table></div>
+      <p class="small quiet">Approve counts: may approve a stock count (Stock › Count) or send rows back to be counted again. The Owner always may; a new manager starts ticked.</p>
       ${ui.supportInfo ? supportPanel() : ''}
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editStaff ? 'Edit person (leave PIN and password empty to keep them)' : 'Add person'}</h2><label class="f">Name<input class="in" data-model="sName" value="${ui.sName ?? ''}" ${ui.editStaff ? 'autofocus' : ''}></label>
         <label class="f">Role<select class="in" data-model="sRole">${['cashier', 'captain', 'manager', 'owner'].map((r) => html`<option value="${r}" ${ui.sRole === r ? 'selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`)}</select></label>
@@ -7099,7 +7105,7 @@ async function serveScreen(bid) {
       if (ui.sv.screen === 'loading' || ui.sv.screen === 'pin') ui.sv.screen = 'list';
       ui.sv.offline = false;
     } catch (e) {
-      if (e.status === 401) { ui.sv.screen = 'pin'; ui.sv.data = null; } else ui.sv.offline = true;
+      if (e.status === 401) { ui.sv.screen = 'pin'; ui.sv.data = null; } else if (e.status === 403) { ui.sv.screen = 'noaccess'; ui.sv.err = e.message; } else ui.sv.offline = true;
     }
     // Only the list redraws by itself; a KOT being served stays as it is until the server is done.
     if (servePath() && ui.sv.screen !== 'kot') paintServe();
@@ -7110,29 +7116,33 @@ async function serveScreen(bid) {
   stopServe();
   serveTimer = setInterval(tick, 10_000);
 }
+/** The phone sign-in (mobile number, then the 6-digit PIN), shared by the Serve and Bar Count apps (28 Nov 2026). */
+function phoneSignIn(sv, title) {
+  const top = (t) => html`<header class="sv-top"><span>${t}</span></header>`;
+  const phone = sv.phone ?? savedServePhone();
+  if (!/^\d{10}$/.test(phone) || sv.askPhone) {
+    return html`<main class="sv">${top(`${title} · sign in`)}<form class="sv-body sv-pin">
+      <label class="f" style="width:min(320px,100%)">Your mobile number<input class="in" id="svPhone" type="tel" inputmode="numeric" autocomplete="tel" maxlength="14" value="${phone}" placeholder="98xxxxxxxx" style="font-size:22px;text-align:center"></label>
+      ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+      <button class="btn pri big wide" type="submit" data-act="svPhoneGo" data-submit style="width:min(320px,100%)">Next</button>
+      <p class="small quiet">The number the manager added you with.</p></form></main>`;
+  }
+  return html`<main class="sv">${top(`${title} · sign in`)}<div class="sv-body sv-pin">
+    <p>Mobile <b>${phone.slice(0, 5)} ${phone.slice(5)}</b> · <button class="linkbtn" type="button" data-act="svPhoneChange">Change</button></p>
+    <p>Type your 6-digit PIN</p>
+    <div class="sv-dots" aria-label="${sv.pin.length} of 6 digits typed">${[0, 1, 2, 3, 4, 5].map((i) => html`<i class="${i < sv.pin.length ? 'on' : ''}"></i>`)}</div>
+    ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+    <div class="sv-pad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((d) => (d ? html`<button type="button" data-act="svKey" data-k="${d}" aria-label="${d === '⌫' ? 'Delete' : d}">${d}</button>` : html`<span></span>`))}</div>
+    <p class="small quiet">Only the PIN the owner gave you for your phone works here. Ask the manager if you have none.</p></div></main>`;
+}
 function paintServe() {
+  if (ui.sv.app === 'count') return paintCount();
   const sv = ui.sv;
   const top = (title, out) => html`<header class="sv-top"><span>${title}</span>${out ? html`<button type="button" data-act="svOut">Sign out</button>` : ''}</header>`;
   if (sv.screen === 'loading') { root.innerHTML = asHtml(html`<main class="sv">${top('Serve')}<p class="sv-body quiet">Loading…</p></main>`); return; }
-  if (sv.screen === 'pin') {
-    const phone = sv.phone ?? savedServePhone();
-    if (!/^\d{10}$/.test(phone) || sv.askPhone) {
-      root.innerHTML = asHtml(html`<main class="sv">${top('Serve · sign in')}<form class="sv-body sv-pin">
-        <label class="f" style="width:min(320px,100%)">Your mobile number<input class="in" id="svPhone" type="tel" inputmode="numeric" autocomplete="tel" maxlength="14" value="${phone}" placeholder="98xxxxxxxx" style="font-size:22px;text-align:center"></label>
-        ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
-        <button class="btn pri big wide" type="submit" data-act="svPhoneGo" data-submit style="width:min(320px,100%)">Next</button>
-        <p class="small quiet">The number the manager added you with.</p></form></main>`);
-      return;
-    }
-    root.innerHTML = asHtml(html`<main class="sv">${top('Serve · sign in')}<div class="sv-body sv-pin">
-      <p>Mobile <b>${phone.slice(0, 5)} ${phone.slice(5)}</b> · <button class="linkbtn" type="button" data-act="svPhoneChange">Change</button></p>
-      <p>Type your 6-digit PIN</p>
-      <div class="sv-dots" aria-label="${sv.pin.length} of 6 digits typed">${[0, 1, 2, 3, 4, 5].map((i) => html`<i class="${i < sv.pin.length ? 'on' : ''}"></i>`)}</div>
-      ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
-      <div class="sv-pad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((d) => (d ? html`<button type="button" data-act="svKey" data-k="${d}" aria-label="${d === '⌫' ? 'Delete' : d}">${d}</button>` : html`<span></span>`))}</div>
-      <p class="small quiet">Only server PINs work here. Ask the manager if you have none.</p></div></main>`);
-    return;
-  }
+  if (sv.screen === 'pin') { root.innerHTML = asHtml(phoneSignIn(sv, 'Serve')); return; }
+  // A person the Owner has not ticked for Serve (28 Nov 2026).
+  if (sv.screen === 'noaccess') { root.innerHTML = asHtml(html`<main class="sv">${top('Serve', true)}<p class="sv-body">${sv.err ?? 'You are not set up for the Serve app. Ask the owner.'}</p></main>`); return; }
   const d = sv.data;
   if (sv.screen === 'kot') {
     const k = d?.kots.find((x) => x.kotId === sv.open);
@@ -7256,23 +7266,314 @@ actions.svUndoNo = () => { ui.svUndo = null; rerender(); };
 actions.svUndoGo = async () => { await api('POST', `${B()}/serving/undo`, { ...ui.svUndo, label: undefined, reason: ui.svReason ?? SERVE_REASONS[0] }); flash = { kind: 'ok', text: `Undone: ${ui.svUndo.label}. It is back on the servers' list.` }; route(); };
 actions.svUnblock = async (d) => { await api('POST', `${B()}/serving/unblock`, { conn: d.c }); flash = { kind: 'ok', text: 'Unlocked: servers on that connection can sign in again.' }; route(); };
 
-// ----- Settings › Staff and PINs: servers (Owner)
+// ----- the Bar Count app: /count/<business id> (28 Nov 2026)
+// Bar staff count on their own phones, signed in with the same mobile number and PIN as the Serve app. A live count: each
+// row is saved as it is typed, with the time it was typed. With no Wi-Fi the rows wait on the phone (kept even if the page
+// is closed) and go when it is back. People ticked for Approve counts check counts here too.
+const countPath = () => (/^\/count\/([0-9a-f-]{36})\/?$/i.exec(location.pathname) ?? [])[1] ?? '';
+const CA_QUEUE = (id) => `bookr-count-q-${id}`;
+let countTimer = null;
+function stopCount() { if (countTimer) { clearInterval(countTimer); countTimer = null; } }
+const caQueueOf = (id) => { try { return JSON.parse(localStorage.getItem(CA_QUEUE(id)) ?? '{}'); } catch { return {}; } };
+const caQueueSave = (id, q) => { try { if (Object.keys(q).length) localStorage.setItem(CA_QUEUE(id), JSON.stringify(q)); else localStorage.removeItem(CA_QUEUE(id)); } catch { /* this visit only */ } };
+/**
+ * How an item is counted on the phone (owner, 28 Nov 2026): spirits and wine as full bottles plus loose ml; cigarettes as
+ * whole packets (no loose sticks); beer, soft drinks and the rest as bottles or pieces.
+ */
+function caWay(r) {
+  if (r.unit !== 'pcs' && r.packSize > 1) return { kind: 'pack', label: ({ bottle: 'Bottles', can: 'Cans' })[r.packName] ?? `${r.packName[0].toUpperCase()}${r.packName.slice(1)}s`, loose: `Loose ${r.unit}` };
+  if (r.unit === 'pcs' && r.packSize > 1 && (/^(packet|pack|pkt)s?$/i.test(r.packName) || /cigar/i.test(r.category ?? ''))) return { kind: 'packets', label: 'Packets' };
+  return { kind: 'pieces', label: /beer|soft|water|mixer|soda|juice/i.test(r.category ?? '') ? 'Bottles' : r.unit === 'pcs' ? 'Pieces' : r.unit };
+}
+/** The four boxes of a row (bar counter and store, whole and loose) from units, and back. */
+function caSplit(r, units) {
+  if (units == null) return ['', ''];
+  const w = caWay(r);
+  if (w.kind === 'pack') return [String(Math.floor(units / r.packSize)), units % r.packSize ? String(units % r.packSize) : ''];
+  if (w.kind === 'packets') return [String(Math.round(units / r.packSize)), ''];
+  return [String(units), ''];
+}
+const caNum = (v) => { const t = String(v ?? '').trim(); if (t === '') return null; const n = Number(t); return Number.isInteger(n) && n >= 0 ? n : NaN; };
+function caUnits(r, whole, loose) {
+  const w = caWay(r); const a = caNum(whole); const b = caNum(loose);
+  if (Number.isNaN(a) || Number.isNaN(b)) return NaN;
+  if (a === null && b === null) return null;
+  if (w.kind === 'pack') return (a ?? 0) * r.packSize + (b ?? 0);
+  if (w.kind === 'packets') return (a ?? 0) * r.packSize;
+  return a ?? 0;
+}
+async function countAppScreen(bid) {
+  document.title = 'Bar Count';
+  if (/^[0-9a-f-]{36}$/i.test(bid)) {
+    const mf = document.querySelector('link[rel="manifest"]');
+    if (mf) mf.setAttribute('href', `/api/count-manifest/${bid}`);
+    let t = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+    if (!t) { t = document.createElement('meta'); t.setAttribute('name', 'apple-mobile-web-app-title'); document.head.append(t); }
+    t.setAttribute('content', 'Bar Count');
+  }
+  document.body.classList.remove('desk');
+  ui.sv = { app: 'count', bid, pin: '', screen: 'loading', me: null, ck: null, cat: null, q: '', vals: {}, err: null, offline: false, sending: false, again: {} };
+  rerender = paintCount;
+  ui.sv.tick = async () => {
+    const sv = ui.sv;
+    try {
+      sv.me = await serveCall('GET', '/count/me');
+      if (sv.screen === 'loading' || sv.screen === 'pin') sv.screen = 'home';
+      sv.offline = false;
+    } catch (e) {
+      if (e.status === 401) { sv.screen = 'pin'; sv.me = null; } else if (e.status === 403) { sv.screen = 'noaccess'; sv.err = e.message; } else sv.offline = true;
+    }
+    if (sv.screen === 'home' || sv.screen === 'pin' || sv.screen === 'noaccess' || sv.screen === 'loading') paintCount();
+  };
+  paintCount();
+  await ui.sv.tick();
+  stopCount();
+  // Rows waiting for the Wi-Fi go as soon as it is back; the home screen refreshes now and then.
+  countTimer = setInterval(() => { if (!countPath()) return stopCount(); if (ui.sv?.ck) caFlush(); else if (ui.sv?.screen === 'home') ui.sv.tick(); }, 8000);
+}
+window.addEventListener('online', () => { if (countPath() && ui.sv?.ck) caFlush(); });
+
+/** Sends the rows waiting on the phone. A row typed again while sending stays for the next try. */
+async function caFlush() {
+  const sv = ui.sv; const ck = sv?.ck;
+  if (!ck || sv.flushing) return;
+  const id = ck.count.id;
+  const q = caQueueOf(id);
+  const lines = Object.values(q);
+  if (!lines.length) { caSync(); return; }
+  sv.flushing = true;
+  try {
+    await serveCall('PUT', `/count/counts/${id}`, { lines });
+    const now = caQueueOf(id);
+    for (const l of lines) if (now[l.itemId]?.typedAt === l.typedAt) delete now[l.itemId];
+    caQueueSave(id, now);
+    sv.offline = false; sv.err = null;
+  } catch (e) {
+    if (e.status === 401) { sv.screen = 'pin'; sv.flushing = false; paintCount(); return; }
+    if (e.status && e.status < 500 && e.status !== 429) { sv.err = e.message; caQueueSave(id, {}); } else sv.offline = true;
+  } finally { sv.flushing = false; }
+  caSync();
+}
+/** The line at the foot: saved, or how many rows are waiting for the Wi-Fi. Changed in place, so typing is not disturbed. */
+function caSyncText() {
+  const sv = ui.sv; const n = sv.ck ? Object.keys(caQueueOf(sv.ck.count.id)).length : 0;
+  if (sv.err) return html`<span class="sv-err">${sv.err}</span>`;
+  if (n) return html`<span class="ca-dot off"></span>${sv.offline ? `No Wi-Fi · ${plural(n, 'row')} waiting to send` : `Sending ${plural(n, 'row')}…`}`;
+  return html`<span class="ca-dot"></span>All saved`;
+}
+/** The "3 of 40" at the top and each tab's count, changed in place while typing. */
+function caCounts() {
+  const sv = ui.sv; if (!sv?.ck) return;
+  const rows = sv.ck.groups.flatMap((g) => g.items.map((r) => ({ ...r, category: g.category })));
+  const done = (r) => { const v = sv.vals[r.id]; return v ? [caUnits(r, v.w1, v.l1), caUnits(r, v.w2, v.l2)].some((x) => x !== null && !Number.isNaN(x)) : false; };
+  const head = document.querySelector('.sv.ca .sv-top span');
+  if (head) head.textContent = `${sv.ck.count.list ?? 'Count'} · ${rows.filter(done).length} of ${rows.length}`;
+  for (const b of document.querySelectorAll('.ca-tabs [data-c]')) { const g = rows.filter((r) => r.category === b.dataset.c); b.textContent = `${b.dataset.c} ${g.filter(done).length}/${g.length}`; }
+}
+function caSync() { const el = document.getElementById('caSync'); if (el) el.innerHTML = asHtml(caSyncText()); }
+
+function paintCount() {
+  const sv = ui.sv;
+  const top = (title, out) => html`<header class="sv-top"><span>${title}</span>${out ? html`<button type="button" data-act="svOut">Sign out</button>` : ''}</header>`;
+  if (sv.screen === 'loading') { root.innerHTML = asHtml(html`<main class="sv">${top('Bar Count')}<p class="sv-body quiet">Loading…</p></main>`); return; }
+  if (sv.screen === 'pin') { root.innerHTML = asHtml(phoneSignIn(sv, 'Bar Count')); return; }
+  if (sv.screen === 'noaccess') { root.innerHTML = asHtml(html`<main class="sv">${top('Bar Count', true)}<p class="sv-body">${sv.err ?? 'You are not set up for the Bar Count app. Ask the owner.'}</p></main>`); return; }
+  const me = sv.me;
+  if (sv.screen === 'count' && sv.ck) return paintCountSheet(top);
+  if (sv.screen === 'check' && sv.ck) return paintCountCheck(top);
+  if (sv.screen === 'sent') {
+    root.innerHTML = asHtml(html`<main class="sv">${top('Bar Count · sent', true)}<div class="sv-body sv-pin">
+      <h2 style="margin:0">Sent to the owner</h2><p>${sv.sentText ?? ''}</p>
+      <p class="small quiet">If the owner sends rows back, they show here marked "count again".</p>
+      <button class="btn pri big wide" type="button" data-act="caHome" style="width:min(320px,100%)">Done</button></div></main>`);
+    return;
+  }
+  const statusOf = { draft: ['warn', 'Not sent yet'], sent_back: ['bad', 'Sent back: count again'], waiting: ['ok', 'With the owner'] };
+  root.innerHTML = asHtml(html`<main class="sv">${top(`Bar Count · ${me?.person.name ?? ''}`, true)}<div class="sv-body">
+    <div class="row between"><b>${me.business}</b><span class="small quiet">${sv.offline ? 'Not connected: trying again' : dateTime(me.now)}</span></div>
+    ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+    ${me.mine.length ? html`<h3 style="margin:0">Your counts</h3>${me.mine.map((k) => html`<button class="ca-card ${k.status}" type="button" data-act="caOpen" data-id="${k.id}" ${k.status === 'waiting' ? 'disabled' : ''}>
+      <span class="row between"><b>${k.list ?? 'Count'}</b><span class="status ${statusOf[k.status][0]}">${statusOf[k.status][1]}</span></span>
+      <span class="small quiet">Started ${dateTime(k.createdAt)} · ${plural(k.rows, 'row')} counted${k.again ? ` · ${plural(k.again, 'item')} to count again` : ''}</span>
+      ${k.note ? html`<span class="small">Owner: ${k.note}</span>` : ''}</button>`)}` : ''}
+    ${me.lists.length ? html`<h3 style="margin:0">Start a count</h3>${me.lists.map((l) => html`<button class="ca-card" type="button" data-act="caStart" data-id="${l.id}">
+      <span><b>${l.name}</b></span><span class="small quiet">${l.store} · ${plural(l.items, 'item')}</span></button>`)}`
+      : me.person.access.some((a) => a.endsWith('_count')) ? html`<p class="quiet">No count list yet. The manager makes one in Stock › Count.</p>` : ''}
+    ${me.person.access.includes('approve_counts') ? html`<h3 style="margin:0">Waiting for approval</h3>${me.waiting.length ? me.waiting.map((k) => html`<button class="ca-card" type="button" data-act="caCheck" data-id="${k.id}">
+      <span class="row between"><b>${k.list ?? k.store}</b><span class="small">${plural(k.rows, 'row')}</span></span>
+      <span class="small quiet">By ${k.byName ?? '—'} · sent ${dateTime(k.sentAt)}</span></button>`) : html`<p class="quiet">Nothing waiting.</p>`}
+      <p class="small quiet">A count left waiting stops nothing: the next count and the day close go ahead.</p>` : ''}
+  </div></main>`);
+}
+
+function paintCountSheet(top) {
+  const sv = ui.sv; const ck = sv.ck; const k = ck.count;
+  const all = ck.groups.flatMap((g) => g.items.map((r) => ({ ...r, category: g.category })));
+  const done = (r) => { const v = sv.vals[r.id]; return v ? [caUnits(r, v.w1, v.l1), caUnits(r, v.w2, v.l2)].some((x) => x !== null && !Number.isNaN(x)) : false; };
+  const cats = ck.groups.map((g) => g.category);
+  if (!sv.cat || !cats.includes(sv.cat)) sv.cat = cats[0] ?? null;
+  const q = sv.q.trim().toLowerCase();
+  const shown = (q ? all.filter((r) => r.name.toLowerCase().includes(q)) : all.filter((r) => r.category === sv.cat)).sort((a, b) => Number(b.recount) - Number(a.recount));
+  const box = (r, p) => {
+    const w = caWay(r); const v = sv.vals[r.id] ?? {};
+    return html`<div class="ca-place"><span class="ca-pl">${p === 1 ? 'Bar counter' : 'Store'}</span><div class="ca-qty">
+      <label>${w.label}<input inputmode="numeric" autocomplete="off" data-ca="${r.id}" data-k="w${p}" value="${v[`w${p}`] ?? ''}" aria-label="${r.name}, ${p === 1 ? 'bar counter' : 'store'}, ${w.label}"></label>
+      ${w.kind === 'pack' ? html`<label>${w.loose}<input inputmode="numeric" autocomplete="off" data-ca="${r.id}" data-k="l${p}" value="${v[`l${p}`] ?? ''}" aria-label="${r.name}, ${p === 1 ? 'bar counter' : 'store'}, ${w.loose}"></label>` : ''}</div></div>`;
+  };
+  const totalOf = (r) => { const v = sv.vals[r.id] ?? {}; const a = caUnits(r, v.w1, v.l1); const b = caUnits(r, v.w2, v.l2);
+    if (Number.isNaN(a) || Number.isNaN(b)) return 'whole numbers, please'; if (a === null && b === null) return '—'; return packText((a ?? 0) + (b ?? 0), r); };
+  root.innerHTML = asHtml(html`<main class="sv ca">${top(`${k.list ?? 'Count'} · ${all.filter(done).length} of ${all.length}`, false)}<div class="sv-body">
+    ${k.status === 'sent_back' ? html`<div class="msg warn" style="display:block">Sent back by the owner${k.note ? `: ${k.note}` : ''}. Count the rows marked "count again".</div>` : ''}
+    <input class="in" id="caQ" type="search" placeholder="Search an item" value="${sv.q}" aria-label="Search an item">
+    ${q ? '' : html`<div class="ca-tabs">${cats.map((c) => { const g = all.filter((r) => r.category === c); return html`<button type="button" class="chip" aria-pressed="${c === sv.cat}" data-act="caCat" data-c="${c}">${c} ${g.filter(done).length}/${g.length}</button>`; })}</div>`}
+    ${shown.length ? shown.map((r) => html`<div class="ca-item ${done(r) ? 'done' : ''} ${r.recount ? 'again' : ''}" data-row="${r.id}">
+      <div class="row between"><b>${r.name}</b>${r.recount ? html`<span class="status warn">count again</span>` : ''}</div>
+      <div class="ca-places">${box(r, 1)}${box(r, 2)}</div>
+      <div class="row between small"><span class="quiet">In hand ${packText(r.inHand, r)}</span><span>Counted <b data-total="${r.id}">${totalOf(r)}</b></span></div></div>`)
+      : html`<p class="quiet">${q ? 'No item by that name on this list.' : 'Nothing on this list.'}</p>`}
+  </div>
+  <footer class="ca-foot"><div class="small" id="caSync" aria-live="polite">${caSyncText()}</div>
+    <div class="row"><button class="btn" type="button" data-act="caHome">Back</button><button class="btn pri grow" type="button" data-act="caSend">Send to owner</button></div></footer></main>`);
+}
+
+function paintCountCheck(top) {
+  const sv = ui.sv; const ck = sv.ck; const k = ck.count;
+  const rows = ck.groups.flatMap((g) => g.items).filter((r) => r.counted !== null);
+  const differ = rows.filter((r) => r.diff);
+  const diffText = (r) => (r.diff === 0 ? html`<span class="ca-ok">matches</span>` : html`<span class="${r.diff < 0 ? 'ca-short' : 'ca-more'}">${r.diff < 0 ? 'short ' : 'more '}${packText(Math.abs(r.diff), r)}</span>`);
+  root.innerHTML = asHtml(html`<main class="sv">${top(`${k.list ?? k.store} · check`, false)}<div class="sv-body">
+    <p class="small quiet" style="margin:0">By ${k.by ?? '—'} · started ${dateTime(k.createdAt)}${k.sentAt ? ` · sent ${dateTime(k.sentAt)}` : ''}</p>
+    ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+    <p style="margin:0"><b>${plural(rows.length, 'item')}</b> counted · <b>${differ.length}</b> differ${differ.length ? ` · ${rs(Math.abs(differ.reduce((t, r) => t + r.valuePaise, 0)))} ${differ.reduce((t, r) => t + r.valuePaise, 0) < 0 ? 'short' : 'more'}` : ''}</p>
+    ${[...differ, ...rows.filter((r) => !r.diff)].map((r) => html`<div class="ca-item ${r.diff ? 'again' : ''}">
+      <div class="row between"><b>${r.name}</b>${diffText(r)}</div>
+      <div class="row between small"><span class="quiet">In hand ${packText(r.inHand, r)}</span><span>Counted ${packText(r.counted, r)}</span></div>
+      ${r.diff ? html`<label class="tickline small"><input type="checkbox" data-act-change="caAgain" data-id="${r.id}" ${sv.again[r.id] ? 'checked' : ''}> count again</label>` : ''}</div>`)}
+    ${ck.canApprove ? html`<label class="f">Note for the counter (optional)<input class="in" id="caNote" maxlength="200" placeholder="e.g. check the cold room"></label>
+      <button class="btn pri big wide" type="button" data-act="caApprove">Approve: set stock to the count</button>
+      <button class="btn wide" type="button" data-act="caBack">Send ticked rows back to count again</button>` : html`<p class="quiet">This count is not waiting any more.</p>`}
+    <button class="btn ghost wide" type="button" data-act="caHome">Back</button></div></main>`);
+}
+
+/** Fills the boxes from what the server has, then lays over rows still waiting on this phone. */
+function caFill(ck) {
+  const vals = {};
+  for (const r of ck.groups.flatMap((g) => g.items)) {
+    if (r.counted === null) continue;
+    const [w1, l1] = caSplit(r, r.place1); const [w2, l2] = caSplit(r, r.place2);
+    vals[r.id] = { w1, l1, w2: r.place2 ? w2 : '', l2: r.place2 ? l2 : '' };
+  }
+  for (const l of Object.values(caQueueOf(ck.count.id))) if (l.boxes) vals[l.itemId] = l.boxes;
+  return vals;
+}
+async function caLoad(id, screen) {
+  const sv = ui.sv;
+  sv.ck = await serveCall('GET', `/count/counts/${id}`);
+  sv.vals = screen === 'count' ? caFill(sv.ck) : {};
+  Object.assign(sv, { screen, q: '', err: null, again: {} });
+  paintCount();
+  if (screen === 'count') caFlush();
+}
+actions.caStart = async (d) => { try { const r = await serveCall('POST', '/count/start', { listId: d.id }); await caLoad(r.id, 'count'); } catch (e) { ui.sv.err = e.message; paintCount(); } };
+actions.caOpen = async (d) => caLoad(d.id, 'count').catch((e) => { ui.sv.err = e.message; paintCount(); });
+actions.caCheck = async (d) => caLoad(d.id, 'check').catch((e) => { ui.sv.err = e.message; paintCount(); });
+actions.caHome = async () => { const sv = ui.sv; if (sv.ck && sv.screen === 'count') await caFlush(); Object.assign(sv, { ck: null, screen: 'home', err: null }); paintCount(); await sv.tick(); };
+actions.caCat = (d) => { ui.sv.cat = d.c; paintCount(); window.scrollTo(0, 0); };
+actions.caAgain = (d, el) => { ui.sv.again[d.id] = el.checked; };
+actions.caSend = async () => {
+  const sv = ui.sv; const id = sv.ck.count.id;
+  await caFlush();
+  const left = Object.keys(caQueueOf(id)).length;
+  if (left) { sv.err = null; sv.offline = true; caSync(); alert(`${plural(left, 'row')} still waiting for the Wi-Fi. Send again when it is back.`); return; }
+  try {
+    const r = await serveCall('POST', `/count/counts/${id}/send`, {});
+    sv.sentText = `${plural(r.rows, 'item')} counted. Items left blank are not counted.`;
+    Object.assign(sv, { ck: null, screen: 'sent' }); paintCount();
+  } catch (e) { sv.err = e.message; caSync(); }
+};
+actions.caApprove = async () => {
+  const sv = ui.sv;
+  try { const r = await serveCall('POST', `/count/counts/${sv.ck.count.id}/approve`, {}); Object.assign(sv, { ck: null, screen: 'home' }); await sv.tick(); alert(`Approved: ${plural(r.rows, 'item')} counted, ${r.differ} changed.`); }
+  catch (e) { sv.err = e.message; paintCount(); }
+};
+actions.caBack = async () => {
+  const sv = ui.sv; const itemIds = Object.keys(sv.again).filter((x) => sv.again[x]);
+  if (!itemIds.length) { sv.err = 'Tick the rows to count again.'; paintCount(); return; }
+  try { await serveCall('POST', `/count/counts/${sv.ck.count.id}/back`, { itemIds, note: document.getElementById('caNote')?.value ?? '' }); Object.assign(sv, { ck: null, screen: 'home' }); await sv.tick(); }
+  catch (e) { sv.err = e.message; paintCount(); }
+};
+// Typing in a box: kept on the phone at once (with the time), the total shown, and sent a moment later.
+let caWait = null;
+root.addEventListener('input', (ev) => {
+  const el = ev.target;
+  if (el.id === 'caQ' && ui.sv?.app === 'count') { ui.sv.q = el.value; const at = el.selectionStart; paintCount(); const n = document.getElementById('caQ'); n?.focus(); n?.setSelectionRange(at, at); return; }
+  const itemId = el.dataset?.ca; const sv = ui.sv;
+  if (!itemId || !sv?.ck) return;
+  const r = sv.ck.groups.flatMap((g) => g.items).find((x) => x.id === itemId);
+  const v = (sv.vals[itemId] ||= { w1: '', l1: '', w2: '', l2: '' });
+  v[el.dataset.k] = el.value.replace(/[^\d]/g, '');
+  if (v[el.dataset.k] !== el.value) el.value = v[el.dataset.k];
+  const p1 = caUnits(r, v.w1, v.l1); const p2 = caUnits(r, v.w2, v.l2);
+  const t = document.querySelector(`[data-total="${itemId}"]`);
+  if (t) t.textContent = p1 === null && p2 === null ? '—' : packText((p1 ?? 0) + (p2 ?? 0), r);
+  document.querySelector(`[data-row="${itemId}"]`)?.classList.toggle('done', p1 !== null || p2 !== null);
+  caCounts();
+  const q = caQueueOf(sv.ck.count.id);
+  q[itemId] = p1 === null && p2 === null ? { itemId, clear: true, typedAt: Date.now(), boxes: { ...v } } : { itemId, place1: p1 ?? 0, place2: p2 ?? 0, typedAt: Date.now(), boxes: { ...v } };
+  caQueueSave(sv.ck.count.id, q);
+  caSync();
+  clearTimeout(caWait); caWait = setTimeout(caFlush, 700);
+});
+
+// ----- Settings › Staff and PINs: people on phones (Owner)
+// Tick boxes per person (28 Nov 2026): which phone apps they may use, and whether they approve counts on the phone.
+const PHONE_ACCESS = [['serve', 'Serve'], ['bar_count', 'Bar count'], ['kitchen_count', 'Kitchen count'], ['approve_counts', 'Approve counts']];
+const phoneApps = (access) => [...(access.includes('serve') ? ['serve'] : []), ...(access.some((a) => a !== 'serve') ? ['count'] : [])];
 function serversPanel() {
   const link = `${location.origin}/serve/${me.business.id}`;
+  const countLink = `${location.origin}/count/${me.business.id}`;
   const quiet14 = (s) => s.active && Date.now() - (s.lastSeenAt ?? s.createdAt) > 14 * 86_400_000;
-  return html`<section class="panel" style="margin-top:16px"><h2>Servers</h2>
-    <p class="quiet small">Servers mark food served on their own phones. Send them this address; they sign in with a 6-digit PIN that works only there and opens only the Serve screen. Remove a server and their PIN stops at once, even on an open phone. Sign-ins end at day close.</p>
-    <div class="row"><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
-    ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Last signed in</th><th></th></tr></thead><tbody>
-      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}<div class="small quiet">${s.phone ? `${s.phone.slice(0, 5)} ${s.phone.slice(5)}` : html`<span style="color:var(--warn)">No mobile yet: add one (Edit) so they can sign in</span>`}</div></td><td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
-        <td class="act"><div class="row">${s.active ? html`<a class="btn" href="${waTo(s.phone, serveInvite(s.name, link))}" target="_blank" rel="noopener">Send on WhatsApp</a><button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Edit</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
-          : html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Bring back</button>`}</div></td></tr>`)}</tbody></table></div>` : html`<p class="quiet">No servers yet.</p>`}
-    <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `Edit ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a server'}</h3>
+  const newTicks = ui.svAccess ?? ['serve'];
+  return html`<section class="panel" style="margin-top:16px"><h2>People on phones</h2>
+    <p class="quiet small">Servers, bar staff and others who use the phone apps. Each signs in on their own phone with their mobile number and a 6-digit PIN, and sees only what you tick. Serve: mark food served. Bar count and Kitchen count: count stock in the Bar Count app. Approve counts: approve a count, or send rows back, on the phone. Taking a tick away works at once, even on an open phone. Remove a person and their PIN stops at once. Sign-ins end at day close.</p>
+    <div class="row"><span class="small">Serve:</span><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
+    <div class="row"><span class="small">Bar Count:</span><code class="tag-any">${countLink}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${countLink}">Copy</button></div>
+    ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th>${PHONE_ACCESS.map(([, l]) => html`<th>${l}</th>`)}<th>Last signed in</th><th></th></tr></thead><tbody>
+      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}<div class="small quiet">${s.phone ? `${s.phone.slice(0, 5)} ${s.phone.slice(5)}` : html`<span style="color:var(--warn)">No mobile yet: add one (Edit) so they can sign in</span>`}</div></td>
+        ${PHONE_ACCESS.map(([a, l]) => html`<td><input type="checkbox" data-act-change="svAccess" data-id="${s.id}" data-a="${a}" ${s.access.includes(a) ? 'checked' : ''} ${s.active ? '' : 'disabled'} aria-label="${s.name}: ${l}"></td>`)}
+        <td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
+        <td class="act"><div class="row">${s.active ? html`${phoneApps(s.access).map((app) => html`<a class="btn" href="${waTo(s.phone, app === 'serve' ? serveInvite(s.name, link) : countInvite(s.name, countLink))}" target="_blank" rel="noopener">${app === 'serve' ? 'Serve invite' : 'Bar Count invite'} on WhatsApp</a>`)}<button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Edit</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
+          : html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Bring back</button>`}</div></td></tr>`)}</tbody></table></div>` : html`<p class="quiet">Nobody yet.</p>`}
+    <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `Edit ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a person'}</h3>
       ${ui.svEdit ? '' : html`<label class="f">Name<input class="in" data-model="svName" value="${ui.svName ?? ''}"></label>`}
       <label class="f">Mobile number<input class="in" type="tel" inputmode="numeric" maxlength="14" autocomplete="off" data-model="svPhone" value="${ui.svPhone ?? ''}" placeholder="98xxxxxxxx"></label>
       <label class="f">${ui.svEdit ? 'New PIN (6 digits, empty: keep)' : 'PIN (6 digits)'}<input class="in" inputmode="numeric" maxlength="6" autocomplete="off" data-model="svPin" value="${ui.svPin ?? ''}"></label>
-      <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save PIN' : 'Add server'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
+      ${ui.svEdit ? '' : html`<div class="row" style="grid-column:1/-1">${PHONE_ACCESS.map(([a, l]) => html`<label class="tickline"><input type="checkbox" data-act-change="svNewTick" data-a="${a}" ${newTicks.includes(a) ? 'checked' : ''}> ${l}</label>`)}</div>`}
+      <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save PIN' : 'Add person'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
 }
+actions.svAccess = async (d, el) => {
+  const s = ui.servers.find((x) => x.id === d.id);
+  const access = PHONE_ACCESS.map(([a]) => a).filter((a) => (a === d.a ? el.checked : s.access.includes(a)));
+  await api('PUT', `${B()}/servers/${s.id}`, { access });
+  s.access = access;
+  flash = { kind: 'ok', text: `${s.name}: ${access.length ? access.map((a) => PHONE_ACCESS.find(([x]) => x === a)[1]).join(', ') : 'nothing ticked'}.` }; rerender();
+};
+actions.svNewTick = (d, el) => { const t = new Set(ui.svAccess ?? ['serve']); if (el.checked) t.add(d.a); else t.delete(d.a); ui.svAccess = PHONE_ACCESS.map(([a]) => a).filter((a) => t.has(a)); };
+actions.staffCountApprove = async (d, el) => {
+  const s = ui.staff.find((x) => x.id === d.id);
+  try { await api('PUT', `${B()}/staff/${s.id}/count-approve`, { on: el.checked }); s.countApprove = el.checked ? 1 : 0; flash = { kind: 'ok', text: `${s.name} ${el.checked ? 'may' : 'may not'} approve counts.` }; }
+  catch (e) { el.checked = !el.checked; throw e; }
+  rerender();
+};
+/** The invite to the Bar Count app (28 Nov 2026), as the Serve invite: the PIN is given separately. */
+const countInvite = (name, link) => `Hi ${name}, join *${me.business.name}* on Bookr POS, to count bar stock on your phone.
+
+1. Open this link on your phone: ${link}
+2. Put it on your phone:
+• Samsung: tap the ⬇ (install) in the address bar, or ☰ › Add page to › Home screen
+• Other Android: in Chrome tap *Install* (or ⋮ › Add to Home screen)
+• iPhone: in Safari tap Share ⬆︎ › *Add to Home Screen*
+3. From then on, open *Bar Count* from its icon. Sign in with your mobile number and the 6-digit PIN the manager gives you (the same PIN as Serve, if you use it).`;
 /** The invite a server gets on WhatsApp (28 Nov 2026), as Bookr's cashier invite: the link, how to put it on the phone, the PIN
  *  given separately (never in the message, so a forwarded message can't be used). */
 const serveInvite = (name, link) => `Hi ${name}, join *${me.business.name}* as a server on Bookr POS, to mark food served.
@@ -7286,7 +7587,7 @@ const serveInvite = (name, link) => `Hi ${name}, join *${me.business.name}* as a
 const waTo = (phone, msg) => `https://wa.me/${phone ? `91${phone}` : ''}?text=${encodeURIComponent(msg)}`;
 actions.svCopyMsg = async (d) => {
   const s = ui.servers.find((x) => x.id === d.id);
-  const msg = serveInvite(s.name, `${location.origin}/serve/${me.business.id}`);
+  const msg = phoneApps(s.access).map((app) => (app === 'serve' ? serveInvite(s.name, `${location.origin}/serve/${me.business.id}`) : countInvite(s.name, `${location.origin}/count/${me.business.id}`))).join('\n\n') || serveInvite(s.name, `${location.origin}/serve/${me.business.id}`);
   try { await navigator.clipboard.writeText(msg); flash = { kind: 'ok', text: `Message for ${s.name} copied. Paste it in WhatsApp or SMS; tell them the PIN separately.` }; }
   catch { flash = { kind: 'warn', text: msg }; }
   rerender();
@@ -7296,7 +7597,7 @@ actions.svNewPin = (d) => { ui.svEdit = d.id; ui.svPin = ''; ui.svPhone = ui.ser
 actions.svEditNo = () => { ui.svEdit = null; ui.svPin = ''; ui.svPhone = ''; rerender(); };
 actions.svSave = async () => {
   if (ui.svEdit) { const s = ui.servers.find((x) => x.id === ui.svEdit); await api('PUT', `${B()}/servers/${s.id}`, { pin: ui.svPin ?? '', phone: ui.svPhone ?? '', active: true }); flash = { kind: 'ok', text: `${s.name} saved.${ui.svPin ? ' Their old sign-in has ended.' : ''}` }; }
-  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', phone: ui.svPhone ?? '', pin: ui.svPin ?? '' }); flash = { kind: 'ok', text: `${ui.svName} added. Press Send on WhatsApp next to their name, and tell them the PIN yourself.` }; }
+  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', phone: ui.svPhone ?? '', pin: ui.svPin ?? '', access: ui.svAccess ?? ['serve'] }); ui.svAccess = null; flash = { kind: 'ok', text: `${ui.svName} added. Press the invite on WhatsApp next to their name, and tell them the PIN yourself.` }; }
   ui.svPhone = ''; ui.svEdit = null;
   route();
 };

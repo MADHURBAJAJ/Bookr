@@ -77,6 +77,11 @@ tab age limit, menu and reason lists are settings per business.
 - **Bar stock.** Stores (main, bar, kitchen), items in ml or pieces with their pack size and price, recipes per menu item;
   settled bills take stock by recipe; receiving, transfers, breakage and counts with variance; a stock report per store.
 - **Phones and tablets.** Menu and order side by side from tablet width; on a phone a bar at the bottom shows the order.
+- **Bar Count app.** Bar staff count stock on their own phones at `/count/<business id>` (installs as "Bar Count"), signing in
+  with the same mobile number and 6-digit PIN as Serve. The Owner ticks what each person on a phone may use (Settings › Staff and
+  PINs › People on phones: Serve, Bar count, Kitchen count, Approve counts) and which staff may approve counts at the PC (the
+  Owner always; managers start ticked). Rows save as typed; with no Wi-Fi they wait on the phone and go later with the time they
+  were typed. A count waiting for approval never blocks the next count or the day close.
 - **Exceptions report.** Voids, reprints, cancelled KOT lines, discounts, complimentary bills and limit warnings, append-only.
 - **Serving time.** Each category has a "Serve in … min" (empty: not timed; bar categories start empty); an item may have
   its own (0: never timed), also as the "Serve time (min)" column of the menu sheet. Each KOT line keeps its minutes, so
