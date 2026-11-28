@@ -35,7 +35,9 @@ app.use('*', async (c, next) => {
     if (origin && origin !== new URL(c.req.url).origin) throw new HTTPException(403, { message: 'Cross-site request refused.' });
     // JSON, or a raw photo or PDF body for uploads. None of these can be sent cross-site without a preflight.
     const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
-    const upload = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/uploads$/.test(c.req.path);
+    // Bill photos on cash book expenses (28 Nov 2026) are the same kind of raw upload.
+    const upload = c.req.method === 'POST' && (/^\/api\/businesses\/[^/]+\/uploads$/.test(c.req.path)
+      || /^\/api\/businesses\/[^/]+\/cashbooks\/[^/]+\/entries\/[^/]+\/bills$/.test(c.req.path));
     // The WhatsApp listener sends its file as a multipart form; it is a program, never a browser, and needs the secret header.
     const waFile = c.req.method === 'POST' && c.req.path === '/api/wa/ingest' && type === 'multipart/form-data';
     if (type !== 'application/json' && !waFile && !(upload && ['image/jpeg', 'image/png', 'application/pdf'].includes(type))) {

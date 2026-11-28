@@ -59,6 +59,8 @@ export async function inHandThrough(db: DB, book: { id: string; branchId: string
 export interface EntryRow {
   id: string; day: string; kind: EntryKind; amountPaise: number; narration: string | null; headId: string | null; headName: string | null;
   partyName: string | null; enteredBy: string | null; enteredByName: string | null; enteredAt: number;
+  /** Bill photos of an expense (28 Nov 2026), comma-separated ids, or null. */
+  billIds?: string | null;
   /** Filled from the day's fee report (soft fill): its amount comes from the report. */
   feeReportId: string | null;
   /** An expense or other money in: the owner's review (null = waiting), who and the note. */
@@ -99,6 +101,7 @@ export async function bookDay(db: DB, businessId: string, book: Book, day: strin
         CASE WHEN e.kind = 'expense' THEN coalesce(e.for_branch_id, ?) END AS forBranchId,
         CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName,
         CASE WHEN e.kind = 'expense' THEN coalesce(fb.is_common, 0) END AS forCommon,
+        (SELECT group_concat(x.id) FROM cash_entry_bills x WHERE x.entry_id = e.id) AS billIds,
         EXISTS (SELECT 1 FROM cash_counts k WHERE k.settle_entry_id = e.id) AS fromSettle,
         (SELECT l.created_at FROM audit_log l WHERE l.row_table = 'cash_entries' AND l.row_id = e.id AND l.action = 'cashbook.entry.edit' ORDER BY l.id DESC LIMIT 1) AS editedAt,
         (SELECT lu.name FROM audit_log l LEFT JOIN users lu ON lu.id = l.user_id
@@ -296,11 +299,12 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
     bookDays(db, book, start, through),
     all<{ id: string; day: string; kind: EntryKind; amountPaise: number; narration: string | null; headName: string | null; partyName: string | null;
       reviewStatus: 'approved' | 'rejected' | null; feeReceipts: number | null; feeFirst: string | null; feeLast: string | null; enteredByName: string | null;
-      forBranchName: string | null; forCommon: number | null }>(db,
+      forBranchName: string | null; forCommon: number | null; bills: number }>(db,
       `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, h.name AS headName, p.name AS partyName, e.review_status AS reviewStatus,
         e.fee_receipts AS feeReceipts, e.fee_first AS feeFirst, e.fee_last AS feeLast, u.name AS enteredByName,
         CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName,
-        CASE WHEN e.kind = 'expense' THEN coalesce(fb.is_common, 0) END AS forCommon
+        CASE WHEN e.kind = 'expense' THEN coalesce(fb.is_common, 0) END AS forCommon,
+        (SELECT count(*) FROM cash_entry_bills x WHERE x.entry_id = e.id) AS bills
       FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
         LEFT JOIN branches fb ON fb.id = e.for_branch_id
       WHERE e.account_id = ? AND e.day >= ? AND e.day <= ? ORDER BY e.day, e.entered_at`, book.branchName, book.id, start, through),
@@ -319,7 +323,7 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
   const out2 = days.map((d) => {
     const ls = lines.filter((l) => l.day === d.day).map((l) => ({
       kind: l.kind, amountPaise: l.amountPaise, narration: l.narration, headName: l.headName, reviewStatus: l.reviewStatus,
-      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName, forBranchName: l.forBranchName, forCommon: !!l.forCommon,
+      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName, forBranchName: l.forBranchName, forCommon: !!l.forCommon, bills: l.bills,
       other: l.kind === 'handover_out' ? toName.get(l.id) ?? l.partyName : l.kind === 'handover_in' ? fromName.get(l.id) ?? null : null,
     }));
     for (const l of ls) {

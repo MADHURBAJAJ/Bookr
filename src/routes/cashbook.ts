@@ -11,6 +11,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../db';
 import { body, date, fail, isUuid, paise, signInSql, text } from '../http';
 import { bookDay, bookDays, bookFor, booksOf, bookReport, headKey, depositCandidates, feeChecks, handovers, inHandThrough, receiptRange, seesAllBooks, type HandoverRow } from '../cashbook';
 import { can } from '../permissions';
+import { MAX_UPLOAD_BYTES, serveStored, sniffImage, storageKey } from '../files';
 import { refillAll } from '../fees';
 
 export const cashBookRoutes = new Hono<AppEnv>();
@@ -505,6 +506,7 @@ cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:ent
   // cashier gets a notice. The reason is optional.
   const note = text(await body(c), 'note', 'Reason', { optional: true, max: 200 }) ?? null;
   const told = e.kind === 'expense' && book.cashierUserId && book.cashierUserId !== user.id;
+  const billKeys = await all<{ k: string }>(db, 'SELECT storage_key AS k FROM cash_entry_bills WHERE entry_id = ?', e.id);
   await db.batch([
     ...(told ? [
       stmt(db, `INSERT INTO removed_cash_lines (id, business_id, account_id, day, kind, amount_paise, narration, removed_by, removed_at, note)
@@ -513,10 +515,85 @@ cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:ent
         detail: { narration: e.narration, amountPaise: e.amountPaise, day: e.day, bookId: book.id, note, byName: user.name }, at: t }),
     ] : []),
     stmt(db, "UPDATE cash_handovers SET to_entry_id = NULL, status = 'sent', settled_by = NULL, settled_at = NULL WHERE to_entry_id = ?", e.id),
+    stmt(db, 'DELETE FROM cash_entry_bills WHERE entry_id = ?', e.id),
     stmt(db, 'DELETE FROM cash_entries WHERE id = ?', e.id),
     audit(db, { businessId: bid, userId: user.id, action: 'cashbook.entry.remove', table: 'cash_entries', rowId: e.id, before: { bookId: book.id, id: e.id, kind: e.kind, day: e.day, amountPaise: e.amountPaise, narration: e.narration }, at: t }),
   ]);
+  if (billKeys.length) await c.env.UPLOADS.delete(billKeys.map((b) => b.k));
   return c.json({ ok: true });
+});
+
+// ---- Bill photos on expenses (approved 28 Nov 2026): optional, up to 3 per expense, proof only. The cashier adds them to
+// their own expenses of today and yesterday (not once reviewed); the Owner and the Accountant at any time. The body is the
+// file itself (JPG, PNG or PDF, checked from its first bytes); the phone makes photos small before sending.
+const MAX_BILLS = 3;
+async function billLine(c: Context<AppEnv>) {
+  const book = await writableBook(c);
+  const entryId = id404(c.req.param('entryId'), 'Line');
+  const e = await one<{ id: string; kind: string; day: string; reviewStatus: string | null }>(c.env.DB,
+    'SELECT id, kind, day, review_status AS reviewStatus FROM cash_entries WHERE id = ? AND account_id = ? AND business_id = ?', entryId, book.id, c.get('businessId'));
+  if (!e) fail(404, 'Line not found.');
+  if (e.kind !== 'expense') fail(400, 'Bill photos go on expenses.');
+  if (!can(c.get('role'), 'rows.approve')) {
+    if (e.reviewStatus) fail(409, `The owner has already ${e.reviewStatus} this expense. Ask the owner or the accountant to add the bill.`);
+    await changeWindow(c, book.id, e.day);
+  }
+  return { book, e };
+}
+
+cashBookRoutes.post('/businesses/:businessId/cashbooks/:accountId/entries/:entryId/bills', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const { book, e } = await billLine(c);
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (!bytes.length) fail(400, 'Choose a photo.');
+  if (bytes.length > MAX_UPLOAD_BYTES) fail(400, 'The file is larger than 10 MB.');
+  const type = sniffImage(bytes);
+  if (!type) fail(400, 'Only a photo (JPG or PNG) or a PDF can be added.');
+  const n = await one<{ n: number }>(db, 'SELECT count(*) AS n FROM cash_entry_bills WHERE entry_id = ?', e.id);
+  if ((n?.n ?? 0) >= MAX_BILLS) fail(409, `An expense can have up to ${MAX_BILLS} bill photos. Remove one first.`);
+  const id = newId();
+  const key = storageKey(bid, `bill-${id}`);
+  await c.env.UPLOADS.put(key, bytes, { httpMetadata: { contentType: type } });
+  const t = now();
+  try {
+    await db.batch([
+      stmt(db, `INSERT INTO cash_entry_bills (id, business_id, entry_id, storage_key, content_type, size_bytes, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, bid, e.id, key, type, bytes.length, c.get('user').id, t),
+      audit(db, { businessId: bid, userId: c.get('user').id, action: 'cashbook.bill.add', table: 'cash_entries', rowId: e.id, after: { bookId: book.id, billId: id }, at: t }),
+    ]);
+  } catch (err) {
+    await c.env.UPLOADS.delete(key);
+    throw err;
+  }
+  return c.json({ id }, 201);
+});
+
+cashBookRoutes.delete('/businesses/:businessId/cashbooks/:accountId/entries/:entryId/bills/:billId', requireRole('rows.edit'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const { book, e } = await billLine(c);
+  const b = await one<{ id: string; key: string }>(db, 'SELECT id, storage_key AS key FROM cash_entry_bills WHERE id = ? AND entry_id = ? AND business_id = ?',
+    id404(c.req.param('billId'), 'Bill photo'), e.id, bid);
+  if (!b) fail(404, 'Bill photo not found.');
+  await db.batch([
+    stmt(db, 'DELETE FROM cash_entry_bills WHERE id = ?', b.id),
+    audit(db, { businessId: bid, userId: c.get('user').id, action: 'cashbook.bill.remove', table: 'cash_entries', rowId: e.id, before: { bookId: book.id, billId: b.id }, at: now() }),
+  ]);
+  await c.env.UPLOADS.delete(b.key);
+  return c.json({ ok: true });
+});
+
+// Seeing a bill photo: anyone who may see that book (a cashier only their own).
+cashBookRoutes.get('/businesses/:businessId/cashbooks/:accountId/bills/:billId', requireRole('business.view'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const user = c.get('user');
+  const book = await bookFor(db, bid, id404(c.req.param('accountId'), 'Cash book'), user.id, c.get('role'));
+  const b = await one<{ key: string }>(db, `SELECT x.storage_key AS key FROM cash_entry_bills x JOIN cash_entries e ON e.id = x.entry_id
+    WHERE x.id = ? AND x.business_id = ? AND e.account_id = ?`, id404(c.req.param('billId'), 'Bill photo'), bid, book.id);
+  if (!b) fail(404, 'Bill photo not found.');
+  return serveStored(c, b.key);
 });
 
 // ---- Cash counted at the end of a day.
@@ -766,7 +843,8 @@ cashBookRoutes.get('/businesses/:businessId/cashbook-report', requireRole('busin
 
 const reviewSql = `SELECT e.id, e.account_id AS accountId, a.name AS bookName, b.name AS branchName, e.day, e.kind, e.amount_paise AS amountPaise, e.narration,
     e.head_id AS headId, h.name AS headName, e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName, e.reviewed_at AS reviewedAt,
-    u.name AS enteredByName, e.entered_at AS enteredAt, e.head_learnt AS headLearnt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName, coalesce(fb.is_common, 0) AS forCommon
+    u.name AS enteredByName, e.entered_at AS enteredAt, e.head_learnt AS headLearnt, coalesce(e.for_branch_id, a.branch_id) AS forBranchId, coalesce(fb.name, b.name) AS forBranchName, coalesce(fb.is_common, 0) AS forCommon,
+    (SELECT group_concat(x.id) FROM cash_entry_bills x WHERE x.entry_id = e.id) AS billIds
   FROM cash_entries e JOIN accounts a ON a.id = e.account_id LEFT JOIN branches b ON b.id = a.branch_id LEFT JOIN heads h ON h.id = e.head_id
     LEFT JOIN branches fb ON fb.id = e.for_branch_id
     LEFT JOIN users u ON u.id = e.entered_by LEFT JOIN users ru ON ru.id = e.reviewed_by

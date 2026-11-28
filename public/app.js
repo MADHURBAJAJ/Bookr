@@ -2221,6 +2221,86 @@ async function apiUpload(path, file) {
   return data;
 }
 
+// ---- Bill photos on expenses (approved 28 Nov 2026): optional, up to 3, proof only. Made small on the phone first.
+const MAX_BILLS = 3;
+const billIdsOf = (e) => (e.billIds ? String(e.billIds).split(',') : []);
+const billSrc = (biz, bookId, id) => `/api/businesses/${biz.id}/cashbooks/${bookId}/bills/${id}`;
+async function shrinkPhoto(file) {
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return file;
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+    cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+    const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.7));
+    return blob ? new File([blob], 'bill.jpg', { type: 'image/jpeg' }) : file;
+  } catch { return file; }
+}
+async function addBills(biz, bookId, entryId, files) {
+  for (const f of [...files].slice(0, MAX_BILLS)) await apiUpload(`/businesses/${biz.id}/cashbooks/${bookId}/entries/${entryId}/bills`, await shrinkPhoto(f));
+}
+/** Opens the phone's camera or gallery (call it straight from a tap). */
+function pickBills(onFiles) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*,application/pdf'; inp.multiple = true;
+  inp.addEventListener('change', () => { if (inp.files?.length) onFiles(inp.files); });
+  inp.click();
+}
+/**
+ * Full-size bill photos, one at a time. items: [{bookId, entryId, id, title, sub, edit}] across one or many expenses;
+ * "Next bill" walks through all of them. With edit, the photo can be removed and one more added (up to 3 an expense).
+ */
+function billViewer(biz, items, start, onChange) {
+  let i = Math.max(0, start);
+  let changed = false;
+  const box = document.createElement('div');
+  box.className = 'bill-view';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-label', 'Bill photo');
+  document.body.append(box);
+  const close = async () => { box.remove(); document.removeEventListener('keydown', key); if (changed) await onChange?.(); };
+  const key = (e) => { if (e.key === 'Escape') close(); if (e.key === 'ArrowRight' && i < items.length - 1) { i++; show(); } if (e.key === 'ArrowLeft' && i > 0) { i--; show(); } };
+  document.addEventListener('keydown', key);
+  const show = () => {
+    const it = items[i];
+    const src = billSrc(biz, it.bookId, it.id);
+    const same = items.filter((x) => x.entryId === it.entryId).length;
+    box.innerHTML = html`<div class="bill-top"><button type="button" class="btn plain" data-bv="close">‹ Back</button>
+        <span class="tiny">${items.length > 1 ? `${i + 1} of ${items.length}` : ''}</span></div>
+      <div class="bill-pic"><img src="${src}" alt="Bill photo for ${it.title}"><a class="btn plain" href="${src}" target="_blank" rel="noopener" hidden data-bv="file">Open the file</a></div>
+      <div class="bill-cap"><b>${it.title}</b>${it.sub ? html`<div class="tiny">${it.sub}</div>` : ''}
+        <div class="form-row" style="margin-top:8px;gap:8px;flex-wrap:wrap">
+          ${i > 0 ? html`<button type="button" class="btn plain" data-bv="prev">‹ Previous</button>` : ''}
+          ${i < items.length - 1 ? html`<button type="button" class="btn" data-bv="next">Next bill ›</button>` : ''}
+          ${it.edit && same < MAX_BILLS ? html`<button type="button" class="btn plain" data-bv="add">+ Add photo</button>` : ''}
+          ${it.edit ? html`<button type="button" class="btn plain bill-del" data-bv="del">Remove this photo</button>` : ''}</div>
+        <div class="form-msg" data-bv="msg"></div></div>`.__html;
+    const img = box.querySelector('img');
+    img.addEventListener('error', () => { img.hidden = true; box.querySelector('[data-bv=file]').hidden = false; });
+    const on = (k, fn) => box.querySelector(`[data-bv=${k}]`)?.addEventListener('click', fn);
+    const err = (e) => { const m = box.querySelector('[data-bv=msg]'); m.textContent = e.message; m.className = 'form-msg error'; };
+    on('close', close);
+    on('prev', () => { i--; show(); });
+    on('next', () => { i++; show(); });
+    on('add', () => pickBills(async (files) => {
+      try { await addBills(biz, it.bookId, it.entryId, [...files].slice(0, MAX_BILLS - same)); changed = true; await close(); } catch (e) { err(e); }
+    }));
+    on('del', async () => {
+      if (!confirm('Remove this bill photo?')) return;
+      try {
+        await api('DELETE', `/businesses/${biz.id}/cashbooks/${it.bookId}/entries/${it.entryId}/bills/${it.id}`);
+        changed = true;
+        items.splice(i, 1);
+        if (!items.length) return close();
+        i = Math.min(i, items.length - 1);
+        show();
+      } catch (e) { err(e); }
+    });
+  };
+  show();
+}
+
 /** Shows an error with its list of reasons, as the server sends them. */
 function showError(el, err) {
   el.innerHTML = html`<div class="error">${err.message}</div>${err.problems?.length ? html`<ul class="error">${err.problems.map((p) => html`<li>${p}</li>`)}</ul>` : ''}`.__html;
@@ -11488,7 +11568,15 @@ async function cashBookDayView(biz, accountId, dayIn) {
       ? html` <button type="button" class="chip ${other ? 'wait' : 'info'} cb-chipbtn" data-cbbranch="${e.id}" title="Change which school this is for">${other ? 'for ' : ''}${label} ▾</button>`
       : html` <span class="chip ${other ? 'wait' : 'info'}">${other ? 'for ' : ''}${label}</span>`;
   };
-  const marks = (e) => html`${branchChip(e)}${e.editedAt ? html` <button type="button" class="chip info cb-chipbtn" data-cbhist="${e.id}" title="See what changed">edited</button>` : ''}${e.changedAfterCount ? html` <span class="chip wait">changed after count</span>` : ''}`;
+  // Bill photos (28 Nov 2026): the cashier adds them while the line can be changed; Owner and Accountant any time.
+  const canBill = (e) => e.kind === 'expense' && !e.fromSettle && (d.can.approve || (w && !e.reviewStatus && !d.count?.settle && e.day >= yest));
+  const billChip = (e) => {
+    if (e.kind !== 'expense') return '';
+    const n = billIdsOf(e).length;
+    return n ? html` <button type="button" class="chip info cb-chipbtn" data-cbbills="${e.id}" title="See the bill photo">📎 ${n === 1 ? 'bill' : `${n} bills`}</button>`
+      : canBill(e) ? html` <button type="button" class="chip wait cb-chipbtn" data-cbaddbill="${e.id}" title="Add a photo of the bill">+ bill photo</button>` : '';
+  };
+  const marks = (e) => html`${branchChip(e)}${billChip(e)}${e.editedAt ? html` <button type="button" class="chip info cb-chipbtn" data-cbhist="${e.id}" title="See what changed">edited</button>` : ''}${e.changedAfterCount ? html` <span class="chip wait">changed after count</span>` : ''}`;
   const reopen = (e) => (owner && e.kind === 'expense' && e.reviewStatus && !e.fromSettle
     ? html` <button type="button" class="linkbtn tiny" data-oreopen="${e.id}">Reopen</button>` : '');
   const row = (label, sub, amt, sign, cls = '', extra = '') => html`<div class="list-row cb-line ${cls}"><span>${label}${sub ? html`<div class="tiny">${sub}</div>` : ''}</span>
@@ -11600,6 +11688,8 @@ async function cashBookDayView(biz, accountId, dayIn) {
         ${branchOptions(d.branches, b.branchId, b.branchId)}</select>
         <span class="tiny">Change it only if the expense is for another school, or common to the group.</span></div>` : ''}
       <div class="field"><label for="cbe-p">Paid to (optional)</label><input id="cbe-p" name="paidTo" placeholder="Gupta Stationers"></div>
+      <div class="field"><label for="cbe-f">Bill photo (optional, up to ${MAX_BILLS})</label><input id="cbe-f" name="bills" type="file" accept="image/*,application/pdf" multiple>
+        <span class="tiny">Take a photo or pick one. It can also be added later from the line.</span></div>
       <div class="tiny">The cash leaves your book now. The accountant sets the head and the owner approves.</div>
       <div class="form-msg"></div><div class="form-row"><button class="btn" type="submit">Save expense</button><button class="btn plain" type="button" data-cbclose>Cancel</button></div>
     </form>
@@ -11692,6 +11782,14 @@ async function cashBookDayView(biz, accountId, dayIn) {
       await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreopen}/review`, { status: null });
     }
   });
+  app.querySelectorAll('[data-cbbills]').forEach((x) => x.addEventListener('click', () => {
+    const e = d.entries.find((y) => y.id === x.dataset.cbbills);
+    billViewer(biz, billIdsOf(e).map((id) => ({ bookId: b.id, entryId: e.id, id, title: `${e.narration || 'Expense'} · ₹ ${rs(e.amountPaise)}`, sub: `${b.name} · ${shortDay(e.day)}`, edit: canBill(e) })), 0, reload);
+  }));
+  app.querySelectorAll('[data-cbaddbill]').forEach((x) => x.addEventListener('click', () => pickBills(async (files) => {
+    x.disabled = true; x.textContent = 'Adding…';
+    try { await addBills(biz, b.id, x.dataset.cbaddbill, files); await reload(); } catch (err) { alert(err.message); x.disabled = false; x.textContent = '+ bill photo'; }
+  })));
   app.querySelectorAll('[data-cbnoticeok]').forEach((x) => x.addEventListener('click', async () => {
     x.disabled = true;
     try { await api('POST', `/businesses/${biz.id}/notices/${x.dataset.cbnoticeok}/done`, {}); await reload(); } catch (err) { alert(err.message); x.disabled = false; }
@@ -11785,7 +11883,12 @@ async function cashBookDayView(biz, accountId, dayIn) {
     await reload();
   });
   onSubmit(fm('expense'), async (x) => {
-    await api('POST', `${base}/entries`, { day, kind: 'expense', amount: x.amount, forBranchId: x.forBranchId || null, narration: `${x.what.trim()}${x.paidTo?.trim() ? ` · paid to ${x.paidTo.trim()}` : ''}` });
+    const files = fm('expense').querySelector('[name=bills]')?.files ?? [];
+    if (files.length > MAX_BILLS) throw new Error(`Choose up to ${MAX_BILLS} photos.`);
+    const { id } = await api('POST', `${base}/entries`, { day, kind: 'expense', amount: x.amount, forBranchId: x.forBranchId || null, narration: `${x.what.trim()}${x.paidTo?.trim() ? ` · paid to ${x.paidTo.trim()}` : ''}` });
+    if (files.length) {
+      try { await addBills(biz, b.id, id, files); } catch (err) { alert(`The expense is saved, but the bill photo was not added: ${err.message}\n\nAdd it again from the line.`); }
+    }
     await reload();
   });
   const to = fm('handover').querySelector('[name=to]');
@@ -11921,7 +12024,7 @@ async function cbReportView(biz, query) {
   const who = (x) => html`${x.book.name}${x.book.branchName ? html` · ${x.book.branchName}` : ''}${x.book.cashierName && x.book.cashierName.toLowerCase() !== x.book.name.toLowerCase() ? html` <span class="rp-mute">(${x.book.cashierName})</span>` : ''}`;
   const neg = (p) => (p < 0 ? 'rp-neg' : '');
   const forChip = (l, x) => (l.kind === 'expense' && l.forBranchName && l.forBranchName !== x.book.branchName ? html` <span class="chip wait">for ${l.forBranchName}${l.forCommon ? ' · Common' : ''}</span>` : '');
-  const chip = (l) => (l.kind !== 'expense' ? '' : l.reviewStatus === 'approved' ? html` <span class="chip ok">approved</span>` : l.reviewStatus === 'rejected' ? html` <span class="chip bad">rejected</span>` : html` <span class="chip wait">waiting</span>`);
+  const chip = (l) => (l.kind !== 'expense' ? '' : html`${l.bills ? html` <span class="chip info" title="Bill photo">📎${l.bills > 1 ? ` ${l.bills}` : ''}</span>` : ''}${l.reviewStatus === 'approved' ? html` <span class="chip ok">approved</span>` : l.reviewStatus === 'rejected' ? html` <span class="chip bad">rejected</span>` : html` <span class="chip wait">waiting</span>`}`);
   const what = (l) => (l.kind === 'fee' ? `Fee cash${l.feeReceipts ? ` · ${l.feeReceipts} receipt${l.feeReceipts === 1 ? '' : 's'}` : ''}${l.feeFirst ? ` · ${l.feeFirst}–${l.feeLast}` : ''}`
     : l.kind === 'handover_out' ? `Handed over to ${l.other ?? '—'}${l.narration ? ` · ${l.narration}` : ''}`
       : l.kind === 'handover_in' ? `Received from ${l.other ?? '—'}` : l.narration || l.headName || '—');
@@ -12125,19 +12228,25 @@ function cbExpList(biz, lines, heads, owner) {
   const groups = new Map();
   for (const e of exp) { const k = `${e.branchName ?? 'Cash holder'} · ${e.bookName}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(e); }
   const noHead = exp.filter((e) => !e.headId).length;
+  const noBill = exp.filter((e) => !e.billIds).length;
+  const thumb = (e) => { const ids = billIdsOf(e); return ids.length
+    ? html`<button type="button" class="bill-th" data-xbill="${e.id}" aria-label="See the bill photo"><img src="${billSrc(biz, e.accountId, ids[0])}" alt="" loading="lazy">${ids.length > 1 ? html`<span>${ids.length}</span>` : ''}</button>`
+    : html`<span class="bill-th none" title="No bill photo">no bill</span>`; };
   const line = (e) => html`<div class="list-row" style="align-items:flex-start;gap:10px">
       <input type="checkbox" data-xt="${e.id}" data-p="${e.amountPaise}" ${owner ? (e.headId ? 'checked' : 'disabled') : ''} aria-label="Tick ${e.narration ?? 'expense'}" style="margin-top:3px;width:18px;height:18px;flex:none">
+      ${thumb(e)}
       <span style="flex:1;min-width:0"><a href="#/b/${biz.id}/cashbook/${e.accountId}/${e.day}" style="color:inherit">${e.narration || 'Expense'}</a>${e.forBranchName && e.forBranchName !== e.branchName ? html` <span class="chip wait">for ${e.forBranchName}</span>` : ''}
         <div class="tiny">${shortDay(e.day)} · ${e.headName ? html`<span class="chip info">${e.headName}</span>${e.headLearnt ? html` <span class="chip ok">learnt</span>` : ''}` : html`<span class="chip wait">head needed</span>`}</div>
         ${e.headId ? '' : html`<div style="margin-top:4px">${pick(e, 'Pick head…')}</div>`}
         <div class="form-row" data-xm="${e.id}" hidden style="margin-top:6px;gap:6px;flex-wrap:wrap">
           <a class="btn plain" style="min-height:30px" href="#/b/${biz.id}/cashbook/${e.accountId}/${e.day}">Edit</a>
           ${e.headId ? pick(e, 'Change head…') : ''}
+          ${billIdsOf(e).length < MAX_BILLS ? html`<button type="button" class="btn plain" style="min-height:30px" data-xaddbill="${e.id}" data-acc="${e.accountId}">+ Bill photo</button>` : ''}
           ${owner ? html`<button type="button" class="btn plain" style="min-height:30px" data-xkeep="${e.id}">Keep pending</button>
             <button type="button" class="btn plain" style="min-height:30px" data-xreject="${e.id}">Reject</button>
             <button type="button" class="btn plain" style="min-height:30px;color:var(--bad,#B91C1C)" data-xdel="${e.id}" data-acc="${e.accountId}">Delete</button>` : ''}</div></span>
       <span style="text-align:right;flex:none"><span class="amount">₹ ${rs(e.amountPaise)}</span><br><button type="button" class="linkbtn" data-xmore="${e.id}" aria-label="More for ${e.narration ?? 'expense'}" style="font-size:18px">⋯</button></span></div>`;
-  return html`<div class="list-row"><span><b>${exp.length}</b> waiting${noHead ? html` · <span class="chip wait">${noHead} need a head</span>` : ''}</span>
+  return html`<div class="list-row"><span><b>${exp.length}</b> waiting${noHead ? html` · <span class="chip wait">${noHead} need a head</span>` : ''}${noBill ? html` · <span class="chip wait">${noBill} no bill</span>` : ''}</span>
       <label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-xall ${owner ? 'checked' : ''}> All</label></div>
     ${[...groups].map(([k, xs]) => html`<div class="cb-branch"><span>${k}</span><span class="amount">₹ ${rs(xs.reduce((t, e) => t + e.amountPaise, 0))}</span></div>${xs.map(line)}`)}
     <div class="xbar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-top:10px">
@@ -12146,7 +12255,14 @@ function cbExpList(biz, lines, heads, owner) {
           <button type="button" class="btn" data-xsethead>Set head for ticked</button>`}</div>
     <div class="form-msg" data-xmsg></div>`;
 }
-function cbExpWire(biz, owner, again) {
+function cbExpWire(biz, owner, again, lines = []) {
+  const bills = lines.filter((e) => e.kind === 'expense' && !e.reviewStatus).flatMap((e) => billIdsOf(e).map((id) => ({ bookId: e.accountId, entryId: e.id, id,
+    title: `${e.narration || 'Expense'} · ₹ ${rs(e.amountPaise)}`, sub: `${e.bookName}${e.branchName ? ` · ${e.branchName}` : ''} · ${shortDay(e.day)}`, edit: true })));
+  app.querySelectorAll('[data-xbill]').forEach((x) => x.addEventListener('click', () => billViewer(biz, bills.map((b) => ({ ...b })), bills.findIndex((b) => b.entryId === x.dataset.xbill), again)));
+  app.querySelectorAll('[data-xaddbill]').forEach((x) => x.addEventListener('click', () => pickBills(async (files) => {
+    x.disabled = true; x.textContent = 'Adding…';
+    try { await addBills(biz, x.dataset.acc, x.dataset.xaddbill, files); await again(); } catch (err) { alert(err.message); x.disabled = false; x.textContent = '+ Bill photo'; }
+  })));
   const ticks = () => [...app.querySelectorAll('[data-xt]')].filter((x) => x.checked);
   const update = () => {
     const t = ticks();
@@ -12233,7 +12349,7 @@ async function cbExpensesView(biz) {
       <a class="tiny" href="#/b/${biz.id}/cashbooks">‹ Cash books</a></div></div>`));
   wireShell();
   const again = () => cbExpensesView(biz);
-  cbExpWire(biz, owner, again);
+  cbExpWire(biz, owner, again, r.lines);
   cbNoticesWire(biz, again);
 }
 
@@ -12303,7 +12419,7 @@ async function ownerLookView(biz) {
     if (note?.trim()) await api('POST', `/businesses/${biz.id}/cashbook-lines/${x.dataset.oreject}/review`, { status: 'rejected', note });
   });
   app.querySelectorAll('[data-ohead]').forEach((x) => x.addEventListener('click', () => ownerHeadPicker(biz, x.dataset.ohead, again)));
-  cbExpWire(biz, true, again);
+  cbExpWire(biz, true, again, l.expenses);
   cbNoticesWire(biz, again);
 }
 
