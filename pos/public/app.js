@@ -3109,6 +3109,12 @@ function roomBillPanel(r) {
       <button class="btn ghost" type="button" data-act="rbGrc" data-id="${st.id}">Registration card</button>
       ${r.balancePaise < 0 ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${st.accountId}" data-n="${name}" data-max="${-r.balancePaise}">Refund ${rs(-r.balancePaise)}</button>` : ''}
       ${djWait.length ? html`<div class="msg warn" style="display:block;width:100%"><strong>Paid at reception, in Djubo: pick how</strong>${djWait.map(djRow)}<div class="small">Check-out waits for this.</div></div>` : ''}
+      ${(r.djuboCovered ?? []).length && !out ? (() => {
+        // Djubo money covered by POS receipts on this bill (28 Nov 2026): nothing to pick; what is left is the bill's balance.
+        const due = r.lines.filter((l) => l.amountPaise > 0).reduce((t, l) => t + l.amountPaise, 0);
+        return html`<div class="msg ok" style="display:block;width:100%">${r.djuboCovered.map((x) => html`<div><strong>Djubo ${rs(x.deskPaidPaise)} (${x.extRef}) · covered by ${x.coveredBy.join(', ')}</strong></div>`)}
+          <div class="small">Total due ${rs(due)} · received ${rs(due - Math.max(0, r.balancePaise))} · <strong>balance to take ${rs(Math.max(0, r.balancePaise))}</strong></div></div>`;
+      })() : ''}
       ${r.balancePaise === 0 && !djWait.length ? (() => {
         // One click (25 Nov 2026): the form opens only for a company invoice, or when a manager must approve (no room rent).
         const rentUnknown = !!(r.booking?.fromReport && r.booking.amountPaise == null);
@@ -5577,6 +5583,9 @@ async function exceptionsScreen(day = me.business.shiftDay) {
         <button class="btn pri" type="button" data-act="exCopy">Copy for WhatsApp</button></form></div>
     ${off?.problems?.length ? html`<div class="msg warn" role="alert" style="display:block;margin-bottom:12px"><b>Made offline: check ${plural(off.problems.length, 'bill')}.</b>${off.problems.map((x) => html`<div>${x.problem}</div>`)}</div>` : ''}
     ${off?.bills?.length || off?.receipts?.length ? html`<p class="small quiet" style="margin-bottom:12px">Made with no internet this shift: ${[...off.bills.map((x) => x.billNo), ...off.receipts.map((x) => x.receiptNo)].join(', ')}. They keep the numbers printed on their paper.</p>` : ''}
+    ${(d.djuboCovered ?? []).length ? html`<div class="msg" style="display:block;margin-bottom:12px"><b>Taken in Djubo, covered by POS receipts: ${d.djuboCovered.length}</b>
+      ${d.djuboCovered.map((x) => html`<div>${x.guestName ?? ''} · Djubo ${x.extRef} ${rs(x.deskPaidPaise)}${x.enteredBy ? ` by ${x.enteredBy}` : ''} · covered by ${x.coveredBy.join(', ')}</div>`)}
+      <div class="small quiet">Anything still owed shows on the guest's bill and must be paid before check-out.</div></div>` : ''}
     ${(d.cancelledReceipts ?? []).length ? html`<div class="msg warn" style="display:block;margin-bottom:12px"><b>Receipts cancelled: ${d.cancelledReceipts.length}</b>
       ${d.cancelledReceipts.map((x) => html`<div>${x.receiptNo ?? 'Receipt'} · ${x.who ?? ''} · ${rs(x.totalPaise)} · ${x.reason}${x.note ? ` (${x.note})` : ''} · by ${x.byName ?? ''}, ${time(x.at)}</div>`)}</div>` : ''}
     ${look.length ? html`<div class="dc-look"><span class="badge-n">${plural(look.length, 'thing')} to look at</span><span>${look.join(' · ')}</span></div>`

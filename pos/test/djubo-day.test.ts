@@ -118,25 +118,26 @@ describe('money marked in Djubo by reception', () => {
     await ok(counter.post(`${B}/debtors/${acc}/receipts`, { kind: 'receipt', payments: [{ mode: 'cash', amount: '1000' }] }));
     await send(s.businessId, 'g2', `Booking DJ-G1 | Food Guest | 9800055552 | Deluxe | ${day} | ${plus(1)} | 2500 | 2500 | Sample Desk | XII`);
     const sh = await ok(s.owner.get(`${B}/shifts/${day}`));
-    expect(sh.summary.djubo.map((x: any) => [x.extRef, x.amountPaise])).toEqual([['DJ-G1', 250_000]]);
+    // The owner's rule (28 Nov 2026): POS receipts on the bill cover Djubo money up to their total, food or not. The ₹1,000
+    // food receipt covers ₹1,000; ₹1,500 is asked; the bill still owes ₹2,500 (the rent), so check-out waits for it.
+    expect(sh.summary.djubo.map((x: any) => [x.extRef, x.amountPaise])).toEqual([['DJ-G1', 150_000]]);
+    expect((await ok(counter.get(`${B}/stays/${stay}/bill`))).balancePaise).toBe(250_000);
 
     // "Already taken in the POS": the desk had also taken the ₹2,500 here. Linked to that receipt, it is counted once.
     const x = sh.summary.djubo[0];
-    // (Here it went against more food on the bill, so the automatic check can't tell it was the rent; staff link it by hand.)
+    // Even with more food on the bill, a receipt taken the same day covers it by itself (28 Nov 2026); staff can still
+    // link it by hand, and then it shows as that receipt.
     await q("INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, at) VALUES ('fd-2', ?, ?, 'charge', 250000, ?)", s.businessId, acc, Date.now());
     const rc = await ok(counter.post(`${B}/debtors/${acc}/receipts`, { kind: 'receipt', payments: [{ mode: 'cash', amount: '2500' }] }));
-    expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(1);
-    const list = (await ok(counter.get(`${B}/bookings/${x.bookingId}/djubo-receipts?mailId=${x.mailId}`))).receipts;
-    const mine = list.find((r: any) => r.receiptNo === rc.receipt.receiptNo);
-    expect(mine).toMatchObject({ amountPaise: 250_000, mode: 'cash' });
-    const before = (await ok(s.owner.get(`${B}/shifts/${day}`))).summary.receipts.find((r: any) => r.mode === 'cash').paise;
-    await ok(counter.post(`${B}/bookings/${x.bookingId}/djubo-link`, { mailId: x.mailId, settlementId: mine.settlementId }));
-    const after = (await ok(s.owner.get(`${B}/shifts/${day}`))).summary;
-    expect(after.djubo.map((y: any) => [y.receiptNo, y.mode])).toEqual([[rc.receipt.receiptNo, 'cash']]);
-    expect(after.receipts.find((r: any) => r.mode === 'cash').paise).toBe(before);   // no new money
-    expect(after.deskMissing).toEqual([]);
-    // The same receipt can't be linked twice.
     expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
+    const after = (await ok(s.owner.get(`${B}/shifts/${day}`))).summary;
+    expect(after.djubo.filter((y: any) => !y.settlementId)).toEqual([]);
+    expect(after.deskMissing).toEqual([]);
+    // Nothing is waiting, so there is nothing to link by hand, and no second receipt can be made for it.
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
+    expect(rc.receipt.receiptNo).toBeTruthy();
+    // The bill still owes the food: ₹1,000 + ₹2,500 + ₹2,500 rent − ₹1,000 − ₹2,500 received.
+    expect((await ok(counter.get(`${B}/stays/${stay}/bill`))).balancePaise).toBe(250_000);
   });
 
   it('a charge added after the rent was paid does not bring the Djubo payment back (28 Nov 2026)', async () => {
@@ -154,6 +155,41 @@ describe('money marked in Djubo by reception', () => {
     await q("INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, at) VALUES ('lc-1', ?, ?, 'charge', 4400, ?)", s.businessId, acc, Date.now() + 60_000);
     expect((await ok(s.owner.get(`${B}/shifts/${day}`))).summary.djubo).toEqual([]);
     expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
+  });
+
+  it('only receipts and advances of that day or before cover it: not deposits, cancelled receipts or a later day (28 Nov 2026)', async () => {
+    const s = await hostel();
+    const { B, counter, owner, ok, day, plus } = s;
+    const guest = async (ref: string, room: string, phone: string) => {
+      await send(s.businessId, ref + 'a', `Booking ${ref} | Guard Guest | ${phone} | Deluxe | ${day} | ${plus(1)} | 2500 | 0 | Sample Team | ${room}`);
+      const arr = (await ok(counter.get(`${B}/bookings/arrivals?day=${day}`))).arrivals;
+      const stay = (await ok(counter.post(`${B}/stays`, { room, guestName: 'Guard Guest', bookingId: arr.find((a: any) => a.extRef === ref).id }))).id;
+      return (await ok(counter.get(`${B}/stays/${stay}/bill`))).stay.accountId as string;
+    };
+    const asked = async () => Object.fromEntries((await ok(owner.get(`${B}/shifts/${day}`))).summary.djubo.filter((x: any) => !x.settlementId).map((x: any) => [x.extRef, x.amountPaise / 100]));
+    const pay = (acc: string, kind: string) => ok(counter.post(`${B}/debtors/${acc}/receipts`, { kind, payments: [{ mode: 'cash', amount: '2500' }] }));
+    const mark = (ref: string, room: string, phone: string) => send(s.businessId, ref + 'b', `Booking ${ref} | Guard Guest | ${phone} | Deluxe | ${day} | ${plus(1)} | 2500 | 2500 | Sample Desk | ${room}`);
+    // A refundable deposit does not cover rent marked in Djubo.
+    const a1 = await guest('DJ-K1', 'X', '9800077771');
+    await pay(a1, 'deposit');
+    await mark('DJ-K1', 'X', '9800077771');
+    // A receipt cancelled afterwards no longer covers it.
+    const a2 = await guest('DJ-K2', 'XI', '9800077772');
+    await pay(a2, 'receipt');
+    const rid = (await q("SELECT id FROM settlements WHERE kind = 'receipt' AND business_id = ? ORDER BY at DESC, rowid DESC LIMIT 1", s.businessId))[0].id;
+    await mark('DJ-K2', 'XI', '9800077772');
+    expect((await asked())['DJ-K2']).toBeUndefined();
+    await ok(owner.post(`${B}/receipts/${rid}/cancel`, { reason: 'No money was taken' }));
+    // A receipt of a later day does not cover money marked on this day.
+    const a3 = await guest('DJ-K3', 'XII', '9800077773');
+    await mark('DJ-K3', 'XII', '9800077773');
+    const back = Date.now() - 86_400_000;   // reception marked it yesterday; the receipt is taken today
+    await q("UPDATE booking_paid_log SET received_at = ? WHERE booking_id = (SELECT id FROM bookings WHERE ext_ref = 'DJ-K3' AND business_id = ?) AND paid_paise > 0", back, s.businessId);
+    await q("UPDATE bookings SET desk_paid_at = ? WHERE ext_ref = 'DJ-K3' AND business_id = ?", back, s.businessId);
+    await pay(a3, 'receipt');
+    expect(await asked()).toEqual({ 'DJ-K1': 2500, 'DJ-K2': 2500 });
+    const k3 = (await q("SELECT stay_id FROM bookings WHERE ext_ref = 'DJ-K3' AND business_id = ?", s.businessId))[0].stay_id;
+    expect((await ok(counter.get(`${B}/stays/${k3}/bill`))).djubo.map((x: any) => x.amountPaise)).toEqual([250_000]);
   });
 
   it('money marked before the rule began, for a stay from then on, counts as paid before arrival', async () => {

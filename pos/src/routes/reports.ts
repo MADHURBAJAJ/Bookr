@@ -11,6 +11,8 @@ import type { AppEnv } from '../types';
 import { occupancy, roomRevenueByDay } from './frontdesk';
 import { drawersOfDay } from './drawers';
 import { cancelledReceipts } from './receipt-cancels';
+import { deskAll } from '../rooms';
+import { shiftDayAt } from '../billing';
 
 export const reportRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -188,6 +190,9 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
   const cancelledReceiptsOfDay = await cancelledReceipts(db, bid, day);
   return {
     day, fy, cancelledReceipts: cancelledReceiptsOfDay,
+    // Djubo money reception marked this day that POS receipts on the room bill cover (28 Nov 2026): not asked about, listed.
+    djuboCovered: (await deskAll(db, bid)).filter((r) => r.coveredBy.length && r.deskPaidAt && shiftDayAt(r.deskPaidAt, b.shift_start_hour) === day)
+      .map((r) => ({ extRef: r.extRef, guestName: r.guestName, enteredBy: r.enteredBy, deskPaidPaise: r.deskPaidPaise, coveredBy: r.coveredBy })),
     sales: { bills: sales!.bills ?? 0, netPaise: sales!.net, totalPaise: sales!.total, voids: sales!.voids ?? 0, ncBills: sales!.nc ?? 0, ncMenuPaise: sales!.ncMenu }, byMode,
     events: Object.fromEntries(events.map((e) => [e.kind, { n: e.n, paise: e.paise }])),
     differences: Object.fromEntries(diffs.map((d) => [d.kind, { n: d.n, paise: d.paise }])),

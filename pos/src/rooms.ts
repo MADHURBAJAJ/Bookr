@@ -3,6 +3,7 @@
 // or the booking team). Money taken at the hotel is a receipt on the folio; at check-out one tax invoice is made for the
 // stay's room rent. Food has its own bills already, so it is never on the room invoice.
 import { all, newId, now, one, stmt, type DB } from '../../src/db';
+import { shiftDayAt } from './billing';
 
 const OTA = /make\s*my\s*trip|\bmmt\b|goibibo|booking\.com|agoda|expedia|airbnb|hostelworld|cleartrip|easemytrip|yatra|\bota\b/i;
 
@@ -152,34 +153,46 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, team
  * money reception marked in Djubo without a POS receipt is never asked for.
  */
 /**
- * Per room bill (and its group's beds): what its receipts have left for rent once they have paid food and other charges.
- * A food payment must not hide rent reception took in Djubo (26 Nov 2026), but a receipt only pays charges that were on
- * the bill when it was taken (28 Nov 2026): a charge added later is owed, it did not use up an earlier receipt.
+ * Per room bill (and its group's beds): the POS money on it that can cover reception's Djubo payments (28 Nov 2026, the
+ * owner's rule): receipts and advances taken on the bill, whatever else is on it. Food and other charges are left to
+ * the bill's own balance ("Owes ₹…", and check-out waits until it is paid), so they are never asked about as Djubo money.
+ * Left out: refundable deposits (never kind receipt/advance), receipts already linked to a Djubo payment, money cancelled
+ * (its reversal nets it out) or refunded (taken off the newest first). Each chunk keeps its day and receipt number, so a
+ * receipt only covers Djubo money of its own day or later (a later day's receipt cannot change a closed day).
  */
+type Chunk = { day: string; left: number; receiptNo: string | null };
 async function billPools(db: DB, bid: string, billIds: string[]) {
-  const out = new Map<string, number>();
+  const out = new Map<string, Chunk[]>();
   for (let i = 0; i < billIds.length; i += 50) {
     const ids = billIds.slice(i, i + 50);
-    const es = await all<{ bill: string; kind: string; amount_paise: number; at: number; pay: number }>(db, `
-      SELECT coalesce(st.group_stay_id, st.id) AS bill, e.kind, e.amount_paise, e.at, e.payment_id IS NOT NULL AS pay
+    const marks = ids.map(() => '?').join(', ');
+    const es = await all<{ bill: string; kind: string; amount_paise: number; day: string | null; receipt_no: string | null; settlement_id: string | null }>(db, `
+      SELECT coalesce(st.group_stay_id, st.id) AS bill, e.kind, e.amount_paise, p.shift_day AS day, s.receipt_no, p.settlement_id
       FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays st ON st.id = a.stay_id
-      WHERE e.business_id = ? AND coalesce(st.group_stay_id, st.id) IN (${ids.map(() => '?').join(', ')})
-        AND (e.kind IN ('charge', 'credit_note', 'transfer') OR (e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL))
-      ORDER BY e.at, e.rowid`, bid, ...ids);
-    const owed = new Map<string, number>();
+        LEFT JOIN payments p ON p.id = e.payment_id LEFT JOIN settlements s ON s.id = p.settlement_id
+      WHERE e.business_id = ? AND coalesce(st.group_stay_id, st.id) IN (${marks})
+        AND ((e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL) OR e.kind = 'refund')
+        AND (p.settlement_id IS NULL OR p.settlement_id NOT IN (SELECT settlement_id FROM booking_paid_log WHERE business_id = ? AND settlement_id IS NOT NULL))
+      ORDER BY e.at, e.rowid`, bid, ...ids, bid);
     for (const e of es) {
-      if (e.kind === 'charge' || e.kind === 'credit_note' || e.kind === 'transfer') { owed.set(e.bill, (owed.get(e.bill) ?? 0) + e.amount_paise); continue; }
-      const v = -e.amount_paise;                       // money in (a cancelled receipt's reversal is money out)
-      const pay = v > 0 ? Math.min(v, Math.max(0, owed.get(e.bill) ?? 0)) : 0;
-      owed.set(e.bill, (owed.get(e.bill) ?? 0) - pay);
-      out.set(e.bill, (out.get(e.bill) ?? 0) + v - pay);
+      const list = out.get(e.bill) ?? [];
+      if (e.kind === 'refund') {                  // money given back: off the newest money first
+        let by = Math.max(0, e.amount_paise);
+        for (const c of [...list].reverse()) { const x = Math.min(c.left, by); c.left -= x; by -= x; if (!by) break; }
+      } else {
+        const v = -e.amount_paise;                // money in; a cancelled receipt's reversal is money out
+        const same = list.find((c) => c.receiptNo === e.receipt_no && c.day === e.day);
+        if (same) same.left = Math.max(0, same.left + v);
+        else if (v > 0) list.push({ day: e.day ?? '', left: v, receiptNo: e.receipt_no });
+      }
+      out.set(e.bill, list);
     }
   }
-  for (const [k, v] of out) out.set(k, Math.max(0, v));
   return out;
 }
 
-export async function deskPending(db: DB, bid: string) {
+/** Every booking with Djubo money reception marked: how much POS money covers it, and by which receipts (28 Nov 2026). */
+export async function deskAll(db: DB, bid: string) {
   const rows = await all<{ id: string; extRef: string; guestName: string | null; checkIn: string | null; checkOut: string | null; status: string; stayId: string | null;
     deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; billId: string | null; heldPaise: number; linkedOnPaise: number; linkedOffPaise: number; poolPaise: number }>(db, `
     SELECT k.id, k.ext_ref AS extRef, k.guest_name AS guestName,
@@ -201,22 +214,32 @@ export async function deskPending(db: DB, bid: string) {
       0 AS poolPaise
     FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in')
     ORDER BY k.check_in, k.desk_paid_at, k.id`, bid);
-  // Per room bill: what its receipts have left once the linked ones are taken out, shared oldest night first.
+  // Per room bill: its receipts not linked to a Djubo payment, shared oldest night first; each covers only Djubo money
+  // marked on its own day or later.
   const pools = await billPools(db, bid, [...new Set(rows.map((r) => r.billId).filter((x): x is string => !!x))]);
-  const left = new Map<string, number>();
-  for (const r of rows) if (r.billId && !left.has(r.billId)) left.set(r.billId, pools.get(r.billId) ?? 0);
-  for (const r of rows) if (r.billId) left.set(r.billId, Math.max(0, left.get(r.billId)! - r.linkedOnPaise));
+  const hour = (await one<{ h: number }>(db, 'SELECT shift_start_hour AS h FROM businesses WHERE id = ?', bid))?.h ?? 8;
   const out = rows.map((r) => {
     let covered = r.heldPaise + r.linkedOnPaise + r.linkedOffPaise;
+    const coveredBy: string[] = [];
     if (r.billId) {
-      const take = Math.min(left.get(r.billId)!, Math.max(0, r.deskPaidPaise - covered));
-      left.set(r.billId, left.get(r.billId)! - take);
-      covered += take;
+      const day = r.deskPaidAt ? shiftDayAt(r.deskPaidAt, hour) : '9999-12-31';
+      for (const c of pools.get(r.billId) ?? []) {
+        if (covered >= r.deskPaidPaise) break;
+        if (!c.left || c.day > day) continue;
+        const take = Math.min(c.left, r.deskPaidPaise - covered);
+        c.left -= take; covered += take;
+        if (c.receiptNo && !coveredBy.includes(c.receiptNo)) coveredBy.push(c.receiptNo);
+      }
     }
     const { heldPaise: _h, linkedOnPaise: _on, linkedOffPaise: _off, poolPaise: _p, billId: _b, ...rest } = r;
-    return { ...rest, coveredPaise: covered, pendingPaise: r.deskPaidPaise - covered };
+    return { ...rest, coveredPaise: covered, pendingPaise: r.deskPaidPaise - covered, coveredBy };
   });
-  return out.filter((r) => r.pendingPaise > 0).sort((a, b) => (a.deskPaidAt ?? 0) - (b.deskPaidAt ?? 0));
+  return out;
+}
+
+/** Reception's Djubo money not yet taken in the POS (no receipt or advance covers it). */
+export async function deskPending(db: DB, bid: string) {
+  return (await deskAll(db, bid)).filter((r) => r.pendingPaise > 0).sort((a, b) => (a.deskPaidAt ?? 0) - (b.deskPaidAt ?? 0));
 }
 
 /**

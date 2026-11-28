@@ -6,7 +6,7 @@ import { all, isUniqueViolation, newId, now, one, stmt, type DB } from '../../..
 import { hashPassword } from '../../../src/crypto';
 import { body, fail, isEmail, isUuid, optionalPaise, paise, text } from '../../../src/http';
 import { approval, approverOf, isManager, requireAction, requireStaff } from '../auth';
-import { bookingUnits, continuesOf, folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
+import { bookingUnits, continuesOf, deskAll, folioLines, nightsBetween, roomTax, syncStay } from '../rooms';
 import { can, isRole } from '../permissions';
 import { basePrice, priceKey, readPrices, type Prices } from '../addons';
 import { isOnline, syncItemStations } from '../stations';
@@ -1153,6 +1153,9 @@ export async function stayBill(c: Context<AppEnv>, id: string) {
     booking, lines, invoice, balancePaise: lines.reduce((t, l) => t + l.amountPaise, 0),
     // Money reception marked in Djubo for this stay, waiting for how it was paid (26 Nov 2026).
     djubo: (await djuboPays(db, c.get('businessId'), bizOf(c).shift_start_hour)).pays.filter((x) => x.stayId === s.id && !x.settlementId),
+    // Djubo money covered by POS receipts on this bill (28 Nov 2026): shown with the bill's balance to take, not asked about.
+    djuboCovered: (await deskAll(db, c.get('businessId'))).filter((r) => r.coveredBy.length && r.stayId && (r.stayId === s.id || group.some((g: { id: string }) => g.id === r.stayId)))
+      .map((r) => ({ extRef: r.extRef, deskPaidPaise: r.deskPaidPaise, coveredPaise: r.coveredPaise, coveredBy: r.coveredBy })),
     rentPaise: sum(['room_rent']), prepaidPaise: -sum(['prepaid']), foodPaise: sum(['charge']), paidPaise: -sum(['receipt', 'advance', 'deposit', 'credit_note']) - sum(['refund']) };
 }
 
