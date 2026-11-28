@@ -50,6 +50,9 @@ describe('did not arrive', () => {
     const dc = await ok(owner.get(`${B}/shifts/${today}`));
     expect(dc.notCheckedIn.map((x: any) => [x.guestName, x.checkIn])).toEqual([['Sample Stayer', add(today, -7)], ['Other Guest', add(today, -2)]]);
     expect(dc.notCheckedIn[0]).not.toHaveProperty('phone');
+    // And the Check-in page's "earlier days" (28 Nov 2026).
+    const ar = await ok(counter.get(`${B}/bookings/arrivals?day=${today}`));
+    expect(ar.late.map((x: any) => [x.guestName, x.checkIn])).toEqual([['Sample Stayer', add(today, -7)], ['Other Guest', add(today, -2)]]);
     const a2 = await s2.ok(s2.counter.get(`${s2.B}/frontdesk/audit`));
     expect(a2.notArrived.map((x: any) => [x.guestName, x.checkIn])).toEqual([['Late Guest', add(today, -2)]]);
   });

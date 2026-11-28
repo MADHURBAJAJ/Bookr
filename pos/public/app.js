@@ -1944,6 +1944,8 @@ async function roomsScreen(view) {
     if (v === 'checkin' && pendingCheckin) {
       const p = pendingCheckin; pendingCheckin = null;
       if (p.kind === 'booking') await actions.pickArrival({ id: p.id }, null, true); else await pickReservation(p.id);
+      // Only this guest shows (28 Nov 2026): the search holds their name; ✕ shows everyone again.
+      ui.ciQ = (p.kind === 'booking' ? (ui.arrivals ?? []).concat(ui.lateArrivals ?? []).find((a) => a.id === p.id)?.guestName : ui.resPicked?.guestName) ?? '';
     }
     // A room bill open before a payment or refund stays open after it.
     if (reopenStay) ui.roomBill = await api('GET', `${B()}/stays/${reopenStay}/bill`).catch(() => null);
@@ -2672,6 +2674,33 @@ actions.regCsv = () => downloadCsv(`guest-register-${ui.regFrom}-to-${ui.regTo}.
 const ID_TYPES = ['Aadhaar', 'Driving licence', 'Passport', 'Voter ID', 'PAN', 'Other'];
 /** Check-in (25 Nov 2026 redesign): one screen in four steps, Guest → Room → ID → Payment. The room picker is searchable,
  *  grouped by room type, with what is free and what is dirty; Enter checks in. */
+/**
+ * The guest list at check-in with a search on top (28 Nov 2026): tapping a guest on Today fills the search with them, so only
+ * they show and their booking sits beside the room picker. Earlier days fold into one line.
+ */
+function ciSearchBox(resArr) {
+  const q = (ui.ciQ ?? '').trim().toLowerCase();
+  const digits = q.replace(/\D/g, '');
+  const hit = (name, ...more) => !q || (name ?? '').toLowerCase().includes(q) || more.some((m) => m && (String(m).toLowerCase().includes(q) || (digits.length >= 4 && String(m).replace(/\D/g, '').includes(digits))));
+  const arr = (ui.arrivals ?? []).filter((a) => hit(a.guestName, a.extRef, a.otaRef, a.phone));
+  const res = resArr.filter((a) => hit(a.guestName, a.phone));
+  const late = (ui.lateArrivals ?? []).filter((a) => hit(a.guestName, a.extRef, a.otaRef, a.phone));
+  const arrRow = (a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}${a.checkIn < me.business.shiftDay ? ` · was due ${dayName(a.checkIn)}` : ''}${a.continues ? ` · already in ${a.continues.map((x) => x.room).join(', ')}: extension` : ''}</small></span>
+    <span class="dright">${dueOf(a) ? html`<span class="status warn">Collect ${rs(dueOf(a))}</span>` : html`<span class="status ok">Prepaid</span>`}</span></button>`;
+  const resRow = (a) => html`<button type="button" class="drow ${ui.resPicked?.id === a.id ? 'on' : ''}" data-act="pickRes" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.rooms} · made here, not in Djubo</small></span>
+    <span class="dright">${a.duePaise ? html`<span class="status warn">Collect ${rs(a.duePaise)}</span>` : html`<span class="status ok">Paid</span>`}</span></button>`;
+  const lateRow = (a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName ?? 'No name'}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · ${dayName(a.checkIn)} → ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}</small></span>
+    <span class="dright"><span class="status bad">was due ${dayName(a.checkIn)}</span></span></button>`;
+  const total = (ui.arrivals ?? []).length + resArr.length;
+  return html`<div class="row cisearch"><input class="in grow" type="search" data-model="ciQ" data-live value="${ui.ciQ ?? ''}" placeholder="Find the guest: name, mobile or Djubo number" aria-label="Find the guest" autocomplete="off">
+      ${q ? html`<button class="btn sm" type="button" data-act="ciQClear" aria-label="Clear the search">✕</button>` : ''}</div>
+    ${q ? (arr.length + res.length + late.length ? html`<div class="cilist">${arr.map(arrRow)}${res.map(resRow)}${late.map(lateRow)}</div>`
+        : html`<p class="small quiet">No guest matches "${ui.ciQ}". Press ✕ to see everyone, or check in a walk-in below.</p>`)
+      : html`${total ? html`<div class="f">Arriving today · ${total}<div class="cilist">${(ui.arrivals ?? []).map(arrRow)}${resArr.map(resRow)}</div></div>` : html`<p class="small quiet">No bookings due today: check in a walk-in below.</p>`}
+        ${(ui.lateArrivals ?? []).length ? html`<button type="button" class="btn ghost wide cimore" data-act="pick" data-k="ciEarly" data-id="${ui.ciEarly ? '' : '1'}">Earlier days, not checked in (${ui.lateArrivals.length}) ${ui.ciEarly ? '▴' : '▾'}</button>
+          ${ui.ciEarly ? html`<p class="small quiet" style="margin:0">Missed at the desk: check in late, or in and out together if the guest has left.</p><div class="cilist">${ui.lateArrivals.map(lateRow)}</div>` : ''}` : ''}`}`;
+}
+actions.ciQClear = () => { ui.ciQ = ''; rerender(); };
 function checkinView() {
   const resArr = (ui.fd?.arrivals ?? []).filter((a) => a.kind === 'reservation');
   const adults = Math.max(1, Math.min(10, Number(ui.ciAdults) || 1));
@@ -2683,15 +2712,7 @@ function checkinView() {
     <form class="ciwrap">
       <div class="cicol">
         ${step(1, 'Guest', html`
-          ${ui.arrivals?.length || resArr.length ? html`<div class="f">Arriving today<div class="cilist">
-            ${ui.arrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · till ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}${a.checkIn < me.business.shiftDay ? ` · was due ${dayName(a.checkIn)}` : ''}${a.continues ? ` · already in ${a.continues.map((x) => x.room).join(', ')}: extension` : ''}</small></span>
-              <span class="dright">${dueOf(a) ? html`<span class="status warn">Collect ${rs(dueOf(a))}</span>` : html`<span class="status ok">Prepaid</span>`}</span></button>`)}
-            ${resArr.map((a) => html`<button type="button" class="drow ${ui.resPicked?.id === a.id ? 'on' : ''}" data-act="pickRes" data-id="${a.id}"><span class="grow"><strong>${a.guestName}</strong><small>${a.rooms} · made here, not in Djubo</small></span>
-              <span class="dright">${a.duePaise ? html`<span class="status warn">Collect ${rs(a.duePaise)}</span>` : html`<span class="status ok">Paid</span>`}</span></button>`)}</div></div>`
-            : html`<p class="small quiet">No bookings due today: check in a walk-in below.</p>`}
-          ${(ui.lateArrivals ?? []).length ? html`<div class="f">Not checked in from earlier days <span class="small quiet">· missed at the desk: check in late, or in and out together if the guest has left</span><div class="cilist">
-            ${ui.lateArrivals.map((a) => html`<button type="button" class="drow ${ui.bookingId === a.id ? 'on' : ''}" data-act="pickArrival" data-id="${a.id}"><span class="grow"><strong>${a.guestName ?? 'No name'}</strong><small>${a.roomLabels ? `Djubo ${a.roomLabels}` : a.roomType ?? 'room?'} · ${dayName(a.checkIn)} → ${dayName(a.checkOut)} · ${a.channel ?? 'Djubo'}</small></span>
-              <span class="dright"><span class="status bad">was due ${dayName(a.checkIn)}</span></span></button>`)}</div></div>` : ''}
+          ${ciSearchBox(resArr)}
           ${picked ? bookingCard(picked) : ''}
           ${picked?.continues ? continueBox(picked) : ''}
           ${ui.resPicked ? html`<div class="msg warn" style="display:block"><strong>${ui.resPicked.guestName}</strong> · reservation made here, not in Djubo yet · total ${rs(ui.resPicked.totalPaise)} · advance ${rs(ui.resPicked.advancePaise)}

@@ -9,7 +9,7 @@ import { audit, bizOf, clock } from '../util';
 import { bookingsInMail, orderOf, readAgain, saveBooking } from '../mail';
 import type { ReadBooking } from '../booking-readers';
 import { CLOSED_TO, type Business } from '../util';
-import { continuesOf, linkStay, nameKey, recomputeDesk } from '../rooms';
+import { continuesOf, leadIntoStay, linkStay, nameKey, recomputeDesk } from '../rooms';
 import { oldDeskPending } from '../djubo-desk';
 import { phoneKey } from './settings';
 import type { AppEnv } from '../types';
@@ -74,7 +74,10 @@ bookingRoutes.get(`${B}/bookings/arrivals`, requireAction('stays.edit'), async (
   ]);
   // A booking that continues a guest already in house (an extension made in Djubo as a new booking): their rooms.
   const cont = await continuesOf(c.env.DB, bid, (arrivals as { id: string; phone: string | null; guestName: string | null; checkIn: string | null }[]));
-  return c.json({ arrivals: (arrivals as { id: string }[]).map((a) => ({ ...a, continues: cont.get(a.id) ?? null })), late });
+  // Nights that lead into a guest's stay, sent late by Djubo, are not missed arrivals (28 Nov 2026), as on Day close and Today.
+  const lateRows = late as { id: string; phone: string | null; guestName: string | null; checkIn: string | null; checkOut: string | null; createdAt: number }[];
+  const stayed = await leadIntoStay(c.env.DB, bid, lateRows, bizOf(c).shift_start_hour);
+  return c.json({ arrivals: (arrivals as { id: string }[]).map((a) => ({ ...a, continues: cont.get(a.id) ?? null })), late: lateRows.filter((x) => !stayed.has(x.id)) });
 });
 
 async function booking(c: Context<AppEnv>, id: string) {
