@@ -33,7 +33,7 @@ stationRoutes.get('/station', async (c) => {
   ]);
   return c.json({
     station: { name: station.name, how: station.how, copies: station.copies }, business: station.business, device: device.name, now: t,
-    kots: kots.map((k) => ({ id: k.id, kotNo: k.kot_no, place: k.place, lines: JSON.parse(k.lines), note: k.note, by: k.by, at: k.at, status: k.status,
+    kots: kots.map((k) => ({ id: k.id, kotNo: k.kot_no, place: k.place, lines: (JSON.parse(k.lines) as Record<string, unknown>[]).map(({ lineId: _, ...l }) => l), note: k.note, by: k.by, at: k.at, status: k.status,
       toPrint: k.print_at === 'station' && !k.printed })),
   });
 });

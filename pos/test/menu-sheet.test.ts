@@ -47,7 +47,7 @@ describe('reading the sheet', () => {
 
   it('understands other layouts: other headings, a title line, section rows, MRP, and asks per category for GST and station', () => {
     expect(guessColumns(['Sr No', 'Item Name', 'Group', 'Rate', 'GST %', 'KOT', 'Veg/NV', 'HSN'])).toEqual(
-      { item: 1, category: 2, price: 3, open: -1, min: -1, tax: 4, station: 5, sac: 7, addons: -1 });
+      { item: 1, category: 2, price: 3, open: -1, min: -1, tax: 4, station: 5, sac: 7, serve: -1, addons: -1 });
     // "Price" is the price even when an "MRP" column is also there.
     expect(guessColumns(['Name', 'MRP', 'Price']).price).toBe(2);
     const sheet = 'Sample Cafe menu 2026\n\nItem Name,Rate,KOT\nSTARTERS,,\nPaneer Tikka,280/-,Kitchen\nCrispy Corn,₹ 220,\nBAR,,\nBeer,320,Bar\nWhisky bottle,MRP,Bar\n';
@@ -71,7 +71,7 @@ describe('menu upload', () => {
     expect(sheet).toMatchObject({ status: 200, type: 'text/csv; charset=utf-8' });
     expect((await s.counter.post(`${s.B}/menu/upload/check`, { csv: 'x' })).status).toBe(403);
     const csv = sheet.text;
-    expect(csv.split('\n')[0].trim().replace(/^\uFEFF/, '')).toBe('Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,SAC');
+    expect(csv.split('\n')[0].trim().replace(/^\uFEFF/, '')).toBe('Item,Category,Price (₹),Price at billing,Lowest price (₹),Tax,Station,SAC,Serve time (min)');
     const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv }));
     expect(r).toMatchObject({ ok: true, errors: [], added: [], off: [], back: [], priceChanges: [], otherChanges: [] });
   });
@@ -250,7 +250,7 @@ describe('add-on prices per dish', () => {
     const size = (await s.ok(s.owner.post(`${s.B}/addon-groups`, { name: 'Half or Full', kind: 'one', options: [{ name: 'Half', price: '' }, { name: 'Full', price: '' }] }))).id;
     const chicken = (await s.ok(s.owner.post(`${s.B}/menu`, { name: 'Sheet Chicken', category: 'Tandoor', price: '', addonGroups: [{ id: size, prices: { Half: '300', Full: '450' } }] }))).id;
     const sheet = await download(s.owner, `${s.B}/menu/sheet`);
-    expect(sheet.text).toContain('Sheet Chicken,Tandoor,300,,,Billing name,Kitchen,996332\r\n');
+    expect(sheet.text).toContain('Sheet Chicken,Tandoor,300,,,Billing name,Kitchen,996332,\r\n');
     // The file says 320: the dish keeps its Half price (and is told why); its Half / Full stay.
     const csv = sheet.text.replace('Sheet Chicken,Tandoor,300,', 'Sheet Chicken,Tandoor,320,');
     const r = await s.ok(s.owner.post(`${s.B}/menu/upload/check`, { csv }));

@@ -90,6 +90,15 @@
           ${exT(ev('pay_change').n, 'Payment type changed', ev('pay_change').paise)}${exT(df('tip').n, 'Tips', df('tip').paise)}${exT(ev('stock_waste').n, 'Breakage', ev('stock_waste').paise)}
         </div></section>
         ${(d.drawers ?? []).length ? `<section><h2>Cash drawers</h2>${d.drawers.map((x) => `<div class="row"><span><strong>${esc(x.holder)}${x.acceptedBy ? ` → ${esc(x.acceptedBy)}` : ''}</strong><div class="q">${esc(time(x.from))} – ${x.to ? esc(time(x.to)) : 'open'} · in ${rs(x.cashInPaise)}${x.reason ? ` · "${esc(x.reason)}"` : ''}</div></span>${x.countedPaise == null ? '<span class="pill mute">Not counted</span>' : x.differencePaise === 0 ? '<span class="pill ok">Agrees</span>' : `<span class="pill bad">${x.differencePaise < 0 ? 'Short' : 'Over'} ${rs(Math.abs(x.differencePaise))}</span>`}</div>`).join('')}</section>` : ''}
+        ${d.serving ? `<section><h2>Serving time</h2>
+          <div class="row"><span>Items timed</span><strong>${d.serving.timed}</strong></div>
+          <div class="row"><span>On time</span><strong>${d.serving.onTime}</strong></div>
+          <div class="row" style="${d.serving.late ? 'color:var(--bad)' : ''}"><span>Late${d.serving.late ? ` · average ${esc(d.serving.avgLateMins)} min` : ''}</span><strong>${d.serving.late}</strong></div>
+          <div class="row"><span class="q">Not marked served</span><span>${d.serving.notMarked}</span></div>
+          ${d.serving.worst.map((w) => `<div class="row"><span>${esc(w.place)} · ${esc(w.name)}</span><span>${w.lateMins} min late</span></div>`).join('')}
+          ${[['Undone by manager', d.serving.undoneByManager], ['Undone by server (2 min)', d.serving.undoneByServer], ['Undone, not served again', d.serving.undoneNotServed.length],
+            ['Served by manager, no photo', d.serving.managerMarks], ['Wrong server PINs', d.serving.wrongPins]].filter(([, n]) => n).map(([k, n]) => `<div class="row" style="color:var(--warn)"><span>${esc(k)}</span><strong>${n}</strong></div>`).join('')}
+        </section>` : ''}
         <section><h2>Bill numbers · FY ${esc(d.fy)}</h2>
           ${broken.length ? broken.map((x) => `<div class="row" style="color:var(--bad)"><span>${esc(x.name)}</span><span>${esc(x.missing.join(', '))} missing</span></div>`).join('') : '<div class="q">Every series is unbroken: no number missing.</div>'}
         </section>

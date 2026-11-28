@@ -1087,3 +1087,36 @@ tr.userow:focus-visible { outline: 2px solid var(--pri); outline-offset: -2px; }
 .useln { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
 .useln:last-child { border-bottom: 0; }
 .useln .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Serving time (28 Nov 2026): a timer chip on tables and KOTs (plain, amber when nearly due, red when late; always says
+   its state in words), and the Serve page on a server's own phone. */
+.svc { display: inline-flex; align-items: center; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--soft); color: var(--quiet); white-space: nowrap; }
+.svc.soon { color: var(--warn); background: var(--warn-tint); border-color: var(--warn-line); }
+.svc.late { color: var(--bad); background: var(--bad-tint); border-color: var(--bad-line); }
+.svc.done { color: var(--go-dark); background: var(--go-tint); border-color: var(--go-line); }
+.tcell .svc { margin-top: 4px; align-self: flex-start; }
+.sv { max-width: 520px; margin: 0 auto; min-height: 100vh; background: var(--bg); }
+.sv-top { position: sticky; top: 0; z-index: 2; background: var(--top); color: var(--top-ink); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; font-weight: 650; }
+.sv-top button { font: inherit; font-size: 14px; background: transparent; color: var(--top-ink); border: 1px solid var(--top-line); border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+.sv-body { padding: 14px 16px 32px; display: grid; gap: 12px; }
+.sv-pin { justify-items: center; text-align: center; }
+.sv-dots { display: flex; gap: 12px; padding: 8px 0; }
+.sv-dots i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--pri); }
+.sv-dots i.on { background: var(--pri); }
+.sv-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: min(320px, 100%); }
+.sv-pad button { font: inherit; font-size: 24px; min-height: 60px; border-radius: 12px; border: 1px solid var(--field-line); background: var(--panel); color: var(--ink); cursor: pointer; }
+.sv-err { color: var(--bad); font-weight: 650; margin: 0; }
+.sv-kot { background: var(--panel); border: 2px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 8px; }
+.sv-kot.soon { border-color: var(--warn-line); background: var(--warn-tint); }
+.sv-kot.late { border-color: var(--bad-line); background: var(--bad-tint); }
+.sv-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.sv-items li { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.sv-items li.done, .sv-check.done { color: var(--quiet); }
+.sv-tick { color: var(--go); font-weight: 800; }
+.sv-btns { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; }
+.sv-btns .btn { min-height: 54px; font-size: 17px; }
+.sv-check { display: flex; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.sv-check input { width: 24px; height: 24px; accent-color: var(--pri); }
+.sv-check .grow { flex: 1; min-width: 0; }
+.sv-photo { width: 100%; max-height: 320px; object-fit: contain; border-radius: 10px; border: 1px solid var(--line); background: var(--soft); }
+.sv-photo.none { min-height: 140px; display: grid; place-items: center; text-align: center; color: var(--quiet); padding: 12px; }
