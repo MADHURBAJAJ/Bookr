@@ -151,6 +151,34 @@ export async function recomputeDesk(db: DB, bid: string, bookingId: string, team
  * between them, oldest night first (27 Nov 2026): with a booking per night, one receipt must not cover every night, or
  * money reception marked in Djubo without a POS receipt is never asked for.
  */
+/**
+ * Per room bill (and its group's beds): what its receipts have left for rent once they have paid food and other charges.
+ * A food payment must not hide rent reception took in Djubo (26 Nov 2026), but a receipt only pays charges that were on
+ * the bill when it was taken (28 Nov 2026): a charge added later is owed, it did not use up an earlier receipt.
+ */
+async function billPools(db: DB, bid: string, billIds: string[]) {
+  const out = new Map<string, number>();
+  for (let i = 0; i < billIds.length; i += 50) {
+    const ids = billIds.slice(i, i + 50);
+    const es = await all<{ bill: string; kind: string; amount_paise: number; at: number; pay: number }>(db, `
+      SELECT coalesce(st.group_stay_id, st.id) AS bill, e.kind, e.amount_paise, e.at, e.payment_id IS NOT NULL AS pay
+      FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id JOIN stays st ON st.id = a.stay_id
+      WHERE e.business_id = ? AND coalesce(st.group_stay_id, st.id) IN (${ids.map(() => '?').join(', ')})
+        AND (e.kind IN ('charge', 'credit_note', 'transfer') OR (e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL))
+      ORDER BY e.at, e.rowid`, bid, ...ids);
+    const owed = new Map<string, number>();
+    for (const e of es) {
+      if (e.kind === 'charge' || e.kind === 'credit_note' || e.kind === 'transfer') { owed.set(e.bill, (owed.get(e.bill) ?? 0) + e.amount_paise); continue; }
+      const v = -e.amount_paise;                       // money in (a cancelled receipt's reversal is money out)
+      const pay = v > 0 ? Math.min(v, Math.max(0, owed.get(e.bill) ?? 0)) : 0;
+      owed.set(e.bill, (owed.get(e.bill) ?? 0) - pay);
+      out.set(e.bill, (out.get(e.bill) ?? 0) + v - pay);
+    }
+  }
+  for (const [k, v] of out) out.set(k, Math.max(0, v));
+  return out;
+}
+
 export async function deskPending(db: DB, bid: string) {
   const rows = await all<{ id: string; extRef: string; guestName: string | null; checkIn: string | null; checkOut: string | null; status: string; stayId: string | null;
     deskPaidPaise: number; deskPaidAt: number | null; enteredBy: string | null; billId: string | null; heldPaise: number; linkedOnPaise: number; linkedOffPaise: number; poolPaise: number }>(db, `
@@ -170,17 +198,13 @@ export async function deskPending(db: DB, bid: string) {
         AND NOT EXISTS (SELECT 1 FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id WHERE e.payment_id = p.id
           AND a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)))
         AND NOT EXISTS (SELECT 1 FROM desk_advances d WHERE d.settlement_id = p.settlement_id AND d.status = 'held' AND (d.booking_id = k.id OR d.booking_id = k.match_id))), 0) AS linkedOffPaise,
-      -- Receipts on the room bill, past what they paid of food and other charges (26 Nov 2026): a food payment must not
-      -- hide rent reception took in Djubo.
-      max(0, coalesce((SELECT -sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('receipt', 'advance') AND e.payment_id IS NOT NULL), 0)
-        - max(0, coalesce((SELECT sum(e.amount_paise) FROM debtor_entries e JOIN debtor_accounts a ON a.id = e.account_id
-          WHERE a.stay_id IN (k.stay_id, (SELECT g.group_stay_id FROM stays g WHERE g.id = k.stay_id)) AND e.kind IN ('charge', 'credit_note', 'transfer')), 0))) AS poolPaise
+      0 AS poolPaise
     FROM bookings k WHERE k.business_id = ? AND k.desk_paid_paise > 0 AND k.status IN ('new', 'approved', 'checked_in')
     ORDER BY k.check_in, k.desk_paid_at, k.id`, bid);
   // Per room bill: what its receipts have left once the linked ones are taken out, shared oldest night first.
+  const pools = await billPools(db, bid, [...new Set(rows.map((r) => r.billId).filter((x): x is string => !!x))]);
   const left = new Map<string, number>();
-  for (const r of rows) if (r.billId && !left.has(r.billId)) left.set(r.billId, r.poolPaise);
+  for (const r of rows) if (r.billId && !left.has(r.billId)) left.set(r.billId, pools.get(r.billId) ?? 0);
   for (const r of rows) if (r.billId) left.set(r.billId, Math.max(0, left.get(r.billId)! - r.linkedOnPaise));
   const out = rows.map((r) => {
     let covered = r.heldPaise + r.linkedOnPaise + r.linkedOffPaise;

@@ -616,6 +616,7 @@ async function counterScreen() {
       ...(f?.alerts.deskToTake ? [{ tone: 'warn', text: `Reception money to take: ${plural(f.alerts.deskToTake, 'booking')}`, href: '#/rooms' }] : []),
       ...(f?.alerts.unplaced ? [{ tone: 'bad', text: `Djubo could not place ${plural(f.alerts.unplaced, 'booking')}`, href: '#/rooms/list' }] : []),
       ...(f?.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'info', text: `Form C due: ${x.room} · ${x.guestName}`, href: '#/rooms' })),
+      ...(f?.nightsNotCharged ?? []).map((x) => ({ tone: 'bad', text: `Nights not charged: ${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`, href: '#/rooms' })),
     ];
     paint(shell('#/counter', html`
       <div class="ctrtop">
@@ -3932,9 +3933,18 @@ async function shiftScreen() {
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
       ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
-        ${(s.notCharged ?? []).length ? html`<div class="msg bad" style="display:block"><strong>No rent for tonight: ${s.notCharged.map((x) => `${x.room} · ${x.guestName}`).join(', ')}</strong>
-          <div class="small">Staying tonight past their booking (rent till ${s.notCharged.map((x) => dayName(x.coveredTo)).join(', ')}). Extend in Djubo (the rent comes with its email, and Continue a new booking), or a manager extends without Djubo.</div>
-          <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+        ${(() => {
+          // Rent till today means they leave today (28 Nov 2026): not "no rent" until they are still here at the close.
+          const past = (s.notCharged ?? []).filter((x) => x.coveredTo < s.shiftDay);
+          const leaving = (s.notCharged ?? []).filter((x) => x.coveredTo >= s.shiftDay);
+          const names = (l) => l.map((x) => `${x.room} · ${x.guestName}`).join(', ');
+          return html`${past.length ? html`<div class="msg bad" style="display:block"><strong>No rent for tonight: ${names(past)}</strong>
+            <div class="small">Staying past their booking (rent till ${past.map((x) => dayName(x.coveredTo)).join(', ')}). Extend in Djubo (the rent comes with its email, and Continue a new booking), or a manager extends without Djubo.</div>
+            <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+          ${leaving.length ? html`<div class="msg warn" style="display:block"><strong>Leaving today, not checked out yet: ${names(leaving)}</strong>
+            <div class="small">Check each out when they leave. If one stays tonight, extend in Djubo or a manager extends without Djubo. The day can't close while they are still in house without rent for tonight.</div>
+            <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}`;
+        })()}
         ${djOpen.length ? html`<div class="msg warn" style="display:block"><strong>Taken in Djubo today, how it was paid not picked: ${plural(djOpen.length, 'payment')} · ${rs(djOpen.reduce((t, x) => t + x.amountPaise, 0))}</strong>
           <div class="small">Pick Cash, UPI or Card for each, in "Taken in Djubo today" below.</div></div>` : ''}
         ${ui.overdue.length ? html`<div class="msg bad" style="display:block"><strong>Open since an earlier day:</strong> ${ui.overdue.map((o) => `${o.place}${o.bill_no ? ` (${o.bill_no})` : ''} · since ${dayName(o.since)}`).join(', ')}
@@ -3987,6 +3997,8 @@ async function shiftScreen() {
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
         <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}
         <p class="small quiet">${Date.now() < ui.endsAt ? `The day ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts ${dayName(addDays(s.shiftDay, 1))} at once: money taken after this goes there.` : ''}</p></form>`}
+      ${(ui.last?.noRent ?? []).length ? html`<div class="msg bad" style="display:block;margin-top:14px"><strong>${dayName(ui.last.shiftDay)} closed by itself with no rent for: ${ui.last.noRent.map((x) => `${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`).join(', ')}</strong>
+        <div class="small">Get the nights into Djubo (the rent comes with its email), or a manager extends without Djubo.</div></div>` : ''}
       ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen ${dayName(ui.last.shiftDay)} (owner)</summary>
         <p class="small quiet">Closed ${ui.last.auto ? 'by itself' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); close it again after. Bookr keeps the first close it was sent.</p>
         <div class="row"><input class="in grow" data-model="reopenWhy" value="${ui.reopenWhy ?? ''}" placeholder="Why reopen (required)"><button class="btn" type="button" data-act="reopenShift" data-day="${ui.last.shiftDay}">Reopen</button></div></details>` : ''}
@@ -5432,8 +5444,35 @@ actions.ckSheet = async () => {
     <thead><tr><th>Item</th><th>In hand</th><th>Bar counter</th><th>Store / other place</th><th>Difference</th></tr></thead><tbody>
     ${sh.groups.map((g) => `<tr class="cat"><td colspan="5">${esc(g.category)}</td></tr>${g.items.map((i) => `<tr><td>${esc(i.name)}<small>${i.packSize > 1 ? `${esc(i.packName)} of ${i.packSize} ${i.unit}` : i.unit}</small></td><td class="r">${esc(packText(i.inHand, i))}</td><td>${blank(i)}</td><td>${blank(i)}</td><td></td></tr>`).join('')}`).join('')}
     </tbody></table></div>`;
+  // In the Windows app 1.0.5 and later (28 Nov 2026): straight to this PC's "Reports (A4)" printer, A4 upright, no print box
+  // (Windows' print box from the app did not send the job on). Elsewhere, or if that fails, the print box as before.
+  if (window.bookrDesktop?.print && appAtLeast('1.0.5')) {
+    const r = await window.bookrDesktop.print({ kind: 'report', html: `<!doctype html><html><head><meta charset="utf-8"><style>${COUNT_SHEET_CSS}</style></head><body>${printArea.innerHTML}</body></html>` })
+      .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    if (r?.ok) { printArea.innerHTML = ''; flash = { kind: 'ok', text: `Count sheet sent to ${r.printer}.` }; rerender(); return; }
+    flash = { kind: 'warn', text: `Not printed: ${r?.error ?? 'the printer did not answer'}. Choose an A4 printer under Reports (A4) in Printers (Ctrl+Shift+P). The print window opens instead.` };
+    rerender();
+  }
   window.print();
 };
+/** The Windows app's version is at least `v` (e.g. '1.0.5'). */
+const appAtLeast = (v) => {
+  const a = String(window.bookrDesktop?.version ?? '').split('.').map(Number);
+  const b = v.split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i]; }
+  return true;
+};
+/** The count sheet's look on A4 for the Windows app (the same as its print styles in app.css). */
+const COUNT_SHEET_CSS = `@page { size: A4 portrait; margin: 12mm; } body { margin: 0; background: #fff; color: #000; }
+  .countsheet { font: 10.5pt/1.35 "Segoe UI", system-ui, sans-serif; color: #000; }
+  .countsheet h1 { font-size: 15pt; margin: 0 0 2pt; } .countsheet p { margin: 0 0 8pt; font-size: 9.5pt; }
+  .countsheet table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .countsheet th, .countsheet td { border: 0.6pt solid #888; padding: 4pt 6pt; text-align: left; vertical-align: bottom; }
+  .countsheet th { font-size: 9pt; } .countsheet td small { display: block; font-size: 8pt; color: #444; }
+  .countsheet td.r { text-align: right; font-weight: 700; white-space: nowrap; }
+  .countsheet tr.cat td { background: #eee; font-weight: 700; font-size: 9pt; text-transform: uppercase; letter-spacing: .5pt; }
+  .countsheet tr { page-break-inside: avoid; }
+  .countsheet .bl { display: inline-block; width: 26pt; border-bottom: 0.8pt solid #000; height: 11pt; margin: 0 2pt 0 4pt; }`;
 actions.stReport = async () => { ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`); rerender(); };
 actions.stItem = async () => {
   const body = { name: ui.siName, unit: ui.siUnit || 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0'), category: ui.siCat || null };
@@ -5509,6 +5548,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   ui.npOpen ??= !!(unpaidOld.length || heavy.length);
   // ----- What to look at first.
   const look = [
+    ...((d.shiftClose?.noRent ?? []).length ? [`Closed automatically with no rent for: ${d.shiftClose.noRent.map((x) => `${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`).join(', ')}`] : []),
     ...(d.shiftClose && !d.shiftClose.countedAt && !d.shiftClose.noCount ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
     ...(d.drawers ?? []).filter((x) => x.differencePaise).map((x) => `Cash ${x.differencePaise < 0 ? 'short' : 'over'} ${rs(Math.abs(x.differencePaise))} in ${x.holder}'s drawer`),
     ...unpaidOld.map((o) => `${o.place} not paid for ${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d` : `${o.hours} h`}`),

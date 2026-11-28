@@ -30,7 +30,17 @@ function row(title, note, value, onChange, testLabel) {
 function paint() {
   const s = data.settings;
   $('bill').replaceChildren(row('Bills', 'Bills, credit notes, statements', s.bill, (v) => { s.bill = v; }, 'Bills'));
-  const names = [...new Set([...s.seenStations, ...Object.keys(s.stations)])];
+  // A4 pages (28 Nov 2026): the stock count sheet, printed upright on A4 with no print box.
+  $('report').replaceChildren(row('Reports (A4)', 'Stock count sheet, on A4 paper', s.report ?? '', (v) => { s.report = v; }, 'Reports (A4)'));
+  // One row per station whatever its capitals ("Bar" and "bar" are the same station, 28 Nov 2026). A printer saved under
+  // another spelling shows on that row, and saving keeps one spelling only.
+  const names = [];
+  for (const n of [...s.seenStations, ...Object.keys(s.stations)]) if (!names.some((x) => x.toLowerCase() === n.toLowerCase())) names.push(n);
+  for (const n of names) {
+    const other = Object.keys(s.stations).find((k) => k !== n && k.toLowerCase() === n.toLowerCase() && s.stations[k]);
+    if (other && !s.stations[n]) s.stations[n] = s.stations[other];
+    for (const k of Object.keys(s.stations)) if (k !== n && k.toLowerCase() === n.toLowerCase()) delete s.stations[k];
+  }
   $('stations').replaceChildren(
     ...names.map((n) => row(n, `KOTs for ${n}`, s.stations[n] ?? '', (v) => { s.stations[n] = v; }, `${n} KOTs`)),
     row('Any other station', 'A station not listed above', s.otherKot, (v) => { s.otherKot = v; }, 'Other KOTs'));
@@ -42,7 +52,7 @@ function paint() {
 $('addStation').addEventListener('click', () => {
   const n = $('newStation').value.trim();
   if (!n) return;
-  if (!data.settings.seenStations.includes(n)) data.settings.seenStations.push(n);
+  if (!data.settings.seenStations.some((x) => x.toLowerCase() === n.toLowerCase())) data.settings.seenStations.push(n);
   $('newStation').value = ''; paint();
 });
 $('save').addEventListener('click', async () => {

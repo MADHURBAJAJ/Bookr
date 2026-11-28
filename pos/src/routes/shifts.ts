@@ -9,7 +9,7 @@ import { requireAction, requireStaff } from '../auth';
 import { rs, shiftDayAt } from '../billing';
 import { djuboPays, oldDeskPending } from '../djubo-desk';
 import { restaurantAdvances } from '../restaurant-advances';
-import { tonightNotCharged } from '../rooms';
+import { leadIntoStay, tonightNotCharged } from '../rooms';
 import { notInDjubo } from './frontdesk';
 import { audit, clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
@@ -94,20 +94,27 @@ shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
   const closed = await one(db, `SELECT opening_float_paise AS openingFloatPaise, counted, counted_paise AS countedPaise, expected_paise AS expectedPaise,
     difference_paise AS differencePaise, difference_reason AS differenceReason, closed_at AS closedAt, counted_at AS countedAt, auto FROM shift_closes WHERE business_id = ? AND shift_day = ?`, bid, day);
   // The last day closed (24 Nov 2026): whether it closed by itself and is waiting for its drawer count, and for an owner to reopen it.
-  const last = await one<{ shift_day: string; counted_at: number | null; auto: number; closed_at: number; by: string | null }>(db,
-    `SELECT x.shift_day, x.counted_at, x.auto, x.closed_at, s.name AS "by" FROM shift_closes x LEFT JOIN staff s ON s.id = x.closed_by
+  const last = await one<{ shift_day: string; counted_at: number | null; auto: number; closed_at: number; by: string | null; totals: string | null }>(db,
+    `SELECT x.shift_day, x.counted_at, x.auto, x.closed_at, s.name AS "by", x.totals FROM shift_closes x LEFT JOIN staff s ON s.id = x.closed_by
      WHERE x.business_id = ? ORDER BY x.shift_day DESC LIMIT 1`, bid);
   const dr = await openDrawer(db, bid);
   const float = (await one<{ f: number }>(db, 'SELECT float_paise AS f FROM businesses WHERE id = ?', bid))!.f;
   return c.json({ summary: await shiftSummary(db, bid, day, b.tab_age_days, b.shift_start_hour), closed, current: clock(b).shiftDay,
-    lastClosed: last ? { shiftDay: last.shift_day, countedAt: last.counted_at, auto: !!last.auto, closedAt: last.closed_at, by: last.by } : null,
+    lastClosed: last ? { shiftDay: last.shift_day, countedAt: last.counted_at, auto: !!last.auto, closedAt: last.closed_at, by: last.by, noRent: noRentOf(last.totals) } : null,
     endsAt: shiftEnd(clock(b).shiftDay, b.shift_start_hour), overdue: await overdueOrders(db, bid, day), floatPaise: float,
     drawerCount: (await one<{ n: number }>(db, 'SELECT drawer_count AS n FROM businesses WHERE id = ?', bid))!.n === 1,
     // Arrivals of this shift and the 7 days before that were never checked in here (25 Nov 2026): a reminder, not a block.
-    notCheckedIn: await all(db, `SELECT guest_name AS guestName, check_in AS checkIn, room_labels AS roomLabels FROM bookings bk
-      WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in <= ? AND check_in >= ?
-        AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
-      ORDER BY check_in, guest_name LIMIT 50`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10)),
+    notCheckedIn: await (async () => {
+      const rows = await all<{ id: string; guestName: string | null; phone: string | null; checkIn: string | null; checkOut: string | null; createdAt: number; roomLabels: string | null }>(db, `
+        SELECT id, guest_name AS guestName, phone, check_in AS checkIn, check_out AS checkOut, created_at AS createdAt, room_labels AS roomLabels FROM bookings bk
+        WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in <= ? AND check_in >= ?
+          AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
+        ORDER BY check_in, guest_name LIMIT 50`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10));
+      // Nights a guest stayed before the desk checked them in (Djubo sent them late) lead into their stay: not an arrival
+      // to check in, the same as the Night audit and Rooms › Today (28 Nov 2026).
+      const stayed = await leadIntoStay(db, bid, rows, b.shift_start_hour);
+      return rows.filter((r) => !stayed.has(r.id)).map((r) => ({ guestName: r.guestName, checkIn: r.checkIn, roomLabels: r.roomLabels }));
+    })(),
     drawer: dr ? { holder: dr.holder, heldBy: dr.held_by, since: dr.opened_at, openingPaise: dr.opening_paise, openingFrom: dr.opening_from } : null });
 });
 
@@ -138,7 +145,13 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   // Money reception marked in Djubo today needs how it was paid, so cash, UPI and card add up (26 Nov 2026, required).
   const noMode = s.djubo.filter((x) => !x.settlementId);
   if (noMode.length) fail(409, `Pick Cash, UPI or Card for the money marked in Djubo today: ${noMode.map((x) => `${x.guestName ?? x.extRef} ${rs(x.amountPaise)}`).join(', ')}.`);
-  if (s.notCharged.length) fail(409, `No rent for tonight: ${s.notCharged.map((x) => `${x.room} · ${x.guestName}`).join(', ')}. Extend in Djubo (the rent comes with its mail), or a manager extends without Djubo.`);
+  if (s.notCharged.length) {
+    const past = s.notCharged.filter((x) => x.coveredTo < day);
+    const leaving = s.notCharged.filter((x) => x.coveredTo >= day);
+    const names = (l: typeof past) => l.map((x) => `${x.room} · ${x.guestName}`).join(', ');
+    fail(409, [past.length ? `No rent for tonight: ${names(past)}. Extend in Djubo (the rent comes with its mail), or a manager extends without Djubo.` : '',
+      leaving.length ? `Leaving today, not checked out yet: ${names(leaving)}. Check them out, or extend if they stay tonight.` : ''].filter(Boolean).join(' '));
+  }
 
   const data = await body(c);
   // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).
@@ -223,6 +236,11 @@ shiftRoutes.post(`${B}/shifts/:day/reopen`, requireAction('staff.manage'), async
 /** The automatic close (24 Nov 2026), run by the 5-minute timer: once a shift's hour has passed, the shift before it is
  *  closed if nobody closed it by hand and anything happened in it. Its drawer is "not counted yet"; open orders, printed
  *  bills and tabs carry on into the next shift and are listed in the close. Only the shift just ended is closed. */
+/** Who had no rent for the night when the day closed by itself (kept in the close's totals). */
+export const noRentOf = (totals: string | null): { room: string; guestName: string; coveredTo: string }[] => {
+  try { return JSON.parse(String(totals ?? '{}')).noRent ?? []; } catch { return []; }
+};
+
 export async function autoCloseAll(db: DB, t = now()) {
   const bs = await all<{ id: string; shift_start_hour: number; tab_age_days: number; drawer_count: number }>(db, "SELECT id, shift_start_hour, tab_age_days, drawer_count FROM businesses WHERE status = 'active'");
   let closed = 0;
@@ -236,7 +254,9 @@ export async function autoCloseAll(db: DB, t = now()) {
     const s = await shiftSummary(db, b.id, prev, b.tab_age_days, b.shift_start_hour);
     const totals = { deskMissing: s.deskMissing, notInDjubo: s.notInDjubo, byMode: s.byMode, receipts: s.receipts, byAccount: s.byAccount, billed: s.billed, events: s.events,
       tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment,
-      carried: { openOrders: s.openOrders, unpaidBills: s.unpaidBills }, ...(b.drawer_count === 0 ? { noCount: true } : {}) };
+      carried: { openOrders: s.openOrders, unpaidBills: s.unpaidBills }, ...(b.drawer_count === 0 ? { noCount: true } : {}),
+      // Still in house with no rent for the night when the day closed by itself (28 Nov 2026): shown in red on its Daily check.
+      ...(s.notCharged.length ? { noRent: s.notCharged.map((x) => ({ room: x.room, guestName: x.guestName, coveredTo: x.coveredTo })) } : {}) };
     try {
       await db.batch([stmt(db, `INSERT INTO shift_closes (id, business_id, shift_day, opening_float_paise, counted, counted_paise, expected_paise, difference_paise,
         difference_reason, totals, closed_by, closed_at, counted_at, auto) VALUES (?, ?, ?, 0, '{}', 0, ?, 0, NULL, ?, NULL, ?, NULL, 1)`,
