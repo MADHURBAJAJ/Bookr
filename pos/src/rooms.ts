@@ -426,3 +426,33 @@ export async function tonightNotCharged(db: DB, bid: string, day: string) {
   }
   return out;
 }
+
+/**
+ * Guests in a different room or bed from Djubo's (28 Nov 2026): the desk put them elsewhere (Djubo's room not free or not
+ * clean, or moved later). Shown on Rooms › Today until Djubo's next email has the same rooms, so Djubo is moved too.
+ * Compared on the rooms of the stay and its group against the rooms of its bookings covering tonight (or the latest),
+ * without spaces or case ("XIV A" = "XIVA"). Not for a guest waiting for a room, who left the room, or with no Djubo room.
+ */
+export async function djuboRoomsDiffer(db: DB, bid: string, today: string) {
+  const rows = await all<{ id: string; room: string; guest_name: string; members: string | null; labels: string | null }>(db, `
+    SELECT s.id, s.room, s.guest_name,
+      (SELECT group_concat(m.room, '|') FROM stays m WHERE m.group_stay_id = s.id AND m.checked_out_at IS NULL) AS members,
+      (SELECT group_concat(k.room_labels, ',') FROM bookings k JOIN stays x ON x.id = k.stay_id
+        WHERE (x.id = s.id OR x.group_stay_id = s.id) AND k.status = 'checked_in' AND k.source = 'djubo' AND coalesce(k.room_labels, '') <> ''
+          AND k.check_in = (SELECT max(k2.check_in) FROM bookings k2 JOIN stays x2 ON x2.id = k2.stay_id
+            WHERE (x2.id = s.id OR x2.group_stay_id = s.id) AND k2.status = 'checked_in' AND k2.source = 'djubo' AND coalesce(k2.room_labels, '') <> '' AND k2.check_in <= ?)) AS labels
+    FROM stays s WHERE s.business_id = ? AND s.checked_out_at IS NULL AND s.group_stay_id IS NULL
+      AND s.room NOT LIKE '%(past stay)' AND s.room NOT LIKE '%(left room)' AND s.room NOT LIKE 'Waiting for room · %'`, today, bid);
+  const flat = (t: string) => t.toLowerCase().replace(/\s+/g, '');
+  const out: { stayId: string; guestName: string; pos: string[]; djubo: string[] }[] = [];
+  for (const r of rows) {
+    if (!r.labels) continue;
+    const pos = [r.room, ...(r.members ? r.members.split('|') : [])];
+    const djubo = [...new Set(r.labels.split(',').map((x) => x.trim()).filter(Boolean))];
+    const p = new Set(pos.map(flat));
+    const d = new Set(djubo.map(flat));
+    if (p.size === d.size && [...p].every((x) => d.has(x))) continue;
+    out.push({ stayId: r.id, guestName: r.guest_name, pos, djubo });
+  }
+  return out;
+}
