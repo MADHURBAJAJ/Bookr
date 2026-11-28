@@ -24,7 +24,8 @@ function saveSettings(s) {
   const clean = {
     bill: str(s.bill), otherKot: str(s.otherKot), paperMm: s.paperMm === 58 ? 58 : 80, startWithWindows: s.startWithWindows !== false,
     stations: Object.fromEntries(Object.entries(s.stations ?? {}).filter(([k]) => str(k)).map(([k, v]) => [str(k), str(v)])),
-    seenStations: [...new Set((s.seenStations ?? []).map(str).filter(Boolean))].slice(0, 30),
+    // One of each station whatever its capitals: the first spelling seen stays.
+    seenStations: (s.seenStations ?? []).map(str).filter(Boolean).filter((x, i, all) => all.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === i).slice(0, 30),
   };
   fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
   fs.writeFileSync(settingsFile(), JSON.stringify(clean, null, 2));
@@ -45,8 +46,12 @@ ipcMain.handle('print', async (event, job) => {
   if (!html || html.length > 300_000) return { ok: false, error: 'Nothing to print.' };
   const copies = Number.isInteger(job?.copies) && job.copies >= 1 && job.copies <= 5 ? job.copies : 1;
   const s = loadSettings();
-  if (kind === 'kot' && station && !s.seenStations.includes(station)) saveSettings({ ...s, seenStations: [...s.seenStations, station] });
-  const printer = kind === 'kot' ? s.stations[station] || s.otherKot : s.bill;
+  // Station names match whatever their capitals (28 Nov 2026): the POS sends "bar", the Printers window showed "Bar", and
+  // a printer chosen for "Bar" was never found for "bar" KOTs.
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  if (kind === 'kot' && station && !s.seenStations.some((x) => same(x, station))) saveSettings({ ...s, seenStations: [...s.seenStations, station] });
+  const stationPrinter = Object.entries(s.stations).find(([k, v]) => v && same(k, station))?.[1];
+  const printer = kind === 'kot' ? stationPrinter || s.otherKot : s.bill;
   const what = kind === 'kot' ? `${station || 'KOT'} KOTs` : 'bills';
   if (!printer) return { ok: false, error: `No printer is chosen for ${what} on this PC.` };
   const installed = await main.webContents.getPrintersAsync();
