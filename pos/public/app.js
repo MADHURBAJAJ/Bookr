@@ -210,9 +210,8 @@ async function route() {
     // A server's own phone (28 Nov 2026): the Serve page, its own PIN sign-in, nothing else.
     // Its own address since 28 Nov 2026 (/serve/<business>), so the phone installs "Serve"; old #/serve/ links move there.
     if (location.hash.startsWith('#/serve/')) { location.replace(`/serve/${location.hash.split('/')[2] ?? ''}`); return; }
-    if (servePath()) return await serveScreen(servePath());
-    // The Bar Count app (28 Nov 2026): bar staff count on their own phones, at /count/<business>.
-    if (countPath()) return await countAppScreen(countPath());
+    // The Staff app (28 Nov 2026): one phone app for Serve and Bar count, at /staff/<business> (also /serve/ and /count/).
+    if (staffPath()) return await staffApp(staffPath());
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
     // Bookr POS admin: its own sign-in, separate from every restaurant's.
@@ -7075,9 +7074,91 @@ function startLive(refresh) {
   }, 30_000);
 }
 
-// ----- the server's phone: /serve/<business id>
-/** The business id when this page is a server's Serve page (/serve/<id>), else ''. */
-const servePath = () => (/^\/serve\/([0-9a-f-]{36})\/?$/i.exec(location.pathname) ?? [])[1] ?? '';
+// ----- the Staff app on a phone: /staff/<business id> (28 Nov 2026)
+// One app for every job on the phone. The jobs a person has are the ticks the owner gave them (Settings › People on
+// phones): one job opens straight into it; two or more show a start screen and a bar at the bottom to switch. The older
+// addresses (/serve/<id> and /bar count's /count/<id>) open the same app, starting on their own job.
+/** The business id when this page is the Staff app (/staff/<id>, /serve/<id> or /count/<id>), else ''. */
+const staffPath = () => (/^\/(?:staff|serve|count)\/([0-9a-f-]{36})\/?$/i.exec(location.pathname) ?? [])[1] ?? '';
+/** The job an old address starts on: /serve/ → Serve, /count/ → Bar count. */
+const staffFirstJob = () => (/^\/(serve|count)\//i.exec(location.pathname) ?? [])[1]?.toLowerCase() ?? '';
+/** The jobs from the person's ticks, in the order they show. Housekeeping joins here once it is built. */
+const STAFF_JOBS = [
+  { key: 'serve', icon: '🍽', name: 'Serve', has: (a) => a.includes('serve'), note: 'Mark food served' },
+  { key: 'count', icon: '🍾', name: 'Bar count', has: (a) => a.some((x) => x.endsWith('_count')), note: 'Count stock, approve counts' },
+];
+/** This phone's Staff app: the business, who is signed in, their jobs and the job open now. Kept across redraws. */
+let staff = null;
+const staffJobsOf = (access) => STAFF_JOBS.filter((j) => j.has(access));
+async function staffApp(bid, job) {
+  document.body.classList.remove('desk');
+  document.title = document.querySelector('meta[name="apple-mobile-web-app-title"]')?.getAttribute('content') ?? 'Staff';
+  stopServe(); stopCount();
+  if (staff?.bid !== bid) staff = { bid, who: null, job: '' };
+  let who;
+  try { who = await serveCall('GET', '/serve/me'); }
+  catch (e) {
+    staff.who = null;
+    ui.sv = { app: 'staff', bid, pin: '', screen: e.status === 401 ? 'pin' : 'offline', err: null };
+    ui.sv.tick = () => staffApp(bid, job);
+    rerender = paintServe; paintServe();
+    return;
+  }
+  staff.who = who;
+  const jobs = staffJobsOf(who.access);
+  const pick = [job, staff.job, staffFirstJob()].find((k) => k && jobs.some((j) => j.key === k)) ?? (jobs.length === 1 ? jobs[0].key : '');
+  if (!pick || job === 'start') {
+    staff.job = '';
+    ui.sv = { app: 'staff', bid, screen: jobs.length ? 'start' : 'noaccess', err: null, pin: '' };
+    ui.sv.tick = () => staffApp(bid, job);
+    rerender = paintServe; paintServe();
+    return;
+  }
+  staff.job = pick;
+  return pick === 'serve' ? serveScreen(bid) : countAppScreen(bid);
+}
+/** The start screen (two or more jobs), and the sign-in before anyone is known. */
+function paintStaff() {
+  const sv = ui.sv;
+  const top = (t, out) => html`<header class="sv-top"><span>${t}</span>${out ? html`<button type="button" data-act="svOut">Sign out</button>` : ''}</header>`;
+  if (sv.screen === 'pin') { root.innerHTML = asHtml(phoneSignIn(sv, 'Staff')); return; }
+  if (sv.screen === 'offline') {
+    root.innerHTML = asHtml(html`<main class="sv">${top('Staff')}<div class="sv-body sv-pin"><p>Could not reach the server. Check the Wi-Fi.</p>
+      <button class="btn pri big wide" type="button" data-act="stRetry" style="width:min(320px,100%)">Try again</button></div></main>`);
+    return;
+  }
+  if (!staff?.who) { root.innerHTML = asHtml(html`<main class="sv">${top('Staff')}<p class="sv-body quiet">Loading…</p></main>`); return; }
+  if (sv.screen === 'noaccess') {
+    root.innerHTML = asHtml(html`<main class="sv">${top(`Hi ${staff?.who?.name ?? ''}`, true)}<p class="sv-body">You are not set up for any job on the phone yet. Ask the owner.</p></main>`);
+    return;
+  }
+  const jobs = staffJobsOf(staff.who.access);
+  root.innerHTML = asHtml(html`<main class="sv">${top(`Hi ${staff.who.name}`, true)}<div class="sv-body">
+    <p class="quiet" style="margin:0">What are you doing now?</p>
+    ${jobs.map((j) => html`<button class="st-job" type="button" data-act="stJob" data-j="${j.key}"><span class="st-ic" aria-hidden="true">${j.icon}</span><span><b>${j.name}</b><small>${j.note}</small></span></button>`)}
+  </div></main>`);
+}
+actions.stJob = (d) => staffApp(staff.bid, d.j);
+actions.stRetry = () => staffApp(staffPath());
+/**
+ * The bar at the bottom of the Staff app: the jobs to switch between (two or more), and the business's name. It sits
+ * outside the screens, shown on the main screen of each job and hidden while a KOT or a count is open.
+ */
+const staffBar = Object.assign(document.createElement('nav'), { className: 'st-bar', hidden: true });
+staffBar.setAttribute('aria-label', 'Jobs');
+document.body.appendChild(staffBar);
+function paintStaffBar() {
+  const sv = ui.sv;
+  const home = staff?.who && staffPath() && sv && ((sv.app === 'staff' && sv.screen === 'start') || (sv.app === 'count' && sv.screen === 'home') || (!sv.app && sv.screen === 'list'));
+  staffBar.hidden = !home; document.body.classList.toggle('st-on', !!home);
+  if (!home) return;
+  const jobs = staffJobsOf(staff.who.access); const now = sv.app === 'staff' ? '' : staff.job;
+  staffBar.innerHTML = asHtml(html`${jobs.length > 1 ? html`<div class="st-tabs">${[{ key: 'start', icon: '🏠', name: 'Start' }, ...jobs].map((j) => html`<button type="button" data-j="${j.key}" aria-current="${(j.key === 'start' ? !now : j.key === now) ? 'true' : 'false'}"><span aria-hidden="true">${j.icon}</span>${j.name}</button>`)}</div>` : ''}
+    <div class="st-biz"><b>${staff.who.business}</b> · Staff</div>`);
+}
+new MutationObserver(() => paintStaffBar()).observe(root, { childList: true });
+// The bar is outside the screens, so its taps are handled here.
+staffBar.addEventListener('click', (ev) => { const b = ev.target.closest('button[data-j]'); if (b) staffApp(staff.bid, b.dataset.j); });
 const SERVE_PHONE_KEY = 'bookr-serve-phone';
 const savedServePhone = () => { try { return localStorage.getItem(SERVE_PHONE_KEY) ?? ''; } catch { return ''; } };
 let serveTimer = null;
@@ -7115,15 +7196,6 @@ svCamera.addEventListener('change', async () => {
   paintServe();
 });
 async function serveScreen(bid) {
-  document.title = 'Serve';
-  // Added to the home screen from here, the icon opens this Serve page (28 Nov 2026), not the staff sign-in.
-  if (/^[0-9a-f-]{36}$/i.test(bid)) {
-    const mf = document.querySelector('link[rel="manifest"]');
-    if (mf) mf.setAttribute('href', `/api/serve-manifest/${bid}`);
-    let t = document.querySelector('meta[name="apple-mobile-web-app-title"]');
-    if (!t) { t = document.createElement('meta'); t.setAttribute('name', 'apple-mobile-web-app-title'); document.head.append(t); }
-    t.setAttribute('content', 'Serve');
-  }
   document.body.classList.remove('desk');
   ui.sv = { bid, pin: '', screen: 'loading', data: null, open: null, whole: true, ticks: {}, shot: null, shotUrl: null, err: null, pending: [] };
   rerender = paintServe;
@@ -7136,7 +7208,7 @@ async function serveScreen(bid) {
       if (e.status === 401) { ui.sv.screen = 'pin'; ui.sv.data = null; } else if (e.status === 403) { ui.sv.screen = 'noaccess'; ui.sv.err = e.message; } else ui.sv.offline = true;
     }
     // Only the list redraws by itself; a KOT being served stays as it is until the server is done.
-    if (servePath() && ui.sv.screen !== 'kot') paintServe();
+    if (ui.sv?.tick === tick && ui.sv.screen !== 'kot') paintServe();
   };
   ui.sv.tick = tick;
   paintServe();
@@ -7165,6 +7237,7 @@ function phoneSignIn(sv, title) {
 }
 function paintServe() {
   if (ui.sv.app === 'count') return paintCount();
+  if (ui.sv.app === 'staff') return paintStaff();
   const sv = ui.sv;
   const top = (title, out) => html`<header class="sv-top"><span>${title}</span>${out ? html`<button type="button" data-act="svOut">Sign out</button>` : ''}</header>`;
   if (sv.screen === 'loading') { root.innerHTML = asHtml(html`<main class="sv">${top('Serve')}<p class="sv-body quiet">Loading…</p></main>`); return; }
@@ -7222,7 +7295,7 @@ actions.svPhoneGo = () => {
   paintServe();
 };
 actions.svPhoneChange = () => { ui.sv.askPhone = true; ui.sv.pin = ''; ui.sv.err = null; paintServe(); };
-actions.svOut = async () => { await serveCall('POST', '/serve/signout', {}).catch(() => {}); Object.assign(ui.sv, { screen: 'pin', data: null, pin: '' }); paintServe(); };
+actions.svOut = async () => { await serveCall('POST', '/serve/signout', {}).catch(() => {}); if (staff) staff.job = ''; await staffApp(staffPath()); };
 actions.svOpen = (d) => { Object.assign(ui.sv, { screen: 'kot', open: d.id, whole: d.whole === '1', ticks: {}, shot: null, shotUrl: null, err: null }); paintServe(); };
 actions.svBack = () => { ui.sv.screen = 'list'; paintServe(); ui.sv.tick(); };
 actions.svTick = (d, el) => { ui.sv.ticks[d.n] = el.checked; };
@@ -7263,7 +7336,7 @@ async function servingScreen() {
     const m = ui.svm;
     paint(shell('#/', html`${pageHead('Serving', `Shift of ${dayName(m.shiftDay)} · timers move every 30 seconds`, html`<a class="btn" href="#/">Back to tables</a>`)}${errorBox()}
       <div class="msg">A server can undo their own tap for 2 minutes. After that, only a manager can, here, with a reason. Every undo and every item marked here shows on the Daily check.
-        Servers sign in at <b>${location.origin}/serve/${me.business.id}</b></div>
+        Servers sign in on the ${staffAppName()} app: <b>${staffLink()}</b></div>
       ${(ui.svBlocks ?? []).length ? html`<section class="panel"><h2>Blocked by wrong server PINs (5 minutes)</h2>${ui.svBlocks.map((b) => html`<div class="row between"><span>${b.mobile ? `${b.name ?? 'Mobile'} · ${b.mobile}` : 'A connection with no mobile number'}: ${b.wrong} wrong tries, last at ${time(b.last)}; open again at ${time(b.until)}</span>
         <button class="btn" type="button" data-act="svUnblock" data-c="${b.conn}">Unlock</button></div>`)}</section>` : ''}
       <section class="panel"><h2>Waiting to be served</h2>
@@ -7298,7 +7371,6 @@ actions.svUnblock = async (d) => { await api('POST', `${B()}/serving/unblock`, {
 // Bar staff count on their own phones, signed in with the same mobile number and PIN as the Serve app. A live count: each
 // row is saved as it is typed, with the time it was typed. With no Wi-Fi the rows wait on the phone (kept even if the page
 // is closed) and go when it is back. People ticked for Approve counts check counts here too.
-const countPath = () => (/^\/count\/([0-9a-f-]{36})\/?$/i.exec(location.pathname) ?? [])[1] ?? '';
 const CA_QUEUE = (id) => `bookr-count-q-${id}`;
 let countTimer = null;
 function stopCount() { if (countTimer) { clearInterval(countTimer); countTimer = null; } }
@@ -7331,14 +7403,6 @@ function caUnits(r, whole, loose) {
   return a ?? 0;
 }
 async function countAppScreen(bid) {
-  document.title = 'Bar Count';
-  if (/^[0-9a-f-]{36}$/i.test(bid)) {
-    const mf = document.querySelector('link[rel="manifest"]');
-    if (mf) mf.setAttribute('href', `/api/count-manifest/${bid}`);
-    let t = document.querySelector('meta[name="apple-mobile-web-app-title"]');
-    if (!t) { t = document.createElement('meta'); t.setAttribute('name', 'apple-mobile-web-app-title'); document.head.append(t); }
-    t.setAttribute('content', 'Bar Count');
-  }
   document.body.classList.remove('desk');
   ui.sv = { app: 'count', bid, pin: '', screen: 'loading', me: null, ck: null, cat: null, q: '', vals: {}, err: null, offline: false, sending: false, again: {} };
   rerender = paintCount;
@@ -7357,9 +7421,9 @@ async function countAppScreen(bid) {
   await ui.sv.tick();
   stopCount();
   // Rows waiting for the Wi-Fi go as soon as it is back; the home screen refreshes now and then.
-  countTimer = setInterval(() => { if (!countPath()) return stopCount(); if (ui.sv?.ck) caFlush(); else if (ui.sv?.screen === 'home') ui.sv.tick(); }, 8000);
+  countTimer = setInterval(() => { if (ui.sv?.app !== 'count') return stopCount(); if (ui.sv?.ck) caFlush(); else if (ui.sv?.screen === 'home') ui.sv.tick(); }, 8000);
 }
-window.addEventListener('online', () => { if (countPath() && ui.sv?.ck) caFlush(); });
+window.addEventListener('online', () => { if (ui.sv?.app === 'count' && ui.sv?.ck) caFlush(); });
 
 /** Sends the rows waiting on the phone. A row typed again while sending stays for the next try. */
 async function caFlush() {
@@ -7556,21 +7620,18 @@ root.addEventListener('input', (ev) => {
 // ----- Settings › Staff and PINs: people on phones (Owner)
 // Tick boxes per person (28 Nov 2026): which phone apps they may use, and whether they approve counts on the phone.
 const PHONE_ACCESS = [['serve', 'Serve'], ['bar_count', 'Bar count'], ['kitchen_count', 'Kitchen count'], ['approve_counts', 'Approve counts']];
-const phoneApps = (access) => [...(access.includes('serve') ? ['serve'] : []), ...(access.some((a) => a !== 'serve') ? ['count'] : [])];
 function serversPanel() {
-  const link = `${location.origin}/serve/${me.business.id}`;
-  const countLink = `${location.origin}/count/${me.business.id}`;
+  const link = staffLink();
   const quiet14 = (s) => s.active && Date.now() - (s.lastSeenAt ?? s.createdAt) > 14 * 86_400_000;
   const newTicks = ui.svAccess ?? ['serve'];
   return html`<section class="panel" style="margin-top:16px"><h2>People on phones</h2>
-    <p class="quiet small">Servers, bar staff and others who use the phone apps. Each signs in on their own phone with their mobile number and a 6-digit PIN, and sees only what you tick. Serve: mark food served. Bar count and Kitchen count: count stock in the Bar Count app. Approve counts: approve a count, or send rows back, on the phone. Taking a tick away works at once, even on an open phone. Remove a person and their PIN stops at once. Sign-ins end at day close.</p>
-    <div class="row"><span class="small">Serve:</span><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
-    <div class="row"><span class="small">Bar Count:</span><code class="tag-any">${countLink}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${countLink}">Copy</button></div>
+    <p class="quiet small">Servers, bar staff and others who use the ${staffAppName()} app on their phones. Each signs in on their own phone with their mobile number and a 6-digit PIN, and sees only the jobs you tick: one job opens straight into it; two or more show a start screen. Serve: mark food served. Bar count and Kitchen count: count stock. Approve counts: approve a count, or send rows back, on the phone. Taking a tick away works at once, even on an open phone. Remove a person and their PIN stops at once. Sign-ins end at day close.</p>
+    <div class="row"><span class="small">${staffAppName()} app:</span><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
     ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th>${PHONE_ACCESS.map(([, l]) => html`<th>${l}</th>`)}<th>Last signed in</th><th></th></tr></thead><tbody>
       ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}<div class="small quiet">${s.phone ? `${s.phone.slice(0, 5)} ${s.phone.slice(5)}` : html`<span style="color:var(--warn)">No mobile yet: add one (Edit) so they can sign in</span>`}</div></td>
         ${PHONE_ACCESS.map(([a, l]) => html`<td><input type="checkbox" data-act-change="svAccess" data-id="${s.id}" data-a="${a}" ${s.access.includes(a) ? 'checked' : ''} ${s.active ? '' : 'disabled'} aria-label="${s.name}: ${l}"></td>`)}
         <td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
-        <td class="act"><div class="row">${s.active ? html`${phoneApps(s.access).map((app) => html`<a class="btn" href="${waTo(s.phone, app === 'serve' ? serveInvite(s.name, link) : countInvite(s.name, countLink))}" target="_blank" rel="noopener">${app === 'serve' ? 'Serve invite' : 'Bar Count invite'} on WhatsApp</a>`)}<button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Edit</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
+        <td class="act"><div class="row">${s.active ? html`<a class="btn" href="${waTo(s.phone, staffInvite(s.name))}" target="_blank" rel="noopener">Staff invite on WhatsApp</a><button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Edit</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
           : html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Bring back</button>`}</div></td></tr>`)}</tbody></table></div>` : html`<p class="quiet">Nobody yet.</p>`}
     <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `Edit ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a person'}</h3>
       ${ui.svEdit ? '' : html`<label class="f">Name<input class="in" data-model="svName" value="${ui.svName ?? ''}"></label>`}
@@ -7593,34 +7654,29 @@ actions.staffCountApprove = async (d, el) => {
   catch (e) { el.checked = !el.checked; throw e; }
   rerender();
 };
-/** The invite to the Bar Count app (28 Nov 2026), as the Serve invite: the PIN is given separately. */
-const countInvite = (name, link) => `Hi ${name}, join *${me.business.name}* on Bookr POS, to count bar stock on your phone.
+/** The Staff app's address and its name on the phone (28 Nov 2026): "XOXO Staff", from the business's first word. */
+const staffLink = () => `${location.origin}/staff/${me.business.id}`;
+const staffAppName = () => `${(me.business.name.trim().split(/\s+/)[0] ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6) || 'STAFF'} Staff`;
+/** The one invite for the phone (28 Nov 2026), as Bookr's cashier invite: the link, how to put it on the phone, the PIN
+ *  given separately (never in the message, so a forwarded message can't be used). Same for every job. */
+const staffInvite = (name) => `Hi ${name}, join *${me.business.name}* on your phone.
 
-1. Open this link on your phone: ${link}
+1. Open this link on your phone: ${staffLink()}
 2. Put it on your phone:
 • Samsung: tap the ⬇ (install) in the address bar, or ☰ › Add page to › Home screen
 • Other Android: in Chrome tap *Install* (or ⋮ › Add to Home screen)
 • iPhone: in Safari tap Share ⬆︎ › *Add to Home Screen*
-3. From then on, open *Bar Count* from its icon. Sign in with your mobile number and the 6-digit PIN the manager gives you (the same PIN as Serve, if you use it).`;
-/** The invite a server gets on WhatsApp (28 Nov 2026), as Bookr's cashier invite: the link, how to put it on the phone, the PIN
- *  given separately (never in the message, so a forwarded message can't be used). */
-const serveInvite = (name, link) => `Hi ${name}, join *${me.business.name}* as a server on Bookr POS, to mark food served.
-
-1. Open this link on your phone: ${link}
-2. Put it on your phone:
-• Samsung: tap the ⬇ (install) in the address bar, or ☰ › Add page to › Home screen
-• Other Android: in Chrome tap *Install* (or ⋮ › Add to Home screen)
-• iPhone: in Safari tap Share ⬆︎ › *Add to Home Screen*
-3. From then on, open *Serve* from its icon. Sign in with your mobile number and the 6-digit PIN the manager gives you.`;
+3. From then on, open *${staffAppName()}* from its icon. Sign in with your mobile number and the 6-digit PIN the manager gives you.
+(Had Serve or Bar Count before? It still works; this one icon now does both.)`;
 const waTo = (phone, msg) => `https://wa.me/${phone ? `91${phone}` : ''}?text=${encodeURIComponent(msg)}`;
 actions.svCopyMsg = async (d) => {
   const s = ui.servers.find((x) => x.id === d.id);
-  const msg = phoneApps(s.access).map((app) => (app === 'serve' ? serveInvite(s.name, `${location.origin}/serve/${me.business.id}`) : countInvite(s.name, `${location.origin}/count/${me.business.id}`))).join('\n\n') || serveInvite(s.name, `${location.origin}/serve/${me.business.id}`);
+  const msg = staffInvite(s.name);
   try { await navigator.clipboard.writeText(msg); flash = { kind: 'ok', text: `Message for ${s.name} copied. Paste it in WhatsApp or SMS; tell them the PIN separately.` }; }
   catch { flash = { kind: 'warn', text: msg }; }
   rerender();
 };
-actions.svCopyLink = async (d) => { await navigator.clipboard?.writeText(d.l).catch(() => {}); flash = { kind: 'ok', text: 'Serve address copied.' }; rerender(); };
+actions.svCopyLink = async (d) => { await navigator.clipboard?.writeText(d.l).catch(() => {}); flash = { kind: 'ok', text: 'Staff app address copied.' }; rerender(); };
 actions.svNewPin = (d) => { ui.svEdit = d.id; ui.svPin = ''; ui.svPhone = ui.servers.find((x) => x.id === d.id)?.phone ?? ''; rerender(); };
 actions.svEditNo = () => { ui.svEdit = null; ui.svPin = ''; ui.svPhone = ''; rerender(); };
 actions.svSave = async () => {

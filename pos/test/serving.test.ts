@@ -2,7 +2,7 @@
 // items served with a photo, undo (2 minutes for the server, then a manager with a reason), the manager's marks, the
 // Daily check and the report, and the server sign-in guards. Invented data only.
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { app } from '../src/app';
+import { app, staffIcon, staffLabel } from '../src/app';
 import { Client, dispose, env, q, setupBusiness } from './helpers';
 import { WRONG_LIMIT } from '../src/routes/serve';
 
@@ -238,29 +238,53 @@ describe('serving time', () => {
   });
 });
 
-describe('serve page on the home screen', () => {
-  it('gives each business a home-screen app that opens its Serve page', async () => {
+describe('the Staff app on the home screen', () => {
+  it('names the app after the business, with the same name and icon on the old Serve and Bar Count addresses', async () => {
     const s = await setupBusiness();
-    const r = await s.owner.get(`/serve-manifest/${s.businessId}`);
+    for (const kind of ['staff', 'serve', 'count']) {
+      const r = await s.owner.get(`/${kind}-manifest/${s.businessId}`);
+      expect(r.status).toBe(200);
+      // Each keeps its own id, so a phone that added /serve/ or /count/ updates its icon in place.
+      expect(r.json).toMatchObject({ name: 'SAMPLE Staff', short_name: 'SAMPLE Staff', id: `/${kind}/${s.businessId}`, start_url: `/${kind}/${s.businessId}`, scope: `/${kind}/${s.businessId}` });
+      expect(r.json.icons[0].src).toBe('/icon-192.png');
+    }
+    expect((await s.owner.get('/staff-manifest/not-a-business')).status).toBe(404);
+    expect((await s.owner.get('/staff-manifest/00000000-0000-4000-8000-00000000abcd')).status).toBe(404);
+  });
+  it('tells the phone who is signed in and their ticks, so it opens the right job', async () => {
+    const s = await setupBusiness();
+    const { B, owner, ok, businessId } = s;
+    await ok(owner.post(`${B}/servers`, { name: 'Ravi', phone: '9800011150', pin: '482915', access: ['serve', 'bar_count'] }));
+    expect((await new Client().get('/serve/me')).status).toBe(401);
+    const { p, r } = await phone(businessId, '482915', '203.0.113.50', '9800011150');
     expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ short_name: 'Serve', start_url: `/serve/${s.businessId}`, scope: `/serve/${s.businessId}` });
-    expect((await s.owner.get('/serve-manifest/not-a-business')).status).toBe(404);
+    expect((await p.get('/serve/me')).json).toEqual({ name: 'Ravi', business: 'Sample Hotel', access: ['serve', 'bar_count'] });
+  });
+  it('draws B over the short name: XOXO Hostel gets its own icon', () => {
+    expect(staffLabel('XOXO Hostel')).toBe('XOXO');
+    expect(staffIcon('XOXO')).toBe('/staff-xoxo');
+    expect(staffLabel("St. Mary's")).toBe('ST');
+    expect(staffIcon(staffLabel('Sample Hotel'))).toBe('/icon');
   });
 });
 
-describe('the Serve page at its own address', () => {
-  it('serves the POS page with the Serve app details from the start; nothing else under /serve/', async () => {
+describe('the Staff app at its own address', () => {
+  it('serves the POS page with the app details from the start, at /staff/ and the old /serve/ and /count/; nothing else', async () => {
+    const s = await setupBusiness();
     const worker = (await import('../src/index')).default;
-    const page = '<html><head><title>Bookr POS</title><link rel="manifest" href="/manifest.webmanifest"></head><body></body></html>';
+    const page = '<html><head><title>Bookr POS</title><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png"></head><body></body></html>';
     const assets = { fetch: async () => new Response(page, { headers: { 'Content-Type': 'text/html' } }) };
-    const bid = '00000000-0000-4000-8000-00000000abcd';
     const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
-    const r = await worker.fetch(new Request(`https://pos.example.test/serve/${bid}`), { ...env, ASSETS: assets } as never, ctx);
-    expect(r.status).toBe(200);
-    const html = await r.text();
-    expect(html).toContain(`<link rel="manifest" href="/api/serve-manifest/${bid}">`);
-    expect(html).toContain('<title>Serve</title>');
-    expect(html).not.toContain('/manifest.webmanifest');
-    expect((await worker.fetch(new Request('https://pos.example.test/serve/other'), { ...env, ASSETS: assets } as never, ctx)).status).toBe(404);
+    for (const kind of ['staff', 'serve', 'count']) {
+      const r = await worker.fetch(new Request(`https://pos.example.test/${kind}/${s.businessId}`), { ...env, ASSETS: assets } as never, ctx);
+      expect(r.status).toBe(200);
+      const html = await r.text();
+      expect(html).toContain(`<link rel="manifest" href="/api/${kind}-manifest/${s.businessId}">`);
+      expect(html).toContain('<title>SAMPLE Staff</title>');
+      expect(html).toContain('<meta name="apple-mobile-web-app-title" content="SAMPLE Staff">');
+      expect(html).not.toContain('/manifest.webmanifest');
+    }
+    expect((await worker.fetch(new Request('https://pos.example.test/staff/other'), { ...env, ASSETS: assets } as never, ctx)).status).toBe(404);
+    expect((await worker.fetch(new Request('https://pos.example.test/staff/00000000-0000-4000-8000-00000000abcd'), { ...env, ASSETS: assets } as never, ctx)).status).toBe(404);
   });
 });

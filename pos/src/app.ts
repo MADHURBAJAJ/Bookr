@@ -47,26 +47,26 @@ app.use('*', async (c, next) => {
   await next();
 });
 
-// A server's phone app (28 Nov 2026): the Serve page added to the home screen opens on that business's Serve page (the
-// POS's own app opens at the staff sign-in, where a server's PIN does not work). Open to anyone: it holds only the id.
-app.get('/serve-manifest/:bid', (c) => {
-  const bid = c.req.param('bid');
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bid)) return c.json({ error: 'Not found.' }, 404);
-  return new Response(JSON.stringify({
-    name: 'Bookr Serve', short_name: 'Serve', description: 'Mark food served.', id: `/serve/${bid}`, start_url: `/serve/${bid}`, scope: `/serve/${bid}`,
-    display: 'standalone', background_color: '#f2efea', theme_color: '#0f4f4f',
-    icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
-  }), { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' } });
-});
+/** The short name under the B on the Staff app's icon: the business name's first word, in capitals (XOXO Hostel → XOXO). */
+export const staffLabel = (name: string) => (name.trim().split(/\s+/)[0] ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6) || 'STAFF';
+/** Icons drawn for a label (B over the short name); any other business keeps the plain Bookr icon until one is drawn. */
+const STAFF_ICONS: Record<string, string> = { XOXO: '/staff-xoxo' };
+export const staffIcon = (label: string) => STAFF_ICONS[label] ?? '/icon';
 
-// The Bar Count app (28 Nov 2026), as the Serve app: added to the home screen from /count/<business id>, it opens there.
-app.get('/count-manifest/:bid', (c) => {
+// The Staff app (28 Nov 2026): one phone app for every job (Serve, Bar count, later Housekeeping), named after the business
+// ("XOXO Staff") with B over its short name as the icon. The older Serve and Bar Count addresses give the same name and
+// icon but keep their own id, so a phone that added one of them updates its icon in place and keeps opening it.
+// Open to anyone: it holds only the id and the business's short name.
+for (const kind of ['staff', 'serve', 'count']) app.get(`/${kind}-manifest/:bid`, async (c) => {
   const bid = c.req.param('bid');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bid)) return c.json({ error: 'Not found.' }, 404);
+  const b = await c.env.DB.prepare("SELECT name FROM businesses WHERE id = ? AND status = 'active'").bind(bid.toLowerCase()).first<{ name: string }>();
+  if (!b) return c.json({ error: 'Not found.' }, 404);
+  const label = staffLabel(b.name); const icon = staffIcon(label); const path = `/${kind}/${bid.toLowerCase()}`;
   return new Response(JSON.stringify({
-    name: 'Bookr Bar Count', short_name: 'Bar Count', description: 'Count bar stock.', id: `/count/${bid}`, start_url: `/count/${bid}`, scope: `/count/${bid}`,
+    name: `${label} Staff`, short_name: `${label} Staff`, description: 'Serve food and count stock.', id: path, start_url: path, scope: path,
     display: 'standalone', background_color: '#f2efea', theme_color: '#0f4f4f',
-    icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
+    icons: [{ src: `${icon}-192.png`, sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: `${icon}-512.png`, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
   }), { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' } });
 });
 

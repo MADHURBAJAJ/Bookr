@@ -18,7 +18,7 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/serve/*", "/count/*"]
+    "run_worker_first": ["/api/*", "/serve/*", "/count/*", "/staff/*"]
   },
   "d1_databases": [
     {

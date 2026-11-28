@@ -112,6 +112,13 @@ serveRoutes.post('/serve/signout', async (c) => {
   return c.json({ ok: true });
 });
 
+// The Staff app (28 Nov 2026): who is signed in on this phone and which jobs they are ticked for, so one app opens the
+// right job (or a start screen when there are two or more). Nothing but the person's own name and ticks.
+serveRoutes.get('/serve/me', async (c) => {
+  const s = await currentServer(c);
+  return c.json({ name: s.name, business: s.businessName, access: s.access });
+});
+
 // The running KOTs, most late first, with the server's own taps they may still undo.
 serveRoutes.get('/serve/kots', async (c) => {
   const s = await currentServer(c, 'serve');
