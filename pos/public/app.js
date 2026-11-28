@@ -7469,7 +7469,8 @@ function caCounts() {
   const done = (r) => { const v = sv.vals[r.id]; return v ? [caUnits(r, v.w1, v.l1), caUnits(r, v.w2, v.l2)].some((x) => x !== null && !Number.isNaN(x)) : false; };
   const head = document.querySelector('.sv.ca .sv-top span');
   if (head) head.textContent = `${sv.ck.count.list ?? 'Count'} · ${rows.filter(done).length} of ${rows.length}`;
-  for (const b of document.querySelectorAll('.ca-tabs [data-c]')) { const g = rows.filter((r) => r.category === b.dataset.c); b.textContent = `${b.dataset.c} ${g.filter(done).length}/${g.length}`; }
+  const cn = document.getElementById('caCatName');
+  if (cn) { const g = rows.filter((r) => r.category === sv.cat); cn.textContent = `${sv.cat} · ${g.filter(done).length} of ${g.length}`; }
 }
 function caSync() { const el = document.getElementById('caSync'); if (el) el.innerHTML = asHtml(caSyncText()); }
 
@@ -7507,34 +7508,84 @@ function paintCount() {
   </div></main>`);
 }
 
+/** What a row's typed boxes add up to (units), null when nothing is typed, NaN when a box is not a whole number. */
+function caTotal(r) {
+  const v = ui.sv.vals[r.id] ?? {}; const a = caUnits(r, v.w1, v.l1); const b = caUnits(r, v.w2, v.l2);
+  if (Number.isNaN(a) || Number.isNaN(b)) return NaN;
+  return a === null && b === null ? null : (a ?? 0) + (b ?? 0);
+}
+/** The difference from what is in hand, shown to everyone as they count (owner, 28 Nov 2026). */
+function caDiff(r, total) {
+  if (total === null || Number.isNaN(total)) return html`<span class="quiet">Difference —</span>`;
+  const d = total - r.inHand;
+  if (d === 0) return html`<span class="ca-ok">Matches ✓</span>`;
+  return d < 0 ? html`<span class="ca-short">Short ${packText(-d, r)}</span>` : html`<span class="ca-more">More ${packText(d, r)}</span>`;
+}
+/**
+ * The counting screen (owner, 28 Nov 2026): one category bar that opens a grid of all the list's categories; in each
+ * category, rows to count again first, then items with stock in hand (A to Z), then items with none in hand, and finished
+ * rows at the bottom, folded to one line, the latest finished on top. A row moves only when Done is tapped or the category
+ * is changed, never while it is being typed in.
+ */
 function paintCountSheet(top) {
   const sv = ui.sv; const ck = sv.ck; const k = ck.count;
   const all = ck.groups.flatMap((g) => g.items.map((r) => ({ ...r, category: g.category })));
-  const done = (r) => { const v = sv.vals[r.id]; return v ? [caUnits(r, v.w1, v.l1), caUnits(r, v.w2, v.l2)].some((x) => x !== null && !Number.isNaN(x)) : false; };
+  const typed = (r) => { const t = caTotal(r); return t !== null && !Number.isNaN(t); };
   const cats = ck.groups.map((g) => g.category);
   if (!sv.cat || !cats.includes(sv.cat)) sv.cat = cats[0] ?? null;
   const q = sv.q.trim().toLowerCase();
-  const shown = (q ? all.filter((r) => r.name.toLowerCase().includes(q)) : all.filter((r) => r.category === sv.cat)).sort((a, b) => Number(b.recount) - Number(a.recount));
+  const fin = (r) => sv.fin[r.id] !== undefined;
+  const byName = (a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' });
   const box = (r, p) => {
     const w = caWay(r); const v = sv.vals[r.id] ?? {};
     return html`<div class="ca-place"><span class="ca-pl">${p === 1 ? 'Bar counter' : 'Store'}</span><div class="ca-qty">
       <label>${w.label}<input inputmode="numeric" autocomplete="off" data-ca="${r.id}" data-k="w${p}" value="${v[`w${p}`] ?? ''}" aria-label="${r.name}, ${p === 1 ? 'bar counter' : 'store'}, ${w.label}"></label>
       ${w.kind === 'pack' ? html`<label>${w.loose}<input inputmode="numeric" autocomplete="off" data-ca="${r.id}" data-k="l${p}" value="${v[`l${p}`] ?? ''}" aria-label="${r.name}, ${p === 1 ? 'bar counter' : 'store'}, ${w.loose}"></label>` : ''}</div></div>`;
   };
-  const totalOf = (r) => { const v = sv.vals[r.id] ?? {}; const a = caUnits(r, v.w1, v.l1); const b = caUnits(r, v.w2, v.l2);
-    if (Number.isNaN(a) || Number.isNaN(b)) return 'whole numbers, please'; if (a === null && b === null) return '—'; return packText((a ?? 0) + (b ?? 0), r); };
-  root.innerHTML = asHtml(html`<main class="sv ca">${top(`${k.list ?? 'Count'} · ${all.filter(done).length} of ${all.length}`, false)}<div class="sv-body">
+  const totalText = (r) => { const t = caTotal(r); return Number.isNaN(t) ? 'whole numbers, please' : t === null ? '—' : packText(t, r); };
+  const open = (r) => html`<div class="ca-item ${fin(r) ? 'done' : ''} ${r.recount && !fin(r) ? 'again' : ''}" data-row="${r.id}">
+      <div class="row between"><b>${r.name}</b>${r.recount && !fin(r) ? html`<span class="status warn">count again</span>` : q ? html`<span class="small quiet">${r.category}</span>` : ''}</div>
+      <div class="ca-places">${box(r, 1)}${box(r, 2)}</div>
+      <div class="row between small"><span class="quiet ${r.inHand ? '' : 'ca-zero'}">In hand ${packText(r.inHand, r)}</span><span>Counted <b data-total="${r.id}">${totalText(r)}</b></span></div>
+      <div class="row between small"><span data-diff="${r.id}">${caDiff(r, caTotal(r))}</span><button class="btn sm" type="button" data-act="caDone" data-id="${r.id}">Done ✓</button></div></div>`;
+  const slim = (r) => (sv.openFin === r.id ? open(r) : html`<button class="ca-item done ca-slim" type="button" data-act="caReopen" data-id="${r.id}">
+      <span class="row between"><b>${r.name}</b>${caDiff(r, caTotal(r))}</span>
+      <span class="small quiet">In hand ${packText(r.inHand, r)} · counted ${totalText(r)}</span></button>`);
+  const sec = (title, rows, f = open) => (rows.length ? html`<div class="ca-sec">${title}</div>${rows.map(f)}` : '');
+  let body;
+  if (q) {
+    const found = all.filter((r) => r.name.toLowerCase().includes(q)).sort(byName);
+    body = found.length ? found.map(open) : html`<p class="quiet">No item by that name on this list.</p>`;
+  } else {
+    const rows = all.filter((r) => r.category === sv.cat);
+    const again = rows.filter((r) => r.recount && !fin(r)).sort(byName);
+    const todo = rows.filter((r) => !r.recount && !fin(r) && r.inHand !== 0).sort(byName);
+    const zero = rows.filter((r) => !r.recount && !fin(r) && r.inHand === 0).sort(byName);
+    const done = rows.filter(fin).sort((a, b) => sv.fin[b.id] - sv.fin[a.id]);
+    const short = done.filter((r) => caTotal(r) < r.inHand).length; const more = done.filter((r) => caTotal(r) > r.inHand).length;
+    body = rows.length ? html`${sec('Count again', again)}${sec('To count', todo)}${sec('0 in hand · still count', zero)}
+      ${sec(`Finished · latest first${done.length ? ` · ${short} short, ${more} more` : ''}`, done, slim)}` : html`<p class="quiet">Nothing on this list.</p>`;
+  }
+  const catCount = (c) => { const g = all.filter((r) => r.category === c); return [g.filter(typed).length, g.length]; };
+  const [cd, ct] = catCount(sv.cat);
+  root.innerHTML = asHtml(html`<main class="sv ca">${top(`${k.list ?? 'Count'} · ${all.filter(typed).length} of ${all.length}`, false)}<div class="sv-body">
     ${k.status === 'sent_back' ? html`<div class="msg warn" style="display:block">Sent back by the owner${k.note ? `: ${k.note}` : ''}. Count the rows marked "count again".</div>` : ''}
     <input class="in" id="caQ" type="search" placeholder="Search an item" value="${sv.q}" aria-label="Search an item">
-    ${q ? '' : html`<div class="ca-tabs">${cats.map((c) => { const g = all.filter((r) => r.category === c); return html`<button type="button" class="chip" aria-pressed="${c === sv.cat}" data-act="caCat" data-c="${c}">${c} ${g.filter(done).length}/${g.length}</button>`; })}</div>`}
-    ${shown.length ? shown.map((r) => html`<div class="ca-item ${done(r) ? 'done' : ''} ${r.recount ? 'again' : ''}" data-row="${r.id}">
-      <div class="row between"><b>${r.name}</b>${r.recount ? html`<span class="status warn">count again</span>` : ''}</div>
-      <div class="ca-places">${box(r, 1)}${box(r, 2)}</div>
-      <div class="row between small"><span class="quiet">In hand ${packText(r.inHand, r)}</span><span>Counted <b data-total="${r.id}">${totalOf(r)}</b></span></div></div>`)
-      : html`<p class="quiet">${q ? 'No item by that name on this list.' : 'Nothing on this list.'}</p>`}
+    ${q ? '' : html`<div class="ca-catbar"><button class="ca-catbtn" type="button" data-act="caGrid" aria-expanded="${sv.grid ? 'true' : 'false'}"><span id="caCatName">${sv.cat} · ${cd} of ${ct}</span><span>${sv.grid ? 'Close ▴' : 'Categories ▾'}</span></button>
+      ${sv.grid ? html`<div class="ca-grid">${cats.map((c) => { const [d, t] = catCount(c); return html`<button type="button" class="ca-gc ${c === sv.cat ? 'on' : ''} ${d === t ? 'full' : ''}" data-act="caCat" data-c="${c}"><b>${c}</b><span class="small">${d === t ? 'All counted ✓' : `${d} of ${t}`}</span></button>`; })}</div>` : ''}</div>`}
+    ${body}
   </div>
   <footer class="ca-foot"><div class="small" id="caSync" aria-live="polite">${caSyncText()}</div>
     <div class="row"><button class="btn" type="button" data-act="caHome">Back</button><button class="btn pri grow" type="button" data-act="caSend">Send to owner</button></div></footer></main>`);
+}
+/** Rows typed in the category being left count as finished, at the time they were last typed. */
+function caSettle() {
+  const sv = ui.sv; if (!sv?.ck) return;
+  const q = caQueueOf(sv.ck.count.id);
+  for (const g of sv.ck.groups) for (const r of g.items) {
+    const t = caTotal(r);
+    if (sv.fin[r.id] === undefined && t !== null && !Number.isNaN(t) && (g.category === sv.cat || sv.q)) sv.fin[r.id] = q[r.id]?.typedAt ?? Date.now();
+  }
 }
 
 function paintCountCheck(top) {
@@ -7571,7 +7622,11 @@ async function caLoad(id, screen) {
   const sv = ui.sv;
   sv.ck = await serveCall('GET', `/count/counts/${id}`);
   sv.vals = screen === 'count' ? caFill(sv.ck) : {};
-  Object.assign(sv, { screen, q: '', err: null, again: {} });
+  // Rows already counted (and not sent back) start in Finished, latest first by when they were typed.
+  const fin = {};
+  for (const r of sv.ck.groups.flatMap((g) => g.items)) if (r.counted !== null && !r.recount) fin[r.id] = r.at ?? 0;
+  for (const l of Object.values(caQueueOf(id))) if (!l.clear) fin[l.itemId] = l.typedAt;
+  Object.assign(sv, { screen, q: '', err: null, again: {}, fin, openFin: null, grid: false });
   paintCount();
   if (screen === 'count') caFlush();
 }
@@ -7579,7 +7634,16 @@ actions.caStart = async (d) => { try { const r = await serveCall('POST', '/count
 actions.caOpen = async (d) => caLoad(d.id, 'count').catch((e) => { ui.sv.err = e.message; paintCount(); });
 actions.caCheck = async (d) => caLoad(d.id, 'check').catch((e) => { ui.sv.err = e.message; paintCount(); });
 actions.caHome = async () => { const sv = ui.sv; if (sv.ck && sv.screen === 'count') await caFlush(); Object.assign(sv, { ck: null, screen: 'home', err: null }); paintCount(); await sv.tick(); };
-actions.caCat = (d) => { ui.sv.cat = d.c; paintCount(); window.scrollTo(0, 0); };
+actions.caCat = (d) => { caSettle(); Object.assign(ui.sv, { cat: d.c, grid: false, openFin: null }); paintCount(); window.scrollTo(0, 0); };
+actions.caGrid = () => { ui.sv.grid = !ui.sv.grid; paintCount(); };
+actions.caReopen = (d) => { ui.sv.openFin = d.id; paintCount(); document.querySelector(`[data-row="${d.id}"] input`)?.focus(); };
+actions.caDone = (d) => {
+  const sv = ui.sv; const r = sv.ck.groups.flatMap((g) => g.items).find((x) => x.id === d.id);
+  const t = caTotal(r);
+  if (t === null || Number.isNaN(t)) { sv.err = null; const el = document.querySelector(`[data-diff="${d.id}"]`); if (el) el.innerHTML = asHtml(html`<span class="sv-err">Type the count first (0 if there is none).</span>`); return; }
+  sv.fin[r.id] = Date.now(); sv.openFin = null;
+  paintCount(); caFlush();
+};
 actions.caAgain = (d, el) => { ui.sv.again[d.id] = el.checked; };
 actions.caSend = async () => {
   const sv = ui.sv; const id = sv.ck.count.id;
@@ -7607,7 +7671,7 @@ actions.caBack = async () => {
 let caWait = null;
 root.addEventListener('input', (ev) => {
   const el = ev.target;
-  if (el.id === 'caQ' && ui.sv?.app === 'count') { ui.sv.q = el.value; const at = el.selectionStart; paintCount(); const n = document.getElementById('caQ'); n?.focus(); n?.setSelectionRange(at, at); return; }
+  if (el.id === 'caQ' && ui.sv?.app === 'count') { if (!el.value && ui.sv.q) caSettle(); ui.sv.q = el.value; const at = el.selectionStart; paintCount(); const n = document.getElementById('caQ'); n?.focus(); n?.setSelectionRange(at, at); return; }
   const itemId = el.dataset?.ca; const sv = ui.sv;
   if (!itemId || !sv?.ck) return;
   const r = sv.ck.groups.flatMap((g) => g.items).find((x) => x.id === itemId);
@@ -7617,6 +7681,8 @@ root.addEventListener('input', (ev) => {
   const p1 = caUnits(r, v.w1, v.l1); const p2 = caUnits(r, v.w2, v.l2);
   const t = document.querySelector(`[data-total="${itemId}"]`);
   if (t) t.textContent = p1 === null && p2 === null ? '—' : packText((p1 ?? 0) + (p2 ?? 0), r);
+  const df = document.querySelector(`[data-diff="${itemId}"]`);
+  if (df) df.innerHTML = asHtml(caDiff(r, caTotal(r)));
   document.querySelector(`[data-row="${itemId}"]`)?.classList.toggle('done', p1 !== null || p2 !== null);
   caCounts();
   const q = caQueueOf(sv.ck.count.id);
