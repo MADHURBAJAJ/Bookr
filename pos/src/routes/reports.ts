@@ -1,6 +1,6 @@
 // Reports the POS gives on its own, before it is connected to Bookr: sales by billing name with GST, by payment mode and by
 // item; discounts and complimentary bills; and who owes what, aged, with each account's statement (GET /debtors/:id).
-import { noRentOf } from './shifts';
+import { noRentOf, waitingOf } from './shifts';
 import { Hono } from 'hono';
 import { all, one, type DB } from '../../../src/db';
 import { date, fail } from '../../../src/http';
@@ -13,6 +13,7 @@ import { drawersOfDay } from './drawers';
 import { cancelledReceipts } from './receipt-cancels';
 import { deskAll } from '../rooms';
 import { shiftDayAt } from '../billing';
+import { servingSummary, timedLines } from '../serving';
 
 export const reportRoutes = new Hono<AppEnv>();
 const B = '/businesses/:businessId';
@@ -215,7 +216,7 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
       // Closed with counting turned off (26 Nov 2026): not a missed count, so not flagged.
       noCount: (() => { try { return !!JSON.parse(String(close.totals ?? '{}')).noCount; } catch { return false; } })(),
       // Closed by itself with guests still in house and no rent for the night (28 Nov 2026).
-      noRent: close.auto ? noRentOf(close.totals) : [] } : null,
+      noRent: close.auto ? noRentOf(close.totals) : [], waitingRoom: close.auto ? waitingOf(close.totals) : [] } : null,
     // Sent to the kitchen or bar, not paid (25 Nov 2026): bills voided this shift whose order was not billed and paid
     // again, and the stock a cancelled KOT put back on the book, to check at the stock count.
     voidedNotRebilled: await all(db, `SELECT b.bill_no AS billNo, b.total_paise AS totalPaise, o.place
@@ -239,8 +240,49 @@ export async function dailyCheckData(db: DB, b: Business, bid: string, day: stri
     cancelReturns: await all(db, `SELECT i.name, ss.name AS store, i.unit, sum(m.qty) AS qty FROM stock_moves m JOIN stock_items i ON i.id = m.item_id
       JOIN stock_stores ss ON ss.id = m.store_id WHERE m.business_id = ? AND m.shift_day = ? AND m.kind = 'sale' AND m.qty > 0 AND m.ref LIKE '% · cancelled'
       GROUP BY i.id, ss.id ORDER BY i.name`, bid, day),
+    serving: await servingOfDay(db, bid, day),
   };
 }
+
+/**
+ * Serving time on the Daily check (28 Nov 2026): items on time, late, not marked; the worst three; and everything done
+ * after the fact (undos by a manager or by a server within 2 minutes, items undone and not served again, items marked
+ * by a manager with no photo), plus wrong server PINs. Null when nothing was timed and nothing happened.
+ */
+export async function servingOfDay(db: DB, bid: string, day: string) {
+  const [lines, log, pins] = await Promise.all([
+    timedLines(db, bid, { from: day, to: day }),
+    all<{ kind: string; ref: string; reason: string | null; detail: string | null; by: string | null; at: number }>(db,
+      `SELECT e.kind, e.ref, e.reason, e.detail, st.name AS by, e.at FROM pos_events e LEFT JOIN staff st ON st.id = e.by_staff
+       WHERE e.business_id = ? AND e.shift_day = ? AND e.kind IN ('serve_undo', 'serve_manager') ORDER BY e.at`, bid, day),
+    one<{ n: number }>(db, 'SELECT count(*) AS n FROM serve_signins WHERE business_id = ? AND shift_day = ? AND ok = 0', bid, day),
+  ]);
+  if (!lines.length && !log.length && !pins?.n) return null;
+  const sum = servingSummary(lines);
+  const serverUndos = log.filter((e) => e.kind === 'serve_undo' && e.detail?.startsWith('server:'));
+  const byName = new Map<string, number>();
+  for (const e of serverUndos) byName.set(e.detail!.slice(7), (byName.get(e.detail!.slice(7)) ?? 0) + 1);
+  return {
+    timed: sum.timed, marked: sum.marked, onTime: sum.onTime, late: sum.late, notMarked: sum.notMarked, waiting: sum.waiting, avgLateMins: sum.avgLateMins, worst: sum.worst,
+    wrongPins: pins?.n ?? 0,
+    undoneByManager: log.filter((e) => e.kind === 'serve_undo' && !e.detail?.startsWith('server:')).length,
+    undoneByServer: serverUndos.length, serverUndos: [...byName].map(([name, n]) => ({ name, n })),
+    // Undone by a manager and still not served again.
+    undoneNotServed: lines.filter((l) => l.undoneAt !== null && l.servedAt === null).map((l) => ({ place: l.place, name: l.name, qty: l.qty, by: l.undoneBy, reason: l.undoReason, at: l.undoneAt })),
+    managerMarks: log.filter((e) => e.kind === 'serve_manager').length,
+    log: log.map((e) => ({ kind: e.kind, ref: e.ref, reason: e.reason, at: e.at, by: e.detail?.startsWith('server:') ? e.detail.slice(7) : e.by, server: !!e.detail?.startsWith('server:') })),
+  };
+}
+
+// Reports › Serving time (28 Nov 2026): items late out of those timed, by item, day, hour and server, for shifts from..to.
+reportRoutes.get(`${B}/reports/serving`, requireAction('reports.view'), async (c) => {
+  const from = date({ v: c.req.query('from') }, 'v', 'From');
+  const to = date({ v: c.req.query('to') }, 'v', 'To');
+  if (to < from) fail(400, 'The end date is before the start.');
+  if (Date.parse(to) - Date.parse(from) > 92 * 86_400_000) fail(400, 'Choose at most 3 months.');
+  const sum = servingSummary(await timedLines(c.env.DB, c.get('businessId'), { from, to }));
+  return c.json({ from, to, ...sum });
+});
 
 // GSTR-1 working for one calendar month, per GST-registered billing name: sales to unregistered buyers (B2C small) by rate,
 // net of credit notes; the SAC summary; and the document summary (bill and credit-note series, with void bills as cancelled).

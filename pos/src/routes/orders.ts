@@ -3,6 +3,7 @@
 // is voided with a reason (the order opens again) and billed again, perhaps under another billing name.
 import { optionAdd, readPrices } from '../addons';
 import { CATEGORY_JOIN, isOnline, ITEM_ROUTE } from '../stations';
+import { serveMinutes } from '../serving';
 import { Hono, type Context } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { phoneKey } from './settings';
@@ -341,6 +342,8 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
      FROM stations s WHERE s.business_id = ? ORDER BY s.is_bar, s.sort`, bid);
   const fallback = stations[0];
   const stationOf = (l: LineRow) => stations.find((s) => s.id === l.station_id) ?? stations.find((s) => (l.station === 'bar') === /bar/i.test(s.name)) ?? fallback;
+  // Serving time (28 Nov 2026): each line keeps the minutes it should be served in, as the menu says now. A cancel KOT is not timed.
+  const mins = cancel ? new Map<string, number>() : await serveMinutes(db, bid, send.map((l) => l.item_id));
   const groups = new Map<string, LineRow[]>();
   for (const l of send) { const s = stationOf(l); if (s) groups.set(s.id, [...(groups.get(s.id) ?? []), l]); }
   const ids: string[] = [];
@@ -358,7 +361,7 @@ async function kotStatements(db: D1Database, bid: string, orderId: string, ls: L
       SELECT ?1, ?2, ?3, coalesce(max(kot_no), 0) + 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
         coalesce((SELECT max(day_no) FROM kots WHERE business_id = ?12 AND shift_day = ?13), 100) + 1, (SELECT kot_note FROM orders WHERE id = ?3), ?15 FROM kots WHERE business_id = ?14`,
       id, bid, orderId, s.name, JSON.stringify(gl.map((l) => ({ name: l.name, qty: l.qty - l.sent_qty, options: chosenOf(l).map((x) => x.name), pricePaise: l.price_paise,
-        ...(l.remark ? { remark: l.remark } : {}), ...(cancel ? { cancelled: true } : {}) }))), staffId, t, s.id, printAt, off || s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid, label);
+        ...(l.remark ? { remark: l.remark } : {}), ...(cancel ? { cancelled: true } : {}), lineId: l.id, ...(mins.get(l.item_id) ? { mins: mins.get(l.item_id) } : {}) }))), staffId, t, s.id, printAt, off || s.how === 'paper' ? 'ready' : 'new', shiftDay, bid, shiftDay, bid, label);
   });
   return { ids, statements };
 }
@@ -367,7 +370,9 @@ async function kotsOut(db: D1Database, ids: string[], place: string) {
   if (!ids.length) return [];
   const ks = await all<{ kot_no: number; station: string; lines: string; print_at: string; copies: number | null; note: string | null }>(db,
     `SELECT coalesce(k.day_no, k.kot_no) AS kot_no, k.station, k.lines, k.print_at, s.copies, k.note FROM kots k LEFT JOIN stations s ON s.id = k.station_id WHERE k.id IN (SELECT value FROM json_each(?)) ORDER BY k.kot_no`, JSON.stringify(ids));
-  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: JSON.parse(k.lines), printAt: k.print_at, copies: k.copies ?? 1, note: k.note }));
+  // The order line's id stays inside (serving time); the KOT printed or shown does not need it.
+  return ks.map((k) => ({ kotNo: k.kot_no, station: k.station, place, lines: (JSON.parse(k.lines) as Record<string, unknown>[]).map(({ lineId: _, ...l }) => l),
+    printAt: k.print_at, copies: k.copies ?? 1, note: k.note }));
 }
 
 // Quick picks for remarks and order notes (26 Nov 2026): worked out from what staff typed on orders of the last 60 days,

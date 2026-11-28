@@ -21,8 +21,8 @@ const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
 async function existing(db: D1Database, bid: string): Promise<Existing> {
   const [items, links, categories, groups, options, stations] = await Promise.all([
     all<{ id: string; name: string; category: string; price_paise: number; station: string; sac: string; tax_mode: TaxMode | null; gst_bp: number | null;
-      open_price: number; min_price_paise: number | null; active: number; created_at: number; kot: number | null; station_id: string | null }>(db,
-      'SELECT id, name, category, price_paise, station, sac, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id FROM menu_items WHERE business_id = ?', bid),
+      open_price: number; min_price_paise: number | null; active: number; created_at: number; kot: number | null; station_id: string | null; serve_mins: number | null }>(db,
+      'SELECT id, name, category, price_paise, station, sac, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id, serve_mins FROM menu_items WHERE business_id = ?', bid),
     all<{ item_id: string; name: string; prices: string | null }>(db, 'SELECT l.item_id, g.name, l.prices FROM menu_item_addons l JOIN addon_groups g ON g.id = l.group_id WHERE l.business_id = ? ORDER BY l.sort', bid),
     all<{ name: string; tax_mode: TaxMode; gst_bp: number | null; kot: number; station_id: string | null }>(db, 'SELECT name, tax_mode, gst_bp, kot, station_id FROM menu_categories WHERE business_id = ? ORDER BY sort, name', bid),
     all<{ id: string; name: string; kind: 'one' | 'any' }>(db, 'SELECT id, name, kind FROM addon_groups WHERE business_id = ?', bid),
@@ -33,7 +33,7 @@ async function existing(db: D1Database, bid: string): Promise<Existing> {
     items: items.map((i) => ({ id: i.id, name: i.name, category: i.category, pricePaise: i.price_paise, station: i.station, sac: i.sac, taxMode: i.tax_mode, gstBp: i.gst_bp,
       openPrice: !!i.open_price, minPricePaise: i.min_price_paise, active: !!i.active, createdAt: i.created_at,
       groups: links.filter((l) => l.item_id === i.id).map((l) => l.name), groupPrices: links.filter((l) => l.item_id === i.id).map((l) => readPrices(l.prices)),
-      kot: i.kot, stationId: i.station_id })),
+      kot: i.kot, stationId: i.station_id, serveMins: i.serve_mins })),
     categories: categories.map((c) => ({ name: c.name, taxMode: c.tax_mode, gstBp: c.gst_bp, kot: c.kot, stationId: c.station_id })),
     stations: stations.map((x) => ({ id: x.id, name: x.name, isBar: !!x.is_bar, active: !!x.active })),
     groups: groups.map((g) => ({ ...g, options: options.filter((o) => o.group_id === g.id).map((o) => ({ name: o.name, addPaise: o.add_paise })) })),
@@ -125,11 +125,12 @@ menuUploadRoutes.post(`${B}/menu/upload/apply`, requireAction('menu.upload'), as
     db.prepare(`INSERT INTO addon_options (id, business_id, group_id, name, add_paise, sort, active) SELECT ${x('id')}, ?, ${x('group')}, ${x('name')}, ${x('add')}, ${x('sort')}, 1 FROM json_each(?) j`)
       .bind(bid, J(p.groups.flatMap((g) => g.def.options.map((o, i) => ({ id: newId(), group: gid.get(norm(g.name)), name: o.name, add: o.addPaise, sort: i }))))),
     db.prepare(`UPDATE menu_items SET name = ${x('name')}, category = ${x('category')}, price_paise = ${x('price')}, station = ${x('station')}, sac = ${x('sac')},
-      tax_mode = ${x('mode')}, gst_bp = ${x('bp')}, open_price = ${x('open')}, min_price_paise = ${x('min')}, active = 1, kot = ${x('kot')}, station_id = ${x('st')}
+      tax_mode = ${x('mode')}, gst_bp = ${x('bp')}, open_price = ${x('open')}, min_price_paise = ${x('min')}, active = 1, kot = ${x('kot')}, station_id = ${x('st')},
+      serve_mins = CASE WHEN ${x('keepServe')} = 1 THEN menu_items.serve_mins ELSE ${x('serve')} END
       FROM json_each(?) j WHERE menu_items.id = ${x('id')} AND menu_items.business_id = ?`)
       .bind(J(items.filter((i) => !i.isNew).map(row)), bid),
-    db.prepare(`INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id)
-      SELECT ${x('id')}, ?, ${x('name')}, ${x('category')}, ${x('price')}, ${x('sac')}, ${x('station')}, ${x('mode')}, ${x('bp')}, ${x('open')}, ${x('min')}, 1, ?, ${x('kot')}, ${x('st')} FROM json_each(?) j`)
+    db.prepare(`INSERT INTO menu_items (id, business_id, name, category, price_paise, sac, station, tax_mode, gst_bp, open_price, min_price_paise, active, created_at, kot, station_id, serve_mins)
+      SELECT ${x('id')}, ?, ${x('name')}, ${x('category')}, ${x('price')}, ${x('sac')}, ${x('station')}, ${x('mode')}, ${x('bp')}, ${x('open')}, ${x('min')}, 1, ?, ${x('kot')}, ${x('st')}, ${x('serve')} FROM json_each(?) j`)
       .bind(bid, t, J(items.filter((i) => i.isNew).map(row))),
     db.prepare('UPDATE menu_items SET active = 0 WHERE business_id = ? AND id IN (SELECT value FROM json_each(?))').bind(bid, J(p.off.map((o) => o.id))),
     db.prepare('DELETE FROM menu_item_addons WHERE business_id = ? AND item_id IN (SELECT value FROM json_each(?))').bind(bid, J(items.map((i) => i.id))),
@@ -148,7 +149,7 @@ menuUploadRoutes.post(`${B}/menu/upload/apply`, requireAction('menu.upload'), as
 
   function row(i: (typeof items)[number]) {
     return { id: i.id, name: i.name, category: i.category, price: i.pricePaise, station: i.station, sac: i.sac, mode: i.tax?.mode ?? null, bp: i.tax?.bp ?? null,
-      open: i.openPrice ? 1 : 0, min: i.minPricePaise, kot: i.ownKot, st: i.ownStationId };
+      open: i.openPrice ? 1 : 0, min: i.minPricePaise, kot: i.ownKot, st: i.ownStationId, serve: i.serveMins ?? null, keepServe: i.serveMins === undefined ? 1 : 0 };
   }
 });
 

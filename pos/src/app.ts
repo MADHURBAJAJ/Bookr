@@ -24,6 +24,7 @@ import { roomDeskRoutes } from './routes/roomdesk';
 import { proofRoutes } from './routes/proof';
 import { offlineRoutes } from './routes/offline';
 import { whatsappRoutes } from './routes/whatsapp';
+import { serveRoutes } from './routes/serve';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -37,8 +38,10 @@ app.use('*', async (c, next) => {
     const type = (c.req.header('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
     const photo = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/stock\/bills$/.test(c.req.path);
     const menuPage = c.req.method === 'POST' && /^\/api\/businesses\/[^/]+\/menu\/upload\/read$/.test(c.req.path);
+    // A served photo from a server's phone (28 Nov 2026).
+    const servedPhoto = c.req.method === 'POST' && /^\/api\/serve\/photo\/[^/]+$/.test(c.req.path);
     if (type !== 'application/json' && !(photo && ['image/jpeg', 'image/png'].includes(type))
-      && !(menuPage && ['image/jpeg', 'image/png', 'application/pdf'].includes(type))) throw new HTTPException(415, { message: 'Send JSON.' });
+      && !(menuPage && ['image/jpeg', 'image/png', 'application/pdf'].includes(type)) && !(servedPhoto && type === 'image/jpeg')) throw new HTTPException(415, { message: 'Send JSON.' });
   }
   await next();
 });
@@ -78,6 +81,7 @@ app.route('/', roomDeskRoutes);
 app.route('/', proofRoutes);
 app.route('/', whatsappRoutes);
 app.route('/', offlineRoutes);
+app.route('/', serveRoutes);
 app.route('/', adminRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));

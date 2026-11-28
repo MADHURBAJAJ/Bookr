@@ -77,6 +77,9 @@ export async function shiftSummary(db: DB, bid: string, day: string, tabAgeDays:
     advancesHeld: await restaurantAdvances(db, bid),
     // Guests in house tonight with no rent for the night (26 Nov 2026): the day cannot close until Djubo has it.
     notCharged: await tonightNotCharged(db, bid, day),
+    // Checked in with no room yet (room later, 28 Nov 2026): the day can't close while a guest waits overnight.
+    waitingRoom: await all<{ id: string; guestName: string; checkIn: string }>(db, `SELECT id, guest_name AS guestName, check_in AS checkIn FROM stays
+      WHERE business_id = ? AND checked_out_at IS NULL AND room LIKE 'Waiting for room · %' ORDER BY created_at`, bid),
     djubo: (await djuboPays(db, bid, startHour)).pays.filter((x) => x.day === day || (x.settlementId && payments.some((p) => p.receiptNo === x.receiptNo))),
     // Reservations made at the desk that Djubo has not confirmed (25 Nov 2026).
     notInDjubo: await notInDjubo(db, bid, day),
@@ -145,6 +148,7 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   // Money reception marked in Djubo today needs how it was paid, so cash, UPI and card add up (26 Nov 2026, required).
   const noMode = s.djubo.filter((x) => !x.settlementId);
   if (noMode.length) fail(409, `Pick Cash, UPI or Card for the money marked in Djubo today: ${noMode.map((x) => `${x.guestName ?? x.extRef} ${rs(x.amountPaise)}`).join(', ')}.`);
+  if (s.waitingRoom.length) fail(409, `Waiting for a room: ${s.waitingRoom.map((x) => x.guestName).join(', ')}. Give each a room (Rooms › Today) before closing the day.`);
   if (s.notCharged.length) {
     const past = s.notCharged.filter((x) => x.coveredTo < day);
     const leaving = s.notCharged.filter((x) => x.coveredTo >= day);
@@ -240,6 +244,10 @@ shiftRoutes.post(`${B}/shifts/:day/reopen`, requireAction('staff.manage'), async
 export const noRentOf = (totals: string | null): { room: string; guestName: string; coveredTo: string }[] => {
   try { return JSON.parse(String(totals ?? '{}')).noRent ?? []; } catch { return []; }
 };
+/** Guests still waiting for a room when the day closed by itself (28 Nov 2026). */
+export const waitingOf = (totals: string | null): string[] => {
+  try { return JSON.parse(String(totals ?? '{}')).waitingRoom ?? []; } catch { return []; }
+};
 
 export async function autoCloseAll(db: DB, t = now()) {
   const bs = await all<{ id: string; shift_start_hour: number; tab_age_days: number; drawer_count: number }>(db, "SELECT id, shift_start_hour, tab_age_days, drawer_count FROM businesses WHERE status = 'active'");
@@ -256,7 +264,8 @@ export async function autoCloseAll(db: DB, t = now()) {
       tabs: s.tabs, drawerOuts: s.drawerOuts, creditNotes: s.creditNotes, tips: s.tips, discountsAtPayment: s.discountsAtPayment,
       carried: { openOrders: s.openOrders, unpaidBills: s.unpaidBills }, ...(b.drawer_count === 0 ? { noCount: true } : {}),
       // Still in house with no rent for the night when the day closed by itself (28 Nov 2026): shown in red on its Daily check.
-      ...(s.notCharged.length ? { noRent: s.notCharged.map((x) => ({ room: x.room, guestName: x.guestName, coveredTo: x.coveredTo })) } : {}) };
+      ...(s.notCharged.length ? { noRent: s.notCharged.map((x) => ({ room: x.room, guestName: x.guestName, coveredTo: x.coveredTo })) } : {}),
+      ...(s.waitingRoom.length ? { waitingRoom: s.waitingRoom.map((x) => x.guestName) } : {}) };
     try {
       await db.batch([stmt(db, `INSERT INTO shift_closes (id, business_id, shift_day, opening_float_paise, counted, counted_paise, expected_paise, difference_paise,
         difference_reason, totals, closed_by, closed_at, counted_at, auto) VALUES (?, ?, ?, 0, '{}', 0, ?, 0, NULL, ?, NULL, ?, NULL, 1)`,
