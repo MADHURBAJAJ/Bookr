@@ -4844,7 +4844,7 @@ async function stockScreen(tab = 'hand') {
       <p class="small quiet">Value is at the last price paid. Bar sales take stock from the bar store when a bill is settled, by each menu item's recipe.</p></section>`;
     else if (tab === 'receive') {
       ui.rcLines ??= [{ k: 1, desc: '' }];
-      const lineTotal = ui.rcLines.reduce((t, l) => t + (int(ui[`rcl${l.k}packs`]) || 0) * (toPaise(ui[`rcl${l.k}cost`] ?? '') ?? 0), 0);
+      const lineTotal = ui.rcLines.reduce((t, l) => t + rcAmount(l, items.find((i) => i.id === ui[`rcl${l.k}item`])), 0);
       const billTotal = ui.rcTotal != null ? Math.round(ui.rcTotal * 100) : null;
       const lastCost = (it) => it?.costPerPackPaise || 0;
       body = html`${ui.drafts?.length && !ui.rcBillId ? html`<section class="panel"><h2>Bills waiting to be received</h2>
@@ -4862,16 +4862,19 @@ async function stockScreen(tab = 'hand') {
         ${ui.rcBillId ? '' : html`<label class="tickline"><input type="checkbox" class="sel" data-model="rcOpening" data-act-change="rcOpenTick" ${ui.rcOpening ? 'checked' : ''}> Opening stock: what is on the shelf now, when you start keeping stock (not a purchase; not counted as spend)</label>`}
         <div class="grid3">${storeSel('rcStore', 'Into store')}${ui.rcOpening ? '' : html`<label class="f">Vendor<input class="in" data-model="rcVendor" value="${ui.rcVendor ?? ''}"></label>
           <label class="f">Invoice number<input class="in" data-model="rcInv" value="${ui.rcInv ?? ''}"></label>`}</div>
-        <div class="scroll"><table class="t"><thead><tr><th>Stock item</th><th class="num">Packs</th><th class="num">Price paid per pack, tax included (₹)</th><th class="num">Amount</th><th></th></tr></thead><tbody>
+        <div class="scroll"><table class="t"><thead><tr><th>Stock item</th><th class="num">Packs</th><th class="num">+ Loose</th><th class="num">Price paid per pack, tax included (₹)</th><th class="num">Amount</th><th></th></tr></thead><tbody>
           ${ui.rcLines.map((l) => {
             const it = items.find((i) => i.id === ui[`rcl${l.k}item`]);
-            const amt = (int(ui[`rcl${l.k}packs`]) || 0) * (toPaise(ui[`rcl${l.k}cost`] ?? '') ?? 0);
+            const amt = rcAmount(l, it);
+            // The bill's own amount for the line (28 Nov 2026): a price per carton on a single-bottle item shows up here.
+            const off = l.billPaise != null && amt && Math.abs(amt - l.billPaise) >= 100;
             return html`<tr><td><select class="in" data-model="rcl${l.k}item" aria-label="Stock item" style="${it ? '' : 'border-color:var(--warn-line)'}"><option value="">Choose</option>${items.map((i) => html`<option value="${i.id}" ${it?.id === i.id ? 'selected' : ''}>${i.name} (${i.packName} of ${i.packSize} ${i.unit})</option>`)}</select>
                 ${l.desc ? html`<div class="small quiet">On the bill: ${l.desc}</div>` : ''}</td>
-              <td class="num"><input class="in" style="max-width:90px;min-width:60px" inputmode="numeric" data-live data-model="rcl${l.k}packs" value="${ui[`rcl${l.k}packs`] ?? ''}" aria-label="Packs">${it ? html`<div class="small quiet">${it.packName}s</div>` : ''}</td>
+              <td class="num"><input class="in" style="max-width:90px;min-width:60px" inputmode="numeric" data-live data-model="rcl${l.k}packs" value="${ui[`rcl${l.k}packs`] ?? ''}" aria-label="Packs">${it ? html`<div class="small quiet">${packPlural(it.packName)}</div>` : ''}</td>
+              <td class="num">${it && it.packSize > 1 ? html`<input class="in" style="max-width:90px;min-width:60px" inputmode="numeric" data-live data-model="rcl${l.k}loose" value="${ui[`rcl${l.k}loose`] ?? ''}" aria-label="Loose ${it.unit}"><div class="small quiet">${it.unit === 'pcs' ? 'pieces' : it.unit}</div>` : ''}</td>
               <td class="num"><input class="in" style="max-width:120px" inputmode="decimal" data-live data-model="rcl${l.k}cost" value="${ui[`rcl${l.k}cost`] ?? ''}" aria-label="Price per pack">
                 ${(() => { const c = toPaise(ui[`rcl${l.k}cost`] ?? ''); const was = lastCost(it); return it && c && was && c > was * 1.05 ? html`<div class="small" style="color:var(--bad)">${Math.round(((c - was) * 100) / was)}% more than last time (${rs(was)})</div>` : ''; })()}</td>
-              <td class="num">${amt ? rs(amt) : ''}</td>
+              <td class="num">${amt ? rs(amt) : ''}${off ? html`<div class="small" style="color:var(--bad)">Bill line says ${rs(l.billPaise)}: check the price is per ${it?.packName ?? 'pack'}</div>` : l.fixed && amt ? html`<div class="small quiet">Price worked out from the bill line</div>` : ''}</td>
               <td><button class="ibtn danger" type="button" data-act="rcDrop" data-k="${l.k}" title="Remove this line" aria-label="Remove this line">${ICON.trash}</button></td></tr>`;
           })}</tbody></table></div>
         <div class="row" style="justify-content:space-between"><button class="btn" type="button" data-act="rcAdd">Add a line</button>
@@ -5292,13 +5295,23 @@ actions.mkAsk = async (d) => {
 };
 actions.stHandover = async () => { ui.handovers = await api('GET', `${B()}/stock/handovers?from=${ui.hFrom}&to=${ui.hTo}&storeId=${ui.hStore}`); rerender(); };
 actions.stReceive = async () => {
-  const lines = ui.rcLines.map((l) => ({ itemId: ui[`rcl${l.k}item`], packs: int(ui[`rcl${l.k}packs`]), costPerPack: (ui[`rcl${l.k}cost`] ?? '').trim() || undefined }));
+  const n = (v) => (String(v ?? '').trim() === '' ? 0 : int(v));
+  const lines = ui.rcLines.map((l) => ({ itemId: ui[`rcl${l.k}item`], packs: n(ui[`rcl${l.k}packs`]), loose: n(ui[`rcl${l.k}loose`]), costPerPack: (ui[`rcl${l.k}cost`] ?? '').trim() || undefined }));
   if (!lines.length) throw new Error('Add what was received.');
   if (lines.some((l) => !l.itemId)) throw new Error('Choose the stock item on every line, or remove the line.');
-  if (lines.some((l) => !(l.packs > 0))) throw new Error('Type how many packs on every line.');
+  if (lines.some((l) => !Number.isInteger(l.packs) || !Number.isInteger(l.loose) || l.packs < 0 || l.loose < 0)) throw new Error('Packs and loose pieces are whole numbers.');
+  if (lines.some((l) => !(l.packs + l.loose > 0))) throw new Error('Type how many came on every line: packs, loose pieces or both.');
   await api('POST', `${B()}/stock/purchases`, ui.rcOpening ? { storeId: ui.rcStore, opening: true, lines } : { storeId: ui.rcStore, vendor: ui.rcVendor, invoiceNo: ui.rcInv, billId: ui.rcBillId ?? undefined, lines });
   flash = { kind: 'ok', text: ui.rcOpening ? `Opening stock saved: ${plural(lines.length, 'item')}.` : `Received ${lines.length} line${lines.length === 1 ? '' : 's'}${ui.rcVendor ? ' from ' + ui.rcVendor : ''}.` }; go('#/stock/hand');
 };
+/** A receive line's amount: packs and loose pieces at the price per pack. */
+function rcAmount(l, it) {
+  const n = (v) => (String(v ?? '').trim() === '' ? 0 : int(v) || 0);
+  const price = toPaise(ui[`rcl${l.k}cost`] ?? '') ?? 0;
+  const ps = it?.packSize ?? 1;
+  return Math.round(((n(ui[`rcl${l.k}packs`]) * ps + (ps > 1 ? n(ui[`rcl${l.k}loose`]) : 0)) * price) / ps);
+}
+const packPlural = (p) => (/(x|s|ch|sh)$/.test(p) ? `${p}es` : `${p}s`);
 actions.rcAdd = () => { const k = Math.max(0, ...ui.rcLines.map((l) => l.k)) + 1; ui.rcLines.push({ k, desc: '' }); rerender(); };
 actions.rcDrop = (d) => { ui.rcLines = ui.rcLines.filter((l) => String(l.k) !== d.k); rerender(); };
 /** A bill photo: made smaller on the device (at most 2000 px, JPEG), kept on the server and read by Claude into the lines. */
@@ -5333,10 +5346,25 @@ function fillFromBill(billId, read, error) {
       if (r.read.vendor) ui.rcVendor = r.read.vendor;
       if (r.read.invoiceNo) ui.rcInv = r.read.invoiceNo;
       ui.rcTotal = r.read.totalRupees;
-      ui.rcLines = r.read.lines.map((l, i) => {
+      // Each line in pieces (28 Nov 2026): half a box of 24 is 12 loose; a price that does not make the bill line's amount is
+      // worked out from it (a carton price on a single bottle); lines of the same item at the same price become one.
+      const its = ui.st?.items ?? [];
+      const merged = [];
+      for (const l of r.read.lines) {
+        const it = its.find((i) => i.id === l.stockItemId);
+        const ps = it?.packSize ?? 1;
+        const units = l.packs != null ? Math.round(l.packs * ps) : null;
+        let price = l.pricePerPackRupees; let fixed = false;
+        if (units && l.lineTotalRupees != null && price != null && Math.abs((units / ps) * price - l.lineTotalRupees) > 1) { price = Math.round((l.lineTotalRupees * ps * 100) / units) / 100; fixed = true; }
+        const same = it && units != null && merged.find((m) => m.item === it.id && m.units != null && m.price === price);
+        if (same) { same.units += units; same.total = l.lineTotalRupees != null && same.total != null ? same.total + l.lineTotalRupees : null; same.descs.push(l.description); same.fixed ||= fixed; }
+        else merged.push({ item: l.stockItemId ?? '', ps, units, price, total: l.lineTotalRupees, descs: [l.description], fixed });
+      }
+      ui.rcLines = merged.map((m, i) => {
         const k = i + 1;
-        ui[`rcl${k}item`] = l.stockItemId ?? ''; ui[`rcl${k}packs`] = l.packs != null ? String(l.packs) : ''; ui[`rcl${k}cost`] = l.pricePerPackRupees != null ? String(l.pricePerPackRupees) : '';
-        return { k, desc: `${l.description}${l.lineTotalRupees != null ? ' · ' + rs(Math.round(l.lineTotalRupees * 100)) : ''}` };
+        ui[`rcl${k}item`] = m.item; ui[`rcl${k}cost`] = m.price != null ? String(m.price) : '';
+        ui[`rcl${k}packs`] = m.units != null ? String(Math.floor(m.units / m.ps)) : ''; ui[`rcl${k}loose`] = m.units != null && m.units % m.ps ? String(m.units % m.ps) : '';
+        return { k, desc: `${m.descs.join(' + ')}${m.total != null ? ' · ' + rs(Math.round(m.total * 100)) : ''}`, billPaise: m.total != null ? Math.round(m.total * 100) : null, fixed: m.fixed };
       });
       if (!ui.rcLines.length) ui.rcLines = [{ k: 1, desc: '' }];
       ui.rcUnmatched = r.read.lines.filter((l) => !l.stockItemId).length;

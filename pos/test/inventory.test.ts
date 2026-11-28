@@ -47,6 +47,18 @@ describe('inventory', () => {
     expect(buys.receipts.find((x: any) => x.opening)).toMatchObject({ vendor: 'Opening stock', amountPaise: 120000 });
   });
 
+  it('receives whole packs and loose pieces: 12 of a box of 24 is 0 boxes + 12', async () => {
+    const s = await setupBusiness();
+    const { B, owner, ok } = s;
+    const bar = (await ok(owner.post(`${B}/stock/stores`, { name: 'Bar', kind: 'bar' }))).id;
+    const cooler = (await ok(owner.post(`${B}/stock/items`, { name: 'Sample Cooler', unit: 'pcs', packName: 'box', packSize: 24, costPerPack: '1600' }))).id;
+    await ok(owner.post(`${B}/stock/purchases`, { storeId: bar, vendor: 'Sample Traders', invoiceNo: 'ST-9', lines: [
+      { itemId: cooler, packs: 0, loose: 12, costPerPack: '1680' }, { itemId: cooler, packs: 1, loose: 6, costPerPack: '1680' }, { itemId: cooler, packs: 2 }] }));
+    expect(await q("SELECT qty FROM stock_moves WHERE item_id = ? AND kind = 'purchase' ORDER BY qty", cooler)).toEqual([{ qty: 12 }, { qty: 30 }, { qty: 48 }]);
+    expect((await owner.post(`${B}/stock/purchases`, { storeId: bar, vendor: 'Sample Traders', lines: [{ itemId: cooler, packs: 0, loose: 0 }] })).status).toBe(400);
+    expect((await owner.post(`${B}/stock/purchases`, { storeId: bar, vendor: 'Sample Traders', lines: [{ itemId: cooler, packs: 0.5 }] })).status).toBe(400);
+  });
+
   it("an item's first count is its opening stock, not stock found extra; later counts are variances", async () => {
     const s = await setupBusiness();
     const { B, owner, counter, ok } = s;
