@@ -1,8 +1,8 @@
 // The menu as a sheet (CSV): download it, change it in Excel or Google Sheets, upload it back. Pure: no database here, so
 // the rules are tested on their own (pos/test/menu-sheet.test.ts, invented rows).
 //
-// Columns: Item, Category, Price (₹), Price at billing, Lowest price, Tax, Station, SAC, Add-ons & choices. Other columns
-// are ignored. Lowest price and SAC may be left out: then they stay as they are.
+// Columns: Item, Category, Price (₹), Price at billing, Lowest price, Tax, Station, SAC, Serve time (min), Add-ons & choices.
+// Other columns are ignored. Lowest price, SAC and Serve time may be left out: then they stay as they are.
 //
 // Matching (approved 19 Nov 2026): a row updates the item with the same name in the same category (capitals and spaces
 // ignored), or else the one item with that name anywhere; its recipes and history stay. Other rows are new items. Items
@@ -24,6 +24,8 @@ export interface Row {
   tax: Tax; groups: GroupRef[];
   /** undefined: the column is not in the file, keep what the item has. */
   minPricePaise?: number | null; sac?: string;
+  /** Serve time in minutes (28 Nov 2026): null = as its category, 0 = not timed; undefined = column not in the file (keep). */
+  serveMins?: number | null;
 }
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
@@ -156,14 +158,14 @@ export function groupText(g: Group, prices?: Prices | null): string {
  * when they come back (readSheet with { addons: true }).
  */
 export const SHEET_ADDONS = false;
-const ALL_FIELDS = ['item', 'category', 'price', 'open', 'min', 'tax', 'station', 'sac', 'addons'] as const;
+const ALL_FIELDS = ['item', 'category', 'price', 'open', 'min', 'tax', 'station', 'sac', 'serve', 'addons'] as const;
 export type Field = (typeof ALL_FIELDS)[number];
 export const FIELDS: readonly Field[] = SHEET_ADDONS ? ALL_FIELDS : ALL_FIELDS.filter((f) => f !== 'addons');
-const ALL_HEADER = ['Item', 'Category', 'Price (₹)', 'Price at billing', 'Lowest price (₹)', 'Tax', 'Station', 'SAC', 'Add-ons & choices'];
+const ALL_HEADER = ['Item', 'Category', 'Price (₹)', 'Price at billing', 'Lowest price (₹)', 'Tax', 'Station', 'SAC', 'Serve time (min)', 'Add-ons & choices'];
 export const HEADER = SHEET_ADDONS ? ALL_HEADER : ALL_HEADER.slice(0, -1);
 export type Columns = Record<Field, number>;
 export const FIELD_NAMES: Record<Field, string> = { item: 'Item', category: 'Category', price: 'Price', open: 'Price at billing', min: 'Lowest price',
-  tax: 'Tax (GST)', station: 'Station', sac: 'SAC', addons: 'Add-ons & choices' };
+  tax: 'Tax (GST)', station: 'Station', sac: 'SAC', serve: 'Serve time (min)', addons: 'Add-ons & choices' };
 // The headings each column is known by, in other POS exports and hand-made sheets. Compared without capitals, spaces,
 // dots or symbols; the first heading that matches wins, so an exact heading is never taken by a looser one.
 const KNOWN: Record<Field, string[]> = {
@@ -175,6 +177,7 @@ const KNOWN: Record<Field, string[]> = {
   tax: ['tax', 'gst', 'gst %', 'gst rate', 'tax rate', 'tax %', 'tax slab', 'gst slab', 'tax type', 'tax category'],
   station: ['station', 'kot', 'kitchen', 'printer', 'kot printer', 'counter', 'section printer', 'kitchen station', 'prep station'],
   sac: ['sac', 'hsn', 'hsn/sac', 'hsn sac', 'sac code', 'hsn code'],
+  serve: ['serve time', 'serve time min', 'serve in', 'serving time', 'prep time', 'preparation time', 'cooking time', 'time min'],
   addons: ['add-ons & choices', 'add-ons', 'addons', 'add ons', 'modifiers', 'variants', 'options', 'extras', 'toppings'],
 };
 const squash = (h: string) => norm(h).replace(/[^a-z0-9%₹/&]+/g, ' ').trim();
@@ -275,7 +278,15 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
     }
     const sac = c.sac >= 0 && get(c.sac) ? get(c.sac) : undefined;
     if (sac !== undefined && !/^\d{4,8}$/.test(sac)) return bad('SAC must be 4 to 8 digits.');
-    out.push({ line, name, category, pricePaise: p, openPrice, station: isNoKot(st) ? '' : st, kot: !isNoKot(st), tax, groups, minPricePaise, sac });
+    // Serve time: empty = as its category; 0 = not timed; else 1 to 240 minutes ("20", "20 min").
+    let serveMins: number | null | undefined;
+    if (c.serve >= 0) {
+      const v = get(c.serve).replace(/\s*(min|mins|minutes|m)\.?$/i, '');
+      if (!v) serveMins = null;
+      else if (/^\d{1,3}$/.test(v) && Number(v) <= 240) serveMins = Number(v);
+      else return bad(`serve time "${get(c.serve)}" should be minutes from 0 to 240, or empty for the category's time.`);
+    }
+    out.push({ line, name, category, pricePaise: p, openPrice, station: isNoKot(st) ? '' : st, kot: !isNoKot(st), tax, groups, minPricePaise, sac, serveMins });
   });
   return { ...base, rows: out, errors, needs: [...needs.values()] };
 }
@@ -283,16 +294,16 @@ export function readSheet(rows: string[][], opts: { columns?: Partial<Columns>; 
 /** A small sheet with invented rows, showing every column and the forms each one takes. */
 export function sampleSheet(): string {
   return toCsv([HEADER,
-    ['Paneer Tikka', 'Starters', '280', '', '', 'Billing name', 'Kitchen', '996332'],
-    ['Veg Burger', 'Snacks', '160', '', '', 'Billing name', 'Kitchen', ''],
-    ['Tandoori Chicken', 'Tandoor', '300', '', '', 'Billing name', 'Kitchen', ''],
-    ['Masala Dosa', 'South Indian', '150', '', '', 'Billing name', 'Kitchen', ''],
-    ['Beer 650 ml', 'Bar', '320', '', '', 'No GST (liquor)', 'Bar', ''],
-    ['Whisky bottle 750 ml', 'Bar', '', 'Yes', '3500', 'No GST (liquor)', 'Bar', ''],
-    ['Fresh Lime Soda', 'Bar', '90', '', '', 'Billing name', 'Bar', ''],
-    ['Cigarette (single)', 'Cigarettes', '20', '', '', 'No GST', 'No KOT', ''],
-    ['Pool Table (per hour)', 'Games', '300', '', '', 'GST 18%', 'No KOT', '999692'],
-    ['Locker deposit', 'Hotel', '200', '', '', 'No GST', 'No KOT', ''],
+    ['Paneer Tikka', 'Starters', '280', '', '', 'Billing name', 'Kitchen', '996332', ''],
+    ['Veg Burger', 'Snacks', '160', '', '', 'Billing name', 'Kitchen', '', ''],
+    ['Tandoori Chicken', 'Tandoor', '300', '', '', 'Billing name', 'Kitchen', '', '30'],
+    ['Masala Dosa', 'South Indian', '150', '', '', 'Billing name', 'Kitchen', '', ''],
+    ['Beer 650 ml', 'Bar', '320', '', '', 'No GST (liquor)', 'Bar', '', ''],
+    ['Whisky bottle 750 ml', 'Bar', '', 'Yes', '3500', 'No GST (liquor)', 'Bar', '', ''],
+    ['Fresh Lime Soda', 'Bar', '90', '', '', 'Billing name', 'Bar', '', ''],
+    ['Cigarette (single)', 'Cigarettes', '20', '', '', 'No GST', 'No KOT', '', ''],
+    ['Pool Table (per hour)', 'Games', '300', '', '', 'GST 18%', 'No KOT', '999692', ''],
+    ['Locker deposit', 'Hotel', '200', '', '', 'No GST', 'No KOT', '', ''],
   ].map((r) => r.slice(0, HEADER.length)));
 }
 
@@ -305,6 +316,8 @@ export interface ExistingItem {
   groupPrices?: (Prices | null)[];
   /** Its own KOT setting and station; null: from its category. */
   kot?: number | null; stationId?: string | null;
+  /** Its own serve time (null: as its category, 0: not timed). */
+  serveMins?: number | null;
 }
 export interface Station { id: string; name: string; isBar: boolean; active: boolean }
 export interface Existing {
@@ -317,6 +330,8 @@ export interface PlanItem {
   openPrice: boolean; minPricePaise: number | null; groups: string[]; groupPrices: (Prices | null)[];
   /** Its own KOT setting and station when they differ from its category's, else null. */
   ownKot: number | null; ownStationId: string | null;
+  /** Its own serve time from the file; undefined: the file has no such column (keep what the item has). */
+  serveMins?: number | null;
 }
 /** Where a category's or an item's KOTs go: a station, or none. */
 export interface Route { kot: boolean; stationId: string | null }
@@ -440,7 +455,8 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
     const p: PlanItem = { id: x?.id ?? null, name: r.name, category: r.category, pricePaise: base ?? r.pricePaise, station: bar ? 'bar' : 'kitchen',
       ownKot: route.kot === cr.kot ? null : route.kot ? 1 : 0, ownStationId: route.kot && route.stationId !== cr.stationId ? route.stationId : null,
       sac: r.sac ?? x?.sac ?? (/^room tariff$/i.test(r.name) ? '996311' : '996332'), tax, openPrice: r.openPrice,
-      minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: gnames.map((n) => groupName(n)), groupPrices };
+      minPricePaise: r.minPricePaise !== undefined ? r.minPricePaise : r.openPrice ? x?.minPricePaise ?? null : null, groups: gnames.map((n) => groupName(n)), groupPrices,
+      serveMins: r.serveMins };
     if (!x) { added.push(r.name); return p; }
     if (!x.active) back.push(r.name);
     if (!r.openPrice && x.pricePaise !== p.pricePaise) priceChanges.push({ name: r.name, from: x.pricePaise, to: p.pricePaise });
@@ -455,6 +471,8 @@ export function plan(sheet: { rows: Row[]; errors: string[]; needs?: SheetResult
     if (x.openPrice !== r.openPrice) what.push(r.openPrice ? 'price now typed at billing' : `fixed price ${rs(p.pricePaise)}`);
     if (r.openPrice && x.minPricePaise !== p.minPricePaise) what.push(`lowest price ${x.minPricePaise === null ? 'none' : rs(x.minPricePaise)} → ${p.minPricePaise === null ? 'none' : rs(p.minPricePaise)}`);
     if (x.sac !== p.sac) what.push(`SAC ${x.sac} → ${p.sac}`);
+    const mt = (m: number | null | undefined) => (m === null || m === undefined ? 'as its category' : m === 0 ? 'not timed' : `${m} min`);
+    if (r.serveMins !== undefined && (x.serveMins ?? null) !== r.serveMins) what.push(`serve time ${mt(x.serveMins)} → ${mt(r.serveMins)}`);
     const g0 = x.groups.join(', '), g1 = p.groups.join(', ');
     if (norm(g0) !== norm(g1)) what.push(`add-ons ${g0 || 'none'} → ${g1 || 'none'}`);
     else {
@@ -490,5 +508,5 @@ export function sheetOf(now: Existing): string {
   items.sort((a, b) => (order.indexOf(norm(a.category)) + 1 || 1e9) - (order.indexOf(norm(b.category)) + 1 || 1e9) || a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   return toCsv([HEADER, ...items.map((i) => [i.name, i.category, i.openPrice ? '' : (i.pricePaise / 100).toFixed(2).replace(/\.00$/, ''), i.openPrice ? 'Yes' : '',
     i.openPrice && i.minPricePaise !== null ? (i.minPricePaise / 100).toFixed(2).replace(/\.00$/, '') : '', taxText(effective(i, cat.get(norm(i.category)))),
-    route(i), i.sac, ...(SHEET_ADDONS ? [i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')] : [])])]);
+    route(i), i.sac, i.serveMins ?? '', ...(SHEET_ADDONS ? [i.groups.map((n, k) => { const g = gs.get(norm(n)); return g ? groupText(g, i.groupPrices?.[k]) : n; }).join('; ')] : [])])]);
 }

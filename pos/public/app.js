@@ -65,7 +65,7 @@ async function api(method, path, body, extraHeaders = {}) {
   }
   const data = await res.json().catch(() => null);
   if (res.ok && method === 'GET') { offline.remember(path, data); return offline.merge(path, data); }
-  if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401, 'signin'); }
+  if (res.status === 401 && !['/me', '/auth/login', '/auth/pin'].includes(path) && !path.startsWith('/admin') && !path.startsWith('/serve/')) { me = null; go('#/signin'); throw new ApiError('Please sign in.', 401, 'signin'); }
   if (!res.ok) throw new ApiError(data?.error ?? 'Something went wrong.', res.status, data?.code, data);
   return data;
 }
@@ -203,7 +203,11 @@ async function route() {
   stopStation();
   stopProof();
   stopWaLink();
+  stopServe();
+  stopLive();
   try {
+    // A server's own phone (28 Nov 2026): the Serve page, its own PIN sign-in, nothing else.
+    if (location.hash.startsWith('#/serve/')) return await serveScreen(location.hash.split('/')[2] ?? '');
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
     // Bookr POS admin: its own sign-in, separate from every restaurant's.
@@ -239,6 +243,7 @@ async function route() {
       location.replace(hit ? `#/done/${hit.id}` : '#/payments/bills'); return;
     }
     if (path === 'shift') return await shiftScreen();
+    if (path === 'serving') return await servingScreen();
     if (path === 'handover') return await handoverScreen(a);
     if (path === 'exceptions') return await exceptionsScreen(a);
     if (path === 'reports') return await reportsScreen(a, b);
@@ -699,7 +704,11 @@ actions.counterAdv = () => { pendingAdv = true; go('#/rooms'); };
 let pendingAdv = false;   // "Take advance" on Counter opens the form on Rooms, where it lives
 
 async function tablesScreen() {
-  const [{ orders, tables, tablesFixed, sections }, ev] = await Promise.all([api('GET', B() + '/orders'), api('GET', B() + '/event-mode/now').catch(() => ({ event: null })), load('stays')]);
+  const [{ orders, tables, tablesFixed, sections }, ev, live] = await Promise.all([api('GET', B() + '/orders'), api('GET', B() + '/event-mode/now').catch(() => ({ event: null })),
+    api('GET', B() + '/serving/live').catch(() => ({ lines: [] })), load('stays')]);
+  ui.svLive = live.lines;
+  // Serving timers (28 Nov 2026): the orders and their timers again every 30 seconds.
+  startLive(async () => { const [o, l] = await Promise.all([api('GET', B() + '/orders'), api('GET', B() + '/serving/live')]); ui.orders = o.orders; ui.svLive = l.lines; });
   ui.orders = orders; ui.tables = tables ?? []; ui.tablesFixed = !!tablesFixed; ui.sections = sections ?? []; ui.event = ev.event;
   if (pendingPick) { ui.picking = pendingPick; pendingPick = null; }
   // Restaurant advances (26 Nov 2026): taken and held here as on the Counter.
@@ -717,7 +726,7 @@ async function tablesScreen() {
       return html`<a class="ocard ${s}" href="${orderHref(o)}">
         <div class="top-l"><div><div class="kind">${KIND_TEXT[o.kind] ?? o.kind}</div><div class="pl">${o.place}</div></div>
           <span class="amt">${rs(o.status === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span></div>
-        <div class="row" style="gap:6px">${carriedTag(o)}<span class="badge ${s}">${s === 'billed' ? `Bill ${o.bill?.billNo} · to pay` : s === 'tab' ? `Tab since ${dayName(o.openedShiftDay)}` : STATE_TEXT[s]}</span></div>
+        <div class="row" style="gap:6px">${carriedTag(o)}${svTile(o)}<span class="badge ${s}">${s === 'billed' ? `Bill ${o.bill?.billNo} · to pay` : s === 'tab' ? `Tab since ${dayName(o.openedShiftDay)}` : STATE_TEXT[s]}</span></div>
         <span class="small quiet">${o.guestName ? o.guestName + ' · ' : ''}${plural(o.lines.reduce((t, l) => t + l.qty, 0), 'item')} · opened ${time(o.openedAt)} (${since(o.openedAt)})</span></a>`;
     };
     paint(shell('#/', html`
@@ -727,7 +736,8 @@ async function tablesScreen() {
           <button class="btn ${ui.picking === 'table' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="table">New table order</button>
           <button class="btn ${ui.picking === 'room' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="room">Room service</button>
           <button class="btn ${ui.picking === 'takeaway' ? 'pri' : ''}" type="button" data-act="newOrder" data-kind="takeaway">Takeaway</button>
-          ${can('debtors.receive') ? html`<button class="btn ${ui.advForm ? 'pri' : ''}" type="button" data-act="partyAdv">Party advance</button>` : ''}</div>` : ''}
+          ${can('debtors.receive') ? html`<button class="btn ${ui.advForm ? 'pri' : ''}" type="button" data-act="partyAdv">Party advance</button>` : ''}
+          ${can('serve.manage') ? html`<a class="btn" href="#/serving">Serving</a>` : ''}</div>` : can('serve.manage') ? html`<a class="btn" href="#/serving">Serving</a>` : ''}
       </div>
       ${errorBox()}
       ${ui.event ? eventStrip(ui.event) : ''}
@@ -790,7 +800,7 @@ function tableGrid() {
     const s = orderState(o);
     const who = guest?.guestName ?? o.guestName;
     return html`<a class="tcell ${s} ${nc ? 'nc' : ''}" href="${orderHref(o)}" aria-label="${t}, ${STATE_TEXT[s]}${o.notSent ? ', not sent yet' : ''}">${carriedTag(o)}${o.notSent ? html`<span class="offtag">NOT SENT</span>` : ''}<span class="tn">${label}</span>${who ? html`<span class="tg">${who}</span>` : ''}
-      <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span></a>`;
+      <span class="ta">${rs(s === 'billed' ? o.bill?.totalPaise ?? 0 : o.itemsPaise)}</span><span class="ts">${nc ? html`<span class="ncbadge">NC</span> ` : ''}${STATE_SHORT[s]} · ${since(o.openedAt)}</span>${svTile(o)}</a>`;
   };
   const used = (t) => busy.has(t.toLowerCase()) || !!stayAt(t);
   const free = all.flatMap((x) => x.tables).filter((t) => !busy.has(t.toLowerCase())).length;
@@ -1841,7 +1851,7 @@ const kotSlip = (k) => {
   const cancel = k.lines.some((l) => l.cancelled);
   return html`<div class="receipt" style="page-break-after:always"><div class="hd">${cancel ? 'CANCEL · ' : ''}KOT ${k.kotNo} · ${String(k.station).toUpperCase()}</div>
     <div class="rl"><span>${k.place}</span><span>${time(k.at ?? Date.now())}</span></div>${k.by ? html`<div class="rl"><span>${k.by}</span></div>` : ''}<hr>
-    ${k.lines.map((l) => html`<div style="font-size:15px;${l.cancelled ? 'font-weight:700' : ''}">${l.cancelled ? `CANCEL ${Math.abs(l.qty)}` : l.qty} × ${l.name}</div>${(l.options ?? []).map((x) => html`<div style="padding-left:18px">+ ${x}</div>`)}${l.remark ? html`<div style="padding-left:18px;font-weight:700;font-size:15px">» ${String(l.remark).toUpperCase()}</div>` : ''}`)}
+    ${k.lines.map((l) => html`<div style="font-size:15px;${l.cancelled ? 'font-weight:700' : ''}">${l.cancelled ? `CANCEL ${Math.abs(l.qty)}` : l.qty} × ${l.name}${l.mins && !l.cancelled ? html` <span style="font-size:12px">· by ${time((k.at ?? Date.now()) + l.mins * 60000)}</span>` : ''}</div>${(l.options ?? []).map((x) => html`<div style="padding-left:18px">+ ${x}</div>`)}${l.remark ? html`<div style="padding-left:18px;font-weight:700;font-size:15px">» ${String(l.remark).toUpperCase()}</div>` : ''}`)}
     ${k.note ? html`<hr><div style="border:2px solid #000;padding:3px 6px;font-weight:700;font-size:14px">NOTE: ${String(k.note).toUpperCase()}</div>` : ''}</div>`;
 };
 function printKots(kots) {
@@ -4529,7 +4539,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   const today = me.business.shiftDay;
   const ranges = [['This shift', today, today], ['Last shift', addDays(today, -1), addDays(today, -1)], ['Last 7 shifts', addDays(today, -6), today], ['This month', today.slice(0, 8) + '01', today]];
   const head = html`${pageHead('Reports', tab === 'owed' ? 'Rooms and credit accounts: what is owed right now.' : tab === 'gst' ? `GSTR-1 working for ${ui.gstMonth}` : `Shift ${from === to ? dayName(from) : `${dayName(from)} to ${dayName(to)}`} · a shift runs 8 am to 8 am`)}
-    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['rooms', 'Rooms'], ['gst', 'GSTR-1'], ['owed', 'Who owes']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
+    ${tabsNav('Reports', [['sales', 'Sales'], ['profit', 'Profit'], ['losses', 'Losses'], ['when', 'When and where'], ['sections', 'By section'], ['mix', 'Menu mix'], ['events', 'Events'], ['rooms', 'Rooms'], ['gst', 'GSTR-1'], ['owed', 'Who owes'], ['serving', 'Serving time']].map(([k, t]) => [`#/reports/${k}/${from}_${to}`, t, k]), tab)}
     ${tab === 'gst' ? html`<form class="row" style="align-items:end;margin-bottom:16px"><label class="f">Month<input class="in" type="month" data-model="gstMonth" value="${ui.gstMonth}"></label>
       <button class="btn" type="submit" data-act="gstGo" data-submit>Show</button></form>`
     : tab !== 'owed' && tab !== 'events' ? html`<div class="row" style="align-items:end;margin-bottom:16px;justify-content:space-between">
@@ -4563,6 +4573,7 @@ async function reportsScreen(tab = 'sales', range = '') {
   if (tab === 'losses') { await lossesTab(head, from, to); return; }
   if (tab === 'gst') { await gstTab(head, ui.gstMonth); return; }
   if (tab === 'rooms') { await roomsReportTab(head, from, to); return; }
+  if (tab === 'serving') { await servingTab(head, from, to); return; }
   const r = await api('GET', `${B()}/reports/sales?from=${from}&to=${to}`);
   const sum = (k) => r.byEntity.reduce((t, e) => t + e[k], 0);
   const cnTotal = r.creditNotes.reduce((t, n) => t + n.totalPaise, 0);
@@ -5527,7 +5538,8 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   ui.exPrev = prev;
   // Made with no internet (27 Nov 2026): kept with their printed numbers; anything that differs from its paper is listed.
   const off = await api('GET', `${B()}/offline/day?day=${encodeURIComponent(day)}`).catch(() => null);
-  const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance', pay_change: 'Payment type changed' };
+  const kind = { void: 'Void', reprint: 'Reprint', kot_cancel: 'KOT line cancelled', discount: 'Discount', comp: 'Complimentary', limit_warning: 'Limit warning', credit_note: 'Credit note', stock_waste: 'Stock breakage or waste', stock_count: 'Stock count variance', pay_change: 'Payment type changed',
+    serve_undo: 'Served mark undone', serve_manager: 'Marked served by a manager' };
   const modeName = { cash: 'Cash', upi: 'UPI', card: 'Card', room: 'Posted to rooms', credit: 'On credit', comp: 'Complimentary', advance: 'Advances used' };
   const ev = (k) => d.events[k] ?? { n: 0, paise: 0 };
   const df = (k) => d.differences[k] ?? { n: 0, paise: 0 };
@@ -5546,6 +5558,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
     d.bar.counts ? `Bar count: ${d.bar.missingPaise ? `${rs(d.bar.missingPaise)} missing` : 'nothing missing'}` : 'Bar not counted',
     d.shiftClose ? `Cash close: ${d.shiftClose.differencePaise === 0 ? 'matched' : `${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))}`}` : 'Shift not closed yet',
     `Bill numbers: ${broken.length ? 'gaps found' : 'unbroken'}`,
+    d.serving?.timed ? `Served late: ${d.serving.late} of ${d.serving.timed} items${d.serving.notMarked ? ` · ${d.serving.notMarked} not marked` : ''}` : '',
     d.unpaid.length ? `Sent to kitchen, not paid: ${d.unpaid.length}${oldUnpaid ? ` (${oldUnpaid} overdue)` : ''}` : '',
     (d.cancelledReceipts ?? []).length ? `Receipts cancelled: ${d.cancelledReceipts.map((x) => `${x.receiptNo} ${rs(x.totalPaise)} (${x.reason}, ${x.byName ?? ''})`).join(' · ')}` : '',
   ].filter(Boolean).join('\n');
@@ -5604,7 +5617,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   const exF = ui.exF ?? 'all';
   const shown = events.filter((e) => exF === 'all' || (exF === 'other' ? !evKind[e.kind] : e.kind === exF));
   const chip = (k, label, n) => html`<button type="button" class="chip" aria-pressed="${exF === k}" data-act="pick" data-k="exF" data-id="${k}">${label} ${n}</button>`;
-  const tone = { void: 'bad', kot_cancel: 'warn', discount: 'mute', comp: 'ok', reprint: 'mute', credit_note: 'warn', stock_waste: 'warn', stock_count: 'warn', limit_warning: 'warn', pay_change: 'warn' };
+  const tone = { void: 'bad', kot_cancel: 'warn', discount: 'mute', comp: 'ok', reprint: 'mute', credit_note: 'warn', stock_waste: 'warn', stock_count: 'warn', limit_warning: 'warn', pay_change: 'warn', serve_undo: 'warn', serve_manager: 'mute' };
   const hrs = (h) => (h >= 24 ? `${Math.floor(h / 24)} d ${h % 24} h` : `${h} h`);
   rerender = () => paint(shell('#/exceptions', html`
     <div class="dc-head"><div class="grow"><h1>Daily check</h1><p class="quiet">Shift of ${dayName(day)} · ${me.business.shift_start_hour ?? 8} am to ${me.business.shift_start_hour ?? 8} am · the owner's morning page</p></div>
@@ -5679,6 +5692,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
           : html`<div class="msg ok">${d.series.length ? 'Every series is unbroken: no number missing.' : 'No bills this year yet.'}</div>`}
         <div class="sums">${d.series.map((x) => html`<div><span>${x.name} · ${x.prefix}</span><span class="quiet">${x.count} bills, last ${x.lastNo ?? x.last}</span></div>`)}</div></section>
     </div>
+    ${servingCard(d.serving, day)}
     ${(d.lateCheckIns ?? []).length ? html`<section class="panel" style="margin-top:16px"><h2>Checked in late</h2>
       <p class="quiet small">Bookings missed at the desk and checked in afterwards, with the booking's date. Many of these mean check-ins are being missed.</p>
       <div class="scroll"><table class="t"><thead><tr><th>Room</th><th>Guest</th><th>Was due</th><th>Checked in</th><th>By</th></tr></thead><tbody>
@@ -5854,7 +5868,7 @@ async function settingsScreen(tab = 'menu') {
   if (!tabs.some((t) => t[0] === tab)) tab = tabs[0][0];
   for (const k of KEEP) delete cache[k];
   await load('menu', 'reasons', 'entities', 'payAccounts');
-  if (tab === 'staff') { ui.staff = (await api('GET', B() + '/staff')).staff; if (!me.support) ui.supportInfo = await api('GET', B() + '/support'); }
+  if (tab === 'staff') { ui.staff = (await api('GET', B() + '/staff')).staff; ui.servers = (await api('GET', B() + '/servers')).servers; if (!me.support) ui.supportInfo = await api('GET', B() + '/support'); }
   if (tab === 'device') ui.devices = (await api('GET', B() + '/devices')).devices;
   if (tab === 'whatsapp') { ui.wa = await api('GET', B() + '/whatsapp'); ui.waAdding = null; }
   // Rooms and bookings (25 Nov 2026): mail approval, reception's Djubo users and room rates, moved here from Rooms.
@@ -5885,7 +5899,7 @@ async function settingsScreen(tab = 'menu') {
       <div class="scroll"><table class="t cards"><thead><tr><th class="selcol"><input type="checkbox" class="sel" data-act-change="mSelAll" aria-label="Tick every item shown" ${menuShown.length && menuShown.every((m) => (ui.mSel ?? []).includes(m.id)) ? 'checked' : ''}></th><th>Item</th><th class="num">Price</th><th>Category</th><th>Station</th><th>Tax</th><th></th></tr></thead><tbody>
         ${menuShown.map((m) => html`<tr class="${(ui.mSel ?? []).includes(m.id) ? 'picked' : ''}"><td class="selcol"><input type="checkbox" class="sel" data-act-change="mSel" data-id="${m.id}" aria-label="Tick ${m.name}" ${(ui.mSel ?? []).includes(m.id) ? 'checked' : ''}></td><td data-label="Item"><strong>${m.name}</strong>${m.active ? '' : ' (off the menu)'}${groupsOf(m).some((g) => g.kind === 'one') ? html` <span class="tag-one">Choose</span>` : ''}${groupsOf(m).some((g) => g.kind === 'any') ? html` <span class="tag-any">+ add-ons</span>` : ''}
           ${groupsOf(m).length ? html`<div class="small quiet">${groupsOf(m).map((g) => g.name).join(', ')}</div>` : ''}</td>
-          <td data-label="Price" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}</td>
+          <td data-label="Price" class="num">${m.openPrice ? `Typed${m.minPricePaise != null ? `, at least ${rs(m.minPricePaise)}` : ''}` : `${groupsOf(m).some((g) => g.kind === 'one') ? 'from ' : ''}${rs(m.pricePaise)}`}</td><td data-label="Category">${m.category}</td><td data-label="Station">${routeOf(m)}<div class="small quiet">${serveText(m)}</div></td>
           <td data-label="Tax">${m.taxMode ? taxName(m) : html`<span class="quiet">${taxName(catOf(m) ?? { taxMode: 'billing' })} · from category</span>`}${taxMarks(m)}</td>
           <td class="act"><div class="irow">${iconBtn('itemEdit', m.id, 'edit', `Edit ${m.name}`)}${m.active ? iconBtn('itemToggle', m.id, 'off', `Take ${m.name} off the menu`) : iconBtn('itemToggle', m.id, 'on', `Put ${m.name} back on the menu`)}${iconBtn('itemDelete', m.id, 'trash', `Delete ${m.name}`, 'danger')}</div></td></tr>`)}</tbody></table></div>
       <form class="grid3"><h2 style="grid-column:1/-1">${ui.editItem ? 'Edit item' : 'Add item'}</h2><label class="f">Name<input class="in" data-model="iName" value="${ui.iName ?? ''}" ${ui.editItem ? 'autofocus' : ''}></label><label class="f">Category<input class="in" data-model="iCat" value="${ui.iCat ?? ''}"></label>
@@ -5894,6 +5908,7 @@ async function settingsScreen(tab = 'menu') {
           : choicePrice() !== null ? html`<label class="f">Price (₹)<input class="in" data-model="iPrice" value="${choicePrice()}" readonly aria-describedby="ip-n"><span class="small quiet" id="ip-n" style="font-weight:400">The first choice's price, set below.</span></label>`
           : html`<label class="f">Price (₹)<input class="in" inputmode="decimal" data-model="iPrice" value="${ui.iPrice ?? ''}"></label>`}
         ${itemKotFields()}
+        ${itemServeField()}
         <label class="f">Tax<select class="in" data-model="iTax">${taxChoices(true).map(([v, t]) => html`<option value="${v}" ${(ui.iTax ?? 'category') === v ? 'selected' : ''}>${t}</option>`)}</select></label>
         ${followSelect('iSc', 'Service charge', 'serviceCharge')}${followSelect('iIncl', 'Price includes GST', 'priceIncl')}
         <div style="grid-column:1/-1">${itemAddons()}</div>
@@ -5901,11 +5916,13 @@ async function settingsScreen(tab = 'menu') {
     if (tab === 'categories') body = html`<section class="panel"><h2>Categories and GST</h2>
       <p class="quiet small">Each item takes its GST from its own setting if it has one, else from its category here, else from the billing name on the bill. A billing name not registered for GST charges none. Check rates with your CA.</p>${errorBox()}
       <p class="quiet small">KOT works the same way: each item follows its category unless the item says otherwise. "No KOT" items go on the order and the bill but never to a station (cigarettes, room charges).</p>
-      <div class="scroll"><table class="t cards"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th><th>KOT</th><th>Station</th></tr></thead><tbody>
+      <p class="quiet small">Serve in: the minutes from the KOT to the table, for every item of the category (an item can have its own). Empty: not timed. Servers mark food served on their phones; late items show on the tables screen and the Daily check.</p>
+      <div class="scroll"><table class="t cards"><thead><tr><th>Category</th><th class="num">Items</th><th>GST</th><th>KOT</th><th>Station</th><th>Serve in (min)</th></tr></thead><tbody>
         ${cache.menuCats.map((c) => html`<tr><td data-label="Category"><strong>${c.name}</strong></td><td data-label="Items" class="num">${cache.menu.filter((m) => m.active && m.category.toLowerCase() === c.name.toLowerCase()).length}</td>
           <td data-label="GST"><select class="in" data-act-change="catTax" data-id="${c.id}" aria-label="GST for ${c.name}">${taxChoices(false).map(([v, t]) => html`<option value="${v}" ${taxValue(c) === v ? 'selected' : ''}>${t}</option>`)}</select></td>
           <td data-label="KOT"><select class="in" data-act-change="catKot" data-id="${c.id}" aria-label="KOT for ${c.name}"><option value="yes">Print KOT</option><option value="no" ${c.kot === 0 ? 'selected' : ''}>No KOT</option></select></td>
-          <td data-label="Station">${c.kot === 0 ? html`<span class="quiet small">Not sent anywhere</span>` : html`<select class="in" data-act-change="catStation" data-id="${c.id}" aria-label="Station for ${c.name}">${activeStations().map((x) => html`<option value="${x.id}" ${c.stationId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>`}</td></tr>`)}</tbody></table></div></section>`;
+          <td data-label="Station">${c.kot === 0 ? html`<span class="quiet small">Not sent anywhere</span>` : html`<select class="in" data-act-change="catStation" data-id="${c.id}" aria-label="Station for ${c.name}">${activeStations().map((x) => html`<option value="${x.id}" ${c.stationId === x.id ? 'selected' : ''}>${x.name}</option>`)}</select>`}</td>
+          <td data-label="Serve in (min)">${c.kot === 0 ? html`<span class="quiet small">No KOT</span>` : html`<input class="in" style="width:90px" inputmode="numeric" maxlength="3" data-act-change="catServe" data-id="${c.id}" value="${c.serveMins ?? ''}" placeholder="Not timed" aria-label="Serve in minutes for ${c.name}">`}</td></tr>`)}</tbody></table></div></section>`;
     if (tab === 'addons') body = addonsTab();
     if (tab === 'stations') body = stationsTab();
     if (tab === 'tables') body = tablesSettings();
@@ -5963,7 +5980,8 @@ async function settingsScreen(tab = 'menu') {
         <label class="f">PIN (4–6 digits)<input class="in" inputmode="numeric" data-model="sPin" maxlength="6" autocomplete="off"></label>
         ${['manager', 'owner'].includes(ui.sRole) ? html`<label class="f">Email<input class="in" type="email" data-model="sEmail" value="${ui.sEmail ?? ''}"></label><label class="f">Password (12+ characters)<input class="in" type="password" data-model="sPassword" autocomplete="new-password"></label>` : ''}
         ${ui.editStaff ? html`<label class="f">Status<select class="in" data-model="sActive"><option value="yes">Active</option><option value="no" ${ui.sActive === 'no' ? 'selected' : ''}>Inactive (cannot sign in)</option></select></label>` : ''}
-        <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>`;
+        <div class="row"><button class="btn pri" type="submit" data-act="addStaff" data-submit>${ui.editStaff ? 'Save person' : 'Add person'}</button>${ui.editStaff ? html`<button class="btn" type="button" data-act="editCancel">Cancel</button>` : ''}</div></form></section>
+      ${serversPanel()}`;
     if (tab === 'bookings') body = html`<div class="stack" style="max-width:900px">${errorBox()}${bookingsPanel(ui.bk, 'settings')}${ratesForm(true)}</div>`;
     if (tab === 'whatsapp') body = whatsappSettings();
     if (tab === 'device') body = html`${window.bookrDesktop ? html`<section class="panel" style="margin-bottom:16px"><h2>Printers on this PC</h2>
@@ -6880,7 +6898,7 @@ actions.catFlag = async (d, el) => {
 actions.addItem = async () => {
   const open = ui.iOpen === 'yes';
   const body = { name: ui.iName, category: ui.iCat, price: open ? '' : ui.iPrice ?? '', stationId: ui.iStationId ?? '', kot: ui.iKot ?? 'category', ...taxBody(ui.iTax ?? 'category'),
-    serviceCharge: ui.iSc ?? 'category', priceIncl: ui.iIncl ?? 'category',
+    serviceCharge: ui.iSc ?? 'category', priceIncl: ui.iIncl ?? 'category', serveMins: String(ui.iServe ?? '').trim(),
     openPrice: open, minPrice: open ? ui.iMin ?? '' : '', addonGroups: (ui.iGroups ?? []).map((id) => ({ id, prices: itemPricesOut(id) })) };
   const fromChoice = !open && choicePrice();
   if (fromChoice) body.price = fromChoice;
@@ -6903,8 +6921,8 @@ function menuFilter() {
   return cache.menu.filter((m) => (!ui.mCat || m.category === ui.mCat) && words.every((w) => m.name.toLowerCase().includes(w) || m.category.toLowerCase().includes(w)));
 }
 const toItemForm = () => setTimeout(() => root.querySelector('form.grid3')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0);
-actions.mNew = () => { Object.assign(ui, { editItem: null, iName: '', iCat: ui.mCat ?? '', iPrice: '', iStationId: '', iKot: 'category', iTax: 'category', iSc: 'category', iIncl: 'category', iOpen: 'no', iMin: '', iGroups: [], iPrices: {} }); rerender(); toItemForm(); root.querySelector('[data-model="iName"]')?.focus({ preventScroll: true }); };
-actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStationId: m.stationId ?? '', iKot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', iTax: taxValue(m),
+actions.mNew = () => { Object.assign(ui, { editItem: null, iServe: '', iName: '', iCat: ui.mCat ?? '', iPrice: '', iStationId: '', iKot: 'category', iTax: 'category', iSc: 'category', iIncl: 'category', iOpen: 'no', iMin: '', iGroups: [], iPrices: {} }); rerender(); toItemForm(); root.querySelector('[data-model="iName"]')?.focus({ preventScroll: true }); };
+actions.itemEdit = (d) => { const m = cache.menu.find((x) => x.id === d.id); Object.assign(ui, { editItem: m.id, iServe: m.serveMins == null ? '' : String(m.serveMins), iName: m.name, iCat: m.category, iPrice: rupees(m.pricePaise), iStationId: m.stationId ?? '', iKot: m.kot == null ? 'category' : m.kot ? 'yes' : 'no', iTax: taxValue(m),
   iSc: m.serviceCharge == null ? 'category' : m.serviceCharge ? 'yes' : 'no', iIncl: m.priceIncl == null ? 'category' : m.priceIncl ? 'yes' : 'no',
   iOpen: m.openPrice ? 'yes' : 'no', iMin: m.minPricePaise != null ? rupees(m.minPricePaise) : '', iGroups: [...(m.addonGroups ?? [])],
   iPrices: Object.fromEntries(Object.entries(m.addonPrices ?? {}).map(([g, ps]) => [g, Object.fromEntries(Object.entries(ps).map(([k, v]) => [k, rupeesShort(v)]))])) }); rerender(); };
@@ -6959,6 +6977,306 @@ actions.revoke = async (d) => {
   if (!confirm(`Remove ${dev?.name ?? 'this device'}? Staff can no longer sign in with a PIN on it until an Owner sets it up again.`)) return;
   await api('POST', `${B()}/devices/${d.id}/revoke`); route();
 };
+
+// ---------- serving time (mock and data model approved 28 Nov 2026)
+// Each dish has a serve time (its own, else its category's). Servers sign in on their own phones on the Serve page and
+// mark items served with a photo; the tables screen counts down; managers see, mark and undo on Tables › Serving.
+const SERVE_REASONS = ['Tapped by mistake', 'Wrong table', 'Food sent back', 'Other'];
+/** A waiting or served line's chip: "12 min left", "Soon · 3 min", "Late 4 min", "Served", "Served 2 min late". */
+function svChip(l) {
+  if (l.state === 'late') return html`<span class="svc late">Late ${-l.leftMins} min</span>`;
+  if (l.state === 'soon') return html`<span class="svc soon">Soon · ${l.leftMins} min</span>`;
+  if (l.state === 'ok') return html`<span class="svc">${l.leftMins} min left</span>`;
+  if (l.state === 'served_late') return html`<span class="svc late">Served ${l.lateMins} min late</span>`;
+  return html`<span class="svc done">Served on time</span>`;
+}
+const SV_RANK = { late: 3, soon: 2, ok: 1 };
+/** The most urgent waiting line of an order, for its table tile (null: nothing timed is waiting). */
+function svWorst(orderId) {
+  const w = (ui.svLive ?? []).filter((l) => l.orderId === orderId && l.servedAt === null);
+  if (!w.length) return (ui.svLive ?? []).some((l) => l.orderId === orderId) ? { state: 'all' } : null;
+  return w.sort((a, b) => SV_RANK[b.state] - SV_RANK[a.state] || a.leftMins - b.leftMins)[0];
+}
+const svTile = (o) => { const w = svWorst(o.id); return !w ? '' : w.state === 'all' ? html`<span class="svc done">All served</span>` : svChip(w); };
+let liveTimer = null;
+function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+/** Every 30 seconds on the tables and serving screens: the timers move, unless someone is typing. */
+function startLive(refresh) {
+  stopLive();
+  liveTimer = setInterval(async () => {
+    if (document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    try { await refresh(); flash = shownFlash; rerender(); } catch { /* the next tick tries again */ }
+  }, 30_000);
+}
+
+// ----- the server's phone: #/serve/<business id>
+let serveTimer = null;
+function stopServe() { if (serveTimer) { clearInterval(serveTimer); serveTimer = null; } }
+async function serveCall(method, path, body, type = 'application/json') {
+  const r = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers: body !== undefined ? { 'Content-Type': type } : {},
+    body: body === undefined ? undefined : type === 'application/json' ? JSON.stringify(body) : body });
+  const data = await r.json().catch(() => null);
+  if (!r.ok) throw new ApiError(data?.error ?? 'Could not reach the server. Check the Wi-Fi.', r.status);
+  return data;
+}
+/**
+ * A photo from the camera, made small enough to send quickly (longest side 1280 px, JPEG), with a preview. Read as a
+ * data: address, which the page's security policy allows for images (blob: addresses are not allowed).
+ */
+async function shrinkPhoto(file) {
+  const src = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(file); });
+  const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = src; });
+  const k = Math.min(1, 1280 / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const blob = await new Promise((ok) => c.toBlob(ok, 'image/jpeg', 0.72));
+  if (!blob) throw new Error('no photo');
+  return { blob, preview: c.toDataURL('image/jpeg', 0.5) };
+}
+// The camera input lives outside the screen, so a refresh of the list never loses a photo being taken.
+const svCamera = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*', capture: 'environment', hidden: true });
+document.body.appendChild(svCamera);
+svCamera.addEventListener('change', async () => {
+  const f = svCamera.files?.[0];
+  svCamera.value = '';
+  if (!f || !ui.sv) return;
+  try { const p = await shrinkPhoto(f); ui.sv.shot = p.blob; ui.sv.shotUrl = p.preview; ui.sv.err = null; }
+  catch { ui.sv.err = 'That photo could not be read. Take it again.'; }
+  paintServe();
+});
+async function serveScreen(bid) {
+  document.title = 'Serve';
+  document.body.classList.remove('desk');
+  ui.sv = { bid, pin: '', screen: 'loading', data: null, open: null, whole: true, ticks: {}, shot: null, shotUrl: null, err: null, pending: [] };
+  rerender = paintServe;
+  const tick = async () => {
+    try {
+      ui.sv.data = await serveCall('GET', '/serve/kots');
+      if (ui.sv.screen === 'loading' || ui.sv.screen === 'pin') ui.sv.screen = 'list';
+      ui.sv.offline = false;
+    } catch (e) {
+      if (e.status === 401) { ui.sv.screen = 'pin'; ui.sv.data = null; } else ui.sv.offline = true;
+    }
+    // Only the list redraws by itself; a KOT being served stays as it is until the server is done.
+    if (location.hash.startsWith('#/serve/') && ui.sv.screen !== 'kot') paintServe();
+  };
+  ui.sv.tick = tick;
+  paintServe();
+  await tick();
+  stopServe();
+  serveTimer = setInterval(tick, 10_000);
+}
+function paintServe() {
+  const sv = ui.sv;
+  const top = (title, out) => html`<header class="sv-top"><span>${title}</span>${out ? html`<button type="button" data-act="svOut">Sign out</button>` : ''}</header>`;
+  if (sv.screen === 'loading') { root.innerHTML = asHtml(html`<main class="sv">${top('Serve')}<p class="sv-body quiet">Loading…</p></main>`); return; }
+  if (sv.screen === 'pin') {
+    root.innerHTML = asHtml(html`<main class="sv">${top('Serve · sign in')}<div class="sv-body sv-pin">
+      <p>Type your 6-digit PIN</p>
+      <div class="sv-dots" aria-label="${sv.pin.length} of 6 digits typed">${[0, 1, 2, 3, 4, 5].map((i) => html`<i class="${i < sv.pin.length ? 'on' : ''}"></i>`)}</div>
+      ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+      <div class="sv-pad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((d) => (d ? html`<button type="button" data-act="svKey" data-k="${d}" aria-label="${d === '⌫' ? 'Delete' : d}">${d}</button>` : html`<span></span>`))}</div>
+      <p class="small quiet">Only server PINs work here. Ask the manager if you have none.</p></div></main>`);
+    return;
+  }
+  const d = sv.data;
+  if (sv.screen === 'kot') {
+    const k = d?.kots.find((x) => x.kotId === sv.open);
+    if (!k) { sv.screen = 'list'; return paintServe(); }
+    const waiting = k.items.filter((i) => i.servedAt === null);
+    const ticked = (i) => sv.whole || sv.ticks[i.lineNo] !== false;
+    root.innerHTML = asHtml(html`<main class="sv">${top(`${k.place} · KOT ${k.kotNo}`, true)}<div class="sv-body">
+      <button class="btn ghost" type="button" data-act="svBack" style="justify-self:start">‹ Back</button>
+      <p class="small quiet" style="margin:0">${sv.whole ? 'Every item below is marked served.' : 'Tick what is going out now. The rest stay on the list.'}</p>
+      ${k.items.map((i) => (i.servedAt !== null
+        ? html`<div class="sv-check done"><span class="sv-tick" aria-hidden="true">✓</span><span class="grow">${i.qty} × ${i.name}</span><span class="small">served ${time(i.servedAt)}</span></div>`
+        : sv.whole ? html`<div class="sv-check"><span class="grow">${i.qty} × ${i.name}${i.remark ? html` <span class="small quiet">» ${i.remark}</span>` : ''}</span>${svChip(i)}</div>`
+        : html`<label class="sv-check"><input type="checkbox" data-act-change="svTick" data-n="${i.lineNo}" ${ticked(i) ? 'checked' : ''}><span class="grow">${i.qty} × ${i.name}</span>${svChip(i)}</label>`))}
+      ${sv.shotUrl ? html`<img class="sv-photo" src="${sv.shotUrl}" alt="Photo of the KOT and the food">` : html`<div class="sv-photo none">No photo yet. Take the KOT and the food together.</div>`}
+      ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+      ${sv.shot ? html`<button class="btn pri big wide" type="button" data-act="svDone">Mark served</button><button class="btn wide" type="button" data-act="svShoot">Take again</button>`
+        : html`<button class="btn pri big wide" type="button" data-act="svShoot">Take photo</button>`}
+      ${waiting.length ? '' : html`<p class="quiet">Everything here is served.</p>`}</div></main>`);
+    return;
+  }
+  const recent = (d?.recent ?? []).filter((r) => r.undoUntil > Date.now());
+  root.innerHTML = asHtml(html`<main class="sv">${top(`Serve · ${d?.server.name ?? ''}`, true)}<div class="sv-body">
+    <div class="row between"><b>Running KOTs</b><span class="small quiet">${sv.offline ? 'Not connected: trying again' : `${d.business} · ${time(d.now)}`}</span></div>
+    ${sv.pending.length ? html`<div class="msg warn"><div class="row between"><span>${plural(sv.pending.length, 'photo')} not sent.</span><button class="btn" type="button" data-act="svRetry">Retry</button></div></div>` : ''}
+    ${recent.map((r) => html`<div class="msg ok"><div class="row between"><span>${r.place}: ${plural(r.items, 'item')} served at ${time(r.at)}</span><button class="btn" type="button" data-act="svUndo" data-b="${r.batch}">Undo</button></div>
+      <span class="small">Undo is here for 2 minutes. After that, ask a manager.</span></div>`)}
+    ${d.kots.length ? d.kots.map((k) => { const left = k.items.filter((i) => i.servedAt === null); return html`<div class="sv-kot ${k.state}">
+      <div class="row between"><b>${k.place} · KOT ${k.kotNo}</b>${svChip(left.sort((a, b) => a.leftMins - b.leftMins)[0])}</div>
+      <ul class="sv-items">${k.items.map((i) => (i.servedAt !== null ? html`<li class="done"><span><span class="sv-tick" aria-hidden="true">✓</span> ${i.qty} × ${i.name}</span><span class="small">served ${time(i.servedAt)}</span></li>`
+        : html`<li><span>${i.qty} × ${i.name}</span></li>`))}</ul>
+      <div class="sv-btns"><button class="btn pri" type="button" data-act="svOpen" data-id="${k.kotId}" data-whole="1">${left.length > 1 ? 'Complete' : 'Served'}</button>${left.length > 1 ? html`<button class="btn" type="button" data-act="svOpen" data-id="${k.kotId}" data-whole="0">Part</button>` : ''}</div></div>`; })
+      : html`<p class="quiet">Nothing waiting.</p>`}</div></main>`);
+}
+actions.svKey = async (d) => {
+  const sv = ui.sv; sv.err = null;
+  if (d.k === '⌫') sv.pin = sv.pin.slice(0, -1); else if (sv.pin.length < 6) sv.pin += d.k;
+  paintServe();
+  if (sv.pin.length < 6) return;
+  const pin = sv.pin; sv.pin = '';
+  try { await serveCall('POST', '/serve/signin', { businessId: sv.bid, pin }); sv.screen = 'loading'; await sv.tick(); }
+  catch (e) { sv.err = e.message; paintServe(); }
+};
+actions.svOut = async () => { await serveCall('POST', '/serve/signout', {}).catch(() => {}); Object.assign(ui.sv, { screen: 'pin', data: null, pin: '' }); paintServe(); };
+actions.svOpen = (d) => { Object.assign(ui.sv, { screen: 'kot', open: d.id, whole: d.whole === '1', ticks: {}, shot: null, shotUrl: null, err: null }); paintServe(); };
+actions.svBack = () => { ui.sv.screen = 'list'; paintServe(); ui.sv.tick(); };
+actions.svTick = (d, el) => { ui.sv.ticks[d.n] = el.checked; };
+actions.svShoot = () => svCamera.click();
+async function svSend(p) {
+  await serveCall('POST', `/serve/photo/${p.batch}`, p.blob, 'image/jpeg');
+  ui.sv.pending = ui.sv.pending.filter((x) => x !== p);
+}
+actions.svDone = async () => {
+  const sv = ui.sv;
+  const k = sv.data.kots.find((x) => x.kotId === sv.open);
+  const lines = k.items.filter((i) => i.servedAt === null && (sv.whole || sv.ticks[i.lineNo] !== false)).map((i) => i.lineNo);
+  if (!lines.length) { sv.err = 'Tick at least one item.'; paintServe(); return; }
+  try {
+    const r = await serveCall('POST', `/serve/kots/${k.kotId}/served`, { lines });
+    // Served now (the time of the tap); the photo follows, and is retried if the Wi-Fi drops.
+    const p = { batch: r.batch, blob: sv.shot };
+    sv.pending.push(p);
+    Object.assign(sv, { screen: 'list', shot: null, shotUrl: null, err: null });
+    await svSend(p).catch(() => {});
+    await sv.tick();
+  } catch (e) { sv.err = e.message; paintServe(); }
+};
+actions.svRetry = async () => { for (const p of [...ui.sv.pending]) await svSend(p).catch(() => {}); paintServe(); };
+actions.svUndo = async (d) => {
+  try { await serveCall('POST', `/serve/undo/${d.b}`, {}); ui.sv.pending = ui.sv.pending.filter((x) => x.batch !== d.b); await ui.sv.tick(); }
+  catch (e) { ui.sv.err = e.message; await ui.sv.tick(); }
+};
+
+// ----- Tables › Serving, for managers on the billing PC
+async function servingScreen() {
+  const refresh = async () => {
+    [ui.svm, ui.svBlocks] = await Promise.all([api('GET', `${B()}/serving`), api('GET', `${B()}/serving/blocks`).then((r) => r.blocks).catch(() => [])]);
+  };
+  await refresh();
+  const photo = (batch) => html`<a href="/api${B()}/serving/photo/${batch}" target="_blank" rel="noopener">Photo</a>`;
+  rerender = () => {
+    const m = ui.svm;
+    paint(shell('#/', html`${pageHead('Serving', `Shift of ${dayName(m.shiftDay)} · timers move every 30 seconds`, html`<a class="btn" href="#/">Back to tables</a>`)}${errorBox()}
+      <div class="msg">A server can undo their own tap for 2 minutes. After that, only a manager can, here, with a reason. Every undo and every item marked here shows on the Daily check.
+        Servers sign in at <b>${location.origin}/#/serve/${me.business.id}</b></div>
+      ${(ui.svBlocks ?? []).length ? html`<section class="panel"><h2>Blocked by wrong server PINs</h2>${ui.svBlocks.map((b) => html`<div class="row between"><span>A connection${b.known ? ' servers use (likely the hotel Wi-Fi)' : ''}: ${b.wrong} wrong PINs, last at ${time(b.last)}. Free again at ${time(b.until)}.</span>
+        <button class="btn" type="button" data-act="svUnblock" data-c="${b.conn}">Unlock</button></div>`)}</section>` : ''}
+      <section class="panel"><h2>Waiting to be served</h2>
+        ${m.waiting.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Table</th><th>Item</th><th>Sent</th><th>Due</th><th>State</th><th></th></tr></thead><tbody>
+          ${m.waiting.map((l) => html`<tr><td>${l.place}</td><td>${l.qty} × ${l.name}</td><td>${time(l.sentAt)}</td><td>${time(l.dueAt)}</td><td>${svChip(l)}</td>
+            <td><button class="btn" type="button" data-act="svMark" data-k="${l.kotId}" data-n="${l.lineNo}">Mark served</button></td></tr>`)}</tbody></table></div>
+          <p class="small quiet">"Mark served" here is for when a server forgot. It is saved as by a manager, with no photo, and counted apart.</p>` : html`<p class="quiet">Nothing waiting.</p>`}</section>
+      ${ui.svUndo ? html`<form class="panel"><h2>Undo served · ${ui.svUndo.label}</h2>
+        <div class="row" style="align-items:end"><label class="f">Reason<select class="in" data-model="svReason">${SERVE_REASONS.map((r) => html`<option ${ui.svReason === r ? 'selected' : ''}>${r}</option>`)}</select></label>
+          <button class="btn pri" type="submit" data-act="svUndoGo" data-submit>Undo</button><button class="btn ghost" type="button" data-act="svUndoNo">Cancel</button></div>
+        <p class="small quiet">The item goes back on the servers' list. Late is still worked out from the first time it was marked.</p></form>` : ''}
+      <section class="panel"><h2>Served this shift</h2>
+        ${m.served.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Table</th><th>Item</th><th>Served</th><th>By</th><th>Photo</th><th>Result</th><th></th></tr></thead><tbody>
+          ${m.served.map((l) => html`<tr><td>${l.place}</td><td>${l.qty} × ${l.name}</td><td>${l.servedAt ? time(l.servedAt) : html`<span class="quiet">undone</span>`}</td>
+            <td>${l.by ?? ''}${l.byManager ? ' (manager, no photo)' : ''}</td><td>${l.photo && l.batch ? photo(l.batch) : html`<span class="quiet">none</span>`}</td>
+            <td>${l.lateMins ? html`<span class="svc late">${l.lateMins} min late</span>` : html`<span class="svc done">On time</span>`}</td>
+            <td>${l.servedAt ? html`<button class="btn" type="button" data-act="svUndoAsk" data-k="${l.kotId}" data-n="${l.lineNo}" data-l="${l.place} · ${l.qty} × ${l.name}">Undo</button>` : ''}</td></tr>`)}</tbody></table></div>`
+          : html`<p class="quiet">Nothing served yet this shift.</p>`}</section>
+      <section class="panel"><h2>Undone and marked by a manager today</h2>
+        ${m.log.length ? html`<ul class="small">${m.log.map((e) => html`<li>${time(e.at)} · ${e.ref} · ${e.kind === 'serve_manager' ? 'marked served by' : 'undone by'} ${e.by ?? ''}${e.reason ? ` · ${e.reason}` : ''}</li>`)}</ul>` : html`<p class="quiet">None.</p>`}</section>`));
+  };
+  rerender();
+  startLive(refresh);
+}
+actions.svMark = async (d) => { await api('POST', `${B()}/serving/mark`, { kotId: d.k, lineNo: Number(d.n) }); flash = { kind: 'ok', text: 'Marked served (by a manager, no photo).' }; route(); };
+actions.svUndoAsk = (d) => { ui.svUndo = { kotId: d.k, lineNo: Number(d.n), label: d.l }; ui.svReason = SERVE_REASONS[0]; rerender(); };
+actions.svUndoNo = () => { ui.svUndo = null; rerender(); };
+actions.svUndoGo = async () => { await api('POST', `${B()}/serving/undo`, { ...ui.svUndo, label: undefined, reason: ui.svReason ?? SERVE_REASONS[0] }); flash = { kind: 'ok', text: `Undone: ${ui.svUndo.label}. It is back on the servers' list.` }; route(); };
+actions.svUnblock = async (d) => { await api('POST', `${B()}/serving/unblock`, { conn: d.c }); flash = { kind: 'ok', text: 'Unlocked: servers on that connection can sign in again.' }; route(); };
+
+// ----- Settings › Staff and PINs: servers (Owner)
+function serversPanel() {
+  const link = `${location.origin}/#/serve/${me.business.id}`;
+  const quiet14 = (s) => s.active && Date.now() - (s.lastSeenAt ?? s.createdAt) > 14 * 86_400_000;
+  return html`<section class="panel" style="margin-top:16px"><h2>Servers</h2>
+    <p class="quiet small">Servers mark food served on their own phones. Send them this address; they sign in with a 6-digit PIN that works only there and opens only the Serve screen. Remove a server and their PIN stops at once, even on an open phone. Sign-ins end at day close.</p>
+    <div class="row"><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
+    ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Last signed in</th><th></th></tr></thead><tbody>
+      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}</td><td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
+        <td class="act"><div class="row">${s.active ? html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">New PIN</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
+          : html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Bring back</button>`}</div></td></tr>`)}</tbody></table></div>` : html`<p class="quiet">No servers yet.</p>`}
+    <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `New PIN for ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a server'}</h3>
+      ${ui.svEdit ? '' : html`<label class="f">Name<input class="in" data-model="svName" value="${ui.svName ?? ''}"></label>`}
+      <label class="f">PIN (6 digits)<input class="in" inputmode="numeric" maxlength="6" autocomplete="off" data-model="svPin" value="${ui.svPin ?? ''}"></label>
+      <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save PIN' : 'Add server'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
+}
+actions.svCopyLink = async (d) => { await navigator.clipboard?.writeText(d.l).catch(() => {}); flash = { kind: 'ok', text: 'Serve address copied.' }; rerender(); };
+actions.svNewPin = (d) => { ui.svEdit = d.id; ui.svPin = ''; rerender(); };
+actions.svEditNo = () => { ui.svEdit = null; ui.svPin = ''; rerender(); };
+actions.svSave = async () => {
+  if (ui.svEdit) { const s = ui.servers.find((x) => x.id === ui.svEdit); await api('PUT', `${B()}/servers/${s.id}`, { pin: ui.svPin ?? '', active: true }); flash = { kind: 'ok', text: `New PIN saved for ${s.name}. Their old sign-in has ended.` }; }
+  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', pin: ui.svPin ?? '' }); flash = { kind: 'ok', text: `${ui.svName} added. Send them the Serve address.` }; }
+  route();
+};
+actions.svRemove = async (d) => {
+  const s = ui.servers.find((x) => x.id === d.id);
+  if (!confirm(`Remove ${s.name}? Their PIN stops at once, even on a phone that is open now.`)) return;
+  await api('PUT', `${B()}/servers/${s.id}`, { active: false }); flash = { kind: 'ok', text: `${s.name} removed.` }; route();
+};
+
+// ----- Settings › Categories and the item form: the serve time
+actions.catServe = async (d, el) => {
+  const v = el.value.trim();
+  await api('PUT', `${B()}/menu-categories/${d.id}`, { serveMins: v === '' ? null : v });
+  const c = cache.menuCats.find((x) => x.id === d.id); c.serveMins = v === '' ? null : Number(v);
+  flash = { kind: 'ok', text: `${c.name}: ${v === '' ? 'not timed' : `serve in ${v} min`}.` }; rerender();
+};
+/** An item's serve time for the menu list: its own, its category's, or not timed. */
+function serveText(m) {
+  const cat = catOf(m)?.serveMins ?? null;
+  if (m.serveMins === 0) return 'Not timed · own';
+  if (m.serveMins != null) return `Serve ${m.serveMins} min · own`;
+  return cat ? `Serve ${cat} min · category` : 'Not timed';
+}
+const itemServeField = () => {
+  const cat = (cache.menuCats ?? []).find((c) => c.name.toLowerCase() === String(ui.iCat ?? '').toLowerCase())?.serveMins ?? null;
+  return html`<label class="f">Serve in (minutes)<input class="in" inputmode="numeric" data-model="iServe" value="${ui.iServe ?? ''}" placeholder="${cat ? `${cat}: its category` : 'Not timed'}" aria-describedby="isv-n">
+    <span class="small quiet" id="isv-n" style="font-weight:400">Empty: as its category (${cat ? `${cat} min` : 'not timed'}). 0: never timed.</span></label>`;
+};
+
+// ----- Daily check and Reports
+function servingCard(sv, day) {
+  if (!sv) return '';
+  const photo = (w) => (w.batch && can('serve.manage') ? html` · <a href="/api${B()}/serving/photo/${w.batch}" target="_blank" rel="noopener">photo</a>` : '');
+  return html`<section class="panel" style="margin-top:16px"><div class="row between"><h2 style="margin:0">Serving time</h2><a class="small" href="#/reports/serving/${day}_${day}">Report</a></div>
+    <div class="dc-tiles">
+      <div class="dc-tile none"><span class="k">Items timed</span><span class="v">${sv.timed}</span><span class="n">${sv.marked ? `${Math.round((sv.onTime / sv.marked) * 100)}% of served on time` : 'none served yet'}</span></div>
+      <div class="dc-tile ${sv.late ? 'bad' : 'none'}"><span class="k">Late</span><span class="v">${sv.late}</span><span class="n">${sv.late ? `average ${sv.avgLateMins} min late` : 'none'}</span></div>
+      <div class="dc-tile ${sv.notMarked ? 'warn' : 'none'}"><span class="k">Not marked served</span><span class="v">${sv.notMarked}</span><span class="n">bill closed, never marked</span></div>
+      ${sv.waiting ? html`<div class="dc-tile none"><span class="k">Still waiting</span><span class="v">${sv.waiting}</span><span class="n">orders still open</span></div>` : ''}
+      <div class="dc-tile ${sv.undoneByManager ? 'warn' : 'none'}"><span class="k">Undone by manager</span><span class="v">${sv.undoneByManager}</span><span class="n">${sv.undoneByManager ? 'see below' : 'none'}</span></div>
+      <div class="dc-tile ${sv.undoneByServer ? 'warn' : 'none'}"><span class="k">Undone by server (2 min)</span><span class="v">${sv.undoneByServer}</span><span class="n">${sv.serverUndos.map((x) => `${x.name} ${x.n}`).join(' · ') || 'none'}</span></div>
+      <div class="dc-tile ${sv.undoneNotServed.length ? 'bad' : 'none'}"><span class="k">Undone, not served again</span><span class="v">${sv.undoneNotServed.length}</span><span class="n">${sv.undoneNotServed.length ? 'check' : 'none'}</span></div>
+      <div class="dc-tile ${sv.managerMarks ? 'warn' : 'none'}"><span class="k">Served by manager, no photo</span><span class="v">${sv.managerMarks}</span><span class="n">${sv.managerMarks ? 'see below' : 'none'}</span></div>
+      <div class="dc-tile ${sv.wrongPins ? 'warn' : 'none'}"><span class="k">Wrong server PINs</span><span class="v">${sv.wrongPins}</span><span class="n">${sv.wrongPins ? 'someone may be guessing' : 'none'}</span></div></div>
+    ${sv.worst.length ? html`<h3 style="margin:0">Most late</h3><ul class="dc-list">${sv.worst.map((w) => html`<li><span>${w.place} · ${w.qty} × ${w.name}</span><strong>${w.lateMins} min late · ${time(w.servedAt)} · ${w.by ?? ''}${photo(w)}</strong></li>`)}</ul>` : ''}
+    ${sv.log.length ? html`<h3 style="margin:0">Undos and manager taps</h3><div class="scroll"><table class="t"><thead><tr><th>Time</th><th>Table · item</th><th>What</th><th>Who</th><th>Reason</th></tr></thead><tbody>
+      ${sv.log.map((e) => html`<tr><td>${time(e.at)}</td><td>${e.ref}</td><td>${e.kind === 'serve_manager' ? 'Served by manager, no photo' : e.server ? 'Undone by server within 2 min' : 'Undone by manager'}</td><td>${e.by ?? ''}</td><td>${e.reason ?? ''}</td></tr>`)}
+      ${sv.undoneNotServed.map((x) => html`<tr><td>${time(x.at)}</td><td>${x.place} · ${x.qty} × ${x.name}</td><td><span class="badge bad">Undone, not served again</span></td><td>${x.by ?? ''}</td><td>${x.reason ?? ''}</td></tr>`)}</tbody></table></div>` : ''}
+    <p class="small quiet" style="margin:0">Late is worked out from the first time an item was marked served, so an undo never makes a late item look on time. Times can't be typed or changed.</p></section>`;
+}
+async function servingTab(head, from, to) {
+  const r = await api('GET', `${B()}/reports/serving?from=${from}&to=${to}`);
+  const pctLate = (x) => (x.marked ? `${Math.round((x.late / x.marked) * 100)}%` : '');
+  const table = (title, rows, label, extra = false) => html`<section class="panel"><h2>${title}</h2>${rows.length ? html`<div class="scroll"><table class="t"><thead><tr><th>${label}</th><th class="num">Timed</th><th class="num">Late</th><th class="num">Share late</th><th class="num">Not marked</th><th class="num">Avg time (min)</th>${extra ? html`<th class="num">Set (min)</th>` : ''}</tr></thead><tbody>
+    ${rows.map((x) => html`<tr><td>${x.label ?? x.key}</td><td class="num">${x.timed}</td><td class="num">${x.late}</td><td class="num">${pctLate(x)}</td><td class="num">${x.notMarked || ''}</td><td class="num">${x.avgMins ?? ''}</td>${extra ? html`<td class="num">${x.setMins}</td>` : ''}</tr>`)}</tbody></table></div>` : html`<p class="quiet">Nothing timed.</p>`}</section>`;
+  rerender = () => paint(shell('#/reports', html`${head}
+    <div class="kpis">${kpi('Items timed', String(r.timed), r.marked ? `${Math.round((r.onTime / r.marked) * 100)}% of served on time` : '')}${kpi('Late', String(r.late), r.late ? `average ${r.avgLateMins} min late` : '', r.late ? 'bad' : '')}
+      ${kpi('Not marked served', String(r.notMarked), 'bill closed, never marked: not counted as late or on time', r.notMarked ? 'warn' : '')}${r.waiting ? kpi('Still waiting', String(r.waiting), 'orders still open') : ''}</div>
+    <p class="small quiet" style="margin:-4px 0 12px">Time is from the KOT to when the item was first marked served. "Set" is the serve time the KOT was sent with. An item often late may have its time set too low.</p>
+    <div class="stack">${table('By item', r.byItem, 'Item', true)}${table('By hour the KOT was sent', r.byHour.map((x) => ({ ...x, label: `${x.key}:00` })), 'Hour')}
+      ${table('By day', r.byDay.map((x) => ({ ...x, label: dayName(x.key) })), 'Shift')}${table('By server', r.byServer, 'Server')}</div>`));
+  rerender();
+}
 
 route();
 
