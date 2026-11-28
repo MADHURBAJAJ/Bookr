@@ -1,4 +1,4 @@
-// Approving expenses at once, learnt heads, notices and removed lines (approved 28 Nov 2026, migration 0047).
+// Approving expenses at once, learnt heads, notices and removed lines (approved 28 Nov 2026, migration 0048).
 // Invented schools, people and amounts.
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addMember, businessWithAllRoles, makeUser, resetDb, signIn, sql } from './helpers';

@@ -64,7 +64,7 @@ export interface EntryRow {
   /** An expense or other money in: the owner's review (null = waiting), who and the note. */
   reviewStatus: 'approved' | 'rejected' | null; reviewNote: string | null; reviewedByName: string | null;
   /** An expense: the school it is for (28 Nov 2026), the book's own school unless another was chosen. */
-  forBranchId: string | null; forBranchName: string | null;
+  forBranchId: string | null; forBranchName: string | null; forCommon: number | null;
   /** Last change (audit log), if the line was edited. */
   editedAt: number | null; editedByName: string | null;
   /** Written by the Owner settling a count (changed only by undoing the settle). */
@@ -98,6 +98,7 @@ export async function bookDay(db: DB, businessId: string, book: Book, day: strin
         e.review_status AS reviewStatus, e.review_note AS reviewNote, ru.name AS reviewedByName,
         CASE WHEN e.kind = 'expense' THEN coalesce(e.for_branch_id, ?) END AS forBranchId,
         CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName,
+        CASE WHEN e.kind = 'expense' THEN coalesce(fb.is_common, 0) END AS forCommon,
         EXISTS (SELECT 1 FROM cash_counts k WHERE k.settle_entry_id = e.id) AS fromSettle,
         (SELECT l.created_at FROM audit_log l WHERE l.row_table = 'cash_entries' AND l.row_id = e.id AND l.action = 'cashbook.entry.edit' ORDER BY l.id DESC LIMIT 1) AS editedAt,
         (SELECT lu.name FROM audit_log l LEFT JOIN users lu ON lu.id = l.user_id
@@ -295,10 +296,11 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
     bookDays(db, book, start, through),
     all<{ id: string; day: string; kind: EntryKind; amountPaise: number; narration: string | null; headName: string | null; partyName: string | null;
       reviewStatus: 'approved' | 'rejected' | null; feeReceipts: number | null; feeFirst: string | null; feeLast: string | null; enteredByName: string | null;
-      forBranchName: string | null }>(db,
+      forBranchName: string | null; forCommon: number | null }>(db,
       `SELECT e.id, e.day, e.kind, e.amount_paise AS amountPaise, e.narration, h.name AS headName, p.name AS partyName, e.review_status AS reviewStatus,
         e.fee_receipts AS feeReceipts, e.fee_first AS feeFirst, e.fee_last AS feeLast, u.name AS enteredByName,
-        CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName
+        CASE WHEN e.kind = 'expense' THEN coalesce(fb.name, ?) END AS forBranchName,
+        CASE WHEN e.kind = 'expense' THEN coalesce(fb.is_common, 0) END AS forCommon
       FROM cash_entries e LEFT JOIN heads h ON h.id = e.head_id LEFT JOIN parties p ON p.id = e.party_id LEFT JOIN users u ON u.id = e.entered_by
         LEFT JOIN branches fb ON fb.id = e.for_branch_id
       WHERE e.account_id = ? AND e.day >= ? AND e.day <= ? ORDER BY e.day, e.entered_at`, book.branchName, book.id, start, through),
@@ -312,11 +314,12 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
   const t = { feePaise: 0, receiptsPaise: 0, expensesPaise: 0, handedPaise: 0 };
   const exp = { approved: { n: 0, paise: 0 }, waiting: { n: 0, paise: 0 }, rejected: { n: 0, paise: 0 } };
   const byBranch = new Map<string, number>();
+  const commonNames = new Set<string>();
   let prev = opening;
   const out2 = days.map((d) => {
     const ls = lines.filter((l) => l.day === d.day).map((l) => ({
       kind: l.kind, amountPaise: l.amountPaise, narration: l.narration, headName: l.headName, reviewStatus: l.reviewStatus,
-      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName, forBranchName: l.forBranchName,
+      feeReceipts: l.feeReceipts, feeFirst: l.feeFirst, feeLast: l.feeLast, enteredByName: l.enteredByName, forBranchName: l.forBranchName, forCommon: !!l.forCommon,
       other: l.kind === 'handover_out' ? toName.get(l.id) ?? l.partyName : l.kind === 'handover_in' ? fromName.get(l.id) ?? null : null,
     }));
     for (const l of ls) {
@@ -328,6 +331,7 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
         const s = exp[l.reviewStatus ?? 'waiting']; s.n += 1; s.paise += l.amountPaise;
         const k = l.forBranchName ?? 'No school';
         byBranch.set(k, (byBranch.get(k) ?? 0) + l.amountPaise);
+        if (l.forCommon) commonNames.add(k);
       }
     }
     // Once the fee day sheet is in, the sheet's cash counts instead of the typed total: the difference is its own line.
@@ -340,7 +344,7 @@ export async function bookReport(db: DB, businessId: string, book: Book, from: s
   });
   return { book: head, from: start, through, openingPaise: opening, days: out2,
     totals: { ...t, inHandPaise: prev }, expenses: exp, daysCounted: out2.filter((d) => d.count).length,
-    expensesByBranch: [...byBranch].map(([branch, paise]) => ({ branch, paise })) };
+    expensesByBranch: [...byBranch].map(([branch, paise]) => ({ branch, paise, common: commonNames.has(branch) })) };
 }
 
 const MONTHS = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/g;
