@@ -49,23 +49,3 @@ describe('check in now, room later', () => {
     expect(await q("SELECT room FROM room_status WHERE room LIKE 'Waiting for room%'")).toEqual([]);
   });
 });
-
-describe('move in Djubo reminder', () => {
-  it('lists a guest whose room differs from Djubo until Djubo has the same room', async () => {
-    const s = await setupBusiness();
-    const { B, owner, counter, ok } = s;
-    await ok(owner.call('PUT', `${B}/tables`, { sections: [{ name: 'Deluxe', kind: 'rooms', tables: ['XIV A', 'XV'] }] }));
-    const day = (await ok(owner.get('/me'))).business.shiftDay;
-    const out = new Date(Date.parse(day) + 86_400_000).toISOString().slice(0, 10);
-    const id = crypto.randomUUID();
-    await q(`INSERT INTO bookings (id, business_id, source, ext_ref, guest_name, room_type, room_labels, rooms, check_in, check_out, status, amount_paise, paid_paise, created_at, updated_at)
-      VALUES (?, ?, 'djubo', 'DJ-MV', 'Moved Guest', 'Deluxe', 'XIVA', 1, ?, ?, 'approved', 100000, 0, ?, ?)`, id, s.businessId, day, out, Date.now(), Date.now());
-    await ok(counter.post(`${B}/stays`, { room: 'XV', guestName: 'Moved Guest', bookingId: id }));
-    let t = await ok(counter.get(`${B}/frontdesk/today`));
-    expect(t.djuboMove.map((x: any) => [x.guestName, x.pos, x.djubo])).toEqual([['Moved Guest', ['XV'], ['XIVA']]]);
-    // Djubo's next email has the guest in XV: the reminder goes. "XIV A" and "XIVA" count as the same.
-    await q("UPDATE bookings SET room_labels = 'XV' WHERE id = ?", id);
-    t = await ok(counter.get(`${B}/frontdesk/today`));
-    expect(t.djuboMove).toEqual([]);
-  });
-});

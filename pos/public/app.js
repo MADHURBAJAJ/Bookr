@@ -1982,8 +1982,6 @@ function todayView() {
   const items = [
     ...fd.alerts.notInDjubo.map((x) => ({ tone: x.level === 'red' ? 'bad' : 'warn', icon: '!', title: `Not in Djubo yet: ${x.guestName}`, sub: `${x.rooms} · ${dayName(x.checkIn)} · made ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h` : `${x.minutes} min`} ago`, act: 'resOpen', id: x.id })),
     ...(fd.alerts.unplaced ? [{ tone: 'bad', icon: '!', title: `Djubo could not place ${plural(fd.alerts.unplaced, 'booking')}`, sub: 'Create it in Djubo by hand', act: 'goTo', href: '#/rooms/list' }] : []),
-    ...(fd.djuboMove ?? []).map((x) => ({ tone: 'warn', icon: '⇄', title: `Move in Djubo: ${x.guestName}`,
-      sub: `In ${x.pos.join(', ')} here; Djubo has ${x.djubo.join(', ')}. Move them in Djubo; this goes when Djubo's email matches`, act: 'roomBill', id: x.stayId })),
     ...(cache.stays ?? []).filter((x) => String(x.room).startsWith(WAITING_ROOM)).map((x) => ({ tone: 'warn', icon: '⌂', title: `Waiting for a room: ${x.guestName}`,
       sub: 'Checked in, no room yet. Give a room when one is free and clean', act: 'giveRoom', id: x.id })),
     ...(fd.nightsNotCharged ?? []).map((x) => ({ tone: 'bad', icon: '₹', title: `Nights not charged: ${x.room} · ${x.guestName}`,
