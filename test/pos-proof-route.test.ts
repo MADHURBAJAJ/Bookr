@@ -62,6 +62,14 @@ describe('POST /pos/proof', () => {
     expect(r.json.listener).toEqual({ lastSeenAt: null, state: null });
   });
 
+  it('a busy shift with more than 50 photos still answers (D1 takes at most 100 bound values)', async () => {
+    for (let k = 0; k < 75; k++) await add({ kind: 'upi', amount: 100 + k, sent: at(10, 0) + k * 60_000 });
+    const r = await ask({ businessId: bid, shiftDay: '2026-11-24', startHour: 8, bills: [bill('C261124007', 100, 'upi', at(10, 0))] });
+    expect(r.status).toBe(200);
+    expect(r.json.rows[0].status).toBe('matched');
+    expect(r.json.extras).toHaveLength(74);
+  });
+
   it('refuses a wrong key, another business and bad bills', async () => {
     expect((await ask({ businessId: bid, shiftDay: '2026-11-24', bills: [] }, 'wrong')).status).toBe(401);
     expect((await ask({ businessId: crypto.randomUUID(), shiftDay: '2026-11-24', bills: [] })).status).toBe(401);

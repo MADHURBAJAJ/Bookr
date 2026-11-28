@@ -308,8 +308,9 @@ export async function loadProof(db: DB, businessId: string, from: number, to: nu
   const reading = rows.filter((r) => (r.read_status === 'waiting' || r.read_status === 'reading') && r.sent_at >= from && r.sent_at < to).length;
   const ids = items.map((i) => i.id);
   const pairs: [string, string][] = [];
-  for (let k = 0; k < ids.length; k += 80) {
-    const part = ids.slice(k, k + 80);
+  // 40 at a time: each id is bound twice, and D1 refuses more than 100 bound values (a busy shift has well over 50 photos).
+  for (let k = 0; k < ids.length; k += 40) {
+    const part = ids.slice(k, k + 40);
     const marks = part.map(() => '?').join(',');
     for (const p of await all<{ upi_item_id: string; bill_item_id: string }>(db,
       `SELECT upi_item_id, bill_item_id FROM wa_pairs WHERE upi_item_id IN (${marks}) OR bill_item_id IN (${marks})`, ...part, ...part)) {
