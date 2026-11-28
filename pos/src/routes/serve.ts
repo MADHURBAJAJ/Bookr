@@ -67,6 +67,7 @@ serveRoutes.post('/serve/signin', async (c) => {
   const bid = typeof data.businessId === 'string' ? data.businessId : '';
   if (!isUuid(bid)) fail(404, 'This Serve link is not right. Ask the manager for the link.');
   const pin = typeof data.pin === 'string' ? data.pin : '';
+  const phone = mobileOf(data.phone);
   const biz = await one<{ status: string }>(c.env.DB, 'SELECT status FROM businesses WHERE id = ?', bid);
   if (!biz) fail(404, 'This Serve link is not right. Ask the manager for the link.');
   if (biz.status !== 'active') fail(403, 'This restaurant is paused.');
@@ -76,12 +77,13 @@ serveRoutes.post('/serve/signin', async (c) => {
   const conn = await connOf(c, bid);
   const tr = await tries(c.env.DB, bid, conn, t);
   if (tr.wrong >= tr.limit) fail(429, 'Too many wrong PINs from this connection. Wait 15 minutes, or ask a manager to unlock it.');
-  const sv = /^\d{6}$/.test(pin) ? await one<{ id: string; pin_hash: string }>(c.env.DB,
-    'SELECT id, pin_hash FROM servers WHERE business_id = ? AND pin_key = ? AND active = 1', bid, await pinKey(bid, pin)) : null;
+  // The mobile number says who it is (28 Nov 2026); the PIN proves it.
+  const sv = /^\d{6}$/.test(pin) && phone ? await one<{ id: string; pin_hash: string }>(c.env.DB,
+    'SELECT id, pin_hash FROM servers WHERE business_id = ? AND phone = ? AND active = 1', bid, phone) : null;
   const ok = await verifyPassword(pin, sv?.pin_hash ?? DUMMY_HASH);
   if (!sv || !ok) {
     await stmt(c.env.DB, 'INSERT INTO serve_signins (business_id, conn, ok, server_id, shift_day, at) VALUES (?, ?, 0, NULL, ?, ?)', bid, conn, day, t).run();
-    fail(401, tr.wrong + 1 >= tr.limit ? 'Wrong PIN. Too many wrong PINs: this connection is blocked for 15 minutes.' : 'Wrong PIN.');
+    fail(401, tr.wrong + 1 >= tr.limit ? 'Wrong mobile number or PIN. Too many tries: this connection is blocked for 15 minutes.' : 'Wrong mobile number or PIN.');
   }
   const token = randomToken();
   await c.env.DB.batch([
@@ -298,28 +300,37 @@ serveRoutes.post(`${B}/serving/unblock`, requireAction('serve.manage'), async (c
 // ---------- servers (the Owner adds and removes them, in Settings › Staff)
 
 serveRoutes.get(`${B}/servers`, requireAction('staff.manage'), async (c) => {
-  const rows = await all<{ id: string; name: string; active: number; created_at: number; last_seen_at: number | null }>(c.env.DB,
-    'SELECT id, name, active, created_at, last_seen_at FROM servers WHERE business_id = ? ORDER BY active DESC, name', c.get('businessId'));
-  return c.json({ servers: rows.map((r) => ({ id: r.id, name: r.name, active: !!r.active, createdAt: r.created_at, lastSeenAt: r.last_seen_at })) });
+  const rows = await all<{ id: string; name: string; phone: string | null; active: number; created_at: number; last_seen_at: number | null }>(c.env.DB,
+    'SELECT id, name, phone, active, created_at, last_seen_at FROM servers WHERE business_id = ? ORDER BY active DESC, name', c.get('businessId'));
+  return c.json({ servers: rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, active: !!r.active, createdAt: r.created_at, lastSeenAt: r.last_seen_at })) });
 });
 
-async function checkPin(c: Context<AppEnv>, pin: unknown, except: string | null): Promise<{ key: string; hash: string }> {
+/** A 10-digit Indian mobile number from what was typed (+91, spaces and dashes allowed), or null. */
+const mobileOf = (v: unknown) => { const d = typeof v === 'string' ? v.replace(/\D/g, '') : ''; const m = d.length === 12 && d.startsWith('91') ? d.slice(2) : d; return /^[6-9]\d{9}$/.test(m) ? m : null; };
+const SIMPLE_PINS = new Set(['123456', '654321', '012345', '543210', '123123', '112233']);
+async function checkPin(c: Context<AppEnv>, pin: unknown, _except: string | null): Promise<{ key: string; hash: string }> {
   if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) fail(400, 'A server PIN is 6 digits.');
-  const bid = c.get('businessId');
-  const key = await pinKey(bid, pin);
-  if (await one(c.env.DB, 'SELECT 1 FROM servers WHERE business_id = ? AND pin_key = ? AND active = 1 AND id <> ?', bid, key, except ?? '')) fail(409, 'Another server has this PIN. Choose another.');
-  return { key, hash: await hashPassword(pin) };
+  // The mobile says who it is (28 Nov 2026), so PINs may repeat between servers; very easy ones are refused.
+  if (/^(\d)\1{5}$/.test(pin) || SIMPLE_PINS.has(pin)) fail(400, 'That PIN is too easy to guess. Choose another.');
+  return { key: await pinKey(c.get('businessId'), pin), hash: await hashPassword(pin) };
+}
+async function checkPhone(c: Context<AppEnv>, v: unknown, except: string | null) {
+  const phone = mobileOf(v);
+  if (!phone) fail(400, 'Type the server\'s 10-digit mobile number.');
+  if (await one(c.env.DB, 'SELECT 1 FROM servers WHERE business_id = ? AND phone = ? AND active = 1 AND id <> ?', c.get('businessId'), phone, except ?? '')) fail(409, 'Another server has this mobile number.');
+  return phone;
 }
 
 serveRoutes.post(`${B}/servers`, requireAction('staff.manage'), async (c) => {
   const data = await body(c);
   const name = text(data, 'name', 'Name', { max: 60 })!;
+  const phone = await checkPhone(c, data.phone, null);
   const p = await checkPin(c, data.pin, null);
   const id = newId();
   const bid = c.get('businessId');
   await c.env.DB.batch([
-    stmt(c.env.DB, 'INSERT INTO servers (id, business_id, name, pin_key, pin_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)', id, bid, name, p.key, p.hash, now()),
-    audit(c.env.DB, bid, c.get('staff').id, 'server.create', 'servers', id, null, { name }),
+    stmt(c.env.DB, 'INSERT INTO servers (id, business_id, name, phone, pin_key, pin_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', id, bid, name, phone, p.key, p.hash, now()),
+    audit(c.env.DB, bid, c.get('staff').id, 'server.create', 'servers', id, null, { name, phone: `••${phone.slice(-4)}` }),
   ]);
   return c.json({ id }, 201);
 });
@@ -328,7 +339,7 @@ serveRoutes.post(`${B}/servers`, requireAction('staff.manage'), async (c) => {
 serveRoutes.put(`${B}/servers/:id`, requireAction('staff.manage'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one<{ name: string; active: number }>(c.env.DB, 'SELECT name, active FROM servers WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one<{ name: string; active: number; phone: string | null }>(c.env.DB, 'SELECT name, active, phone FROM servers WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Server not found.');
   const data = await body(c);
   const name = data.name === undefined ? before.name : text(data, 'name', 'Name', { max: 60 })!;
@@ -336,8 +347,12 @@ serveRoutes.put(`${B}/servers/:id`, requireAction('staff.manage'), async (c) => 
   const active = data.active === undefined ? before.active : data.active ? 1 : 0;
   const p = data.pin !== undefined && data.pin !== '' ? await checkPin(c, data.pin, id) : null;
   if (active && !before.active && !p) fail(400, 'Give a new PIN to bring a server back.');
+  const phone = data.phone !== undefined && data.phone !== '' ? await checkPhone(c, data.phone, id) : before.phone;
+  if (active && !phone) fail(400, 'Type the server\'s 10-digit mobile number.');
+  const phoneChanged = phone !== before.phone;
   await c.env.DB.batch([
-    stmt(c.env.DB, `UPDATE servers SET name = ?, active = ?${p ? ', pin_key = ?, pin_hash = ?' : ''} WHERE id = ?`, ...[name, active, ...(p ? [p.key, p.hash] : []), id]),
+    stmt(c.env.DB, `UPDATE servers SET name = ?, active = ?, phone = ?${p ? ', pin_key = ?, pin_hash = ?' : ''} WHERE id = ?`, ...[name, active, phone, ...(p ? [p.key, p.hash] : []), id]),
+    ...(phoneChanged ? [stmt(c.env.DB, 'DELETE FROM serve_sessions WHERE server_id = ?', id)] : []),
     ...(active ? [] : [stmt(c.env.DB, 'DELETE FROM serve_sessions WHERE server_id = ?', id)]),
     ...(p ? [stmt(c.env.DB, 'DELETE FROM serve_sessions WHERE server_id = ?', id)] : []),
     audit(c.env.DB, bid, c.get('staff').id, 'server.update', 'servers', id, before, { name, active, pinChanged: !!p }),

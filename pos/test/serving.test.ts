@@ -14,9 +14,11 @@ afterEach(() => { clockAt = Date.now(); vi.useRealTimers(); });
 const later = (mins: number) => vi.setSystemTime(Date.now() + mins * MIN);
 
 /** A phone (no counter device): a server signs in on the Serve page. */
-async function phone(businessId: string, pin: string, ip = '203.0.113.7') {
+// Each test server's mobile, by PIN (servers sign in with mobile number and PIN since 28 Nov 2026).
+const MOBILE: Record<string, string> = { '482915': '9800011101', '551177': '9800011102' };
+async function phone(businessId: string, pin: string, ip = '203.0.113.7', mobile = MOBILE[pin] ?? '9800011101') {
   const p = new Client();
-  const r = await p.call('POST', '/serve/signin', { businessId, pin }, { 'CF-Connecting-IP': ip });
+  const r = await p.call('POST', '/serve/signin', { businessId, phone: mobile, pin }, { 'CF-Connecting-IP': ip });
   return { p, r };
 }
 async function photo(p: Client, batch: string) {
@@ -37,7 +39,7 @@ async function business() {
     const i = item(n);
     await ok(owner.put(`${B}/menu/${i.id}`, { name: i.name, price: String(i.pricePaise / 100), category: i.category, station: i.station, serveMins: m }));
   }
-  const server = (await ok(owner.post(`${B}/servers`, { name: 'Anil', pin: '482915' }))).id;
+  const server = (await ok(owner.post(`${B}/servers`, { name: 'Anil', phone: '98000 11101', pin: '482915' }))).id;
   return { ...s, server };
 }
 
@@ -161,10 +163,17 @@ describe('serving time', () => {
   it('keeps servers to the Serve page: PIN rules, wrong-PIN blocks per connection, removal and day close', async () => {
     const s = await business();
     const { B, owner, counter, ok, businessId } = s;
-    // 6 digits, and unique among servers. Only the Owner adds servers.
-    expect((await owner.post(`${B}/servers`, { name: 'Short', pin: '1234' })).status).toBe(400);
-    expect((await owner.post(`${B}/servers`, { name: 'Twin', pin: '482915' })).status).toBe(409);
-    expect((await counter.post(`${B}/servers`, { name: 'X', pin: '111222' })).status).toBe(403);
+    // A mobile number (one per active server) and 6 digits, not too easy. Only the Owner adds servers.
+    expect((await owner.post(`${B}/servers`, { name: 'Short', phone: '9800011199', pin: '1234' })).status).toBe(400);
+    expect((await owner.post(`${B}/servers`, { name: 'No mobile', pin: '482916' })).status).toBe(400);
+    expect((await owner.post(`${B}/servers`, { name: 'Easy', phone: '9800011198', pin: '111111' })).status).toBe(400);
+    expect((await owner.post(`${B}/servers`, { name: 'Twin', phone: '+91 98000-11101', pin: '482917' })).status).toBe(409);
+    expect((await counter.post(`${B}/servers`, { name: 'X', phone: '9800011197', pin: '111222' })).status).toBe(403);
+    // The same PIN on another mobile is fine; the mobile says who it is.
+    const same = (await ok(owner.post(`${B}/servers`, { name: 'Same PIN', phone: '9800011196', pin: '482915' }))).id;
+    expect((await phone(businessId, '482915', '198.51.100.9', '9800011196')).r.status).toBe(200);
+    expect((await phone(businessId, '482915', '198.51.100.9', '9800011195')).r.status).toBe(401);   // no such mobile
+    await ok(owner.put(`${B}/servers/${same}`, { active: false }));
     // A server's sign-in opens nothing else: no staff route, no other business.
     const { p } = await phone(businessId, '482915');
     expect((await p.get(`${B}/orders`)).status).toBe(401);
@@ -184,17 +193,17 @@ describe('serving time', () => {
     await ok(owner.post(`${B}/serving/unblock`, { conn: blocks[0].conn }));
     expect((await phone(businessId, '482915', bad)).r.status).toBe(200);
     const day = (await ok(owner.get(`${B}/serving`))).shiftDay;
-    expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving.wrongPins).toBe(WRONG_LIMIT + 1);
+    expect((await ok(owner.get(`${B}/reports/daily-check?day=${day}`))).serving.wrongPins).toBe(WRONG_LIMIT + 2);   // + the try with a mobile no server has
 
     // Removed: the open phone stops at its next tap, and the PIN no longer works.
     await ok(owner.put(`${B}/servers/${s.server}`, { active: false }));
     expect((await p.get('/serve/kots')).status).toBe(401);
     expect((await phone(businessId, '482915', '198.51.100.4')).r.status).toBe(401);
     const list = (await ok(owner.get(`${B}/servers`))).servers;
-    expect(list[0]).toMatchObject({ name: 'Anil', active: false });
+    expect(list.find((x: any) => x.name === 'Anil')).toMatchObject({ active: false, phone: '9800011101' });
 
     // Day close ends server sign-ins.
-    await ok(owner.post(`${B}/servers`, { name: 'Sunita', pin: '551177' }));
+    await ok(owner.post(`${B}/servers`, { name: 'Sunita', phone: '9800011102', pin: '551177' }));
     const sun = (await phone(businessId, '551177')).p;
     expect((await sun.get('/serve/kots')).status).toBe(200);
     await q(`INSERT INTO shift_closes (id, business_id, shift_day, opening_float_paise, counted, counted_paise, expected_paise, difference_paise, totals, closed_at)
@@ -224,7 +233,24 @@ describe('serve page on the home screen', () => {
     const s = await setupBusiness();
     const r = await s.owner.get(`/serve-manifest/${s.businessId}`);
     expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ short_name: 'Serve', start_url: `/#/serve/${s.businessId}`, scope: '/' });
+    expect(r.json).toMatchObject({ short_name: 'Serve', start_url: `/serve/${s.businessId}`, scope: `/serve/${s.businessId}` });
     expect((await s.owner.get('/serve-manifest/not-a-business')).status).toBe(404);
+  });
+});
+
+describe('the Serve page at its own address', () => {
+  it('serves the POS page with the Serve app details from the start; nothing else under /serve/', async () => {
+    const worker = (await import('../src/index')).default;
+    const page = '<html><head><title>Bookr POS</title><link rel="manifest" href="/manifest.webmanifest"></head><body></body></html>';
+    const assets = { fetch: async () => new Response(page, { headers: { 'Content-Type': 'text/html' } }) };
+    const bid = '00000000-0000-4000-8000-00000000abcd';
+    const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+    const r = await worker.fetch(new Request(`https://pos.example.test/serve/${bid}`), { ...env, ASSETS: assets } as never, ctx);
+    expect(r.status).toBe(200);
+    const html = await r.text();
+    expect(html).toContain(`<link rel="manifest" href="/api/serve-manifest/${bid}">`);
+    expect(html).toContain('<title>Serve</title>');
+    expect(html).not.toContain('/manifest.webmanifest');
+    expect((await worker.fetch(new Request('https://pos.example.test/serve/other'), { ...env, ASSETS: assets } as never, ctx)).status).toBe(404);
   });
 });

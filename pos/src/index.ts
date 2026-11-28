@@ -7,7 +7,20 @@ import type { Env } from './types';
 // The POS Worker: /api/* here, the counter screens as static assets (see pos/wrangler.jsonc).
 // Every 5 minutes (cron) it closes a shift nobody closed at the shift's hour, and sends Bookr whatever is still waiting.
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    // A server's own address (28 Nov 2026): the POS page, carrying the Serve app's details from the start, so the phone
+    // installs "Serve" (opening this page) rather than the POS. Nothing about the business is in it but its id.
+    const m = /^\/serve\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i.exec(new URL(request.url).pathname);
+    if (m && env.ASSETS) {
+      const page = await env.ASSETS.fetch(new Request(new URL('/', request.url)));
+      const html = (await page.text())
+        .replace('<link rel="manifest" href="/manifest.webmanifest">', `<link rel="manifest" href="/api/serve-manifest/${m[1].toLowerCase()}">`)
+        .replace('<title>Bookr POS</title>', '<title>Serve</title><meta name="apple-mobile-web-app-title" content="Serve"><meta name="apple-mobile-web-app-capable" content="yes">');
+      const h = new Headers(page.headers);
+      h.set('Content-Type', 'text/html; charset=utf-8'); h.set('Cache-Control', 'no-cache'); h.delete('Content-Length');
+      return new Response(html, { status: 200, headers: h });
+    }
+    if (new URL(request.url).pathname.startsWith('/serve/')) return new Response('Not found', { status: 404 });
     return app.fetch(request, env, ctx);
   },
   // Booking mails forwarded from Gmail (Cloudflare Email Routing → here).

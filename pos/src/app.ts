@@ -52,7 +52,7 @@ app.get('/serve-manifest/:bid', (c) => {
   const bid = c.req.param('bid');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bid)) return c.json({ error: 'Not found.' }, 404);
   return new Response(JSON.stringify({
-    name: 'Bookr Serve', short_name: 'Serve', description: 'Mark food served.', id: `/serve/${bid}`, start_url: `/#/serve/${bid}`, scope: '/',
+    name: 'Bookr Serve', short_name: 'Serve', description: 'Mark food served.', id: `/serve/${bid}`, start_url: `/serve/${bid}`, scope: `/serve/${bid}`,
     display: 'standalone', background_color: '#f2efea', theme_color: '#0f4f4f',
     icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
   }), { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' } });

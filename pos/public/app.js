@@ -207,7 +207,9 @@ async function route() {
   stopLive();
   try {
     // A server's own phone (28 Nov 2026): the Serve page, its own PIN sign-in, nothing else.
-    if (location.hash.startsWith('#/serve/')) return await serveScreen(location.hash.split('/')[2] ?? '');
+    // Its own address since 28 Nov 2026 (/serve/<business>), so the phone installs "Serve"; old #/serve/ links move there.
+    if (location.hash.startsWith('#/serve/')) { location.replace(`/serve/${location.hash.split('/')[2] ?? ''}`); return; }
+    if (servePath()) return await serveScreen(servePath());
     // A station's own device shows its KOTs; nobody signs in on it.
     if (location.hash.startsWith('#/station')) return await stationScreen();
     // Bookr POS admin: its own sign-in, separate from every restaurant's.
@@ -7017,7 +7019,11 @@ function startLive(refresh) {
   }, 30_000);
 }
 
-// ----- the server's phone: #/serve/<business id>
+// ----- the server's phone: /serve/<business id>
+/** The business id when this page is a server's Serve page (/serve/<id>), else ''. */
+const servePath = () => (/^\/serve\/([0-9a-f-]{36})\/?$/i.exec(location.pathname) ?? [])[1] ?? '';
+const SERVE_PHONE_KEY = 'bookr-serve-phone';
+const savedServePhone = () => { try { return localStorage.getItem(SERVE_PHONE_KEY) ?? ''; } catch { return ''; } };
 let serveTimer = null;
 function stopServe() { if (serveTimer) { clearInterval(serveTimer); serveTimer = null; } }
 async function serveCall(method, path, body, type = 'application/json') {
@@ -7074,7 +7080,7 @@ async function serveScreen(bid) {
       if (e.status === 401) { ui.sv.screen = 'pin'; ui.sv.data = null; } else ui.sv.offline = true;
     }
     // Only the list redraws by itself; a KOT being served stays as it is until the server is done.
-    if (location.hash.startsWith('#/serve/') && ui.sv.screen !== 'kot') paintServe();
+    if (servePath() && ui.sv.screen !== 'kot') paintServe();
   };
   ui.sv.tick = tick;
   paintServe();
@@ -7087,7 +7093,17 @@ function paintServe() {
   const top = (title, out) => html`<header class="sv-top"><span>${title}</span>${out ? html`<button type="button" data-act="svOut">Sign out</button>` : ''}</header>`;
   if (sv.screen === 'loading') { root.innerHTML = asHtml(html`<main class="sv">${top('Serve')}<p class="sv-body quiet">Loading…</p></main>`); return; }
   if (sv.screen === 'pin') {
+    const phone = sv.phone ?? savedServePhone();
+    if (!/^\d{10}$/.test(phone) || sv.askPhone) {
+      root.innerHTML = asHtml(html`<main class="sv">${top('Serve · sign in')}<form class="sv-body sv-pin">
+        <label class="f" style="width:min(320px,100%)">Your mobile number<input class="in" id="svPhone" type="tel" inputmode="numeric" autocomplete="tel" maxlength="14" value="${phone}" placeholder="98xxxxxxxx" style="font-size:22px;text-align:center"></label>
+        ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
+        <button class="btn pri big wide" type="submit" data-act="svPhoneGo" data-submit style="width:min(320px,100%)">Next</button>
+        <p class="small quiet">The number the manager added you with.</p></form></main>`);
+      return;
+    }
     root.innerHTML = asHtml(html`<main class="sv">${top('Serve · sign in')}<div class="sv-body sv-pin">
+      <p>Mobile <b>${phone.slice(0, 5)} ${phone.slice(5)}</b> · <button class="linkbtn" type="button" data-act="svPhoneChange">Change</button></p>
       <p>Type your 6-digit PIN</p>
       <div class="sv-dots" aria-label="${sv.pin.length} of 6 digits typed">${[0, 1, 2, 3, 4, 5].map((i) => html`<i class="${i < sv.pin.length ? 'on' : ''}"></i>`)}</div>
       ${sv.err ? html`<p class="sv-err" role="alert">${sv.err}</p>` : ''}
@@ -7101,7 +7117,7 @@ function paintServe() {
     if (!k) { sv.screen = 'list'; return paintServe(); }
     const waiting = k.items.filter((i) => i.servedAt === null);
     const ticked = (i) => sv.whole || sv.ticks[i.lineNo] !== false;
-    root.innerHTML = asHtml(html`<main class="sv">${top(`${k.place} · KOT ${k.kotNo}`, true)}<div class="sv-body">
+    root.innerHTML = asHtml(html`<main class="sv">${top(`${k.place} · KOT ${k.kotNo} · ${time(k.sentAt)}`, true)}<div class="sv-body">
       <button class="btn ghost" type="button" data-act="svBack" style="justify-self:start">‹ Back</button>
       <p class="small quiet" style="margin:0">${sv.whole ? 'Every item below is marked served.' : 'Tick what is going out now. The rest stay on the list.'}</p>
       ${k.items.map((i) => (i.servedAt !== null
@@ -7122,7 +7138,7 @@ function paintServe() {
     ${recent.map((r) => html`<div class="msg ok"><div class="row between"><span>${r.place}: ${plural(r.items, 'item')} served at ${time(r.at)}</span><button class="btn" type="button" data-act="svUndo" data-b="${r.batch}">Undo</button></div>
       <span class="small">Undo is here for 2 minutes. After that, ask a manager.</span></div>`)}
     ${d.kots.length ? d.kots.map((k) => { const left = k.items.filter((i) => i.servedAt === null); return html`<div class="sv-kot ${k.state}">
-      <div class="row between"><b>${k.place} · KOT ${k.kotNo}</b>${svChip(left.sort((a, b) => a.leftMins - b.leftMins)[0])}</div>
+      <div class="row between"><span><b>${k.place} · KOT ${k.kotNo}</b><span class="small quiet"> · ${time(k.sentAt)}</span></span>${svChip(left.sort((a, b) => a.leftMins - b.leftMins)[0])}</div>
       <ul class="sv-items">${k.items.map((i) => (i.servedAt !== null ? html`<li class="done"><span><span class="sv-tick" aria-hidden="true">✓</span> ${i.qty} × ${i.name}</span><span class="small">served ${time(i.servedAt)}</span></li>`
         : html`<li><span>${i.qty} × ${i.name}</span></li>`))}</ul>
       <div class="sv-btns"><button class="btn pri" type="button" data-act="svOpen" data-id="${k.kotId}" data-whole="1">${left.length > 1 ? 'Complete' : 'Served'}</button>${left.length > 1 ? html`<button class="btn" type="button" data-act="svOpen" data-id="${k.kotId}" data-whole="0">Part</button>` : ''}</div></div>`; })
@@ -7134,9 +7150,18 @@ actions.svKey = async (d) => {
   paintServe();
   if (sv.pin.length < 6) return;
   const pin = sv.pin; sv.pin = '';
-  try { await serveCall('POST', '/serve/signin', { businessId: sv.bid, pin }); sv.screen = 'loading'; await sv.tick(); }
+  try { await serveCall('POST', '/serve/signin', { businessId: sv.bid, phone: sv.phone ?? savedServePhone(), pin }); sv.screen = 'loading'; await sv.tick(); }
   catch (e) { sv.err = e.message; paintServe(); }
 };
+actions.svPhoneGo = () => {
+  const d = (document.getElementById('svPhone')?.value ?? '').replace(/\D/g, '');
+  const m = d.length === 12 && d.startsWith('91') ? d.slice(2) : d;
+  if (!/^[6-9]\d{9}$/.test(m)) { ui.sv.err = 'Type your 10-digit mobile number.'; paintServe(); return; }
+  ui.sv.phone = m; ui.sv.askPhone = false; ui.sv.err = null;
+  try { localStorage.setItem(SERVE_PHONE_KEY, m); } catch { /* this visit only */ }
+  paintServe();
+};
+actions.svPhoneChange = () => { ui.sv.askPhone = true; ui.sv.pin = ''; ui.sv.err = null; paintServe(); };
 actions.svOut = async () => { await serveCall('POST', '/serve/signout', {}).catch(() => {}); Object.assign(ui.sv, { screen: 'pin', data: null, pin: '' }); paintServe(); };
 actions.svOpen = (d) => { Object.assign(ui.sv, { screen: 'kot', open: d.id, whole: d.whole === '1', ticks: {}, shot: null, shotUrl: null, err: null }); paintServe(); };
 actions.svBack = () => { ui.sv.screen = 'list'; paintServe(); ui.sv.tick(); };
@@ -7178,7 +7203,7 @@ async function servingScreen() {
     const m = ui.svm;
     paint(shell('#/', html`${pageHead('Serving', `Shift of ${dayName(m.shiftDay)} · timers move every 30 seconds`, html`<a class="btn" href="#/">Back to tables</a>`)}${errorBox()}
       <div class="msg">A server can undo their own tap for 2 minutes. After that, only a manager can, here, with a reason. Every undo and every item marked here shows on the Daily check.
-        Servers sign in at <b>${location.origin}/#/serve/${me.business.id}</b></div>
+        Servers sign in at <b>${location.origin}/serve/${me.business.id}</b></div>
       ${(ui.svBlocks ?? []).length ? html`<section class="panel"><h2>Blocked by wrong server PINs</h2>${ui.svBlocks.map((b) => html`<div class="row between"><span>A connection${b.known ? ' servers use (likely the hotel Wi-Fi)' : ''}: ${b.wrong} wrong PINs, last at ${time(b.last)}. Free again at ${time(b.until)}.</span>
         <button class="btn" type="button" data-act="svUnblock" data-c="${b.conn}">Unlock</button></div>`)}</section>` : ''}
       <section class="panel"><h2>Waiting to be served</h2>
@@ -7211,18 +7236,19 @@ actions.svUnblock = async (d) => { await api('POST', `${B()}/serving/unblock`, {
 
 // ----- Settings › Staff and PINs: servers (Owner)
 function serversPanel() {
-  const link = `${location.origin}/#/serve/${me.business.id}`;
+  const link = `${location.origin}/serve/${me.business.id}`;
   const quiet14 = (s) => s.active && Date.now() - (s.lastSeenAt ?? s.createdAt) > 14 * 86_400_000;
   return html`<section class="panel" style="margin-top:16px"><h2>Servers</h2>
     <p class="quiet small">Servers mark food served on their own phones. Send them this address; they sign in with a 6-digit PIN that works only there and opens only the Serve screen. Remove a server and their PIN stops at once, even on an open phone. Sign-ins end at day close.</p>
     <div class="row"><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
     ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Last signed in</th><th></th></tr></thead><tbody>
-      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}</td><td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
-        <td class="act"><div class="row">${s.active ? html`<a class="btn" href="${`https://wa.me/?text=${encodeURIComponent(serveInvite(s.name, link))}`}" target="_blank" rel="noopener">Send on WhatsApp</a><button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">New PIN</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
+      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}<div class="small quiet">${s.phone ? `${s.phone.slice(0, 5)} ${s.phone.slice(5)}` : html`<span style="color:var(--warn)">No mobile yet: add one (Edit) so they can sign in</span>`}</div></td><td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
+        <td class="act"><div class="row">${s.active ? html`<a class="btn" href="${waTo(s.phone, serveInvite(s.name, link))}" target="_blank" rel="noopener">Send on WhatsApp</a><button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Edit</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
           : html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Bring back</button>`}</div></td></tr>`)}</tbody></table></div>` : html`<p class="quiet">No servers yet.</p>`}
-    <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `New PIN for ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a server'}</h3>
+    <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `Edit ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a server'}</h3>
       ${ui.svEdit ? '' : html`<label class="f">Name<input class="in" data-model="svName" value="${ui.svName ?? ''}"></label>`}
-      <label class="f">PIN (6 digits)<input class="in" inputmode="numeric" maxlength="6" autocomplete="off" data-model="svPin" value="${ui.svPin ?? ''}"></label>
+      <label class="f">Mobile number<input class="in" type="tel" inputmode="numeric" maxlength="14" autocomplete="off" data-model="svPhone" value="${ui.svPhone ?? ''}" placeholder="98xxxxxxxx"></label>
+      <label class="f">${ui.svEdit ? 'New PIN (6 digits, empty: keep)' : 'PIN (6 digits)'}<input class="in" inputmode="numeric" maxlength="6" autocomplete="off" data-model="svPin" value="${ui.svPin ?? ''}"></label>
       <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save PIN' : 'Add server'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
 }
 /** The invite a server gets on WhatsApp (28 Nov 2026), as Bookr's cashier invite: the link, how to put it on the phone, the PIN
@@ -7231,22 +7257,25 @@ const serveInvite = (name, link) => `Hi ${name}, join *${me.business.name}* as a
 
 1. Open this link on your phone: ${link}
 2. Put it on your phone:
-• Android: open the link in Chrome, then tap *Install* (or ⋮ › Add to Home screen)
-• iPhone: open the link in Safari, tap Share ⬆︎ › *Add to Home Screen*
-3. From then on, open *Serve* from its icon and sign in with the 6-digit PIN the manager gives you.`;
+• Samsung: tap the ⬇ (install) in the address bar, or ☰ › Add page to › Home screen
+• Other Android: in Chrome tap *Install* (or ⋮ › Add to Home screen)
+• iPhone: in Safari tap Share ⬆︎ › *Add to Home Screen*
+3. From then on, open *Serve* from its icon. Sign in with your mobile number and the 6-digit PIN the manager gives you.`;
+const waTo = (phone, msg) => `https://wa.me/${phone ? `91${phone}` : ''}?text=${encodeURIComponent(msg)}`;
 actions.svCopyMsg = async (d) => {
   const s = ui.servers.find((x) => x.id === d.id);
-  const msg = serveInvite(s.name, `${location.origin}/#/serve/${me.business.id}`);
+  const msg = serveInvite(s.name, `${location.origin}/serve/${me.business.id}`);
   try { await navigator.clipboard.writeText(msg); flash = { kind: 'ok', text: `Message for ${s.name} copied. Paste it in WhatsApp or SMS; tell them the PIN separately.` }; }
   catch { flash = { kind: 'warn', text: msg }; }
   rerender();
 };
 actions.svCopyLink = async (d) => { await navigator.clipboard?.writeText(d.l).catch(() => {}); flash = { kind: 'ok', text: 'Serve address copied.' }; rerender(); };
-actions.svNewPin = (d) => { ui.svEdit = d.id; ui.svPin = ''; rerender(); };
-actions.svEditNo = () => { ui.svEdit = null; ui.svPin = ''; rerender(); };
+actions.svNewPin = (d) => { ui.svEdit = d.id; ui.svPin = ''; ui.svPhone = ui.servers.find((x) => x.id === d.id)?.phone ?? ''; rerender(); };
+actions.svEditNo = () => { ui.svEdit = null; ui.svPin = ''; ui.svPhone = ''; rerender(); };
 actions.svSave = async () => {
-  if (ui.svEdit) { const s = ui.servers.find((x) => x.id === ui.svEdit); await api('PUT', `${B()}/servers/${s.id}`, { pin: ui.svPin ?? '', active: true }); flash = { kind: 'ok', text: `New PIN saved for ${s.name}. Their old sign-in has ended.` }; }
-  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', pin: ui.svPin ?? '' }); flash = { kind: 'ok', text: `${ui.svName} added. Press Send on WhatsApp next to their name, and tell them the PIN yourself.` }; }
+  if (ui.svEdit) { const s = ui.servers.find((x) => x.id === ui.svEdit); await api('PUT', `${B()}/servers/${s.id}`, { pin: ui.svPin ?? '', phone: ui.svPhone ?? '', active: true }); flash = { kind: 'ok', text: `${s.name} saved.${ui.svPin ? ' Their old sign-in has ended.' : ''}` }; }
+  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', phone: ui.svPhone ?? '', pin: ui.svPin ?? '' }); flash = { kind: 'ok', text: `${ui.svName} added. Press Send on WhatsApp next to their name, and tell them the PIN yourself.` }; }
+  ui.svPhone = ''; ui.svEdit = null;
   route();
 };
 actions.svRemove = async (d) => {
