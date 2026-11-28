@@ -25,6 +25,7 @@ import { proofRoutes } from './routes/proof';
 import { offlineRoutes } from './routes/offline';
 import { whatsappRoutes } from './routes/whatsapp';
 import { serveRoutes } from './routes/serve';
+import { countAppRoutes } from './routes/count-app';
 
 export const app = new Hono<AppEnv>().basePath('/api');
 
@@ -53,6 +54,17 @@ app.get('/serve-manifest/:bid', (c) => {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bid)) return c.json({ error: 'Not found.' }, 404);
   return new Response(JSON.stringify({
     name: 'Bookr Serve', short_name: 'Serve', description: 'Mark food served.', id: `/serve/${bid}`, start_url: `/serve/${bid}`, scope: `/serve/${bid}`,
+    display: 'standalone', background_color: '#f2efea', theme_color: '#0f4f4f',
+    icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
+  }), { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' } });
+});
+
+// The Bar Count app (28 Nov 2026), as the Serve app: added to the home screen from /count/<business id>, it opens there.
+app.get('/count-manifest/:bid', (c) => {
+  const bid = c.req.param('bid');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bid)) return c.json({ error: 'Not found.' }, 404);
+  return new Response(JSON.stringify({
+    name: 'Bookr Bar Count', short_name: 'Bar Count', description: 'Count bar stock.', id: `/count/${bid}`, start_url: `/count/${bid}`, scope: `/count/${bid}`,
     display: 'standalone', background_color: '#f2efea', theme_color: '#0f4f4f',
     icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }],
   }), { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'no-store' } });
@@ -94,6 +106,7 @@ app.route('/', proofRoutes);
 app.route('/', whatsappRoutes);
 app.route('/', offlineRoutes);
 app.route('/', serveRoutes);
+app.route('/', countAppRoutes);
 app.route('/', adminRoutes);
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));

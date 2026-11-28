@@ -130,7 +130,7 @@ settingsRoutes.put(`${B}/tables`, requireAction('menu.edit'), async (c) => {
 // ---------- staff
 
 settingsRoutes.get(`${B}/staff`, requireAction('staff.manage'), async (c) => {
-  return c.json({ staff: await all(c.env.DB, `SELECT id, name, role, email, pin_hash IS NOT NULL AS hasPin, active, support
+  return c.json({ staff: await all(c.env.DB, `SELECT id, name, role, email, pin_hash IS NOT NULL AS hasPin, active, support, role = 'owner' OR count_approve = 1 AS countApprove
     FROM staff WHERE business_id = ? ORDER BY support, active DESC, name`, c.get('businessId')) });
 });
 
@@ -191,7 +191,8 @@ settingsRoutes.post(`${B}/staff`, requireAction('staff.manage'), async (c) => {
   const id = newId();
   try {
     await c.env.DB.batch([
-      stmt(c.env.DB, 'INSERT INTO staff (id, business_id, name, role, email, password_hash, pin_hash, created_at, login_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CASE WHEN ?5 IS NULL THEN NULL ELSE ?1 END)',
+      stmt(c.env.DB, // A new manager starts ticked for Approve counts (28 Nov 2026); the Owner can untick it.
+        'INSERT INTO staff (id, business_id, name, role, email, password_hash, pin_hash, created_at, login_id, count_approve) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CASE WHEN ?5 IS NULL THEN NULL ELSE ?1 END, CASE WHEN ?4 IN (\'owner\', \'manager\') THEN 1 ELSE 0 END)',
         id, c.get('businessId'), f.name, f.role, f.email, f.password ? await hashPassword(f.password) : null, f.pin ? await hashPassword(f.pin) : null, now()),
       audit(c.env.DB, c.get('businessId'), c.get('staff').id, 'staff.create', 'staff', id, null, { name: f.name, role: f.role, email: f.email, pin: !!f.pin }),
     ]);
@@ -225,6 +226,8 @@ settingsRoutes.put(`${B}/staff/:id`, requireAction('staff.manage'), async (c) =>
   }
   const sets = ['name = ?', 'role = ?', 'email = ?', 'active = ?', 'login_id = ?'];
   const vals: unknown[] = [f.name, f.role, f.email, active, f.email ? before.login_id ?? id : null];
+  // Made a manager or owner: ticked for Approve counts, as a new manager is (28 Nov 2026).
+  if (f.role !== before.role && (f.role === 'owner' || f.role === 'manager')) sets.push('count_approve = 1');
   // A person with places at several restaurants has one password: only they change it, and it changes everywhere.
   const sharedLogin = before.login_id ? ((await one<{ n: number }>(c.env.DB, 'SELECT count(*) AS n FROM staff WHERE login_id = ?', before.login_id))?.n ?? 0) > 1 : false;
   if (f.password && sharedLogin && c.get('loginId') !== before.login_id) fail(409, 'This person signs in at other restaurants too: only they can change their password.');

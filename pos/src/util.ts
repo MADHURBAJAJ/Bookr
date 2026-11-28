@@ -79,12 +79,12 @@ export function clock(b: Business, t = now()) {
 }
 
 /** An audit row (before and after as JSON) for the same batch as the change. */
-export function audit(db: DB, businessId: string, staffId: string, action: string, table: string, rowId: string, before: unknown, after: unknown) {
+export function audit(db: DB, businessId: string, staffId: string | null, action: string, table: string, rowId: string, before: unknown, after: unknown) {
   return stmt(db, 'INSERT INTO audit_log (business_id, staff_id, action, row_table, row_id, before, after, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     businessId, staffId, action, table, rowId, before === null ? null : JSON.stringify(before), after === null ? null : JSON.stringify(after), now());
 }
 
-export function event(db: DB, businessId: string, kind: string, ref: string, amountPaise: number | null, reason: string | null, detail: string | null, staffId: string, shiftDay: string) {
+export function event(db: DB, businessId: string, kind: string, ref: string, amountPaise: number | null, reason: string | null, detail: string | null, staffId: string | null, shiftDay: string) {
   return stmt(db, 'INSERT INTO pos_events (business_id, kind, ref, amount_paise, reason, detail, by_staff, shift_day, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     businessId, kind, ref, amountPaise, reason, detail, staffId, shiftDay, now());
 }

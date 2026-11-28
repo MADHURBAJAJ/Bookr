@@ -35,13 +35,18 @@ const pinKey = (bid: string, pin: string) => sha256(`serve-pin:${bid}:${pin}`);
 const connOf = (c: Context<AppEnv>, bid: string) => sha256(`serve-conn:${bid}:${c.req.header('CF-Connecting-IP') ?? 'unknown'}`);
 const photoKey = (bid: string, batch: string) => `pos/${bid}/served/${batch}.jpg`;
 
-interface Server { id: string; name: string; businessId: string; businessName: string; shiftDay: string }
+/** What a person on a phone may use (28 Nov 2026): tick boxes the Owner sets in Settings › Staff and PINs › People on phones. */
+export const ACCESS = ['serve', 'bar_count', 'kitchen_count', 'approve_counts'] as const;
+export type Access = (typeof ACCESS)[number];
+export interface Server { id: string; name: string; businessId: string; businessName: string; shiftDay: string; access: Access[] }
+const accessOf = (v: string | null): Access[] => { try { const a = JSON.parse(v ?? '[]'); return Array.isArray(a) ? ACCESS.filter((x) => a.includes(x)) : []; } catch { return []; } };
 
-async function currentServer(c: Context<AppEnv>): Promise<Server> {
+/** The person signed in on this phone, still active, from a shift not yet closed; with `need`, only if ticked for it. */
+export async function currentServer(c: Context<AppEnv>, need?: Access): Promise<Server> {
   const token = getCookie(c, SERVE_COOKIE);
   if (!token) fail(401, 'Please sign in with your PIN.');
-  const row = await one<{ id: string; name: string; business_id: string; b_name: string; shift_day: string }>(c.env.DB, `
-    SELECT sv.id, sv.name, sv.business_id, b.name AS b_name, ss.shift_day FROM serve_sessions ss
+  const row = await one<{ id: string; name: string; business_id: string; b_name: string; shift_day: string; access: string }>(c.env.DB, `
+    SELECT sv.id, sv.name, sv.business_id, b.name AS b_name, ss.shift_day, sv.access FROM serve_sessions ss
     JOIN servers sv ON sv.id = ss.server_id JOIN businesses b ON b.id = sv.business_id
     WHERE ss.id = ? AND ss.expires_at > ? AND sv.active = 1 AND b.status = 'active'
       AND NOT EXISTS (SELECT 1 FROM shift_closes x WHERE x.business_id = b.id AND x.shift_day >= ss.shift_day)`, await sha256(token), now());
@@ -49,7 +54,9 @@ async function currentServer(c: Context<AppEnv>): Promise<Server> {
     deleteCookie(c, SERVE_COOKIE, { path: '/', secure: true });
     fail(401, 'Please sign in with your PIN.');
   }
-  return { id: row.id, name: row.name, businessId: row.business_id, businessName: row.b_name, shiftDay: row.shift_day };
+  const access = accessOf(row.access);
+  if (need && !access.includes(need)) fail(403, need === 'serve' ? 'You are not set up for the Serve app. Ask the owner.' : 'You are not set up for this. Ask the owner.');
+  return { id: row.id, name: row.name, businessId: row.business_id, businessName: row.b_name, shiftDay: row.shift_day, access };
 }
 
 /** Wrong PINs from this connection in the last 5 minutes, and how many it may have. */
@@ -107,7 +114,7 @@ serveRoutes.post('/serve/signout', async (c) => {
 
 // The running KOTs, most late first, with the server's own taps they may still undo.
 serveRoutes.get('/serve/kots', async (c) => {
-  const s = await currentServer(c);
+  const s = await currentServer(c, 'serve');
   const t = now();
   const [lines] = await Promise.all([
     timedLines(c.env.DB, s.businessId, { running: true, now: t }),
@@ -123,7 +130,7 @@ serveRoutes.get('/serve/kots', async (c) => {
 
 // Mark items of a KOT served (the server's tap, after the photo is taken). The time is now: it cannot be typed.
 serveRoutes.post('/serve/kots/:id/served', async (c) => {
-  const s = await currentServer(c);
+  const s = await currentServer(c, 'serve');
   const data = await body(c);
   const want = data.lines;
   if (!Array.isArray(want) || !want.length || want.length > 50 || !want.every((n) => Number.isInteger(n) && n >= 0)) fail(400, 'Choose what is going out.');
@@ -148,7 +155,7 @@ serveRoutes.post('/serve/kots/:id/served', async (c) => {
 
 // The photo of the KOT and the food for one tap (JPEG, the request body). Only the server who tapped.
 serveRoutes.post('/serve/photo/:batch', async (c) => {
-  const s = await currentServer(c);
+  const s = await currentServer(c, 'serve');
   const batch = c.req.param('batch');
   if (!isUuid(batch)) fail(404, 'Not found.');
   const rows = await all<{ id: string }>(c.env.DB, 'SELECT id FROM kot_served WHERE batch = ? AND business_id = ? AND server_id = ? AND served_at IS NOT NULL', batch, s.businessId, s.id);
@@ -166,7 +173,7 @@ serveRoutes.post('/serve/photo/:batch', async (c) => {
 
 // A server's own undo, for 2 minutes after the tap: the mark is taken away (as if never made) and the undo is logged.
 serveRoutes.post('/serve/undo/:batch', async (c) => {
-  const s = await currentServer(c);
+  const s = await currentServer(c, 'serve');
   const batch = c.req.param('batch');
   const t = now();
   const rows = await all<{ id: string; served_at: number; name: string; place: string }>(c.env.DB, `
@@ -308,9 +315,9 @@ serveRoutes.post(`${B}/serving/unblock`, requireAction('serve.manage'), async (c
 // ---------- servers (the Owner adds and removes them, in Settings › Staff)
 
 serveRoutes.get(`${B}/servers`, requireAction('staff.manage'), async (c) => {
-  const rows = await all<{ id: string; name: string; phone: string | null; active: number; created_at: number; last_seen_at: number | null }>(c.env.DB,
-    'SELECT id, name, phone, active, created_at, last_seen_at FROM servers WHERE business_id = ? ORDER BY active DESC, name', c.get('businessId'));
-  return c.json({ servers: rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, active: !!r.active, createdAt: r.created_at, lastSeenAt: r.last_seen_at })) });
+  const rows = await all<{ id: string; name: string; phone: string | null; active: number; created_at: number; last_seen_at: number | null; access: string }>(c.env.DB,
+    'SELECT id, name, phone, active, created_at, last_seen_at, access FROM servers WHERE business_id = ? ORDER BY active DESC, name', c.get('businessId'));
+  return c.json({ servers: rows.map((r) => ({ id: r.id, name: r.name, phone: r.phone, active: !!r.active, createdAt: r.created_at, lastSeenAt: r.last_seen_at, access: accessOf(r.access) })) });
 });
 
 /** A 10-digit Indian mobile number from what was typed (+91, spaces and dashes allowed), or null. */
@@ -320,6 +327,11 @@ async function checkPin(c: Context<AppEnv>, pin: unknown, _except: string | null
   // The mobile says who it is (28 Nov 2026), so PINs may repeat between servers. Simple PINs (999999) are allowed: the
   // owner's choice; the mobile number and the wrong-try block keep them safe enough.
   return { key: await pinKey(c.get('businessId'), pin), hash: await hashPassword(pin) };
+}
+/** The tick boxes sent from Settings: a list of known accesses. */
+function checkAccess(v: unknown): Access[] {
+  if (!Array.isArray(v) || v.some((x) => !ACCESS.includes(x as Access))) fail(400, 'Choose what this person may use.');
+  return ACCESS.filter((x) => (v as string[]).includes(x));
 }
 async function checkPhone(c: Context<AppEnv>, v: unknown, except: string | null) {
   const phone = mobileOf(v);
@@ -333,11 +345,12 @@ serveRoutes.post(`${B}/servers`, requireAction('staff.manage'), async (c) => {
   const name = text(data, 'name', 'Name', { max: 60 })!;
   const phone = await checkPhone(c, data.phone, null);
   const p = await checkPin(c, data.pin, null);
+  const access = data.access === undefined ? (['serve'] as Access[]) : checkAccess(data.access);
   const id = newId();
   const bid = c.get('businessId');
   await c.env.DB.batch([
-    stmt(c.env.DB, 'INSERT INTO servers (id, business_id, name, phone, pin_key, pin_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', id, bid, name, phone, p.key, p.hash, now()),
-    audit(c.env.DB, bid, c.get('staff').id, 'server.create', 'servers', id, null, { name, phone: `••${phone.slice(-4)}` }),
+    stmt(c.env.DB, 'INSERT INTO servers (id, business_id, name, phone, pin_key, pin_hash, created_at, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', id, bid, name, phone, p.key, p.hash, now(), JSON.stringify(access)),
+    audit(c.env.DB, bid, c.get('staff').id, 'server.create', 'servers', id, null, { name, phone: `••${phone.slice(-4)}`, access }),
   ]);
   return c.json({ id }, 201);
 });
@@ -346,7 +359,7 @@ serveRoutes.post(`${B}/servers`, requireAction('staff.manage'), async (c) => {
 serveRoutes.put(`${B}/servers/:id`, requireAction('staff.manage'), async (c) => {
   const bid = c.get('businessId');
   const id = c.req.param('id');
-  const before = await one<{ name: string; active: number; phone: string | null }>(c.env.DB, 'SELECT name, active, phone FROM servers WHERE id = ? AND business_id = ?', id, bid);
+  const before = await one<{ name: string; active: number; phone: string | null; access: string }>(c.env.DB, 'SELECT name, active, phone, access FROM servers WHERE id = ? AND business_id = ?', id, bid);
   if (!before) fail(404, 'Server not found.');
   const data = await body(c);
   const name = data.name === undefined ? before.name : text(data, 'name', 'Name', { max: 60 })!;
@@ -357,12 +370,14 @@ serveRoutes.put(`${B}/servers/:id`, requireAction('staff.manage'), async (c) => 
   const phone = data.phone !== undefined && data.phone !== '' ? await checkPhone(c, data.phone, id) : before.phone;
   if (active && !phone) fail(400, 'Type the server\'s 10-digit mobile number.');
   const phoneChanged = phone !== before.phone;
+  // A tick taken away works at once: every request from the phone checks the person's ticks.
+  const access = data.access === undefined ? accessOf(before.access) : checkAccess(data.access);
   await c.env.DB.batch([
-    stmt(c.env.DB, `UPDATE servers SET name = ?, active = ?, phone = ?${p ? ', pin_key = ?, pin_hash = ?' : ''} WHERE id = ?`, ...[name, active, phone, ...(p ? [p.key, p.hash] : []), id]),
+    stmt(c.env.DB, `UPDATE servers SET name = ?, active = ?, phone = ?, access = ?${p ? ', pin_key = ?, pin_hash = ?' : ''} WHERE id = ?`, ...[name, active, phone, JSON.stringify(access), ...(p ? [p.key, p.hash] : []), id]),
     ...(phoneChanged ? [stmt(c.env.DB, 'DELETE FROM serve_sessions WHERE server_id = ?', id)] : []),
     ...(active ? [] : [stmt(c.env.DB, 'DELETE FROM serve_sessions WHERE server_id = ?', id)]),
     ...(p ? [stmt(c.env.DB, 'DELETE FROM serve_sessions WHERE server_id = ?', id)] : []),
-    audit(c.env.DB, bid, c.get('staff').id, 'server.update', 'servers', id, before, { name, active, pinChanged: !!p }),
+    audit(c.env.DB, bid, c.get('staff').id, 'server.update', 'servers', id, before, { name, active, pinChanged: !!p, access }),
   ]);
   return c.json({ ok: true });
 });
