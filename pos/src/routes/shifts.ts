@@ -138,7 +138,13 @@ shiftRoutes.post(`${B}/shifts/:day/close`, requireAction('shift.close'), async (
   // Money reception marked in Djubo today needs how it was paid, so cash, UPI and card add up (26 Nov 2026, required).
   const noMode = s.djubo.filter((x) => !x.settlementId);
   if (noMode.length) fail(409, `Pick Cash, UPI or Card for the money marked in Djubo today: ${noMode.map((x) => `${x.guestName ?? x.extRef} ${rs(x.amountPaise)}`).join(', ')}.`);
-  if (s.notCharged.length) fail(409, `No rent for tonight: ${s.notCharged.map((x) => `${x.room} · ${x.guestName}`).join(', ')}. Extend in Djubo (the rent comes with its mail), or a manager extends without Djubo.`);
+  if (s.notCharged.length) {
+    const past = s.notCharged.filter((x) => x.coveredTo < day);
+    const leaving = s.notCharged.filter((x) => x.coveredTo >= day);
+    const names = (l: typeof past) => l.map((x) => `${x.room} · ${x.guestName}`).join(', ');
+    fail(409, [past.length ? `No rent for tonight: ${names(past)}. Extend in Djubo (the rent comes with its mail), or a manager extends without Djubo.` : '',
+      leaving.length ? `Leaving today, not checked out yet: ${names(leaving)}. Check them out, or extend if they stay tonight.` : ''].filter(Boolean).join(' '));
+  }
 
   const data = await body(c);
   // Money reception entered in Djubo with no POS receipt: take it in Rooms first, or say why (24 Nov 2026).

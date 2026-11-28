@@ -3917,9 +3917,18 @@ async function shiftScreen() {
         <p class="small">It closed at ${dateTime(ui.last.closedAt)}. Its cash is still in ${ui.dz ? `${ui.dz.holder}'s` : 'the'} drawer: count it now, or it is counted at the next handover.</p>
         <div class="row"><a class="btn pri" href="#/handover/count">Count the drawer now</a></div></section>` : ''}
       ${block ? html`<section class="panel blockers"><div class="bh"><h2>Before you close</h2><span class="status bad">${block}</span></div>
-        ${(s.notCharged ?? []).length ? html`<div class="msg bad" style="display:block"><strong>No rent for tonight: ${s.notCharged.map((x) => `${x.room} · ${x.guestName}`).join(', ')}</strong>
-          <div class="small">Staying tonight past their booking (rent till ${s.notCharged.map((x) => dayName(x.coveredTo)).join(', ')}). Extend in Djubo (the rent comes with its email, and Continue a new booking), or a manager extends without Djubo.</div>
-          <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+        ${(() => {
+          // Rent till today means they leave today (28 Nov 2026): not "no rent" until they are still here at the close.
+          const past = (s.notCharged ?? []).filter((x) => x.coveredTo < s.shiftDay);
+          const leaving = (s.notCharged ?? []).filter((x) => x.coveredTo >= s.shiftDay);
+          const names = (l) => l.map((x) => `${x.room} · ${x.guestName}`).join(', ');
+          return html`${past.length ? html`<div class="msg bad" style="display:block"><strong>No rent for tonight: ${names(past)}</strong>
+            <div class="small">Staying past their booking (rent till ${past.map((x) => dayName(x.coveredTo)).join(', ')}). Extend in Djubo (the rent comes with its email, and Continue a new booking), or a manager extends without Djubo.</div>
+            <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}
+          ${leaving.length ? html`<div class="msg warn" style="display:block"><strong>Leaving today, not checked out yet: ${names(leaving)}</strong>
+            <div class="small">Check each out when they leave. If one stays tonight, extend in Djubo or a manager extends without Djubo. The day can't close while they are still in house without rent for tonight.</div>
+            <div class="row" style="margin-top:6px"><a class="btn" href="#/rooms">Go to Rooms</a></div></div>` : ''}`;
+        })()}
         ${djOpen.length ? html`<div class="msg warn" style="display:block"><strong>Taken in Djubo today, how it was paid not picked: ${plural(djOpen.length, 'payment')} · ${rs(djOpen.reduce((t, x) => t + x.amountPaise, 0))}</strong>
           <div class="small">Pick Cash, UPI or Card for each, in "Taken in Djubo today" below.</div></div>` : ''}
         ${ui.overdue.length ? html`<div class="msg bad" style="display:block"><strong>Open since an earlier day:</strong> ${ui.overdue.map((o) => `${o.place}${o.bill_no ? ` (${o.bill_no})` : ''} · since ${dayName(o.since)}`).join(', ')}

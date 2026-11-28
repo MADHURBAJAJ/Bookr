@@ -71,7 +71,13 @@ describe('extending a stay through Djubo', () => {
     await q("DELETE FROM debtor_entries WHERE note LIKE '%extra night%' AND business_id = ?", s.businessId);
     const close = await owner.post(`${B}/shifts/${day}/close`, { counted: '0' });
     expect(close.status).toBe(409);
-    expect(close.json.error).toMatch(/No rent for tonight: X · Stay Guest/);
+    // Rent till today: they leave today, so it says so (28 Nov 2026); still in house at the close, it still blocks.
+    expect(close.json.error).toMatch(/Leaving today, not checked out yet: X · Stay Guest/);
+    // Rent till yesterday: staying past the booking with no rent for tonight.
+    await q("UPDATE bookings SET check_out = ? WHERE ext_ref = 'DJ-E1' AND business_id = ?", plus(-1), s.businessId);
+    const late = await owner.post(`${B}/shifts/${day}/close`, { counted: '0' });
+    expect(late.status).toBe(409);
+    expect(late.json.error).toMatch(/No rent for tonight: X · Stay Guest/);
   });
 
   it('a booking continuing a guest in house is their extension: not checked in again, not a no-show', async () => {
