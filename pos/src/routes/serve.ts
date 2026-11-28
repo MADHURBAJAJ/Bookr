@@ -4,7 +4,7 @@
 // 28 Nov 2026), sees only the running KOTs, and marks items served with a photo. A server's sign-in is a separate cookie
 // and table from staff sign-in, so it can never reach a staff route; and every request here checks, on the server, that the
 // server is still active and their sign-in is from a shift not yet closed. Wrong PINs block only the connection they came
-// from: 10 in 15 minutes, or 30 from a connection servers have signed in from before (the hotel Wi-Fi); a manager can unlock.
+// from: 10 in 5 minutes, or 30 from a connection servers have signed in from before (the hotel Wi-Fi); a manager can unlock.
 //
 // The manager's side, on the billing PC (Manager and Owner, checked per request): what is waiting and what was served today,
 // mark a forgotten item served (no photo), undo a mark with a reason, see the photos, unlock a connection. The Owner adds
@@ -24,7 +24,7 @@ const B = '/businesses/:businessId';
 export const SERVE_COOKIE = 'pos_serve';
 const MIN = 60_000;
 const SESSION_MS = 16 * 60 * MIN;
-const TRY_WINDOW_MS = 15 * MIN;
+const TRY_WINDOW_MS = 5 * MIN;   // 5 minutes (28 Nov 2026, owner's choice)
 export const WRONG_LIMIT = 10;
 export const WRONG_LIMIT_KNOWN = 30;
 const KNOWN_MS = 7 * 24 * 60 * MIN;
@@ -52,7 +52,7 @@ async function currentServer(c: Context<AppEnv>): Promise<Server> {
   return { id: row.id, name: row.name, businessId: row.business_id, businessName: row.b_name, shiftDay: row.shift_day };
 }
 
-/** Wrong PINs from this connection in the last 15 minutes, and how many it may have. */
+/** Wrong PINs from this connection in the last 5 minutes, and how many it may have. */
 async function tries(db: D1Database, bid: string, conn: string, t: number) {
   const r = await one<{ wrong: number; known: number }>(db, `SELECT
       (SELECT count(*) FROM serve_signins WHERE business_id = ?1 AND conn = ?2 AND ok = 0 AND cleared_at IS NULL AND at > ?3) AS wrong,
@@ -76,14 +76,14 @@ serveRoutes.post('/serve/signin', async (c) => {
   const day = clock(b, t).shiftDay;
   const conn = await connOf(c, bid);
   const tr = await tries(c.env.DB, bid, conn, t);
-  if (tr.wrong >= tr.limit) fail(429, 'Too many wrong PINs from this connection. Wait 15 minutes, or ask a manager to unlock it.');
+  if (tr.wrong >= tr.limit) fail(429, 'Too many wrong tries. Wait 5 minutes and try again, or ask a manager to unlock it (Counter › Serving).');
   // The mobile number says who it is (28 Nov 2026); the PIN proves it.
   const sv = /^\d{6}$/.test(pin) && phone ? await one<{ id: string; pin_hash: string }>(c.env.DB,
     'SELECT id, pin_hash FROM servers WHERE business_id = ? AND phone = ? AND active = 1', bid, phone) : null;
   const ok = await verifyPassword(pin, sv?.pin_hash ?? DUMMY_HASH);
   if (!sv || !ok) {
     await stmt(c.env.DB, 'INSERT INTO serve_signins (business_id, conn, ok, server_id, shift_day, at) VALUES (?, ?, 0, NULL, ?, ?)', bid, conn, day, t).run();
-    fail(401, tr.wrong + 1 >= tr.limit ? 'Wrong mobile number or PIN. Too many tries: this connection is blocked for 15 minutes.' : 'Wrong mobile number or PIN.');
+    fail(401, tr.wrong + 1 >= tr.limit ? 'Wrong mobile number or PIN. Too many wrong tries: wait 5 minutes and try again.' : 'Wrong mobile number or PIN.');
   }
   const token = randomToken();
   await c.env.DB.batch([
@@ -307,11 +307,10 @@ serveRoutes.get(`${B}/servers`, requireAction('staff.manage'), async (c) => {
 
 /** A 10-digit Indian mobile number from what was typed (+91, spaces and dashes allowed), or null. */
 const mobileOf = (v: unknown) => { const d = typeof v === 'string' ? v.replace(/\D/g, '') : ''; const m = d.length === 12 && d.startsWith('91') ? d.slice(2) : d; return /^[6-9]\d{9}$/.test(m) ? m : null; };
-const SIMPLE_PINS = new Set(['123456', '654321', '012345', '543210', '123123', '112233']);
 async function checkPin(c: Context<AppEnv>, pin: unknown, _except: string | null): Promise<{ key: string; hash: string }> {
   if (typeof pin !== 'string' || !/^\d{6}$/.test(pin)) fail(400, 'A server PIN is 6 digits.');
-  // The mobile says who it is (28 Nov 2026), so PINs may repeat between servers; very easy ones are refused.
-  if (/^(\d)\1{5}$/.test(pin) || SIMPLE_PINS.has(pin)) fail(400, 'That PIN is too easy to guess. Choose another.');
+  // The mobile says who it is (28 Nov 2026), so PINs may repeat between servers. Simple PINs (999999) are allowed: the
+  // owner's choice; the mobile number and the wrong-try block keep them safe enough.
   return { key: await pinKey(c.get('businessId'), pin), hash: await hashPassword(pin) };
 }
 async function checkPhone(c: Context<AppEnv>, v: unknown, except: string | null) {

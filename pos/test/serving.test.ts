@@ -166,7 +166,8 @@ describe('serving time', () => {
     // A mobile number (one per active server) and 6 digits, not too easy. Only the Owner adds servers.
     expect((await owner.post(`${B}/servers`, { name: 'Short', phone: '9800011199', pin: '1234' })).status).toBe(400);
     expect((await owner.post(`${B}/servers`, { name: 'No mobile', pin: '482916' })).status).toBe(400);
-    expect((await owner.post(`${B}/servers`, { name: 'Easy', phone: '9800011198', pin: '111111' })).status).toBe(400);
+    // Simple PINs are allowed (owner's choice, 28 Nov 2026).
+    expect((await owner.post(`${B}/servers`, { name: 'Easy', phone: '9800011198', pin: '999999' })).status).toBe(201);
     expect((await owner.post(`${B}/servers`, { name: 'Twin', phone: '+91 98000-11101', pin: '482917' })).status).toBe(409);
     expect((await counter.post(`${B}/servers`, { name: 'X', phone: '9800011197', pin: '111222' })).status).toBe(403);
     // The same PIN on another mobile is fine; the mobile says who it is.
