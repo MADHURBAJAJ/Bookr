@@ -3802,15 +3802,24 @@ async function creditScreen() {
       <div class="row" style="margin-bottom:8px"><input class="in" type="search" data-model="crQ" data-live value="${ui.crQ ?? ''}" placeholder="Search name or phone" aria-label="Search credit accounts" style="flex:0 1 320px"></div>
       <div class="scroll"><table class="t cards"><thead><tr><th data-sort>Name</th><th class="num" data-sort>Owes</th><th class="num" data-sort>Oldest unpaid</th><th class="num" data-sort>Limit</th><th></th></tr></thead><tbody>
         ${cache.credit.length ? '' : html`<tr><td colspan="5"><p class="empty">No credit accounts yet. One is made when a bill is settled on credit.</p></td></tr>`}
-        ${cache.credit.filter((a) => !ui.crQ || `${a.name} ${a.phone ?? ''}`.toLowerCase().includes(String(ui.crQ).toLowerCase())).map((a) => html`<tr>
-          <td data-label="Name"><strong>${a.name}</strong>${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num" data-label="Owes" data-v="${a.balancePaise}">${rs(a.balancePaise)}</td>
-          <td class="num" data-label="Oldest unpaid" data-v="${a.oldestDays ?? -1}">${a.oldestDays === null || a.oldestDays === undefined ? '—' : html`<span class="status ${a.oldestDays > 30 ? 'bad' : a.oldestDays > 7 ? 'warn' : 'mute'}">${plural(a.oldestDays, 'day')}</span>`}</td>
-          <td class="num" data-label="Limit">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td>
-          <td class="act"><div class="row">${can('debtors.receive') ? html`<button class="btn pri" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button>` : ''}
-            ${a.balancePaise < 0 && can('debtors.receive') ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${a.id}" data-n="${a.name}" data-max="${-a.balancePaise}">Refund advance</button>` : ''}</div></td></tr>`)}
-      </tbody></table></div><p class="small quiet">New credit accounts are made at the settle screen. Every payment prints a numbered receipt. A negative amount owed is an advance.</p>
+        ${crRows(cache.credit.filter((a) => a.balancePaise !== 0))}
+      </tbody></table></div>
+      ${((settled) => (settled.length ? html`<details class="cr-settled" ${ui.crQ ? 'open' : ''}><summary>Settled (${settled.length}): owe nothing now</summary>
+        <div class="scroll"><table class="t cards"><tbody>${crRows(settled)}</tbody></table></div></details>` : ''))(cache.credit.filter((a) => a.balancePaise === 0))}
+      <p class="small quiet">New credit accounts are made at the settle screen. Every payment prints a numbered receipt. A negative amount owed is an advance.</p>
     </section>`));
   rerender();
+}
+/** The Credit page's rows (28 Nov 2026: A to Z whatever the capitals; "Today" and "Yesterday" for the newest unpaid). */
+function crRows(list) {
+  const q = String(ui.crQ ?? '').toLowerCase();
+  const age = (d) => (d === 0 ? 'Today' : d === 1 ? 'Yesterday' : plural(d, 'day'));
+  return list.filter((a) => !q || `${a.name} ${a.phone ?? ''}`.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' })).map((a) => html`<tr>
+          <td data-label="Name"><strong>${a.name}</strong>${a.phone ? html`<div class="small quiet">${a.phone}</div>` : ''}</td><td class="num" data-label="Owes" data-v="${a.balancePaise}">${rs(a.balancePaise)}</td>
+          <td class="num" data-label="Oldest unpaid" data-v="${a.oldestDays ?? -1}">${a.oldestDays === null || a.oldestDays === undefined ? '—' : html`<span class="status ${a.oldestDays > 30 ? 'bad' : a.oldestDays > 7 ? 'warn' : 'mute'}">${age(a.oldestDays)}</span>`}</td>
+          <td class="num" data-label="Limit">${a.creditLimitPaise ? rs(a.creditLimitPaise) : '—'}</td>
+          <td class="act"><div class="row">${can('debtors.receive') ? html`<button class="btn pri" type="button" data-act="recv" data-id="${a.id}" data-n="${a.name}">Take payment</button>` : ''}
+            ${a.balancePaise < 0 && can('debtors.receive') ? html`<button class="btn" type="button" data-act="refundAsk" data-id="${a.id}" data-n="${a.name}" data-max="${-a.balancePaise}">Refund advance</button>` : ''}</div></td></tr>`);
 }
 // One room, or several for one guest (24 Nov 2026): the first chosen holds the bill, the others are checked in with it.
 actions.pickRoom = (d) => {

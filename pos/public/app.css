@@ -1267,3 +1267,6 @@ tr.clickrow:hover td { background: var(--soft); }
 .st-biz { text-align: center; font-size: 12px; color: var(--quiet); padding: 6px 0 8px; border-top: 1px solid var(--line); }
 .st-biz b { color: var(--ink); }
 body.st-on .sv { padding-bottom: 110px; }
+
+/* Credit: accounts that owe nothing, folded under the list (28 Nov 2026). */
+.cr-settled { margin-top: 12px; } .cr-settled summary { cursor: pointer; color: var(--quiet); font-weight: 600; padding: 6px 0; }

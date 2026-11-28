@@ -1362,7 +1362,7 @@ settingsRoutes.post(`${B}/stays/:id/check-out`, requireAction('stays.edit'), asy
 settingsRoutes.get(`${B}/credit-accounts`, requireAction('pos.view'), async (c) => {
   const accounts = await all<{ id: string; balancePaise: number }>(c.env.DB, `SELECT d.id, d.name, d.phone, d.credit_limit_paise AS creditLimitPaise,
       coalesce((SELECT sum(amount_paise) FROM debtor_entries e WHERE e.account_id = d.id), 0) AS balancePaise
-    FROM debtor_accounts d WHERE d.business_id = ? AND d.kind = 'credit' ORDER BY d.name`, c.get('businessId'));
+    FROM debtor_accounts d WHERE d.business_id = ? AND d.kind = 'credit' ORDER BY d.name COLLATE NOCASE`, c.get('businessId'));
   // How old the oldest unpaid bill is (25 Nov 2026): what is owed is taken to be the newest charges.
   const charges = await all<{ account_id: string; amount_paise: number; at: number }>(c.env.DB, `SELECT e.account_id, e.amount_paise, e.at FROM debtor_entries e
     JOIN debtor_accounts d ON d.id = e.account_id WHERE d.business_id = ? AND d.kind = 'credit' AND e.amount_paise > 0 AND e.kind IN ('charge', 'advance_used', 'transfer') ORDER BY e.at DESC`, c.get('businessId'));
