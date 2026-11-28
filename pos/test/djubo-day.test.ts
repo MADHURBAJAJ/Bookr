@@ -139,6 +139,23 @@ describe('money marked in Djubo by reception', () => {
     expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
   });
 
+  it('a charge added after the rent was paid does not bring the Djubo payment back (28 Nov 2026)', async () => {
+    const s = await hostel();
+    const { B, counter, ok, day, plus } = s;
+    // Rent ₹4,000: ₹2,000 paid to the booking team; reception takes the other ₹2,000 here, then marks it in Djubo.
+    await send(s.businessId, 'l1', `Booking DJ-L1 | Late Charge | 9800066661 | Deluxe | ${day} | ${plus(1)} | 4000 | 2000 | Sample Team | X`);
+    const arr = (await ok(counter.get(`${B}/bookings/arrivals?day=${day}`))).arrivals;
+    const stay = (await ok(counter.post(`${B}/stays`, { room: 'X', guestName: 'Late Charge', bookingId: arr.find((a: any) => a.extRef === 'DJ-L1').id }))).id;
+    const acc = (await ok(counter.get(`${B}/stays/${stay}/bill`))).stay.accountId;
+    await ok(counter.post(`${B}/debtors/${acc}/receipts`, { kind: 'receipt', payments: [{ mode: 'cash', amount: '2000' }] }));
+    await send(s.businessId, 'l2', `Booking DJ-L1 | Late Charge | 9800066661 | Deluxe | ${day} | ${plus(1)} | 4000 | 4000 | Sample Desk | X`);
+    expect((await ok(s.owner.get(`${B}/shifts/${day}`))).summary.djubo).toEqual([]);
+    // The next morning ₹44 of tea goes on the room: it is owed, it did not use up the rent receipt.
+    await q("INSERT INTO debtor_entries (id, business_id, account_id, kind, amount_paise, at) VALUES ('lc-1', ?, ?, 'charge', 4400, ?)", s.businessId, acc, Date.now() + 60_000);
+    expect((await ok(s.owner.get(`${B}/shifts/${day}`))).summary.djubo).toEqual([]);
+    expect((await ok(counter.get(`${B}/frontdesk/today`))).alerts.djuboToMode).toBe(0);
+  });
+
   it('money marked before the rule began, for a stay from then on, counts as paid before arrival', async () => {
     const s = await hostel();
     const { B, counter, ok, plus } = s;
