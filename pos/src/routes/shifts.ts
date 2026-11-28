@@ -9,7 +9,7 @@ import { requireAction, requireStaff } from '../auth';
 import { rs, shiftDayAt } from '../billing';
 import { djuboPays, oldDeskPending } from '../djubo-desk';
 import { restaurantAdvances } from '../restaurant-advances';
-import { tonightNotCharged } from '../rooms';
+import { leadIntoStay, tonightNotCharged } from '../rooms';
 import { notInDjubo } from './frontdesk';
 import { audit, clock, isTrigger, bizOf, loadBusiness } from '../util';
 import { sendOutbox, sendSoon } from '../sync';
@@ -104,10 +104,17 @@ shiftRoutes.get(`${B}/shifts/:day`, requireAction('shift.close'), async (c) => {
     endsAt: shiftEnd(clock(b).shiftDay, b.shift_start_hour), overdue: await overdueOrders(db, bid, day), floatPaise: float,
     drawerCount: (await one<{ n: number }>(db, 'SELECT drawer_count AS n FROM businesses WHERE id = ?', bid))!.n === 1,
     // Arrivals of this shift and the 7 days before that were never checked in here (25 Nov 2026): a reminder, not a block.
-    notCheckedIn: await all(db, `SELECT guest_name AS guestName, check_in AS checkIn, room_labels AS roomLabels FROM bookings bk
-      WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in <= ? AND check_in >= ?
-        AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
-      ORDER BY check_in, guest_name LIMIT 50`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10)),
+    notCheckedIn: await (async () => {
+      const rows = await all<{ id: string; guestName: string | null; phone: string | null; checkIn: string | null; checkOut: string | null; createdAt: number; roomLabels: string | null }>(db, `
+        SELECT id, guest_name AS guestName, phone, check_in AS checkIn, check_out AS checkOut, created_at AS createdAt, room_labels AS roomLabels FROM bookings bk
+        WHERE business_id = ? AND status = 'approved' AND stay_id IS NULL AND check_in <= ? AND check_in >= ?
+          AND NOT (bk.source = 'mmt' AND EXISTS (SELECT 1 FROM bookings m WHERE m.id = bk.match_id AND m.status = 'approved' AND m.stay_id IS NULL))
+        ORDER BY check_in, guest_name LIMIT 50`, bid, day, new Date(Date.parse(day) - 7 * 86_400_000).toISOString().slice(0, 10));
+      // Nights a guest stayed before the desk checked them in (Djubo sent them late) lead into their stay: not an arrival
+      // to check in, the same as the Night audit and Rooms › Today (28 Nov 2026).
+      const stayed = await leadIntoStay(db, bid, rows, b.shift_start_hour);
+      return rows.filter((r) => !stayed.has(r.id)).map((r) => ({ guestName: r.guestName, checkIn: r.checkIn, roomLabels: r.roomLabels }));
+    })(),
     drawer: dr ? { holder: dr.holder, heldBy: dr.held_by, since: dr.opened_at, openingPaise: dr.opening_paise, openingFrom: dr.opening_from } : null });
 });
 

@@ -46,6 +46,10 @@ describe('did not arrive', () => {
     expect(a.notArrived.map((x: any) => x.extRef ?? x.guestName).sort()).toEqual(['Other Guest', 'Sample Stayer']);
     expect(a.notArrived.find((x: any) => x.guestName === 'Sample Stayer').checkIn).toBe(add(today, -7));   // the gap night only
     expect(a.notArrived[0]).not.toHaveProperty('phone');
+    // Day close's "Arrivals not checked in" follows the same rule (28 Nov 2026).
+    const dc = await ok(owner.get(`${B}/shifts/${today}`));
+    expect(dc.notCheckedIn.map((x: any) => [x.guestName, x.checkIn])).toEqual([['Sample Stayer', add(today, -7)], ['Other Guest', add(today, -2)]]);
+    expect(dc.notCheckedIn[0]).not.toHaveProperty('phone');
     const a2 = await s2.ok(s2.counter.get(`${s2.B}/frontdesk/audit`));
     expect(a2.notArrived.map((x: any) => [x.guestName, x.checkIn])).toEqual([['Late Guest', add(today, -2)]]);
   });
