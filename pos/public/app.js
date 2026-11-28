@@ -7702,8 +7702,9 @@ function serversPanel() {
   return html`<section class="panel" style="margin-top:16px"><h2>People on phones</h2>
     <p class="quiet small">Servers, bar staff and others who use the ${staffAppName()} app on their phones. Each signs in on their own phone with their mobile number and a 6-digit PIN, and sees only the jobs you tick: one job opens straight into it; two or more show a start screen. Serve: mark food served. Bar count and Kitchen count: count stock. Approve counts: approve a count, or send rows back, on the phone. Taking a tick away works at once, even on an open phone. Remove a person and their PIN stops at once. Sign-ins end at day close.</p>
     <div class="row"><span class="small">${staffAppName()} app:</span><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
-    ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th>${PHONE_ACCESS.map(([, l]) => html`<th>${l}</th>`)}<th>Last signed in</th><th></th></tr></thead><tbody>
-      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}<div class="small quiet">${s.phone ? `${s.phone.slice(0, 5)} ${s.phone.slice(5)}` : html`<span style="color:var(--warn)">No mobile yet: add one (Edit) so they can sign in</span>`}</div></td>
+    ${ui.servers.length ? html`<p class="small" style="margin:8px 0 0"><b>Tap a tick to change it: it saves at once</b> (no Save button). "Saved" shows next to the name.</p>
+    <div class="scroll"><table class="t"><thead><tr><th>Name</th>${PHONE_ACCESS.map(([, l]) => html`<th>${l}</th>`)}<th>Last signed in</th><th></th></tr></thead><tbody>
+      ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}${ui.svSavedId === s.id ? html` <span class="status ok">Saved ✓</span>` : ''}<div class="small quiet">${s.phone ? `${s.phone.slice(0, 5)} ${s.phone.slice(5)}` : html`<span style="color:var(--warn)">No mobile yet: add one (Edit) so they can sign in</span>`}</div></td>
         ${PHONE_ACCESS.map(([a, l]) => html`<td><input type="checkbox" data-act-change="svAccess" data-id="${s.id}" data-a="${a}" ${s.access.includes(a) ? 'checked' : ''} ${s.active ? '' : 'disabled'} aria-label="${s.name}: ${l}"></td>`)}
         <td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
         <td class="act"><div class="row">${s.active ? html`<a class="btn" href="${waTo(s.phone, staffInvite(s.name))}" target="_blank" rel="noopener">Staff invite on WhatsApp</a><button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Edit</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
@@ -7713,13 +7714,13 @@ function serversPanel() {
       <label class="f">Mobile number<input class="in" type="tel" inputmode="numeric" maxlength="14" autocomplete="off" data-model="svPhone" value="${ui.svPhone ?? ''}" placeholder="98xxxxxxxx"></label>
       <label class="f">${ui.svEdit ? 'New PIN (6 digits, empty: keep)' : 'PIN (6 digits)'}<input class="in" inputmode="numeric" maxlength="6" autocomplete="off" data-model="svPin" value="${ui.svPin ?? ''}"></label>
       ${ui.svEdit ? '' : html`<div class="row" style="grid-column:1/-1">${PHONE_ACCESS.map(([a, l]) => html`<label class="tickline"><input type="checkbox" data-act-change="svNewTick" data-a="${a}" ${newTicks.includes(a) ? 'checked' : ''}> ${l}</label>`)}</div>`}
-      <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save PIN' : 'Add person'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
+      <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save mobile and PIN' : 'Add person'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
 }
 actions.svAccess = async (d, el) => {
   const s = ui.servers.find((x) => x.id === d.id);
   const access = PHONE_ACCESS.map(([a]) => a).filter((a) => (a === d.a ? el.checked : s.access.includes(a)));
-  await api('PUT', `${B()}/servers/${s.id}`, { access });
-  s.access = access;
+  try { await api('PUT', `${B()}/servers/${s.id}`, { access }); } catch (e) { el.checked = !el.checked; throw e; }
+  s.access = access; ui.svSavedId = s.id;
   flash = { kind: 'ok', text: `${s.name}: ${access.length ? access.map((a) => PHONE_ACCESS.find(([x]) => x === a)[1]).join(', ') : 'nothing ticked'}.` }; rerender();
 };
 actions.svNewTick = (d, el) => { const t = new Set(ui.svAccess ?? ['serve']); if (el.checked) t.add(d.a); else t.delete(d.a); ui.svAccess = PHONE_ACCESS.map(([a]) => a).filter((a) => t.has(a)); };
