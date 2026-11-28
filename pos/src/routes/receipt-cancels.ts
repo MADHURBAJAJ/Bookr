@@ -116,6 +116,33 @@ receiptCancelRoutes.post(`${B}/receipts/:id/cancel`, requireAction('receipts.can
     takenAt: r.s.at, cancelledAt: t, by: staff.name, reason, note } }, 201);
 });
 
+/**
+ * A receipt printed again (28 Nov 2026): the same slip, marked COPY (and CANCELLED if it was), for anyone who takes
+ * payments. Every reprint is logged as a reprint, as for bills.
+ */
+receiptCancelRoutes.get(`${B}/receipts/:id/slip`, requireAction('debtors.receive'), async (c) => {
+  const db = c.env.DB;
+  const bid = c.get('businessId');
+  const r = await receiptOf(db, bid, c.req.param('id'));
+  const pays = await all<{ mode: string; amount_paise: number; card_last4: string | null; pay_name: string | null }>(db, `SELECT p.mode, p.amount_paise, p.card_last4,
+      (SELECT a.name FROM pay_accounts a WHERE a.id = p.pay_account_id) AS pay_name FROM payments p WHERE p.settlement_id = ? ORDER BY p.rowid`, r.s.id);
+  const first = r.entries.find((e) => e.amount_paise < 0) ?? r.entries[0];
+  const kind = first ? (first.kind === 'deposit' ? 'deposit' : first.kind === 'advance' ? 'advance' : 'receipt') : 'advance';
+  const staff = c.get('staff');
+  const t = now();
+  await db.batch([
+    stmt(db, 'INSERT INTO pos_events (business_id, kind, ref, amount_paise, reason, detail, by_staff, shift_day, at) VALUES (?, \'reprint\', ?, ?, ?, NULL, ?, ?, ?)',
+      bid, r.s.receipt_no ?? r.s.id, r.total, 'Receipt printed again', staff.id, clock(bizOf(c)).shiftDay, t),
+  ]);
+  return c.json({ receipt: {
+    receiptNo: r.s.receipt_no, kind, at: r.s.at, copy: true, cancelled: !!r.cancelled,
+    name: first ? (first.guest ?? first.acc_name) : r.desk?.guest_name ?? '', room: first?.room ?? null,
+    // No balance on a copy: today's balance would read as the balance when it was paid.
+    totalPaise: r.total, balancePaise: null,
+    payments: pays.map((p) => ({ mode: p.mode, amountPaise: p.amount_paise, payAccountName: p.pay_name, cardLast4: p.card_last4 })),
+  } });
+});
+
 /** The day's cancelled receipts, for the Daily check and Day close. */
 export async function cancelledReceipts(db: DB, bid: string, from: string, to = from) {
   return all<{ receiptNo: string | null; totalPaise: number; reason: string; note: string | null; at: number; byName: string | null; who: string | null; shiftDay: string }>(db, `

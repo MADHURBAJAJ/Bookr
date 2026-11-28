@@ -2958,7 +2958,13 @@ actions.rcGo = async () => {
 };
 /** A receipt's number, struck through and marked when it was cancelled; a Cancel button for managers otherwise. */
 const rcTag = (cancelled) => (cancelled ? html` <span class="status bad">CANCELLED</span>` : '');
-const rcBtn = (sid, cancelled) => (sid && !cancelled && can('receipts.cancel') ? html` <button class="btn sm ghost" type="button" data-act="rcAsk" data-id="${sid}">Cancel</button>` : '');
+const rcBtn = (sid, cancelled) => html`${sid && can('debtors.receive') ? html` <button class="btn sm ghost" type="button" data-act="rcPrint" data-id="${sid}" title="Print this receipt again (marked COPY)">Print</button>` : ''}${sid && !cancelled && can('receipts.cancel') ? html` <button class="btn sm ghost" type="button" data-act="rcAsk" data-id="${sid}">Cancel</button>` : ''}`;
+/** Print a receipt again (28 Nov 2026): marked COPY, and CANCELLED if it was; logged as a reprint. */
+actions.rcPrint = async (d) => {
+  const r = await api('GET', `${B()}/receipts/${d.id}/slip`);
+  printJobs([{ kind: 'bill', html: asHtml(receiptSlip(r.receipt)) }]);
+  flash = { kind: 'ok', text: `${r.receipt.receiptNo} printed again (COPY).` }; rerender();
+};
 function folioLabel(l) {
   const no = l.receiptNo ? ` ${l.receiptNo}` : '';
   const how = l.mode ? ` · ${MODE_NAME[l.mode] ?? l.mode}` : '';
@@ -2992,6 +2998,8 @@ function djRow(x) {
 async function djSave(bookingId, mailId, mode, payAccountId) {
   const r = await api('POST', `${B()}/bookings/${bookingId}/djubo-paid`, { mailId, mode, payAccountId });
   djDone[mailId] = r.receipt; ui.djUpi = null;
+  // Printed straight away, as every other receipt (28 Nov 2026); Print again is on the receipt's line.
+  printJobs([{ kind: 'bill', html: asHtml(receiptSlip(r.receipt)) }]);
   flash = { kind: 'ok', text: `${r.receipt.receiptNo}: ${rs(r.receipt.totalPaise)} from ${r.receipt.name}, ${MODE_NAME[mode]}, counted on ${dayName(r.shiftDay)}.` };
   if (location.hash.startsWith('#/rooms')) {
     const [fd, bill] = await Promise.all([api('GET', B() + '/frontdesk/today').catch(() => ui.fd), ui.roomBill ? api('GET', `${B()}/stays/${ui.roomBill.stay.id}/bill`) : null]);
@@ -3281,7 +3289,7 @@ actions.rbReprint = () => printJobs([{ kind: 'bill', html: asHtml(roomInvoiceSli
 actions.rbGrc = async (d) => printJobs([{ kind: 'bill', html: asHtml(grcSlip((await api('GET', `${B()}/stays/${d.id}/grc`)).grc)) }]);
 actions.formC = async (d) => { await api('POST', `${B()}/stays/${d.id}/form-c`); if (ui.roomBill) ui.roomBill = await api('GET', `${B()}/stays/${d.id}/bill`); flash = { kind: 'ok', text: 'Form C marked filed.' }; if (ui.audit) ui.audit = await api('GET', `${B()}/frontdesk/audit`); rerender(); };
 /** A payment receipt slip (24 Nov 2026): its number, the room and guest, how it was paid, and what is left to pay. */
-const receiptSlip = (r) => html`<div class="receipt"><div class="hd">${me.business.name}</div><div class="c">${r.kind === 'deposit' ? 'DEPOSIT RECEIPT (REFUNDABLE)' : r.kind === 'advance' ? 'ADVANCE RECEIPT' : 'PAYMENT RECEIPT'}</div>
+const receiptSlip = (r) => html`<div class="receipt"><div class="hd">${me.business.name}</div>${r.copy ? html`<div class="c" style="font-weight:700">COPY${r.cancelled ? ' · CANCELLED' : ''}</div>` : ''}<div class="c">${r.kind === 'deposit' ? 'DEPOSIT RECEIPT (REFUNDABLE)' : r.kind === 'advance' ? 'ADVANCE RECEIPT' : 'PAYMENT RECEIPT'}</div>
   <div class="rl"><span>${r.receiptNo}</span><span>${dateTime(r.at)}</span></div>
   <div>${r.room ? `Room ${r.room} · ` : r.place ? `${r.place} · ` : ''}${r.name}</div>${r.party ? html`<div>Party ${dayName(r.party.day)}${r.party.time ? `, ${r.party.time}` : ''}${r.party.people ? ` · ${r.party.people} people` : ''}</div>` : ''}${r.booking ? html`<div>Booking ${r.booking}</div>` : ''}${r.checkIn ? html`<div>Stay from ${dayName(r.checkIn)}${r.checkOut ? ` to ${dayName(r.checkOut)}` : ''}</div>` : ''}<hr>
   ${r.payments.map((p) => html`<div class="rl"><span>${MODE_NAME[p.mode] ?? p.mode}${p.payAccountName ? ` (${p.payAccountName})` : ''}${p.cardLast4 ? ` ****${p.cardLast4}` : ''}</span><span>${rs(p.amountPaise)}</span></div>`)}

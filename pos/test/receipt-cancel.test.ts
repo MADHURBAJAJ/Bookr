@@ -78,3 +78,18 @@ describe('cancel a receipt', () => {
     void r;
   });
 });
+
+describe('print a receipt again', () => {
+  it('gives the same receipt marked COPY (and CANCELLED once cancelled), and logs each reprint', async () => {
+    const { s, B, owner, counter, ok, take } = await setup();
+    const rid = await take('500');
+    const r = (await ok(counter.get(`${B}/receipts/${rid}/slip`))).receipt;
+    expect(r).toMatchObject({ copy: true, cancelled: false, totalPaise: 50_000, balancePaise: null });
+    expect(r.receiptNo).toMatch(/^RCPT/);
+    expect(r.payments).toEqual([expect.objectContaining({ mode: 'upi', amountPaise: 50_000 })]);
+    await ok(owner.post(`${B}/receipts/${rid}/cancel`, { reason: 'Typed twice' }));
+    expect((await ok(counter.get(`${B}/receipts/${rid}/slip`))).receipt.cancelled).toBe(true);
+    expect((await q("SELECT count(*) AS n FROM pos_events WHERE business_id = ? AND kind = 'reprint' AND ref = ?", s.businessId, r.receiptNo))[0].n).toBe(2);
+    expect((await counter.get(`${B}/receipts/00000000-0000-4000-8000-000000000000/slip`)).status).toBe(404);
+  });
+});
