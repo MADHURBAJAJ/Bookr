@@ -48,4 +48,26 @@ async function printSlip(body, printer, { paperMm = 80, copies = 1 } = {}) {
   }
 }
 
-module.exports = { printSlip, slipDocument };
+/**
+ * Prints a whole A4 page (28 Nov 2026: the stock count sheet) on `printer`, portrait, with no print box. `doc` is a full
+ * HTML document with its own styles, made by the POS. Windows' print box from the app window did not send the job on.
+ */
+async function printPage(doc, printer) {
+  const w = new BrowserWindow({
+    show: false, focusable: false, skipTaskbar: true, width: 794, height: 1123,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+  });
+  try {
+    const safe = doc.replace(/<script[\s\S]*?<\/script>/gi, '');
+    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">`;
+    await w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(safe.replace(/<head>/i, `<head>${csp}`))}`);
+    await new Promise((resolve, reject) => {
+      w.webContents.print({ silent: true, deviceName: printer, copies: 1, printBackground: true, landscape: false, pageSize: 'A4', margins: { marginType: 'default' } },
+        (ok, why) => (ok ? resolve() : reject(new Error(why || 'The printer did not take it.'))));
+    });
+  } finally {
+    w.destroy();
+  }
+}
+
+module.exports = { printSlip, printPage, slipDocument };

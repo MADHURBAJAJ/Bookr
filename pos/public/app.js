@@ -5429,8 +5429,35 @@ actions.ckSheet = async () => {
     <thead><tr><th>Item</th><th>In hand</th><th>Bar counter</th><th>Store / other place</th><th>Difference</th></tr></thead><tbody>
     ${sh.groups.map((g) => `<tr class="cat"><td colspan="5">${esc(g.category)}</td></tr>${g.items.map((i) => `<tr><td>${esc(i.name)}<small>${i.packSize > 1 ? `${esc(i.packName)} of ${i.packSize} ${i.unit}` : i.unit}</small></td><td class="r">${esc(packText(i.inHand, i))}</td><td>${blank(i)}</td><td>${blank(i)}</td><td></td></tr>`).join('')}`).join('')}
     </tbody></table></div>`;
+  // In the Windows app 1.0.5 and later (28 Nov 2026): straight to this PC's "Reports (A4)" printer, A4 upright, no print box
+  // (Windows' print box from the app did not send the job on). Elsewhere, or if that fails, the print box as before.
+  if (window.bookrDesktop?.print && appAtLeast('1.0.5')) {
+    const r = await window.bookrDesktop.print({ kind: 'report', html: `<!doctype html><html><head><meta charset="utf-8"><style>${COUNT_SHEET_CSS}</style></head><body>${printArea.innerHTML}</body></html>` })
+      .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+    if (r?.ok) { printArea.innerHTML = ''; flash = { kind: 'ok', text: `Count sheet sent to ${r.printer}.` }; rerender(); return; }
+    flash = { kind: 'warn', text: `Not printed: ${r?.error ?? 'the printer did not answer'}. Choose an A4 printer under Reports (A4) in Printers (Ctrl+Shift+P). The print window opens instead.` };
+    rerender();
+  }
   window.print();
 };
+/** The Windows app's version is at least `v` (e.g. '1.0.5'). */
+const appAtLeast = (v) => {
+  const a = String(window.bookrDesktop?.version ?? '').split('.').map(Number);
+  const b = v.split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i]; }
+  return true;
+};
+/** The count sheet's look on A4 for the Windows app (the same as its print styles in app.css). */
+const COUNT_SHEET_CSS = `@page { size: A4 portrait; margin: 12mm; } body { margin: 0; background: #fff; color: #000; }
+  .countsheet { font: 10.5pt/1.35 "Segoe UI", system-ui, sans-serif; color: #000; }
+  .countsheet h1 { font-size: 15pt; margin: 0 0 2pt; } .countsheet p { margin: 0 0 8pt; font-size: 9.5pt; }
+  .countsheet table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .countsheet th, .countsheet td { border: 0.6pt solid #888; padding: 4pt 6pt; text-align: left; vertical-align: bottom; }
+  .countsheet th { font-size: 9pt; } .countsheet td small { display: block; font-size: 8pt; color: #444; }
+  .countsheet td.r { text-align: right; font-weight: 700; white-space: nowrap; }
+  .countsheet tr.cat td { background: #eee; font-weight: 700; font-size: 9pt; text-transform: uppercase; letter-spacing: .5pt; }
+  .countsheet tr { page-break-inside: avoid; }
+  .countsheet .bl { display: inline-block; width: 26pt; border-bottom: 0.8pt solid #000; height: 11pt; margin: 0 2pt 0 4pt; }`;
 actions.stReport = async () => { ui.report = await api('GET', `${B()}/stock/report?from=${ui.rFrom}&to=${ui.rTo}&storeId=${ui.rStore}`); rerender(); };
 actions.stItem = async () => {
   const body = { name: ui.siName, unit: ui.siUnit || 'ml', packName: ui.siPack, packSize: int(ui.siSize), costPerPack: ui.siCost, reorderLevel: int(ui.siReorder || '0'), category: ui.siCat || null };

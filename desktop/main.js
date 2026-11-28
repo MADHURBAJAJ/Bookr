@@ -4,7 +4,7 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { printSlip } = require('./print');
+const { printSlip, printPage } = require('./print');
 
 const POS_URL = process.env.BOOKR_POS_URL || 'https://pos.thebajajgroup.co/';
 const POS_ORIGIN = new URL(POS_URL).origin;
@@ -15,14 +15,14 @@ let printersWin = null;
 
 // ---------- the printer choices, saved on this PC only
 
-const DEFAULTS = { bill: '', stations: {}, otherKot: '', paperMm: 80, startWithWindows: true, seenStations: ['Kitchen', 'Bar'] };
+const DEFAULTS = { bill: '', report: '', stations: {}, otherKot: '', paperMm: 80, startWithWindows: true, seenStations: ['Kitchen', 'Bar'] };
 const settingsFile = () => path.join(app.getPath('userData'), 'printers.json');
 function loadSettings() {
   try { return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) }; } catch { return { ...DEFAULTS }; }
 }
 function saveSettings(s) {
   const clean = {
-    bill: str(s.bill), otherKot: str(s.otherKot), paperMm: s.paperMm === 58 ? 58 : 80, startWithWindows: s.startWithWindows !== false,
+    bill: str(s.bill), report: str(s.report), otherKot: str(s.otherKot), paperMm: s.paperMm === 58 ? 58 : 80, startWithWindows: s.startWithWindows !== false,
     stations: Object.fromEntries(Object.entries(s.stations ?? {}).filter(([k]) => str(k)).map(([k, v]) => [str(k), str(v)])),
     // One of each station whatever its capitals: the first spelling seen stays.
     seenStations: (s.seenStations ?? []).map(str).filter(Boolean).filter((x, i, all) => all.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === i).slice(0, 30),
@@ -40,6 +40,18 @@ const fromPos = (event) => { try { return new URL(event.senderFrame.url).origin 
 
 ipcMain.handle('print', async (event, job) => {
   if (!fromPos(event)) return { ok: false, error: 'Not from the POS.' };
+  // An A4 page (28 Nov 2026): the stock count sheet, to the "Reports (A4)" printer, portrait.
+  if (job?.kind === 'report') {
+    const doc = typeof job.html === 'string' ? job.html : '';
+    if (!doc || doc.length > 2_000_000) return { ok: false, error: 'Nothing to print.' };
+    const s = loadSettings();
+    if (!s.report) return { ok: false, error: 'No A4 printer is chosen for reports on this PC.' };
+    const installed = await main.webContents.getPrintersAsync();
+    if (!installed.some((p) => p.name === s.report)) return { ok: false, error: `The A4 printer "${s.report}" is not found on this PC.` };
+    try { await printPage(doc, s.report); return { ok: true, printer: s.report }; }
+    catch (e) { return { ok: false, error: `${s.report}: ${e.message}` }; }
+    finally { refocus(); }
+  }
   const kind = job?.kind === 'kot' ? 'kot' : 'bill';
   const station = str(job?.station);
   const html = typeof job?.html === 'string' ? job.html : '';
@@ -94,6 +106,12 @@ ipcMain.handle('settings:test', async (event, printer, label) => {
   if (!fromPrinters(event)) return { ok: false };
   const p = str(printer);
   if (!p) return { ok: false, error: 'Choose a printer first.' };
+  if (str(label) === 'Reports (A4)') {
+    const when = new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+    const doc = `<!doctype html><html><head><meta charset="utf-8"><style>body{font:14pt "Segoe UI",sans-serif;margin:0}h1{font-size:20pt}</style></head>
+      <body><h1>Bookr POS · A4 test page</h1><p>Printer: ${escape(p)}</p><p>When: ${escape(when)}</p><p>If this page printed upright on A4, the stock count sheet will too.</p></body></html>`;
+    try { await printPage(doc, p); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; }
+  }
   const when = new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
   const body = `<div class="receipt"><div class="hd">TEST PRINT</div><div class="c">${escape(str(label))}</div><hr>
     <div class="rl"><span>Printer</span><span>${escape(p)}</span></div><div class="rl"><span>When</span><span>${escape(when)}</span></div><hr>

@@ -30,6 +30,8 @@ function row(title, note, value, onChange, testLabel) {
 function paint() {
   const s = data.settings;
   $('bill').replaceChildren(row('Bills', 'Bills, credit notes, statements', s.bill, (v) => { s.bill = v; }, 'Bills'));
+  // A4 pages (28 Nov 2026): the stock count sheet, printed upright on A4 with no print box.
+  $('report').replaceChildren(row('Reports (A4)', 'Stock count sheet, on A4 paper', s.report ?? '', (v) => { s.report = v; }, 'Reports (A4)'));
   // One row per station whatever its capitals ("Bar" and "bar" are the same station, 28 Nov 2026). A printer saved under
   // another spelling shows on that row, and saving keeps one spelling only.
   const names = [];
