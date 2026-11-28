@@ -380,10 +380,14 @@ stockRoutes.post(`${B}/stock/purchases`, requireAction('stock.edit'), async (c) 
   for (const raw of data.lines) {
     const r = (raw ?? {}) as Record<string, unknown>;
     const i = await item(db, bid, r.itemId);
-    const packs = whole(r.packs, `Packs of ${i.name}`, 1, 100000);
+    // Whole packs and, for a pack of several (a box of 24), loose pieces too (28 Nov 2026): 12 Breezers are 0 boxes + 12.
+    const packs = r.packs === undefined || r.packs === null ? 0 : whole(r.packs, `Packs of ${i.name}`, 0, 100000);
+    const loose = r.loose === undefined || r.loose === null ? 0 : whole(r.loose, `Loose ${i.unit} of ${i.name}`, 0, 10_000_000);
+    const qty = packs * i.pack_size + loose;
+    if (qty <= 0) fail(400, `Type how many of ${i.name} came.`);
     const cost = optionalPaise(r, 'costPerPack', `Price per pack of ${i.name}`);
     statements.push(stmt(db, `INSERT INTO stock_moves (id, business_id, item_id, store_id, kind, qty, cost_per_pack_paise, ref, vendor, by_staff, shift_day, at, bill_id)
-      VALUES (?, ?, ?, ?, 'purchase', ?, ?, ?, ?, ?, ?, ?, ?)`, newId(), bid, i.id, s.id, packs * i.pack_size, cost, invoice, vendor, c.get('staff').id, shiftDay, t, billId));
+      VALUES (?, ?, ?, ?, 'purchase', ?, ?, ?, ?, ?, ?, ?, ?)`, newId(), bid, i.id, s.id, qty, cost, invoice, vendor, c.get('staff').id, shiftDay, t, billId));
     if (cost !== null) statements.push(stmt(db, 'UPDATE stock_items SET cost_per_pack_paise = ? WHERE id = ?', cost, i.id));
   }
   await db.batch(statements);
@@ -415,7 +419,9 @@ Read it and return:
 - lines: one entry per item row on the bill, in order. description = the item as printed (name, size, brand).
   packs = how many packs were bought, counted in the pack of the matched stock item below (for example bottles or cases).
   If the bill counts in a different unit (cases against bottles), convert to the stock item's pack; if unsure, use null.
-  pricePerPackRupees = what was paid for one such pack including the tax shown on the bill, so packs x price is the real cost.
+  packs may be a fraction when the bill has fewer pieces than a full pack (12 bottles of a box of 24 is 0.5).
+  pricePerPackRupees = what was paid for one such pack including the tax shown on the bill, so packs x price equals lineTotalRupees.
+  When you convert cartons into single bottles, divide the price too: 1 carton of 24 at 1,350 is packs 24 at 56.25.
   lineTotalRupees = the row's amount as printed.
   stockItemId = the id of the matching stock item below, only when you are confident it is the same product and size; otherwise null.
 Use null for anything you cannot read clearly. Never guess a number.
