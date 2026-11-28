@@ -13,7 +13,7 @@ import { fail, isUuid } from '../http';
 import { IST_OFFSET_MS, shiftDayOf } from '../time';
 import { addGroup, editGroup, groupsView, InboxError } from '../waInbox';
 import { askLink, LinkError, linkView } from '../waLink';
-import { loadProof, matchProof, shiftWindow, type PosMode, type ProofBill } from '../posProof';
+import { loadProof, matchProof, namedBillNos, shiftWindow, type PosMode, type ProofBill } from '../posProof';
 
 export const posRoutes = new Hono<AppEnv>();
 
@@ -299,11 +299,40 @@ function proofBill(raw: unknown): ProofBill {
   };
 }
 
+/** Bills the POS has sent Bookr, with their payment lines, as the proof list wants them. */
+async function sentBills(db: DB, bid: string, where: string, ...args: unknown[]): Promise<ProofBill[]> {
+  const rows = await all<{ id: string; bill_no: string; place: string | null; guest_name: string | null; printed_at: number; total_paise: number;
+    discount_paise: number; shift_day: string }>(db,
+    `SELECT id, bill_no, place, guest_name, printed_at, total_paise, discount_paise + settle_discount_paise AS discount_paise, shift_day
+     FROM pos_bills WHERE business_id = ? AND ${where} ORDER BY settled_at LIMIT 600`, bid, ...args);
+  if (!rows.length) return [];
+  const lines: { bill_id: string; payment_id: string; mode: PosMode; amount_paise: number; payment_total_paise: number; card_approval: string | null;
+    card_last4: string | null; paid_at: number }[] = [];
+  for (let k = 0; k < rows.length; k += 80) {
+    const part = rows.slice(k, k + 80).map((b) => b.id);
+    lines.push(...await all<(typeof lines)[number]>(db, `SELECT bill_id, payment_id, mode, amount_paise, payment_total_paise, card_approval, card_last4, paid_at
+      FROM pos_payment_lines WHERE business_id = ? AND bill_id IN (${part.map(() => '?').join(',')}) ORDER BY paid_at`, bid, ...part));
+  }
+  return rows.map((b) => ({ key: b.id, billNo: b.bill_no, kind: 'bill', state: 'settled', totalPaise: b.total_paise, discountPaise: b.discount_paise,
+    at: b.printed_at, label: b.place ?? b.guest_name, shiftDay: b.shift_day,
+    tenders: lines.filter((l) => l.bill_id === b.id).map((l) => ({ paymentId: l.payment_id, mode: l.mode, amountPaise: l.amount_paise,
+      totalPaise: l.payment_total_paise, cardApproval: l.card_approval, cardLast4: l.card_last4, paidAt: l.paid_at })) }));
+}
+
 async function proofAnswer(db: DB, bid: string, day: string, startHour: number, bills: ProofBill[]) {
   const [from, to] = shiftWindow(day, startHour);
-  const { items, pairs, reading } = await loadProof(db, bid, from, to);
+  const { items, pairs, reading } = await loadProof(db, bid, from, to, bills.map((b) => b.billNo));
+  // A bill of another shift or day named by this proof (28 Nov 2026): its number says the day it was printed, so it is
+  // found by number among the bills the POS has sent, and matched apart from this shift's own bills.
+  const have = new Set(bills.flatMap((b) => (b.billNo ? [b.billNo.toUpperCase().replace(/[^A-Z0-9]/g, ''), b.billNo.replace(/\D/g, '')] : [])));
+  const keys = new Set(bills.map((b) => b.key));
+  const wanted = namedBillNos(items).filter((n) => !have.has(n) && !have.has(n.replace(/\D/g, ''))).map((n) => n.replace(/\D/g, '')).slice(0, 50);
+  const context = wanted.length
+    ? (await sentBills(db, bid, `ltrim(upper(bill_no), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ-') IN (${wanted.map(() => '?').join(',')})`, ...wanted))
+      .filter((b) => !keys.has(b.key)).map((b) => ({ ...b, context: true }))
+    : [];
   const listener = await one<{ last_heartbeat_at: number | null; state: string | null }>(db, 'SELECT last_heartbeat_at, state FROM wa_listener_status WHERE id = 1');
-  return { day, ...matchProof(bills, items, pairs, from, to), reading, listener: { lastSeenAt: listener?.last_heartbeat_at ?? null, state: listener?.state ?? null }, at: now() };
+  return { day, ...matchProof([...bills, ...context], items, pairs, from, to), reading, listener: { lastSeenAt: listener?.last_heartbeat_at ?? null, state: listener?.state ?? null }, at: now() };
 }
 
 // POST /api/pos/proof  Authorization: Bearer <key>  { businessId, shiftDay, startHour, bills: [...] } (up to 600)

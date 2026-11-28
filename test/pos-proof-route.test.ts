@@ -98,3 +98,30 @@ describe('GET /businesses/:id/pos/proof', () => {
     expect(r.json.rows.map((x: any) => [x.billNo, x.kind, x.status])).toEqual([['C261124007', 'bill', 'matched'], [null, 'receipt', 'missing']]);
   });
 });
+
+describe('bills of other shifts, found by their number (28 Nov 2026)', () => {
+  const sentBill = async (id: string, no: string, day: string, rupees: number, printedAt: number) => {
+    const msg = crypto.randomUUID();
+    await sql`INSERT INTO pos_messages (id, business_id, kind, body, outcome, received_at) VALUES (${msg}, ${bid}, 'bill_settled', '{}', 'stored', ${Date.now()})`;
+    await sql`INSERT INTO pos_bills (id, business_id, message_id, bill_no, entity_name, gst_registered, place, printed_at, settled_at, shift_day, gross_paise, discount_paise,
+        cgst_paise, sgst_paise, round_off_paise, total_paise) VALUES (${id}, ${bid}, ${msg}, ${no}, 'Exospark', 1, 'OH 6', ${printedAt}, ${printedAt}, ${day}, ${rupees * 100}, 0, 0, 0, 0, ${rupees * 100})`;
+    await sql`INSERT INTO pos_payment_lines (id, business_id, message_id, bill_id, payment_id, kind, mode, amount_paise, payment_total_paise, paid_at, shift_day)
+      VALUES (${'l-' + id}, ${bid}, ${msg}, ${id}, ${'pay-' + id}, 'bill', 'upi', ${rupees * 100}, ${rupees * 100}, ${printedAt}, ${day})`;
+  };
+
+  it('proof posted after 8 am for last night\'s bill is not an extra today; that bill\'s own shift shows it, even posted days later', async () => {
+    // Printed 7:49 am on 25 Nov: the 24 Nov shift. Proof posted 8:35 am: the 25 Nov shift.
+    const printed = istToMs(2026, 11, 25, 7, 49);
+    await sentBill('pb17', 'C261125017', '2026-11-24', 368, printed);
+    await add({ kind: 'upi', amount: 360, sent: istToMs(2026, 11, 25, 8, 35), caption: 'C261125017' });
+    const today = await ask({ businessId: bid, shiftDay: '2026-11-25', bills: [] });
+    expect(today.json.extras).toEqual([]);
+    expect(today.json.earlier.map((x: any) => [x.billNo, x.shiftDay, x.status, x.differences])).toEqual([
+      ['C261125017', '2026-11-24', 'difference', ['UPI ₹360 posted, settled ₹368 UPI']]]);
+
+    // Its own shift: a row; and a bill photo posted three days later, naming it, is found too.
+    await add({ kind: 'bill', amount: 368, billNo: 'C261125017', sent: istToMs(2026, 11, 28, 11, 0) });
+    const own = await viewer.get(`/businesses/${bid}/pos/proof?day=2026-11-24`);
+    expect(own.json.rows.map((x: any) => [x.billNo, x.status, x.proof.map((e: any) => e.kind)])).toEqual([['C261125017', 'difference', ['upi', 'bill']]]);
+  });
+});

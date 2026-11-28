@@ -3591,7 +3591,22 @@ async function paymentsScreen(tab = '') {
           <span class="small quiet">Up to ${PAY_MAX} days</span>`}
       <span class="grow"></span>
       <button class="btn ${live ? '' : 'pri'}" type="button" data-act="payToday">Today's shift</button></div>`;
-    const body = p.mode === 'one' ? html`<section class="panel">${tableOf(shifts[0])}</section>`
+    // Proof posted in this shift for a bill of another shift (28 Nov 2026): found by the bill's number, shown apart and not
+    // counted here. The bill itself is under its own shift.
+    const earlierOf = (x) => {
+      const list = (x.d.earlier ?? []).filter((r) => tab === 'diff' ? r.status === 'difference' : tab !== 'extras' && tab !== 'missing');
+      return list.length ? html`<section class="panel"><div class="row between" style="margin-bottom:6px"><h2>Proof for earlier bills</h2>
+          <span class="small quiet">Posted in this shift for bills of another shift; counted there, not here.</span></div>
+          <div class="scroll"><table class="t"><thead><tr><th>Bill printed</th><th>Bill</th><th>Shift</th><th>Table</th><th class="num">Amount</th><th>Paid by</th><th>Proof posted</th><th>Status</th></tr></thead>
+          <tbody>${list.map((r) => {
+            const [tone, label] = PROOF_STATUS[r.status] ?? PROOF_STATUS.unknown;
+            return html`<tr><td>${payWhen(r.at)}</td><td class="mono"><a href="#/done/${r.key}">${r.billNo}</a></td><td class="small">${r.shiftDay ? shiftName(r.shiftDay) : ''}</td><td>${r.label ?? ''}</td>
+              <td class="num">${rs(r.totalPaise)}</td><td>${r.modes.map((m) => `${PROOF_MODE[m.mode] ?? m.mode} ${rs(m.amountPaise)}`).join(' + ')}</td>
+              <td class="small">${r.proof.map((e) => html`<div>${proofText(e)}</div>`)}</td>
+              <td>${tone ? html`<span class="status ${tone}">${label}</span>` : ''}${[...r.differences, ...r.missing].map((y) => html`<div class="small">${y}</div>`)}</td></tr>`;
+          })}</tbody></table></div></section>` : '';
+    };
+    const body = p.mode === 'one' ? html`<section class="panel">${tableOf(shifts[0])}</section>${earlierOf(shifts[0])}`
       : shifts.map((x) => html`<section class="panel"><div class="row between" style="margin-bottom:6px"><h2>${shiftName(x.d.day)} shift</h2>
           <span class="small quiet">${plural(x.rows.length, 'bill')} · ${x.c.matched} matched${x.c.missing ? html` · <b style="color:var(--bad)">${x.c.missing} no proof</b>` : ''}${x.c.diff ? ` · ${plural(x.c.diff, 'difference')}` : ''}</span></div>
           ${tableOf(x)}</section>`);

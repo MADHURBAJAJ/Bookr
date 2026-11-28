@@ -110,6 +110,39 @@ describe('matchProof', () => {
       ['difference', ['Screenshot is from 13 Nov, 10:30 pm, before the bill']], ['matched', []]]);
   });
 
+  it('proof posted after 8 am for a bill of the shift before: not an extra, listed under earlier bills (C261128017, 28 Nov)', () => {
+    const next = at(8, 0) + 86400_000; // the 25 Nov shift in these tests starts here
+    const prev = bill('C261125017', 368, [tender('upi', 368, next - 11 * 60_000)], { at: next - 11 * 60_000, context: true, shiftDay: '2026-11-24' });
+    const r = matchProof([prev], [
+      item('u', 'upi', { amountPaise: 36000, sentAt: next + 35 * 60_000, replyTo: null }),
+      item('p', 'bill', { amountPaise: 36800, billNo: 'C261125017', caption: 'C261125017', replyTo: 'm-u', sentAt: next + 36 * 60_000 }),
+    ], [], next, next + 86400_000);
+    expect(r.rows).toEqual([]);
+    expect(r.extras).toEqual([]);
+    expect(r.earlier.map((x) => [x.billNo, x.shiftDay, x.status, x.differences])).toEqual([
+      ['C261125017', '2026-11-24', 'difference', ['UPI ₹360 posted, settled ₹368 UPI']]]);
+    // On the bill's own shift it is a row as before, and nothing is listed as earlier.
+    const own = run([{ ...prev, context: false }], [item('u', 'upi', { amountPaise: 36000, sentAt: next + 35 * 60_000, caption: 'C261125017' })]);
+    expect(own.rows[0].status).toBe('difference');
+    expect(own.earlier).toEqual([]);
+  });
+
+  it('one UPI for two bills settled as two payments is checked against both together (₹946 = ₹902 + ₹44)', () => {
+    const r = run([
+      bill('C261124024', 902, [tender('upi', 902, at(8, 30))], { context: true, shiftDay: '2026-11-23' }),
+      bill('C261124037', 44, [tender('upi', 44, at(8, 37))]),
+    ], [
+      item('u', 'upi', { amountPaise: 94600, sentAt: at(8, 38) }),
+      item('p', 'bill', { amountPaise: 90200, billNo: 'C261124024', caption: 'C261124024 C261124037', replyTo: 'm-u', sentAt: at(8, 39) }),
+    ]);
+    expect(r.rows.map((x) => [x.billNo, x.status, x.differences])).toEqual([['C261124037', 'matched', []]]);
+    expect(r.earlier.map((x) => [x.billNo, x.status])).toEqual([['C261124024', 'matched']]);
+    // Paid ₹10 less than both together: said once, naming both bills.
+    const less = run([bill('C261124024', 902, [tender('upi', 902, at(8, 30))]), bill('C261124037', 44, [tender('upi', 44, at(8, 37))])], [
+      item('u', 'upi', { amountPaise: 93600, caption: 'C261124024 C261124037', sentAt: at(8, 38) })]);
+    expect(less.rows[1].differences).toEqual(['UPI ₹936 posted, settled ₹946 UPI for C261124024 + C261124037']);
+  });
+
   it('room and credit bills need no proof', () => {
     const r = run([bill('C261124040', 1500, [tender('room', 1500, at(9, 0))])], []);
     expect(r.rows[0].status).toBe('not_needed');

@@ -28,6 +28,10 @@ export interface ProofBill {
   at: number;                 // printed (a bill) or paid (a receipt)
   label: string | null;       // table, guest or the account a receipt is for
   tenders: ProofTender[];
+  // A bill of another shift named by proof posted in this one (28 Nov 2026): matched like the others, but listed apart
+  // ("Proof for earlier bills"), never as a row of this shift.
+  context?: boolean;
+  shiftDay?: string | null;
 }
 export interface ProofItem {
   id: string;
@@ -54,7 +58,8 @@ export interface ProofRow {
   missing: string[];
 }
 export interface Extra { itemIds: string[]; kind: 'upi' | 'bill' | 'card'; amountPaise: number | null; sentAt: number; caption: string | null; sender: string | null; what: string }
-export interface ProofList { rows: ProofRow[]; extras: Extra[] }
+export interface EarlierRow extends ProofRow { shiftDay: string | null }
+export interface ProofList { rows: ProofRow[]; extras: Extra[]; earlier: EarlierRow[] }
 
 const MIN = 60_000;
 const NEEDS_PROOF: PosMode[] = ['cash', 'upi', 'card'];
@@ -76,6 +81,18 @@ export function billsNamed(ref: string, bills: ProofBill[]): ProofBill[] {
   // Bookr POS numbers: letter, YYMMDD, then the number within the day.
   const short = bills.filter((b) => b.billNo && /^[A-Z]*\d{9,}$/.test(alnum(b.billNo)) && Number(digits(b.billNo).slice(6)) === Number(r));
   return short.length === 1 ? short : [];
+}
+
+/** Full Bookr POS bill numbers named by these photos (a caption, or the number printed on a bill photo): letter(s),
+ *  YYMMDD, the number within the day, so the bill can be found whatever shift it is in. "C261128017", "261128017". */
+export function namedBillNos(items: Pick<ProofItem, 'caption' | 'billNo' | 'kind'>[]): string[] {
+  const out = new Set<string>();
+  const add = (ref: string) => { const r = alnum(ref); if (/^[A-Z]{0,3}\d{9,12}$/.test(r)) out.add(r); };
+  for (const i of items) {
+    for (const ref of readCaption(i.caption).refs) add(ref);
+    if (i.kind === 'bill' && i.billNo) add(i.billNo);
+  }
+  return [...out];
 }
 
 class Groups {
@@ -165,7 +182,7 @@ export function matchProof(bills: ProofBill[], items: ProofItem[], pairs: [strin
   }
 
   // 4. Each bill: what it needs against what was posted.
-  const rows = bills.map((b): ProofRow => {
+  const rowOf = (b: ProofBill): ProofRow => {
     const mine = [...posts.values()].filter((p) => p.bills.has(b.key));
     const proof: Evidence[] = mine.flatMap((p) => p.items.map((i) => ({ itemId: i.id, kind: i.kind as Evidence['kind'], amountPaise: i.amountPaise,
       sentAt: i.sentAt, docAt: i.docAt ?? null, caption: i.caption, how: p.how.get(b.key)! })));
@@ -178,6 +195,17 @@ export function matchProof(bills: ProofBill[], items: ProofItem[], pairs: [strin
       seen.add(t.paymentId);
       modes.set(t.mode, (modes.get(t.mode) ?? 0) + (NEEDS_PROOF.includes(t.mode) ? t.totalPaise : t.amountPaise));
     }
+    // One payment posted for several bills (a caption naming two bills, or bills paid together): checked against what
+    // those bills together were settled by in that mode, each payment counted once.
+    const together = (mode: CaptionMode, has: (p: Post) => boolean) => {
+      const keys = new Set<string>([b.key]);
+      for (const p of mine) if (has(p)) for (const k of p.bills) keys.add(k);
+      const group = bills.filter((x) => keys.has(x.key));
+      const paid = new Map<string, number>();
+      for (const x of group) for (const t of x.tenders) if (t.mode === mode) paid.set(t.paymentId, t.totalPaise);
+      const names = group.length > 1 ? ` for ${group.map((x) => x.billNo ?? 'a receipt').join(' + ')}` : '';
+      return { need: [...paid.values()].reduce((a, v) => a + v, 0), names, many: group.length > 1 };
+    };
     const differences: string[] = [];
     const missing: string[] = [];
     const posted = (kind: 'upi' | 'card') => proof.filter((e) => e.kind === kind);
@@ -189,15 +217,17 @@ export function matchProof(bills: ProofBill[], items: ProofItem[], pairs: [strin
           const notes = said('cash');
           if (need && !notes.length) missing.push('No cash note');
           const written = notes.filter((n) => n.amountPaise != null).reduce((s, n) => s + n.amountPaise!, 0);
-          if (need && written && written !== need) differences.push(`Cash ${rs(written)} in caption, settled ${rs(need)} cash`);
+          const all = together('cash', (p) => p.captions.some((c) => c.tenders.some((t) => t.mode === 'cash')));
+          if (need && written && written !== all.need) differences.push(`Cash ${rs(written)} in caption, settled ${rs(all.need)} cash${all.names}`);
           if (!need && notes.length) differences.push(`Caption says cash, settled as ${settledAs(modes)}`);
           continue;
         }
         const ev = posted(mode);
         const got = ev.reduce((s, e) => s + (e.amountPaise ?? 0), 0);
         if (need && !ev.length) missing.push(mode === 'upi' ? 'No UPI screenshot' : 'No card slip');
-        if (need && ev.length && got && got !== need) differences.push(`${NAME[mode]} ${rs(got)} posted, settled ${rs(need)} ${NAME[mode]}`);
-        if (!need && ev.length) differences.push(`${mode === 'upi' ? 'UPI screenshot' : 'Card slip'} ${got ? `${rs(got)} ` : ''}posted, settled as ${settledAs(modes)}`);
+        const all = together(mode, (p) => p.items.some((i) => i.kind === mode));
+        if (need && ev.length && got && got !== all.need) differences.push(`${NAME[mode]} ${rs(got)} posted, settled ${rs(all.need)} ${NAME[mode]}${all.names}`);
+        if (!need && ev.length && !(all.many && got === all.need)) differences.push(`${mode === 'upi' ? 'UPI screenshot' : 'Card slip'} ${got ? `${rs(got)} ` : ''}posted, settled as ${settledAs(modes)}`);
         if (!need && !ev.length && said(mode).length) differences.push(`Caption says ${NAME[mode]}, settled as ${settledAs(modes)}`);
       }
       const disc = captions.find((c) => c.discountPaise != null)?.discountPaise;
@@ -214,7 +244,12 @@ export function matchProof(bills: ProofBill[], items: ProofItem[], pairs: [strin
       : differences.length ? 'difference' : missing.length ? 'missing' : needsAny || proof.length ? 'matched' : 'not_needed';
     return { key: b.key, billNo: b.billNo, kind: b.kind, state: b.state, totalPaise: b.totalPaise, at: b.at, label: b.label,
       modes: [...modes].map(([mode, amountPaise]) => ({ mode, amountPaise })), status, proof, differences, missing };
-  });
+  };
+  const rows = bills.filter((b) => !b.context).map(rowOf);
+  // Bills of other shifts with proof posted in this one.
+  const inShift = (e: Evidence) => e.sentAt >= from && e.sentAt < to;
+  const earlier: EarlierRow[] = bills.filter((b) => b.context).map((b) => ({ ...rowOf(b), shiftDay: b.shiftDay ?? null }))
+    .filter((r) => r.proof.some(inShift)).sort((a, b) => a.at - b.at);
 
   // 5. Extras: proof posted in the shift that fits no POS bill. A bill photo counts only when it says how it was paid
   //    or names a bill the POS does not have.
@@ -235,7 +270,7 @@ export function matchProof(bills: ProofBill[], items: ProofItem[], pairs: [strin
       caption: p.items.map((i) => i.caption).filter(Boolean).join(' / ') || null, sender: first.sender, what });
   }
   extras.sort((a, b) => a.sentAt - b.sentAt);
-  return { rows, extras };
+  return { rows, extras, earlier };
 }
 
 function settledAs(modes: Map<PosMode, number>) {
@@ -253,15 +288,20 @@ export function shiftWindow(day: string, startHour: number): [number, number] {
 }
 
 /** The proof posted around a shift in the business's proof groups, and how many photos are still being read. */
-export async function loadProof(db: DB, businessId: string, from: number, to: number) {
+export async function loadProof(db: DB, businessId: string, from: number, to: number, billNos: (string | null)[] = []) {
   // A bill number or a reply can tie a photo posted a little before the shift, or after it, to a bill of the shift.
   const lo = from - 6 * 60 * MIN, hi = to + 6 * 60 * MIN;
+  // Proof posted later still for a bill of this shift (an old bill paid days after): found by the date part of its
+  // number in a caption or on a bill photo, up to 30 days on (28 Nov 2026).
+  const dates = [...new Set(billNos.map((n) => digits(n ?? '')).filter((d) => d.length >= 9).map((d) => d.slice(0, 6)))].slice(0, 4);
+  const late = dates.length ? ` OR (i.sent_at > ? AND i.sent_at <= ? AND (${dates.map(() => '(i.caption LIKE ? OR i.bill_no LIKE ?)').join(' OR ')}))` : '';
+  const lateArgs = dates.length ? [hi, hi + 30 * 24 * 60 * MIN, ...dates.flatMap((d) => [`%${d}%`, `%${d}%`])] : [];
   const rows = await all<{ id: string; kind: ProofItem['kind']; amount_paise: number | null; bill_no: string | null; card_approval: string | null;
     caption: string | null; sent_at: number; doc_at: number | null; wa_message_id: string; reply_to_id: string | null; sender: string | null; read_status: string; status: string }>(db,
     `SELECT i.id, i.kind, i.amount_paise, i.bill_no, i.card_approval, i.caption, i.sent_at, i.doc_at, i.wa_message_id, i.reply_to_id,
        coalesce(i.sender_name, i.sender_number) AS sender, i.read_status, i.status
      FROM wa_items i JOIN wa_groups g ON g.id = i.group_id
-     WHERE i.business_id = ? AND g.pos_proof = 1 AND i.sent_at BETWEEN ? AND ? ORDER BY i.sent_at`, businessId, lo, hi);
+     WHERE i.business_id = ? AND g.pos_proof = 1 AND (i.sent_at BETWEEN ? AND ?${late}) ORDER BY i.sent_at`, businessId, lo, hi, ...lateArgs);
   const items: ProofItem[] = rows.filter((r) => r.read_status === 'read' && r.status !== 'rejected' && r.status !== 'duplicate')
     .map((r) => ({ id: r.id, kind: r.kind, amountPaise: r.amount_paise, billNo: r.bill_no, cardApproval: r.card_approval, caption: r.caption,
       sentAt: r.sent_at, docAt: r.doc_at, messageId: r.wa_message_id, replyTo: r.reply_to_id, sender: r.sender }));
