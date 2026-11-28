@@ -7046,6 +7046,14 @@ svCamera.addEventListener('change', async () => {
 });
 async function serveScreen(bid) {
   document.title = 'Serve';
+  // Added to the home screen from here, the icon opens this Serve page (28 Nov 2026), not the staff sign-in.
+  if (/^[0-9a-f-]{36}$/i.test(bid)) {
+    const mf = document.querySelector('link[rel="manifest"]');
+    if (mf) mf.setAttribute('href', `/api/serve-manifest/${bid}`);
+    let t = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+    if (!t) { t = document.createElement('meta'); t.setAttribute('name', 'apple-mobile-web-app-title'); document.head.append(t); }
+    t.setAttribute('content', 'Serve');
+  }
   document.body.classList.remove('desk');
   ui.sv = { bid, pin: '', screen: 'loading', data: null, open: null, whole: true, ticks: {}, shot: null, shotUrl: null, err: null, pending: [] };
   rerender = paintServe;
@@ -7202,19 +7210,35 @@ function serversPanel() {
     <div class="row"><code class="tag-any">${link}</code><button class="btn" type="button" data-act="svCopyLink" data-l="${link}">Copy</button></div>
     ${ui.servers.length ? html`<div class="scroll"><table class="t"><thead><tr><th>Name</th><th>Last signed in</th><th></th></tr></thead><tbody>
       ${ui.servers.map((s) => html`<tr><td>${s.name}${s.active ? '' : ' (removed)'}</td><td>${s.lastSeenAt ? dateTime(s.lastSeenAt) : 'Not yet'}${quiet14(s) ? html` <span class="badge new">Not seen 14+ days</span>` : ''}</td>
-        <td class="act"><div class="row">${s.active ? html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">New PIN</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
+        <td class="act"><div class="row">${s.active ? html`<a class="btn" href="${`https://wa.me/?text=${encodeURIComponent(serveInvite(s.name, link))}`}" target="_blank" rel="noopener">Send on WhatsApp</a><button class="btn" type="button" data-act="svCopyMsg" data-id="${s.id}">Copy message</button><button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">New PIN</button><button class="btn danger" type="button" data-act="svRemove" data-id="${s.id}">Remove</button>`
           : html`<button class="btn" type="button" data-act="svNewPin" data-id="${s.id}">Bring back</button>`}</div></td></tr>`)}</tbody></table></div>` : html`<p class="quiet">No servers yet.</p>`}
     <form class="grid3"><h3 style="grid-column:1/-1;margin:0">${ui.svEdit ? `New PIN for ${ui.servers.find((s) => s.id === ui.svEdit)?.name}` : 'Add a server'}</h3>
       ${ui.svEdit ? '' : html`<label class="f">Name<input class="in" data-model="svName" value="${ui.svName ?? ''}"></label>`}
       <label class="f">PIN (6 digits)<input class="in" inputmode="numeric" maxlength="6" autocomplete="off" data-model="svPin" value="${ui.svPin ?? ''}"></label>
       <div class="row"><button class="btn pri" type="submit" data-act="svSave" data-submit>${ui.svEdit ? 'Save PIN' : 'Add server'}</button>${ui.svEdit ? html`<button class="btn" type="button" data-act="svEditNo">Cancel</button>` : ''}</div></form></section>`;
 }
+/** The invite a server gets on WhatsApp (28 Nov 2026), as Bookr's cashier invite: the link, how to put it on the phone, the PIN
+ *  given separately (never in the message, so a forwarded message can't be used). */
+const serveInvite = (name, link) => `Hi ${name}, join *${me.business.name}* as a server on Bookr POS, to mark food served.
+
+1. Open this link on your phone: ${link}
+2. Put it on your phone:
+• Android: open the link in Chrome, then tap *Install* (or ⋮ › Add to Home screen)
+• iPhone: open the link in Safari, tap Share ⬆︎ › *Add to Home Screen*
+3. From then on, open *Serve* from its icon and sign in with the 6-digit PIN the manager gives you.`;
+actions.svCopyMsg = async (d) => {
+  const s = ui.servers.find((x) => x.id === d.id);
+  const msg = serveInvite(s.name, `${location.origin}/#/serve/${me.business.id}`);
+  try { await navigator.clipboard.writeText(msg); flash = { kind: 'ok', text: `Message for ${s.name} copied. Paste it in WhatsApp or SMS; tell them the PIN separately.` }; }
+  catch { flash = { kind: 'warn', text: msg }; }
+  rerender();
+};
 actions.svCopyLink = async (d) => { await navigator.clipboard?.writeText(d.l).catch(() => {}); flash = { kind: 'ok', text: 'Serve address copied.' }; rerender(); };
 actions.svNewPin = (d) => { ui.svEdit = d.id; ui.svPin = ''; rerender(); };
 actions.svEditNo = () => { ui.svEdit = null; ui.svPin = ''; rerender(); };
 actions.svSave = async () => {
   if (ui.svEdit) { const s = ui.servers.find((x) => x.id === ui.svEdit); await api('PUT', `${B()}/servers/${s.id}`, { pin: ui.svPin ?? '', active: true }); flash = { kind: 'ok', text: `New PIN saved for ${s.name}. Their old sign-in has ended.` }; }
-  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', pin: ui.svPin ?? '' }); flash = { kind: 'ok', text: `${ui.svName} added. Send them the Serve address.` }; }
+  else { await api('POST', `${B()}/servers`, { name: ui.svName ?? '', pin: ui.svPin ?? '' }); flash = { kind: 'ok', text: `${ui.svName} added. Press Send on WhatsApp next to their name, and tell them the PIN yourself.` }; }
   route();
 };
 actions.svRemove = async (d) => {
