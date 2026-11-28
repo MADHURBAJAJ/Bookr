@@ -2,7 +2,8 @@
 // add rent by hand; a manager can, with a reason; nights no rent covers are flagged and block the day's close; a booking that
 // continues a guest in house is never checked in again or marked a no-show. All names, numbers and amounts are invented.
 import { afterAll, describe, expect, it } from 'vitest';
-import { dispose, env, q, setupBusiness } from './helpers';
+import { billed, db, dispose, env, q, setupBusiness } from './helpers';
+import { autoCloseAll } from '../src/routes/shifts';
 import { buildHistory, receiveMail } from '../src/mail';
 import { setReader } from '../src/booking-readers';
 import { shiftDayAt } from '../src/billing';
@@ -78,6 +79,14 @@ describe('extending a stay through Djubo', () => {
     const late = await owner.post(`${B}/shifts/${day}/close`, { counted: '0' });
     expect(late.status).toBe(409);
     expect(late.json.error).toMatch(/No rent for tonight: X · Stay Guest/);
+
+    // Nobody closes it: at 8 am it closes by itself, and its Daily check says in red who had no rent (28 Nov 2026).
+    await billed(s, [['Masala Dosa', 1]]);
+    const at8 = Date.parse(plus(1) + 'T00:00:00Z') + 8 * 3_600_000 + 5 * 60_000 - 19_800_000;
+    expect(await autoCloseAll(db, at8)).toBe(1);
+    const daily = await ok(owner.get(`${B}/reports/daily-check?day=${day}`));
+    expect(daily.shiftClose.noRent).toEqual([{ room: 'X', guestName: 'Stay Guest', coveredTo: plus(-1) }]);
+    expect((await ok(owner.get(`${B}/shifts/${plus(1)}`))).lastClosed.noRent).toEqual([{ room: 'X', guestName: 'Stay Guest', coveredTo: plus(-1) }]);
   });
 
   it('a booking continuing a guest in house is their extension: not checked in again, not a no-show', async () => {

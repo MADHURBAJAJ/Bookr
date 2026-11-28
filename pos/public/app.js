@@ -616,6 +616,7 @@ async function counterScreen() {
       ...(f?.alerts.deskToTake ? [{ tone: 'warn', text: `Reception money to take: ${plural(f.alerts.deskToTake, 'booking')}`, href: '#/rooms' }] : []),
       ...(f?.alerts.unplaced ? [{ tone: 'bad', text: `Djubo could not place ${plural(f.alerts.unplaced, 'booking')}`, href: '#/rooms/list' }] : []),
       ...(f?.alerts.formC ?? []).map((x) => ({ tone: x.level === 'red' ? 'bad' : 'info', text: `Form C due: ${x.room} · ${x.guestName}`, href: '#/rooms' })),
+      ...(f?.nightsNotCharged ?? []).map((x) => ({ tone: 'bad', text: `Nights not charged: ${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`, href: '#/rooms' })),
     ];
     paint(shell('#/counter', html`
       <div class="ctrtop">
@@ -3981,6 +3982,8 @@ async function shiftScreen() {
         ${s.deskMissing?.length ? html`<label class="f">Why reception's Djubo payments are not in the POS (required)<input class="in" data-model="deskReason" value="${ui.deskReason ?? ''}" placeholder="e.g. Entered in Djubo by mistake"></label>` : ''}
         <button class="btn pri" type="submit" data-act="closeShift" data-submit ${ui.overdue.length || djOpen.length || (s.notCharged ?? []).length ? 'disabled' : ''}>Close the day</button>${djOpen.length ? html`<p class="small" style="color:var(--warn)">Pick how the ${plural(djOpen.length, 'Djubo payment')} ${djOpen.length === 1 ? 'was' : 'were'} paid first (above).</p>` : ''}
         <p class="small quiet">${Date.now() < ui.endsAt ? `The day ends at ${time(ui.endsAt)} (${dayName(addDays(s.shiftDay, 1))}) and closes by itself then if nobody closes it. Closing now starts ${dayName(addDays(s.shiftDay, 1))} at once: money taken after this goes there.` : ''}</p></form>`}
+      ${(ui.last?.noRent ?? []).length ? html`<div class="msg bad" style="display:block;margin-top:14px"><strong>${dayName(ui.last.shiftDay)} closed by itself with no rent for: ${ui.last.noRent.map((x) => `${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`).join(', ')}</strong>
+        <div class="small">Get the nights into Djubo (the rent comes with its email), or a manager extends without Djubo.</div></div>` : ''}
       ${ui.last && can('staff.manage') ? html`<details class="panel" style="margin-top:14px"><summary>Reopen ${dayName(ui.last.shiftDay)} (owner)</summary>
         <p class="small quiet">Closed ${ui.last.auto ? 'by itself' : `by ${ui.last.by ?? 'staff'}`} at ${dateTime(ui.last.closedAt)}. Reopening removes the close (kept in the log); close it again after. Bookr keeps the first close it was sent.</p>
         <div class="row"><input class="in grow" data-model="reopenWhy" value="${ui.reopenWhy ?? ''}" placeholder="Why reopen (required)"><button class="btn" type="button" data-act="reopenShift" data-day="${ui.last.shiftDay}">Reopen</button></div></details>` : ''}
@@ -5503,6 +5506,7 @@ async function exceptionsScreen(day = me.business.shiftDay) {
   ui.npOpen ??= !!(unpaidOld.length || heavy.length);
   // ----- What to look at first.
   const look = [
+    ...((d.shiftClose?.noRent ?? []).length ? [`Closed automatically with no rent for: ${d.shiftClose.noRent.map((x) => `${x.room} · ${x.guestName} (rent till ${dayName(x.coveredTo)})`).join(', ')}`] : []),
     ...(d.shiftClose && !d.shiftClose.countedAt && !d.shiftClose.noCount ? ['Cash drawer not counted at day close'] : d.shiftClose && d.shiftClose.differencePaise ? [`Cash ${d.shiftClose.differencePaise > 0 ? 'over' : 'short'} ${rs(Math.abs(d.shiftClose.differencePaise))} at day close`] : []),
     ...(d.drawers ?? []).filter((x) => x.differencePaise).map((x) => `Cash ${x.differencePaise < 0 ? 'short' : 'over'} ${rs(Math.abs(x.differencePaise))} in ${x.holder}'s drawer`),
     ...unpaidOld.map((o) => `${o.place} not paid for ${o.hours >= 24 ? `${Math.floor(o.hours / 24)} d` : `${o.hours} h`}`),
